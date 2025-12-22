@@ -45,11 +45,15 @@ export function generateVerificationCode(): string {
  */
 export function cleanExpiredCodes(): void {
   const now = Date.now()
-  for (const [email, record] of verificationCodes) {
+  const expiredEmails: string[] = []
+  
+  verificationCodes.forEach((record, email) => {
     if (now - record.createdAt > CODE_EXPIRY_MS) {
-      verificationCodes.delete(email)
+      expiredEmails.push(email)
     }
-  }
+  })
+  
+  expiredEmails.forEach(email => verificationCodes.delete(email))
 }
 
 /**
