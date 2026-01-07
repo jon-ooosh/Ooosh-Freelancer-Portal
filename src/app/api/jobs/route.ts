@@ -187,7 +187,8 @@ function groupJobs(jobs: OrganisedJob[]): DisplayItem[] {
   }
   
   // Convert grouped jobs into GroupedRun objects
-  for (const [key, groupedJobs] of groupMap) {
+  // Using Array.from() for TypeScript compatibility
+  Array.from(groupMap.entries()).forEach(([key, groupedJobs]) => {
     if (groupedJobs.length === 1) {
       // Single job in a group - display as individual
       result.push({ ...groupedJobs[0], isGrouped: false })
@@ -212,7 +213,7 @@ function groupJobs(jobs: OrganisedJob[]): DisplayItem[] {
         jobCount: groupedJobs.length,
       })
     }
-  }
+  })
   
   // Sort by date, then by time
   result.sort((a, b) => {
