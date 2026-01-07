@@ -1,36 +1,325 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 
 // =============================================================================
-// TODO: PLACEHOLDER DATA
-// The job cards in the "Upcoming" section are placeholder/mock data for UI 
-// demonstration only. Replace with real API calls to /api/jobs once working.
+// TYPES (matching API response)
+// =============================================================================
+
+interface OrganisedJob {
+  id: string
+  name: string
+  type: 'delivery' | 'collection'
+  date: string
+  time?: string
+  venueName?: string
+  agreedFee?: number
+  runGroup?: string
+  hhRef?: string
+  keyNotes?: string
+}
+
+interface GroupedRun {
+  isGrouped: true
+  runGroup: string
+  date: string
+  jobs: OrganisedJob[]
+  totalFee: number
+  jobCount: number
+}
+
+interface SingleJob extends OrganisedJob {
+  isGrouped: false
+}
+
+type DisplayItem = GroupedRun | SingleJob
+
+interface JobsApiResponse {
+  success: boolean
+  user?: {
+    id: string
+    name: string
+    email: string
+  }
+  today?: DisplayItem[]
+  upcoming?: DisplayItem[]
+  completed?: DisplayItem[]
+  cancelled?: DisplayItem[]
+  error?: string
+}
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * Format a date string for display (e.g., "Friday 29 Nov")
+ */
+function formatDate(dateStr: string): string {
+  if (!dateStr) return ''
+  
+  const date = new Date(dateStr)
+  if (isNaN(date.getTime())) return dateStr
+  
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  
+  return `${days[date.getDay()]} ${date.getDate()} ${months[date.getMonth()]}`
+}
+
+/**
+ * Format a time string for display (e.g., "10:00 AM")
+ */
+function formatTime(timeStr: string | undefined): string {
+  if (!timeStr) return ''
+  
+  // Handle various time formats from Monday
+  // Could be "10:00", "10:00:00", "10:00 AM", etc.
+  const match = timeStr.match(/(\d{1,2}):(\d{2})/)
+  if (!match) return timeStr
+  
+  const hours = parseInt(match[1])
+  const minutes = match[2]
+  const ampm = hours >= 12 ? 'PM' : 'AM'
+  const displayHours = hours % 12 || 12
+  
+  return `${displayHours}:${minutes} ${ampm}`
+}
+
+/**
+ * Format currency for display
+ */
+function formatFee(amount: number | undefined): string {
+  if (amount === undefined || amount === null) return ''
+  return `£${amount.toFixed(0)}`
+}
+
+/**
+ * Get the first name from a full name
+ */
+function getFirstName(fullName: string): string {
+  return fullName.split(' ')[0] || fullName
+}
+
+// =============================================================================
+// COMPONENTS
+// =============================================================================
+
+/**
+ * Job Card Component - displays a single job or grouped run
+ */
+function JobCard({ item }: { item: DisplayItem }) {
+  if (item.isGrouped) {
+    // Multi-drop run card
+    return (
+      <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+        <div className="flex items-start justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
+              <span className="text-purple-600">📦</span>
+            </div>
+            <div>
+              <p className="font-medium text-gray-900">
+                Multi-drop Run ({item.jobCount} stops)
+              </p>
+              <p className="text-sm text-gray-500">
+                {formatDate(item.date)}
+                {item.jobs[0]?.time && ` · ${formatTime(item.jobs[0].time)}`}
+              </p>
+            </div>
+          </div>
+          {item.totalFee > 0 && (
+            <span className="text-sm font-medium text-green-600">
+              {formatFee(item.totalFee)}
+            </span>
+          )}
+        </div>
+        
+        {/* Show stop previews */}
+        <div className="mt-3 pl-13 space-y-1">
+          {item.jobs.slice(0, 3).map((job, idx) => (
+            <p key={job.id} className="text-xs text-gray-500">
+              {idx + 1}. {job.venueName || job.name}
+            </p>
+          ))}
+          {item.jobs.length > 3 && (
+            <p className="text-xs text-gray-400">
+              +{item.jobs.length - 3} more stops
+            </p>
+          )}
+        </div>
+        
+        <div className="mt-3 flex justify-end">
+          <a 
+            href={`/job/${item.jobs[0]?.id}?run=${item.runGroup}`} 
+            className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500"
+          >
+            View details →
+          </a>
+        </div>
+      </div>
+    )
+  }
+  
+  // Single job card
+  const isDelivery = item.type === 'delivery'
+  
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+      <div className="flex items-start justify-between">
+        <div className="flex items-center space-x-3">
+          <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+            isDelivery ? 'bg-blue-100' : 'bg-orange-100'
+          }`}>
+            <span className={isDelivery ? 'text-blue-600' : 'text-orange-600'}>
+              {isDelivery ? '📦' : '🚚'}
+            </span>
+          </div>
+          <div>
+            <p className="font-medium text-gray-900">
+              {isDelivery ? 'Delivery' : 'Collection'} - {item.venueName || item.name}
+            </p>
+            <p className="text-sm text-gray-500">
+              {formatDate(item.date)}
+              {item.time && ` · ${formatTime(item.time)}`}
+            </p>
+          </div>
+        </div>
+        {item.agreedFee !== undefined && item.agreedFee > 0 && (
+          <span className="text-sm font-medium text-green-600">
+            {formatFee(item.agreedFee)}
+          </span>
+        )}
+      </div>
+      <div className="mt-3 flex justify-end">
+        <a 
+          href={`/job/${item.id}`} 
+          className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500"
+        >
+          View details →
+        </a>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Empty State Component
+ */
+function EmptyState({ message, icon }: { message: string; icon?: React.ReactNode }) {
+  return (
+    <div className="bg-white rounded-xl border border-gray-100 p-6 text-center">
+      <div className="text-gray-400 mb-2">
+        {icon || (
+          <svg className="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          </svg>
+        )}
+      </div>
+      <p className="text-gray-500 text-sm">{message}</p>
+    </div>
+  )
+}
+
+/**
+ * Loading Skeleton Component
+ */
+function LoadingSkeleton() {
+  return (
+    <div className="space-y-3">
+      {[1, 2].map((i) => (
+        <div key={i} className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm animate-pulse">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 bg-gray-200 rounded-lg" />
+            <div className="flex-1">
+              <div className="h-4 bg-gray-200 rounded w-3/4 mb-2" />
+              <div className="h-3 bg-gray-200 rounded w-1/2" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// =============================================================================
+// MAIN DASHBOARD PAGE
 // =============================================================================
 
 export default function DashboardPage() {
   const router = useRouter()
+  
+  // State
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [loggingOut, setLoggingOut] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date())
-  const [userName, setUserName] = useState('Freelancer')
+  
+  // User info
+  const [userName, setUserName] = useState<string>('')
+  
+  // Job data
+  const [todayJobs, setTodayJobs] = useState<DisplayItem[]>([])
+  const [upcomingJobs, setUpcomingJobs] = useState<DisplayItem[]>([])
+  const [completedJobs, setCompletedJobs] = useState<DisplayItem[]>([])
+  const [cancelledJobs, setCancelledJobs] = useState<DisplayItem[]>([])
 
-  useEffect(() => {
-    // TODO: Fetch user info and jobs from API
-    // For now, showing placeholder state
-    setLoading(false)
-  }, [])
-
-  const handleRefresh = () => {
+  /**
+   * Fetch jobs from the API
+   */
+  const fetchJobs = useCallback(async () => {
     setLoading(true)
-    // TODO: Refetch jobs from API
-    setTimeout(() => {
+    setError(null)
+    
+    try {
+      const response = await fetch('/api/jobs')
+      const data: JobsApiResponse = await response.json()
+      
+      if (!response.ok || !data.success) {
+        if (response.status === 401) {
+          // Session expired - redirect to login
+          router.push('/login')
+          return
+        }
+        throw new Error(data.error || 'Failed to load jobs')
+      }
+      
+      // Update user info
+      if (data.user) {
+        setUserName(getFirstName(data.user.name))
+      }
+      
+      // Update job lists
+      setTodayJobs(data.today || [])
+      setUpcomingJobs(data.upcoming || [])
+      setCompletedJobs(data.completed || [])
+      setCancelledJobs(data.cancelled || [])
       setLastUpdated(new Date())
+      
+    } catch (err) {
+      console.error('Failed to fetch jobs:', err)
+      setError(err instanceof Error ? err.message : 'Failed to load jobs')
+    } finally {
       setLoading(false)
-    }, 500)
+    }
+  }, [router])
+
+  // Fetch jobs on mount
+  useEffect(() => {
+    fetchJobs()
+  }, [fetchJobs])
+
+  /**
+   * Handle refresh button click
+   */
+  const handleRefresh = () => {
+    fetchJobs()
   }
 
+  /**
+   * Handle logout
+   */
   const handleLogout = async () => {
     setLoggingOut(true)
     try {
@@ -42,6 +331,9 @@ export default function DashboardPage() {
     }
   }
 
+  /**
+   * Format "last updated" time
+   */
   const formatLastUpdated = () => {
     const now = new Date()
     const diff = Math.floor((now.getTime() - lastUpdated.getTime()) / 1000 / 60)
@@ -61,8 +353,12 @@ export default function DashboardPage() {
                 <span className="text-white text-lg font-bold">O</span>
               </div>
               <div>
-                <h1 className="text-lg font-semibold text-gray-900">Welcome back</h1>
-                <p className="text-sm text-gray-500">{userName}</p>
+                <h1 className="text-lg font-semibold text-gray-900">
+                  {userName ? `Welcome back` : 'Dashboard'}
+                </h1>
+                <p className="text-sm text-gray-500">
+                  {userName || 'Loading...'}
+                </p>
               </div>
             </div>
             <div className="flex items-center space-x-2">
@@ -95,22 +391,40 @@ export default function DashboardPage() {
       {/* Main Content */}
       <main className="max-w-lg mx-auto px-4 py-6 space-y-6">
         
+        {/* Error Banner */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+            {error}
+            <button 
+              onClick={handleRefresh}
+              className="ml-2 underline hover:no-underline"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
         {/* Today Section */}
         <section>
           <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center">
             <span className="mr-2">📅</span>
             Today
+            {todayJobs.length > 0 && (
+              <span className="ml-2 text-ooosh-600">({todayJobs.length})</span>
+            )}
           </h2>
           
-          {/* Empty state */}
-          <div className="bg-white rounded-xl border border-gray-100 p-6 text-center">
-            <div className="text-gray-400 mb-2">
-              <svg className="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
+          {loading ? (
+            <LoadingSkeleton />
+          ) : todayJobs.length > 0 ? (
+            <div className="space-y-3">
+              {todayJobs.map((item) => (
+                <JobCard key={item.isGrouped ? `run-${item.runGroup}-${item.date}` : item.id} item={item} />
+              ))}
             </div>
-            <p className="text-gray-500 text-sm">No jobs scheduled for today</p>
-          </div>
+          ) : (
+            <EmptyState message="No jobs scheduled for today" />
+          )}
         </section>
 
         {/* Upcoming Section */}
@@ -118,55 +432,22 @@ export default function DashboardPage() {
           <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 flex items-center">
             <span className="mr-2">📆</span>
             Upcoming
+            {upcomingJobs.length > 0 && (
+              <span className="ml-2 text-ooosh-600">({upcomingJobs.length})</span>
+            )}
           </h2>
           
-          {/* =================================================================
-              TODO: PLACEHOLDER JOB CARDS
-              These are hardcoded examples for UI demonstration.
-              Replace with real data from API once /api/jobs endpoint is built.
-              ================================================================= */}
-          <div className="space-y-3">
-            <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-              <div className="flex items-start justify-between">
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-                    <span className="text-blue-600">📦</span>
-                  </div>
-                  <div>
-                    <p className="font-medium text-gray-900">Delivery - O2 Arena</p>
-                    <p className="text-sm text-gray-500">Friday 29 Nov · 6:00 PM</p>
-                  </div>
-                </div>
-                <span className="text-sm font-medium text-green-600">£85</span>
-              </div>
-              <div className="mt-3 flex justify-end">
-                <a href="#" className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500">
-                  View details →
-                </a>
-              </div>
+          {loading ? (
+            <LoadingSkeleton />
+          ) : upcomingJobs.length > 0 ? (
+            <div className="space-y-3">
+              {upcomingJobs.map((item) => (
+                <JobCard key={item.isGrouped ? `run-${item.runGroup}-${item.date}` : item.id} item={item} />
+              ))}
             </div>
-
-            <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
-              <div className="flex items-start justify-between">
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
-                    <span className="text-orange-600">🚚</span>
-                  </div>
-                  <div>
-                    <p className="font-medium text-gray-900">Collection - Brighton Dome</p>
-                    <p className="text-sm text-gray-500">Saturday 30 Nov · 10:00 AM</p>
-                  </div>
-                </div>
-                <span className="text-sm font-medium text-green-600">£75</span>
-              </div>
-              <div className="mt-3 flex justify-end">
-                <a href="#" className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500">
-                  View details →
-                </a>
-              </div>
-            </div>
-          </div>
-          {/* END PLACEHOLDER JOB CARDS */}
+          ) : (
+            <EmptyState message="No upcoming jobs in the next 30 days" />
+          )}
         </section>
 
         {/* Completed Section */}
@@ -175,15 +456,38 @@ export default function DashboardPage() {
             <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide flex items-center">
               <span className="mr-2">✅</span>
               Completed
+              {completedJobs.length > 0 && (
+                <span className="ml-2 text-ooosh-600">({completedJobs.length})</span>
+              )}
             </h2>
-            <a href="#" className="text-xs font-medium text-ooosh-600 hover:text-ooosh-500">
-              View all →
-            </a>
+            {completedJobs.length > 0 && (
+              <a href="/completed" className="text-xs font-medium text-ooosh-600 hover:text-ooosh-500">
+                View all →
+              </a>
+            )}
           </div>
           
-          <div className="bg-gray-100 rounded-xl p-4 text-center">
-            <p className="text-gray-500 text-sm">No completed jobs in the last 30 days</p>
-          </div>
+          {loading ? (
+            <div className="bg-gray-100 rounded-xl p-4 animate-pulse">
+              <div className="h-4 bg-gray-200 rounded w-1/2 mx-auto" />
+            </div>
+          ) : completedJobs.length > 0 ? (
+            <div className="space-y-3">
+              {/* Show first 2 completed jobs */}
+              {completedJobs.slice(0, 2).map((item) => (
+                <JobCard key={item.isGrouped ? `run-${item.runGroup}-${item.date}` : item.id} item={item} />
+              ))}
+              {completedJobs.length > 2 && (
+                <p className="text-center text-sm text-gray-500">
+                  +{completedJobs.length - 2} more completed jobs
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="bg-gray-100 rounded-xl p-4 text-center">
+              <p className="text-gray-500 text-sm">No completed jobs in the last 30 days</p>
+            </div>
+          )}
         </section>
 
         {/* Cancelled Section */}
@@ -192,15 +496,32 @@ export default function DashboardPage() {
             <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide flex items-center">
               <span className="mr-2">❌</span>
               Cancelled
+              {cancelledJobs.length > 0 && (
+                <span className="ml-2 text-gray-400">({cancelledJobs.length})</span>
+              )}
             </h2>
-            <a href="#" className="text-xs font-medium text-ooosh-600 hover:text-ooosh-500">
-              View all →
-            </a>
+            {cancelledJobs.length > 0 && (
+              <a href="/cancelled" className="text-xs font-medium text-ooosh-600 hover:text-ooosh-500">
+                View all →
+              </a>
+            )}
           </div>
           
-          <div className="bg-gray-100 rounded-xl p-4 text-center">
-            <p className="text-gray-500 text-sm">No cancelled jobs</p>
-          </div>
+          {loading ? (
+            <div className="bg-gray-100 rounded-xl p-4 animate-pulse">
+              <div className="h-4 bg-gray-200 rounded w-1/2 mx-auto" />
+            </div>
+          ) : cancelledJobs.length > 0 ? (
+            <div className="bg-gray-100 rounded-xl p-4 text-center">
+              <p className="text-gray-500 text-sm">
+                {cancelledJobs.length} cancelled job{cancelledJobs.length !== 1 ? 's' : ''} in the last 30 days
+              </p>
+            </div>
+          ) : (
+            <div className="bg-gray-100 rounded-xl p-4 text-center">
+              <p className="text-gray-500 text-sm">No cancelled jobs</p>
+            </div>
+          )}
         </section>
 
       </main>
