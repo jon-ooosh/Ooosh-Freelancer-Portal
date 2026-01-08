@@ -31,7 +31,7 @@ export const DC_COLUMNS = {
   timeToArrive: 'hour',
   venueConnect: 'connect_boards6',
   driverConnect: 'connect_boards3',
-  driverEmailMirror: 'mirror1',            // Mirrored email from Freelance Crew
+  driverEmailMirror: 'driver_email__gc_',            // Mirrored email from Freelance Crew
   status: 'status90',
   keyPoints: 'key_points___summary',
   runGroup: 'color_mkxvwn11',              // Status: A, B, C, D, E
