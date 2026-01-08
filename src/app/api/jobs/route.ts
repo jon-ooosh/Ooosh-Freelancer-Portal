@@ -125,22 +125,33 @@ function isWithinNextDays(date: Date, days: number): boolean {
 /**
  * Map Monday.com status to our visibility/category rules
  * Returns: 'upcoming' | 'completed' | 'cancelled' | null (hidden)
+ * 
+ * Note: Monday status values may vary (e.g., "All arranged & email driver" 
+ * instead of just "Arranged"), so we use flexible matching.
  */
 function getJobCategory(status: string): 'upcoming' | 'completed' | 'cancelled' | null {
   const normalised = status.toLowerCase().trim()
   
-  // Visible statuses
-  if (normalised === 'arranged' || normalised === 'working on it') {
+  // Visible statuses - using includes() for flexible matching
+  // "All arranged & email driver" contains "arranged"
+  // "Working on it" matches exactly
+  if (normalised.includes('arranged') || normalised.includes('working on it')) {
     return 'upcoming'
   }
-  if (normalised === 'all done') {
+  
+  // "All done" - completed jobs
+  if (normalised.includes('all done') || normalised.includes('done')) {
     return 'completed'
   }
-  if (normalised === 'now not needed') {
+  
+  // "Now not needed" - cancelled jobs
+  if (normalised.includes('not needed') || normalised.includes('cancelled')) {
     return 'cancelled'
   }
   
   // Hidden statuses (TO DO, Arranging, etc.)
+  // Log unknown statuses for debugging
+  console.log('Job status hidden (not matched):', status)
   return null
 }
 
@@ -241,9 +252,13 @@ function groupJobs(jobs: OrganisedJob[]): DisplayItem[] {
 // =============================================================================
 
 export async function GET(): Promise<NextResponse<JobsApiResponse>> {
+  const startTime = Date.now()
+  console.log('Jobs API: Starting request')
+  
   try {
     // Get the logged-in user from session
     const user = await getSessionUser()
+    console.log('Jobs API: Session check took', Date.now() - startTime, 'ms')
     
     if (!user) {
       return NextResponse.json(
@@ -252,12 +267,16 @@ export async function GET(): Promise<NextResponse<JobsApiResponse>> {
       )
     }
     
+    console.log('Jobs API: Fetching jobs for', user.email)
+    
     // Fetch all jobs for this freelancer from Monday
     let allJobs: JobRecord[]
+    const mondayStart = Date.now()
     try {
       allJobs = await getJobsForFreelancer(user.email)
+      console.log('Jobs API: Monday query took', Date.now() - mondayStart, 'ms, found', allJobs.length, 'jobs')
     } catch (mondayError) {
-      console.error('Monday API error:', mondayError)
+      console.error('Monday API error after', Date.now() - mondayStart, 'ms:', mondayError)
       return NextResponse.json(
         { success: false, error: 'Failed to fetch jobs from Monday.com' },
         { status: 502 }
@@ -310,6 +329,8 @@ export async function GET(): Promise<NextResponse<JobsApiResponse>> {
     const completed = groupJobs(completedJobs)
     const cancelled = groupJobs(cancelledJobs)
     
+    console.log('Jobs API: Total request took', Date.now() - startTime, 'ms')
+    
     return NextResponse.json({
       success: true,
       user: {
@@ -324,7 +345,7 @@ export async function GET(): Promise<NextResponse<JobsApiResponse>> {
     })
     
   } catch (error) {
-    console.error('Jobs API error:', error)
+    console.error('Jobs API error after', Date.now() - startTime, 'ms:', error)
     return NextResponse.json(
       { success: false, error: 'An error occurred while fetching jobs' },
       { status: 500 }
