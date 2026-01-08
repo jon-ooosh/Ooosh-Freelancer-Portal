@@ -45,6 +45,23 @@ export const DC_COLUMNS = {
   extraChargesReason: 'long_text_mkywkth4',
 } as const
 
+// List of column IDs we actually need to fetch for jobs
+// This dramatically reduces response size and speeds up queries
+const DC_COLUMNS_TO_FETCH = [
+  DC_COLUMNS.hhRef,
+  DC_COLUMNS.deliverCollect,
+  DC_COLUMNS.date,
+  DC_COLUMNS.timeToArrive,
+  DC_COLUMNS.venueConnect,
+  DC_COLUMNS.driverEmailMirror,
+  DC_COLUMNS.status,
+  DC_COLUMNS.keyPoints,
+  DC_COLUMNS.runGroup,
+  DC_COLUMNS.agreedFeeOverride,
+  DC_COLUMNS.completedAtDate,
+  DC_COLUMNS.completionNotes,
+]
+
 // =============================================================================
 // API HELPERS
 // =============================================================================
@@ -306,6 +323,8 @@ export interface JobRecord {
 
 /**
  * Get all jobs for a specific freelancer (by email)
+ * 
+ * OPTIMIZED: Only fetches the columns we need, not all 80+ columns
  */
 export async function getJobsForFreelancer(freelancerEmail: string): Promise<JobRecord[]> {
   const boardId = getBoardIds().deliveries
@@ -314,16 +333,19 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
     throw new Error('MONDAY_BOARD_ID_DELIVERIES is not configured')
   }
 
-  // Fetch all items - we'll filter by email in code
-  // In future, could optimize with Monday's query_params if needed
+  console.log('Monday: Fetching jobs for', freelancerEmail, 'from board', boardId)
+  const startTime = Date.now()
+
+  // OPTIMIZED: Only request specific columns we need
+  // This dramatically reduces response size and query time
   const query = `
-    query ($boardId: [ID!]!) {
+    query ($boardId: [ID!]!, $columnIds: [String!]) {
       boards(ids: $boardId) {
         items_page(limit: 500) {
           items {
             id
             name
-            column_values {
+            column_values(ids: $columnIds) {
               id
               text
               value
@@ -350,51 +372,60 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
     }>
   }
 
-  const result = await mondayQuery<QueryResult>(query, { boardId: [boardId] })
+  const result = await mondayQuery<QueryResult>(query, { 
+    boardId: [boardId],
+    columnIds: DC_COLUMNS_TO_FETCH
+  })
+
+  const queryTime = Date.now() - startTime
+  console.log('Monday: Query completed in', queryTime, 'ms')
   
   const items = result.boards[0]?.items_page?.items || []
+  console.log('Monday: Retrieved', items.length, 'total items')
+  
   const normalizedEmail = freelancerEmail.toLowerCase().trim()
   
-  // Filter and transform items
-  return items
-    .filter(item => {
-      // Check if this freelancer is assigned (via mirrored email column)
-      const driverEmailCol = item.column_values.find(col => col.id === DC_COLUMNS.driverEmailMirror)
-      const driverEmail = driverEmailCol?.text?.toLowerCase().trim()
-      return driverEmail === normalizedEmail
-    })
-    .map(item => {
-      const columnMap = item.column_values.reduce((acc, col) => {
-        acc[col.id] = { text: col.text, value: col.value }
-        return acc
-      }, {} as Record<string, { text: string; value: string }>)
+  // Filter items where this freelancer is assigned
+  const matchingItems = items.filter(item => {
+    const driverEmailCol = item.column_values.find(col => col.id === DC_COLUMNS.driverEmailMirror)
+    const driverEmail = driverEmailCol?.text?.toLowerCase().trim()
+    return driverEmail === normalizedEmail
+  })
 
-      // Determine job type from status
-      const deliverCollectText = columnMap[DC_COLUMNS.deliverCollect]?.text?.toLowerCase() || ''
-      const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
+  console.log('Monday: Found', matchingItems.length, 'jobs assigned to', freelancerEmail)
 
-      // Parse agreed fee override
-      const feeText = columnMap[DC_COLUMNS.agreedFeeOverride]?.text
-      const agreedFeeOverride = feeText ? parseFloat(feeText) : undefined
+  // Transform matching items to JobRecord format
+  return matchingItems.map(item => {
+    const columnMap = item.column_values.reduce((acc, col) => {
+      acc[col.id] = { text: col.text, value: col.value }
+      return acc
+    }, {} as Record<string, { text: string; value: string }>)
 
-      return {
-        id: item.id,
-        name: item.name,
-        hhRef: columnMap[DC_COLUMNS.hhRef]?.text,
-        type: jobType,
-        date: columnMap[DC_COLUMNS.date]?.text,
-        time: columnMap[DC_COLUMNS.timeToArrive]?.text,
-        venueName: columnMap[DC_COLUMNS.venueConnect]?.text,
-        status: columnMap[DC_COLUMNS.status]?.text || 'unknown',
-        runGroup: columnMap[DC_COLUMNS.runGroup]?.text,
-        agreedFeeOverride,
-        driverEmail: columnMap[DC_COLUMNS.driverEmailMirror]?.text,
-        keyNotes: columnMap[DC_COLUMNS.keyPoints]?.text,
-        completedAtDate: columnMap[DC_COLUMNS.completedAtDate]?.text,
-        completedAtTime: columnMap[DC_COLUMNS.completedAtTime]?.text,
-        completionNotes: columnMap[DC_COLUMNS.completionNotes]?.text,
-      }
-    })
+    // Determine job type from status
+    const deliverCollectText = columnMap[DC_COLUMNS.deliverCollect]?.text?.toLowerCase() || ''
+    const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
+
+    // Parse agreed fee override
+    const feeText = columnMap[DC_COLUMNS.agreedFeeOverride]?.text
+    const agreedFeeOverride = feeText ? parseFloat(feeText) : undefined
+
+    return {
+      id: item.id,
+      name: item.name,
+      hhRef: columnMap[DC_COLUMNS.hhRef]?.text,
+      type: jobType,
+      date: columnMap[DC_COLUMNS.date]?.text,
+      time: columnMap[DC_COLUMNS.timeToArrive]?.text,
+      venueName: columnMap[DC_COLUMNS.venueConnect]?.text,
+      status: columnMap[DC_COLUMNS.status]?.text || 'unknown',
+      runGroup: columnMap[DC_COLUMNS.runGroup]?.text,
+      agreedFeeOverride,
+      driverEmail: columnMap[DC_COLUMNS.driverEmailMirror]?.text,
+      keyNotes: columnMap[DC_COLUMNS.keyPoints]?.text,
+      completedAtDate: columnMap[DC_COLUMNS.completedAtDate]?.text,
+      completionNotes: columnMap[DC_COLUMNS.completionNotes]?.text,
+    } as JobRecord
+  })
 }
 
 /**
