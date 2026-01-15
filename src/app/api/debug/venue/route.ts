@@ -12,6 +12,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { mondayQuery, getBoardIds, DC_COLUMNS, VENUE_COLUMNS } from '@/lib/monday'
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type DebugInfo = Record<string, any>
+
 export async function GET(request: NextRequest) {
   const jobId = request.nextUrl.searchParams.get('jobId')
   
@@ -22,7 +25,7 @@ export async function GET(request: NextRequest) {
     })
   }
 
-  const debug: Record<string, unknown> = {
+  const debug: DebugInfo = {
     jobId,
     boardIds: getBoardIds(),
     steps: []
