@@ -31,7 +31,7 @@ export const DC_COLUMNS = {
   timeToArrive: 'hour',
   venueConnect: 'connect_boards6',
   driverConnect: 'connect_boards3',
-  driverEmailMirror: 'driver_email__gc_',            // Mirrored email from Freelance Crew
+  driverEmailMirror: 'driver_email__gc_',  // Text column populated by General Caster from mirror
   status: 'status90',
   keyPoints: 'key_points___summary',
   runGroup: 'color_mkxvwn11',              // Status: A, B, C, D, E
@@ -338,6 +338,8 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
 
   // OPTIMIZED: Only request specific columns we need
   // This dramatically reduces response size and query time
+  // Note: We request both 'text' and the raw 'value' because mirror columns
+  // sometimes store data differently
   const query = `
     query ($boardId: [ID!]!, $columnIds: [String!]) {
       boards(ids: $boardId) {
@@ -349,6 +351,9 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
               id
               text
               value
+              ... on MirrorValue {
+                display_value
+              }
             }
           }
         }
@@ -356,7 +361,7 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
     }
   `
 
-  interface QueryResult {
+  const result = await mondayQuery<{
     boards: Array<{
       items_page: {
         items: Array<{
@@ -366,13 +371,12 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
             id: string
             text: string
             value: string
+            display_value?: string  // Mirror columns use this field
           }>
         }>
       }
     }>
-  }
-
-  const result = await mondayQuery<QueryResult>(query, { 
+  }>(query, { 
     boardId: [boardId],
     columnIds: DC_COLUMNS_TO_FETCH
   })
@@ -386,9 +390,17 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
   const normalizedEmail = freelancerEmail.toLowerCase().trim()
   
   // Filter items where this freelancer is assigned
+  // Mirror columns can return data in either 'text' or 'display_value'
   const matchingItems = items.filter(item => {
     const driverEmailCol = item.column_values.find(col => col.id === DC_COLUMNS.driverEmailMirror)
-    const driverEmail = driverEmailCol?.text?.toLowerCase().trim()
+    // Check both text and display_value - mirror columns can use either
+    const driverEmail = (driverEmailCol?.display_value || driverEmailCol?.text || '').toLowerCase().trim()
+    
+    // Debug log to help troubleshoot
+    if (driverEmail) {
+      console.log('Monday: Item', item.id, 'has driver email:', driverEmail)
+    }
+    
     return driverEmail === normalizedEmail
   })
 
@@ -396,36 +408,151 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
 
   // Transform matching items to JobRecord format
   return matchingItems.map(item => {
+    // Build column map including display_value for mirror columns
     const columnMap = item.column_values.reduce((acc, col) => {
-      acc[col.id] = { text: col.text, value: col.value }
+      acc[col.id] = { 
+        text: col.text, 
+        value: col.value,
+        display_value: col.display_value 
+      }
       return acc
-    }, {} as Record<string, { text: string; value: string }>)
+    }, {} as Record<string, { text: string; value: string; display_value?: string }>)
+
+    // Helper to get text from a column, preferring display_value for mirrors
+    const getColText = (colId: string) => {
+      const col = columnMap[colId]
+      return col?.display_value || col?.text || ''
+    }
 
     // Determine job type from status
-    const deliverCollectText = columnMap[DC_COLUMNS.deliverCollect]?.text?.toLowerCase() || ''
+    const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
     const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
 
     // Parse agreed fee override
-    const feeText = columnMap[DC_COLUMNS.agreedFeeOverride]?.text
+    const feeText = getColText(DC_COLUMNS.agreedFeeOverride)
     const agreedFeeOverride = feeText ? parseFloat(feeText) : undefined
 
     return {
       id: item.id,
       name: item.name,
-      hhRef: columnMap[DC_COLUMNS.hhRef]?.text,
+      hhRef: getColText(DC_COLUMNS.hhRef),
       type: jobType,
-      date: columnMap[DC_COLUMNS.date]?.text,
-      time: columnMap[DC_COLUMNS.timeToArrive]?.text,
-      venueName: columnMap[DC_COLUMNS.venueConnect]?.text,
-      status: columnMap[DC_COLUMNS.status]?.text || 'unknown',
-      runGroup: columnMap[DC_COLUMNS.runGroup]?.text,
+      date: getColText(DC_COLUMNS.date),
+      time: getColText(DC_COLUMNS.timeToArrive),
+      venueName: getColText(DC_COLUMNS.venueConnect),
+      status: getColText(DC_COLUMNS.status) || 'unknown',
+      runGroup: getColText(DC_COLUMNS.runGroup),
       agreedFeeOverride,
-      driverEmail: columnMap[DC_COLUMNS.driverEmailMirror]?.text,
-      keyNotes: columnMap[DC_COLUMNS.keyPoints]?.text,
-      completedAtDate: columnMap[DC_COLUMNS.completedAtDate]?.text,
-      completionNotes: columnMap[DC_COLUMNS.completionNotes]?.text,
+      driverEmail: getColText(DC_COLUMNS.driverEmailMirror),
+      keyNotes: getColText(DC_COLUMNS.keyPoints),
+      completedAtDate: getColText(DC_COLUMNS.completedAtDate),
+      completionNotes: getColText(DC_COLUMNS.completionNotes),
     } as JobRecord
   })
+}
+
+/**
+ * Get a single job by ID
+ * 
+ * Only returns the job if the specified email matches the assigned driver.
+ * This ensures users can only view their own jobs.
+ */
+export async function getJobById(jobId: string, freelancerEmail: string): Promise<JobRecord | null> {
+  const boardId = getBoardIds().deliveries
+
+  if (!boardId) {
+    throw new Error('MONDAY_BOARD_ID_DELIVERIES is not configured')
+  }
+
+  console.log('Monday: Fetching job', jobId, 'for', freelancerEmail)
+
+  // Query for a specific item by ID
+  const query = `
+    query ($itemIds: [ID!]!) {
+      items(ids: $itemIds) {
+        id
+        name
+        column_values(ids: ${JSON.stringify(DC_COLUMNS_TO_FETCH)}) {
+          id
+          text
+          value
+          ... on MirrorValue {
+            display_value
+          }
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    items: Array<{
+      id: string
+      name: string
+      column_values: Array<{
+        id: string
+        text: string
+        value: string
+        display_value?: string
+      }>
+    }>
+  }>(query, { itemIds: [jobId] })
+
+  const item = result.items?.[0]
+  
+  if (!item) {
+    console.log('Monday: Job not found:', jobId)
+    return null
+  }
+
+  // Build column map
+  const columnMap = item.column_values.reduce((acc, col) => {
+    acc[col.id] = { 
+      text: col.text, 
+      value: col.value,
+      display_value: col.display_value 
+    }
+    return acc
+  }, {} as Record<string, { text: string; value: string; display_value?: string }>)
+
+  // Helper to get text from a column
+  const getColText = (colId: string) => {
+    const col = columnMap[colId]
+    return col?.display_value || col?.text || ''
+  }
+
+  // Check if this job is assigned to the requesting user
+  const driverEmail = getColText(DC_COLUMNS.driverEmailMirror).toLowerCase().trim()
+  const normalizedEmail = freelancerEmail.toLowerCase().trim()
+
+  if (driverEmail !== normalizedEmail) {
+    console.log('Monday: Job', jobId, 'not assigned to', freelancerEmail, '(assigned to', driverEmail, ')')
+    return null
+  }
+
+  // Determine job type
+  const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
+  const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
+
+  // Parse agreed fee
+  const feeText = getColText(DC_COLUMNS.agreedFeeOverride)
+  const agreedFeeOverride = feeText ? parseFloat(feeText) : undefined
+
+  return {
+    id: item.id,
+    name: item.name,
+    hhRef: getColText(DC_COLUMNS.hhRef),
+    type: jobType,
+    date: getColText(DC_COLUMNS.date),
+    time: getColText(DC_COLUMNS.timeToArrive),
+    venueName: getColText(DC_COLUMNS.venueConnect),
+    status: getColText(DC_COLUMNS.status) || 'unknown',
+    runGroup: getColText(DC_COLUMNS.runGroup),
+    agreedFeeOverride,
+    driverEmail: driverEmail,
+    keyNotes: getColText(DC_COLUMNS.keyPoints),
+    completedAtDate: getColText(DC_COLUMNS.completedAtDate),
+    completionNotes: getColText(DC_COLUMNS.completionNotes),
+  }
 }
 
 /**
