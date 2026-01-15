@@ -3,15 +3,26 @@
 /**
  * Job Details Page
  * 
- * Displays full details for a single job.
+ * Displays full details for a single job including venue information.
  * Route: /job/[id]
+ * 
+ * Features:
+ * - Job type, venue name, date, time
+ * - Full venue address with What3Words and "Open in Maps" link
+ * - Contact details (with 48-hour visibility rule for phone numbers)
+ * - Access notes and key points
+ * - HireHop reference
+ * - Action buttons (Calendar, Start Delivery/Collection)
  */
 
 import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 
-// Job type from API
+// =============================================================================
+// TYPES
+// =============================================================================
+
 interface Job {
   id: string
   name: string
@@ -19,6 +30,7 @@ interface Job {
   date?: string
   time?: string
   venueName?: string
+  venueId?: string
   status: string
   hhRef?: string
   keyNotes?: string
@@ -28,12 +40,88 @@ interface Job {
   completionNotes?: string
 }
 
+interface Venue {
+  id: string
+  name: string
+  address?: string
+  whatThreeWords?: string
+  contact1?: string
+  contact2?: string
+  phone?: string | null
+  phoneHidden?: boolean
+  phoneVisibleFrom?: string | null
+  email?: string
+  accessNotes?: string
+  stageNotes?: string
+}
+
+interface JobApiResponse {
+  success: boolean
+  job?: Job
+  venue?: Venue | null
+  contactsVisible?: boolean
+  error?: string
+}
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+/**
+ * Format a date string for display (e.g., "Tuesday 26 November 2024")
+ */
+function formatDate(dateStr?: string): string {
+  if (!dateStr) return 'TBC'
+  const date = new Date(dateStr)
+  if (isNaN(date.getTime())) return dateStr
+  return date.toLocaleDateString('en-GB', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric'
+  })
+}
+
+/**
+ * Format a time string for display
+ */
+function formatTime(timeStr?: string): string {
+  if (!timeStr) return 'TBC'
+  return timeStr
+}
+
+/**
+ * Build a Google Maps URL for an address
+ */
+function getMapsUrl(address?: string, whatThreeWords?: string): string | null {
+  // Prefer What3Words if available
+  if (whatThreeWords) {
+    // What3Words URLs: https://what3words.com/word.word.word
+    const words = whatThreeWords.replace(/^\/+/, '').trim()
+    if (words) {
+      return `https://what3words.com/${words}`
+    }
+  }
+  
+  // Fall back to Google Maps for address
+  if (address) {
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
+  }
+  
+  return null
+}
+
+// =============================================================================
+// COMPONENT
+// =============================================================================
+
 export default function JobDetailsPage() {
   const params = useParams()
   const router = useRouter()
   const jobId = params.id as string
 
   const [job, setJob] = useState<Job | null>(null)
+  const [venue, setVenue] = useState<Venue | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -41,7 +129,7 @@ export default function JobDetailsPage() {
     async function fetchJob() {
       try {
         const response = await fetch(`/api/jobs/${jobId}`)
-        const data = await response.json()
+        const data: JobApiResponse = await response.json()
 
         if (!response.ok) {
           if (response.status === 401) {
@@ -51,7 +139,8 @@ export default function JobDetailsPage() {
           throw new Error(data.error || 'Failed to fetch job')
         }
 
-        setJob(data.job)
+        setJob(data.job || null)
+        setVenue(data.venue || null)
       } catch (err) {
         console.error('Error fetching job:', err)
         setError(err instanceof Error ? err.message : 'Failed to load job')
@@ -65,30 +154,12 @@ export default function JobDetailsPage() {
     }
   }, [jobId, router])
 
-  // Format date for display
-  const formatDate = (dateStr?: string) => {
-    if (!dateStr) return 'TBC'
-    const date = new Date(dateStr)
-    return date.toLocaleDateString('en-GB', {
-      weekday: 'long',
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric'
-    })
-  }
-
-  // Format time for display
-  const formatTime = (timeStr?: string) => {
-    if (!timeStr) return 'TBC'
-    return timeStr
-  }
-
   // Loading state
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-8 h-8 border-4 border-orange-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-8 h-8 border-4 border-ooosh-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-600">Loading job details...</p>
         </div>
       </div>
@@ -106,7 +177,7 @@ export default function JobDetailsPage() {
             <p className="text-gray-600 mb-6">{error}</p>
             <Link
               href="/dashboard"
-              className="inline-block bg-orange-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-orange-600 transition-colors"
+              className="inline-block bg-ooosh-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-ooosh-600 transition-colors"
             >
               Back to Dashboard
             </Link>
@@ -127,7 +198,7 @@ export default function JobDetailsPage() {
             <p className="text-gray-600 mb-6">This job doesn&apos;t exist or isn&apos;t assigned to you.</p>
             <Link
               href="/dashboard"
-              className="inline-block bg-orange-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-orange-600 transition-colors"
+              className="inline-block bg-ooosh-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-ooosh-600 transition-colors"
             >
               Back to Dashboard
             </Link>
@@ -141,9 +212,10 @@ export default function JobDetailsPage() {
   const isDelivery = job.type === 'delivery'
   const typeIcon = isDelivery ? '📦' : '🚚'
   const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
+  const mapsUrl = getMapsUrl(venue?.address, venue?.whatThreeWords)
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 pb-8">
       {/* Header */}
       <header className="bg-white shadow-sm sticky top-0 z-10">
         <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
@@ -169,28 +241,28 @@ export default function JobDetailsPage() {
       </header>
 
       {/* Main Content */}
-      <main className="max-w-lg mx-auto p-4">
-        {/* Job Type & Venue */}
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-4">
+      <main className="max-w-lg mx-auto p-4 space-y-4">
+        
+        {/* Job Type & Venue Header */}
+        <div className="bg-white rounded-xl shadow-sm p-6">
           <div className="flex items-start gap-3 mb-4">
             <span className="text-3xl">{typeIcon}</span>
             <div>
-              <span className="text-xs font-semibold text-orange-600 uppercase tracking-wide">
+              <span className="text-xs font-semibold text-ooosh-600 uppercase tracking-wide">
                 {typeLabel}
               </span>
               <h1 className="text-xl font-bold text-gray-900 mt-1">
-                {job.venueName || job.name}
+                {venue?.name || job.venueName || job.name}
               </h1>
             </div>
           </div>
 
-          {/* Divider */}
           <hr className="my-4 border-gray-100" />
 
-          {/* Date & Time */}
+          {/* Date, Time, Fee */}
           <div className="space-y-3">
             <div className="flex items-center gap-3">
-              <span className="text-gray-400">📅</span>
+              <span className="text-gray-400 w-6 text-center">📅</span>
               <div>
                 <p className="text-sm text-gray-500">Date</p>
                 <p className="font-medium text-gray-900">{formatDate(job.date)}</p>
@@ -198,40 +270,160 @@ export default function JobDetailsPage() {
             </div>
 
             <div className="flex items-center gap-3">
-              <span className="text-gray-400">⏰</span>
+              <span className="text-gray-400 w-6 text-center">⏰</span>
               <div>
                 <p className="text-sm text-gray-500">Arrive by</p>
                 <p className="font-medium text-gray-900">{formatTime(job.time)}</p>
               </div>
             </div>
 
-            {job.agreedFeeOverride && (
+            {job.agreedFeeOverride && job.agreedFeeOverride > 0 && (
               <div className="flex items-center gap-3">
-                <span className="text-gray-400">💷</span>
+                <span className="text-gray-400 w-6 text-center">💷</span>
                 <div>
                   <p className="text-sm text-gray-500">Agreed fee</p>
-                  <p className="font-medium text-gray-900">£{job.agreedFeeOverride.toFixed(2)}</p>
+                  <p className="font-medium text-green-600">£{job.agreedFeeOverride.toFixed(0)} + expenses</p>
                 </div>
               </div>
             )}
           </div>
         </div>
 
-        {/* Key Notes */}
+        {/* Location Section */}
+        {venue && (venue.address || venue.whatThreeWords) && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <span>📍</span> Location
+            </h2>
+            
+            <div className="space-y-2">
+              {venue.address && (
+                <p className="text-gray-700">{venue.address}</p>
+              )}
+              
+              {venue.whatThreeWords && (
+                <p className="text-gray-500 text-sm font-mono">
+                  ///{venue.whatThreeWords}
+                </p>
+              )}
+            </div>
+            
+            {mapsUrl && (
+              <a
+                href={mapsUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-4 inline-flex items-center gap-2 text-ooosh-600 hover:text-ooosh-700 font-medium"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Open in Maps
+              </a>
+            )}
+          </div>
+        )}
+
+        {/* Contact Section */}
+        {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.email) && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <span>👤</span> Contact
+              {venue.phoneHidden && venue.phoneVisibleFrom && (
+                <span className="text-xs font-normal text-gray-400 ml-2">
+                  (phone visible from {venue.phoneVisibleFrom})
+                </span>
+              )}
+            </h2>
+            
+            <div className="space-y-3">
+              {/* Contact names */}
+              {venue.contact1 && (
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400 w-6 text-center">👤</span>
+                  <span className="text-gray-700">{venue.contact1}</span>
+                </div>
+              )}
+              
+              {venue.contact2 && (
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400 w-6 text-center">👤</span>
+                  <span className="text-gray-700">{venue.contact2}</span>
+                </div>
+              )}
+              
+              {/* Phone number - with visibility rule */}
+              {venue.phoneHidden ? (
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400 w-6 text-center">📞</span>
+                  <span className="text-gray-400 italic">
+                    Available from {venue.phoneVisibleFrom}
+                  </span>
+                </div>
+              ) : venue.phone && (
+                <a
+                  href={`tel:${venue.phone}`}
+                  className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
+                >
+                  <span className="w-6 text-center">📞</span>
+                  <span className="font-medium">{venue.phone}</span>
+                </a>
+              )}
+              
+              {/* Email */}
+              {venue.email && (
+                <a
+                  href={`mailto:${venue.email}`}
+                  className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
+                >
+                  <span className="w-6 text-center">✉️</span>
+                  <span className="font-medium">{venue.email}</span>
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Access Notes */}
+        {venue?.accessNotes && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span>🚪</span> Access Info
+            </h2>
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Key Notes from Job */}
         {job.keyNotes && (
-          <div className="bg-white rounded-xl shadow-sm p-6 mb-4">
+          <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
               <span>📋</span> Key Notes
             </h2>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Stage Notes (if different from access notes) */}
+        {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span>🎭</span> Stage Notes
+            </h2>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
             </div>
           </div>
         )}
 
         {/* HireHop Reference */}
         {job.hhRef && (
-          <div className="bg-white rounded-xl shadow-sm p-6 mb-4">
+          <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
               <span>🔗</span> Reference
             </h2>
@@ -242,7 +434,7 @@ export default function JobDetailsPage() {
         )}
 
         {/* Status Badge */}
-        <div className="bg-white rounded-xl shadow-sm p-6 mb-4">
+        <div className="bg-white rounded-xl shadow-sm p-6">
           <h2 className="font-semibold text-gray-900 mb-3">Status</h2>
           <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
             job.status.toLowerCase().includes('done') || job.status.toLowerCase().includes('completed')
@@ -256,8 +448,8 @@ export default function JobDetailsPage() {
         </div>
 
         {/* Action Buttons */}
-        <div className="space-y-3">
-          {/* Add to Calendar - placeholder for now */}
+        <div className="space-y-3 pt-2">
+          {/* Add to Calendar */}
           <button
             className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
             onClick={() => alert('Calendar export coming soon!')}
@@ -265,17 +457,17 @@ export default function JobDetailsPage() {
             <span>📅</span> Add to Calendar
           </button>
 
-          {/* Start Delivery/Collection - placeholder for now */}
+          {/* Start Delivery/Collection */}
           {!job.completedAtDate && (
             <button
-              className="w-full bg-orange-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-orange-600 transition-colors flex items-center justify-center gap-2 text-lg"
+              className="w-full bg-ooosh-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-ooosh-600 transition-colors flex items-center justify-center gap-2 text-lg"
               onClick={() => alert('Completion flow coming soon!')}
             >
               <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
             </button>
           )}
 
-          {/* Show completed badge if already done */}
+          {/* Completed badge */}
           {job.completedAtDate && (
             <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
               <span className="text-green-600 font-medium">
@@ -284,6 +476,7 @@ export default function JobDetailsPage() {
             </div>
           )}
         </div>
+
       </main>
     </div>
   )
