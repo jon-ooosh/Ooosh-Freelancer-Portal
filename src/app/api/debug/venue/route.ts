@@ -3,10 +3,7 @@
  * 
  * GET /api/debug/venue?jobId=xxx
  * 
- * Diagnoses venue connection issues by showing:
- * 1. Raw column data from the job
- * 2. Extracted venue ID
- * 3. Venue fetch result
+ * Diagnoses venue connection issues
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -32,7 +29,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    // Step 1: Fetch the raw job data including venue connect column
+    // Step 1: Fetch the raw job data
     const jobQuery = `
       query ($itemIds: [ID!]!) {
         items(ids: $itemIds) {
@@ -40,7 +37,6 @@ export async function GET(request: NextRequest) {
           name
           column_values {
             id
-            title
             text
             value
             type
@@ -55,7 +51,6 @@ export async function GET(request: NextRequest) {
         name: string
         column_values: Array<{
           id: string
-          title: string
           text: string
           value: string
           type: string
@@ -77,7 +72,7 @@ export async function GET(request: NextRequest) {
       totalColumns: job.column_values.length
     })
 
-    // Step 2: Find the venue connect column specifically
+    // Step 2: Find the venue connect column
     const venueColumn = job.column_values.find(col => col.id === DC_COLUMNS.venueConnect)
     
     debug.steps.push({
@@ -87,14 +82,13 @@ export async function GET(request: NextRequest) {
       venueColumnFound: !!venueColumn,
       venueColumnData: venueColumn ? {
         id: venueColumn.id,
-        title: venueColumn.title,
         text: venueColumn.text,
         value: venueColumn.value,
         type: venueColumn.type,
       } : null
     })
 
-    // Step 3: Try to parse the venue ID from the connect column value
+    // Step 3: Parse the venue ID
     let venueId: string | null = null
     let parseError: string | null = null
 
@@ -107,13 +101,9 @@ export async function GET(request: NextRequest) {
           parsedValue: parsed
         })
         
-        // Connect columns can have different structures
-        // Try linkedPulseIds first (standard connect column)
         if (parsed?.linkedPulseIds?.[0]?.linkedPulseId) {
           venueId = parsed.linkedPulseIds[0].linkedPulseId.toString()
-        }
-        // Also try direct array format
-        else if (Array.isArray(parsed) && parsed[0]) {
+        } else if (Array.isArray(parsed) && parsed[0]) {
           venueId = parsed[0].toString()
         }
         
@@ -129,15 +119,14 @@ export async function GET(request: NextRequest) {
       parseError
     })
 
-    // Step 4: If we have a venue ID, try to fetch the venue
+    // Step 4: Fetch the venue if we have an ID
     if (venueId) {
       const venuesBoardId = getBoardIds().venues
       
       if (!venuesBoardId) {
         debug.steps.push({
           step: 5,
-          result: 'ERROR: MONDAY_BOARD_ID_VENUES not configured',
-          envValue: process.env.MONDAY_BOARD_ID_VENUES || '(not set)'
+          result: 'ERROR: MONDAY_BOARD_ID_VENUES not configured'
         })
       } else {
         const venueQuery = `
@@ -147,7 +136,6 @@ export async function GET(request: NextRequest) {
               name
               column_values {
                 id
-                title
                 text
                 value
               }
@@ -161,7 +149,6 @@ export async function GET(request: NextRequest) {
             name: string
             column_values: Array<{
               id: string
-              title: string
               text: string
               value: string
             }>
@@ -178,11 +165,9 @@ export async function GET(request: NextRequest) {
             boardId: venuesBoardId
           })
         } else {
-          // Show all venue columns so we can verify the column IDs
           const venueColumns = venue.column_values.map(col => ({
             id: col.id,
-            title: col.title,
-            text: col.text?.substring(0, 100), // Truncate long text
+            text: col.text?.substring(0, 100),
             hasValue: !!col.value
           }))
 
@@ -204,17 +189,14 @@ export async function GET(request: NextRequest) {
       })
     }
 
-    // Also show all connect-type columns to help identify the right one
+    // Show all connect-type columns
     const connectColumns = job.column_values.filter(col => 
       col.type === 'board-relation' || 
-      col.id.includes('connect') ||
-      col.title?.toLowerCase().includes('venue') ||
-      col.title?.toLowerCase().includes('address')
+      col.id.includes('connect')
     )
 
     debug.connectColumnsInJob = connectColumns.map(col => ({
       id: col.id,
-      title: col.title,
       type: col.type,
       text: col.text,
       value: col.value
