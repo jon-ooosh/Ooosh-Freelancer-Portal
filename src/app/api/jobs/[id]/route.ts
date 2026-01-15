@@ -8,7 +8,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getSession } from '@/lib/session'
+import { getSessionUser } from '@/lib/session'
 import { getJobById } from '@/lib/monday'
 
 export async function GET(
@@ -27,7 +27,7 @@ export async function GET(
     }
 
     // Check session
-    const session = getSession()
+    const session = await getSessionUser()
     
     if (!session) {
       return NextResponse.json(
