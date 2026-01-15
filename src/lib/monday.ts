@@ -29,7 +29,7 @@ export const DC_COLUMNS = {
   deliverCollect: 'status_1',              // "Delivery" or "Collection"
   date: 'date4',
   timeToArrive: 'hour',
-  venueConnect: 'connect_boards6',
+  venueConnect: 'connect_boards6',         // Connect column linking to Address Book
   driverConnect: 'connect_boards3',
   driverEmailMirror: 'driver_email__gc_',  // Text column populated by General Caster from mirror
   status: 'status90',
@@ -45,14 +45,27 @@ export const DC_COLUMNS = {
   extraChargesReason: 'long_text_mkywkth4',
 } as const
 
-// List of column IDs we actually need to fetch for jobs
+// Address Book / Venues board columns
+export const VENUE_COLUMNS = {
+  address: 'long_text',           // Full address ("Load in address")
+  whatThreeWords: 'text3',        // What3Words location
+  contact1: 'text',               // Contact 1 name
+  contact2: 'text4',              // Contact 2 name
+  phone: 'phone',                 // Phone number
+  email: 'email',                 // Email address
+  accessNotes: 'long_text9',      // Access notes
+  stageNotes: 'long_text7',       // Notes re stage
+  files: 'files',                 // Files
+} as const
+
+// List of column IDs we need to fetch for jobs
 // This dramatically reduces response size and speeds up queries
 const DC_COLUMNS_TO_FETCH = [
   DC_COLUMNS.hhRef,
   DC_COLUMNS.deliverCollect,
   DC_COLUMNS.date,
   DC_COLUMNS.timeToArrive,
-  DC_COLUMNS.venueConnect,
+  DC_COLUMNS.venueConnect,        // Need this to get linked venue ID
   DC_COLUMNS.driverEmailMirror,
   DC_COLUMNS.status,
   DC_COLUMNS.keyPoints,
@@ -60,6 +73,18 @@ const DC_COLUMNS_TO_FETCH = [
   DC_COLUMNS.agreedFeeOverride,
   DC_COLUMNS.completedAtDate,
   DC_COLUMNS.completionNotes,
+]
+
+// List of column IDs we need to fetch for venues
+const VENUE_COLUMNS_TO_FETCH = [
+  VENUE_COLUMNS.address,
+  VENUE_COLUMNS.whatThreeWords,
+  VENUE_COLUMNS.contact1,
+  VENUE_COLUMNS.contact2,
+  VENUE_COLUMNS.phone,
+  VENUE_COLUMNS.email,
+  VENUE_COLUMNS.accessNotes,
+  VENUE_COLUMNS.stageNotes,
 ]
 
 // =============================================================================
@@ -300,6 +325,106 @@ export async function updateFreelancerDateColumn(
 }
 
 // =============================================================================
+// VENUE QUERIES
+// =============================================================================
+
+export interface VenueRecord {
+  id: string
+  name: string
+  address?: string
+  whatThreeWords?: string
+  contact1?: string
+  contact2?: string
+  phone?: string
+  email?: string
+  accessNotes?: string
+  stageNotes?: string
+}
+
+/**
+ * Get venue details by ID
+ */
+export async function getVenueById(venueId: string): Promise<VenueRecord | null> {
+  const boardId = getBoardIds().venues
+
+  if (!boardId) {
+    console.warn('MONDAY_BOARD_ID_VENUES is not configured')
+    return null
+  }
+
+  console.log('Monday: Fetching venue', venueId, 'from board', boardId)
+
+  // Query for a specific item by ID
+  const query = `
+    query ($itemIds: [ID!]!) {
+      items(ids: $itemIds) {
+        id
+        name
+        column_values(ids: ${JSON.stringify(VENUE_COLUMNS_TO_FETCH)}) {
+          id
+          text
+          value
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    items: Array<{
+      id: string
+      name: string
+      column_values: Array<{
+        id: string
+        text: string
+        value: string
+      }>
+    }>
+  }>(query, { itemIds: [venueId] })
+
+  const item = result.items?.[0]
+  
+  if (!item) {
+    console.log('Monday: Venue not found:', venueId)
+    return null
+  }
+
+  // Build column map
+  const columnMap = item.column_values.reduce((acc, col) => {
+    acc[col.id] = { text: col.text, value: col.value }
+    return acc
+  }, {} as Record<string, { text: string; value: string }>)
+
+  // Helper to get text from a column
+  const getColText = (colId: string) => columnMap[colId]?.text || ''
+
+  // Parse phone number - Monday stores it as JSON like {"phone":"123","countryShortName":"GB"}
+  let phoneNumber = ''
+  const phoneValue = columnMap[VENUE_COLUMNS.phone]?.value
+  if (phoneValue) {
+    try {
+      const phoneData = JSON.parse(phoneValue)
+      phoneNumber = phoneData.phone || ''
+    } catch {
+      // If not JSON, try using text directly
+      phoneNumber = columnMap[VENUE_COLUMNS.phone]?.text || ''
+    }
+  }
+
+  return {
+    id: item.id,
+    name: item.name,
+    address: getColText(VENUE_COLUMNS.address),
+    whatThreeWords: getColText(VENUE_COLUMNS.whatThreeWords),
+    contact1: getColText(VENUE_COLUMNS.contact1),
+    contact2: getColText(VENUE_COLUMNS.contact2),
+    phone: phoneNumber,
+    email: getColText(VENUE_COLUMNS.email),
+    accessNotes: getColText(VENUE_COLUMNS.accessNotes),
+    stageNotes: getColText(VENUE_COLUMNS.stageNotes),
+  }
+}
+
+// =============================================================================
 // DELIVERY/COLLECTION QUERIES
 // =============================================================================
 
@@ -311,6 +436,7 @@ export interface JobRecord {
   date?: string
   time?: string
   venueName?: string
+  venueId?: string              // ID of linked venue for fetching details
   status: string
   runGroup?: string
   agreedFeeOverride?: number
@@ -338,8 +464,6 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
 
   // OPTIMIZED: Only request specific columns we need
   // This dramatically reduces response size and query time
-  // Note: We request both 'text' and the raw 'value' because mirror columns
-  // sometimes store data differently
   const query = `
     query ($boardId: [ID!]!, $columnIds: [String!]) {
       boards(ids: $boardId) {
@@ -371,7 +495,7 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
             id: string
             text: string
             value: string
-            display_value?: string  // Mirror columns use this field
+            display_value?: string
           }>
         }>
       }
@@ -390,13 +514,10 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
   const normalizedEmail = freelancerEmail.toLowerCase().trim()
   
   // Filter items where this freelancer is assigned
-  // Mirror columns can return data in either 'text' or 'display_value'
   const matchingItems = items.filter(item => {
     const driverEmailCol = item.column_values.find(col => col.id === DC_COLUMNS.driverEmailMirror)
-    // Check both text and display_value - mirror columns can use either
     const driverEmail = (driverEmailCol?.display_value || driverEmailCol?.text || '').toLowerCase().trim()
     
-    // Debug log to help troubleshoot
     if (driverEmail) {
       console.log('Monday: Item', item.id, 'has driver email:', driverEmail)
     }
@@ -408,7 +529,6 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
 
   // Transform matching items to JobRecord format
   return matchingItems.map(item => {
-    // Build column map including display_value for mirror columns
     const columnMap = item.column_values.reduce((acc, col) => {
       acc[col.id] = { 
         text: col.text, 
@@ -418,7 +538,6 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
       return acc
     }, {} as Record<string, { text: string; value: string; display_value?: string }>)
 
-    // Helper to get text from a column, preferring display_value for mirrors
     const getColText = (colId: string) => {
       const col = columnMap[colId]
       return col?.display_value || col?.text || ''
@@ -432,6 +551,20 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
     const feeText = getColText(DC_COLUMNS.agreedFeeOverride)
     const agreedFeeOverride = feeText ? parseFloat(feeText) : undefined
 
+    // Extract venue ID from connect column
+    // Connect columns store linked item IDs in the value as JSON
+    let venueId: string | undefined
+    const venueConnectValue = columnMap[DC_COLUMNS.venueConnect]?.value
+    if (venueConnectValue) {
+      try {
+        const parsed = JSON.parse(venueConnectValue)
+        // Connect column value is like: {"linkedPulseIds":[{"linkedPulseId":123456}]}
+        venueId = parsed?.linkedPulseIds?.[0]?.linkedPulseId?.toString()
+      } catch {
+        // If parsing fails, ignore
+      }
+    }
+
     return {
       id: item.id,
       name: item.name,
@@ -440,6 +573,7 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
       date: getColText(DC_COLUMNS.date),
       time: getColText(DC_COLUMNS.timeToArrive),
       venueName: getColText(DC_COLUMNS.venueConnect),
+      venueId,
       status: getColText(DC_COLUMNS.status) || 'unknown',
       runGroup: getColText(DC_COLUMNS.runGroup),
       agreedFeeOverride,
@@ -537,6 +671,18 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
   const feeText = getColText(DC_COLUMNS.agreedFeeOverride)
   const agreedFeeOverride = feeText ? parseFloat(feeText) : undefined
 
+  // Extract venue ID from connect column
+  let venueId: string | undefined
+  const venueConnectValue = columnMap[DC_COLUMNS.venueConnect]?.value
+  if (venueConnectValue) {
+    try {
+      const parsed = JSON.parse(venueConnectValue)
+      venueId = parsed?.linkedPulseIds?.[0]?.linkedPulseId?.toString()
+    } catch {
+      // If parsing fails, ignore
+    }
+  }
+
   return {
     id: item.id,
     name: item.name,
@@ -545,6 +691,7 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
     date: getColText(DC_COLUMNS.date),
     time: getColText(DC_COLUMNS.timeToArrive),
     venueName: getColText(DC_COLUMNS.venueConnect),
+    venueId,
     status: getColText(DC_COLUMNS.status) || 'unknown',
     runGroup: getColText(DC_COLUMNS.runGroup),
     agreedFeeOverride,
