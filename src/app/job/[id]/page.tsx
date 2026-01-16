@@ -8,8 +8,8 @@
  * 
  * Features:
  * - Job type, venue name, date, time
- * - Full venue address with What3Words and "Open in Maps" link
- * - Contact details (with 48-hour visibility rule for phone numbers)
+ * - Full venue address with Google Maps AND What3Words links
+ * - Contact details with two phone numbers (48-hour visibility rule)
  * - Access notes and key points
  * - HireHop reference
  * - Action buttons (Calendar, Start Delivery/Collection)
@@ -48,6 +48,7 @@ interface Venue {
   contact1?: string
   contact2?: string
   phone?: string | null
+  phone2?: string | null
   phoneHidden?: boolean
   phoneVisibleFrom?: string | null
   email?: string
@@ -93,22 +94,20 @@ function formatTime(timeStr?: string): string {
 /**
  * Build a Google Maps URL for an address
  */
-function getMapsUrl(address?: string, whatThreeWords?: string): string | null {
-  // Prefer What3Words if available
-  if (whatThreeWords) {
-    // What3Words URLs: https://what3words.com/word.word.word
-    const words = whatThreeWords.replace(/^\/+/, '').trim()
-    if (words) {
-      return `https://what3words.com/${words}`
-    }
-  }
-  
-  // Fall back to Google Maps for address
-  if (address) {
-    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
-  }
-  
-  return null
+function getGoogleMapsUrl(address?: string): string | null {
+  if (!address) return null
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
+}
+
+/**
+ * Build a What3Words URL
+ */
+function getWhat3WordsUrl(w3w?: string): string | null {
+  if (!w3w) return null
+  // Clean up the W3W string - remove leading slashes if present
+  const words = w3w.replace(/^\/+/, '').trim()
+  if (!words) return null
+  return `https://what3words.com/${words}`
 }
 
 // =============================================================================
@@ -212,7 +211,10 @@ export default function JobDetailsPage() {
   const isDelivery = job.type === 'delivery'
   const typeIcon = isDelivery ? '📦' : '🚚'
   const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
-  const mapsUrl = getMapsUrl(venue?.address, venue?.whatThreeWords)
+  
+  // Map URLs
+  const googleMapsUrl = getGoogleMapsUrl(venue?.address)
+  const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
 
   return (
     <div className="min-h-screen bg-gray-50 pb-8">
@@ -308,25 +310,40 @@ export default function JobDetailsPage() {
               )}
             </div>
             
-            {mapsUrl && (
-              <a
-                href={mapsUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-4 inline-flex items-center gap-2 text-ooosh-600 hover:text-ooosh-700 font-medium"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-                Open in Maps
-              </a>
-            )}
+            {/* Map Links - separate buttons for Google Maps and What3Words */}
+            <div className="mt-4 flex flex-wrap gap-3">
+              {googleMapsUrl && (
+                <a
+                  href={googleMapsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  Google Maps
+                </a>
+              )}
+              
+              {what3WordsUrl && (
+                <a
+                  href={what3WordsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm"
+                >
+                  <span className="font-bold">///</span>
+                  What3Words
+                </a>
+              )}
+            </div>
           </div>
         )}
 
         {/* Contact Section */}
-        {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.email) && (
+        {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <span>👤</span> Contact
@@ -353,7 +370,7 @@ export default function JobDetailsPage() {
                 </div>
               )}
               
-              {/* Phone number - with visibility rule */}
+              {/* Phone numbers - with visibility rule */}
               {venue.phoneHidden ? (
                 <div className="flex items-center gap-3">
                   <span className="text-gray-400 w-6 text-center">📞</span>
@@ -361,14 +378,28 @@ export default function JobDetailsPage() {
                     Available from {venue.phoneVisibleFrom}
                   </span>
                 </div>
-              ) : venue.phone && (
-                <a
-                  href={`tel:${venue.phone}`}
-                  className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
-                >
-                  <span className="w-6 text-center">📞</span>
-                  <span className="font-medium">{venue.phone}</span>
-                </a>
+              ) : (
+                <>
+                  {venue.phone && (
+                    <a
+                      href={`tel:${venue.phone}`}
+                      className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
+                    >
+                      <span className="w-6 text-center">📞</span>
+                      <span className="font-medium">{venue.phone}</span>
+                    </a>
+                  )}
+                  
+                  {venue.phone2 && (
+                    <a
+                      href={`tel:${venue.phone2}`}
+                      className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
+                    >
+                      <span className="w-6 text-center">📞</span>
+                      <span className="font-medium">{venue.phone2}</span>
+                    </a>
+                  )}
+                </>
               )}
               
               {/* Email */}
