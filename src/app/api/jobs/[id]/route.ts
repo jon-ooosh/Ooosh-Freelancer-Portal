@@ -96,7 +96,7 @@ export async function GET(
     const contactVisibleFrom = !contactsVisible ? getContactVisibleDate(job.date) : null
 
     // Build the response with venue details
-    // Phone number is redacted if outside the 48-hour window
+    // Phone numbers are redacted if outside the 48-hour window
     const venueDetails = venue ? {
       id: venue.id,
       name: venue.name,
@@ -104,8 +104,9 @@ export async function GET(
       whatThreeWords: venue.whatThreeWords,
       contact1: venue.contact1,
       contact2: venue.contact2,
-      // Only include phone if within 48-hour window
+      // Only include phones if within 48-hour window
       phone: contactsVisible ? venue.phone : null,
+      phone2: contactsVisible ? venue.phone2 : null,
       phoneHidden: !contactsVisible,
       phoneVisibleFrom: contactVisibleFrom,
       email: venue.email,
