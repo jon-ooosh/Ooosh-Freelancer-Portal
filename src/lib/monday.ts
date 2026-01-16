@@ -51,7 +51,8 @@ export const VENUE_COLUMNS = {
   whatThreeWords: 'text3',        // What3Words location
   contact1: 'text',               // Contact 1 name
   contact2: 'text4',              // Contact 2 name
-  phone: 'phone',                 // Phone number
+  phone: 'phone',                 // Phone number 1
+  phone2: 'phone_mkznt3rr',       // Phone number 2
   email: 'email',                 // Email address
   accessNotes: 'long_text9',      // Access notes
   stageNotes: 'long_text7',       // Notes re stage
@@ -82,6 +83,7 @@ const VENUE_COLUMNS_TO_FETCH = [
   VENUE_COLUMNS.contact1,
   VENUE_COLUMNS.contact2,
   VENUE_COLUMNS.phone,
+  VENUE_COLUMNS.phone2,
   VENUE_COLUMNS.email,
   VENUE_COLUMNS.accessNotes,
   VENUE_COLUMNS.stageNotes,
@@ -336,9 +338,28 @@ export interface VenueRecord {
   contact1?: string
   contact2?: string
   phone?: string
+  phone2?: string
   email?: string
   accessNotes?: string
   stageNotes?: string
+}
+
+/**
+ * Parse a phone column value from Monday.com
+ * Phone columns store data as JSON like {"phone":"123","countryShortName":"GB"}
+ */
+function parsePhoneValue(value: string | undefined, text: string | undefined): string {
+  if (value) {
+    try {
+      const phoneData = JSON.parse(value)
+      if (phoneData.phone) {
+        return phoneData.phone
+      }
+    } catch {
+      // If not JSON, fall through to text
+    }
+  }
+  return text || ''
 }
 
 /**
@@ -397,18 +418,15 @@ export async function getVenueById(venueId: string): Promise<VenueRecord | null>
   // Helper to get text from a column
   const getColText = (colId: string) => columnMap[colId]?.text || ''
 
-  // Parse phone number - Monday stores it as JSON like {"phone":"123","countryShortName":"GB"}
-  let phoneNumber = ''
-  const phoneValue = columnMap[VENUE_COLUMNS.phone]?.value
-  if (phoneValue) {
-    try {
-      const phoneData = JSON.parse(phoneValue)
-      phoneNumber = phoneData.phone || ''
-    } catch {
-      // If not JSON, try using text directly
-      phoneNumber = columnMap[VENUE_COLUMNS.phone]?.text || ''
-    }
-  }
+  // Parse phone numbers (they're stored as JSON)
+  const phone1 = parsePhoneValue(
+    columnMap[VENUE_COLUMNS.phone]?.value,
+    columnMap[VENUE_COLUMNS.phone]?.text
+  )
+  const phone2 = parsePhoneValue(
+    columnMap[VENUE_COLUMNS.phone2]?.value,
+    columnMap[VENUE_COLUMNS.phone2]?.text
+  )
 
   return {
     id: item.id,
@@ -417,7 +435,8 @@ export async function getVenueById(venueId: string): Promise<VenueRecord | null>
     whatThreeWords: getColText(VENUE_COLUMNS.whatThreeWords),
     contact1: getColText(VENUE_COLUMNS.contact1),
     contact2: getColText(VENUE_COLUMNS.contact2),
-    phone: phoneNumber,
+    phone: phone1,
+    phone2: phone2,
     email: getColText(VENUE_COLUMNS.email),
     accessNotes: getColText(VENUE_COLUMNS.accessNotes),
     stageNotes: getColText(VENUE_COLUMNS.stageNotes),
@@ -517,11 +536,6 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
   const matchingItems = items.filter(item => {
     const driverEmailCol = item.column_values.find(col => col.id === DC_COLUMNS.driverEmailMirror)
     const driverEmail = (driverEmailCol?.display_value || driverEmailCol?.text || '').toLowerCase().trim()
-    
-    if (driverEmail) {
-      console.log('Monday: Item', item.id, 'has driver email:', driverEmail)
-    }
-    
     return driverEmail === normalizedEmail
   })
 
