@@ -357,6 +357,7 @@ export default function JobDetailsPage() {
 
       <main className="max-w-lg mx-auto p-4 space-y-4">
         
+        {/* Job Header - Type, Venue, Date, Time, Fee */}
         <div className="bg-white rounded-xl shadow-sm p-6">
           <div className="flex items-start gap-3 mb-4">
             <span className="text-3xl">{typeIcon}</span>
@@ -401,6 +402,33 @@ export default function JobDetailsPage() {
           </div>
         </div>
 
+        {/* Reference - MOVED UP */}
+        {job.hhRef && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span>🔗</span> Reference
+            </h2>
+            <p className="text-gray-600">
+              HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
+            </p>
+          </div>
+        )}
+
+        {/* Status - MOVED UP */}
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3">Status</h2>
+          <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
+            job.status.toLowerCase().includes('done') || job.status.toLowerCase().includes('completed')
+              ? 'bg-green-100 text-green-800'
+              : job.status.toLowerCase().includes('arranged')
+                ? 'bg-blue-100 text-blue-800'
+                : 'bg-gray-100 text-gray-800'
+          }`}>
+            {job.status}
+          </span>
+        </div>
+
+        {/* Location */}
         {venue && (venue.address || venue.whatThreeWords) && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -450,6 +478,7 @@ export default function JobDetailsPage() {
           </div>
         )}
 
+        {/* Contact */}
         {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -520,10 +549,12 @@ export default function JobDetailsPage() {
           </div>
         )}
 
+        {/* Equipment List */}
         {job.hhRef && (
           <EquipmentList hhRef={job.hhRef} />
         )}
 
+        {/* Access Info */}
         {venue?.accessNotes && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -535,6 +566,7 @@ export default function JobDetailsPage() {
           </div>
         )}
 
+        {/* Key Notes */}
         {job.keyNotes && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -546,6 +578,7 @@ export default function JobDetailsPage() {
           </div>
         )}
 
+        {/* Stage Notes */}
         {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -557,30 +590,7 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {job.hhRef && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>🔗</span> Reference
-            </h2>
-            <p className="text-gray-600">
-              HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
-            </p>
-          </div>
-        )}
-
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3">Status</h2>
-          <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
-            job.status.toLowerCase().includes('done') || job.status.toLowerCase().includes('completed')
-              ? 'bg-green-100 text-green-800'
-              : job.status.toLowerCase().includes('arranged')
-                ? 'bg-blue-100 text-blue-800'
-                : 'bg-gray-100 text-gray-800'
-          }`}>
-            {job.status}
-          </span>
-        </div>
-
+        {/* Action Buttons */}
         <div className="space-y-3 pt-2">
           <button
             className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
