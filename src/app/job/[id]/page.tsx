@@ -80,8 +80,8 @@ interface EquipmentItem {
  * Returns a clean title like "Job Name - Venue" or just "Venue" if they're the same
  */
 function formatJobTitle(itemName: string, venueName?: string): string {
-  // Strip "DEL - " or "COL - " prefix (case insensitive)
-  const cleanedName = itemName.replace(/^(DEL|COL)\s*-\s*/i, '').trim()
+  // Strip "DEL - ", "DEL:", "COL - ", "COL:" prefix (case insensitive)
+  const cleanedName = itemName.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
   
   // If no venue name, just return the cleaned item name
   if (!venueName) {
