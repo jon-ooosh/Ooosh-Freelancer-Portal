@@ -10,6 +10,7 @@
  * - Job type, venue name, date, time
  * - Full venue address with Google Maps AND What3Words links
  * - Contact details with two phone numbers (48-hour visibility rule)
+ * - Equipment list from HireHop
  * - Access notes and key points
  * - HireHop reference
  * - Action buttons (Calendar, Start Delivery/Collection)
@@ -64,6 +65,15 @@ interface JobApiResponse {
   error?: string
 }
 
+interface EquipmentItem {
+  id: string
+  name: string
+  quantity: number
+  category?: string
+  categoryId?: number
+  isVirtual?: boolean
+}
+
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
@@ -111,7 +121,145 @@ function getWhat3WordsUrl(w3w?: string): string | null {
 }
 
 // =============================================================================
-// COMPONENT
+// EQUIPMENT LIST COMPONENT
+// =============================================================================
+
+function EquipmentList({ hhRef }: { hhRef: string }) {
+  const [items, setItems] = useState<EquipmentItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState(false)
+
+  useEffect(() => {
+    async function fetchItems() {
+      try {
+        const response = await fetch(`/api/hirehop/items/${hhRef}`)
+        const data = await response.json()
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Failed to fetch equipment list')
+        }
+
+        setItems(data.items || [])
+      } catch (err) {
+        console.error('Error fetching equipment:', err)
+        setError(err instanceof Error ? err.message : 'Failed to load equipment')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    if (hhRef) {
+      fetchItems()
+    } else {
+      setLoading(false)
+      setError('No HireHop reference available')
+    }
+  }, [hhRef])
+
+  // Loading state
+  if (loading) {
+    return (
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📦</span> Equipment List
+        </h2>
+        <div className="animate-pulse space-y-2">
+          <div className="h-4 bg-gray-200 rounded w-3/4"></div>
+          <div className="h-4 bg-gray-200 rounded w-1/2"></div>
+          <div className="h-4 bg-gray-200 rounded w-2/3"></div>
+        </div>
+      </div>
+    )
+  }
+
+  // Error state
+  if (error) {
+    return (
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📦</span> Equipment List
+        </h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+          <p className="text-red-700 text-sm">{error}</p>
+        </div>
+      </div>
+    )
+  }
+
+  // No items state
+  if (items.length === 0) {
+    return (
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📦</span> Equipment List
+        </h2>
+        <p className="text-gray-500 text-sm">No equipment items found for this job.</p>
+      </div>
+    )
+  }
+
+  // Determine how many items to show
+  const PREVIEW_COUNT = 5
+  const hasMoreItems = items.length > PREVIEW_COUNT
+  const displayItems = expanded ? items : items.slice(0, PREVIEW_COUNT)
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm p-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+          <span>📦</span> Equipment List
+          <span className="text-sm font-normal text-gray-500">
+            ({items.length} item{items.length !== 1 ? 's' : ''})
+          </span>
+        </h2>
+      </div>
+
+      {/* Equipment items */}
+      <div className="space-y-2">
+        {displayItems.map((item, index) => (
+          <div 
+            key={item.id || index} 
+            className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"
+          >
+            <div className="flex-1">
+              <p className="text-gray-900 text-sm">{item.name}</p>
+              {item.category && (
+                <p className="text-gray-400 text-xs">{item.category}</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="bg-gray-100 text-gray-700 px-2 py-1 rounded text-sm font-medium">
+                × {item.quantity}
+              </span>
+              {item.isVirtual && (
+                <span className="text-xs text-gray-400" title="Virtual item">
+                  (V)
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Show more/less toggle */}
+      {hasMoreItems && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="mt-3 w-full text-center text-sm font-medium text-ooosh-600 hover:text-ooosh-500 py-2 border-t border-gray-100"
+        >
+          {expanded 
+            ? '▲ Show less' 
+            : `▼ Show all ${items.length} items (+${items.length - PREVIEW_COUNT} more)`
+          }
+        </button>
+      )}
+    </div>
+  )
+}
+
+// =============================================================================
+// MAIN PAGE COMPONENT
 // =============================================================================
 
 export default function JobDetailsPage() {
@@ -313,7 +461,7 @@ export default function JobDetailsPage() {
             {/* Map Links - separate buttons for Google Maps and What3Words */}
             <div className="mt-4 flex flex-wrap gap-3">
               {googleMapsUrl && (
-                <a
+                
                   href={googleMapsUrl}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -328,7 +476,7 @@ export default function JobDetailsPage() {
               )}
               
               {what3WordsUrl && (
-                <a
+                
                   href={what3WordsUrl}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -381,7 +529,7 @@ export default function JobDetailsPage() {
               ) : (
                 <>
                   {venue.phone && (
-                    <a
+                    
                       href={`tel:${venue.phone}`}
                       className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
                     >
@@ -391,7 +539,7 @@ export default function JobDetailsPage() {
                   )}
                   
                   {venue.phone2 && (
-                    <a
+                    
                       href={`tel:${venue.phone2}`}
                       className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
                     >
@@ -404,7 +552,7 @@ export default function JobDetailsPage() {
               
               {/* Email */}
               {venue.email && (
-                <a
+                
                   href={`mailto:${venue.email}`}
                   className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
                 >
@@ -414,6 +562,11 @@ export default function JobDetailsPage() {
               )}
             </div>
           </div>
+        )}
+
+        {/* Equipment List - Only show if we have a HireHop reference */}
+        {job.hhRef && (
+          <EquipmentList hhRef={job.hhRef} />
         )}
 
         {/* Access Notes */}
