@@ -78,9 +78,6 @@ interface EquipmentItem {
 // HELPER FUNCTIONS
 // =============================================================================
 
-/**
- * Format a date string for display (e.g., "Tuesday 26 November 2024")
- */
 function formatDate(dateStr?: string): string {
   if (!dateStr) return 'TBC'
   const date = new Date(dateStr)
@@ -93,28 +90,18 @@ function formatDate(dateStr?: string): string {
   })
 }
 
-/**
- * Format a time string for display
- */
 function formatTime(timeStr?: string): string {
   if (!timeStr) return 'TBC'
   return timeStr
 }
 
-/**
- * Build a Google Maps URL for an address
- */
 function getGoogleMapsUrl(address?: string): string | null {
   if (!address) return null
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
 }
 
-/**
- * Build a What3Words URL
- */
 function getWhat3WordsUrl(w3w?: string): string | null {
   if (!w3w) return null
-  // Clean up the W3W string - remove leading slashes if present
   const words = w3w.replace(/^\/+/, '').trim()
   if (!words) return null
   return `https://what3words.com/${words}`
@@ -157,7 +144,6 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
     }
   }, [hhRef])
 
-  // Loading state
   if (loading) {
     return (
       <div className="bg-white rounded-xl shadow-sm p-6">
@@ -173,7 +159,6 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
     )
   }
 
-  // Error state
   if (error) {
     return (
       <div className="bg-white rounded-xl shadow-sm p-6">
@@ -187,7 +172,6 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
     )
   }
 
-  // No items state
   if (items.length === 0) {
     return (
       <div className="bg-white rounded-xl shadow-sm p-6">
@@ -199,7 +183,6 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
     )
   }
 
-  // Determine how many items to show
   const PREVIEW_COUNT = 5
   const hasMoreItems = items.length > PREVIEW_COUNT
   const displayItems = expanded ? items : items.slice(0, PREVIEW_COUNT)
@@ -215,7 +198,6 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
         </h2>
       </div>
 
-      {/* Equipment items */}
       <div className="space-y-2">
         {displayItems.map((item, index) => (
           <div 
@@ -242,7 +224,6 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
         ))}
       </div>
 
-      {/* Show more/less toggle */}
       {hasMoreItems && (
         <button
           onClick={() => setExpanded(!expanded)}
@@ -301,7 +282,6 @@ export default function JobDetailsPage() {
     }
   }, [jobId, router])
 
-  // Loading state
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -313,7 +293,6 @@ export default function JobDetailsPage() {
     )
   }
 
-  // Error state
   if (error) {
     return (
       <div className="min-h-screen bg-gray-50 p-4">
@@ -334,7 +313,6 @@ export default function JobDetailsPage() {
     )
   }
 
-  // Job not found
   if (!job) {
     return (
       <div className="min-h-screen bg-gray-50 p-4">
@@ -355,18 +333,14 @@ export default function JobDetailsPage() {
     )
   }
 
-  // Job type display
   const isDelivery = job.type === 'delivery'
   const typeIcon = isDelivery ? '📦' : '🚚'
   const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
-  
-  // Map URLs
   const googleMapsUrl = getGoogleMapsUrl(venue?.address)
   const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
 
   return (
     <div className="min-h-screen bg-gray-50 pb-8">
-      {/* Header */}
       <header className="bg-white shadow-sm sticky top-0 z-10">
         <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
           <Link
@@ -390,10 +364,8 @@ export default function JobDetailsPage() {
         </div>
       </header>
 
-      {/* Main Content */}
       <main className="max-w-lg mx-auto p-4 space-y-4">
         
-        {/* Job Type & Venue Header */}
         <div className="bg-white rounded-xl shadow-sm p-6">
           <div className="flex items-start gap-3 mb-4">
             <span className="text-3xl">{typeIcon}</span>
@@ -409,7 +381,6 @@ export default function JobDetailsPage() {
 
           <hr className="my-4 border-gray-100" />
 
-          {/* Date, Time, Fee */}
           <div className="space-y-3">
             <div className="flex items-center gap-3">
               <span className="text-gray-400 w-6 text-center">📅</span>
@@ -439,7 +410,6 @@ export default function JobDetailsPage() {
           </div>
         </div>
 
-        {/* Location Section */}
         {venue && (venue.address || venue.whatThreeWords) && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -458,7 +428,6 @@ export default function JobDetailsPage() {
               )}
             </div>
             
-            {/* Map Links - separate buttons for Google Maps and What3Words */}
             <div className="mt-4 flex flex-wrap gap-3">
               {googleMapsUrl && (
                 
@@ -490,7 +459,6 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* Contact Section */}
         {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -503,7 +471,6 @@ export default function JobDetailsPage() {
             </h2>
             
             <div className="space-y-3">
-              {/* Contact names */}
               {venue.contact1 && (
                 <div className="flex items-center gap-3">
                   <span className="text-gray-400 w-6 text-center">👤</span>
@@ -518,7 +485,6 @@ export default function JobDetailsPage() {
                 </div>
               )}
               
-              {/* Phone numbers - with visibility rule */}
               {venue.phoneHidden ? (
                 <div className="flex items-center gap-3">
                   <span className="text-gray-400 w-6 text-center">📞</span>
@@ -550,7 +516,6 @@ export default function JobDetailsPage() {
                 </>
               )}
               
-              {/* Email */}
               {venue.email && (
                 
                   href={`mailto:${venue.email}`}
@@ -564,12 +529,10 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* Equipment List - Only show if we have a HireHop reference */}
         {job.hhRef && (
           <EquipmentList hhRef={job.hhRef} />
         )}
 
-        {/* Access Notes */}
         {venue?.accessNotes && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -581,7 +544,6 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* Key Notes from Job */}
         {job.keyNotes && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -593,7 +555,6 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* Stage Notes (if different from access notes) */}
         {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -605,7 +566,6 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* HireHop Reference */}
         {job.hhRef && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -617,7 +577,6 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* Status Badge */}
         <div className="bg-white rounded-xl shadow-sm p-6">
           <h2 className="font-semibold text-gray-900 mb-3">Status</h2>
           <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
@@ -631,9 +590,7 @@ export default function JobDetailsPage() {
           </span>
         </div>
 
-        {/* Action Buttons */}
         <div className="space-y-3 pt-2">
-          {/* Add to Calendar */}
           <button
             className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
             onClick={() => alert('Calendar export coming soon!')}
@@ -641,7 +598,6 @@ export default function JobDetailsPage() {
             <span>📅</span> Add to Calendar
           </button>
 
-          {/* Start Delivery/Collection */}
           {!job.completedAtDate && (
             <button
               className="w-full bg-ooosh-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-ooosh-600 transition-colors flex items-center justify-center gap-2 text-lg"
@@ -651,7 +607,6 @@ export default function JobDetailsPage() {
             </button>
           )}
 
-          {/* Completed badge */}
           {job.completedAtDate && (
             <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
               <span className="text-green-600 font-medium">
