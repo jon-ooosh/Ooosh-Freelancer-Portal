@@ -102,6 +102,28 @@ function getFirstName(fullName: string): string {
   return fullName.split(' ')[0] || fullName
 }
 
+/**
+ * Strip DEL/COL prefix from Monday item name and format job title consistently
+ * Returns a clean title like "Job Name - Venue" or just "Venue" if they're the same
+ */
+function formatJobTitle(itemName: string, venueName?: string): string {
+  // Strip "DEL - " or "COL - " prefix (case insensitive)
+  const cleanedName = itemName.replace(/^(DEL|COL)\s*-\s*/i, '').trim()
+  
+  // If no venue name, just return the cleaned item name
+  if (!venueName) {
+    return cleanedName
+  }
+  
+  // If cleaned name matches venue name (case insensitive), just show venue
+  if (cleanedName.toLowerCase() === venueName.toLowerCase()) {
+    return venueName
+  }
+  
+  // Otherwise show "Job Name - Venue"
+  return `${cleanedName} - ${venueName}`
+}
+
 // =============================================================================
 // COMPONENTS
 // =============================================================================
@@ -140,7 +162,7 @@ function JobCard({ item }: { item: DisplayItem }) {
         <div className="mt-3 pl-13 space-y-1">
           {item.jobs.slice(0, 3).map((job, idx) => (
             <p key={job.id} className="text-xs text-gray-500">
-              {idx + 1}. {job.venueName || job.name}
+              {idx + 1}. {formatJobTitle(job.name, job.venueName)}
             </p>
           ))}
           {item.jobs.length > 3 && (
@@ -164,6 +186,7 @@ function JobCard({ item }: { item: DisplayItem }) {
   
   // Single job card
   const isDelivery = item.type === 'delivery'
+  const jobTitle = formatJobTitle(item.name, item.venueName)
   
   return (
     <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
@@ -178,7 +201,7 @@ function JobCard({ item }: { item: DisplayItem }) {
           </div>
           <div>
             <p className="font-medium text-gray-900">
-              {isDelivery ? 'Delivery' : 'Collection'} - {item.venueName || item.name}
+              {isDelivery ? 'Delivery' : 'Collection'} - {jobTitle}
             </p>
             <p className="text-sm text-gray-500">
               {formatDate(item.date)}
