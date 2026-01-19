@@ -246,7 +246,7 @@ export async function uploadFileToColumn(
     formData.append('query', mutation)
     
     // Create a Blob from the buffer
-    const blob = new Blob([fileBuffer], { type: 'image/png' })
+    const blob = new Blob([new Uint8Array(fileBuffer)], { type: 'image/png' })
     formData.append('variables[file]', blob, filename)
 
     console.log(`Monday: Uploading file ${filename} to item ${itemId}, column ${columnId}`)
