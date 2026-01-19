@@ -87,6 +87,7 @@ const VENUE_COLUMNS_TO_FETCH = [
   VENUE_COLUMNS.email,
   VENUE_COLUMNS.accessNotes,
   VENUE_COLUMNS.stageNotes,
+  VENUE_COLUMNS.files,            // Include files column
 ]
 
 // =============================================================================
@@ -327,6 +328,90 @@ export async function updateFreelancerDateColumn(
 }
 
 // =============================================================================
+// FILE/ASSET QUERIES
+// =============================================================================
+
+export interface FileAsset {
+  assetId: string
+  name: string
+}
+
+export interface FileAssetWithUrl extends FileAsset {
+  publicUrl: string
+}
+
+/**
+ * Extract asset IDs from a Monday.com file column value
+ * File columns store JSON like: {"files":[{"assetId":123456789,"name":"file.pdf"}]}
+ */
+export function extractFileAssets(fileColumnValue: string | undefined): FileAsset[] {
+  if (!fileColumnValue) return []
+  
+  try {
+    const parsed = typeof fileColumnValue === 'string' 
+      ? JSON.parse(fileColumnValue) 
+      : fileColumnValue
+    
+    if (!parsed.files || !Array.isArray(parsed.files)) {
+      return []
+    }
+    
+    return parsed.files
+      .filter((f: any) => f.assetId)
+      .map((f: any) => ({
+        assetId: String(f.assetId),
+        name: f.name || 'Unknown file'
+      }))
+  } catch (e) {
+    console.error('Failed to parse file column value:', e)
+    return []
+  }
+}
+
+/**
+ * Get public URL for a Monday.com asset
+ * The public_url is a temporary signed S3 URL (expires in ~minutes)
+ * so fetch immediately after getting it.
+ */
+export async function getAssetPublicUrl(assetId: string): Promise<FileAssetWithUrl | null> {
+  const query = `
+    query ($assetIds: [ID!]!) {
+      assets(ids: $assetIds) {
+        id
+        name
+        public_url
+      }
+    }
+  `
+  
+  try {
+    const result = await mondayQuery<{
+      assets: Array<{
+        id: string
+        name: string
+        public_url: string
+      }>
+    }>(query, { assetIds: [assetId] })
+    
+    const asset = result.assets?.[0]
+    
+    if (!asset || !asset.public_url) {
+      console.log('Monday: Asset not found or no public URL:', assetId)
+      return null
+    }
+    
+    return {
+      assetId: asset.id,
+      name: asset.name,
+      publicUrl: asset.public_url
+    }
+  } catch (error) {
+    console.error('Monday: Failed to get asset public URL:', error)
+    return null
+  }
+}
+
+// =============================================================================
 // VENUE QUERIES
 // =============================================================================
 
@@ -342,6 +427,7 @@ export interface VenueRecord {
   email?: string
   accessNotes?: string
   stageNotes?: string
+  files?: FileAsset[]           // Array of file assets
 }
 
 /**
@@ -428,6 +514,9 @@ export async function getVenueById(venueId: string): Promise<VenueRecord | null>
     columnMap[VENUE_COLUMNS.phone2]?.text
   )
 
+  // Extract file assets from the files column
+  const files = extractFileAssets(columnMap[VENUE_COLUMNS.files]?.value)
+
   return {
     id: item.id,
     name: item.name,
@@ -440,6 +529,7 @@ export async function getVenueById(venueId: string): Promise<VenueRecord | null>
     email: getColText(VENUE_COLUMNS.email),
     accessNotes: getColText(VENUE_COLUMNS.accessNotes),
     stageNotes: getColText(VENUE_COLUMNS.stageNotes),
+    files: files.length > 0 ? files : undefined,
   }
 }
 
