@@ -75,6 +75,28 @@ interface EquipmentItem {
 // HELPER FUNCTIONS
 // =============================================================================
 
+/**
+ * Strip DEL/COL prefix from Monday item name and format job title consistently
+ * Returns a clean title like "Job Name - Venue" or just "Venue" if they're the same
+ */
+function formatJobTitle(itemName: string, venueName?: string): string {
+  // Strip "DEL - " or "COL - " prefix (case insensitive)
+  const cleanedName = itemName.replace(/^(DEL|COL)\s*-\s*/i, '').trim()
+  
+  // If no venue name, just return the cleaned item name
+  if (!venueName) {
+    return cleanedName
+  }
+  
+  // If cleaned name matches venue name (case insensitive), just show venue
+  if (cleanedName.toLowerCase() === venueName.toLowerCase()) {
+    return venueName
+  }
+  
+  // Otherwise show "Job Name - Venue"
+  return `${cleanedName} - ${venueName}`
+}
+
 function formatDate(dateStr?: string): string {
   if (!dateStr) return 'TBC'
   const date = new Date(dateStr)
@@ -461,6 +483,9 @@ export default function JobDetailsPage() {
   const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
   const googleMapsUrl = getGoogleMapsUrl(venue?.address)
   const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
+  
+  // Format the job title consistently (strips DEL/COL prefix, combines with venue)
+  const jobTitle = formatJobTitle(job.name, venue?.name || job.venueName)
 
   return (
     <div className="min-h-screen bg-gray-50 pb-8">
@@ -498,7 +523,7 @@ export default function JobDetailsPage() {
                 {typeLabel}
               </span>
               <h1 className="text-xl font-bold text-gray-900 mt-1">
-                {venue?.name || job.venueName || job.name}
+                {jobTitle}
               </h1>
             </div>
           </div>
@@ -534,7 +559,7 @@ export default function JobDetailsPage() {
           </div>
         </div>
 
-        {/* Reference */}
+        {/* Reference - MOVED UP */}
         {job.hhRef && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -546,7 +571,7 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* Status */}
+        {/* Status - MOVED UP */}
         <div className="bg-white rounded-xl shadow-sm p-6">
           <h2 className="font-semibold text-gray-900 mb-3">Status</h2>
           <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
