@@ -8,6 +8,7 @@
  */
 
 const MONDAY_API_URL = 'https://api.monday.com/v2'
+const MONDAY_FILE_URL = 'https://api.monday.com/v2/file'
 
 // =============================================================================
 // COLUMN ID MAPPINGS
@@ -87,7 +88,7 @@ const VENUE_COLUMNS_TO_FETCH = [
   VENUE_COLUMNS.email,
   VENUE_COLUMNS.accessNotes,
   VENUE_COLUMNS.stageNotes,
-  VENUE_COLUMNS.files,            // Include files column
+  VENUE_COLUMNS.files,
 ]
 
 // =============================================================================
@@ -137,6 +138,188 @@ export function getBoardIds() {
     costings: process.env.MONDAY_BOARD_ID_COSTINGS || '',
     venues: process.env.MONDAY_BOARD_ID_VENUES || '',
   }
+}
+
+// =============================================================================
+// FILE UPLOAD FUNCTIONS
+// =============================================================================
+
+export interface FileAsset {
+  assetId: string
+  name: string
+}
+
+export interface FileAssetWithUrl extends FileAsset {
+  publicUrl: string
+}
+
+/**
+ * Extract file assets from a Monday file column value
+ * File column values are stored as JSON: {"files":[{"assetId":123,"name":"file.pdf"}]}
+ */
+export function extractFileAssets(fileColumnValue: string | undefined): FileAsset[] {
+  if (!fileColumnValue) return []
+  
+  try {
+    const parsed = JSON.parse(fileColumnValue)
+    if (parsed.files && Array.isArray(parsed.files)) {
+      return parsed.files.map((f: { assetId: number; name: string }) => ({
+        assetId: String(f.assetId),
+        name: f.name
+      }))
+    }
+  } catch {
+    // Not valid JSON, ignore
+  }
+  
+  return []
+}
+
+/**
+ * Get the public URL for a Monday.com asset
+ * Note: These URLs are temporary and expire
+ */
+export async function getAssetPublicUrl(assetId: string): Promise<FileAssetWithUrl | null> {
+  const query = `
+    query ($assetIds: [ID!]!) {
+      assets(ids: $assetIds) {
+        id
+        name
+        public_url
+      }
+    }
+  `
+  
+  const result = await mondayQuery<{
+    assets: Array<{
+      id: string
+      name: string
+      public_url: string
+    }>
+  }>(query, { assetIds: [assetId] })
+  
+  const asset = result.assets?.[0]
+  if (!asset) return null
+  
+  return {
+    assetId: asset.id,
+    name: asset.name,
+    publicUrl: asset.public_url
+  }
+}
+
+/**
+ * Upload a file to a Monday.com file column
+ * 
+ * Uses Monday's file upload API with multipart form data
+ * 
+ * @param itemId - The item ID to attach the file to
+ * @param columnId - The file column ID
+ * @param fileBuffer - The file content as a Buffer
+ * @param filename - The filename to use
+ * @returns Success status and optional asset ID
+ */
+export async function uploadFileToColumn(
+  itemId: string,
+  columnId: string,
+  fileBuffer: Buffer,
+  filename: string
+): Promise<{ success: boolean; assetId?: string; error?: string }> {
+  try {
+    const token = getApiToken()
+    
+    // Create the GraphQL mutation
+    // Note: Variables must be embedded in query for file uploads
+    const mutation = `mutation {
+      add_file_to_column (
+        item_id: ${itemId},
+        column_id: "${columnId}",
+        file: $file
+      ) {
+        id
+        name
+      }
+    }`
+
+    // Create form data for multipart upload
+    const formData = new FormData()
+    formData.append('query', mutation)
+    
+    // Create a Blob from the buffer
+    const blob = new Blob([fileBuffer], { type: 'image/png' })
+    formData.append('variables[file]', blob, filename)
+
+    console.log(`Monday: Uploading file ${filename} to item ${itemId}, column ${columnId}`)
+
+    const response = await fetch(MONDAY_FILE_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': token,
+        // Don't set Content-Type - fetch will set it with boundary for multipart
+      },
+      body: formData,
+    })
+
+    const responseText = await response.text()
+    
+    if (!response.ok) {
+      console.error('Monday file upload HTTP error:', response.status, responseText)
+      return { success: false, error: `Upload failed: HTTP ${response.status}` }
+    }
+
+    let data
+    try {
+      data = JSON.parse(responseText)
+    } catch {
+      console.error('Monday file upload: Invalid JSON response', responseText)
+      return { success: false, error: 'Invalid response from Monday' }
+    }
+    
+    if (data.errors) {
+      console.error('Monday file upload GraphQL errors:', data.errors)
+      return { success: false, error: data.errors[0]?.message || 'Upload failed' }
+    }
+
+    console.log('Monday file upload success:', data.data?.add_file_to_column)
+    
+    return { 
+      success: true, 
+      assetId: data.data?.add_file_to_column?.id 
+    }
+  } catch (error) {
+    console.error('File upload exception:', error)
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Upload failed' 
+    }
+  }
+}
+
+/**
+ * Upload a base64-encoded image to a Monday.com file column
+ * 
+ * Convenience wrapper for signature/photo uploads from browser canvas
+ * 
+ * @param itemId - The Monday item ID
+ * @param columnId - The file column ID
+ * @param base64Data - Base64-encoded image data (may include data URL prefix)
+ * @param filename - The filename to use
+ */
+export async function uploadBase64ImageToColumn(
+  itemId: string,
+  columnId: string,
+  base64Data: string,
+  filename: string
+): Promise<{ success: boolean; assetId?: string; error?: string }> {
+  // Remove data URL prefix if present (e.g., "data:image/png;base64,")
+  const base64Clean = base64Data.replace(/^data:image\/\w+;base64,/, '')
+  
+  // Convert base64 to Buffer
+  const buffer = Buffer.from(base64Clean, 'base64')
+  
+  console.log(`Monday: Converting base64 image (${buffer.length} bytes) for upload`)
+  
+  return uploadFileToColumn(itemId, columnId, buffer, filename)
 }
 
 // =============================================================================
@@ -328,90 +511,6 @@ export async function updateFreelancerDateColumn(
 }
 
 // =============================================================================
-// FILE/ASSET QUERIES
-// =============================================================================
-
-export interface FileAsset {
-  assetId: string
-  name: string
-}
-
-export interface FileAssetWithUrl extends FileAsset {
-  publicUrl: string
-}
-
-/**
- * Extract asset IDs from a Monday.com file column value
- * File columns store JSON like: {"files":[{"assetId":123456789,"name":"file.pdf"}]}
- */
-export function extractFileAssets(fileColumnValue: string | undefined): FileAsset[] {
-  if (!fileColumnValue) return []
-  
-  try {
-    const parsed = typeof fileColumnValue === 'string' 
-      ? JSON.parse(fileColumnValue) 
-      : fileColumnValue
-    
-    if (!parsed.files || !Array.isArray(parsed.files)) {
-      return []
-    }
-    
-    return parsed.files
-      .filter((f: any) => f.assetId)
-      .map((f: any) => ({
-        assetId: String(f.assetId),
-        name: f.name || 'Unknown file'
-      }))
-  } catch (e) {
-    console.error('Failed to parse file column value:', e)
-    return []
-  }
-}
-
-/**
- * Get public URL for a Monday.com asset
- * The public_url is a temporary signed S3 URL (expires in ~minutes)
- * so fetch immediately after getting it.
- */
-export async function getAssetPublicUrl(assetId: string): Promise<FileAssetWithUrl | null> {
-  const query = `
-    query ($assetIds: [ID!]!) {
-      assets(ids: $assetIds) {
-        id
-        name
-        public_url
-      }
-    }
-  `
-  
-  try {
-    const result = await mondayQuery<{
-      assets: Array<{
-        id: string
-        name: string
-        public_url: string
-      }>
-    }>(query, { assetIds: [assetId] })
-    
-    const asset = result.assets?.[0]
-    
-    if (!asset || !asset.public_url) {
-      console.log('Monday: Asset not found or no public URL:', assetId)
-      return null
-    }
-    
-    return {
-      assetId: asset.id,
-      name: asset.name,
-      publicUrl: asset.public_url
-    }
-  } catch (error) {
-    console.error('Monday: Failed to get asset public URL:', error)
-    return null
-  }
-}
-
-// =============================================================================
 // VENUE QUERIES
 // =============================================================================
 
@@ -427,7 +526,7 @@ export interface VenueRecord {
   email?: string
   accessNotes?: string
   stageNotes?: string
-  files?: FileAsset[]           // Array of file assets
+  files?: FileAsset[]
 }
 
 /**
@@ -513,8 +612,8 @@ export async function getVenueById(venueId: string): Promise<VenueRecord | null>
     columnMap[VENUE_COLUMNS.phone2]?.value,
     columnMap[VENUE_COLUMNS.phone2]?.text
   )
-
-  // Extract file assets from the files column
+  
+  // Extract files from the files column
   const files = extractFileAssets(columnMap[VENUE_COLUMNS.files]?.value)
 
   return {
@@ -529,7 +628,7 @@ export async function getVenueById(venueId: string): Promise<VenueRecord | null>
     email: getColText(VENUE_COLUMNS.email),
     accessNotes: getColText(VENUE_COLUMNS.accessNotes),
     stageNotes: getColText(VENUE_COLUMNS.stageNotes),
-    files: files.length > 0 ? files : undefined,
+    files,
   }
 }
 
@@ -834,19 +933,27 @@ export async function updateJobStatus(itemId: string, status: string): Promise<v
 }
 
 /**
- * Update job completion fields
+ * Update job completion fields (notes, date, time, status)
+ * Does NOT handle file uploads - those are done separately
  */
 export async function updateJobCompletion(
   itemId: string,
   notes: string,
-  completedDate: Date
+  completedDate: Date,
+  customerPresent: boolean
 ): Promise<void> {
   const boardId = getBoardIds().deliveries
   
   const dateStr = completedDate.toISOString().split('T')[0]
-  const timeStr = completedDate.toTimeString().slice(0, 5) // HH:MM format
+  const hours = completedDate.getHours()
+  const minutes = completedDate.getMinutes()
+  
+  // Add "SECURE DROP - Customer not present" prefix if applicable
+  const finalNotes = customerPresent 
+    ? notes 
+    : `⚠️ SECURE DROP - Customer not present\n\n${notes}`
 
-  // Update multiple columns
+  // Update multiple columns at once
   const mutation = `
     mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
       change_multiple_column_values(
@@ -860,9 +967,10 @@ export async function updateJobCompletion(
   `
 
   const columnValues = {
-    [DC_COLUMNS.completionNotes]: notes,
+    [DC_COLUMNS.completionNotes]: notes ? finalNotes : (customerPresent ? '' : '⚠️ SECURE DROP - Customer not present'),
     [DC_COLUMNS.completedAtDate]: { date: dateStr },
-    [DC_COLUMNS.completedAtTime]: { hour: parseInt(timeStr.split(':')[0]), minute: parseInt(timeStr.split(':')[1]) },
+    [DC_COLUMNS.completedAtTime]: { hour: hours, minute: minutes },
+    [DC_COLUMNS.status]: { label: 'All done' },
   }
 
   await mondayQuery(mutation, { 
