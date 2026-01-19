@@ -8,17 +8,12 @@
  */
 
 import { useEffect, useState } from 'react'
-import { useParams, useRouter } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 
 // =============================================================================
 // TYPES
 // =============================================================================
-
-interface FileAsset {
-  assetId: string
-  name: string
-}
 
 interface Job {
   id: string
@@ -37,6 +32,11 @@ interface Job {
   completionNotes?: string
 }
 
+interface VenueFile {
+  assetId: string
+  name: string
+}
+
 interface Venue {
   id: string
   name: string
@@ -51,7 +51,7 @@ interface Venue {
   email?: string
   accessNotes?: string
   stageNotes?: string
-  files?: FileAsset[]
+  files?: VenueFile[]
 }
 
 interface JobApiResponse {
@@ -74,28 +74,6 @@ interface EquipmentItem {
 // =============================================================================
 // HELPER FUNCTIONS
 // =============================================================================
-
-/**
- * Strip DEL/COL prefix from Monday item name and format job title consistently
- * Returns a clean title like "Job Name - Venue" or just "Venue" if they're the same
- */
-function formatJobTitle(itemName: string, venueName?: string): string {
-  // Strip "DEL - ", "DEL:", "COL - ", "COL:" prefix (case insensitive)
-  const cleanedName = itemName.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
-  
-  // If no venue name, just return the cleaned item name
-  if (!venueName) {
-    return cleanedName
-  }
-  
-  // If cleaned name matches venue name (case insensitive), just show venue
-  if (cleanedName.toLowerCase() === venueName.toLowerCase()) {
-    return venueName
-  }
-  
-  // Otherwise show "Job Name - Venue"
-  return `${cleanedName} - ${venueName}`
-}
 
 function formatDate(dateStr?: string): string {
   if (!dateStr) return 'TBC'
@@ -127,125 +105,99 @@ function getWhat3WordsUrl(w3w?: string): string | null {
 }
 
 /**
- * Get the appropriate icon for a file based on its extension
+ * Strip DEL/COL prefix from job name and combine with venue
+ */
+function formatJobTitle(jobName: string, venueName?: string): string {
+  // Strip "DEL: ", "COL: ", "DEL - ", "COL - " prefixes (case insensitive)
+  const cleanedName = jobName.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
+  
+  if (!venueName) return cleanedName
+  
+  // If cleaned name equals venue name, just show venue
+  if (cleanedName.toLowerCase() === venueName.toLowerCase()) {
+    return venueName
+  }
+  
+  // Otherwise show "Job Name - Venue"
+  return `${cleanedName} - ${venueName}`
+}
+
+/**
+ * Get file icon based on extension
  */
 function getFileIcon(filename: string): string {
-  const ext = filename.split('.').pop()?.toLowerCase() || ''
-  
-  // Images
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) {
-    return '🖼️'
+  const ext = filename.split('.').pop()?.toLowerCase()
+  switch (ext) {
+    case 'pdf':
+      return '📄'
+    case 'doc':
+    case 'docx':
+      return '📝'
+    case 'xls':
+    case 'xlsx':
+      return '📊'
+    case 'jpg':
+    case 'jpeg':
+    case 'png':
+    case 'gif':
+    case 'webp':
+      return '🖼️'
+    default:
+      return '📎'
   }
-  
-  // PDFs
-  if (ext === 'pdf') {
-    return '📄'
-  }
-  
-  // Documents
-  if (['doc', 'docx', 'txt', 'rtf'].includes(ext)) {
-    return '📝'
-  }
-  
-  // Spreadsheets
-  if (['xls', 'xlsx', 'csv'].includes(ext)) {
-    return '📊'
-  }
-  
-  // Default
-  return '📁'
 }
 
 // =============================================================================
 // VENUE FILES COMPONENT
 // =============================================================================
 
-function VenueFiles({ files }: { files: FileAsset[] }) {
+function VenueFiles({ files }: { files: VenueFile[] }) {
   const [loadingFile, setLoadingFile] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
 
-  /**
-   * Fetch the public URL for a file and open it in a new tab
-   */
-  async function openFile(assetId: string, filename: string) {
+  if (!files || files.length === 0) return null
+
+  const handleFileClick = async (assetId: string, filename: string) => {
     setLoadingFile(assetId)
-    setError(null)
-
     try {
       const response = await fetch(`/api/files/${assetId}`)
       const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch file')
-      }
-
-      if (data.publicUrl) {
-        // Open the file in a new tab
-        window.open(data.publicUrl, '_blank')
+      
+      if (data.success && data.url) {
+        window.open(data.url, '_blank')
       } else {
-        throw new Error('No download URL available')
+        alert('Failed to open file')
       }
     } catch (err) {
       console.error('Error opening file:', err)
-      setError(err instanceof Error ? err.message : 'Failed to open file')
+      alert('Failed to open file')
     } finally {
       setLoadingFile(null)
     }
   }
 
-  if (!files || files.length === 0) {
-    return null
-  }
-
   return (
     <div className="bg-white rounded-xl shadow-sm p-6">
-      <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-        <span>📎</span> Venue Files
-        <span className="text-sm font-normal text-gray-500">
-          ({files.length} file{files.length !== 1 ? 's' : ''})
-        </span>
+      <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+        <span>📁</span> Venue Files
       </h2>
-
-      {error && (
-        <div className="mb-3 bg-red-50 border border-red-200 rounded-lg p-3">
-          <p className="text-red-700 text-sm">{error}</p>
-        </div>
-      )}
-
       <div className="space-y-2">
         {files.map((file) => (
-          <div 
+          <button
             key={file.assetId}
-            className="flex items-center justify-between py-3 px-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+            onClick={() => handleFileClick(file.assetId, file.name)}
+            disabled={loadingFile === file.assetId}
+            className="w-full flex items-center gap-3 p-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors text-left disabled:opacity-50"
           >
-            <div className="flex items-center gap-3 min-w-0 flex-1">
-              <span className="text-xl flex-shrink-0">{getFileIcon(file.name)}</span>
-              <span className="text-gray-900 text-sm truncate">{file.name}</span>
-            </div>
-            
-            <button
-              onClick={() => openFile(file.assetId, file.name)}
-              disabled={loadingFile === file.assetId}
-              className="flex-shrink-0 ml-3 inline-flex items-center gap-1 px-3 py-1.5 bg-ooosh-500 text-white rounded-lg text-sm font-medium hover:bg-ooosh-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loadingFile === file.assetId ? (
-                <>
-                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  <span>Loading...</span>
-                </>
-              ) : (
-                <>
-                  <span>Open</span>
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                  </svg>
-                </>
-              )}
-            </button>
-          </div>
+            <span className="text-xl">{getFileIcon(file.name)}</span>
+            <span className="flex-1 text-sm text-gray-700 truncate">{file.name}</span>
+            {loadingFile === file.assetId ? (
+              <div className="w-4 h-4 border-2 border-ooosh-500 border-t-transparent rounded-full animate-spin"></div>
+            ) : (
+              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+              </svg>
+            )}
+          </button>
         ))}
       </div>
     </div>
@@ -385,13 +337,33 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
 }
 
 // =============================================================================
+// COMPLETION SUCCESS BANNER
+// =============================================================================
+
+function CompletionSuccessBanner() {
+  return (
+    <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-4">
+      <div className="flex items-center gap-3">
+        <div className="text-2xl">✅</div>
+        <div>
+          <p className="font-semibold text-green-800">Job Completed!</p>
+          <p className="text-sm text-green-700">The job has been marked as complete and all details saved.</p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// =============================================================================
 // MAIN PAGE COMPONENT
 // =============================================================================
 
 export default function JobDetailsPage() {
   const params = useParams()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const jobId = params.id as string
+  const justCompleted = searchParams.get('completed') === 'true'
 
   const [job, setJob] = useState<Job | null>(null)
   const [venue, setVenue] = useState<Venue | null>(null)
@@ -483,9 +455,7 @@ export default function JobDetailsPage() {
   const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
   const googleMapsUrl = getGoogleMapsUrl(venue?.address)
   const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
-  
-  // Format the job title consistently (strips DEL/COL prefix, combines with venue)
-  const jobTitle = formatJobTitle(job.name, venue?.name || job.venueName)
+  const isCompleted = !!job.completedAtDate
 
   return (
     <div className="min-h-screen bg-gray-50 pb-8">
@@ -514,6 +484,9 @@ export default function JobDetailsPage() {
 
       <main className="max-w-lg mx-auto p-4 space-y-4">
         
+        {/* Completion Success Banner */}
+        {justCompleted && <CompletionSuccessBanner />}
+        
         {/* Job Header - Type, Venue, Date, Time, Fee */}
         <div className="bg-white rounded-xl shadow-sm p-6">
           <div className="flex items-start gap-3 mb-4">
@@ -523,7 +496,7 @@ export default function JobDetailsPage() {
                 {typeLabel}
               </span>
               <h1 className="text-xl font-bold text-gray-900 mt-1">
-                {jobTitle}
+                {formatJobTitle(job.name, venue?.name || job.venueName)}
               </h1>
             </div>
           </div>
@@ -559,7 +532,7 @@ export default function JobDetailsPage() {
           </div>
         </div>
 
-        {/* Reference - MOVED UP */}
+        {/* Reference */}
         {job.hhRef && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -571,7 +544,7 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* Status - MOVED UP */}
+        {/* Status */}
         <div className="bg-white rounded-xl shadow-sm p-6">
           <h2 className="font-semibold text-gray-900 mb-3">Status</h2>
           <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
@@ -706,14 +679,14 @@ export default function JobDetailsPage() {
           </div>
         )}
 
-        {/* Venue Files */}
-        {venue?.files && venue.files.length > 0 && (
-          <VenueFiles files={venue.files} />
-        )}
-
         {/* Equipment List */}
         {job.hhRef && (
           <EquipmentList hhRef={job.hhRef} />
+        )}
+
+        {/* Venue Files */}
+        {venue?.files && venue.files.length > 0 && (
+          <VenueFiles files={venue.files} />
         )}
 
         {/* Access Info */}
@@ -752,6 +725,18 @@ export default function JobDetailsPage() {
           </div>
         )}
 
+        {/* Completion Notes (if already completed) */}
+        {isCompleted && job.completionNotes && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span>✅</span> Completion Notes
+            </h2>
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+              <p className="text-gray-700 whitespace-pre-wrap">{job.completionNotes}</p>
+            </div>
+          </div>
+        )}
+
         {/* Action Buttons */}
         <div className="space-y-3 pt-2">
           <button
@@ -761,16 +746,16 @@ export default function JobDetailsPage() {
             <span>📅</span> Add to Calendar
           </button>
 
-          {!job.completedAtDate && (
-            <button
+          {!isCompleted && (
+            <Link
+              href={`/job/${jobId}/complete`}
               className="w-full bg-ooosh-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-ooosh-600 transition-colors flex items-center justify-center gap-2 text-lg"
-              onClick={() => alert('Completion flow coming soon!')}
             >
               <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
-            </button>
+            </Link>
           )}
 
-          {job.completedAtDate && (
+          {isCompleted && (
             <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
               <span className="text-green-600 font-medium">
                 ✅ Completed on {formatDate(job.completedAtDate)}
