@@ -1,4 +1,4 @@
-/**
+/** 
  * Job Completion API Endpoint
  * 
  * POST /api/jobs/[id]/complete
