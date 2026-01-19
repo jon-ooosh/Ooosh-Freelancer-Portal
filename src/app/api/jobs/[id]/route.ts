@@ -112,6 +112,8 @@ export async function GET(
       email: venue.email,
       accessNotes: venue.accessNotes,
       stageNotes: venue.stageNotes,
+      // Include files (array of {assetId, name})
+      files: venue.files || [],
     } : null
 
     return NextResponse.json({
