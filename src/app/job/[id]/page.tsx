@@ -5,15 +5,6 @@
  * 
  * Displays full details for a single job including venue information.
  * Route: /job/[id]
- * 
- * Features:
- * - Job type, venue name, date, time
- * - Full venue address with Google Maps AND What3Words links
- * - Contact details with two phone numbers (48-hour visibility rule)
- * - Equipment list from HireHop
- * - Access notes and key points
- * - HireHop reference
- * - Action buttons (Calendar, Start Delivery/Collection)
  */
 
 import { useEffect, useState } from 'react'
@@ -430,7 +421,7 @@ export default function JobDetailsPage() {
             
             <div className="mt-4 flex flex-wrap gap-3">
               {googleMapsUrl && (
-                
+                <a
                   href={googleMapsUrl}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -445,7 +436,7 @@ export default function JobDetailsPage() {
               )}
               
               {what3WordsUrl && (
-                
+                <a
                   href={what3WordsUrl}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -495,7 +486,7 @@ export default function JobDetailsPage() {
               ) : (
                 <>
                   {venue.phone && (
-                    
+                    <a
                       href={`tel:${venue.phone}`}
                       className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
                     >
@@ -505,7 +496,7 @@ export default function JobDetailsPage() {
                   )}
                   
                   {venue.phone2 && (
-                    
+                    <a
                       href={`tel:${venue.phone2}`}
                       className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
                     >
@@ -517,7 +508,7 @@ export default function JobDetailsPage() {
               )}
               
               {venue.email && (
-                
+                <a
                   href={`mailto:${venue.email}`}
                   className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
                 >
