@@ -212,50 +212,67 @@ export async function getAssetPublicUrl(assetId: string): Promise<FileAssetWithU
  * Upload a file to a Monday.com file column
  * 
  * Uses Monday's file upload API with multipart form data
+ * CRITICAL: Must include the 'map' parameter to link file to GraphQL variable
  * 
  * @param itemId - The item ID to attach the file to
  * @param columnId - The file column ID
  * @param fileBuffer - The file content as a Buffer
  * @param filename - The filename to use
+ * @param contentType - MIME type (default: 'image/png')
  * @returns Success status and optional asset ID
  */
 export async function uploadFileToColumn(
   itemId: string,
   columnId: string,
   fileBuffer: Buffer,
-  filename: string
+  filename: string,
+  contentType: string = 'image/png'
 ): Promise<{ success: boolean; assetId?: string; error?: string }> {
   try {
     const token = getApiToken()
     
-    // Create the GraphQL mutation
-    // Note: Variables must be embedded in query for file uploads
-    const mutation = `mutation {
-      add_file_to_column (
+    // Create the GraphQL mutation with $file variable declaration
+    const mutation = `mutation($file: File!) {
+      add_file_to_column(
         item_id: ${itemId},
         column_id: "${columnId}",
         file: $file
       ) {
         id
         name
+        url
       }
     }`
 
     // Create form data for multipart upload
     const formData = new FormData()
+    
+    // 1. Append the query
     formData.append('query', mutation)
     
-    // Create a Blob from the buffer
-    const blob = new Blob([new Uint8Array(fileBuffer)], { type: 'image/png' })
-    formData.append('variables[file]', blob, filename)
+    // 2. Append variables (file is null here - actual file comes from map)
+    formData.append('variables', JSON.stringify({ file: null }))
+    
+    // 3. THE CRITICAL MAP FIELD - links "0" to variables.file
+    // This tells Monday.com which form field contains the file data
+    formData.append('map', JSON.stringify({ "0": ["variables.file"] }))
+    
+    // 4. Append the actual file with key "0" (matches the map)
+    // Convert Buffer to Uint8Array for Blob compatibility
+    const blob = new Blob([new Uint8Array(fileBuffer)], { type: contentType })
+    formData.append('0', blob, filename)
 
-    console.log(`Monday: Uploading file ${filename} to item ${itemId}, column ${columnId}`)
+    const isDebug = process.env.DEBUG_MODE === 'true'
+    if (isDebug) {
+      console.log(`Monday: Uploading file ${filename} (${fileBuffer.length} bytes) to item ${itemId}, column ${columnId}`)
+    }
 
+    // POST to the FILE endpoint (not the regular /v2 endpoint!)
     const response = await fetch(MONDAY_FILE_URL, {
       method: 'POST',
       headers: {
         'Authorization': token,
-        // Don't set Content-Type - fetch will set it with boundary for multipart
+        // DO NOT set Content-Type - fetch will set it with boundary for multipart
       },
       body: formData,
     })
@@ -280,7 +297,9 @@ export async function uploadFileToColumn(
       return { success: false, error: data.errors[0]?.message || 'Upload failed' }
     }
 
-    console.log('Monday file upload success:', data.data?.add_file_to_column)
+    if (isDebug) {
+      console.log('Monday file upload success:', data.data?.add_file_to_column)
+    }
     
     return { 
       success: true, 
@@ -317,7 +336,10 @@ export async function uploadBase64ImageToColumn(
   // Convert base64 to Buffer
   const buffer = Buffer.from(base64Clean, 'base64')
   
-  console.log(`Monday: Converting base64 image (${buffer.length} bytes) for upload`)
+  const isDebug = process.env.DEBUG_MODE === 'true'
+  if (isDebug) {
+    console.log(`Monday: Converting base64 image (${buffer.length} bytes) for upload as ${filename}`)
+  }
   
   return uploadFileToColumn(itemId, columnId, buffer, filename)
 }
@@ -848,7 +870,6 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
       value: col.value,
       display_value: col.display_value 
     }
-    return acc
   }, {} as Record<string, { text: string; value: string; display_value?: string }>)
 
   // Helper to get text from a column
@@ -970,7 +991,7 @@ export async function updateJobCompletion(
     [DC_COLUMNS.completionNotes]: notes ? finalNotes : (customerPresent ? '' : '⚠️ SECURE DROP - Customer not present'),
     [DC_COLUMNS.completedAtDate]: { date: dateStr },
     [DC_COLUMNS.completedAtTime]: { hour: hours, minute: minutes },
-    [DC_COLUMNS.status]: { label: 'All done' },
+    [DC_COLUMNS.status]: { label: 'All done!' },  // Note: exclamation mark to match Monday status label
   }
 
   await mondayQuery(mutation, { 
