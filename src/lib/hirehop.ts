@@ -94,6 +94,7 @@ export async function getJobItems(jobId: string): Promise<HireHopItemsResponse> 
       }
     }
     
+    // Clean logging - just count, not full structure
     console.log(`HireHop: Retrieved ${rawItems.length} items in ${Date.now() - startTime}ms`)
     
     // Transform items - extract only what we need (no prices!)
@@ -105,11 +106,6 @@ export async function getJobItems(jobId: string): Promise<HireHopItemsResponse> 
       categoryId: item.CATEGORY_ID ? parseInt(item.CATEGORY_ID, 10) : undefined,
       isVirtual: item.VIRTUAL === '1' || item.VIRTUAL === 1 || item.virtual === true
     }))
-    
-    // Log raw response structure for debugging (first item only)
-    if (rawItems.length > 0) {
-      console.log('HireHop: Sample item structure:', JSON.stringify(rawItems[0], null, 2))
-    }
     
     return {
       success: true,
