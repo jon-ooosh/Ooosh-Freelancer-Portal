@@ -32,6 +32,7 @@ interface OrganisedJob {
   runGroup?: string
   hhRef?: string
   keyNotes?: string
+  completedAtDate?: string  // Added for dashboard to know if job is completed
 }
 
 interface GroupedRun {
@@ -139,7 +140,7 @@ function getJobCategory(status: string): 'upcoming' | 'completed' | 'cancelled' 
     return 'upcoming'
   }
   
-  // "All done" - completed jobs
+  // "All done" or "All done!" - completed jobs
   if (normalised.includes('all done') || normalised.includes('done')) {
     return 'completed'
   }
@@ -150,8 +151,6 @@ function getJobCategory(status: string): 'upcoming' | 'completed' | 'cancelled' 
   }
   
   // Hidden statuses (TO DO, Arranging, etc.)
-  // Log unknown statuses for debugging
-  console.log('Job status hidden (not matched):', status)
   return null
 }
 
@@ -170,6 +169,7 @@ function toOrganisedJob(job: JobRecord): OrganisedJob {
     runGroup: job.runGroup,
     hhRef: job.hhRef,
     keyNotes: job.keyNotes,
+    completedAtDate: job.completedAtDate,  // Pass through for dashboard
   }
 }
 
