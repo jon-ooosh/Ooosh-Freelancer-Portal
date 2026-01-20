@@ -870,6 +870,7 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
       value: col.value,
       display_value: col.display_value 
     }
+    return acc
   }, {} as Record<string, { text: string; value: string; display_value?: string }>)
 
   // Helper to get text from a column
