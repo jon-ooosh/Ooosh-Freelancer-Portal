@@ -7,7 +7,7 @@
  * - Uploads signature image to Monday file column
  * - Uploads photo to Monday file column (for secure drops)
  * - Saves completion notes
- * - Updates status to "All done"
+ * - Updates status to "All done!"
  * - Sets completion timestamp
  */
 
@@ -182,7 +182,7 @@ export async function POST(
         [DC_COLUMNS.completionNotes]: finalNotes,
         [DC_COLUMNS.completedAtDate]: { date: dateStr },
         [DC_COLUMNS.completedAtTime]: { hour: hours, minute: minutes },
-        [DC_COLUMNS.status]: { label: 'All done' },
+        [DC_COLUMNS.status]: { label: 'All done!' },  // Note: exclamation mark to match Monday status label
       }
 
       await mondayQuery(mutation, { 
