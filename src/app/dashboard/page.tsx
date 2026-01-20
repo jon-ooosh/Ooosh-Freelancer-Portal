@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 
 // =============================================================================
 // TYPES (matching API response)
@@ -18,6 +19,7 @@ interface OrganisedJob {
   runGroup?: string
   hhRef?: string
   keyNotes?: string
+  completedAtDate?: string
 }
 
 interface GroupedRun {
@@ -74,8 +76,6 @@ function formatDate(dateStr: string): string {
 function formatTime(timeStr: string | undefined): string {
   if (!timeStr) return ''
   
-  // Handle various time formats from Monday
-  // Could be "10:00", "10:00:00", "10:00 AM", etc.
   const match = timeStr.match(/(\d{1,2}):(\d{2})/)
   if (!match) return timeStr
   
@@ -103,25 +103,11 @@ function getFirstName(fullName: string): string {
 }
 
 /**
- * Strip DEL/COL prefix from Monday item name and format job title consistently
- * Returns a clean title like "Job Name - Venue" or just "Venue" if they're the same
+ * Strip DEL/COL prefix and get clean venue name
  */
-function formatJobTitle(itemName: string, venueName?: string): string {
-  // Strip "DEL - ", "DEL:", "COL - ", "COL:" prefix (case insensitive)
-  const cleanedName = itemName.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
-  
-  // If no venue name, just return the cleaned item name
-  if (!venueName) {
-    return cleanedName
-  }
-  
-  // If cleaned name matches venue name (case insensitive), just show venue
-  if (cleanedName.toLowerCase() === venueName.toLowerCase()) {
-    return venueName
-  }
-  
-  // Otherwise show "Job Name - Venue"
-  return `${cleanedName} - ${venueName}`
+function getDisplayName(name: string, venueName?: string): string {
+  if (venueName) return venueName
+  return name.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
 }
 
 // =============================================================================
@@ -131,9 +117,12 @@ function formatJobTitle(itemName: string, venueName?: string): string {
 /**
  * Job Card Component - displays a single job or grouped run
  */
-function JobCard({ item }: { item: DisplayItem }) {
+function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStartButton?: boolean }) {
   if (item.isGrouped) {
     // Multi-drop run card
+    const firstJob = item.jobs[0]
+    const isCompleted = item.jobs.every(j => j.completedAtDate)
+    
     return (
       <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
         <div className="flex items-start justify-between">
@@ -147,7 +136,7 @@ function JobCard({ item }: { item: DisplayItem }) {
               </p>
               <p className="text-sm text-gray-500">
                 {formatDate(item.date)}
-                {item.jobs[0]?.time && ` · ${formatTime(item.jobs[0].time)}`}
+                {firstJob?.time && ` · ${formatTime(firstJob.time)}`}
               </p>
             </div>
           </div>
@@ -162,7 +151,7 @@ function JobCard({ item }: { item: DisplayItem }) {
         <div className="mt-3 pl-13 space-y-1">
           {item.jobs.slice(0, 3).map((job, idx) => (
             <p key={job.id} className="text-xs text-gray-500">
-              {idx + 1}. {formatJobTitle(job.name, job.venueName)}
+              {idx + 1}. {getDisplayName(job.name, job.venueName)}
             </p>
           ))}
           {item.jobs.length > 3 && (
@@ -172,13 +161,22 @@ function JobCard({ item }: { item: DisplayItem }) {
           )}
         </div>
         
-        <div className="mt-3 flex justify-end">
-          <a 
-            href={`/job/${item.jobs[0]?.id}?run=${item.runGroup}`} 
+        {/* Action buttons */}
+        <div className="mt-3 flex justify-between items-center">
+          <Link 
+            href={`/job/${firstJob?.id}?run=${item.runGroup}`} 
             className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500"
           >
             View details →
-          </a>
+          </Link>
+          {showStartButton && !isCompleted && (
+            <Link 
+              href={`/job/${firstJob?.id}/complete`} 
+              className="text-sm font-medium text-green-600 hover:text-green-500 flex items-center gap-1"
+            >
+              <span>▶</span> Start run
+            </Link>
+          )}
         </div>
       </div>
     )
@@ -186,7 +184,7 @@ function JobCard({ item }: { item: DisplayItem }) {
   
   // Single job card
   const isDelivery = item.type === 'delivery'
-  const jobTitle = formatJobTitle(item.name, item.venueName)
+  const isCompleted = !!item.completedAtDate
   
   return (
     <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
@@ -201,7 +199,7 @@ function JobCard({ item }: { item: DisplayItem }) {
           </div>
           <div>
             <p className="font-medium text-gray-900">
-              {isDelivery ? 'Delivery' : 'Collection'} - {jobTitle}
+              {isDelivery ? 'Delivery' : 'Collection'} - {getDisplayName(item.name, item.venueName)}
             </p>
             <p className="text-sm text-gray-500">
               {formatDate(item.date)}
@@ -215,13 +213,23 @@ function JobCard({ item }: { item: DisplayItem }) {
           </span>
         )}
       </div>
-      <div className="mt-3 flex justify-end">
-        <a 
+      
+      {/* Action buttons */}
+      <div className="mt-3 flex justify-between items-center">
+        <Link 
           href={`/job/${item.id}`} 
           className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500"
         >
           View details →
-        </a>
+        </Link>
+        {showStartButton && !isCompleted && (
+          <Link 
+            href={`/job/${item.id}/complete`} 
+            className="text-sm font-medium text-green-600 hover:text-green-500 flex items-center gap-1"
+          >
+            <span>▶</span> Start {isDelivery ? 'delivery' : 'collection'}
+          </Link>
+        )}
       </div>
     </div>
   )
@@ -230,15 +238,13 @@ function JobCard({ item }: { item: DisplayItem }) {
 /**
  * Empty State Component
  */
-function EmptyState({ message, icon }: { message: string; icon?: React.ReactNode }) {
+function EmptyState({ message }: { message: string }) {
   return (
     <div className="bg-white rounded-xl border border-gray-100 p-6 text-center">
       <div className="text-gray-400 mb-2">
-        {icon || (
-          <svg className="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-          </svg>
-        )}
+        <svg className="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
       </div>
       <p className="text-gray-500 text-sm">{message}</p>
     </div>
@@ -301,7 +307,6 @@ export default function DashboardPage() {
       
       if (!response.ok || !data.success) {
         if (response.status === 401) {
-          // Session expired - redirect to login
           router.push('/login')
           return
         }
@@ -372,8 +377,13 @@ export default function DashboardPage() {
         <div className="max-w-lg mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 bg-ooosh-600 rounded-lg flex items-center justify-center">
-                <span className="text-white text-lg font-bold">O</span>
+              {/* Logo */}
+              <div className="w-10 h-10 rounded-lg flex items-center justify-center overflow-hidden">
+                <img 
+                  src="/ooosh-tours-logo-small.png" 
+                  alt="Ooosh Tours" 
+                  className="w-full h-full object-contain"
+                />
               </div>
               <div>
                 <h1 className="text-lg font-semibold text-gray-900">
@@ -496,9 +506,13 @@ export default function DashboardPage() {
             </div>
           ) : completedJobs.length > 0 ? (
             <div className="space-y-3">
-              {/* Show first 2 completed jobs */}
+              {/* Show first 2 completed jobs - no start button for completed */}
               {completedJobs.slice(0, 2).map((item) => (
-                <JobCard key={item.isGrouped ? `run-${item.runGroup}-${item.date}` : item.id} item={item} />
+                <JobCard 
+                  key={item.isGrouped ? `run-${item.runGroup}-${item.date}` : item.id} 
+                  item={item} 
+                  showStartButton={false}
+                />
               ))}
               {completedJobs.length > 2 && (
                 <p className="text-center text-sm text-gray-500">
