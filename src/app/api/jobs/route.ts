@@ -290,16 +290,23 @@ export async function GET(): Promise<NextResponse<JobsApiResponse>> {
     const cancelledJobs: OrganisedJob[] = []
     
     for (const job of allJobs) {
+      // DEBUG: Log each job's key fields
+      console.log('Jobs API: Processing job', job.id, '- status:', job.status, '- date:', job.date)
+      
       // Determine category based on status
       const category = getJobCategory(job.status)
       
       // Skip hidden jobs
       if (category === null) {
+        console.log('Jobs API: Job', job.id, 'hidden (status not matched):', job.status)
         continue
       }
       
       const jobDate = parseJobDate(job.date)
       const organisedJob = toOrganisedJob(job)
+      
+      // DEBUG: Log date parsing
+      console.log('Jobs API: Job', job.id, '- category:', category, '- parsed date:', jobDate, '- isToday:', jobDate ? isToday(jobDate) : 'N/A')
       
       if (category === 'completed') {
         // Completed jobs - show last 30 days
