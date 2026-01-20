@@ -4,11 +4,15 @@
  * POST /api/jobs/[id]/complete
  * 
  * Completes a delivery/collection job:
- * - Uploads signature image to Monday file column
- * - Uploads photo to Monday file column (for secure drops)
+ * - Uploads signature image to Monday file column (when customer present)
+ * - Uploads photo(s) to Monday file column (required when customer not present, optional otherwise)
  * - Saves completion notes
  * - Updates status to "All done!"
  * - Sets completion timestamp
+ * 
+ * Validation:
+ * - Customer present: signature required, photos optional (0-5)
+ * - Customer not present: at least 1 photo required (up to 5), no signature
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -27,8 +31,8 @@ import {
 
 interface CompleteJobRequest {
   notes?: string
-  signature?: string        // Base64 PNG of signature
-  photo?: string           // Base64 PNG of photo
+  signature?: string        // Base64 PNG of signature (required when customer present)
+  photos?: string[]         // Array of base64 images (required when customer not present)
   customerPresent: boolean
 }
 
@@ -71,7 +75,7 @@ export async function POST(
       )
     }
 
-    const { notes, signature, photo, customerPresent } = body
+    const { notes, signature, photos, customerPresent } = body
 
     // Validate required fields based on customerPresent
     if (customerPresent && !signature) {
@@ -81,14 +85,23 @@ export async function POST(
       )
     }
 
-    if (!customerPresent && !photo) {
+    if (!customerPresent && (!photos || photos.length === 0)) {
       return NextResponse.json(
-        { success: false, error: 'Photo is required for secure drops (customer not present)' },
+        { success: false, error: 'At least one photo is required when customer is not present' },
+        { status: 400 }
+      )
+    }
+
+    // Validate photo count (max 5)
+    if (photos && photos.length > 5) {
+      return NextResponse.json(
+        { success: false, error: 'Maximum 5 photos allowed' },
         { status: 400 }
       )
     }
 
     console.log(`Complete API: Processing completion for job ${jobId} by ${session.email}`)
+    console.log(`Complete API: customerPresent=${customerPresent}, signature=${!!signature}, photos=${photos?.length || 0}`)
 
     // Verify the job exists and is assigned to this user
     const job = await getJobById(jobId, session.email)
@@ -111,7 +124,7 @@ export async function POST(
     const completedDate = new Date()
     const errors: string[] = []
 
-    // 1. Upload signature if provided
+    // 1. Upload signature if provided (customer present)
     if (signature) {
       console.log(`Complete API: Uploading signature for job ${jobId}`)
       try {
@@ -132,24 +145,27 @@ export async function POST(
       }
     }
 
-    // 2. Upload photo if provided (for secure drops)
-    if (photo) {
-      console.log(`Complete API: Uploading photo for job ${jobId}`)
-      try {
-        const photoResult = await uploadBase64ImageToColumn(
-          jobId,
-          DC_COLUMNS.completionPhotos,
-          photo,
-          `delivery-photo-${jobId}-${Date.now()}.png`
-        )
-        
-        if (!photoResult.success) {
-          console.error('Failed to upload photo:', photoResult.error)
-          errors.push(`Photo upload: ${photoResult.error}`)
+    // 2. Upload photos if provided
+    if (photos && photos.length > 0) {
+      console.log(`Complete API: Uploading ${photos.length} photo(s) for job ${jobId}`)
+      
+      for (let i = 0; i < photos.length; i++) {
+        try {
+          const photoResult = await uploadBase64ImageToColumn(
+            jobId,
+            DC_COLUMNS.completionPhotos,
+            photos[i],
+            `delivery-photo-${jobId}-${Date.now()}-${i + 1}.jpg`
+          )
+          
+          if (!photoResult.success) {
+            console.error(`Failed to upload photo ${i + 1}:`, photoResult.error)
+            errors.push(`Photo ${i + 1} upload: ${photoResult.error}`)
+          }
+        } catch (err) {
+          console.error(`Photo ${i + 1} upload error:`, err)
+          errors.push(`Photo ${i + 1} upload failed`)
         }
-      } catch (err) {
-        console.error('Photo upload error:', err)
-        errors.push('Photo upload failed')
       }
     }
 
@@ -161,10 +177,10 @@ export async function POST(
       const hours = completedDate.getHours()
       const minutes = completedDate.getMinutes()
       
-      // Add "SECURE DROP - Customer not present" prefix if applicable
+      // Add "Customer not present" prefix if applicable
       const finalNotes = customerPresent 
         ? (notes || '')
-        : `⚠️ SECURE DROP - Customer not present\n\n${notes || ''}`.trim()
+        : `Customer not present\n\n${notes || ''}`.trim()
 
       const mutation = `
         mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
@@ -179,10 +195,10 @@ export async function POST(
       `
 
       const columnValues = {
-        [DC_COLUMNS.completionNotes]: finalNotes,
+        [DC_COLUMNS.completionNotes]: finalNotes || (customerPresent ? '' : 'Customer not present'),
         [DC_COLUMNS.completedAtDate]: { date: dateStr },
         [DC_COLUMNS.completedAtTime]: { hour: hours, minute: minutes },
-        [DC_COLUMNS.status]: { label: 'All done!' },  // Note: exclamation mark to match Monday status label
+        [DC_COLUMNS.status]: { label: 'All done!' },
       }
 
       await mondayQuery(mutation, { 
