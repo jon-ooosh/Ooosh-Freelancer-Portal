@@ -36,7 +36,8 @@ export const DC_COLUMNS = {
   status: 'status90',
   keyPoints: 'key_points___summary',
   runGroup: 'color_mkxvwn11',              // Status: A, B, C, D, E
-  agreedFeeOverride: 'numeric_mky3z4gm',
+  driverPayMirror: 'lookup_mkzsfkg2',      // Mirror column: driver pay from D&C Costings
+  groupedRunFee: 'numeric_mky3z4gm',       // Reserved for future: aggregated fee for grouped runs
   completionNotes: 'long_text_mkyweafm',
   completionPhotos: 'file_mkyww89n',
   signature: 'file_mkywf297',
@@ -72,7 +73,7 @@ const DC_COLUMNS_TO_FETCH = [
   DC_COLUMNS.status,
   DC_COLUMNS.keyPoints,
   DC_COLUMNS.runGroup,
-  DC_COLUMNS.agreedFeeOverride,
+  DC_COLUMNS.driverPayMirror,
   DC_COLUMNS.completedAtDate,
   DC_COLUMNS.completionNotes,
 ]
@@ -111,7 +112,7 @@ export async function mondayQuery<T>(query: string, variables?: Record<string, u
     headers: {
       'Content-Type': 'application/json',
       'Authorization': getApiToken(),
-      'API-Version': '2024-01',
+      'API-Version': '2024-10',
     },
     body: JSON.stringify({ query, variables }),
   })
@@ -669,7 +670,7 @@ export interface JobRecord {
   venueId?: string              // ID of linked venue for fetching details
   status: string
   runGroup?: string
-  agreedFeeOverride?: number
+  driverPay?: number
   driverEmail?: string
   keyNotes?: string
   completedAtDate?: string
@@ -767,9 +768,9 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
     const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
     const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
 
-    // Parse agreed fee override
-    const feeText = getColText(DC_COLUMNS.agreedFeeOverride)
-    const agreedFeeOverride = feeText ? parseFloat(feeText) : undefined
+     // Parse driver pay from mirror column
+    const feeText = getColText(DC_COLUMNS.driverPayMirror)
+    const driverPay = feeText ? parseFloat(feeText) : undefined
 
     // Extract venue ID from connect column
     // Connect columns store linked item IDs in the value as JSON
@@ -796,7 +797,7 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
       venueId,
       status: getColText(DC_COLUMNS.status) || 'unknown',
       runGroup: getColText(DC_COLUMNS.runGroup),
-      agreedFeeOverride,
+      driverPay,
       driverEmail: getColText(DC_COLUMNS.driverEmailMirror),
       keyNotes: getColText(DC_COLUMNS.keyPoints),
       completedAtDate: getColText(DC_COLUMNS.completedAtDate),
@@ -887,9 +888,9 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
   const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
   const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
 
-  // Parse agreed fee
-  const feeText = getColText(DC_COLUMNS.agreedFeeOverride)
-  const agreedFeeOverride = feeText ? parseFloat(feeText) : undefined
+  // Parse driver pay from mirror column
+  const feeText = getColText(DC_COLUMNS.driverPayMirror)
+  const driverPay = feeText ? parseFloat(feeText) : undefined
 
   // Extract venue ID from connect column
   let venueId: string | undefined
@@ -914,7 +915,7 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
     venueId,
     status: getColText(DC_COLUMNS.status) || 'unknown',
     runGroup: getColText(DC_COLUMNS.runGroup),
-    agreedFeeOverride,
+    driverPay,
     driverEmail: driverEmail,
     keyNotes: getColText(DC_COLUMNS.keyPoints),
     completedAtDate: getColText(DC_COLUMNS.completedAtDate),

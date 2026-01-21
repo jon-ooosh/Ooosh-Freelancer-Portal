@@ -15,7 +15,7 @@ interface OrganisedJob {
   date: string
   time?: string
   venueName?: string
-  agreedFee?: number
+  driverPay?: number
   runGroup?: string
   hhRef?: string
   keyNotes?: string
@@ -207,9 +207,9 @@ function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStar
             </p>
           </div>
         </div>
-        {item.agreedFee !== undefined && item.agreedFee > 0 && (
+         {item.driverPay !== undefined && item.driverPay > 0 && (
           <span className="text-sm font-medium text-green-600">
-            {formatFee(item.agreedFee)}
+            {formatFee(item.driverPay)}
           </span>
         )}
       </div>

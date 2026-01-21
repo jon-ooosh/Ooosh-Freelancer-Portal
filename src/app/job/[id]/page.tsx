@@ -27,7 +27,7 @@ interface Job {
   hhRef?: string
   keyNotes?: string
   runGroup?: string
-  agreedFeeOverride?: number
+  driverPay?: number
   completedAtDate?: string
   completionNotes?: string
 }
@@ -520,12 +520,12 @@ export default function JobDetailsPage() {
               </div>
             </div>
 
-            {job.agreedFeeOverride && job.agreedFeeOverride > 0 && (
+            {job.driverPay && job.driverPay > 0 && (
               <div className="flex items-center gap-3">
                 <span className="text-gray-400 w-6 text-center">💷</span>
                 <div>
                   <p className="text-sm text-gray-500">Agreed fee</p>
-                  <p className="font-medium text-green-600">£{job.agreedFeeOverride.toFixed(0)} + expenses</p>
+                  <p className="font-medium text-green-600">£{job.driverPay.toFixed(0)} + expenses</p>
                 </div>
               </div>
             )}

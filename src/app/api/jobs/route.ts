@@ -28,7 +28,7 @@ interface OrganisedJob {
   date: string
   time?: string
   venueName?: string
-  agreedFee?: number
+  driverPay?: number
   runGroup?: string
   hhRef?: string
   keyNotes?: string
@@ -165,7 +165,7 @@ function toOrganisedJob(job: JobRecord): OrganisedJob {
     date: job.date || '',
     time: job.time,
     venueName: job.venueName,
-    agreedFee: job.agreedFeeOverride,
+    driverPay: job.driverPay,
     runGroup: job.runGroup,
     hhRef: job.hhRef,
     keyNotes: job.keyNotes,
@@ -206,7 +206,7 @@ function groupJobs(jobs: OrganisedJob[]): DisplayItem[] {
     } else {
       // Multiple jobs - create a grouped run
       const [date, runGroup] = key.split('|')
-      const totalFee = groupedJobs.reduce((sum, j) => sum + (j.agreedFee || 0), 0)
+      const totalFee = groupedJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0)
       
       // Sort jobs within the group by time
       groupedJobs.sort((a, b) => {
