@@ -163,7 +163,7 @@ function VenueFiles({ files }: { files: VenueFile[] }) {
       const data = await response.json()
       
       if (data.success && data.url) {
-        window.open(data.url, '_blank')
+        window.open(data.publicUrl, '_blank')
       } else {
         alert('Failed to open file')
       }

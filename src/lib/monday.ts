@@ -61,6 +61,12 @@ export const VENUE_COLUMNS = {
   files: 'files',                 // Files
 } as const
 
+// Resources / Staff Training board columns
+export const RESOURCES_COLUMNS = {
+  shareWithFreelancers: 'color_mkzs6btf',  // Status column: "Share with freelancers"
+  files: 'files',                           // Files column
+} as const
+
 // List of column IDs we need to fetch for jobs
 // This dramatically reduces response size and speeds up queries
 const DC_COLUMNS_TO_FETCH = [
@@ -90,6 +96,12 @@ const VENUE_COLUMNS_TO_FETCH = [
   VENUE_COLUMNS.accessNotes,
   VENUE_COLUMNS.stageNotes,
   VENUE_COLUMNS.files,
+]
+
+// List of column IDs we need to fetch for resources
+const RESOURCES_COLUMNS_TO_FETCH = [
+  RESOURCES_COLUMNS.shareWithFreelancers,
+  RESOURCES_COLUMNS.files,
 ]
 
 // =============================================================================
@@ -138,6 +150,7 @@ export function getBoardIds() {
     freelancers: process.env.MONDAY_BOARD_ID_FREELANCERS || '',
     costings: process.env.MONDAY_BOARD_ID_COSTINGS || '',
     venues: process.env.MONDAY_BOARD_ID_VENUES || '',
+    resources: '1829209673',  // Staff Training board - hardcoded as it's stable
   }
 }
 
@@ -148,6 +161,8 @@ export function getBoardIds() {
 export interface FileAsset {
   assetId: string
   name: string
+  fileType?: string    // e.g., "ASSET", "MONDAY_DOC", etc.
+  url?: string         // For link-type files (Google Docs, etc.)
 }
 
 export interface FileAssetWithUrl extends FileAsset {
@@ -156,7 +171,10 @@ export interface FileAssetWithUrl extends FileAsset {
 
 /**
  * Extract file assets from a Monday file column value
- * File column values are stored as JSON: {"files":[{"assetId":123,"name":"file.pdf"}]}
+ * File column values are stored as JSON with different structures:
+ * - Regular files: {"files":[{"assetId":123,"name":"file.pdf"}]}
+ * - Monday Docs: {"files":[{"name":"Doc","fileType":"MONDAY_DOC","objectId":"abc"}]}
+ * - Links/Google Docs: May have a "linkToFile" or URL property
  */
 export function extractFileAssets(fileColumnValue: string | undefined): FileAsset[] {
   if (!fileColumnValue) return []
@@ -164,9 +182,18 @@ export function extractFileAssets(fileColumnValue: string | undefined): FileAsse
   try {
     const parsed = JSON.parse(fileColumnValue)
     if (parsed.files && Array.isArray(parsed.files)) {
-      return parsed.files.map((f: { assetId: number; name: string }) => ({
-        assetId: String(f.assetId),
-        name: f.name
+      return parsed.files.map((f: { 
+        assetId?: number
+        name: string
+        fileType?: string
+        objectId?: string
+        linkToFile?: { url: string }
+        url?: string
+      }) => ({
+        assetId: f.assetId ? String(f.assetId) : (f.objectId || ''),
+        name: f.name,
+        fileType: f.fileType || 'ASSET',
+        url: f.linkToFile?.url || f.url || undefined,
       }))
     }
   } catch {
@@ -995,5 +1022,95 @@ export async function updateJobCompletion(
     boardId, 
     itemId, 
     columnValues: JSON.stringify(columnValues)
+  })
+}
+
+// =============================================================================
+// RESOURCES QUERIES
+// =============================================================================
+
+export interface ResourceRecord {
+  id: string
+  name: string
+  files: FileAsset[]
+}
+
+/**
+ * Get all resources marked for freelancer sharing
+ * 
+ * Fetches items from the Staff Training board where the 
+ * "Share with freelancers" status is set.
+ */
+export async function getResourcesForFreelancers(): Promise<ResourceRecord[]> {
+  const boardId = getBoardIds().resources
+
+  console.log('Monday: Fetching resources from board', boardId)
+  const startTime = Date.now()
+
+  // Use items_page_by_column_values to filter on the server
+  const query = `
+    query {
+      items_page_by_column_values (
+        board_id: ${boardId},
+        columns: [
+          {
+            column_id: "${RESOURCES_COLUMNS.shareWithFreelancers}",
+            column_values: ["Share with freelancers"]
+          }
+        ],
+        limit: 100
+      ) {
+        items {
+          id
+          name
+          column_values(ids: ${JSON.stringify(RESOURCES_COLUMNS_TO_FETCH)}) {
+            id
+            text
+            value
+          }
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    items_page_by_column_values: {
+      items: Array<{
+        id: string
+        name: string
+        column_values: Array<{
+          id: string
+          text: string
+          value: string
+        }>
+      }>
+    }
+  }>(query)
+
+  const queryTime = Date.now() - startTime
+  const items = result.items_page_by_column_values?.items || []
+  console.log('Monday: Resources query completed in', queryTime, 'ms, found', items.length, 'items')
+
+  // Log raw file column data for debugging (first item only)
+  if (items.length > 0) {
+    const firstItem = items[0]
+    const filesCol = firstItem.column_values.find(c => c.id === RESOURCES_COLUMNS.files)
+    console.log('Monday: Sample files column value:', filesCol?.value)
+  }
+
+  // Transform to ResourceRecord format
+  return items.map(item => {
+    const columnMap = item.column_values.reduce((acc, col) => {
+      acc[col.id] = { text: col.text, value: col.value }
+      return acc
+    }, {} as Record<string, { text: string; value: string }>)
+
+    const files = extractFileAssets(columnMap[RESOURCES_COLUMNS.files]?.value)
+
+    return {
+      id: item.id,
+      name: item.name,
+      files,
+    }
   })
 }
