@@ -50,6 +50,18 @@ function getContactVisibleDate(jobDateStr: string | undefined): string | null {
   })
 }
 
+/**
+ * Parse a time string to total minutes for proper numeric sorting
+ * e.g., "10:30" -> 630, "9:00" -> 540
+ * Returns 9999 for missing/invalid times to push them to the end
+ */
+function parseTimeToMinutes(timeStr: string | undefined): number {
+  if (!timeStr) return 9999
+  const match = timeStr.match(/(\d{1,2}):(\d{2})/)
+  if (!match) return 9999
+  return parseInt(match[1]) * 60 + parseInt(match[2])
+}
+
 interface JobWithVenue extends JobRecord {
   venue?: {
     id: string
@@ -114,12 +126,8 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Sort jobs by time
-    runJobs.sort((a, b) => {
-      if (!a.time) return 1
-      if (!b.time) return -1
-      return a.time.localeCompare(b.time)
-    })
+    // Sort jobs by time (numeric comparison, not string)
+    runJobs.sort((a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time))
 
     // Fetch venue details for each job
     const contactsVisible = isWithin48Hours(date)

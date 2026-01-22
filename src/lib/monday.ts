@@ -174,7 +174,7 @@ export interface FileAssetWithUrl extends FileAsset {
  * File column values are stored as JSON with different structures:
  * - Regular files: {"files":[{"assetId":123,"name":"file.pdf","fileType":"ASSET"}]}
  * - Monday Docs: {"files":[{"name":"Doc","fileType":"MONDAY_DOC","objectId":"abc"}]}
- * - Google Drive: {"files":[{"name":"Doc","fileType":"GOOGLE_DRIVE",...}]}
+ * - Google Drive: {"files":[{"name":"Doc","fileType":"GOOGLE_DRIVE","linkToFile":"https://..."}]}
  */
 export function extractFileAssets(fileColumnValue: string | undefined): FileAsset[] {
   if (!fileColumnValue) return []
@@ -193,7 +193,9 @@ export function extractFileAssets(fileColumnValue: string | undefined): FileAsse
           name: String(f.name || 'Unknown'),
           fileType: String(f.fileType || 'ASSET'),
           // Try multiple possible URL locations
-          url: (f.linkToFile as { url?: string })?.url || 
+          // linkToFile can be a direct string (Google Drive) or an object with url property
+          url: (typeof f.linkToFile === 'string' ? f.linkToFile : null) ||
+               (f.linkToFile as { url?: string } | null)?.url || 
                (f.url as string) || 
                (f.link as string) || 
                (f.publicUrl as string) ||
