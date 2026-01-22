@@ -3,8 +3,11 @@
 /**
  * Job Details Page
  * 
- * Displays full details for a single job including venue information.
+ * Displays full details for a single job OR all jobs in a multi-drop run.
+ * 
  * Route: /job/[id]
+ * Query params:
+ *   - run=X : If present, shows all jobs in that run group (multi-drop view)
  */
 
 import { useEffect, useState } from 'react'
@@ -14,6 +17,22 @@ import Link from 'next/link'
 // =============================================================================
 // TYPES
 // =============================================================================
+
+interface Venue {
+  id: string
+  name: string
+  address?: string
+  whatThreeWords?: string
+  contact1?: string
+  contact2?: string
+  phone?: string | null
+  phone2?: string | null
+  phoneHidden?: boolean
+  phoneVisibleFrom?: string | null
+  email?: string
+  accessNotes?: string
+  stageNotes?: string
+}
 
 interface Job {
   id: string
@@ -30,34 +49,24 @@ interface Job {
   driverPay?: number
   completedAtDate?: string
   completionNotes?: string
-}
-
-interface VenueFile {
-  assetId: string
-  name: string
-}
-
-interface Venue {
-  id: string
-  name: string
-  address?: string
-  whatThreeWords?: string
-  contact1?: string
-  contact2?: string
-  phone?: string | null
-  phone2?: string | null
-  phoneHidden?: boolean
-  phoneVisibleFrom?: string | null
-  email?: string
-  accessNotes?: string
-  stageNotes?: string
-  files?: VenueFile[]
+  venue?: Venue | null
 }
 
 interface JobApiResponse {
   success: boolean
   job?: Job
   venue?: Venue | null
+  contactsVisible?: boolean
+  error?: string
+}
+
+interface RunApiResponse {
+  success: boolean
+  runGroup?: string
+  date?: string
+  jobs?: Job[]
+  jobCount?: number
+  totalFee?: number
   contactsVisible?: boolean
   error?: string
 }
@@ -87,6 +96,17 @@ function formatDate(dateStr?: string): string {
   })
 }
 
+function formatShortDate(dateStr?: string): string {
+  if (!dateStr) return 'TBC'
+  const date = new Date(dateStr)
+  if (isNaN(date.getTime())) return dateStr
+  return date.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short'
+  })
+}
+
 function formatTime(timeStr?: string): string {
   if (!timeStr) return 'TBC'
   return timeStr
@@ -102,106 +122,6 @@ function getWhat3WordsUrl(w3w?: string): string | null {
   const words = w3w.replace(/^\/+/, '').trim()
   if (!words) return null
   return `https://what3words.com/${words}`
-}
-
-/**
- * Strip DEL/COL prefix from job name and combine with venue
- */
-function formatJobTitle(jobName: string, venueName?: string): string {
-  // Strip "DEL: ", "COL: ", "DEL - ", "COL - " prefixes (case insensitive)
-  const cleanedName = jobName.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
-  
-  if (!venueName) return cleanedName
-  
-  // If cleaned name equals venue name, just show venue
-  if (cleanedName.toLowerCase() === venueName.toLowerCase()) {
-    return venueName
-  }
-  
-  // Otherwise show "Job Name - Venue"
-  return `${cleanedName} - ${venueName}`
-}
-
-/**
- * Get file icon based on extension
- */
-function getFileIcon(filename: string): string {
-  const ext = filename.split('.').pop()?.toLowerCase()
-  switch (ext) {
-    case 'pdf':
-      return '📄'
-    case 'doc':
-    case 'docx':
-      return '📝'
-    case 'xls':
-    case 'xlsx':
-      return '📊'
-    case 'jpg':
-    case 'jpeg':
-    case 'png':
-    case 'gif':
-    case 'webp':
-      return '🖼️'
-    default:
-      return '📎'
-  }
-}
-
-// =============================================================================
-// VENUE FILES COMPONENT
-// =============================================================================
-
-function VenueFiles({ files }: { files: VenueFile[] }) {
-  const [loadingFile, setLoadingFile] = useState<string | null>(null)
-
-  if (!files || files.length === 0) return null
-
-  const handleFileClick = async (assetId: string, filename: string) => {
-    setLoadingFile(assetId)
-    try {
-      const response = await fetch(`/api/files/${assetId}`)
-      const data = await response.json()
-      
-      if (data.success && data.url) {
-        window.open(data.publicUrl, '_blank')
-      } else {
-        alert('Failed to open file')
-      }
-    } catch (err) {
-      console.error('Error opening file:', err)
-      alert('Failed to open file')
-    } finally {
-      setLoadingFile(null)
-    }
-  }
-
-  return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
-      <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-        <span>📁</span> Venue Files
-      </h2>
-      <div className="space-y-2">
-        {files.map((file) => (
-          <button
-            key={file.assetId}
-            onClick={() => handleFileClick(file.assetId, file.name)}
-            disabled={loadingFile === file.assetId}
-            className="w-full flex items-center gap-3 p-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors text-left disabled:opacity-50"
-          >
-            <span className="text-xl">{getFileIcon(file.name)}</span>
-            <span className="flex-1 text-sm text-gray-700 truncate">{file.name}</span>
-            {loadingFile === file.assetId ? (
-              <div className="w-4 h-4 border-2 border-ooosh-500 border-t-transparent rounded-full animate-spin"></div>
-            ) : (
-              <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-              </svg>
-            )}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
 }
 
 // =============================================================================
@@ -243,80 +163,43 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
 
   if (loading) {
     return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📦</span> Equipment List
-        </h2>
+      <div className="bg-gray-50 rounded-lg p-4">
+        <h3 className="font-medium text-gray-900 mb-2 flex items-center gap-2 text-sm">
+          <span>📦</span> Equipment
+        </h3>
         <div className="animate-pulse space-y-2">
-          <div className="h-4 bg-gray-200 rounded w-3/4"></div>
-          <div className="h-4 bg-gray-200 rounded w-1/2"></div>
-          <div className="h-4 bg-gray-200 rounded w-2/3"></div>
+          <div className="h-3 bg-gray-200 rounded w-3/4"></div>
+          <div className="h-3 bg-gray-200 rounded w-1/2"></div>
         </div>
       </div>
     )
   }
 
-  if (error) {
-    return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📦</span> Equipment List
-        </h2>
-        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-          <p className="text-red-700 text-sm">{error}</p>
-        </div>
-      </div>
-    )
+  if (error || items.length === 0) {
+    return null
   }
 
-  if (items.length === 0) {
-    return (
-      <div className="bg-white rounded-xl shadow-sm p-6">
-        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📦</span> Equipment List
-        </h2>
-        <p className="text-gray-500 text-sm">No equipment items found for this job.</p>
-      </div>
-    )
-  }
-
-  const PREVIEW_COUNT = 5
+  const PREVIEW_COUNT = 3
   const hasMoreItems = items.length > PREVIEW_COUNT
   const displayItems = expanded ? items : items.slice(0, PREVIEW_COUNT)
 
   return (
-    <div className="bg-white rounded-xl shadow-sm p-6">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="font-semibold text-gray-900 flex items-center gap-2">
-          <span>📦</span> Equipment List
-          <span className="text-sm font-normal text-gray-500">
-            ({items.length} item{items.length !== 1 ? 's' : ''})
-          </span>
-        </h2>
-      </div>
+    <div className="bg-gray-50 rounded-lg p-4">
+      <h3 className="font-medium text-gray-900 mb-2 flex items-center gap-2 text-sm">
+        <span>📦</span> Equipment
+        <span className="font-normal text-gray-500">
+          ({items.length} item{items.length !== 1 ? 's' : ''})
+        </span>
+      </h3>
 
-      <div className="space-y-2">
+      <div className="space-y-1">
         {displayItems.map((item, index) => (
           <div 
             key={item.id || index} 
-            className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"
+            className="flex items-center justify-between text-sm"
           >
-            <div className="flex-1">
-              <p className="text-gray-900 text-sm">{item.name}</p>
-              {item.category && (
-                <p className="text-gray-400 text-xs">{item.category}</p>
-              )}
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="bg-gray-100 text-gray-700 px-2 py-1 rounded text-sm font-medium">
-                × {item.quantity}
-              </span>
-              {item.isVirtual && (
-                <span className="text-xs text-gray-400" title="Virtual item">
-                  (V)
-                </span>
-              )}
-            </div>
+            <span className="text-gray-700">{item.name}</span>
+            <span className="text-gray-500">×{item.quantity}</span>
           </div>
         ))}
       </div>
@@ -324,12 +207,9 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
       {hasMoreItems && (
         <button
           onClick={() => setExpanded(!expanded)}
-          className="mt-3 w-full text-center text-sm font-medium text-ooosh-600 hover:text-ooosh-500 py-2 border-t border-gray-100"
+          className="mt-2 text-xs font-medium text-ooosh-600 hover:text-ooosh-500"
         >
-          {expanded 
-            ? '▲ Show less' 
-            : `▼ Show all ${items.length} items (+${items.length - PREVIEW_COUNT} more)`
-          }
+          {expanded ? '▲ Show less' : `▼ +${items.length - PREVIEW_COUNT} more`}
         </button>
       )}
     </div>
@@ -337,19 +217,396 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
 }
 
 // =============================================================================
-// COMPLETION SUCCESS BANNER
+// SINGLE STOP CARD (for multi-drop view)
 // =============================================================================
 
-function CompletionSuccessBanner() {
+function StopCard({ 
+  stop, 
+  index, 
+  expanded, 
+  onToggle 
+}: { 
+  stop: Job
+  index: number
+  expanded: boolean
+  onToggle: () => void
+}) {
+  const isDelivery = stop.type === 'delivery'
+  const typeIcon = isDelivery ? '📦' : '🚚'
+  const venue = stop.venue
+  const googleMapsUrl = getGoogleMapsUrl(venue?.address)
+  const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
+
   return (
-    <div className="bg-green-50 border border-green-200 rounded-xl p-4 mb-4">
-      <div className="flex items-center gap-3">
-        <div className="text-2xl">✅</div>
-        <div>
-          <p className="font-semibold text-green-800">Job Completed!</p>
-          <p className="text-sm text-green-700">The job has been marked as complete and all details saved.</p>
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <button
+        onClick={onToggle}
+        className="w-full px-4 py-3 flex items-center justify-between bg-gray-50 hover:bg-gray-100 transition-colors"
+      >
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 bg-ooosh-100 rounded-full flex items-center justify-center text-ooosh-600 font-semibold text-sm">
+            {index + 1}
+          </div>
+          <div className="text-left">
+            <p className="font-medium text-gray-900">
+              {venue?.name || stop.venueName || stop.name}
+            </p>
+            <p className="text-sm text-gray-500">
+              {typeIcon} {isDelivery ? 'Delivery' : 'Collection'} · {formatTime(stop.time)}
+            </p>
+          </div>
         </div>
-      </div>
+        <div className="flex items-center gap-2">
+          {stop.driverPay && stop.driverPay > 0 && (
+            <span className="text-sm font-medium text-green-600">
+              £{stop.driverPay.toFixed(0)}
+            </span>
+          )}
+          <svg 
+            className={`w-5 h-5 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`} 
+            fill="none" 
+            stroke="currentColor" 
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </div>
+      </button>
+
+      {expanded && (
+        <div className="px-4 py-4 border-t border-gray-100 space-y-4">
+          {venue && (venue.address || venue.whatThreeWords) && (
+            <div>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">📍 Location</h3>
+              {venue.address && <p className="text-gray-700 text-sm">{venue.address}</p>}
+              {venue.whatThreeWords && (
+                <p className="text-gray-500 text-xs font-mono mt-1">///{venue.whatThreeWords}</p>
+              )}
+              <div className="mt-2 flex flex-wrap gap-2">
+                {googleMapsUrl && (
+                  <a href={googleMapsUrl} target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors text-xs font-medium">
+                    📍 Maps
+                  </a>
+                )}
+                {what3WordsUrl && (
+                  <a href={what3WordsUrl} target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 px-3 py-1.5 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors text-xs font-medium">
+                    /// W3W
+                  </a>
+                )}
+              </div>
+            </div>
+          )}
+
+          {venue && (venue.contact1 || venue.phone) && (
+            <div>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">👤 Contact</h3>
+              {venue.contact1 && <p className="text-gray-700 text-sm">{venue.contact1}</p>}
+              {venue.phoneHidden ? (
+                <p className="text-gray-400 text-sm italic">Phone available from {venue.phoneVisibleFrom}</p>
+              ) : venue.phone ? (
+                <a href={`tel:${venue.phone}`} className="text-ooosh-600 text-sm font-medium">📞 {venue.phone}</a>
+              ) : null}
+            </div>
+          )}
+
+          {stop.keyNotes && (
+            <div>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">📋 Notes</h3>
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                <p className="text-gray-700 text-sm whitespace-pre-wrap">{stop.keyNotes}</p>
+              </div>
+            </div>
+          )}
+
+          {venue?.accessNotes && (
+            <div>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">🚪 Access</h3>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <p className="text-gray-700 text-sm whitespace-pre-wrap">{venue.accessNotes}</p>
+              </div>
+            </div>
+          )}
+
+          {stop.hhRef && (
+            <>
+              <div>
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">🔗 Reference</h3>
+                <p className="text-gray-600 text-sm">HireHop: <span className="font-mono font-medium">#{stop.hhRef}</span></p>
+              </div>
+              <EquipmentList hhRef={stop.hhRef} />
+            </>
+          )}
+
+          {!stop.completedAtDate && (
+            <Link href={`/job/${stop.id}/complete`}
+              className="block w-full bg-ooosh-500 text-white px-4 py-3 rounded-xl font-semibold hover:bg-ooosh-600 transition-colors text-center">
+              ▶️ Start {isDelivery ? 'Delivery' : 'Collection'}
+            </Link>
+          )}
+
+          {stop.completedAtDate && (
+            <div className="bg-green-50 border border-green-200 rounded-xl p-3 text-center">
+              <span className="text-green-600 font-medium text-sm">✅ Completed on {formatShortDate(stop.completedAtDate)}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// =============================================================================
+// MULTI-DROP RUN VIEW
+// =============================================================================
+
+function MultiDropView({ jobs, date, runGroup, totalFee }: { jobs: Job[]; date: string; runGroup: string; totalFee: number }) {
+  const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set([jobs[0]?.id]))
+
+  const toggleStop = (jobId: string) => {
+    setExpandedStops(prev => {
+      const next = new Set(prev)
+      if (next.has(jobId)) { next.delete(jobId) } else { next.add(jobId) }
+      return next
+    })
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 pb-8">
+      <header className="bg-white shadow-sm sticky top-0 z-10">
+        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
+          <Link href="/dashboard" className="flex items-center text-gray-600 hover:text-gray-900 transition-colors">
+            <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            Back
+          </Link>
+          <button onClick={() => window.location.reload()} className="text-gray-600 hover:text-gray-900 transition-colors" title="Refresh">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <main className="max-w-lg mx-auto p-4 space-y-4">
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <div className="flex items-start gap-3 mb-4">
+            <span className="text-3xl">🚐</span>
+            <div>
+              <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Multi-Drop Run · Group {runGroup}</span>
+              <h1 className="text-xl font-bold text-gray-900 mt-1">{jobs.length} Stops</h1>
+            </div>
+          </div>
+          <hr className="my-4 border-gray-100" />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-sm text-gray-500">📅 Date</p>
+              <p className="font-medium text-gray-900">{formatDate(date)}</p>
+            </div>
+            {totalFee > 0 && (
+              <div>
+                <p className="text-sm text-gray-500">💷 Total Fee</p>
+                <p className="font-medium text-green-600">£{totalFee.toFixed(0)}</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide px-1">Route ({jobs.length} stops)</h2>
+          {jobs.map((job, index) => (
+            <StopCard key={job.id} stop={job} index={index} expanded={expandedStops.has(job.id)} onToggle={() => toggleStop(job.id)} />
+          ))}
+        </div>
+
+        <button className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+          onClick={() => alert('Calendar export coming soon!')}>
+          <span>📅</span> Add All to Calendar
+        </button>
+      </main>
+    </div>
+  )
+}
+
+// =============================================================================
+// SINGLE JOB VIEW
+// =============================================================================
+
+function SingleJobView({ job, venue }: { job: Job; venue: Venue | null }) {
+  const isDelivery = job.type === 'delivery'
+  const typeIcon = isDelivery ? '📦' : '🚚'
+  const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
+  const googleMapsUrl = getGoogleMapsUrl(venue?.address)
+  const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
+
+  return (
+    <div className="min-h-screen bg-gray-50 pb-8">
+      <header className="bg-white shadow-sm sticky top-0 z-10">
+        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
+          <Link href="/dashboard" className="flex items-center text-gray-600 hover:text-gray-900 transition-colors">
+            <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            Back
+          </Link>
+          <button onClick={() => window.location.reload()} className="text-gray-600 hover:text-gray-900 transition-colors" title="Refresh">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <main className="max-w-lg mx-auto p-4 space-y-4">
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <div className="flex items-start gap-3 mb-4">
+            <span className="text-3xl">{typeIcon}</span>
+            <div>
+              <span className="text-xs font-semibold text-ooosh-600 uppercase tracking-wide">{typeLabel}</span>
+              <h1 className="text-xl font-bold text-gray-900 mt-1">{venue?.name || job.venueName || job.name}</h1>
+            </div>
+          </div>
+          <hr className="my-4 border-gray-100" />
+          <div className="space-y-3">
+            <div className="flex items-center gap-3">
+              <span className="text-gray-400 w-6 text-center">📅</span>
+              <div><p className="text-sm text-gray-500">Date</p><p className="font-medium text-gray-900">{formatDate(job.date)}</p></div>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-gray-400 w-6 text-center">⏰</span>
+              <div><p className="text-sm text-gray-500">Arrive by</p><p className="font-medium text-gray-900">{formatTime(job.time)}</p></div>
+            </div>
+            {job.driverPay && job.driverPay > 0 && (
+              <div className="flex items-center gap-3">
+                <span className="text-gray-400 w-6 text-center">💷</span>
+                <div><p className="text-sm text-gray-500">Agreed fee</p><p className="font-medium text-green-600">£{job.driverPay.toFixed(0)} + expenses</p></div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {job.hhRef && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2"><span>🔗</span> Reference</h2>
+            <p className="text-gray-600">HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span></p>
+          </div>
+        )}
+
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3">Status</h2>
+          <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
+            job.status.toLowerCase().includes('done') ? 'bg-green-100 text-green-800' :
+            job.status.toLowerCase().includes('arranged') ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-800'
+          }`}>{job.status}</span>
+        </div>
+
+        {venue && (venue.address || venue.whatThreeWords) && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2"><span>📍</span> Location</h2>
+            <div className="space-y-2">
+              {venue.address && <p className="text-gray-700">{venue.address}</p>}
+              {venue.whatThreeWords && <p className="text-gray-500 text-sm font-mono">///{venue.whatThreeWords}</p>}
+            </div>
+            <div className="mt-4 flex flex-wrap gap-3">
+              {googleMapsUrl && (
+                <a href={googleMapsUrl} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  Google Maps
+                </a>
+              )}
+              {what3WordsUrl && (
+                <a href={what3WordsUrl} target="_blank" rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm">
+                  <span className="font-bold">///</span> What3Words
+                </a>
+              )}
+            </div>
+          </div>
+        )}
+
+        {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <span>👤</span> Contact
+              {venue.phoneHidden && venue.phoneVisibleFrom && (
+                <span className="text-xs font-normal text-gray-400 ml-2">(phone visible from {venue.phoneVisibleFrom})</span>
+              )}
+            </h2>
+            <div className="space-y-3">
+              {venue.contact1 && <div className="flex items-center gap-3"><span className="text-gray-400 w-6 text-center">👤</span><span className="text-gray-700">{venue.contact1}</span></div>}
+              {venue.contact2 && <div className="flex items-center gap-3"><span className="text-gray-400 w-6 text-center">👤</span><span className="text-gray-700">{venue.contact2}</span></div>}
+              {venue.phoneHidden ? (
+                <div className="flex items-center gap-3"><span className="text-gray-400 w-6 text-center">📞</span><span className="text-gray-400 italic">Available from {venue.phoneVisibleFrom}</span></div>
+              ) : (
+                <>
+                  {venue.phone && <a href={`tel:${venue.phone}`} className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"><span className="w-6 text-center">📞</span><span className="font-medium">{venue.phone}</span></a>}
+                  {venue.phone2 && <a href={`tel:${venue.phone2}`} className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"><span className="w-6 text-center">📞</span><span className="font-medium">{venue.phone2}</span></a>}
+                </>
+              )}
+              {venue.email && <a href={`mailto:${venue.email}`} className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"><span className="w-6 text-center">✉️</span><span className="font-medium">{venue.email}</span></a>}
+            </div>
+          </div>
+        )}
+
+        {job.hhRef && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <EquipmentList hhRef={job.hhRef} />
+          </div>
+        )}
+
+        {venue?.accessNotes && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2"><span>🚪</span> Access Info</h2>
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+              <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
+            </div>
+          </div>
+        )}
+
+        {job.keyNotes && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2"><span>📋</span> Key Notes</h2>
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
+            </div>
+          </div>
+        )}
+
+        {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2"><span>🎭</span> Stage Notes</h2>
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+              <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-3 pt-2">
+          <button className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+            onClick={() => alert('Calendar export coming soon!')}>
+            <span>📅</span> Add to Calendar
+          </button>
+
+          {!job.completedAtDate && (
+            <Link href={`/job/${job.id}/complete`}
+              className="block w-full bg-ooosh-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-ooosh-600 transition-colors text-center text-lg">
+              ▶️ Start {isDelivery ? 'Delivery' : 'Collection'}
+            </Link>
+          )}
+
+          {job.completedAtDate && (
+            <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
+              <span className="text-green-600 font-medium">✅ Completed on {formatDate(job.completedAtDate)}</span>
+            </div>
+          )}
+        </div>
+      </main>
     </div>
   )
 }
@@ -362,30 +619,66 @@ export default function JobDetailsPage() {
   const params = useParams()
   const router = useRouter()
   const searchParams = useSearchParams()
+  
   const jobId = params.id as string
-  const justCompleted = searchParams.get('completed') === 'true'
+  const runGroup = searchParams.get('run')
 
   const [job, setJob] = useState<Job | null>(null)
   const [venue, setVenue] = useState<Venue | null>(null)
+  const [runJobs, setRunJobs] = useState<Job[]>([])
+  const [runDate, setRunDate] = useState<string>('')
+  const [runTotalFee, setRunTotalFee] = useState<number>(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    async function fetchJob() {
+    async function fetchData() {
       try {
-        const response = await fetch(`/api/jobs/${jobId}`)
-        const data: JobApiResponse = await response.json()
-
-        if (!response.ok) {
-          if (response.status === 401) {
-            router.push('/login')
-            return
+        if (runGroup) {
+          console.log('Multi-drop mode: fetching run group', runGroup)
+          
+          const jobResponse = await fetch(`/api/jobs/${jobId}`)
+          const jobData: JobApiResponse = await jobResponse.json()
+          
+          if (!jobResponse.ok) {
+            if (jobResponse.status === 401) { router.push('/login'); return }
+            throw new Error(jobData.error || 'Failed to fetch job')
           }
-          throw new Error(data.error || 'Failed to fetch job')
-        }
+          
+          if (!jobData.job) throw new Error('Job not found')
+          
+          const primaryJob = jobData.job
+          const jobDate = primaryJob.date?.split('T')[0]
+          
+          if (!jobDate) throw new Error('Job has no date')
+          
+          const runResponse = await fetch(`/api/jobs/run?group=${encodeURIComponent(runGroup)}&date=${encodeURIComponent(jobDate)}`)
+          const runData: RunApiResponse = await runResponse.json()
+          
+          if (!runResponse.ok) {
+            console.log('Run endpoint failed, falling back to single job view')
+            setJob(primaryJob)
+            setVenue(jobData.venue || null)
+          } else if (runData.success && runData.jobs && runData.jobs.length > 0) {
+            setRunJobs(runData.jobs)
+            setRunDate(runData.date || jobDate)
+            setRunTotalFee(runData.totalFee || 0)
+          } else {
+            setJob(primaryJob)
+            setVenue(jobData.venue || null)
+          }
+        } else {
+          const response = await fetch(`/api/jobs/${jobId}`)
+          const data: JobApiResponse = await response.json()
 
-        setJob(data.job || null)
-        setVenue(data.venue || null)
+          if (!response.ok) {
+            if (response.status === 401) { router.push('/login'); return }
+            throw new Error(data.error || 'Failed to fetch job')
+          }
+
+          setJob(data.job || null)
+          setVenue(data.venue || null)
+        }
       } catch (err) {
         console.error('Error fetching job:', err)
         setError(err instanceof Error ? err.message : 'Failed to load job')
@@ -394,10 +687,8 @@ export default function JobDetailsPage() {
       }
     }
 
-    if (jobId) {
-      fetchJob()
-    }
-  }, [jobId, router])
+    if (jobId) fetchData()
+  }, [jobId, runGroup, router])
 
   if (loading) {
     return (
@@ -418,16 +709,15 @@ export default function JobDetailsPage() {
             <div className="text-red-500 text-5xl mb-4">⚠️</div>
             <h1 className="text-xl font-semibold text-gray-900 mb-2">Error</h1>
             <p className="text-gray-600 mb-6">{error}</p>
-            <Link
-              href="/dashboard"
-              className="inline-block bg-ooosh-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-ooosh-600 transition-colors"
-            >
-              Back to Dashboard
-            </Link>
+            <Link href="/dashboard" className="inline-block bg-ooosh-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-ooosh-600 transition-colors">Back to Dashboard</Link>
           </div>
         </div>
       </div>
     )
+  }
+
+  if (runGroup && runJobs.length > 0) {
+    return <MultiDropView jobs={runJobs} date={runDate} runGroup={runGroup} totalFee={runTotalFee} />
   }
 
   if (!job) {
@@ -438,333 +728,12 @@ export default function JobDetailsPage() {
             <div className="text-gray-400 text-5xl mb-4">🔍</div>
             <h1 className="text-xl font-semibold text-gray-900 mb-2">Job Not Found</h1>
             <p className="text-gray-600 mb-6">This job doesn&apos;t exist or isn&apos;t assigned to you.</p>
-            <Link
-              href="/dashboard"
-              className="inline-block bg-ooosh-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-ooosh-600 transition-colors"
-            >
-              Back to Dashboard
-            </Link>
+            <Link href="/dashboard" className="inline-block bg-ooosh-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-ooosh-600 transition-colors">Back to Dashboard</Link>
           </div>
         </div>
       </div>
     )
   }
 
-  const isDelivery = job.type === 'delivery'
-  const typeIcon = isDelivery ? '📦' : '🚚'
-  const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
-  const googleMapsUrl = getGoogleMapsUrl(venue?.address)
-  const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
-  const isCompleted = !!job.completedAtDate
-
-  return (
-    <div className="min-h-screen bg-gray-50 pb-8">
-      <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
-          <Link
-            href="/dashboard"
-            className="flex items-center text-gray-600 hover:text-gray-900 transition-colors"
-          >
-            <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-            Back
-          </Link>
-          <button
-            onClick={() => window.location.reload()}
-            className="text-gray-600 hover:text-gray-900 transition-colors"
-            title="Refresh"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-          </button>
-        </div>
-      </header>
-
-      <main className="max-w-lg mx-auto p-4 space-y-4">
-        
-        {/* Completion Success Banner */}
-        {justCompleted && <CompletionSuccessBanner />}
-        
-        {/* Job Header - Type, Venue, Date, Time, Fee */}
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <div className="flex items-start gap-3 mb-4">
-            <span className="text-3xl">{typeIcon}</span>
-            <div>
-              <span className="text-xs font-semibold text-ooosh-600 uppercase tracking-wide">
-                {typeLabel}
-              </span>
-              <h1 className="text-xl font-bold text-gray-900 mt-1">
-                {formatJobTitle(job.name, venue?.name || job.venueName)}
-              </h1>
-            </div>
-          </div>
-
-          <hr className="my-4 border-gray-100" />
-
-          <div className="space-y-3">
-            <div className="flex items-center gap-3">
-              <span className="text-gray-400 w-6 text-center">📅</span>
-              <div>
-                <p className="text-sm text-gray-500">Date</p>
-                <p className="font-medium text-gray-900">{formatDate(job.date)}</p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <span className="text-gray-400 w-6 text-center">⏰</span>
-              <div>
-                <p className="text-sm text-gray-500">Arrive by</p>
-                <p className="font-medium text-gray-900">{formatTime(job.time)}</p>
-              </div>
-            </div>
-
-            {job.driverPay && job.driverPay > 0 && (
-              <div className="flex items-center gap-3">
-                <span className="text-gray-400 w-6 text-center">💷</span>
-                <div>
-                  <p className="text-sm text-gray-500">Agreed fee</p>
-                  <p className="font-medium text-green-600">£{job.driverPay.toFixed(0)} + expenses</p>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Reference */}
-        {job.hhRef && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>🔗</span> Reference
-            </h2>
-            <p className="text-gray-600">
-              HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
-            </p>
-          </div>
-        )}
-
-        {/* Status */}
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3">Status</h2>
-          <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${
-            job.status.toLowerCase().includes('done') || job.status.toLowerCase().includes('completed')
-              ? 'bg-green-100 text-green-800'
-              : job.status.toLowerCase().includes('arranged')
-                ? 'bg-blue-100 text-blue-800'
-                : 'bg-gray-100 text-gray-800'
-          }`}>
-            {job.status}
-          </span>
-        </div>
-
-        {/* Location */}
-        {venue && (venue.address || venue.whatThreeWords) && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <span>📍</span> Location
-            </h2>
-            
-            <div className="space-y-2">
-              {venue.address && (
-                <p className="text-gray-700">{venue.address}</p>
-              )}
-              
-              {venue.whatThreeWords && (
-                <p className="text-gray-500 text-sm font-mono">
-                  ///{venue.whatThreeWords}
-                </p>
-              )}
-            </div>
-            
-            <div className="mt-4 flex flex-wrap gap-3">
-              {googleMapsUrl && (
-                <a
-                  href={googleMapsUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                  </svg>
-                  Google Maps
-                </a>
-              )}
-              
-              {what3WordsUrl && (
-                <a
-                  href={what3WordsUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm"
-                >
-                  <span className="font-bold">///</span>
-                  What3Words
-                </a>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Contact */}
-        {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-              <span>👤</span> Contact
-              {venue.phoneHidden && venue.phoneVisibleFrom && (
-                <span className="text-xs font-normal text-gray-400 ml-2">
-                  (phone visible from {venue.phoneVisibleFrom})
-                </span>
-              )}
-            </h2>
-            
-            <div className="space-y-3">
-              {venue.contact1 && (
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">👤</span>
-                  <span className="text-gray-700">{venue.contact1}</span>
-                </div>
-              )}
-              
-              {venue.contact2 && (
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">👤</span>
-                  <span className="text-gray-700">{venue.contact2}</span>
-                </div>
-              )}
-              
-              {venue.phoneHidden ? (
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">📞</span>
-                  <span className="text-gray-400 italic">
-                    Available from {venue.phoneVisibleFrom}
-                  </span>
-                </div>
-              ) : (
-                <>
-                  {venue.phone && (
-                    <a
-                      href={`tel:${venue.phone}`}
-                      className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
-                    >
-                      <span className="w-6 text-center">📞</span>
-                      <span className="font-medium">{venue.phone}</span>
-                    </a>
-                  )}
-                  
-                  {venue.phone2 && (
-                    <a
-                      href={`tel:${venue.phone2}`}
-                      className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
-                    >
-                      <span className="w-6 text-center">📞</span>
-                      <span className="font-medium">{venue.phone2}</span>
-                    </a>
-                  )}
-                </>
-              )}
-              
-              {venue.email && (
-                <a
-                  href={`mailto:${venue.email}`}
-                  className="flex items-center gap-3 text-ooosh-600 hover:text-ooosh-700"
-                >
-                  <span className="w-6 text-center">✉️</span>
-                  <span className="font-medium">{venue.email}</span>
-                </a>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Equipment List */}
-        {job.hhRef && (
-          <EquipmentList hhRef={job.hhRef} />
-        )}
-
-        {/* Venue Files */}
-        {venue?.files && venue.files.length > 0 && (
-          <VenueFiles files={venue.files} />
-        )}
-
-        {/* Access Info */}
-        {venue?.accessNotes && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>🚪</span> Access Info
-            </h2>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-              <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Key Notes */}
-        {job.keyNotes && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>📋</span> Key Notes
-            </h2>
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Stage Notes */}
-        {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>🎭</span> Stage Notes
-            </h2>
-            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-              <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Completion Notes (if already completed) */}
-        {isCompleted && job.completionNotes && (
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>✅</span> Completion Notes
-            </h2>
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-              <p className="text-gray-700 whitespace-pre-wrap">{job.completionNotes}</p>
-            </div>
-          </div>
-        )}
-
-        {/* Action Buttons */}
-        <div className="space-y-3 pt-2">
-          <button
-            className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
-            onClick={() => alert('Calendar export coming soon!')}
-          >
-            <span>📅</span> Add to Calendar
-          </button>
-
-          {!isCompleted && (
-            <Link
-              href={`/job/${jobId}/complete`}
-              className="w-full bg-ooosh-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-ooosh-600 transition-colors flex items-center justify-center gap-2 text-lg"
-            >
-              <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
-            </Link>
-          )}
-
-          {isCompleted && (
-            <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
-              <span className="text-green-600 font-medium">
-                ✅ Completed on {formatDate(job.completedAtDate)}
-              </span>
-            </div>
-          )}
-        </div>
-
-      </main>
-    </div>
-  )
+  return <SingleJobView job={job} venue={venue} />
 }

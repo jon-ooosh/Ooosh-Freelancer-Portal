@@ -124,7 +124,7 @@ export async function mondayQuery<T>(query: string, variables?: Record<string, u
     headers: {
       'Content-Type': 'application/json',
       'Authorization': getApiToken(),
-      'API-Version': '2024-10',
+      'API-Version': '2025-04',
     },
     body: JSON.stringify({ query, variables }),
   })
@@ -161,7 +161,7 @@ export function getBoardIds() {
 export interface FileAsset {
   assetId: string
   name: string
-  fileType?: string    // e.g., "ASSET", "MONDAY_DOC", etc.
+  fileType?: string    // e.g., "ASSET", "MONDAY_DOC", "GOOGLE_DRIVE", etc.
   url?: string         // For link-type files (Google Docs, etc.)
 }
 
@@ -172,9 +172,9 @@ export interface FileAssetWithUrl extends FileAsset {
 /**
  * Extract file assets from a Monday file column value
  * File column values are stored as JSON with different structures:
- * - Regular files: {"files":[{"assetId":123,"name":"file.pdf"}]}
+ * - Regular files: {"files":[{"assetId":123,"name":"file.pdf","fileType":"ASSET"}]}
  * - Monday Docs: {"files":[{"name":"Doc","fileType":"MONDAY_DOC","objectId":"abc"}]}
- * - Links/Google Docs: May have a "linkToFile" or URL property
+ * - Google Drive: {"files":[{"name":"Doc","fileType":"GOOGLE_DRIVE",...}]}
  */
 export function extractFileAssets(fileColumnValue: string | undefined): FileAsset[] {
   if (!fileColumnValue) return []
@@ -182,22 +182,27 @@ export function extractFileAssets(fileColumnValue: string | undefined): FileAsse
   try {
     const parsed = JSON.parse(fileColumnValue)
     if (parsed.files && Array.isArray(parsed.files)) {
-      return parsed.files.map((f: { 
-        assetId?: number
-        name: string
-        fileType?: string
-        objectId?: string
-        linkToFile?: { url: string }
-        url?: string
-      }) => ({
-        assetId: f.assetId ? String(f.assetId) : (f.objectId || ''),
-        name: f.name,
-        fileType: f.fileType || 'ASSET',
-        url: f.linkToFile?.url || f.url || undefined,
-      }))
+      return parsed.files.map((f: Record<string, unknown>) => {
+        // Log non-ASSET files to see their full structure
+        if (f.fileType && f.fileType !== 'ASSET') {
+          console.log('Monday: Non-ASSET file entry:', JSON.stringify(f))
+        }
+        
+        return {
+          assetId: f.assetId ? String(f.assetId) : (f.objectId ? String(f.objectId) : ''),
+          name: String(f.name || 'Unknown'),
+          fileType: String(f.fileType || 'ASSET'),
+          // Try multiple possible URL locations
+          url: (f.linkToFile as { url?: string })?.url || 
+               (f.url as string) || 
+               (f.link as string) || 
+               (f.publicUrl as string) ||
+               undefined,
+        }
+      })
     }
-  } catch {
-    // Not valid JSON, ignore
+  } catch (e) {
+    console.error('Monday: Failed to parse files column:', e)
   }
   
   return []
@@ -725,6 +730,9 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
 
   // OPTIMIZED: Use items_page_by_column_values to filter on the server
   // This returns only items where the driver email matches, instead of all 500+ items
+  // 
+  // API 2025-04 CHANGE: Connect board columns now return null for 'value' field.
+  // We use BoardRelationValue fragment with linked_item_ids to get connected item IDs.
   const query = `
     query {
       items_page_by_column_values (
@@ -747,6 +755,9 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
             ... on MirrorValue {
               display_value
             }
+            ... on BoardRelationValue {
+              linked_item_ids
+            }
           }
         }
       }
@@ -763,6 +774,7 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
           text: string
           value: string
           display_value?: string
+          linked_item_ids?: string[]
         }>
       }>
     }
@@ -781,10 +793,11 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
       acc[col.id] = { 
         text: col.text, 
         value: col.value,
-        display_value: col.display_value 
+        display_value: col.display_value,
+        linked_item_ids: col.linked_item_ids
       }
       return acc
-    }, {} as Record<string, { text: string; value: string; display_value?: string }>)
+    }, {} as Record<string, { text: string; value: string; display_value?: string; linked_item_ids?: string[] }>)
 
     const getColText = (colId: string) => {
       const col = columnMap[colId]
@@ -800,17 +813,12 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
     const driverPay = feeText ? parseFloat(feeText) : undefined
 
     // Extract venue ID from connect column
-    // Connect columns store linked item IDs in the value as JSON
+    // API 2025-04: Use linked_item_ids from BoardRelationValue fragment
+    // (the 'value' field now returns null for connect board columns)
     let venueId: string | undefined
-    const venueConnectValue = columnMap[DC_COLUMNS.venueConnect]?.value
-    if (venueConnectValue) {
-      try {
-        const parsed = JSON.parse(venueConnectValue)
-        // Connect column value is like: {"linkedPulseIds":[{"linkedPulseId":123456}]}
-        venueId = parsed?.linkedPulseIds?.[0]?.linkedPulseId?.toString()
-      } catch {
-        // If parsing fails, ignore
-      }
+    const venueConnectCol = columnMap[DC_COLUMNS.venueConnect]
+    if (venueConnectCol?.linked_item_ids && venueConnectCol.linked_item_ids.length > 0) {
+      venueId = venueConnectCol.linked_item_ids[0]
     }
 
     return {
@@ -849,6 +857,8 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
   console.log('Monday: Fetching job', jobId, 'for', freelancerEmail)
 
   // Query for a specific item by ID
+  // API 2025-04 CHANGE: Connect board columns now return null for 'value' field.
+  // We use BoardRelationValue fragment with linked_item_ids to get connected item IDs.
   const query = `
     query ($itemIds: [ID!]!) {
       items(ids: $itemIds) {
@@ -860,6 +870,9 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
           value
           ... on MirrorValue {
             display_value
+          }
+          ... on BoardRelationValue {
+            linked_item_ids
           }
         }
       }
@@ -875,6 +888,7 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
         text: string
         value: string
         display_value?: string
+        linked_item_ids?: string[]
       }>
     }>
   }>(query, { itemIds: [jobId] })
@@ -891,10 +905,11 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
     acc[col.id] = { 
       text: col.text, 
       value: col.value,
-      display_value: col.display_value 
+      display_value: col.display_value,
+      linked_item_ids: col.linked_item_ids
     }
     return acc
-  }, {} as Record<string, { text: string; value: string; display_value?: string }>)
+  }, {} as Record<string, { text: string; value: string; display_value?: string; linked_item_ids?: string[] }>)
 
   // Helper to get text from a column
   const getColText = (colId: string) => {
@@ -920,15 +935,12 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
   const driverPay = feeText ? parseFloat(feeText) : undefined
 
   // Extract venue ID from connect column
+  // API 2025-04: Use linked_item_ids from BoardRelationValue fragment
+  // (the 'value' field now returns null for connect board columns)
   let venueId: string | undefined
-  const venueConnectValue = columnMap[DC_COLUMNS.venueConnect]?.value
-  if (venueConnectValue) {
-    try {
-      const parsed = JSON.parse(venueConnectValue)
-      venueId = parsed?.linkedPulseIds?.[0]?.linkedPulseId?.toString()
-    } catch {
-      // If parsing fails, ignore
-    }
+  const venueConnectCol = columnMap[DC_COLUMNS.venueConnect]
+  if (venueConnectCol?.linked_item_ids && venueConnectCol.linked_item_ids.length > 0) {
+    venueId = venueConnectCol.linked_item_ids[0]
   }
 
   return {
@@ -1091,12 +1103,11 @@ export async function getResourcesForFreelancers(): Promise<ResourceRecord[]> {
   const items = result.items_page_by_column_values?.items || []
   console.log('Monday: Resources query completed in', queryTime, 'ms, found', items.length, 'items')
 
-  // Log raw file column data for debugging (first item only)
-  if (items.length > 0) {
-    const firstItem = items[0]
-    const filesCol = firstItem.column_values.find(c => c.id === RESOURCES_COLUMNS.files)
-    console.log('Monday: Sample files column value:', filesCol?.value)
-  }
+  // Log raw file column data for ALL items (debugging Google Drive)
+  items.forEach(item => {
+    const filesCol = item.column_values.find(c => c.id === RESOURCES_COLUMNS.files)
+    console.log(`Monday: Files for "${item.name}" (${item.id}):`, filesCol?.value)
+  })
 
   // Transform to ResourceRecord format
   return items.map(item => {
