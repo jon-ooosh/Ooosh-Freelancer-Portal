@@ -143,7 +143,90 @@ Ooosh Tours`
 }
 
 /**
- * Send new job notification email
+ * Send job confirmed notification email
+ * 
+ * Sent when a job is assigned to a freelancer (status changes to "Arranged")
+ * This is the primary notification to get freelancers using the portal.
+ */
+export async function sendJobConfirmedNotification(
+  to: string, 
+  jobDetails: {
+    venueName: string
+    date: string
+    time?: string
+    type: 'delivery' | 'collection'
+  },
+  name?: string
+): Promise<void> {
+  const greeting = name ? `Hi ${name}` : 'Hi'
+  const portalUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
+  const typeText = jobDetails.type === 'delivery' ? 'delivery' : 'collection'
+  
+  // Format date nicely if possible
+  let formattedDate = jobDetails.date
+  try {
+    const dateObj = new Date(jobDetails.date)
+    if (!isNaN(dateObj.getTime())) {
+      formattedDate = dateObj.toLocaleDateString('en-GB', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+      })
+    }
+  } catch {
+    // Keep original date string if parsing fails
+  }
+  
+  // Build time string
+  const timeStr = jobDetails.time ? ` at ${jobDetails.time}` : ''
+  
+  // Email subject includes name and date for quick scanning in inbox
+  const subjectName = name || 'Driver'
+  const shortDate = jobDetails.date // Keep short for subject line
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background-color: #0ea5e9; padding: 20px; text-align: center;">
+        <h1 style="color: white; margin: 0;">Ooosh Tours</h1>
+      </div>
+      <div style="padding: 30px; background-color: #ffffff;">
+        <p style="font-size: 16px; color: #333;">${greeting},</p>
+        <p style="font-size: 16px; color: #333;">You've agreed to do a driving job for us on <strong>${formattedDate}</strong>${timeStr} – a <strong>${typeText}</strong> of equipment to <strong>${jobDetails.venueName}</strong>.</p>
+        <p style="font-size: 16px; color: #333;">For full details, please check your dashboard:</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${portalUrl}/dashboard" style="background-color: #0ea5e9; color: white; padding: 14px 30px; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">View Dashboard</a>
+        </div>
+        <p style="font-size: 16px; color: #333;">Many thanks,</p>
+        <p style="font-size: 16px; color: #333;"><strong>The team at Ooosh Tours Ltd</strong></p>
+      </div>
+      <div style="padding: 20px; background-color: #f9fafb; text-align: center;">
+        <p style="font-size: 12px; color: #999; margin: 0;">Ooosh Tours Ltd</p>
+      </div>
+    </div>
+  `
+
+  const text = `${greeting},
+
+You've agreed to do a driving job for us on ${formattedDate}${timeStr} – a ${typeText} of equipment to ${jobDetails.venueName}.
+
+For full details, please check your dashboard:
+${portalUrl}/dashboard
+
+Many thanks,
+The team at Ooosh Tours Ltd`
+
+  await sendEmail({
+    to,
+    subject: `${subjectName}, new job on ${shortDate}`,
+    text,
+    html,
+  })
+}
+
+/**
+ * Send new job notification email (legacy - kept for compatibility)
+ * @deprecated Use sendJobConfirmedNotification instead
  */
 export async function sendNewJobNotification(
   to: string, 
@@ -156,52 +239,13 @@ export async function sendNewJobNotification(
   },
   name?: string
 ): Promise<void> {
-  const greeting = name ? `Hi ${name}` : 'Hi'
-  const portalUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
-  const typeEmoji = jobDetails.type === 'delivery' ? '📦' : '🚚'
-  const typeText = jobDetails.type === 'delivery' ? 'Delivery' : 'Collection'
-
-  const html = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <div style="background-color: #0ea5e9; padding: 20px; text-align: center;">
-        <h1 style="color: white; margin: 0;">Ooosh Tours</h1>
-      </div>
-      <div style="padding: 30px; background-color: #ffffff;">
-        <p style="font-size: 16px; color: #333;">${greeting},</p>
-        <p style="font-size: 16px; color: #333;">You've been assigned a new job:</p>
-        <div style="background-color: #f3f4f6; padding: 20px; margin: 20px 0; border-radius: 8px;">
-          <p style="margin: 0 0 10px 0; font-size: 18px; font-weight: bold;">${typeEmoji} ${typeText} - ${jobDetails.venue}</p>
-          <p style="margin: 0 0 5px 0; color: #666;">📅 ${jobDetails.date}${jobDetails.time ? ` at ${jobDetails.time}` : ''}</p>
-          ${jobDetails.fee ? `<p style="margin: 0; color: #059669; font-weight: bold;">💷 £${jobDetails.fee} agreed</p>` : ''}
-        </div>
-        <div style="text-align: center; margin: 30px 0;">
-          <a href="${portalUrl}/dashboard" style="background-color: #0ea5e9; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; font-weight: bold;">View in Portal</a>
-        </div>
-      </div>
-      <div style="padding: 20px; background-color: #f9fafb; text-align: center;">
-        <p style="font-size: 12px; color: #999; margin: 0;">Ooosh Tours Ltd</p>
-      </div>
-    </div>
-  `
-
-  const text = `${greeting},
-
-You've been assigned a new job:
-
-${typeText} - ${jobDetails.venue}
-${jobDetails.date}${jobDetails.time ? ` at ${jobDetails.time}` : ''}
-${jobDetails.fee ? `£${jobDetails.fee} agreed` : ''}
-
-View details: ${portalUrl}/dashboard
-
-Ooosh Tours`
-
-  await sendEmail({
-    to,
-    subject: `New job from Ooosh! ${typeEmoji} ${typeText} - ${jobDetails.venue}`,
-    text,
-    html,
-  })
+  // Map to new function format
+  await sendJobConfirmedNotification(to, {
+    venueName: jobDetails.venue,
+    date: jobDetails.date,
+    time: jobDetails.time,
+    type: jobDetails.type,
+  }, name)
 }
 
 /**

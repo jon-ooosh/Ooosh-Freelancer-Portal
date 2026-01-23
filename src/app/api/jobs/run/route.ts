@@ -52,14 +52,29 @@ function getContactVisibleDate(jobDateStr: string | undefined): string | null {
 
 /**
  * Parse a time string to total minutes for proper numeric sorting
- * e.g., "10:30" -> 630, "9:00" -> 540
+ * Handles both 24-hour format (14:30) and 12-hour format with AM/PM (2:30 PM)
+ * e.g., "10:00 AM" -> 600, "09:00 PM" -> 1260
  * Returns 9999 for missing/invalid times to push them to the end
  */
 function parseTimeToMinutes(timeStr: string | undefined): number {
   if (!timeStr) return 9999
-  const match = timeStr.match(/(\d{1,2}):(\d{2})/)
+  
+  // Match time with optional AM/PM
+  const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i)
   if (!match) return 9999
-  return parseInt(match[1]) * 60 + parseInt(match[2])
+  
+  let hours = parseInt(match[1])
+  const minutes = parseInt(match[2])
+  const period = match[3]?.toUpperCase()
+  
+  // Convert to 24-hour format if AM/PM is present
+  if (period === 'PM' && hours !== 12) {
+    hours += 12  // 9 PM → 21
+  } else if (period === 'AM' && hours === 12) {
+    hours = 0    // 12 AM → 0
+  }
+  
+  return hours * 60 + minutes
 }
 
 interface JobWithVenue extends JobRecord {
@@ -126,7 +141,7 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Sort jobs by time (numeric comparison, not string)
+    // Sort jobs by time (numeric comparison with AM/PM handling)
     runJobs.sort((a, b) => parseTimeToMinutes(a.time) - parseTimeToMinutes(b.time))
 
     // Fetch venue details for each job
