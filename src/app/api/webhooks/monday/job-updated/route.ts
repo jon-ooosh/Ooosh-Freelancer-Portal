@@ -1,12 +1,17 @@
 /**
- * Monday.com Webhook Endpoint - Job Confirmed
+ * Monday.com Webhook Endpoint - Job Updated
  * 
- * POST /api/webhooks/monday/job-confirmed?secret=YOUR_SECRET
+ * POST /api/webhooks/monday/job-updated?secret=YOUR_SECRET
  * 
- * Called by Monday.com automation when a job's status changes to
- * "All arranged & email driver" (or similar).
+ * Called by Monday.com automation when a job's date, time, or venue changes.
  * 
- * Sends notification email to the assigned driver (unless muted).
+ * IMPORTANT: Only sends notifications if job status is "Arranged" (confirmed).
+ * This prevents spam while the job is still being set up.
+ * 
+ * Set up 3 Monday automations pointing to this endpoint:
+ * 1. When Date (date4) changes → trigger webhook
+ * 2. When Time (hour) changes → trigger webhook  
+ * 3. When Venue (connect_boards6) changes → trigger webhook
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -15,7 +20,21 @@ import {
   getFreelancerByEmail,
   getVenueById,
 } from '@/lib/monday'
-import { sendJobConfirmedNotification } from '@/lib/email'
+import { sendJobUpdatedNotification } from '@/lib/email'
+
+// Column IDs we care about for "job updated" notifications
+const WATCHED_COLUMNS = {
+  date: 'date4',
+  time: 'hour',
+  venue: 'connect_boards6',
+}
+
+// Status values that mean "job is confirmed"
+const CONFIRMED_STATUSES = [
+  'all arranged & email driver',
+  'arranged',
+  'working on it',
+]
 
 /**
  * Verify the webhook secret from query params
@@ -25,7 +44,7 @@ function verifyWebhookSecret(request: NextRequest): boolean {
   const expectedSecret = process.env.MONDAY_WEBHOOK_SECRET
   
   if (!expectedSecret) {
-    console.error('Webhook (confirmed): MONDAY_WEBHOOK_SECRET not configured')
+    console.error('Webhook (updated): MONDAY_WEBHOOK_SECRET not configured')
     return false
   }
   
@@ -56,59 +75,99 @@ function isJobMuted(mutedJobIds: string | undefined, jobId: string): boolean {
   return mutedIds.includes(jobId)
 }
 
+/**
+ * Check if the job status indicates it's confirmed/arranged
+ */
+function isJobConfirmed(status: string): boolean {
+  const normalised = status.toLowerCase().trim()
+  return CONFIRMED_STATUSES.some(s => normalised.includes(s))
+}
+
+/**
+ * Determine which field changed based on the column ID in the event
+ */
+function getChangedField(columnId: string): 'date' | 'time' | 'venue' | null {
+  if (columnId === WATCHED_COLUMNS.date) return 'date'
+  if (columnId === WATCHED_COLUMNS.time) return 'time'
+  if (columnId === WATCHED_COLUMNS.venue) return 'venue'
+  return null
+}
+
 export async function POST(request: NextRequest) {
   const startTime = Date.now()
-  console.log('Webhook (confirmed): Received request')
+  console.log('Webhook (updated): Received request')
   
   try {
     const body = await request.json()
     
     // Handle Monday's challenge verification
     if (body.challenge) {
-      console.log('Webhook (confirmed): Responding to challenge')
+      console.log('Webhook (updated): Responding to challenge')
       return NextResponse.json({ challenge: body.challenge })
     }
     
     // Verify webhook secret
     if (!verifyWebhookSecret(request)) {
-      console.error('Webhook (confirmed): Invalid secret')
+      console.error('Webhook (updated): Invalid secret')
       return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 })
     }
     
     // Extract event data
     const event = body.event
     if (!event?.pulseId) {
-      console.error('Webhook (confirmed): No pulseId in payload')
+      console.error('Webhook (updated): No pulseId in payload')
       return NextResponse.json({ success: false, error: 'No item ID' }, { status: 400 })
     }
     
     const itemId = event.pulseId.toString()
-    console.log(`Webhook (confirmed): Processing job ${itemId}`)
+    const columnId = event.columnId
+    const changedField = getChangedField(columnId)
+    
+    console.log(`Webhook (updated): Job ${itemId}, column ${columnId} (${changedField || 'unknown'})`)
+    
+    // Only process if it's a column we care about
+    if (!changedField) {
+      console.log(`Webhook (updated): Ignoring change to column ${columnId}`)
+      return NextResponse.json({ success: true, message: 'Column not watched', skipped: true })
+    }
     
     // Fetch job details
     const job = await getJobByIdInternal(itemId)
     if (!job) {
-      console.error(`Webhook (confirmed): Job ${itemId} not found`)
+      console.error(`Webhook (updated): Job ${itemId} not found`)
       return NextResponse.json({ success: false, error: 'Job not found' }, { status: 404 })
+    }
+    
+    // ========================================
+    // CRITICAL: Only notify if job is confirmed
+    // ========================================
+    if (!isJobConfirmed(job.status)) {
+      console.log(`Webhook (updated): Skipped - job ${itemId} status is "${job.status}" (not confirmed)`)
+      return NextResponse.json({
+        success: true,
+        message: 'Skipped - job not yet confirmed',
+        skipped: true,
+        status: job.status,
+      })
     }
     
     // Check driver assigned
     const driverEmail = job.driverEmail
     if (!driverEmail) {
-      console.log(`Webhook (confirmed): No driver assigned to job ${itemId}`)
+      console.log(`Webhook (updated): No driver assigned to job ${itemId}`)
       return NextResponse.json({ success: true, message: 'No driver assigned', skipped: true })
     }
     
     // Fetch freelancer to check mute settings
     const freelancer = await getFreelancerByEmail(driverEmail)
     if (!freelancer) {
-      console.error(`Webhook (confirmed): Freelancer ${driverEmail} not found`)
+      console.error(`Webhook (updated): Freelancer ${driverEmail} not found`)
       return NextResponse.json({ success: false, error: 'Freelancer not found' }, { status: 404 })
     }
     
     // Check global mute
     if (isGloballyMuted(freelancer.notificationsPausedUntil)) {
-      console.log(`Webhook (confirmed): Skipped - ${driverEmail} has global mute until ${freelancer.notificationsPausedUntil}`)
+      console.log(`Webhook (updated): Skipped - ${driverEmail} has global mute until ${freelancer.notificationsPausedUntil}`)
       return NextResponse.json({
         success: true,
         message: 'Skipped - notifications muted',
@@ -119,7 +178,7 @@ export async function POST(request: NextRequest) {
     
     // Check per-job mute
     if (isJobMuted(freelancer.mutedJobIds, itemId)) {
-      console.log(`Webhook (confirmed): Skipped - job ${itemId} is muted by ${driverEmail}`)
+      console.log(`Webhook (updated): Skipped - job ${itemId} is muted by ${driverEmail}`)
       return NextResponse.json({
         success: true,
         message: 'Skipped - job notifications muted',
@@ -134,37 +193,39 @@ export async function POST(request: NextRequest) {
         const venue = await getVenueById(job.venueId)
         if (venue?.name) venueName = venue.name
       } catch (e) {
-        console.warn('Webhook (confirmed): Could not fetch venue:', e)
+        console.warn('Webhook (updated): Could not fetch venue:', e)
       }
     }
     
     // Send email
-    console.log(`Webhook (confirmed): Sending email to ${driverEmail}`)
+    console.log(`Webhook (updated): Sending email to ${driverEmail} (${changedField} changed)`)
     
-    await sendJobConfirmedNotification(
+    await sendJobUpdatedNotification(
       driverEmail,
       {
         venueName,
         date: job.date || 'TBC',
         time: job.time,
         type: job.type,
+        changedField,
       },
       freelancer.name
     )
     
     const duration = Date.now() - startTime
-    console.log(`Webhook (confirmed): Sent to ${driverEmail} (${duration}ms)`)
+    console.log(`Webhook (updated): Sent to ${driverEmail} (${duration}ms)`)
     
     return NextResponse.json({
       success: true,
-      message: 'Confirmation sent',
+      message: 'Update notification sent',
       itemId,
       recipient: driverEmail,
+      changedField,
       duration: `${duration}ms`,
     })
     
   } catch (error) {
-    console.error('Webhook (confirmed): Error:', error)
+    console.error('Webhook (updated): Error:', error)
     return NextResponse.json(
       { success: false, error: error instanceof Error ? error.message : 'Error' },
       { status: 200 } // Return 200 to prevent Monday retries

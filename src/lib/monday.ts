@@ -22,6 +22,7 @@ export const FREELANCER_COLUMNS = {
   emailVerified: 'color_mkywshb8',        // Status column - "Done" = verified
   notificationsPausedUntil: 'date_mkywsxdc',
   lastLogin: 'date_mkywyq3h',
+  mutedJobIds: 'text_mkzws3r3', 
 } as const
 
 // Deliveries & Collections board columns
@@ -392,6 +393,7 @@ export interface FreelancerRecord {
   emailVerified: boolean
   notificationsPausedUntil?: string
   lastLogin?: string
+  mutedJobIds?: string
 }
 
 /**
@@ -473,6 +475,7 @@ export async function findFreelancerByEmail(email: string): Promise<FreelancerRe
     emailVerified: isVerified,
     notificationsPausedUntil: columnMap[FREELANCER_COLUMNS.notificationsPausedUntil]?.text,
     lastLogin: columnMap[FREELANCER_COLUMNS.lastLogin]?.text,
+    mutedJobIds: columnMap[FREELANCER_COLUMNS.mutedJobIds]?.text,
   }
 }
 
@@ -964,6 +967,252 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
   }
 }
 
+/**
+ * Get a job by ID without checking driver assignment
+ * 
+ * Used by webhooks which are trusted and need to fetch job details
+ * before we know who the driver is.
+ */
+export async function getJobByIdInternal(jobId: string): Promise<JobRecord | null> {
+  const boardId = getBoardIds().deliveries
+
+  if (!boardId) {
+    throw new Error('MONDAY_BOARD_ID_DELIVERIES is not configured')
+  }
+
+  console.log('Monday: Fetching job (internal)', jobId)
+
+  const query = `
+    query ($itemIds: [ID!]!) {
+      items(ids: $itemIds) {
+        id
+        name
+        column_values(ids: ${JSON.stringify(DC_COLUMNS_TO_FETCH)}) {
+          id
+          text
+          value
+          ... on MirrorValue {
+            display_value
+          }
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    items: Array<{
+      id: string
+      name: string
+      column_values: Array<{
+        id: string
+        text: string
+        value: string
+        display_value?: string
+      }>
+    }>
+  }>(query, { itemIds: [jobId] })
+
+  const item = result.items?.[0]
+  
+  if (!item) {
+    return null
+  }
+
+  // Build column map
+  const columnMap = item.column_values.reduce((acc, col) => {
+    acc[col.id] = { 
+      text: col.text, 
+      value: col.value,
+      display_value: col.display_value 
+    }
+    return acc
+  }, {} as Record<string, { text: string; value: string; display_value?: string }>)
+
+  const getColText = (colId: string) => {
+    const col = columnMap[colId]
+    return col?.display_value || col?.text || ''
+  }
+
+  // Determine job type
+  const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
+  const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
+
+  // Parse fee
+  const feeText = getColText(DC_COLUMNS.driverPayMirror)
+  const driverPay = feeText ? parseFloat(feeText) : undefined
+
+  // Extract venue ID
+  let venueId: string | undefined
+  const venueConnectValue = columnMap[DC_COLUMNS.venueConnect]?.value
+  if (venueConnectValue) {
+    try {
+      const parsed = JSON.parse(venueConnectValue)
+      venueId = parsed?.linkedPulseIds?.[0]?.linkedPulseId?.toString()
+    } catch {
+      // Ignore
+    }
+  }
+
+  return {
+    id: item.id,
+    name: item.name,
+    hhRef: getColText(DC_COLUMNS.hhRef),
+    type: jobType,
+    date: getColText(DC_COLUMNS.date),
+    time: getColText(DC_COLUMNS.timeToArrive),
+    venueName: getColText(DC_COLUMNS.venueConnect),
+    venueId,
+    status: getColText(DC_COLUMNS.status) || 'unknown',
+    runGroup: getColText(DC_COLUMNS.runGroup),
+    driverPay,
+    driverEmail: getColText(DC_COLUMNS.driverEmailMirror),
+    keyNotes: getColText(DC_COLUMNS.keyPoints),
+    completedAtDate: getColText(DC_COLUMNS.completedAtDate),
+    completionNotes: getColText(DC_COLUMNS.completionNotes),
+  } as JobRecord
+}
+
+/**
+ * Get a freelancer's name by their email address
+ * 
+ * Used by webhooks to personalize notification emails.
+ * Returns just the name, or null if not found.
+ */
+export async function getFreelancerNameByEmail(email: string): Promise<string | null> {
+  const freelancer = await findFreelancerByEmail(email)
+  return freelancer?.name || null
+}
+
+/**
+ * Update a freelancer's notification mute settings (global mute)
+ * 
+ * @param email - Freelancer's email
+ * @param mutedUntil - Date to mute until, or null to unmute
+ */
+export async function updateFreelancerMuteUntil(
+  email: string,
+  mutedUntil: Date | null
+): Promise<void> {
+  // First find the freelancer to get their ID
+  const freelancer = await findFreelancerByEmail(email)
+  if (!freelancer) {
+    throw new Error(`Freelancer not found: ${email}`)
+  }
+
+  const boardId = getBoardIds().freelancers
+
+  if (mutedUntil === null) {
+    // Clear the date - use empty string
+    const mutation = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
+        change_simple_column_value(
+          board_id: $boardId, 
+          item_id: $itemId, 
+          column_id: $columnId, 
+          value: $value
+        ) {
+          id
+        }
+      }
+    `
+    await mondayQuery(mutation, { 
+      boardId, 
+      itemId: freelancer.id, 
+      columnId: FREELANCER_COLUMNS.notificationsPausedUntil,
+      value: ''
+    })
+  } else {
+    // Set the date
+    const dateStr = mutedUntil.toISOString().split('T')[0]
+    const mutation = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: JSON!) {
+        change_column_value(
+          board_id: $boardId, 
+          item_id: $itemId, 
+          column_id: $columnId, 
+          value: $value
+        ) {
+          id
+        }
+      }
+    `
+    await mondayQuery(mutation, { 
+      boardId, 
+      itemId: freelancer.id, 
+      columnId: FREELANCER_COLUMNS.notificationsPausedUntil,
+      value: JSON.stringify({ date: dateStr })
+    })
+  }
+}
+
+/**
+ * Update a freelancer's per-job mute list
+ * 
+ * @param email - Freelancer's email
+ * @param jobId - Job ID to mute/unmute
+ * @param mute - true to mute, false to unmute
+ */
+export async function updateFreelancerJobMute(
+  email: string,
+  jobId: string,
+  mute: boolean
+): Promise<void> {
+  const freelancer = await findFreelancerByEmail(email)
+  if (!freelancer) {
+    throw new Error(`Freelancer not found: ${email}`)
+  }
+
+  const boardId = getBoardIds().freelancers
+  
+  // Parse current muted jobs
+  const currentMuted = freelancer.mutedJobIds
+    ? freelancer.mutedJobIds.split(',').map(id => id.trim()).filter(Boolean)
+    : []
+
+  let newMuted: string[]
+  if (mute) {
+    // Add job ID if not already present
+    if (!currentMuted.includes(jobId)) {
+      newMuted = [...currentMuted, jobId]
+    } else {
+      newMuted = currentMuted
+    }
+  } else {
+    // Remove job ID
+    newMuted = currentMuted.filter(id => id !== jobId)
+  }
+
+  const newValue = newMuted.join(',')
+
+  const mutation = `
+    mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
+      change_simple_column_value(
+        board_id: $boardId, 
+        item_id: $itemId, 
+        column_id: $columnId, 
+        value: $value
+      ) {
+        id
+      }
+    }
+  `
+
+  await mondayQuery(mutation, { 
+    boardId, 
+    itemId: freelancer.id, 
+    columnId: FREELANCER_COLUMNS.mutedJobIds,
+    value: newValue
+  })
+}
+
+/**
+ * Get freelancer by email - convenience wrapper that includes mute fields
+ * 
+ * This is the same as findFreelancerByEmail but named more clearly for webhook use.
+ */
+export async function getFreelancerByEmail(email: string): Promise<FreelancerRecord | null> {
+  return findFreelancerByEmail(email)
+}
 
 /**
  * Get a job by ID without freelancer email verification
