@@ -964,6 +964,133 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
   }
 }
 
+
+/**
+ * Get a job by ID without freelancer email verification
+ * 
+ * INTERNAL USE ONLY - for trusted webhook calls.
+ * This function fetches job details without checking if the requesting user
+ * is assigned to the job. Only use when the caller is already authenticated
+ * (e.g., via webhook secret).
+ */
+export async function getJobByIdInternal(jobId: string): Promise<JobRecord | null> {
+  const boardId = getBoardIds().deliveries
+
+  if (!boardId) {
+    throw new Error('MONDAY_BOARD_ID_DELIVERIES is not configured')
+  }
+
+  console.log('Monday: Fetching job (internal)', jobId)
+
+  // Query for a specific item by ID
+  // Uses same query structure as getJobById but without email verification
+  const query = `
+    query ($itemIds: [ID!]!) {
+      items(ids: $itemIds) {
+        id
+        name
+        column_values(ids: ${JSON.stringify(DC_COLUMNS_TO_FETCH)}) {
+          id
+          text
+          value
+          ... on MirrorValue {
+            display_value
+          }
+          ... on BoardRelationValue {
+            linked_item_ids
+          }
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    items: Array<{
+      id: string
+      name: string
+      column_values: Array<{
+        id: string
+        text: string
+        value: string
+        display_value?: string
+        linked_item_ids?: string[]
+      }>
+    }>
+  }>(query, { itemIds: [jobId] })
+
+  const item = result.items?.[0]
+  
+  if (!item) {
+    console.log('Monday: Job not found:', jobId)
+    return null
+  }
+
+  // Build column map
+  const columnMap = item.column_values.reduce((acc, col) => {
+    acc[col.id] = { 
+      text: col.text, 
+      value: col.value,
+      display_value: col.display_value,
+      linked_item_ids: col.linked_item_ids
+    }
+    return acc
+  }, {} as Record<string, { text: string; value: string; display_value?: string; linked_item_ids?: string[] }>)
+
+  // Helper to get text from a column
+  const getColText = (colId: string) => {
+    const col = columnMap[colId]
+    return col?.display_value || col?.text || ''
+  }
+
+  // Determine job type
+  const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
+  const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
+
+  // Parse driver pay from mirror column
+  const feeText = getColText(DC_COLUMNS.driverPayMirror)
+  const driverPay = feeText ? parseFloat(feeText) : undefined
+
+  // Extract venue ID from connect column
+  // API 2025-04: Use linked_item_ids from BoardRelationValue fragment
+  let venueId: string | undefined
+  const venueConnectCol = columnMap[DC_COLUMNS.venueConnect]
+  if (venueConnectCol?.linked_item_ids && venueConnectCol.linked_item_ids.length > 0) {
+    venueId = venueConnectCol.linked_item_ids[0]
+  }
+
+  // Get driver email (no verification - we trust the webhook caller)
+  const driverEmail = getColText(DC_COLUMNS.driverEmailMirror).toLowerCase().trim()
+
+  return {
+    id: item.id,
+    name: item.name,
+    hhRef: getColText(DC_COLUMNS.hhRef),
+    type: jobType,
+    date: getColText(DC_COLUMNS.date),
+    time: getColText(DC_COLUMNS.timeToArrive),
+    venueName: getColText(DC_COLUMNS.venueConnect),
+    venueId,
+    status: getColText(DC_COLUMNS.status) || 'unknown',
+    runGroup: getColText(DC_COLUMNS.runGroup),
+    driverPay,
+    driverEmail,
+    keyNotes: getColText(DC_COLUMNS.keyPoints),
+    completedAtDate: getColText(DC_COLUMNS.completedAtDate),
+    completionNotes: getColText(DC_COLUMNS.completionNotes),
+  }
+}
+
+/**
+ * Get a freelancer's name by their email address
+ * 
+ * Used by webhooks to personalize notification emails.
+ * Returns the freelancer's name or null if not found.
+ */
+export async function getFreelancerNameByEmail(email: string): Promise<string | null> {
+  const freelancer = await findFreelancerByEmail(email)
+  return freelancer?.name || null
+}
+
 /**
  * Update a job's status
  */
