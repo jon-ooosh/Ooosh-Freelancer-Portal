@@ -46,6 +46,17 @@ function formatMuteDate(dateStr: string | null): string {
     return 'indefinitely'
   }
   
+  // Check if it's tomorrow (meaning "end of today")
+  const tomorrow = new Date()
+  tomorrow.setDate(tomorrow.getDate() + 1)
+  tomorrow.setHours(0, 0, 0, 0)
+  const dateOnly = new Date(date)
+  dateOnly.setHours(0, 0, 0, 0)
+  
+  if (dateOnly.getTime() === tomorrow.getTime()) {
+    return 'end of today'
+  }
+  
   return date.toLocaleDateString('en-GB', {
     weekday: 'short',
     day: 'numeric',
@@ -64,6 +75,7 @@ export default function SettingsPage() {
   // State
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [savingAction, setSavingAction] = useState<string | null>(null) // Track which button is saving
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   
@@ -73,8 +85,9 @@ export default function SettingsPage() {
   // Notification settings
   const [notifications, setNotifications] = useState<NotificationSettings | null>(null)
   
-  // Modal state for specific date picker
+  // Modal states
   const [showDatePicker, setShowDatePicker] = useState(false)
+  const [showIndefiniteConfirm, setShowIndefiniteConfirm] = useState(false)
   const [selectedDate, setSelectedDate] = useState('')
 
   // ===========================================
@@ -119,12 +132,21 @@ export default function SettingsPage() {
     fetchSettings()
   }, [fetchSettings])
 
+  // Clear success message after 3 seconds
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => setSuccess(null), 3000)
+      return () => clearTimeout(timer)
+    }
+  }, [success])
+
   // ===========================================
   // MUTE ACTIONS
   // ===========================================
 
   const handleMute = async (muteType: '7_days' | 'end_of_today' | 'specific_date' | 'indefinite', date?: string) => {
     setSaving(true)
+    setSavingAction(muteType)
     setError(null)
     setSuccess(null)
     
@@ -153,16 +175,19 @@ export default function SettingsPage() {
       await fetchSettings()
       setSuccess('Notifications muted')
       setShowDatePicker(false)
+      setShowIndefiniteConfirm(false)
       
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to mute notifications')
     } finally {
       setSaving(false)
+      setSavingAction(null)
     }
   }
 
   const handleUnmute = async () => {
     setSaving(true)
+    setSavingAction('unmute')
     setError(null)
     setSuccess(null)
     
@@ -186,6 +211,7 @@ export default function SettingsPage() {
       setError(err instanceof Error ? err.message : 'Failed to enable notifications')
     } finally {
       setSaving(false)
+      setSavingAction(null)
     }
   }
 
@@ -217,6 +243,9 @@ export default function SettingsPage() {
     )
   }
 
+  // Helper to show spinner on specific button
+  const isButtonSaving = (action: string) => saving && savingAction === action
+
   return (
     <div className="min-h-screen bg-gray-50 pb-24">
       {/* Header */}
@@ -232,8 +261,11 @@ export default function SettingsPage() {
         
         {/* Success/Error Messages */}
         {success && (
-          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm">
-            ✓ {success}
+          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm flex items-center gap-2">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+            {success}
           </div>
         )}
         
@@ -279,7 +311,7 @@ export default function SettingsPage() {
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="font-medium text-amber-800">Notifications paused</p>
+                  <p className="font-medium text-amber-800">🔕 Notifications paused</p>
                   <p className="text-sm text-amber-600">
                     Until {formatMuteDate(notifications.globalMuteUntil)}
                   </p>
@@ -287,9 +319,12 @@ export default function SettingsPage() {
                 <button
                   onClick={handleUnmute}
                   disabled={saving}
-                  className="bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
+                  className="bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-amber-700 disabled:opacity-50 flex items-center gap-2"
                 >
-                  {saving ? 'Saving...' : 'Turn On'}
+                  {isButtonSaving('unmute') && (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  )}
+                  Turn On
                 </button>
               </div>
             </div>
@@ -299,6 +334,9 @@ export default function SettingsPage() {
                 <span className="text-green-600">✓</span>
                 <p className="font-medium text-green-800">Notifications are enabled</p>
               </div>
+              <p className="text-sm text-green-600 mt-1">
+                You&apos;ll receive emails for new jobs, changes, and cancellations
+              </p>
             </div>
           )}
 
@@ -310,37 +348,57 @@ export default function SettingsPage() {
               <button
                 onClick={() => handleMute('end_of_today')}
                 disabled={saving}
-                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-between"
               >
-                <p className="font-medium text-gray-900">Until end of today</p>
-                <p className="text-sm text-gray-500">Resume tomorrow morning</p>
+                <div>
+                  <p className="font-medium text-gray-900">Until end of today</p>
+                  <p className="text-sm text-gray-500">Resume tomorrow morning</p>
+                </div>
+                {isButtonSaving('end_of_today') && (
+                  <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+                )}
               </button>
               
               <button
                 onClick={() => handleMute('7_days')}
                 disabled={saving}
-                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-between"
               >
-                <p className="font-medium text-gray-900">For 7 days</p>
-                <p className="text-sm text-gray-500">Good for a week off</p>
+                <div>
+                  <p className="font-medium text-gray-900">For 7 days</p>
+                  <p className="text-sm text-gray-500">Good for a week off</p>
+                </div>
+                {isButtonSaving('7_days') && (
+                  <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+                )}
               </button>
               
               <button
                 onClick={() => setShowDatePicker(true)}
                 disabled={saving}
-                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-between"
               >
-                <p className="font-medium text-gray-900">Until a specific date</p>
-                <p className="text-sm text-gray-500">Choose when to resume</p>
+                <div>
+                  <p className="font-medium text-gray-900">Until a specific date</p>
+                  <p className="text-sm text-gray-500">Choose when to resume</p>
+                </div>
+                {isButtonSaving('specific_date') && (
+                  <div className="w-5 h-5 border-2 border-purple-500 border-t-transparent rounded-full animate-spin"></div>
+                )}
               </button>
               
               <button
-                onClick={() => handleMute('indefinite')}
+                onClick={() => setShowIndefiniteConfirm(true)}
                 disabled={saving}
-                className="w-full text-left px-4 py-3 bg-gray-50 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+                className="w-full text-left px-4 py-3 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50 border border-red-200 flex items-center justify-between"
               >
-                <p className="font-medium text-gray-900">Until I turn back on</p>
-                <p className="text-sm text-gray-500">Manual control</p>
+                <div>
+                  <p className="font-medium text-red-700">⚠️ Until I turn back on</p>
+                  <p className="text-sm text-red-600">You won&apos;t receive any job notifications</p>
+                </div>
+                {isButtonSaving('indefinite') && (
+                  <div className="w-5 h-5 border-2 border-red-500 border-t-transparent rounded-full animate-spin"></div>
+                )}
               </button>
             </div>
           )}
@@ -385,7 +443,10 @@ export default function SettingsPage() {
             />
             <div className="flex gap-3">
               <button
-                onClick={() => setShowDatePicker(false)}
+                onClick={() => {
+                  setShowDatePicker(false)
+                  setSelectedDate('')
+                }}
                 className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
               >
                 Cancel
@@ -393,9 +454,50 @@ export default function SettingsPage() {
               <button
                 onClick={() => selectedDate && handleMute('specific_date', selectedDate)}
                 disabled={!selectedDate || saving}
-                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                className="flex-1 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 flex items-center justify-center gap-2"
               >
-                {saving ? 'Saving...' : 'Confirm'}
+                {isButtonSaving('specific_date') && (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                )}
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Indefinite Confirmation Modal */}
+      {showIndefiniteConfirm && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl p-6 w-full max-w-sm">
+            <div className="text-center mb-4">
+              <span className="text-4xl">⚠️</span>
+            </div>
+            <h3 className="font-semibold text-gray-900 mb-2 text-center">Turn off all notifications?</h3>
+            <p className="text-sm text-gray-600 mb-4 text-center">
+              You won&apos;t receive any emails about new jobs, changes, or cancellations until you manually turn notifications back on.
+            </p>
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+              <p className="text-sm text-amber-800 text-center">
+                <strong>Important:</strong> You may miss time-sensitive job updates
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowIndefiniteConfirm(false)}
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleMute('indefinite')}
+                disabled={saving}
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isButtonSaving('indefinite') && (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                )}
+                Turn Off
               </button>
             </div>
           </div>

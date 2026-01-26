@@ -30,12 +30,19 @@ export async function GET() {
     }
 
     // Check if global mute is active
+    // Monday only stores dates (no times), so we compare date-to-date
     let globalMuteActive = false
     let globalMuteUntil: string | null = null
     
     if (freelancer.notificationsPausedUntil) {
-      const pausedUntil = new Date(freelancer.notificationsPausedUntil)
-      if (pausedUntil > new Date()) {
+      const pausedDate = new Date(freelancer.notificationsPausedUntil)
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      pausedDate.setHours(0, 0, 0, 0)
+      
+      // Mute is active if paused date is today or in the future
+      // (For "end of today", we store tomorrow's date, so it will show as muted)
+      if (pausedDate > today) {
         globalMuteActive = true
         globalMuteUntil = freelancer.notificationsPausedUntil
       }
@@ -94,14 +101,18 @@ export async function POST(request: NextRequest) {
         let mutedUntil: Date
 
         switch (muteType) {
+          case 'end_of_today':
+            // Monday only stores DATES, not times!
+            // To mute "until end of today", we store TOMORROW's date.
+            // The check compares: is pausedDate > today? If tomorrow > today, yes = muted.
+            mutedUntil = new Date()
+            mutedUntil.setDate(mutedUntil.getDate() + 1)  // Tomorrow
+            mutedUntil.setHours(0, 0, 0, 0)
+            break
+          
           case '7_days':
             mutedUntil = new Date()
             mutedUntil.setDate(mutedUntil.getDate() + 7)
-            break
-          
-          case 'end_of_today':
-            mutedUntil = new Date()
-            mutedUntil.setHours(23, 59, 59, 999)
             break
           
           case 'specific_date':
@@ -111,9 +122,9 @@ export async function POST(request: NextRequest) {
                 { status: 400 }
               )
             }
+            // User picks a date - we store the day AFTER so they're muted ON that day
             mutedUntil = new Date(muteUntilDate)
-            // Set to end of that day
-            mutedUntil.setHours(23, 59, 59, 999)
+            mutedUntil.setDate(mutedUntil.getDate() + 1)  // Day after selected
             break
           
           case 'indefinite':
