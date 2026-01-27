@@ -1419,10 +1419,7 @@ export async function getResourcesForFreelancers(): Promise<ResourceRecord[]> {
       files,
     }
   })
-
-  // =============================================================================
-// ADD THIS FUNCTION TO THE END OF src/lib/monday.ts (before the final closing brace if any)
-// =============================================================================
+}
 
 /**
  * Related job info for driver notes alerts
@@ -1586,5 +1583,4 @@ export async function getRelatedUpcomingJobs(
     console.error('Monday: Error querying related jobs:', error)
     return []
   }
-}
 }
