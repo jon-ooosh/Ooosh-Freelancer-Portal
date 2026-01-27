@@ -4,7 +4,7 @@
  * Job Completion Page
  * 
  * Allows drivers to complete a delivery/collection with:
- * - Review of equipment list
+ * - Interactive equipment checklist with tickboxes
  * - Notes field
  * - Signature capture (when customer present)
  * - Photo capture with compression (required when customer not present, optional otherwise)
@@ -25,6 +25,7 @@ interface Job {
   id: string
   name: string
   type: 'delivery' | 'collection'
+  whatIsIt?: 'equipment' | 'vehicle'  // Equipment or A vehicle - for filtering
   date?: string
   time?: string
   venueName?: string
@@ -36,6 +37,9 @@ interface EquipmentItem {
   name: string
   quantity: number
   category?: string
+  categoryId?: number
+  isVirtual?: boolean
+  barcode?: string
 }
 
 // =============================================================================
@@ -74,6 +78,20 @@ function formatJobTitle(jobName: string, venueName?: string): string {
     return venueName
   }
   return `${cleanedName} - ${venueName}`
+}
+
+/**
+ * Get the filter mode for HireHop items based on job's whatIsIt value
+ */
+function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehicles' | 'all' {
+  switch (whatIsIt) {
+    case 'equipment':
+      return 'equipment'  // Exclude vehicles and services
+    case 'vehicle':
+      return 'all'        // Show everything for vehicle deliveries
+    default:
+      return 'all'        // Unknown - show everything to be safe
+  }
 }
 
 /**
@@ -379,7 +397,7 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
         }`}>
           {compressing ? (
             <div className="py-4">
-              <div className="w-8 h-8 border-4 border-ooosh-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+              <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
               <p className="text-sm text-gray-600">Compressing photo...</p>
             </div>
           ) : (
@@ -411,7 +429,7 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
             onChange={handleFileSelect}
             className="hidden"
           />
-          <div className="w-full py-3 px-4 bg-ooosh-500 text-white rounded-lg font-medium text-center hover:bg-ooosh-600 transition-colors flex items-center justify-center gap-2">
+          <div className="w-full py-3 px-4 bg-purple-500 text-white rounded-lg font-medium text-center hover:bg-purple-600 transition-colors flex items-center justify-center gap-2">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
@@ -428,18 +446,30 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
 }
 
 // =============================================================================
-// EQUIPMENT LIST COMPONENT
+// EQUIPMENT LIST WITH TICKBOXES COMPONENT
 // =============================================================================
 
-function EquipmentList({ hhRef }: { hhRef: string }) {
+interface EquipmentChecklistProps {
+  hhRef: string
+  whatIsIt?: 'equipment' | 'vehicle'
+  isDelivery: boolean
+}
+
+function EquipmentChecklist({ hhRef, whatIsIt, isDelivery }: EquipmentChecklistProps) {
   const [items, setItems] = useState<EquipmentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState(true) // Default expanded on completion page
+  
+  // Track checked counts for each item (keyed by item id + index for uniqueness)
+  const [checkedCounts, setCheckedCounts] = useState<Record<string, number>>({})
 
   useEffect(() => {
     async function fetchItems() {
       try {
-        const response = await fetch(`/api/hirehop/items/${hhRef}`)
+        // Determine filter based on job type
+        const filterMode = getFilterMode(whatIsIt)
+        const response = await fetch(`/api/hirehop/items/${hhRef}?filter=${filterMode}`)
         const data = await response.json()
 
         if (!response.ok) {
@@ -447,6 +477,13 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
         }
 
         setItems(data.items || [])
+        
+        // Initialize checked counts to 0 for all items
+        const initialCounts: Record<string, number> = {}
+        ;(data.items || []).forEach((item: EquipmentItem, index: number) => {
+          initialCounts[`${item.id}-${index}`] = 0
+        })
+        setCheckedCounts(initialCounts)
       } catch (err) {
         console.error('Error fetching equipment:', err)
         setError(err instanceof Error ? err.message : 'Failed to load equipment')
@@ -460,45 +497,263 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
     } else {
       setLoading(false)
     }
-  }, [hhRef])
+  }, [hhRef, whatIsIt])
+
+  // Handle incrementing/decrementing check count for an item
+  const handleCheckToggle = (itemKey: string, quantity: number, increment: boolean) => {
+    setCheckedCounts(prev => {
+      const currentCount = prev[itemKey] || 0
+      let newCount: number
+      
+      if (increment) {
+        newCount = Math.min(currentCount + 1, quantity)
+      } else {
+        newCount = Math.max(currentCount - 1, 0)
+      }
+      
+      return { ...prev, [itemKey]: newCount }
+    })
+  }
+
+  // Toggle all checks for an item (for single-quantity items or quick toggle)
+  const handleToggleAll = (itemKey: string, quantity: number) => {
+    setCheckedCounts(prev => {
+      const currentCount = prev[itemKey] || 0
+      // If all checked, uncheck all. Otherwise, check all.
+      const newCount = currentCount >= quantity ? 0 : quantity
+      return { ...prev, [itemKey]: newCount }
+    })
+  }
+
+  // Calculate totals for summary
+  const totalItems = items.reduce((sum, item) => sum + item.quantity, 0)
+  const totalChecked = Object.entries(checkedCounts).reduce((sum, [key, count]) => {
+    const index = parseInt(key.split('-').pop() || '0')
+    const item = items[index]
+    return sum + Math.min(count, item?.quantity || 0)
+  }, 0)
 
   if (loading) {
     return (
-      <div className="animate-pulse space-y-2">
-        <div className="h-4 bg-gray-200 rounded w-3/4"></div>
-        <div className="h-4 bg-gray-200 rounded w-1/2"></div>
-        <div className="h-4 bg-gray-200 rounded w-2/3"></div>
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📋</span> Equipment {isDelivery ? 'to Deliver' : 'to Collect'}
+        </h3>
+        <div className="animate-pulse space-y-2">
+          <div className="h-4 bg-gray-200 rounded w-3/4"></div>
+          <div className="h-4 bg-gray-200 rounded w-1/2"></div>
+          <div className="h-4 bg-gray-200 rounded w-2/3"></div>
+        </div>
       </div>
     )
   }
 
   if (error) {
     return (
-      <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-        <p className="text-red-700 text-sm">{error}</p>
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📋</span> Equipment {isDelivery ? 'to Deliver' : 'to Collect'}
+        </h3>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+          <p className="text-red-700 text-sm">{error}</p>
+        </div>
       </div>
     )
   }
 
   if (items.length === 0) {
     return (
-      <p className="text-gray-500 text-sm italic">No equipment items found</p>
+      <div className="bg-white rounded-xl shadow-sm p-4">
+        <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📋</span> Equipment {isDelivery ? 'to Deliver' : 'to Collect'}
+        </h3>
+        <p className="text-gray-500 text-sm italic">No equipment items found</p>
+      </div>
     )
   }
 
+  const PREVIEW_COUNT = 8
+  const hasMoreItems = items.length > PREVIEW_COUNT
+  const displayItems = expanded ? items : items.slice(0, PREVIEW_COUNT)
+
   return (
-    <div className="space-y-1 max-h-64 overflow-y-auto">
-      {items.map((item, index) => (
-        <div 
-          key={item.id || index} 
-          className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"
-        >
-          <span className="text-gray-700 text-sm">{item.name}</span>
-          <span className="bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-sm font-medium">
-            × {item.quantity}
+    <div className="bg-white rounded-xl shadow-sm p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+          <span>📋</span> Equipment {isDelivery ? 'to Deliver' : 'to Collect'}
+          <span className="text-sm font-normal text-gray-500">
+            ({items.length} item{items.length !== 1 ? 's' : ''})
           </span>
+        </h3>
+        {/* Progress indicator */}
+        <span className={`text-sm font-medium px-2 py-1 rounded-full ${
+          totalChecked === totalItems 
+            ? 'bg-green-100 text-green-700' 
+            : totalChecked > 0
+              ? 'bg-amber-100 text-amber-700'
+              : 'bg-gray-100 text-gray-500'
+        }`}>
+          {totalChecked}/{totalItems} ✓
+        </span>
+      </div>
+
+      {/* Filter indicator */}
+      {whatIsIt === 'equipment' && (
+        <p className="text-xs text-gray-400 mb-3">
+          Showing equipment only (vehicles filtered out)
+        </p>
+      )}
+
+      <p className="text-sm text-gray-500 mb-3">
+        Tap to check off each item as you {isDelivery ? 'load/deliver' : 'collect'} it
+      </p>
+
+      <div className="space-y-1">
+        {displayItems.map((item, index) => {
+          const itemKey = `${item.id}-${index}`
+          const checkedCount = checkedCounts[itemKey] || 0
+          const isFullyChecked = checkedCount >= item.quantity
+          const isPartiallyChecked = checkedCount > 0 && checkedCount < item.quantity
+          
+          return (
+            <div 
+              key={itemKey} 
+              className={`flex items-center gap-3 py-2 px-2 rounded-lg border-b border-gray-50 last:border-0 transition-colors ${
+                isFullyChecked ? 'bg-gray-50' : ''
+              }`}
+            >
+              {/* Checkbox/Counter area */}
+              <div className="flex-shrink-0">
+                {item.quantity <= 5 ? (
+                  // Individual checkboxes for small quantities
+                  <div className="flex gap-1">
+                    {Array.from({ length: item.quantity }).map((_, i) => (
+                      <button
+                        key={i}
+                        onClick={() => {
+                          // Toggle this specific checkbox
+                          const newCount = i < checkedCount ? i : i + 1
+                          setCheckedCounts(prev => ({ ...prev, [itemKey]: newCount }))
+                        }}
+                        className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
+                          i < checkedCount
+                            ? 'bg-green-500 border-green-500 text-white'
+                            : 'border-gray-300 hover:border-green-400'
+                        }`}
+                        title={i < checkedCount ? 'Uncheck' : 'Check'}
+                      >
+                        {i < checkedCount && (
+                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  // Counter for larger quantities
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handleCheckToggle(itemKey, item.quantity, false)}
+                      disabled={checkedCount === 0}
+                      className="w-7 h-7 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-30 disabled:hover:bg-gray-100 flex items-center justify-center text-gray-600 font-bold"
+                    >
+                      −
+                    </button>
+                    <span className={`min-w-[3rem] text-center text-sm font-medium ${
+                      isFullyChecked ? 'text-green-600' : isPartiallyChecked ? 'text-amber-600' : 'text-gray-500'
+                    }`}>
+                      {checkedCount}/{item.quantity}
+                    </span>
+                    <button
+                      onClick={() => handleCheckToggle(itemKey, item.quantity, true)}
+                      disabled={checkedCount >= item.quantity}
+                      className="w-7 h-7 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-30 disabled:hover:bg-gray-100 flex items-center justify-center text-gray-600 font-bold"
+                    >
+                      +
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Item details */}
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm transition-all ${
+                  isFullyChecked 
+                    ? 'text-gray-400 line-through' 
+                    : 'text-gray-900'
+                }`}>
+                  {item.name}
+                </p>
+                {item.category && (
+                  <p className="text-gray-400 text-xs truncate">{item.category}</p>
+                )}
+              </div>
+
+              {/* Quantity badge (for items with qty > 5, already shown in counter) */}
+              {item.quantity <= 5 && item.quantity > 1 && (
+                <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                  isFullyChecked 
+                    ? 'bg-green-100 text-green-600' 
+                    : 'bg-gray-100 text-gray-500'
+                }`}>
+                  ×{item.quantity}
+                </span>
+              )}
+
+              {/* Quick toggle all button for items with quantity > 1 */}
+              {item.quantity > 1 && (
+                <button
+                  onClick={() => handleToggleAll(itemKey, item.quantity)}
+                  className={`text-xs px-2 py-1 rounded transition-colors ${
+                    isFullyChecked
+                      ? 'text-gray-400 hover:text-gray-600'
+                      : 'text-purple-600 hover:bg-purple-50'
+                  }`}
+                  title={isFullyChecked ? 'Uncheck all' : 'Check all'}
+                >
+                  {isFullyChecked ? 'Undo' : 'All'}
+                </button>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {hasMoreItems && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="mt-3 w-full text-center text-sm font-medium text-purple-600 hover:text-purple-500 py-2 border-t border-gray-100"
+        >
+          {expanded 
+            ? '▲ Show less' 
+            : `▼ Show all ${items.length} items (+${items.length - PREVIEW_COUNT} more)`
+          }
+        </button>
+      )}
+
+      {/* Partial completion warning */}
+      {totalChecked > 0 && totalChecked < totalItems && (
+        <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <p className="text-amber-800 text-sm flex items-start gap-2">
+            <span className="flex-shrink-0">⚠️</span>
+            <span>
+              <strong>{totalItems - totalChecked} item{totalItems - totalChecked !== 1 ? 's' : ''} not checked.</strong>
+              {' '}If anything is missing or different, please add a note below.
+            </span>
+          </p>
         </div>
-      ))}
+      )}
+
+      {/* All checked success message */}
+      {totalChecked === totalItems && totalItems > 0 && (
+        <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-3">
+          <p className="text-green-800 text-sm flex items-center gap-2">
+            <span>✅</span>
+            <span>All {totalItems} items checked off!</span>
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -620,7 +875,7 @@ export default function CompletePage() {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-8 h-8 border-4 border-ooosh-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-600">Loading...</p>
         </div>
       </div>
@@ -638,7 +893,7 @@ export default function CompletePage() {
             <p className="text-gray-600 mb-6">{error || 'Job not found'}</p>
             <Link
               href="/dashboard"
-              className="inline-block bg-ooosh-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-ooosh-600 transition-colors"
+              className="inline-block bg-purple-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-purple-600 transition-colors"
             >
               Back to Dashboard
             </Link>
@@ -691,14 +946,13 @@ export default function CompletePage() {
           </div>
         </div>
 
-        {/* Equipment List */}
+        {/* Equipment Checklist with Tickboxes */}
         {job.hhRef && (
-          <div className="bg-white rounded-xl shadow-sm p-4">
-            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>📋</span> Equipment {isDelivery ? 'Delivered' : 'Collected'}
-            </h3>
-            <EquipmentList hhRef={job.hhRef} />
-          </div>
+          <EquipmentChecklist 
+            hhRef={job.hhRef} 
+            whatIsIt={job.whatIsIt}
+            isDelivery={isDelivery}
+          />
         )}
 
         {/* Notes */}
@@ -709,8 +963,8 @@ export default function CompletePage() {
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
-            placeholder="Any notes about this delivery/collection..."
-            className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-ooosh-500 focus:border-ooosh-500 resize-none"
+            placeholder="Any notes about this delivery/collection... (e.g., items missing, access issues, customer requests)"
+            className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 resize-none"
             rows={3}
           />
         </div>
@@ -735,7 +989,7 @@ export default function CompletePage() {
                 }}
                 className="sr-only"
               />
-              <div className={`w-11 h-6 rounded-full transition-colors ${!customerPresent ? 'bg-ooosh-500' : 'bg-gray-300'}`}>
+              <div className={`w-11 h-6 rounded-full transition-colors ${!customerPresent ? 'bg-purple-500' : 'bg-gray-300'}`}>
                 <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${!customerPresent ? 'translate-x-5' : ''}`}></div>
               </div>
             </div>

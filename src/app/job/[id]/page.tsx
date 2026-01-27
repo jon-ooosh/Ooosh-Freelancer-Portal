@@ -19,6 +19,7 @@ interface Job {
   id: string
   name: string
   type: 'delivery' | 'collection'
+  whatIsIt?: 'equipment' | 'vehicle'  // Equipment or A vehicle
   date?: string
   time?: string
   venueName?: string
@@ -128,11 +129,30 @@ function translateStatus(status: string): { label: string; style: string; icon: 
   return { label: status, style: 'bg-gray-100 text-gray-800', icon: '•' }
 }
 
+/**
+ * Get the filter mode for HireHop items based on job's whatIsIt value
+ */
+function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehicles' | 'all' {
+  switch (whatIsIt) {
+    case 'equipment':
+      return 'equipment'  // Exclude vehicles and services
+    case 'vehicle':
+      return 'all'        // Show everything for vehicle deliveries
+    default:
+      return 'all'        // Unknown - show everything to be safe
+  }
+}
+
 // =============================================================================
-// EQUIPMENT LIST COMPONENT
+// SIMPLE EQUIPMENT LIST COMPONENT (Read-only, no tickboxes)
 // =============================================================================
 
-function EquipmentList({ hhRef }: { hhRef: string }) {
+interface EquipmentListProps {
+  hhRef: string
+  whatIsIt?: 'equipment' | 'vehicle'
+}
+
+function EquipmentList({ hhRef, whatIsIt }: EquipmentListProps) {
   const [items, setItems] = useState<EquipmentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -141,7 +161,9 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
   useEffect(() => {
     async function fetchItems() {
       try {
-        const response = await fetch(`/api/hirehop/items/${hhRef}`)
+        // Determine filter based on job type
+        const filterMode = getFilterMode(whatIsIt)
+        const response = await fetch(`/api/hirehop/items/${hhRef}?filter=${filterMode}`)
         const data = await response.json()
 
         if (!response.ok) {
@@ -163,7 +185,7 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
       setLoading(false)
       setError('No HireHop reference available')
     }
-  }, [hhRef])
+  }, [hhRef, whatIsIt])
 
   if (loading) {
     return (
@@ -218,6 +240,13 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
           </span>
         </h2>
       </div>
+
+      {/* Filter indicator */}
+      {whatIsIt === 'equipment' && (
+        <p className="text-xs text-gray-400 mb-3">
+          Showing equipment only (vehicles filtered out)
+        </p>
+      )}
 
       <div className="space-y-2">
         {displayItems.map((item, index) => (
@@ -539,6 +568,15 @@ export default function JobDetailsPage() {
                     <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">
                       {typeLabel}
                     </span>
+                    {job.whatIsIt && (
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                        job.whatIsIt === 'vehicle' 
+                          ? 'bg-blue-100 text-blue-700' 
+                          : 'bg-gray-100 text-gray-600'
+                      }`}>
+                        {job.whatIsIt === 'vehicle' ? '🚐 Vehicle' : '🎸 Equipment'}
+                      </span>
+                    )}
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.style}`}>
                       <span>{statusInfo.icon}</span>
                       {statusInfo.label}
@@ -714,9 +752,9 @@ export default function JobDetailsPage() {
               </div>
             )}
 
-            {/* Equipment List */}
+            {/* Equipment List - simple read-only with filtering */}
             {job.hhRef && (
-              <EquipmentList hhRef={job.hhRef} />
+              <EquipmentList hhRef={job.hhRef} whatIsIt={job.whatIsIt} />
             )}
 
             {/* Access Info */}

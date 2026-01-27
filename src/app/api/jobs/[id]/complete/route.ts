@@ -9,6 +9,7 @@
  * - Saves completion notes
  * - Updates status to "All done!"
  * - Sets completion timestamp
+ * - Sends driver notes alert to staff if notes were provided
  * 
  * Validation:
  * - Customer present: signature required, photos optional (0-5)
@@ -22,8 +23,11 @@ import {
   DC_COLUMNS,
   uploadBase64ImageToColumn,
   getBoardIds,
-  mondayQuery
+  mondayQuery,
+  getRelatedUpcomingJobs,
+  getFreelancerNameByEmail
 } from '@/lib/monday'
+import { sendDriverNotesAlert } from '@/lib/email'
 
 // =============================================================================
 // TYPES
@@ -101,7 +105,7 @@ export async function POST(
     }
 
     console.log(`Complete API: Processing completion for job ${jobId} by ${session.email}`)
-    console.log(`Complete API: customerPresent=${customerPresent}, signature=${!!signature}, photos=${photos?.length || 0}`)
+    console.log(`Complete API: customerPresent=${customerPresent}, signature=${!!signature}, photos=${photos?.length || 0}, hasNotes=${!!(notes && notes.trim())}`)
 
     // Verify the job exists and is assigned to this user
     const job = await getJobById(jobId, session.email)
@@ -215,6 +219,55 @@ export async function POST(
     }
 
     console.log(`Complete API: Job ${jobId} completed successfully`)
+
+    // 4. Send driver notes alert if notes were provided
+    // Only send if there are actual notes (not just "Customer not present")
+    const actualNotes = notes?.trim()
+    if (actualNotes) {
+      console.log(`Complete API: Sending driver notes alert for job ${jobId}`)
+      try {
+        // Get driver name
+        const driverName = await getFreelancerNameByEmail(session.email) || session.email
+
+        // Find related upcoming jobs (same venue or same HH ref)
+        const relatedJobs = await getRelatedUpcomingJobs(
+          jobId,
+          job.venueId,
+          job.hhRef
+        )
+
+        // Build final notes (include "Customer not present" prefix if applicable)
+        const notesForEmail = customerPresent 
+          ? actualNotes
+          : `Customer not present\n\n${actualNotes}`
+
+        // Send the alert email
+        const emailResult = await sendDriverNotesAlert(
+          driverName,
+          {
+            id: job.id,
+            name: job.name,
+            type: job.type,
+            date: job.date || '',
+            venue: job.venueName || job.name,
+          },
+          notesForEmail,
+          relatedJobs
+        )
+
+        if (!emailResult.success) {
+          console.error('Failed to send driver notes alert:', emailResult.error)
+          // Don't fail the whole request, just log the error
+          errors.push(`Driver notes alert: ${emailResult.error}`)
+        } else {
+          console.log(`Complete API: Driver notes alert sent successfully`)
+        }
+      } catch (err) {
+        console.error('Error sending driver notes alert:', err)
+        // Don't fail the whole request
+        errors.push('Driver notes alert failed')
+      }
+    }
 
     // Return success, but include any file upload warnings
     return NextResponse.json({

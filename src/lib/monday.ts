@@ -1419,4 +1419,172 @@ export async function getResourcesForFreelancers(): Promise<ResourceRecord[]> {
       files,
     }
   })
+
+  // =============================================================================
+// ADD THIS FUNCTION TO THE END OF src/lib/monday.ts (before the final closing brace if any)
+// =============================================================================
+
+/**
+ * Related job info for driver notes alerts
+ */
+export interface RelatedJobInfo {
+  id: string
+  name: string
+  type: 'delivery' | 'collection'
+  date: string
+  venue: string
+}
+
+/**
+ * Find related upcoming jobs for driver notes alert
+ * 
+ * Finds jobs that share the same venue OR same HireHop reference,
+ * with dates from today onwards, excluding the specified job.
+ * 
+ * @param excludeJobId - The job ID to exclude (the one just completed)
+ * @param venueId - Venue ID to match (optional)
+ * @param hhRef - HireHop reference to match (optional)
+ * @returns Array of related upcoming jobs
+ */
+export async function getRelatedUpcomingJobs(
+  excludeJobId: string,
+  venueId?: string,
+  hhRef?: string
+): Promise<RelatedJobInfo[]> {
+  // If we have neither venue nor hhRef, no point querying
+  if (!venueId && !hhRef) {
+    console.log('Monday: No venueId or hhRef provided, skipping related jobs query')
+    return []
+  }
+
+  const boardId = getBoardIds().deliveries
+  if (!boardId) {
+    console.warn('MONDAY_BOARD_ID_DELIVERIES is not configured')
+    return []
+  }
+
+  console.log(`Monday: Finding related jobs (venueId: ${venueId}, hhRef: ${hhRef}, excluding: ${excludeJobId})`)
+
+  // Get today's date in YYYY-MM-DD format
+  const today = new Date()
+  const todayStr = today.toISOString().split('T')[0]
+
+  // We need to query jobs and filter manually since Monday doesn't support OR queries well
+  // Query jobs from today onwards (limit to recent/upcoming for performance)
+  // Using items_page_by_column_values with date filter
+  const query = `
+    query {
+      boards(ids: [${boardId}]) {
+        items_page(
+          limit: 200,
+          query_params: {
+            rules: [
+              {
+                column_id: "${DC_COLUMNS.date}",
+                compare_value: ["${todayStr}"],
+                operator: greater_than_or_equals
+              }
+            ]
+          }
+        ) {
+          items {
+            id
+            name
+            column_values(ids: ["${DC_COLUMNS.hhRef}", "${DC_COLUMNS.deliverCollect}", "${DC_COLUMNS.date}", "${DC_COLUMNS.venueConnect}", "${DC_COLUMNS.status}"]) {
+              id
+              text
+              ... on BoardRelationValue {
+                linked_item_ids
+              }
+            }
+          }
+        }
+      }
+    }
+  `
+
+  try {
+    const result = await mondayQuery<{
+      boards: Array<{
+        items_page: {
+          items: Array<{
+            id: string
+            name: string
+            column_values: Array<{
+              id: string
+              text: string
+              linked_item_ids?: string[]
+            }>
+          }>
+        }
+      }>
+    }>(query)
+
+    const items = result.boards?.[0]?.items_page?.items || []
+    console.log(`Monday: Found ${items.length} jobs from ${todayStr} onwards`)
+
+    // Filter to find related jobs
+    const relatedJobs: RelatedJobInfo[] = []
+
+    for (const item of items) {
+      // Skip the excluded job
+      if (item.id === excludeJobId) {
+        continue
+      }
+
+      // Build column map
+      const columnMap = item.column_values.reduce((acc, col) => {
+        acc[col.id] = {
+          text: col.text,
+          linked_item_ids: col.linked_item_ids
+        }
+        return acc
+      }, {} as Record<string, { text: string; linked_item_ids?: string[] }>)
+
+      // Get job's venue ID and hhRef
+      const jobVenueId = columnMap[DC_COLUMNS.venueConnect]?.linked_item_ids?.[0]
+      const jobHhRef = columnMap[DC_COLUMNS.hhRef]?.text || ''
+      const jobDate = columnMap[DC_COLUMNS.date]?.text || ''
+      const jobVenueName = columnMap[DC_COLUMNS.venueConnect]?.text || item.name
+      const jobStatus = columnMap[DC_COLUMNS.status]?.text?.toLowerCase() || ''
+
+      // Skip completed or cancelled jobs
+      if (jobStatus.includes('done') || jobStatus.includes('not needed') || jobStatus.includes('cancelled')) {
+        continue
+      }
+
+      // Check if this job matches by venue OR hhRef
+      const matchesByVenue = venueId && jobVenueId && jobVenueId === venueId
+      const matchesByHhRef = hhRef && jobHhRef && jobHhRef === hhRef
+
+      if (matchesByVenue || matchesByHhRef) {
+        // Determine job type
+        const deliverCollectText = columnMap[DC_COLUMNS.deliverCollect]?.text?.toLowerCase() || ''
+        const jobType: 'delivery' | 'collection' = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
+
+        relatedJobs.push({
+          id: item.id,
+          name: item.name,
+          type: jobType,
+          date: jobDate,
+          venue: jobVenueName,
+        })
+      }
+    }
+
+    // Sort by date
+    relatedJobs.sort((a, b) => {
+      if (!a.date) return 1
+      if (!b.date) return -1
+      return a.date.localeCompare(b.date)
+    })
+
+    console.log(`Monday: Found ${relatedJobs.length} related upcoming jobs`)
+    return relatedJobs
+
+  } catch (error) {
+    console.error('Monday: Error querying related jobs:', error)
+    return []
+  }
+}
 }
