@@ -8,6 +8,7 @@
  * - Job cancellation notifications
  * - Email verification during registration
  * - Driver notes alerts to staff
+ * - Client delivery/collection notes
  */
 
 import nodemailer from 'nodemailer'
@@ -28,6 +29,12 @@ const EMAIL_CONFIG = {
 
 const FROM_ADDRESS = process.env.EMAIL_FROM || 'Ooosh Tours <noreply@oooshtours.co.uk>'
 const STAFF_ALERT_EMAIL = 'info@oooshtours.co.uk'
+
+// Helper to get app URL without trailing slash
+function getAppUrl(): string {
+  const url = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
+  return url.replace(/\/$/, '') // Remove trailing slash if present
+}
 
 // =============================================================================
 // TRANSPORTER
@@ -144,6 +151,7 @@ function generateJobConfirmationEmail(jobDetails: JobDetails, freelancerName: st
   const typeIcon = jobDetails.type === 'delivery' ? '📦' : '🚚'
   const formattedDate = formatDateNice(jobDetails.date)
   const formattedTime = formatTime(jobDetails.time)
+  const appUrl = getAppUrl()
   
   return `
     <!DOCTYPE html>
@@ -190,7 +198,7 @@ function generateJobConfirmationEmail(jobDetails: JobDetails, freelancerName: st
         </p>
         
         <div style="text-align: center; margin-top: 25px;">
-          <a href="${process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-portal.netlify.app'}/job/${jobDetails.id}" 
+          <a href="${appUrl}/job/${jobDetails.id}" 
              style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; padding: 12px 30px; border-radius: 6px; font-weight: 600;">
             View Job Details
           </a>
@@ -212,6 +220,7 @@ function generateJobUpdateEmail(jobDetails: JobDetails, freelancerName: string):
   const typeLabel = getJobTypeLabel(jobDetails.type)
   const formattedDate = formatDateNice(jobDetails.date)
   const formattedTime = formatTime(jobDetails.time)
+  const appUrl = getAppUrl()
   
   return `
     <!DOCTYPE html>
@@ -239,7 +248,7 @@ function generateJobUpdateEmail(jobDetails: JobDetails, freelancerName: string):
         </div>
         
         <div style="text-align: center; margin-top: 25px;">
-          <a href="${process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-portal.netlify.app'}/job/${jobDetails.id}" 
+          <a href="${appUrl}/job/${jobDetails.id}" 
              style="display: inline-block; background: #f59e0b; color: white; text-decoration: none; padding: 12px 30px; border-radius: 6px; font-weight: 600;">
             View Updated Details
           </a>
@@ -310,7 +319,7 @@ function generateDriverNotesAlertEmail(
   const typeLabel = getJobTypeLabel(jobDetails.type)
   const typeIcon = jobDetails.type === 'delivery' ? '📦' : '🚚'
   const formattedDate = formatDateNice(jobDetails.date)
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-portal.netlify.app'
+  const appUrl = getAppUrl()
   
   // Build related jobs HTML if any exist
   let relatedJobsHtml = ''

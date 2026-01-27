@@ -1420,11 +1420,6 @@ export async function getResourcesForFreelancers(): Promise<ResourceRecord[]> {
     }
   })
 }
-<<<<<<< HEAD
-
-// =============================================================================
-// RELATED JOBS QUERY (for driver notes alerts)
-// =============================================================================
 
 /**
  * Related job info for driver notes alerts

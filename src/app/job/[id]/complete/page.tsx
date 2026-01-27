@@ -6,9 +6,20 @@
  * Allows drivers to complete a delivery/collection with:
  * - Interactive equipment checklist with tickboxes
  * - Notes field
+ * - Photo capture with compression
+ * - Client email input for delivery notes (equipment jobs only)
  * - Signature capture (when customer present)
- * - Photo capture with compression (required when customer not present, optional otherwise)
  * - Offline detection
+ * 
+ * Section order:
+ * 1. Job summary
+ * 2. Equipment checklist
+ * 3. Notes
+ * 4. Customer not present toggle
+ * 5. Photos
+ * 6. Client email (for delivery notes)
+ * 7. Signature (when customer present)
+ * 8. Complete button
  * 
  * Route: /job/[id]/complete
  */
@@ -30,6 +41,7 @@ interface Job {
   time?: string
   venueName?: string
   hhRef?: string
+  clientEmail?: string  // Pre-filled client email from Monday
 }
 
 interface EquipmentItem {
@@ -49,7 +61,7 @@ interface EquipmentItem {
 const MAX_PHOTOS = 5
 const MAX_IMAGE_DIMENSION = 1200  // Max width or height in pixels
 const JPEG_QUALITY = 0.8         // 80% quality
-const TARGET_FILE_SIZE = 200000  // ~200KB target
+const MAX_CLIENT_EMAILS = 3      // Maximum number of client email recipients
 
 // =============================================================================
 // HELPER FUNCTIONS
@@ -92,6 +104,14 @@ function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehic
     default:
       return 'all'        // Unknown - show everything to be safe
   }
+}
+
+/**
+ * Validate email format
+ */
+function isValidEmail(email: string): boolean {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+  return emailRegex.test(email.trim())
 }
 
 /**
@@ -446,6 +466,142 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
 }
 
 // =============================================================================
+// CLIENT EMAIL INPUT COMPONENT
+// =============================================================================
+
+interface ClientEmailInputProps {
+  emails: string[]
+  onEmailsChange: (emails: string[]) => void
+  dontSend: boolean
+  onDontSendChange: (dontSend: boolean) => void
+  jobType: 'delivery' | 'collection'
+}
+
+function ClientEmailInput({ 
+  emails, 
+  onEmailsChange, 
+  dontSend, 
+  onDontSendChange,
+  jobType 
+}: ClientEmailInputProps) {
+  const [emailErrors, setEmailErrors] = useState<Record<number, string>>({})
+
+  const handleEmailChange = (index: number, value: string) => {
+    const newEmails = [...emails]
+    newEmails[index] = value
+    onEmailsChange(newEmails)
+
+    // Clear error when user starts typing
+    if (emailErrors[index]) {
+      const newErrors = { ...emailErrors }
+      delete newErrors[index]
+      setEmailErrors(newErrors)
+    }
+  }
+
+  const handleEmailBlur = (index: number) => {
+    const email = emails[index]?.trim()
+    if (email && !isValidEmail(email)) {
+      setEmailErrors(prev => ({ ...prev, [index]: 'Please enter a valid email' }))
+    }
+  }
+
+  const addEmailField = () => {
+    if (emails.length < MAX_CLIENT_EMAILS) {
+      onEmailsChange([...emails, ''])
+    }
+  }
+
+  const removeEmailField = (index: number) => {
+    if (emails.length > 1) {
+      const newEmails = emails.filter((_, i) => i !== index)
+      onEmailsChange(newEmails)
+      
+      // Clean up errors
+      const newErrors = { ...emailErrors }
+      delete newErrors[index]
+      setEmailErrors(newErrors)
+    }
+  }
+
+  const typeLabel = jobType === 'delivery' ? 'Delivery Note' : 'Collection Confirmation'
+
+  return (
+    <div className="space-y-3">
+      {/* Don't send checkbox */}
+      <label className="flex items-center gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={dontSend}
+          onChange={(e) => onDontSendChange(e.target.checked)}
+          className="w-5 h-5 rounded border-gray-300 text-purple-600 focus:ring-purple-500"
+        />
+        <span className="text-sm text-gray-700">Don't send {typeLabel.toLowerCase()} to client</span>
+      </label>
+
+      {/* Email inputs (hidden when don't send is checked) */}
+      {!dontSend && (
+        <div className="space-y-2">
+          {emails.map((email, index) => (
+            <div key={index} className="flex gap-2">
+              <div className="flex-1">
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => handleEmailChange(index, e.target.value)}
+                  onBlur={() => handleEmailBlur(index)}
+                  placeholder={index === 0 ? "Client email address" : "Additional email"}
+                  className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 ${
+                    emailErrors[index] ? 'border-red-300 bg-red-50' : 'border-gray-300'
+                  }`}
+                />
+                {emailErrors[index] && (
+                  <p className="text-red-500 text-xs mt-1">{emailErrors[index]}</p>
+                )}
+              </div>
+              {emails.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => removeEmailField(index)}
+                  className="px-2 text-gray-400 hover:text-red-500 transition-colors"
+                  title="Remove email"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              )}
+            </div>
+          ))}
+
+          {/* Add another email button */}
+          {emails.length < MAX_CLIENT_EMAILS && (
+            <button
+              type="button"
+              onClick={addEmailField}
+              className="text-sm text-purple-600 hover:text-purple-700 font-medium flex items-center gap-1"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              Add another email
+            </button>
+          )}
+
+          {/* Info text */}
+          <p className="text-xs text-gray-500">
+            {jobType === 'delivery' 
+              ? 'A PDF delivery note with equipment list will be emailed to the client.'
+              : 'A collection confirmation email will be sent to the client.'
+            }
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// =============================================================================
 // EQUIPMENT LIST WITH TICKBOXES COMPONENT
 // =============================================================================
 
@@ -794,6 +950,10 @@ export default function CompletePage() {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
+  // Client email state
+  const [clientEmails, setClientEmails] = useState<string[]>([''])
+  const [dontSendClientEmail, setDontSendClientEmail] = useState(false)
+
   // Fetch job data
   useEffect(() => {
     async function fetchJob() {
@@ -809,7 +969,13 @@ export default function CompletePage() {
           throw new Error(data.error || 'Failed to fetch job')
         }
 
-        setJob(data.job || null)
+        const fetchedJob = data.job || null
+        setJob(fetchedJob)
+
+        // Pre-fill client email if available
+        if (fetchedJob?.clientEmail) {
+          setClientEmails([fetchedJob.clientEmail])
+        }
       } catch (err) {
         console.error('Error fetching job:', err)
         setError(err instanceof Error ? err.message : 'Failed to load job')
@@ -830,6 +996,10 @@ export default function CompletePage() {
     ? signature !== null 
     : photos.length >= 1
 
+  // Check if client emails are valid (if sending)
+  const hasValidClientEmails = dontSendClientEmail || 
+    clientEmails.some(email => email.trim() && isValidEmail(email.trim()))
+
   // Handle form submission
   const handleSubmit = async () => {
     if (!isValid || !job || !isOnline) return
@@ -838,6 +1008,11 @@ export default function CompletePage() {
     setSubmitError(null)
 
     try {
+      // Filter out empty/invalid emails
+      const validEmails = dontSendClientEmail 
+        ? [] 
+        : clientEmails.filter(email => email.trim() && isValidEmail(email.trim()))
+
       const response = await fetch(`/api/jobs/${jobId}/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -846,6 +1021,9 @@ export default function CompletePage() {
           signature: customerPresent ? signature : null,
           photos: photos.length > 0 ? photos : undefined,
           customerPresent,
+          // Client email data (for next phase - API will use these)
+          clientEmails: validEmails,
+          sendClientEmail: !dontSendClientEmail && validEmails.length > 0,
         }),
       })
 
@@ -906,6 +1084,9 @@ export default function CompletePage() {
   const isDelivery = job.type === 'delivery'
   const typeLabel = isDelivery ? 'Delivery' : 'Collection'
   const typeIcon = isDelivery ? '📦' : '🚚'
+
+  // Only show client email section for equipment jobs (not vehicles, for now)
+  const showClientEmailSection = job.whatIsIt === 'equipment' || !job.whatIsIt
 
   return (
     <div className="min-h-screen bg-gray-50 pb-8">
@@ -996,20 +1177,6 @@ export default function CompletePage() {
           </label>
         </div>
 
-        {/* Signature (when customer present) */}
-        {customerPresent && (
-          <div className="bg-white rounded-xl shadow-sm p-4">
-            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>✍️</span> Client Signature
-              <span className="text-red-500 text-sm">*required</span>
-            </h3>
-            <p className="text-sm text-gray-500 mb-3">
-              Please ask the client to sign below to confirm receipt
-            </p>
-            <SignatureCanvas onSignatureChange={setSignature} />
-          </div>
-        )}
-
         {/* Photos */}
         <div className="bg-white rounded-xl shadow-sm p-4">
           <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
@@ -1029,6 +1196,42 @@ export default function CompletePage() {
             required={!customerPresent}
           />
         </div>
+
+        {/* Client Email Section (for equipment jobs) */}
+        {showClientEmailSection && (
+          <div className="bg-white rounded-xl shadow-sm p-4">
+            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span>📧</span> {isDelivery ? 'Delivery Note' : 'Collection Confirmation'}
+            </h3>
+            <p className="text-sm text-gray-500 mb-3">
+              {isDelivery 
+                ? 'Send a delivery note with equipment list to the client'
+                : 'Send a collection confirmation to the client'
+              }
+            </p>
+            <ClientEmailInput
+              emails={clientEmails}
+              onEmailsChange={setClientEmails}
+              dontSend={dontSendClientEmail}
+              onDontSendChange={setDontSendClientEmail}
+              jobType={job.type}
+            />
+          </div>
+        )}
+
+        {/* Signature (when customer present) */}
+        {customerPresent && (
+          <div className="bg-white rounded-xl shadow-sm p-4">
+            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span>✍️</span> Client Signature
+              <span className="text-red-500 text-sm">*required</span>
+            </h3>
+            <p className="text-sm text-gray-500 mb-3">
+              Please ask the client to sign below to confirm receipt
+            </p>
+            <SignatureCanvas onSignatureChange={setSignature} />
+          </div>
+        )}
 
         {/* Submit Error */}
         {submitError && (

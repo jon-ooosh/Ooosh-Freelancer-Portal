@@ -12,6 +12,8 @@
  * - Level 2: 6 hours after job time (2+4)
  * - Level 3: 14 hours after job time (6+8)
  * 
+ * After level 3: Staff notification sent to info@oooshtours.co.uk
+ * 
  * Business hours: Only sends between 7am and 10pm
  */
 
@@ -28,6 +30,7 @@ const DC_COLUMNS = {
   date: 'date4',
   timeToArrive: 'hour',
   status: 'status90',
+  deliverCollect: 'status_1',              // "Delivery" or "Collection" - use this for job type!
   driverEmailMirror: 'driver_email__gc_',
   venueConnect: 'connect_boards6',
   completedAtDate: 'date_mkywpv0h',
@@ -49,6 +52,9 @@ const BUSINESS_HOURS = {
 
 // Status that indicates job is confirmed but not completed
 const CONFIRMED_STATUS = 'all arranged & email driver'
+
+// Staff email for escalations
+const STAFF_ALERT_EMAIL = 'info@oooshtours.co.uk'
 
 // =============================================================================
 // MONDAY.COM API HELPERS
@@ -101,21 +107,21 @@ async function sendCompletionReminderEmail(
   },
   reminderLevel: number
 ): Promise<boolean> {
-  // Use nodemailer via internal API call or direct SMTP
-  // For simplicity, we'll call our own API endpoint
+  // Remove trailing slash from URL to prevent double-slash issues
+  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app').replace(/\/$/, '')
   
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
-  
-  const typeLabel = jobDetails.type === 'delivery' ? 'Delivery' : 'Collection'
+  const typeLabel = jobDetails.type === 'delivery' ? 'delivery' : 'collection'
+  const typeLabelCapitalised = jobDetails.type === 'delivery' ? 'Delivery' : 'Collection'
   const urgencyText = reminderLevel === 1 
     ? 'Please complete it when you have a moment.'
     : reminderLevel === 2
       ? 'Please complete it as soon as possible.'
       : 'This is urgent - please complete it immediately or contact us.'
   
+  // Subject format: "Reminder: please complete your delivery - Venue - Date"
   const subject = reminderLevel === 3
-    ? `🚨 URGENT: Please complete your ${typeLabel.toLowerCase()} - ${jobDetails.venue}`
-    : `⏰ Reminder: Please complete your ${typeLabel.toLowerCase()} - ${jobDetails.venue}`
+    ? `🚨 URGENT: please complete your ${typeLabel} - ${jobDetails.venue} - ${jobDetails.date}`
+    : `⏰ Reminder: please complete your ${typeLabel} - ${jobDetails.venue} - ${jobDetails.date}`
 
   const firstName = driverName.split(' ')[0] || 'Driver'
 
@@ -130,7 +136,7 @@ async function sendCompletionReminderEmail(
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="background: ${reminderLevel === 3 ? '#ef4444' : '#f59e0b'}; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
         <h1 style="color: white; margin: 0; font-size: 24px;">
-          ${reminderLevel === 3 ? '🚨' : '⏰'} ${typeLabel} Not Completed
+          ${reminderLevel === 3 ? '🚨' : '⏰'} ${typeLabelCapitalised} Not Completed
         </h1>
       </div>
       
@@ -138,12 +144,11 @@ async function sendCompletionReminderEmail(
         <p style="font-size: 16px; margin-bottom: 20px;">Hi ${firstName},</p>
         
         <p style="font-size: 16px; margin-bottom: 20px;">
-          We noticed you haven't marked your ${typeLabel.toLowerCase()} as complete yet. ${urgencyText}
+          We noticed you haven't marked your ${typeLabel} as complete yet. ${urgencyText}
         </p>
         
         <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid ${reminderLevel === 3 ? '#ef4444' : '#f59e0b'};">
-          <h2 style="margin: 0 0 15px 0; color: #333; font-size: 18px;">${jobDetails.venue}</h2>
-          <p style="margin: 8px 0; color: #555;"><strong>Type:</strong> ${typeLabel}</p>
+          <h2 style="margin: 0 0 15px 0; color: #333; font-size: 18px;">${typeLabelCapitalised} - ${jobDetails.venue}</h2>
           <p style="margin: 8px 0; color: #555;"><strong>📅 Date:</strong> ${jobDetails.date}</p>
           <p style="margin: 8px 0; color: #555;"><strong>⏰ Expected time:</strong> ${jobDetails.time}</p>
         </div>
@@ -155,7 +160,7 @@ async function sendCompletionReminderEmail(
         <div style="text-align: center; margin-top: 25px;">
           <a href="${appUrl}/job/${jobDetails.id}/complete" 
              style="display: inline-block; background: ${reminderLevel === 3 ? '#ef4444' : '#f59e0b'}; color: white; text-decoration: none; padding: 14px 35px; border-radius: 6px; font-weight: 600; font-size: 16px;">
-            Complete ${typeLabel} Now
+            Complete ${typeLabelCapitalised} Now
           </a>
         </div>
         
@@ -173,10 +178,7 @@ async function sendCompletionReminderEmail(
     </html>
   `
 
-  // Send via SMTP
   try {
-    // We need to use nodemailer here
-    // Since this is a Netlify function, we'll import dynamically
     const nodemailer = await import('nodemailer')
     
     const transporter = nodemailer.default.createTransport({
@@ -200,6 +202,105 @@ async function sendCompletionReminderEmail(
     return true
   } catch (error) {
     console.error(`Failed to send reminder to ${to}:`, error)
+    return false
+  }
+}
+
+/**
+ * Send escalation email to staff after all 3 reminders have been sent
+ */
+async function sendStaffEscalationEmail(
+  driverName: string,
+  driverEmail: string,
+  jobDetails: {
+    id: string
+    type: 'delivery' | 'collection'
+    venue: string
+    date: string
+    time: string
+  }
+): Promise<boolean> {
+  // Remove trailing slash from URL to prevent double-slash issues
+  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app').replace(/\/$/, '')
+  const typeLabel = jobDetails.type === 'delivery' ? 'Delivery' : 'Collection'
+
+  const subject = `⚠️ Escalation: ${typeLabel} - ${jobDetails.venue} - not completed after 3 reminders`
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Completion Escalation</title>
+    </head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <div style="background: #dc2626; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">
+          ⚠️ Job Not Completed - Manual Follow-up Required
+        </h1>
+      </div>
+      
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 12px 12px;">
+        <p style="font-size: 16px; margin-bottom: 20px;">
+          The following job has not been marked as complete despite 3 reminder emails. 
+          Please follow up with the freelancer directly.
+        </p>
+        
+        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid #dc2626;">
+          <h2 style="margin: 0 0 15px 0; color: #333; font-size: 18px;">${typeLabel} - ${jobDetails.venue}</h2>
+          <p style="margin: 8px 0; color: #555;"><strong>📅 Date:</strong> ${jobDetails.date}</p>
+          <p style="margin: 8px 0; color: #555;"><strong>⏰ Expected time:</strong> ${jobDetails.time}</p>
+          <p style="margin: 8px 0; color: #555;"><strong>👤 Driver:</strong> ${driverName}</p>
+          <p style="margin: 8px 0; color: #555;"><strong>📧 Email:</strong> <a href="mailto:${driverEmail}">${driverEmail}</a></p>
+        </div>
+        
+        <div style="background: #fef3c7; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+          <p style="margin: 0; color: #92400e; font-size: 14px;">
+            <strong>Possible reasons:</strong> Freelancer may have forgotten, had phone issues, 
+            or there may have been a problem with the job that needs discussing.
+          </p>
+        </div>
+        
+        <div style="text-align: center; margin-top: 25px;">
+          <a href="${appUrl}/job/${jobDetails.id}" 
+             style="display: inline-block; background: #6366f1; color: white; text-decoration: none; padding: 14px 35px; border-radius: 6px; font-weight: 600; font-size: 16px;">
+            View Job in Portal
+          </a>
+        </div>
+        
+        <p style="font-size: 12px; color: #999; margin-top: 30px; text-align: center;">
+          This is an automated escalation from the Ooosh Freelancer Portal.
+        </p>
+      </div>
+    </body>
+    </html>
+  `
+
+  try {
+    const nodemailer = await import('nodemailer')
+    
+    const transporter = nodemailer.default.createTransport({
+      host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.EMAIL_PORT || '587'),
+      secure: false,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_APP_PASSWORD,
+      },
+    })
+
+    await transporter.sendMail({
+      from: process.env.EMAIL_FROM || 'Ooosh Tours <noreply@oooshtours.co.uk>',
+      to: STAFF_ALERT_EMAIL,
+      subject,
+      html,
+    })
+
+    console.log(`Staff escalation sent for job ${jobDetails.id} (driver: ${driverEmail})`)
+    return true
+  } catch (error) {
+    console.error(`Failed to send staff escalation:`, error)
     return false
   }
 }
@@ -386,8 +487,7 @@ export default async function handler(req: Request, context: Context) {
 
     console.log(`Completion Reminders: Checking jobs for ${yesterdayStr} and ${todayStr}`)
 
-    // Query for jobs that are confirmed but not completed
-    // We need to check date is today or yesterday
+    // Query for jobs - now including deliverCollect column for job type
     const query = `
       query {
         boards(ids: [${boardId}]) {
@@ -395,7 +495,7 @@ export default async function handler(req: Request, context: Context) {
             items {
               id
               name
-              column_values(ids: ["${DC_COLUMNS.date}", "${DC_COLUMNS.timeToArrive}", "${DC_COLUMNS.status}", "${DC_COLUMNS.driverEmailMirror}", "${DC_COLUMNS.venueConnect}", "${DC_COLUMNS.completedAtDate}", "${DC_COLUMNS.completionReminderLevel}"]) {
+              column_values(ids: ["${DC_COLUMNS.date}", "${DC_COLUMNS.timeToArrive}", "${DC_COLUMNS.status}", "${DC_COLUMNS.deliverCollect}", "${DC_COLUMNS.driverEmailMirror}", "${DC_COLUMNS.venueConnect}", "${DC_COLUMNS.completedAtDate}", "${DC_COLUMNS.completionReminderLevel}"]) {
                 id
                 text
                 value
@@ -421,6 +521,7 @@ export default async function handler(req: Request, context: Context) {
     console.log(`Completion Reminders: Found ${allItems.length} total items`)
 
     let remindersSent = 0
+    let escalationsSent = 0
     let jobsChecked = 0
 
     for (const item of allItems) {
@@ -433,10 +534,11 @@ export default async function handler(req: Request, context: Context) {
       const jobDate = columnMap[DC_COLUMNS.date]
       const jobTime = columnMap[DC_COLUMNS.timeToArrive]
       const status = columnMap[DC_COLUMNS.status]?.toLowerCase() || ''
+      const deliverCollectText = columnMap[DC_COLUMNS.deliverCollect]?.toLowerCase() || ''
       const driverEmail = columnMap[DC_COLUMNS.driverEmailMirror]
       const completedAt = columnMap[DC_COLUMNS.completedAtDate]
       const currentReminderLevel = parseInt(columnMap[DC_COLUMNS.completionReminderLevel] || '0') || 0
-      const venueName = columnMap[DC_COLUMNS.venueConnect] || item.name
+      const venueName = columnMap[DC_COLUMNS.venueConnect] || 'Unknown Venue'
 
       // Skip if not today or yesterday
       if (jobDate !== todayStr && jobDate !== yesterdayStr) {
@@ -483,13 +585,12 @@ export default async function handler(req: Request, context: Context) {
       // Get driver name
       const driverName = await getDriverName(driverEmail)
 
-      // Determine job type from name
-      const jobType: 'delivery' | 'collection' = item.name.toLowerCase().includes('col') ? 'collection' : 'delivery'
+      // Determine job type from deliverCollect column (not item name!)
+      const jobType: 'delivery' | 'collection' = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
 
       // Format date nicely
       const dateObj = new Date(jobDate)
       const formattedDate = dateObj.toLocaleDateString('en-GB', {
-        weekday: 'short',
         day: 'numeric',
         month: 'short',
         year: 'numeric'
@@ -514,15 +615,34 @@ export default async function handler(req: Request, context: Context) {
         // Update reminder level in Monday
         await updateReminderLevel(item.id, nextLevel)
         remindersSent++
+
+        // If this was the 3rd reminder, also send staff escalation
+        if (nextLevel === 3) {
+          const escalationSent = await sendStaffEscalationEmail(
+            driverName,
+            driverEmail,
+            {
+              id: item.id,
+              type: jobType,
+              venue: venueName,
+              date: formattedDate,
+              time: jobTime || 'TBC',
+            }
+          )
+          if (escalationSent) {
+            escalationsSent++
+          }
+        }
       }
     }
 
-    console.log(`Completion Reminders: Checked ${jobsChecked} eligible jobs, sent ${remindersSent} reminders`)
+    console.log(`Completion Reminders: Checked ${jobsChecked} eligible jobs, sent ${remindersSent} reminders, ${escalationsSent} escalations`)
 
     return new Response(JSON.stringify({
       success: true,
       jobsChecked,
       remindersSent,
+      escalationsSent,
       timestamp: new Date().toISOString(),
     }))
 
