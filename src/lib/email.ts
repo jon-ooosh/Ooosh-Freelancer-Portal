@@ -8,7 +8,8 @@
  * - Job cancellation notifications
  * - Email verification during registration
  * - Driver notes alerts to staff
- * - Client delivery/collection notes
+ * - Client delivery notes (with PDF attachment)
+ * - Client collection confirmations
  */
 
 import nodemailer from 'nodemailer'
@@ -398,6 +399,142 @@ function generateDriverNotesAlertEmail(
   `
 }
 
+/**
+ * Generate client delivery note email HTML
+ */
+function generateClientDeliveryNoteEmail(
+  venueName: string,
+  jobDate: string,
+  hhRef: string
+): string {
+  const formattedDate = formatDateNice(jobDate)
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Delivery Note - Ooosh Tours</title>
+    </head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">📦 Delivery Note</h1>
+      </div>
+      
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 12px 12px;">
+        <p style="font-size: 16px; margin-bottom: 20px;">Hello,</p>
+        
+        <p style="font-size: 16px; margin-bottom: 20px;">
+          Please find attached the delivery note for your recent equipment hire from Ooosh Tours.
+        </p>
+        
+        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid #667eea;">
+          <p style="margin: 8px 0; color: #555;">
+            <strong>📍 Venue:</strong> ${venueName}
+          </p>
+          <p style="margin: 8px 0; color: #555;">
+            <strong>📅 Date:</strong> ${formattedDate}
+          </p>
+          <p style="margin: 8px 0; color: #555;">
+            <strong>🔖 Job Reference:</strong> ${hhRef}
+          </p>
+        </div>
+        
+        <p style="font-size: 14px; color: #666; margin-bottom: 20px;">
+          The attached PDF contains a full list of the equipment delivered. If you have any questions or notice any discrepancies, please get in touch asap.
+        </p>
+        
+        <p style="font-size: 14px; color: #555; margin-top: 25px;">
+          Many thanks,<br>
+          <strong>The Ooosh Tours Team</strong>
+        </p>
+        
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
+          <p style="font-size: 12px; color: #999; margin: 0;">
+            Ooosh Tours Ltd | Compass House, 7 East Street, Portslade, BN41 1DL
+          </p>
+          <p style="font-size: 12px; color: #999; margin: 5px 0 0 0;">
+            <a href="https://www.oooshtours.co.uk" style="color: #667eea; text-decoration: none;">www.oooshtours.co.uk</a>
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `
+}
+
+/**
+ * Generate client collection confirmation email HTML
+ */
+function generateClientCollectionConfirmationEmail(
+  venueName: string,
+  jobDate: string,
+  hhRef: string
+): string {
+  const formattedDate = formatDateNice(jobDate)
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Collection Confirmation - Ooosh Tours</title>
+    </head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">🚚 Collection Complete</h1>
+      </div>
+      
+      <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 12px 12px;">
+        <p style="font-size: 16px; margin-bottom: 20px;">Hello,</p>
+        
+        <p style="font-size: 16px; margin-bottom: 20px;">
+          This is an automated email to let you know we've collected your equipment for job <strong>${hhRef}</strong> from <strong>${venueName}</strong>.
+        </p>
+        
+        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid #667eea;">
+          <p style="margin: 8px 0; color: #555;">
+            <strong>📍 Venue:</strong> ${venueName}
+          </p>
+          <p style="margin: 8px 0; color: #555;">
+            <strong>📅 Collection Date:</strong> ${formattedDate}
+          </p>
+          <p style="margin: 8px 0; color: #555;">
+            <strong>🔖 Job Reference:</strong> ${hhRef}
+          </p>
+        </div>
+        
+        <div style="background: #fff8e6; border-radius: 8px; padding: 15px; margin-bottom: 20px; border-left: 4px solid #f59e0b;">
+          <p style="margin: 0; color: #92400e; font-size: 14px;">
+            <strong>📋 Please note:</strong> This is a collection only - we'll verify all items are present and in good condition once everything is back at our warehouse. We'll be in touch if there are any issues.
+          </p>
+        </div>
+        
+        <p style="font-size: 14px; color: #666; margin-bottom: 20px;">
+          Thanks for choosing Ooosh Tours! If you have any questions, please get in touch.
+        </p>
+        
+        <p style="font-size: 14px; color: #555; margin-top: 25px;">
+          Cheers,<br>
+          <strong>The Ooosh Tours Team</strong>
+        </p>
+        
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
+          <p style="font-size: 12px; color: #999; margin: 0;">
+            Ooosh Tours Ltd | Compass House, 7 East Street, Portslade, BN41 1DL
+          </p>
+          <p style="font-size: 12px; color: #999; margin: 5px 0 0 0;">
+            <a href="https://www.oooshtours.co.uk" style="color: #667eea; text-decoration: none;">www.oooshtours.co.uk</a>
+          </p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `
+}
+
 // =============================================================================
 // EMAIL SENDING FUNCTIONS
 // =============================================================================
@@ -552,6 +689,116 @@ export async function sendDriverNotesAlert(
     return { success: true }
   } catch (error) {
     console.error('Failed to send driver notes alert:', error)
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Failed to send email' 
+    }
+  }
+}
+
+/**
+ * Send delivery note email to client(s) with PDF attachment
+ * 
+ * @param clientEmails - Array of email addresses to send to
+ * @param venueName - Venue name for the job
+ * @param jobDate - Date of the job
+ * @param hhRef - HireHop job reference
+ * @param pdfBuffer - The generated PDF as a Buffer
+ */
+export async function sendClientDeliveryNote(
+  clientEmails: string[],
+  venueName: string,
+  jobDate: string,
+  hhRef: string,
+  pdfBuffer: Buffer
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
+      console.warn('Email not configured, skipping client delivery note')
+      return { success: true }
+    }
+
+    if (clientEmails.length === 0) {
+      console.warn('No client emails provided, skipping delivery note')
+      return { success: true }
+    }
+
+    const transport = getTransporter()
+    
+    // Format date for subject line
+    const formattedDateShort = formatDateShort(jobDate)
+    
+    // Create filename for attachment
+    const safeVenueName = venueName.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30)
+    const filename = `Ooosh_Delivery_Note_${hhRef}_${safeVenueName}.pdf`
+    
+    await transport.sendMail({
+      from: FROM_ADDRESS,
+      to: clientEmails.join(', '),
+      subject: `📦 Delivery Note - ${venueName} - ${formattedDateShort} (Ref: ${hhRef})`,
+      html: generateClientDeliveryNoteEmail(venueName, jobDate, hhRef),
+      attachments: [
+        {
+          filename,
+          content: pdfBuffer,
+          contentType: 'application/pdf',
+        }
+      ],
+    })
+
+    console.log(`Client delivery note sent to ${clientEmails.join(', ')}`)
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to send client delivery note:', error)
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Failed to send email' 
+    }
+  }
+}
+
+/**
+ * Send collection confirmation email to client(s)
+ * No PDF attachment - just a friendly confirmation with caveat about item verification
+ * 
+ * @param clientEmails - Array of email addresses to send to
+ * @param venueName - Venue name for the job
+ * @param jobDate - Date of the job
+ * @param hhRef - HireHop job reference
+ */
+export async function sendClientCollectionConfirmation(
+  clientEmails: string[],
+  venueName: string,
+  jobDate: string,
+  hhRef: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
+      console.warn('Email not configured, skipping client collection confirmation')
+      return { success: true }
+    }
+
+    if (clientEmails.length === 0) {
+      console.warn('No client emails provided, skipping collection confirmation')
+      return { success: true }
+    }
+
+    const transport = getTransporter()
+    
+    // Format date for subject line
+    const formattedDateShort = formatDateShort(jobDate)
+    
+    await transport.sendMail({
+      from: FROM_ADDRESS,
+      to: clientEmails.join(', '),
+      subject: `🚚 Collection Complete - ${venueName} - ${formattedDateShort} (Ref: ${hhRef})`,
+      html: generateClientCollectionConfirmationEmail(venueName, jobDate, hhRef),
+    })
+
+    console.log(`Client collection confirmation sent to ${clientEmails.join(', ')}`)
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to send client collection confirmation:', error)
     return { 
       success: false, 
       error: error instanceof Error ? error.message : 'Failed to send email' 
