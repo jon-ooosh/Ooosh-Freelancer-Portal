@@ -4,9 +4,9 @@
  * POST /api/webhooks/monday/job-confirmed?secret=YOUR_SECRET
  * 
  * Called by Monday.com automation when a job's status changes to
- * "All arranged & email driver" (or similar).
+ * "All arranged & email driver" (or similar confirmed status).
  * 
- * Sends notification email to the assigned driver (unless muted).
+ * Sends confirmation email to the assigned driver (unless muted).
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -138,18 +138,21 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    // Send email
+    // Send email - NEW SIGNATURE: (email, name, jobDetails)
     console.log(`Webhook (confirmed): Sending email to ${driverEmail}`)
     
     await sendJobConfirmedNotification(
       driverEmail,
+      freelancer.name,
       {
-        venueName,
+        id: itemId,
+        name: job.name,
+        type: job.type,
         date: job.date || 'TBC',
         time: job.time,
-        type: job.type,
-      },
-      freelancer.name
+        venue: venueName,
+        keyNotes: job.keyNotes,
+      }
     )
     
     const duration = Date.now() - startTime

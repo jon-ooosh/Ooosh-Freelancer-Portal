@@ -1584,4 +1584,3 @@ export async function getRelatedUpcomingJobs(
     return []
   }
 }
-}

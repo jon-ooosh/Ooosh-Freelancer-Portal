@@ -138,17 +138,19 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    // Send email
+    // Send email - NEW SIGNATURE: (email, name, jobDetails)
     console.log(`Webhook (cancelled): Sending email to ${driverEmail}`)
     
     await sendJobCancelledNotification(
       driverEmail,
+      freelancer.name,
       {
-        venue: venueName,
-        date: job.date || 'TBC',
+        id: itemId,
+        name: job.name,
         type: job.type,
-      },
-      freelancer.name
+        date: job.date || 'TBC',
+        venue: venueName,
+      }
     )
     
     const duration = Date.now() - startTime

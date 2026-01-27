@@ -79,14 +79,14 @@ function isJobMuted(mutedJobIds: string | undefined, jobId: string): boolean {
  * Check if the job status indicates it's confirmed/arranged
  */
 function isJobConfirmed(status: string): boolean {
-  const normalised = status.toLowerCase().trim()
-  return CONFIRMED_STATUSES.some(s => normalised.includes(s))
+  const normalizedStatus = status.toLowerCase().trim()
+  return CONFIRMED_STATUSES.some(s => normalizedStatus.includes(s))
 }
 
 /**
  * Determine which field changed based on the column ID in the event
  */
-function getChangedField(columnId: string): 'date' | 'time' | 'venue' | null {
+function getChangedField(columnId: string): string | null {
   if (columnId === WATCHED_COLUMNS.date) return 'date'
   if (columnId === WATCHED_COLUMNS.time) return 'time'
   if (columnId === WATCHED_COLUMNS.venue) return 'venue'
@@ -121,15 +121,20 @@ export async function POST(request: NextRequest) {
     
     const itemId = event.pulseId.toString()
     const columnId = event.columnId
+    
+    // Determine what changed
     const changedField = getChangedField(columnId)
-    
-    console.log(`Webhook (updated): Job ${itemId}, column ${columnId} (${changedField || 'unknown'})`)
-    
-    // Only process if it's a column we care about
     if (!changedField) {
-      console.log(`Webhook (updated): Ignoring change to column ${columnId}`)
-      return NextResponse.json({ success: true, message: 'Column not watched', skipped: true })
+      console.log(`Webhook (updated): Ignoring change to column ${columnId} - not a watched field`)
+      return NextResponse.json({ 
+        success: true, 
+        message: 'Column not watched',
+        skipped: true,
+        columnId 
+      })
     }
+    
+    console.log(`Webhook (updated): Processing job ${itemId} - ${changedField} changed`)
     
     // Fetch job details
     const job = await getJobByIdInternal(itemId)
@@ -138,14 +143,12 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Job not found' }, { status: 404 })
     }
     
-    // ========================================
-    // CRITICAL: Only notify if job is confirmed
-    // ========================================
+    // Only notify if job is in "confirmed" status
     if (!isJobConfirmed(job.status)) {
-      console.log(`Webhook (updated): Skipped - job ${itemId} status is "${job.status}" (not confirmed)`)
+      console.log(`Webhook (updated): Skipped - job ${itemId} not yet confirmed (status: ${job.status})`)
       return NextResponse.json({
         success: true,
-        message: 'Skipped - job not yet confirmed',
+        message: 'Job not yet confirmed - no notification needed',
         skipped: true,
         status: job.status,
       })
@@ -197,19 +200,20 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    // Send email
+    // Send email - NEW SIGNATURE: (email, name, jobDetails)
     console.log(`Webhook (updated): Sending email to ${driverEmail} (${changedField} changed)`)
     
     await sendJobUpdatedNotification(
       driverEmail,
+      freelancer.name,
       {
-        venueName,
+        id: itemId,
+        name: job.name,
+        type: job.type,
         date: job.date || 'TBC',
         time: job.time,
-        type: job.type,
-        changedField,
-      },
-      freelancer.name
+        venue: venueName,
+      }
     )
     
     const duration = Date.now() - startTime
