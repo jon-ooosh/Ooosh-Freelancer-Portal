@@ -1420,6 +1420,11 @@ export async function getResourcesForFreelancers(): Promise<ResourceRecord[]> {
     }
   })
 }
+<<<<<<< HEAD
+
+// =============================================================================
+// RELATED JOBS QUERY (for driver notes alerts)
+// =============================================================================
 
 /**
  * Related job info for driver notes alerts
@@ -1437,6 +1442,9 @@ export interface RelatedJobInfo {
  * 
  * Finds jobs that share the same venue OR same HireHop reference,
  * with dates from today onwards, excluding the specified job.
+ * 
+ * Uses local filtering instead of query_params for reliability -
+ * Monday's date comparison operators can be unreliable.
  * 
  * @param excludeJobId - The job ID to exclude (the one just completed)
  * @param venueId - Venue ID to match (optional)
@@ -1462,28 +1470,16 @@ export async function getRelatedUpcomingJobs(
 
   console.log(`Monday: Finding related jobs (venueId: ${venueId}, hhRef: ${hhRef}, excluding: ${excludeJobId})`)
 
-  // Get today's date in YYYY-MM-DD format
+  // Get today's date in YYYY-MM-DD format for comparison
   const today = new Date()
   const todayStr = today.toISOString().split('T')[0]
 
-  // We need to query jobs and filter manually since Monday doesn't support OR queries well
-  // Query jobs from today onwards (limit to recent/upcoming for performance)
-  // Using items_page_by_column_values with date filter
+  // Fetch items from the board and filter locally
+  // This is more reliable than query_params which can be finicky with date operators
   const query = `
-    query {
-      boards(ids: [${boardId}]) {
-        items_page(
-          limit: 200,
-          query_params: {
-            rules: [
-              {
-                column_id: "${DC_COLUMNS.date}",
-                compare_value: ["${todayStr}"],
-                operator: greater_than_or_equals
-              }
-            ]
-          }
-        ) {
+    query ($boardId: [ID!]!) {
+      boards(ids: $boardId) {
+        items_page(limit: 500) {
           items {
             id
             name
@@ -1515,16 +1511,16 @@ export async function getRelatedUpcomingJobs(
           }>
         }
       }>
-    }>(query)
+    }>(query, { boardId: [boardId] })
 
     const items = result.boards?.[0]?.items_page?.items || []
-    console.log(`Monday: Found ${items.length} jobs from ${todayStr} onwards`)
+    console.log(`Monday: Retrieved ${items.length} total items for related jobs search`)
 
     // Filter to find related jobs
     const relatedJobs: RelatedJobInfo[] = []
 
     for (const item of items) {
-      // Skip the excluded job
+      // Skip the excluded job (the one being completed)
       if (item.id === excludeJobId) {
         continue
       }
@@ -1538,12 +1534,17 @@ export async function getRelatedUpcomingJobs(
         return acc
       }, {} as Record<string, { text: string; linked_item_ids?: string[] }>)
 
-      // Get job's venue ID and hhRef
+      // Get job details
+      const jobDate = columnMap[DC_COLUMNS.date]?.text || ''
       const jobVenueId = columnMap[DC_COLUMNS.venueConnect]?.linked_item_ids?.[0]
       const jobHhRef = columnMap[DC_COLUMNS.hhRef]?.text || ''
-      const jobDate = columnMap[DC_COLUMNS.date]?.text || ''
       const jobVenueName = columnMap[DC_COLUMNS.venueConnect]?.text || item.name
       const jobStatus = columnMap[DC_COLUMNS.status]?.text?.toLowerCase() || ''
+
+      // Skip if date is in the past (before today)
+      if (!jobDate || jobDate < todayStr) {
+        continue
+      }
 
       // Skip completed or cancelled jobs
       if (jobStatus.includes('done') || jobStatus.includes('not needed') || jobStatus.includes('cancelled')) {
@@ -1569,7 +1570,7 @@ export async function getRelatedUpcomingJobs(
       }
     }
 
-    // Sort by date
+    // Sort by date (earliest first)
     relatedJobs.sort((a, b) => {
       if (!a.date) return 1
       if (!b.date) return -1
