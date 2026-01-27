@@ -1,15 +1,21 @@
 /**
  * HireHop Items API Endpoint
  * 
- * GET /api/hirehop/items/[jobId]
+ * GET /api/hirehop/items/[jobId]?filter=equipment|vehicles|all
  * 
  * Fetches equipment/supply list for a HireHop job.
  * Requires authentication - only returns items if user is logged in.
+ * 
+ * Query params:
+ *   filter: 'equipment' | 'vehicles' | 'all' (default: 'all')
+ *     - 'equipment': Excludes vehicles, delivery charges, crew items
+ *     - 'vehicles': Only shows vehicle items
+ *     - 'all': Shows everything (excluding virtual items)
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
-import { getJobItems } from '@/lib/hirehop'
+import { getJobItemsFiltered, ItemFilterMode } from '@/lib/hirehop'
 
 export async function GET(
   request: NextRequest,
@@ -36,10 +42,20 @@ export async function GET(
       )
     }
 
-    console.log(`HireHop Items API: Fetching items for HH job ${jobId} (user: ${session.email})`)
+    // Get filter mode from query params (default to 'all')
+    const searchParams = request.nextUrl.searchParams
+    const filterParam = searchParams.get('filter') || 'all'
+    
+    // Validate filter mode
+    const validFilters: ItemFilterMode[] = ['all', 'equipment', 'vehicles']
+    const filterMode: ItemFilterMode = validFilters.includes(filterParam as ItemFilterMode) 
+      ? (filterParam as ItemFilterMode) 
+      : 'all'
 
-    // Fetch items from HireHop
-    const result = await getJobItems(jobId)
+    console.log(`HireHop Items API: Fetching items for HH job ${jobId} with filter '${filterMode}' (user: ${session.email})`)
+
+    // Fetch items from HireHop with filtering
+    const result = await getJobItemsFiltered(jobId, filterMode)
 
     if (!result.success) {
       return NextResponse.json(
@@ -52,7 +68,8 @@ export async function GET(
       success: true,
       jobId,
       items: result.items,
-      totalItems: result.totalItems
+      totalItems: result.totalItems,
+      filterApplied: filterMode,
     })
 
   } catch (error) {
