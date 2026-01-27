@@ -1,20 +1,14 @@
 'use client'
 
 /**
- * Job Completion Page
+ * Job Details Page
  * 
- * Allows drivers to complete a delivery/collection with:
- * - Review of equipment list
- * - Notes field
- * - Signature capture (when customer present)
- * - Photo capture with compression (required when customer not present, optional otherwise)
- * - Offline detection
- * 
- * Route: /job/[id]/complete
+ * Displays full details for a single job including venue information.
+ * Route: /job/[id]
  */
 
-import { useEffect, useState, useRef, useCallback } from 'react'
-import { useParams, useRouter } from 'next/navigation'
+import { useEffect, useState, useCallback } from 'react'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 
 // =============================================================================
@@ -25,10 +19,42 @@ interface Job {
   id: string
   name: string
   type: 'delivery' | 'collection'
+  whatIsIt?: 'equipment' | 'vehicle'  // Equipment or A vehicle
   date?: string
   time?: string
   venueName?: string
+  venueId?: string
+  status: string
   hhRef?: string
+  keyNotes?: string
+  runGroup?: string
+  driverPay?: number
+  completedAtDate?: string
+  completionNotes?: string
+}
+
+interface Venue {
+  id: string
+  name: string
+  address?: string
+  whatThreeWords?: string
+  contact1?: string
+  contact2?: string
+  phone?: string | null
+  phone2?: string | null
+  phoneHidden?: boolean
+  phoneVisibleFrom?: string | null
+  email?: string
+  accessNotes?: string
+  stageNotes?: string
+}
+
+interface JobApiResponse {
+  success: boolean
+  job?: Job
+  venue?: Venue | null
+  contactsVisible?: boolean
+  error?: string
 }
 
 interface EquipmentItem {
@@ -36,16 +62,10 @@ interface EquipmentItem {
   name: string
   quantity: number
   category?: string
+  categoryId?: number
+  isVirtual?: boolean
+  barcode?: string
 }
-
-// =============================================================================
-// CONSTANTS
-// =============================================================================
-
-const MAX_PHOTOS = 5
-const MAX_IMAGE_DIMENSION = 1200  // Max width or height in pixels
-const JPEG_QUALITY = 0.8         // 80% quality
-const TARGET_FILE_SIZE = 200000  // ~200KB target
 
 // =============================================================================
 // HELPER FUNCTIONS
@@ -56,390 +76,98 @@ function formatDate(dateStr?: string): string {
   const date = new Date(dateStr)
   if (isNaN(date.getTime())) return dateStr
   return date.toLocaleDateString('en-GB', {
-    weekday: 'short',
+    weekday: 'long',
     day: 'numeric',
-    month: 'short',
+    month: 'long',
     year: 'numeric'
   })
 }
 
+function formatTime(timeStr?: string): string {
+  if (!timeStr) return 'TBC'
+  return timeStr
+}
+
+function getGoogleMapsUrl(address?: string): string | null {
+  if (!address) return null
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
+}
+
+function getWhat3WordsUrl(w3w?: string): string | null {
+  if (!w3w) return null
+  const words = w3w.replace(/^\/+/, '').trim()
+  if (!words) return null
+  return `https://what3words.com/${words}`
+}
+
 /**
- * Strip DEL/COL prefix from job name and combine with venue
+ * Translate Monday.com status to user-friendly display
  */
-function formatJobTitle(jobName: string, venueName?: string): string {
-  const cleanedName = jobName.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
+function translateStatus(status: string): { label: string; style: string; icon: string } {
+  const normalised = status.toLowerCase().trim()
   
-  if (!venueName) return cleanedName
-  if (cleanedName.toLowerCase() === venueName.toLowerCase()) {
-    return venueName
+  // Confirmed / Arranged
+  if (normalised.includes('arranged')) {
+    return { label: 'Confirmed', style: 'bg-green-100 text-green-800', icon: '✓' }
   }
-  return `${cleanedName} - ${venueName}`
+  
+  // In Progress / Working on it
+  if (normalised.includes('working on it')) {
+    return { label: 'In Progress', style: 'bg-blue-100 text-blue-800', icon: '🔄' }
+  }
+  
+  // Completed / All done
+  if (normalised.includes('done') || normalised.includes('completed')) {
+    return { label: 'Completed', style: 'bg-gray-100 text-gray-600', icon: '✓' }
+  }
+  
+  // Cancelled / Not needed
+  if (normalised.includes('not needed') || normalised.includes('cancelled')) {
+    return { label: 'Cancelled', style: 'bg-red-100 text-red-800', icon: '✗' }
+  }
+  
+  // Default - show raw status
+  return { label: status, style: 'bg-gray-100 text-gray-800', icon: '•' }
 }
 
 /**
- * Compress an image to target size
- * Resizes to max 1200px and converts to JPEG at 80% quality
+ * Get the filter mode for HireHop items based on job's whatIsIt value
  */
-async function compressImage(dataUrl: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => {
-      // Calculate new dimensions
-      let { width, height } = img
-      
-      if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
-        if (width > height) {
-          height = Math.round((height * MAX_IMAGE_DIMENSION) / width)
-          width = MAX_IMAGE_DIMENSION
-        } else {
-          width = Math.round((width * MAX_IMAGE_DIMENSION) / height)
-          height = MAX_IMAGE_DIMENSION
-        }
-      }
-
-      // Create canvas and draw resized image
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      
-      const ctx = canvas.getContext('2d')
-      if (!ctx) {
-        reject(new Error('Could not get canvas context'))
-        return
-      }
-
-      // Use better quality scaling
-      ctx.imageSmoothingEnabled = true
-      ctx.imageSmoothingQuality = 'high'
-      ctx.drawImage(img, 0, 0, width, height)
-
-      // Convert to JPEG
-      const compressedDataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY)
-      
-      // Log compression results
-      const originalSize = Math.round(dataUrl.length * 0.75 / 1024) // Approximate KB
-      const compressedSize = Math.round(compressedDataUrl.length * 0.75 / 1024)
-      console.log(`Image compressed: ${originalSize}KB → ${compressedSize}KB (${width}x${height})`)
-      
-      resolve(compressedDataUrl)
-    }
-    
-    img.onerror = () => reject(new Error('Failed to load image'))
-    img.src = dataUrl
-  })
-}
-
-// =============================================================================
-// OFFLINE DETECTION HOOK
-// =============================================================================
-
-function useOnlineStatus() {
-  const [isOnline, setIsOnline] = useState(true)
-
-  useEffect(() => {
-    // Set initial state
-    setIsOnline(navigator.onLine)
-
-    const handleOnline = () => setIsOnline(true)
-    const handleOffline = () => setIsOnline(false)
-
-    window.addEventListener('online', handleOnline)
-    window.addEventListener('offline', handleOffline)
-
-    return () => {
-      window.removeEventListener('online', handleOnline)
-      window.removeEventListener('offline', handleOffline)
-    }
-  }, [])
-
-  return isOnline
-}
-
-// =============================================================================
-// SIGNATURE CANVAS COMPONENT
-// =============================================================================
-
-interface SignatureCanvasProps {
-  onSignatureChange: (dataUrl: string | null) => void
-}
-
-function SignatureCanvas({ onSignatureChange }: SignatureCanvasProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [isDrawing, setIsDrawing] = useState(false)
-  const [hasSignature, setHasSignature] = useState(false)
-
-  const getPosition = useCallback((e: MouseEvent | TouchEvent) => {
-    const canvas = canvasRef.current
-    if (!canvas) return { x: 0, y: 0 }
-
-    const rect = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / rect.width
-    const scaleY = canvas.height / rect.height
-
-    if ('touches' in e) {
-      const touch = e.touches[0]
-      return {
-        x: (touch.clientX - rect.left) * scaleX,
-        y: (touch.clientY - rect.top) * scaleY
-      }
-    } else {
-      return {
-        x: (e.clientX - rect.left) * scaleX,
-        y: (e.clientY - rect.top) * scaleY
-      }
-    }
-  }, [])
-
-  const startDrawing = useCallback((e: React.MouseEvent | React.TouchEvent) => {
-    e.preventDefault()
-    const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
-    if (!ctx || !canvas) return
-
-    setIsDrawing(true)
-    const pos = getPosition(e.nativeEvent)
-    ctx.beginPath()
-    ctx.moveTo(pos.x, pos.y)
-  }, [getPosition])
-
-  const draw = useCallback((e: React.MouseEvent | React.TouchEvent) => {
-    if (!isDrawing) return
-    e.preventDefault()
-
-    const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
-    if (!ctx) return
-
-    const pos = getPosition(e.nativeEvent)
-    ctx.lineTo(pos.x, pos.y)
-    ctx.stroke()
-    setHasSignature(true)
-  }, [isDrawing, getPosition])
-
-  const stopDrawing = useCallback(() => {
-    if (isDrawing) {
-      setIsDrawing(false)
-      const canvas = canvasRef.current
-      if (canvas && hasSignature) {
-        const dataUrl = canvas.toDataURL('image/png')
-        onSignatureChange(dataUrl)
-      }
-    }
-  }, [isDrawing, hasSignature, onSignatureChange])
-
-  const clearSignature = useCallback(() => {
-    const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
-    if (!ctx || !canvas) return
-
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-    setHasSignature(false)
-    onSignatureChange(null)
-  }, [onSignatureChange])
-
-  useEffect(() => {
-    const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
-    if (!ctx || !canvas) return
-
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, canvas.width, canvas.height)
-    ctx.strokeStyle = '#1f2937'
-    ctx.lineWidth = 2
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-  }, [])
-
-  return (
-    <div className="space-y-2">
-      <div className="border-2 border-gray-300 rounded-lg overflow-hidden bg-white">
-        <canvas
-          ref={canvasRef}
-          width={600}
-          height={200}
-          className="w-full touch-none cursor-crosshair"
-          style={{ height: '150px' }}
-          onMouseDown={startDrawing}
-          onMouseMove={draw}
-          onMouseUp={stopDrawing}
-          onMouseLeave={stopDrawing}
-          onTouchStart={startDrawing}
-          onTouchMove={draw}
-          onTouchEnd={stopDrawing}
-        />
-      </div>
-      <div className="flex justify-between items-center">
-        <p className="text-xs text-gray-500">Sign above using finger or mouse</p>
-        <button
-          type="button"
-          onClick={clearSignature}
-          className="text-sm text-red-600 hover:text-red-700 font-medium"
-        >
-          Clear
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// =============================================================================
-// MULTI-PHOTO CAPTURE COMPONENT
-// =============================================================================
-
-interface PhotoCaptureProps {
-  photos: string[]
-  onPhotosChange: (photos: string[]) => void
-  required: boolean
-}
-
-function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const [compressing, setCompressing] = useState(false)
-
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files || files.length === 0) return
-
-    // Check if we'd exceed max photos
-    const remainingSlots = MAX_PHOTOS - photos.length
-    if (remainingSlots <= 0) {
-      alert(`Maximum ${MAX_PHOTOS} photos allowed`)
-      return
-    }
-
-    setCompressing(true)
-
-    try {
-      const newPhotos: string[] = []
-      const filesToProcess = Array.from(files).slice(0, remainingSlots)
-
-      for (const file of filesToProcess) {
-        // Read file as data URL
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader()
-          reader.onload = () => resolve(reader.result as string)
-          reader.onerror = () => reject(new Error('Failed to read file'))
-          reader.readAsDataURL(file)
-        })
-
-        // Compress the image
-        const compressed = await compressImage(dataUrl)
-        newPhotos.push(compressed)
-      }
-
-      onPhotosChange([...photos, ...newPhotos])
-    } catch (error) {
-      console.error('Error processing photos:', error)
-      alert('Failed to process one or more photos')
-    } finally {
-      setCompressing(false)
-      // Reset input so same file can be selected again
-      if (fileInputRef.current) {
-        fileInputRef.current.value = ''
-      }
-    }
+function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehicles' | 'all' {
+  switch (whatIsIt) {
+    case 'equipment':
+      return 'equipment'  // Exclude vehicles and services
+    case 'vehicle':
+      return 'all'        // Show everything for vehicle deliveries
+    default:
+      return 'all'        // Unknown - show everything to be safe
   }
-
-  const removePhoto = (index: number) => {
-    const newPhotos = photos.filter((_, i) => i !== index)
-    onPhotosChange(newPhotos)
-  }
-
-  return (
-    <div className="space-y-3">
-      {/* Photo grid */}
-      {photos.length > 0 && (
-        <div className="grid grid-cols-3 gap-2">
-          {photos.map((photo, index) => (
-            <div key={index} className="relative aspect-square">
-              <img 
-                src={photo} 
-                alt={`Photo ${index + 1}`} 
-                className="w-full h-full object-cover rounded-lg border border-gray-200"
-              />
-              <button
-                type="button"
-                onClick={() => removePhoto(index)}
-                className="absolute -top-2 -right-2 bg-red-500 text-white w-6 h-6 rounded-full flex items-center justify-center hover:bg-red-600 shadow-md"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Add photo button or placeholder */}
-      {photos.length < MAX_PHOTOS && (
-        <div className={`border-2 border-dashed rounded-lg p-4 text-center ${
-          required && photos.length === 0 ? 'border-orange-300 bg-orange-50' : 'border-gray-300 bg-gray-50'
-        }`}>
-          {compressing ? (
-            <div className="py-4">
-              <div className="w-8 h-8 border-4 border-ooosh-500 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-              <p className="text-sm text-gray-600">Compressing photo...</p>
-            </div>
-          ) : (
-            <>
-              <svg className="mx-auto h-10 w-10 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-              <p className="mt-2 text-sm text-gray-600">
-                {photos.length === 0 
-                  ? (required ? 'At least 1 photo required' : 'Photos optional')
-                  : `${photos.length}/${MAX_PHOTOS} photos`
-                }
-              </p>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Add photo button */}
-      {photos.length < MAX_PHOTOS && !compressing && (
-        <label className="block cursor-pointer">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            multiple
-            onChange={handleFileSelect}
-            className="hidden"
-          />
-          <div className="w-full py-3 px-4 bg-ooosh-500 text-white rounded-lg font-medium text-center hover:bg-ooosh-600 transition-colors flex items-center justify-center gap-2">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            {photos.length === 0 ? 'Add Photo' : 'Add Another Photo'}
-          </div>
-        </label>
-      )}
-
-      {photos.length >= MAX_PHOTOS && (
-        <p className="text-center text-sm text-gray-500">Maximum {MAX_PHOTOS} photos reached</p>
-      )}
-    </div>
-  )
 }
 
 // =============================================================================
-// EQUIPMENT LIST COMPONENT
+// EQUIPMENT LIST COMPONENT WITH TICKBOXES
 // =============================================================================
 
-function EquipmentList({ hhRef }: { hhRef: string }) {
+interface EquipmentListProps {
+  hhRef: string
+  whatIsIt?: 'equipment' | 'vehicle'
+}
+
+function EquipmentList({ hhRef, whatIsIt }: EquipmentListProps) {
   const [items, setItems] = useState<EquipmentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState(false)
+  
+  // Track checked counts for each item (keyed by item id + index for uniqueness)
+  const [checkedCounts, setCheckedCounts] = useState<Record<string, number>>({})
 
   useEffect(() => {
     async function fetchItems() {
       try {
-        const response = await fetch(`/api/hirehop/items/${hhRef}`)
+        // Determine filter based on job type
+        const filterMode = getFilterMode(whatIsIt)
+        const response = await fetch(`/api/hirehop/items/${hhRef}?filter=${filterMode}`)
         const data = await response.json()
 
         if (!response.ok) {
@@ -447,6 +175,13 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
         }
 
         setItems(data.items || [])
+        
+        // Initialize checked counts to 0 for all items
+        const initialCounts: Record<string, number> = {}
+        ;(data.items || []).forEach((item: EquipmentItem, index: number) => {
+          initialCounts[`${item.id}-${index}`] = 0
+        })
+        setCheckedCounts(initialCounts)
       } catch (err) {
         console.error('Error fetching equipment:', err)
         setError(err instanceof Error ? err.message : 'Failed to load equipment')
@@ -459,60 +194,335 @@ function EquipmentList({ hhRef }: { hhRef: string }) {
       fetchItems()
     } else {
       setLoading(false)
+      setError('No HireHop reference available')
     }
-  }, [hhRef])
+  }, [hhRef, whatIsIt])
+
+  // Handle incrementing/decrementing check count for an item
+  const handleCheckToggle = (itemKey: string, quantity: number, increment: boolean) => {
+    setCheckedCounts(prev => {
+      const currentCount = prev[itemKey] || 0
+      let newCount: number
+      
+      if (increment) {
+        newCount = Math.min(currentCount + 1, quantity)
+      } else {
+        newCount = Math.max(currentCount - 1, 0)
+      }
+      
+      return { ...prev, [itemKey]: newCount }
+    })
+  }
+
+  // Toggle all checks for an item (for single-quantity items or quick toggle)
+  const handleToggleAll = (itemKey: string, quantity: number) => {
+    setCheckedCounts(prev => {
+      const currentCount = prev[itemKey] || 0
+      // If all checked, uncheck all. Otherwise, check all.
+      const newCount = currentCount >= quantity ? 0 : quantity
+      return { ...prev, [itemKey]: newCount }
+    })
+  }
+
+  // Calculate totals for summary
+  const totalItems = items.reduce((sum, item) => sum + item.quantity, 0)
+  const totalChecked = Object.entries(checkedCounts).reduce((sum, [key, count]) => {
+    const index = parseInt(key.split('-').pop() || '0')
+    const item = items[index]
+    return sum + Math.min(count, item?.quantity || 0)
+  }, 0)
 
   if (loading) {
     return (
-      <div className="animate-pulse space-y-2">
-        <div className="h-4 bg-gray-200 rounded w-3/4"></div>
-        <div className="h-4 bg-gray-200 rounded w-1/2"></div>
-        <div className="h-4 bg-gray-200 rounded w-2/3"></div>
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📦</span> Equipment List
+        </h2>
+        <div className="animate-pulse space-y-2">
+          <div className="h-4 bg-gray-200 rounded w-3/4"></div>
+          <div className="h-4 bg-gray-200 rounded w-1/2"></div>
+          <div className="h-4 bg-gray-200 rounded w-2/3"></div>
+        </div>
       </div>
     )
   }
 
   if (error) {
     return (
-      <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-        <p className="text-red-700 text-sm">{error}</p>
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📦</span> Equipment List
+        </h2>
+        <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+          <p className="text-red-700 text-sm">{error}</p>
+        </div>
       </div>
     )
   }
 
   if (items.length === 0) {
     return (
-      <p className="text-gray-500 text-sm italic">No equipment items found</p>
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>📦</span> Equipment List
+        </h2>
+        <p className="text-gray-500 text-sm">No equipment items found for this job.</p>
+      </div>
     )
   }
 
+  const PREVIEW_COUNT = 5
+  const hasMoreItems = items.length > PREVIEW_COUNT
+  const displayItems = expanded ? items : items.slice(0, PREVIEW_COUNT)
+
   return (
-    <div className="space-y-1 max-h-64 overflow-y-auto">
-      {items.map((item, index) => (
-        <div 
-          key={item.id || index} 
-          className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0"
-        >
-          <span className="text-gray-700 text-sm">{item.name}</span>
-          <span className="bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-sm font-medium">
-            × {item.quantity}
+    <div className="bg-white rounded-xl shadow-sm p-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+          <span>📦</span> Equipment List
+          <span className="text-sm font-normal text-gray-500">
+            ({items.length} item{items.length !== 1 ? 's' : ''})
           </span>
+        </h2>
+        {/* Progress indicator */}
+        {totalChecked > 0 && (
+          <span className={`text-sm font-medium px-2 py-1 rounded-full ${
+            totalChecked === totalItems 
+              ? 'bg-green-100 text-green-700' 
+              : 'bg-amber-100 text-amber-700'
+          }`}>
+            {totalChecked}/{totalItems} ✓
+          </span>
+        )}
+      </div>
+
+      {/* Filter indicator */}
+      {whatIsIt === 'equipment' && (
+        <p className="text-xs text-gray-400 mb-3">
+          Showing equipment only (vehicles filtered out)
+        </p>
+      )}
+
+      <div className="space-y-1">
+        {displayItems.map((item, index) => {
+          const itemKey = `${item.id}-${index}`
+          const checkedCount = checkedCounts[itemKey] || 0
+          const isFullyChecked = checkedCount >= item.quantity
+          const isPartiallyChecked = checkedCount > 0 && checkedCount < item.quantity
+          
+          return (
+            <div 
+              key={itemKey} 
+              className={`flex items-center gap-3 py-2 px-2 rounded-lg border-b border-gray-50 last:border-0 transition-colors ${
+                isFullyChecked ? 'bg-gray-50' : ''
+              }`}
+            >
+              {/* Checkbox/Counter area */}
+              <div className="flex-shrink-0">
+                {item.quantity <= 5 ? (
+                  // Individual checkboxes for small quantities
+                  <div className="flex gap-1">
+                    {Array.from({ length: item.quantity }).map((_, i) => (
+                      <button
+                        key={i}
+                        onClick={() => {
+                          // Toggle this specific checkbox
+                          const newCount = i < checkedCount ? i : i + 1
+                          setCheckedCounts(prev => ({ ...prev, [itemKey]: newCount }))
+                        }}
+                        className={`w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all ${
+                          i < checkedCount
+                            ? 'bg-green-500 border-green-500 text-white'
+                            : 'border-gray-300 hover:border-green-400'
+                        }`}
+                        title={i < checkedCount ? 'Uncheck' : 'Check'}
+                      >
+                        {i < checkedCount && (
+                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  // Counter for larger quantities
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handleCheckToggle(itemKey, item.quantity, false)}
+                      disabled={checkedCount === 0}
+                      className="w-7 h-7 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-30 disabled:hover:bg-gray-100 flex items-center justify-center text-gray-600 font-bold"
+                    >
+                      −
+                    </button>
+                    <span className={`min-w-[3rem] text-center text-sm font-medium ${
+                      isFullyChecked ? 'text-green-600' : isPartiallyChecked ? 'text-amber-600' : 'text-gray-500'
+                    }`}>
+                      {checkedCount}/{item.quantity}
+                    </span>
+                    <button
+                      onClick={() => handleCheckToggle(itemKey, item.quantity, true)}
+                      disabled={checkedCount >= item.quantity}
+                      className="w-7 h-7 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-30 disabled:hover:bg-gray-100 flex items-center justify-center text-gray-600 font-bold"
+                    >
+                      +
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Item details */}
+              <div className="flex-1 min-w-0">
+                <p className={`text-sm transition-all ${
+                  isFullyChecked 
+                    ? 'text-gray-400 line-through' 
+                    : 'text-gray-900'
+                }`}>
+                  {item.name}
+                </p>
+                {item.category && (
+                  <p className="text-gray-400 text-xs truncate">{item.category}</p>
+                )}
+              </div>
+
+              {/* Quantity badge (for items with qty > 5, already shown in counter) */}
+              {item.quantity <= 5 && item.quantity > 1 && (
+                <span className={`text-xs font-medium px-2 py-0.5 rounded ${
+                  isFullyChecked 
+                    ? 'bg-green-100 text-green-600' 
+                    : 'bg-gray-100 text-gray-500'
+                }`}>
+                  ×{item.quantity}
+                </span>
+              )}
+
+              {/* Quick toggle all button for items with quantity > 1 */}
+              {item.quantity > 1 && (
+                <button
+                  onClick={() => handleToggleAll(itemKey, item.quantity)}
+                  className={`text-xs px-2 py-1 rounded transition-colors ${
+                    isFullyChecked
+                      ? 'text-gray-400 hover:text-gray-600'
+                      : 'text-purple-600 hover:bg-purple-50'
+                  }`}
+                  title={isFullyChecked ? 'Uncheck all' : 'Check all'}
+                >
+                  {isFullyChecked ? 'Undo' : 'All'}
+                </button>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {hasMoreItems && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="mt-3 w-full text-center text-sm font-medium text-purple-600 hover:text-purple-500 py-2 border-t border-gray-100"
+        >
+          {expanded 
+            ? '▲ Show less' 
+            : `▼ Show all ${items.length} items (+${items.length - PREVIEW_COUNT} more)`
+          }
+        </button>
+      )}
+
+      {/* Partial completion warning */}
+      {totalChecked > 0 && totalChecked < totalItems && (
+        <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <p className="text-amber-800 text-sm flex items-start gap-2">
+            <span className="flex-shrink-0">⚠️</span>
+            <span>
+              <strong>{totalItems - totalChecked} item{totalItems - totalChecked !== 1 ? 's' : ''} not checked.</strong>
+              {' '}If anything is missing or different, please note it when completing the job.
+            </span>
+          </p>
         </div>
-      ))}
+      )}
+
+      {/* All checked success message */}
+      {totalChecked === totalItems && totalItems > 0 && (
+        <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-3">
+          <p className="text-green-800 text-sm flex items-center gap-2">
+            <span>✅</span>
+            <span>All {totalItems} items checked off!</span>
+          </p>
+        </div>
+      )}
     </div>
   )
 }
 
 // =============================================================================
-// OFFLINE BANNER COMPONENT
+// NOTIFICATION MUTE TOGGLE COMPONENT
 // =============================================================================
 
-function OfflineBanner() {
+function NotificationMuteToggle({ jobId }: { jobId: string }) {
+  const [isMuted, setIsMuted] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  // Fetch current mute status
+  useEffect(() => {
+    async function checkMuteStatus() {
+      try {
+        const res = await fetch('/api/settings/notifications')
+        const data = await res.json()
+        if (data.success && data.notifications) {
+          setIsMuted(data.notifications.mutedJobIds?.includes(jobId) || false)
+        }
+      } catch (err) {
+        console.error('Failed to check mute status:', err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    checkMuteStatus()
+  }, [jobId])
+
+  const toggleMute = async () => {
+    setSaving(true)
+    try {
+      const res = await fetch('/api/settings/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: isMuted ? 'unmute_job' : 'mute_job',
+          jobId,
+        }),
+      })
+      const data = await res.json()
+      if (data.success) {
+        setIsMuted(!isMuted)
+      }
+    } catch (err) {
+      console.error('Failed to toggle mute:', err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return null // Don't show anything while loading
+  }
+
   return (
-    <div className="bg-red-500 text-white px-4 py-2 text-center text-sm font-medium">
-      <span className="mr-2">📡</span>
-      You are offline. Please reconnect to complete this job.
-    </div>
+    <button
+      onClick={toggleMute}
+      disabled={saving}
+      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${
+        isMuted 
+          ? 'bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200'
+          : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200'
+      }`}
+    >
+      {saving ? (
+        <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"></div>
+      ) : (
+        <span>{isMuted ? '🔕' : '🔔'}</span>
+      )}
+      {isMuted ? 'Notifications off for this job' : 'Notifications on'}
+    </button>
   )
 }
 
@@ -520,31 +530,30 @@ function OfflineBanner() {
 // MAIN PAGE COMPONENT
 // =============================================================================
 
-export default function CompletePage() {
+export default function JobDetailsPage() {
   const params = useParams()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const jobId = params.id as string
-  const isOnline = useOnlineStatus()
+  const runGroup = searchParams.get('run')
 
-  // Job data
   const [job, setJob] = useState<Job | null>(null)
+  const [venue, setVenue] = useState<Venue | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  
+  // Multi-drop run state
+  const [runJobs, setRunJobs] = useState<Job[]>([])
+  const [runVenues, setRunVenues] = useState<Map<string, Venue>>(new Map())
+  const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set())
+  const [loadingRun, setLoadingRun] = useState(false)
 
-  // Form state
-  const [notes, setNotes] = useState('')
-  const [signature, setSignature] = useState<string | null>(null)
-  const [photos, setPhotos] = useState<string[]>([])
-  const [customerPresent, setCustomerPresent] = useState(true)
-  const [submitting, setSubmitting] = useState(false)
-  const [submitError, setSubmitError] = useState<string | null>(null)
-
-  // Fetch job data
+  // Fetch primary job
   useEffect(() => {
     async function fetchJob() {
       try {
         const response = await fetch(`/api/jobs/${jobId}`)
-        const data = await response.json()
+        const data: JobApiResponse = await response.json()
 
         if (!response.ok) {
           if (response.status === 401) {
@@ -555,6 +564,12 @@ export default function CompletePage() {
         }
 
         setJob(data.job || null)
+        setVenue(data.venue || null)
+        
+        // If this is a grouped run, fetch all jobs in the run
+        if (runGroup && data.job?.date) {
+          fetchRunJobs(runGroup, data.job.date)
+        }
       } catch (err) {
         console.error('Error fetching job:', err)
         setError(err instanceof Error ? err.message : 'Failed to load job')
@@ -566,79 +581,87 @@ export default function CompletePage() {
     if (jobId) {
       fetchJob()
     }
-  }, [jobId, router])
+  }, [jobId, router, runGroup])
 
-  // Check if form is valid
-  // Customer present: signature required, photos optional
-  // Customer not present: at least 1 photo required, no signature needed
-  const isValid = customerPresent 
-    ? signature !== null 
-    : photos.length >= 1
-
-  // Handle form submission
-  const handleSubmit = async () => {
-    if (!isValid || !job || !isOnline) return
-
-    setSubmitting(true)
-    setSubmitError(null)
-
+  // Fetch all jobs in a run group
+  const fetchRunJobs = async (group: string, date: string) => {
+    setLoadingRun(true)
     try {
-      const response = await fetch(`/api/jobs/${jobId}/complete`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          notes,
-          signature: customerPresent ? signature : null,
-          photos: photos.length > 0 ? photos : undefined,
-          customerPresent,
-        }),
-      })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to complete job')
+      const res = await fetch(`/api/jobs/run?group=${group}&date=${date}`)
+      const data = await res.json()
+      
+      if (data.success && data.jobs) {
+        setRunJobs(data.jobs)
+        // Expand first stop by default
+        if (data.jobs.length > 0) {
+          setExpandedStops(new Set([data.jobs[0].id]))
+        }
+        // Fetch venues for all jobs
+        if (data.venues) {
+          setRunVenues(new Map(Object.entries(data.venues)))
+        }
       }
-
-      // Show warnings if any
-      if (data.warnings && data.warnings.length > 0) {
-        console.warn('Completion warnings:', data.warnings)
-      }
-
-      // Success! Redirect to job page with success message
-      router.push(`/job/${jobId}?completed=true`)
     } catch (err) {
-      console.error('Error completing job:', err)
-      setSubmitError(err instanceof Error ? err.message : 'Failed to complete job')
+      console.error('Error fetching run jobs:', err)
     } finally {
-      setSubmitting(false)
+      setLoadingRun(false)
     }
   }
 
-  // Loading state
+  const toggleStopExpanded = (stopId: string) => {
+    setExpandedStops(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(stopId)) {
+        newSet.delete(stopId)
+      } else {
+        newSet.add(stopId)
+      }
+      return newSet
+    })
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="w-8 h-8 border-4 border-ooosh-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading...</p>
+          <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading job details...</p>
         </div>
       </div>
     )
   }
 
-  // Error state
-  if (error || !job) {
+  if (error) {
     return (
       <div className="min-h-screen bg-gray-50 p-4">
         <div className="max-w-lg mx-auto">
           <div className="bg-white rounded-xl shadow-sm p-6 text-center">
             <div className="text-red-500 text-5xl mb-4">⚠️</div>
             <h1 className="text-xl font-semibold text-gray-900 mb-2">Error</h1>
-            <p className="text-gray-600 mb-6">{error || 'Job not found'}</p>
+            <p className="text-gray-600 mb-6">{error}</p>
             <Link
               href="/dashboard"
-              className="inline-block bg-ooosh-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-ooosh-600 transition-colors"
+              className="inline-block bg-purple-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-purple-600 transition-colors"
+            >
+              Back to Dashboard
+            </Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (!job) {
+    return (
+      <div className="min-h-screen bg-gray-50 p-4">
+        <div className="max-w-lg mx-auto">
+          <div className="bg-white rounded-xl shadow-sm p-6 text-center">
+            <div className="text-gray-400 text-5xl mb-4">🔍</div>
+            <h1 className="text-xl font-semibold text-gray-900 mb-2">Job Not Found</h1>
+            <p className="text-gray-600 mb-6">This job doesn&apos;t exist or isn&apos;t assigned to you.</p>
+            <Link
+              href="/dashboard"
+              className="inline-block bg-purple-500 text-white px-6 py-2 rounded-lg font-medium hover:bg-purple-600 transition-colors"
             >
               Back to Dashboard
             </Link>
@@ -649,175 +672,463 @@ export default function CompletePage() {
   }
 
   const isDelivery = job.type === 'delivery'
-  const typeLabel = isDelivery ? 'Delivery' : 'Collection'
   const typeIcon = isDelivery ? '📦' : '🚚'
+  const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
+  const googleMapsUrl = getGoogleMapsUrl(venue?.address)
+  const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
+  const statusInfo = translateStatus(job.status)
+  
+  // Check if this is a multi-stop view
+  const isMultiStop = runGroup && runJobs.length > 1
 
   return (
     <div className="min-h-screen bg-gray-50 pb-8">
-      {/* Offline banner */}
-      {!isOnline && <OfflineBanner />}
-
-      {/* Header */}
       <header className="bg-white shadow-sm sticky top-0 z-10">
-        <div className="max-w-lg mx-auto px-4 py-3 flex items-center">
+        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
           <Link
-            href={`/job/${jobId}`}
+            href="/dashboard"
             className="flex items-center text-gray-600 hover:text-gray-900 transition-colors"
           >
             <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
-            Cancel
+            Back
           </Link>
-          <h1 className="flex-1 text-center font-semibold text-gray-900">
-            Complete {typeLabel}
-          </h1>
-          <div className="w-16"></div>
+          <button
+            onClick={() => window.location.reload()}
+            className="text-gray-600 hover:text-gray-900 transition-colors"
+            title="Refresh"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </button>
         </div>
       </header>
 
       <main className="max-w-lg mx-auto p-4 space-y-4">
         
-        {/* Job Summary */}
-        <div className="bg-white rounded-xl shadow-sm p-4">
-          <div className="flex items-center gap-3">
-            <span className="text-2xl">{typeIcon}</span>
-            <div>
-              <h2 className="font-semibold text-gray-900">
-                {formatJobTitle(job.name, job.venueName)}
-              </h2>
-              <p className="text-sm text-gray-500">{formatDate(job.date)}</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Equipment List */}
-        {job.hhRef && (
-          <div className="bg-white rounded-xl shadow-sm p-4">
-            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>📋</span> Equipment {isDelivery ? 'Delivered' : 'Collected'}
-            </h3>
-            <EquipmentList hhRef={job.hhRef} />
+        {/* Multi-stop header */}
+        {isMultiStop && (
+          <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
+            <h2 className="font-semibold text-purple-800 mb-1">
+              📦 Multi-drop Run ({runJobs.length} stops)
+            </h2>
+            <p className="text-sm text-purple-600">
+              {formatDate(job.date)}
+            </p>
           </div>
         )}
 
-        {/* Notes */}
-        <div className="bg-white rounded-xl shadow-sm p-4">
-          <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>📝</span> Notes
-          </h3>
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Any notes about this delivery/collection..."
-            className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-ooosh-500 focus:border-ooosh-500 resize-none"
-            rows={3}
-          />
-        </div>
+        {/* Single job or first stop header */}
+        {!isMultiStop && (
+          <>
+            {/* Job Header */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="text-3xl">{typeIcon}</span>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">
+                      {typeLabel}
+                    </span>
+                    {job.whatIsIt && (
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                        job.whatIsIt === 'vehicle' 
+                          ? 'bg-blue-100 text-blue-700' 
+                          : 'bg-gray-100 text-gray-600'
+                      }`}>
+                        {job.whatIsIt === 'vehicle' ? '🚐 Vehicle' : '🎸 Equipment'}
+                      </span>
+                    )}
+                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.style}`}>
+                      <span>{statusInfo.icon}</span>
+                      {statusInfo.label}
+                    </span>
+                  </div>
+                  <h1 className="text-xl font-bold text-gray-900 mt-1">
+                    {venue?.name || job.venueName || job.name}
+                  </h1>
+                </div>
+              </div>
 
-        {/* Customer Present Toggle */}
-        <div className="bg-white rounded-xl shadow-sm p-4">
-          <label className="flex items-center justify-between cursor-pointer">
-            <div>
-              <span className="font-medium text-gray-900">Customer not present</span>
-              <p className="text-sm text-gray-500">Photo required instead of signature</p>
-            </div>
-            <div className="relative">
-              <input
-                type="checkbox"
-                checked={!customerPresent}
-                onChange={(e) => {
-                  setCustomerPresent(!e.target.checked)
-                  // Clear signature when switching to customer not present
-                  if (e.target.checked) {
-                    setSignature(null)
-                  }
-                }}
-                className="sr-only"
-              />
-              <div className={`w-11 h-6 rounded-full transition-colors ${!customerPresent ? 'bg-ooosh-500' : 'bg-gray-300'}`}>
-                <div className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${!customerPresent ? 'translate-x-5' : ''}`}></div>
+              <hr className="my-4 border-gray-100" />
+
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400 w-6 text-center">📅</span>
+                  <div>
+                    <p className="text-sm text-gray-500">Date</p>
+                    <p className="font-medium text-gray-900">{formatDate(job.date)}</p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400 w-6 text-center">⏰</span>
+                  <div>
+                    <p className="text-sm text-gray-500">Arrive by</p>
+                    <p className="font-medium text-gray-900">{formatTime(job.time)}</p>
+                  </div>
+                </div>
+
+                {job.driverPay && job.driverPay > 0 && (
+                  <div className="flex items-center gap-3">
+                    <span className="text-gray-400 w-6 text-center">💷</span>
+                    <div>
+                      <p className="text-sm text-gray-500">Agreed fee</p>
+                      <p className="font-medium text-green-600">£{job.driverPay.toFixed(0)} + expenses</p>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
-          </label>
-        </div>
 
-        {/* Signature (when customer present) */}
-        {customerPresent && (
-          <div className="bg-white rounded-xl shadow-sm p-4">
-            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-              <span>✍️</span> Client Signature
-              <span className="text-red-500 text-sm">*required</span>
-            </h3>
-            <p className="text-sm text-gray-500 mb-3">
-              Please ask the client to sign below to confirm receipt
-            </p>
-            <SignatureCanvas onSignatureChange={setSignature} />
+            {/* Reference */}
+            {job.hhRef && (
+              <div className="bg-white rounded-xl shadow-sm p-6">
+                <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                  <span>🔗</span> Reference
+                </h2>
+                <p className="text-gray-600">
+                  HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
+                </p>
+              </div>
+            )}
+
+            {/* Location */}
+            {venue && (venue.address || venue.whatThreeWords) && (
+              <div className="bg-white rounded-xl shadow-sm p-6">
+                <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <span>📍</span> Location
+                </h2>
+                
+                <div className="space-y-2">
+                  {venue.address && (
+                    <p className="text-gray-700">{venue.address}</p>
+                  )}
+                  
+                  {venue.whatThreeWords && (
+                    <p className="text-gray-500 text-sm font-mono">
+                      ///{venue.whatThreeWords}
+                    </p>
+                  )}
+                </div>
+                
+                <div className="mt-4 flex flex-wrap gap-3">
+                  {googleMapsUrl && (
+                    <a
+                      href={googleMapsUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                      Google Maps
+                    </a>
+                  )}
+                  
+                  {what3WordsUrl && (
+                    <a
+                      href={what3WordsUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm"
+                    >
+                      <span className="font-bold">///</span>
+                      What3Words
+                    </a>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Contact */}
+            {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
+              <div className="bg-white rounded-xl shadow-sm p-6">
+                <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <span>👤</span> Contact
+                  {venue.phoneHidden && venue.phoneVisibleFrom && (
+                    <span className="text-xs font-normal text-gray-400 ml-2">
+                      (phone visible from {venue.phoneVisibleFrom})
+                    </span>
+                  )}
+                </h2>
+                
+                <div className="space-y-3">
+                  {venue.contact1 && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-400 w-6 text-center">👤</span>
+                      <span className="text-gray-700">{venue.contact1}</span>
+                    </div>
+                  )}
+                  
+                  {venue.contact2 && (
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-400 w-6 text-center">👤</span>
+                      <span className="text-gray-700">{venue.contact2}</span>
+                    </div>
+                  )}
+                  
+                  {venue.phoneHidden ? (
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-400 w-6 text-center">📞</span>
+                      <span className="text-gray-400 italic">
+                        Available from {venue.phoneVisibleFrom}
+                      </span>
+                    </div>
+                  ) : (
+                    <>
+                      {venue.phone && (
+                        <a
+                          href={`tel:${venue.phone}`}
+                          className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                        >
+                          <span className="w-6 text-center">📞</span>
+                          <span className="font-medium">{venue.phone}</span>
+                        </a>
+                      )}
+                      
+                      {venue.phone2 && (
+                        <a
+                          href={`tel:${venue.phone2}`}
+                          className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                        >
+                          <span className="w-6 text-center">📞</span>
+                          <span className="font-medium">{venue.phone2}</span>
+                        </a>
+                      )}
+                    </>
+                  )}
+                  
+                  {venue.email && (
+                    <a
+                      href={`mailto:${venue.email}`}
+                      className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                    >
+                      <span className="w-6 text-center">✉️</span>
+                      <span className="font-medium">{venue.email}</span>
+                    </a>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Equipment List - now with whatIsIt for filtering */}
+            {job.hhRef && (
+              <EquipmentList hhRef={job.hhRef} whatIsIt={job.whatIsIt} />
+            )}
+
+            {/* Access Info */}
+            {venue?.accessNotes && (
+              <div className="bg-white rounded-xl shadow-sm p-6">
+                <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                  <span>🚪</span> Access Info
+                </h2>
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                  <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Key Notes */}
+            {job.keyNotes && (
+              <div className="bg-white rounded-xl shadow-sm p-6">
+                <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                  <span>📋</span> Key Notes
+                </h2>
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Stage Notes */}
+            {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
+              <div className="bg-white rounded-xl shadow-sm p-6">
+                <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                  <span>🎭</span> Stage Notes
+                </h2>
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
+                </div>
+              </div>
+            )}
+
+            {/* Notification Toggle */}
+            <div className="bg-white rounded-xl shadow-sm p-6">
+              <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                <span>🔔</span> Notifications
+              </h2>
+              <NotificationMuteToggle jobId={job.id} />
+              <p className="text-xs text-gray-500 mt-2">
+                Turn off to stop receiving email updates about this specific job
+              </p>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="space-y-3 pt-2">
+              <button
+                className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+                onClick={() => alert('Calendar export coming soon!')}
+              >
+                <span>📅</span> Add to Calendar
+              </button>
+
+              {!job.completedAtDate && (
+                <Link
+                  href={`/job/${job.id}/complete`}
+                  className="w-full bg-purple-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-purple-600 transition-colors flex items-center justify-center gap-2 text-lg"
+                >
+                  <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
+                </Link>
+              )}
+
+              {job.completedAtDate && (
+                <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
+                  <span className="text-green-600 font-medium">
+                    ✅ Completed on {formatDate(job.completedAtDate)}
+                  </span>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* Multi-stop accordion view */}
+        {isMultiStop && !loadingRun && (
+          <div className="space-y-3">
+            {runJobs.map((stopJob, index) => {
+              const stopVenue = runVenues.get(stopJob.venueId || '') || null
+              const isExpanded = expandedStops.has(stopJob.id)
+              const stopStatusInfo = translateStatus(stopJob.status)
+              
+              return (
+                <div key={stopJob.id} className="bg-white rounded-xl shadow-sm overflow-hidden">
+                  {/* Stop header - always visible */}
+                  <button
+                    onClick={() => toggleStopExpanded(stopJob.id)}
+                    className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center font-bold text-sm">
+                        {index + 1}
+                      </div>
+                      <div className="text-left">
+                        <p className="font-medium text-gray-900">
+                          {stopVenue?.name || stopJob.venueName || stopJob.name}
+                        </p>
+                        <p className="text-sm text-gray-500">
+                          {stopJob.time || 'TBC'} · {stopJob.type === 'delivery' ? 'Delivery' : 'Collection'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${stopStatusInfo.style}`}>
+                        {stopStatusInfo.icon}
+                      </span>
+                      <svg 
+                        className={`w-5 h-5 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} 
+                        fill="none" 
+                        stroke="currentColor" 
+                        viewBox="0 0 24 24"
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </div>
+                  </button>
+                  
+                  {/* Expanded details */}
+                  {isExpanded && (
+                    <div className="px-6 pb-4 border-t border-gray-100">
+                      <div className="pt-4 space-y-4">
+                        {/* Location */}
+                        {stopVenue?.address && (
+                          <div>
+                            <p className="text-sm text-gray-500 mb-1">📍 Location</p>
+                            <p className="text-gray-700">{stopVenue.address}</p>
+                            {stopVenue.whatThreeWords && (
+                              <p className="text-gray-500 text-sm font-mono mt-1">
+                                ///{stopVenue.whatThreeWords}
+                              </p>
+                            )}
+                            <div className="mt-2 flex gap-2">
+                              {getGoogleMapsUrl(stopVenue.address) && (
+                                <a
+                                  href={getGoogleMapsUrl(stopVenue.address)!}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-sm text-blue-600 hover:underline"
+                                >
+                                  Open in Maps →
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        
+                        {/* Contact */}
+                        {(stopVenue?.contact1 || stopVenue?.phone) && (
+                          <div>
+                            <p className="text-sm text-gray-500 mb-1">👤 Contact</p>
+                            {stopVenue.contact1 && <p className="text-gray-700">{stopVenue.contact1}</p>}
+                            {stopVenue.phone && (
+                              <a href={`tel:${stopVenue.phone}`} className="text-purple-600 hover:underline">
+                                {stopVenue.phone}
+                              </a>
+                            )}
+                          </div>
+                        )}
+                        
+                        {/* Access Notes */}
+                        {stopVenue?.accessNotes && (
+                          <div>
+                            <p className="text-sm text-gray-500 mb-1">🚪 Access</p>
+                            <p className="text-gray-700 text-sm">{stopVenue.accessNotes}</p>
+                          </div>
+                        )}
+                        
+                        {/* Key Notes */}
+                        {stopJob.keyNotes && (
+                          <div>
+                            <p className="text-sm text-gray-500 mb-1">📋 Notes</p>
+                            <p className="text-gray-700 text-sm">{stopJob.keyNotes}</p>
+                          </div>
+                        )}
+                        
+                        {/* View full details link */}
+                        <Link
+                          href={`/job/${stopJob.id}`}
+                          className="inline-block text-sm font-medium text-purple-600 hover:text-purple-500"
+                        >
+                          View full details →
+                        </Link>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+            
+            {/* Total fee for run */}
+            {runJobs.length > 0 && (
+              <div className="bg-white rounded-xl shadow-sm p-4 flex items-center justify-between">
+                <span className="text-gray-600">Total agreed fee</span>
+                <span className="font-bold text-green-600">
+                  £{runJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0).toFixed(0)}
+                </span>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Photos */}
-        <div className="bg-white rounded-xl shadow-sm p-4">
-          <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>📸</span> Photos
-            {!customerPresent && <span className="text-red-500 text-sm">*required</span>}
-            {customerPresent && <span className="text-gray-400 text-sm">(optional)</span>}
-          </h3>
-          <p className="text-sm text-gray-500 mb-3">
-            {customerPresent 
-              ? 'Optionally add photos of the delivery/collection'
-              : 'Take at least one photo showing where items were left'
-            }
-          </p>
-          <PhotoCapture 
-            photos={photos} 
-            onPhotosChange={setPhotos} 
-            required={!customerPresent}
-          />
-        </div>
-
-        {/* Submit Error */}
-        {submitError && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-            <p className="text-red-700 text-sm">{submitError}</p>
+        {loadingRun && (
+          <div className="text-center py-8">
+            <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+            <p className="text-gray-600">Loading run details...</p>
           </div>
-        )}
-
-        {/* Submit Button */}
-        <button
-          onClick={handleSubmit}
-          disabled={!isValid || submitting || !isOnline}
-          className={`w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center gap-2 transition-colors ${
-            isValid && !submitting && isOnline
-              ? 'bg-green-500 text-white hover:bg-green-600'
-              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-          }`}
-        >
-          {submitting ? (
-            <>
-              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-              Completing...
-            </>
-          ) : !isOnline ? (
-            <>
-              <span>📡</span>
-              Offline - Cannot Submit
-            </>
-          ) : (
-            <>
-              <span>✓</span>
-              Complete {typeLabel}
-            </>
-          )}
-        </button>
-
-        {!isValid && isOnline && (
-          <p className="text-center text-sm text-gray-500">
-            {customerPresent 
-              ? 'Please capture client signature above'
-              : 'Please take at least one photo'
-            }
-          </p>
         )}
 
       </main>

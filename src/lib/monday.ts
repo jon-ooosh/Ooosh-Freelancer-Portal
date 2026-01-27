@@ -29,6 +29,7 @@ export const FREELANCER_COLUMNS = {
 export const DC_COLUMNS = {
   hhRef: 'text2',
   deliverCollect: 'status_1',              // "Delivery" or "Collection"
+  whatIsIt: 'status4',                     // "Equipment" or "A vehicle"
   date: 'date4',
   timeToArrive: 'hour',
   venueConnect: 'connect_boards6',         // Connect column linking to Address Book
@@ -46,6 +47,7 @@ export const DC_COLUMNS = {
   completedAtTime: 'hour_mkywgx0x',
   extraCharges: 'numeric_mkyws6s',
   extraChargesReason: 'long_text_mkywkth4',
+  clientEmail: 'email',                    // Client email for delivery notes
 } as const
 
 // Address Book / Venues board columns
@@ -73,6 +75,7 @@ export const RESOURCES_COLUMNS = {
 const DC_COLUMNS_TO_FETCH = [
   DC_COLUMNS.hhRef,
   DC_COLUMNS.deliverCollect,
+  DC_COLUMNS.whatIsIt,            // Equipment vs Vehicle
   DC_COLUMNS.date,
   DC_COLUMNS.timeToArrive,
   DC_COLUMNS.venueConnect,        // Need this to get linked venue ID
@@ -83,6 +86,7 @@ const DC_COLUMNS_TO_FETCH = [
   DC_COLUMNS.driverPayMirror,
   DC_COLUMNS.completedAtDate,
   DC_COLUMNS.completionNotes,
+  DC_COLUMNS.clientEmail,
 ]
 
 // List of column IDs we need to fetch for venues
@@ -701,6 +705,7 @@ export interface JobRecord {
   name: string
   hhRef?: string
   type: 'delivery' | 'collection'
+  whatIsIt?: 'equipment' | 'vehicle'      // Equipment or A vehicle
   date?: string
   time?: string
   venueName?: string
@@ -713,6 +718,18 @@ export interface JobRecord {
   completedAtDate?: string
   completedAtTime?: string
   completionNotes?: string
+  clientEmail?: string          // Client email for delivery notes
+}
+
+/**
+ * Parse the "What is it?" status column into a normalized value
+ */
+function parseWhatIsIt(text: string | undefined): 'equipment' | 'vehicle' | undefined {
+  if (!text) return undefined
+  const normalized = text.toLowerCase().trim()
+  if (normalized.includes('vehicle')) return 'vehicle'
+  if (normalized.includes('equipment')) return 'equipment'
+  return undefined
 }
 
 /**
@@ -813,6 +830,9 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
     const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
     const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
 
+    // Determine what is it (equipment or vehicle)
+    const whatIsIt = parseWhatIsIt(getColText(DC_COLUMNS.whatIsIt))
+
      // Parse driver pay from mirror column
     const feeText = getColText(DC_COLUMNS.driverPayMirror)
     const driverPay = feeText ? parseFloat(feeText) : undefined
@@ -831,6 +851,7 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
       name: item.name,
       hhRef: getColText(DC_COLUMNS.hhRef),
       type: jobType,
+      whatIsIt,
       date: getColText(DC_COLUMNS.date),
       time: getColText(DC_COLUMNS.timeToArrive),
       venueName: getColText(DC_COLUMNS.venueConnect),
@@ -842,6 +863,7 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
       keyNotes: getColText(DC_COLUMNS.keyPoints),
       completedAtDate: getColText(DC_COLUMNS.completedAtDate),
       completionNotes: getColText(DC_COLUMNS.completionNotes),
+      clientEmail: getColText(DC_COLUMNS.clientEmail),
     } as JobRecord
   })
 }
@@ -935,6 +957,9 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
   const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
   const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
 
+  // Determine what is it (equipment or vehicle)
+  const whatIsIt = parseWhatIsIt(getColText(DC_COLUMNS.whatIsIt))
+
   // Parse driver pay from mirror column
   const feeText = getColText(DC_COLUMNS.driverPayMirror)
   const driverPay = feeText ? parseFloat(feeText) : undefined
@@ -953,6 +978,7 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
     name: item.name,
     hhRef: getColText(DC_COLUMNS.hhRef),
     type: jobType,
+    whatIsIt,
     date: getColText(DC_COLUMNS.date),
     time: getColText(DC_COLUMNS.timeToArrive),
     venueName: getColText(DC_COLUMNS.venueConnect),
@@ -964,6 +990,7 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
     keyNotes: getColText(DC_COLUMNS.keyPoints),
     completedAtDate: getColText(DC_COLUMNS.completedAtDate),
     completionNotes: getColText(DC_COLUMNS.completionNotes),
+    clientEmail: getColText(DC_COLUMNS.clientEmail),
   }
 }
 
@@ -1180,6 +1207,9 @@ export async function getJobByIdInternal(jobId: string): Promise<JobRecord | nul
   const deliverCollectText = getColText(DC_COLUMNS.deliverCollect).toLowerCase()
   const jobType = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
 
+  // Determine what is it (equipment or vehicle)
+  const whatIsIt = parseWhatIsIt(getColText(DC_COLUMNS.whatIsIt))
+
   // Parse driver pay from mirror column
   const feeText = getColText(DC_COLUMNS.driverPayMirror)
   const driverPay = feeText ? parseFloat(feeText) : undefined
@@ -1200,6 +1230,7 @@ export async function getJobByIdInternal(jobId: string): Promise<JobRecord | nul
     name: item.name,
     hhRef: getColText(DC_COLUMNS.hhRef),
     type: jobType,
+    whatIsIt,
     date: getColText(DC_COLUMNS.date),
     time: getColText(DC_COLUMNS.timeToArrive),
     venueName: getColText(DC_COLUMNS.venueConnect),
@@ -1211,6 +1242,7 @@ export async function getJobByIdInternal(jobId: string): Promise<JobRecord | nul
     keyNotes: getColText(DC_COLUMNS.keyPoints),
     completedAtDate: getColText(DC_COLUMNS.completedAtDate),
     completionNotes: getColText(DC_COLUMNS.completionNotes),
+    clientEmail: getColText(DC_COLUMNS.clientEmail),
   }
 }
 

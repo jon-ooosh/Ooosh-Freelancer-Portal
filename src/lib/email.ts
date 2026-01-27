@@ -65,7 +65,8 @@ function getPortalUrl(): string {
 }
 
 /**
- * Format a date string nicely
+ * Format a date string nicely (full format for email body)
+ * e.g., "Monday, 27 January 2026"
  */
 function formatDateNice(dateStr: string): string {
   try {
@@ -82,6 +83,43 @@ function formatDateNice(dateStr: string): string {
     // Fall through
   }
   return dateStr
+}
+
+/**
+ * Format a date string for subject lines (short format)
+ * e.g., "27th Jan, 2026"
+ */
+function formatDateShort(dateStr: string): string {
+  try {
+    const dateObj = new Date(dateStr)
+    if (!isNaN(dateObj.getTime())) {
+      const day = dateObj.getDate()
+      const month = dateObj.toLocaleDateString('en-GB', { month: 'short' })
+      const year = dateObj.getFullYear()
+      
+      // Add ordinal suffix (1st, 2nd, 3rd, 4th, etc.)
+      const ordinal = getOrdinalSuffix(day)
+      
+      return `${day}${ordinal} ${month}, ${year}`
+    }
+  } catch {
+    // Fall through
+  }
+  return dateStr
+}
+
+/**
+ * Get ordinal suffix for a day number
+ * e.g., 1 -> "st", 2 -> "nd", 3 -> "rd", 4 -> "th"
+ */
+function getOrdinalSuffix(day: number): string {
+  if (day > 3 && day < 21) return 'th' // 4th-20th all use 'th'
+  switch (day % 10) {
+    case 1: return 'st'
+    case 2: return 'nd'
+    case 3: return 'rd'
+    default: return 'th'
+  }
 }
 
 /**
@@ -193,6 +231,7 @@ export async function sendJobConfirmedNotification(
   const portalUrl = getPortalUrl()
   const typeText = jobDetails.type === 'delivery' ? 'delivery' : 'collection'
   const formattedDate = formatDateNice(jobDetails.date)
+  const formattedDateShort = formatDateShort(jobDetails.date)
   const timeStr = jobDetails.time ? ` at ${jobDetails.time}` : ''
   const subjectName = name || 'Driver'
 
@@ -229,7 +268,7 @@ The team at Ooosh! Tours Ltd`
 
   await sendEmail({
     to,
-    subject: `${subjectName}, new job on ${jobDetails.date}`,
+    subject: `${subjectName}, new job on ${formattedDateShort}`,
     text,
     html,
   })
@@ -335,6 +374,7 @@ export async function sendJobCancelledNotification(
   const greeting = name ? `Hi ${name}` : 'Hi'
   const typeText = jobDetails.type === 'delivery' ? 'Delivery' : 'Collection'
   const formattedDate = formatDateNice(jobDetails.date)
+  const formattedDateShort = formatDateShort(jobDetails.date)
 
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -372,7 +412,7 @@ The team at Ooosh! Tours Ltd`
 
   await sendEmail({
     to,
-    subject: `Job cancelled - ${jobDetails.venue}`,
+    subject: `Job cancelled - ${formattedDateShort} - ${jobDetails.venue}`,
     text,
     html,
   })
