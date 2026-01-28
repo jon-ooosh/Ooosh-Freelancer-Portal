@@ -50,6 +50,72 @@ interface CompleteJobRequest {
 }
 
 // =============================================================================
+// HELPER: Fetch client name from mirrored column
+// =============================================================================
+
+/**
+ * Fetch client name from the D&C board's mirrored client column
+ * Column ID: lookup_mm01477j
+ */
+async function getClientNameForJob(jobId: string): Promise<string | undefined> {
+  try {
+    const boardId = getBoardIds().deliveries
+    
+    // For mirrored columns, we need to fetch with display_value
+    const query = `
+      query ($boardId: [ID!]!, $itemId: [ID!]!) {
+        boards(ids: $boardId) {
+          items_page(query_params: { ids: $itemId }) {
+            items {
+              id
+              column_values(ids: ["lookup_mm01477j"]) {
+                id
+                text
+                ... on MirrorValue {
+                  display_value
+                }
+              }
+            }
+          }
+        }
+      }
+    `
+    
+    const result = await mondayQuery<{
+      boards: Array<{
+        items_page: {
+          items: Array<{
+            id: string
+            column_values: Array<{
+              id: string
+              text: string
+              display_value?: string
+            }>
+          }>
+        }
+      }>
+    }>(query, { boardId: [boardId], itemId: [jobId] })
+    
+    const item = result.boards[0]?.items_page?.items?.[0]
+    if (!item) return undefined
+    
+    const clientCol = item.column_values.find(col => col.id === 'lookup_mm01477j')
+    // Try display_value first (for mirror columns), fall back to text
+    const clientName = clientCol?.display_value || clientCol?.text
+    
+    if (clientName && clientName.trim()) {
+      console.log(`Complete API: Found client name: ${clientName}`)
+      return clientName.trim()
+    }
+    
+    return undefined
+  } catch (err) {
+    console.error('Failed to fetch client name:', err)
+    return undefined
+  }
+}
+
+// =============================================================================
 // API HANDLER
 // =============================================================================
 
@@ -284,6 +350,9 @@ export async function POST(
       console.log(`Complete API: Sending client email for job ${jobId} (type: ${job.type})`)
       
       try {
+        // Fetch client name for personalization
+        const clientName = await getClientNameForJob(jobId)
+        
         if (job.type === 'delivery') {
           // For deliveries: Generate PDF and send with attachment
           await sendDeliveryNoteToClient(
@@ -292,6 +361,7 @@ export async function POST(
             signature || null,
             completedDate,
             session.email,
+            clientName,
             errors
           )
         } else {
@@ -300,7 +370,8 @@ export async function POST(
             clientEmails,
             job.venueName || job.name,
             job.date || completedDate.toISOString(),
-            job.hhRef || 'N/A'
+            job.hhRef || 'N/A',
+            clientName
           )
           
           if (!emailResult.success) {
@@ -355,6 +426,7 @@ async function sendDeliveryNoteToClient(
   signatureBase64: string | null,
   completedDate: Date,
   driverEmail: string,
+  clientName: string | undefined,
   errors: string[]
 ): Promise<void> {
   // Fetch equipment list from HireHop
@@ -395,6 +467,7 @@ async function sendDeliveryNoteToClient(
       hhRef: job.hhRef || 'N/A',
       jobDate: job.date || completedDate.toISOString(),
       completedAt: completedDate.toISOString(),
+      clientName,
       venueName: job.venueName || job.name,
       deliveryAddress: job.venueAddress,
       items: equipmentItems.map(item => ({
@@ -414,7 +487,8 @@ async function sendDeliveryNoteToClient(
       job.venueName || job.name,
       job.date || completedDate.toISOString(),
       job.hhRef || 'N/A',
-      pdfBuffer
+      pdfBuffer,
+      clientName
     )
     
     if (!emailResult.success) {

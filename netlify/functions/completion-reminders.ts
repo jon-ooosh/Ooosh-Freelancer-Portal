@@ -25,6 +25,9 @@ import type { Config, Context } from '@netlify/functions'
 
 const MONDAY_API_URL = 'https://api.monday.com/v2'
 
+// D&C Board ID for Monday.com links
+const DC_BOARD_ID = '2028045828'
+
 // Column IDs from your Monday.com board
 const DC_COLUMNS = {
   date: 'date4',
@@ -90,6 +93,39 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
   return data.data as T
 }
 
+/**
+ * Fetch venue name from linked venue item
+ * The venueConnect column links to the Address Book board
+ */
+async function getVenueName(linkedItemIds: string[]): Promise<string> {
+  if (!linkedItemIds || linkedItemIds.length === 0) {
+    return 'Unknown Venue'
+  }
+
+  try {
+    const query = `
+      query ($itemIds: [ID!]!) {
+        items(ids: $itemIds) {
+          id
+          name
+        }
+      }
+    `
+
+    const result = await mondayQuery<{
+      items: Array<{ id: string; name: string }>
+    }>(query, { itemIds: linkedItemIds })
+
+    if (result.items && result.items.length > 0) {
+      return result.items[0].name
+    }
+  } catch (err) {
+    console.error('Failed to fetch venue name:', err)
+  }
+
+  return 'Unknown Venue'
+}
+
 // =============================================================================
 // EMAIL SENDING
 // =============================================================================
@@ -112,11 +148,13 @@ async function sendCompletionReminderEmail(
   
   const typeLabel = jobDetails.type === 'delivery' ? 'delivery' : 'collection'
   const typeLabelCapitalised = jobDetails.type === 'delivery' ? 'Delivery' : 'Collection'
+  
+  // Urgency text now includes the problem disclaimer inline
   const urgencyText = reminderLevel === 1 
-    ? 'Please complete it when you have a moment.'
+    ? 'Please complete it when you have a moment - if there was a problem with this job, please reply to this email or contact us asap.'
     : reminderLevel === 2
-      ? 'Please complete it as soon as possible.'
-      : 'This is urgent - please complete it immediately or contact us.'
+      ? 'Please complete it as soon as possible - if there was a problem with this job, please reply to this email or contact us asap.'
+      : 'Please complete it immediately - if there was a problem with this job, please reply to this email or contact us asap.'
   
   // Subject format: "Reminder: please complete your delivery - Venue - Date"
   const subject = reminderLevel === 3
@@ -164,12 +202,6 @@ async function sendCompletionReminderEmail(
           </a>
         </div>
         
-        ${reminderLevel >= 2 ? `
-        <p style="font-size: 13px; color: #999; margin-top: 25px; text-align: center;">
-          If there was a problem with this job, please reply to this email or contact us.
-        </p>
-        ` : ''}
-        
         <p style="font-size: 12px; color: #999; margin-top: 30px; text-align: center;">
           This is reminder ${reminderLevel} of 3. This is an automated message from Ooosh Tours Ltd.
         </p>
@@ -207,9 +239,10 @@ async function sendCompletionReminderEmail(
 }
 
 /**
- * Send escalation email to staff after all 3 reminders have been sent
+ * Send notification email to staff after all 3 reminders have been sent
+ * Links to Monday.com board instead of portal
  */
-async function sendStaffEscalationEmail(
+async function sendStaffNotificationEmail(
   driverName: string,
   driverEmail: string,
   jobDetails: {
@@ -220,11 +253,12 @@ async function sendStaffEscalationEmail(
     time: string
   }
 ): Promise<boolean> {
-  // Remove trailing slash from URL to prevent double-slash issues
-  const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app').replace(/\/$/, '')
+  // Link to Monday.com board item directly
+  const mondayUrl = `https://oooshtours.monday.com/boards/${DC_BOARD_ID}/pulses/${jobDetails.id}`
   const typeLabel = jobDetails.type === 'delivery' ? 'Delivery' : 'Collection'
 
-  const subject = `⚠️ Escalation: ${typeLabel} - ${jobDetails.venue} - not completed after 3 reminders`
+  // Removed "Escalation" from subject
+  const subject = `⚠️ ${typeLabel} - ${jobDetails.venue} - not completed after 3 reminders`
 
   const html = `
     <!DOCTYPE html>
@@ -232,7 +266,7 @@ async function sendStaffEscalationEmail(
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Completion Escalation</title>
+      <title>Job Not Completed</title>
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
       <div style="background: #dc2626; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
@@ -263,14 +297,14 @@ async function sendStaffEscalationEmail(
         </div>
         
         <div style="text-align: center; margin-top: 25px;">
-          <a href="${appUrl}/job/${jobDetails.id}" 
+          <a href="${mondayUrl}" 
              style="display: inline-block; background: #6366f1; color: white; text-decoration: none; padding: 14px 35px; border-radius: 6px; font-weight: 600; font-size: 16px;">
-            View Job in Portal
+            View Job in Monday.com
           </a>
         </div>
         
         <p style="font-size: 12px; color: #999; margin-top: 30px; text-align: center;">
-          This is an automated escalation from the Ooosh Freelancer Portal.
+          This is an automated notification from the Ooosh Freelancer Portal.
         </p>
       </div>
     </body>
@@ -297,10 +331,10 @@ async function sendStaffEscalationEmail(
       html,
     })
 
-    console.log(`Staff escalation sent for job ${jobDetails.id} (driver: ${driverEmail})`)
+    console.log(`Staff notification sent for job ${jobDetails.id} (driver: ${driverEmail})`)
     return true
   } catch (error) {
-    console.error(`Failed to send staff escalation:`, error)
+    console.error(`Failed to send staff notification:`, error)
     return false
   }
 }
@@ -488,6 +522,7 @@ export default async function handler(req: Request, context: Context) {
     console.log(`Completion Reminders: Checking jobs for ${yesterdayStr} and ${todayStr}`)
 
     // Query for jobs - now including deliverCollect column for job type
+    // Using BoardRelationValue to get linked_item_ids for venue
     const query = `
       query {
         boards(ids: [${boardId}]) {
@@ -521,15 +556,19 @@ export default async function handler(req: Request, context: Context) {
     console.log(`Completion Reminders: Found ${allItems.length} total items`)
 
     let remindersSent = 0
-    let escalationsSent = 0
+    let staffNotificationsSent = 0
     let jobsChecked = 0
 
     for (const item of allItems) {
-      // Build column map
+      // Build column map for text values
       const columnMap = item.column_values.reduce((acc, col) => {
         acc[col.id] = col.text || ''
         return acc
       }, {} as Record<string, string>)
+
+      // Get linked_item_ids for venue separately
+      const venueCol = item.column_values.find(col => col.id === DC_COLUMNS.venueConnect)
+      const venueLinkedIds = venueCol?.linked_item_ids || []
 
       const jobDate = columnMap[DC_COLUMNS.date]
       const jobTime = columnMap[DC_COLUMNS.timeToArrive]
@@ -538,7 +577,6 @@ export default async function handler(req: Request, context: Context) {
       const driverEmail = columnMap[DC_COLUMNS.driverEmailMirror]
       const completedAt = columnMap[DC_COLUMNS.completedAtDate]
       const currentReminderLevel = parseInt(columnMap[DC_COLUMNS.completionReminderLevel] || '0') || 0
-      const venueName = columnMap[DC_COLUMNS.venueConnect] || 'Unknown Venue'
 
       // Skip if not today or yesterday
       if (jobDate !== todayStr && jobDate !== yesterdayStr) {
@@ -585,6 +623,9 @@ export default async function handler(req: Request, context: Context) {
       // Get driver name
       const driverName = await getDriverName(driverEmail)
 
+      // Fetch venue name from linked item
+      const venueName = await getVenueName(venueLinkedIds)
+
       // Determine job type from deliverCollect column (not item name!)
       const jobType: 'delivery' | 'collection' = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'
 
@@ -616,9 +657,9 @@ export default async function handler(req: Request, context: Context) {
         await updateReminderLevel(item.id, nextLevel)
         remindersSent++
 
-        // If this was the 3rd reminder, also send staff escalation
+        // If this was the 3rd reminder, also send staff notification
         if (nextLevel === 3) {
-          const escalationSent = await sendStaffEscalationEmail(
+          const notificationSent = await sendStaffNotificationEmail(
             driverName,
             driverEmail,
             {
@@ -629,20 +670,20 @@ export default async function handler(req: Request, context: Context) {
               time: jobTime || 'TBC',
             }
           )
-          if (escalationSent) {
-            escalationsSent++
+          if (notificationSent) {
+            staffNotificationsSent++
           }
         }
       }
     }
 
-    console.log(`Completion Reminders: Checked ${jobsChecked} eligible jobs, sent ${remindersSent} reminders, ${escalationsSent} escalations`)
+    console.log(`Completion Reminders: Checked ${jobsChecked} eligible jobs, sent ${remindersSent} reminders, ${staffNotificationsSent} staff notifications`)
 
     return new Response(JSON.stringify({
       success: true,
       jobsChecked,
       remindersSent,
-      escalationsSent,
+      staffNotificationsSent,
       timestamp: new Date().toISOString(),
     }))
 

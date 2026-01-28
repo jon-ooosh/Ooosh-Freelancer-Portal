@@ -401,13 +401,16 @@ function generateDriverNotesAlertEmail(
 
 /**
  * Generate client delivery note email HTML
+ * Updated with purple header and tweaked wording
  */
 function generateClientDeliveryNoteEmail(
   venueName: string,
   jobDate: string,
-  hhRef: string
+  hhRef: string,
+  clientName?: string
 ): string {
   const formattedDate = formatDateNice(jobDate)
+  const greeting = clientName ? `Hello ${clientName.split(' ')[0]},` : 'Hello,'
   
   return `
     <!DOCTYPE html>
@@ -423,7 +426,7 @@ function generateClientDeliveryNoteEmail(
       </div>
       
       <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 12px 12px;">
-        <p style="font-size: 16px; margin-bottom: 20px;">Hello,</p>
+        <p style="font-size: 16px; margin-bottom: 20px;">${greeting}</p>
         
         <p style="font-size: 16px; margin-bottom: 20px;">
           Please find attached the delivery note for your recent equipment hire from Ooosh Tours.
@@ -470,9 +473,11 @@ function generateClientDeliveryNoteEmail(
 function generateClientCollectionConfirmationEmail(
   venueName: string,
   jobDate: string,
-  hhRef: string
+  hhRef: string,
+  clientName?: string
 ): string {
   const formattedDate = formatDateNice(jobDate)
+  const greeting = clientName ? `Hello ${clientName.split(' ')[0]},` : 'Hello,'
   
   return `
     <!DOCTYPE html>
@@ -488,10 +493,10 @@ function generateClientCollectionConfirmationEmail(
       </div>
       
       <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 12px 12px;">
-        <p style="font-size: 16px; margin-bottom: 20px;">Hello,</p>
+        <p style="font-size: 16px; margin-bottom: 20px;">${greeting}</p>
         
         <p style="font-size: 16px; margin-bottom: 20px;">
-          This is an automated email to let you know we've collected your equipment for job <strong>${hhRef}</strong> from <strong>${venueName}</strong>.
+          Just to let you know - we've collected the equipment for job <strong>${hhRef}</strong> from <strong>${venueName}</strong>.
         </p>
         
         <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid #667eea;">
@@ -508,12 +513,12 @@ function generateClientCollectionConfirmationEmail(
         
         <div style="background: #fff8e6; border-radius: 8px; padding: 15px; margin-bottom: 20px; border-left: 4px solid #f59e0b;">
           <p style="margin: 0; color: #92400e; font-size: 14px;">
-            <strong>📋 Please note:</strong> This is a collection only - we'll verify all items are present and in good condition once everything is back at our warehouse. We'll be in touch if there are any issues.
+            <strong>📋 Please note:</strong> We'll verify that all items are present and in good condition once everything is back at our warehouse. We'll be in touch if there are any issues.
           </p>
         </div>
         
         <p style="font-size: 14px; color: #666; margin-bottom: 20px;">
-          Thanks for choosing Ooosh Tours! If you have any questions, please get in touch.
+          Thanks for choosing Ooosh Tours! If you have any questions, feel free to get in touch.
         </p>
         
         <p style="font-size: 14px; color: #555; margin-top: 25px;">
@@ -704,13 +709,15 @@ export async function sendDriverNotesAlert(
  * @param jobDate - Date of the job
  * @param hhRef - HireHop job reference
  * @param pdfBuffer - The generated PDF as a Buffer
+ * @param clientName - Optional client name for personalization
  */
 export async function sendClientDeliveryNote(
   clientEmails: string[],
   venueName: string,
   jobDate: string,
   hhRef: string,
-  pdfBuffer: Buffer
+  pdfBuffer: Buffer,
+  clientName?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
@@ -736,7 +743,7 @@ export async function sendClientDeliveryNote(
       from: FROM_ADDRESS,
       to: clientEmails.join(', '),
       subject: `📦 Delivery Note - ${venueName} - ${formattedDateShort} (Ref: ${hhRef})`,
-      html: generateClientDeliveryNoteEmail(venueName, jobDate, hhRef),
+      html: generateClientDeliveryNoteEmail(venueName, jobDate, hhRef, clientName),
       attachments: [
         {
           filename,
@@ -765,12 +772,14 @@ export async function sendClientDeliveryNote(
  * @param venueName - Venue name for the job
  * @param jobDate - Date of the job
  * @param hhRef - HireHop job reference
+ * @param clientName - Optional client name for personalization
  */
 export async function sendClientCollectionConfirmation(
   clientEmails: string[],
   venueName: string,
   jobDate: string,
-  hhRef: string
+  hhRef: string,
+  clientName?: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
     if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
@@ -792,7 +801,7 @@ export async function sendClientCollectionConfirmation(
       from: FROM_ADDRESS,
       to: clientEmails.join(', '),
       subject: `🚚 Collection Complete - ${venueName} - ${formattedDateShort} (Ref: ${hhRef})`,
-      html: generateClientCollectionConfirmationEmail(venueName, jobDate, hhRef),
+      html: generateClientCollectionConfirmationEmail(venueName, jobDate, hhRef, clientName),
     })
 
     console.log(`Client collection confirmation sent to ${clientEmails.join(', ')}`)

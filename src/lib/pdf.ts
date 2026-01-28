@@ -19,6 +19,9 @@ export interface DeliveryNoteData {
   jobDate: string
   completedAt: string
   
+  // Client info
+  clientName?: string
+  
   // Venue/delivery info
   venueName: string
   deliveryAddress?: string
@@ -105,6 +108,25 @@ function wrapText(text: string, maxCharsPerLine: number): string[] {
   return lines
 }
 
+/**
+ * Fetch logo image from URL and return as bytes
+ */
+async function fetchLogoImage(): Promise<Uint8Array | null> {
+  try {
+    const logoUrl = 'https://ooosh-freelancer-portal.netlify.app/ooosh-tours-logo-small.png'
+    const response = await fetch(logoUrl)
+    if (!response.ok) {
+      console.warn('Failed to fetch logo:', response.status)
+      return null
+    }
+    const arrayBuffer = await response.arrayBuffer()
+    return new Uint8Array(arrayBuffer)
+  } catch (err) {
+    console.warn('Error fetching logo:', err)
+    return null
+  }
+}
+
 // =============================================================================
 // PDF GENERATION
 // =============================================================================
@@ -126,46 +148,79 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   // Page settings
   const pageWidth = 595.28  // A4 width in points
   const pageHeight = 841.89 // A4 height in points
-  const margin = 50
+  const margin = 40
   const contentWidth = pageWidth - (margin * 2)
   
   // Colors
-  const primaryColor = rgb(0.4, 0.49, 0.92)  // Purple-ish (matches Ooosh brand)
+  const primaryColor = rgb(0.4, 0.49, 0.92)  // Ooosh purple
   const textColor = rgb(0.2, 0.2, 0.2)
-  const lightGray = rgb(0.6, 0.6, 0.6)
-  const tableHeaderBg = rgb(0.95, 0.95, 0.95)
+  const lightGray = rgb(0.5, 0.5, 0.5)
+  const borderColor = rgb(0.85, 0.85, 0.85)
+  const headerBg = rgb(0.96, 0.96, 0.98)
   
   // Add first page
   let page = pdfDoc.addPage([pageWidth, pageHeight])
   let yPosition = pageHeight - margin
   
   // ==========================================================================
-  // HEADER SECTION
+  // HEADER SECTION - HireHop style with logo
   // ==========================================================================
   
-  // Company name (since we can't easily load external images in all environments)
-  page.drawText('OOOSH TOURS', {
-    x: margin,
-    y: yPosition,
-    size: 24,
+  // Try to fetch and embed logo
+  const logoBytes = await fetchLogoImage()
+  let logoHeight = 50
+  
+  if (logoBytes) {
+    try {
+      const logoImage = await pdfDoc.embedPng(logoBytes)
+      const logoAspect = logoImage.width / logoImage.height
+      const logoDisplayHeight = 50
+      const logoDisplayWidth = logoDisplayHeight * logoAspect
+      
+      page.drawImage(logoImage, {
+        x: margin,
+        y: yPosition - logoDisplayHeight,
+        width: logoDisplayWidth,
+        height: logoDisplayHeight,
+      })
+      logoHeight = logoDisplayHeight
+    } catch (err) {
+      console.warn('Failed to embed logo, using text fallback:', err)
+      // Fallback to text
+      page.drawText('OOOSH TOURS', {
+        x: margin,
+        y: yPosition - 25,
+        size: 22,
+        font: helveticaBold,
+        color: primaryColor,
+      })
+    }
+  } else {
+    // Text fallback
+    page.drawText('OOOSH TOURS', {
+      x: margin,
+      y: yPosition - 25,
+      size: 22,
+      font: helveticaBold,
+      color: primaryColor,
+    })
+  }
+  
+  // "Delivery Note" title on the right - larger and bolder
+  const titleText = 'Delivery Note'
+  const titleSize = 24
+  const titleWidth = helveticaBold.widthOfTextAtSize(titleText, titleSize)
+  page.drawText(titleText, {
+    x: pageWidth - margin - titleWidth,
+    y: yPosition - 30,
+    size: titleSize,
     font: helveticaBold,
     color: primaryColor,
   })
   
-  // "Delivery Note" title on the right
-  const titleText = 'Delivery Note'
-  const titleWidth = helveticaBold.widthOfTextAtSize(titleText, 20)
-  page.drawText(titleText, {
-    x: pageWidth - margin - titleWidth,
-    y: yPosition,
-    size: 20,
-    font: helveticaBold,
-    color: textColor,
-  })
+  yPosition -= logoHeight + 10
   
-  yPosition -= 15
-  
-  // Company address line
+  // Company details line
   page.drawText('Compass House, 7 East Street, Portslade, BN41 1DL', {
     x: margin,
     y: yPosition,
@@ -174,64 +229,74 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     color: lightGray,
   })
   
-  yPosition -= 30
+  // Job number on the right
+  const jobNumText = `Job Number: ${data.hhRef}`
+  const jobNumWidth = helvetica.widthOfTextAtSize(jobNumText, 9)
+  page.drawText(jobNumText, {
+    x: pageWidth - margin - jobNumWidth,
+    y: yPosition,
+    size: 9,
+    font: helvetica,
+    color: lightGray,
+  })
   
-  // Divider line
+  yPosition -= 25
+  
+  // Thick divider line
   page.drawLine({
     start: { x: margin, y: yPosition },
     end: { x: pageWidth - margin, y: yPosition },
-    thickness: 1,
-    color: rgb(0.85, 0.85, 0.85),
+    thickness: 2,
+    color: primaryColor,
   })
   
   yPosition -= 25
   
   // ==========================================================================
-  // JOB DETAILS SECTION
+  // JOB DETAILS SECTION - in a bordered box
   // ==========================================================================
   
-  // Two-column layout for job details
-  const leftColX = margin
-  const rightColX = pageWidth / 2 + 20
+  const detailsBoxTop = yPosition
+  const detailsBoxHeight = data.clientName ? 100 : 85
+  
+  // Draw box border
+  page.drawRectangle({
+    x: margin,
+    y: yPosition - detailsBoxHeight,
+    width: contentWidth,
+    height: detailsBoxHeight,
+    borderColor: borderColor,
+    borderWidth: 1,
+    color: headerBg,
+  })
+  
+  yPosition -= 20
+  
+  // Two-column layout
+  const leftColX = margin + 15
+  const rightColX = pageWidth / 2 + 10
   const labelSize = 9
   const valueSize = 11
-  const rowHeight = 18
   
-  // Left column
-  page.drawText('Job Reference:', {
-    x: leftColX,
-    y: yPosition,
-    size: labelSize,
-    font: helvetica,
-    color: lightGray,
-  })
-  page.drawText(data.hhRef || 'N/A', {
-    x: leftColX,
-    y: yPosition - 12,
-    size: valueSize,
-    font: helveticaBold,
-    color: textColor,
-  })
+  // Left column - Client & Venue
+  if (data.clientName) {
+    page.drawText('Client:', {
+      x: leftColX,
+      y: yPosition,
+      size: labelSize,
+      font: helvetica,
+      color: lightGray,
+    })
+    page.drawText(data.clientName, {
+      x: leftColX,
+      y: yPosition - 13,
+      size: valueSize,
+      font: helveticaBold,
+      color: textColor,
+    })
+    yPosition -= 30
+  }
   
-  // Right column
-  page.drawText('Job Date:', {
-    x: rightColX,
-    y: yPosition,
-    size: labelSize,
-    font: helvetica,
-    color: lightGray,
-  })
-  page.drawText(formatDateNice(data.jobDate), {
-    x: rightColX,
-    y: yPosition - 12,
-    size: valueSize,
-    font: helveticaBold,
-    color: textColor,
-  })
-  
-  yPosition -= rowHeight + 20
-  
-  // Venue
   page.drawText('Venue:', {
     x: leftColX,
     y: yPosition,
@@ -241,59 +306,74 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   })
   page.drawText(data.venueName || 'N/A', {
     x: leftColX,
-    y: yPosition - 12,
+    y: yPosition - 13,
     size: valueSize,
     font: helveticaBold,
     color: textColor,
   })
   
-  // Completed at
+  // Reset Y for right column
+  const rightColStartY = detailsBoxTop - 20
+  
+  // Right column - Job Date & Completed
+  page.drawText('Job Date:', {
+    x: rightColX,
+    y: data.clientName ? rightColStartY - 30 : rightColStartY,
+    size: labelSize,
+    font: helvetica,
+    color: lightGray,
+  })
+  page.drawText(formatDateNice(data.jobDate), {
+    x: rightColX,
+    y: (data.clientName ? rightColStartY - 30 : rightColStartY) - 13,
+    size: valueSize,
+    font: helveticaBold,
+    color: textColor,
+  })
+  
   page.drawText('Completed:', {
     x: rightColX,
-    y: yPosition,
+    y: (data.clientName ? rightColStartY - 60 : rightColStartY - 30),
     size: labelSize,
     font: helvetica,
     color: lightGray,
   })
   page.drawText(formatDateTime(data.completedAt), {
     x: rightColX,
-    y: yPosition - 12,
+    y: (data.clientName ? rightColStartY - 60 : rightColStartY - 30) - 13,
     size: valueSize,
     font: helveticaBold,
     color: textColor,
   })
   
-  yPosition -= rowHeight + 20
+  yPosition = detailsBoxTop - detailsBoxHeight - 20
   
-  // Delivery address (if provided)
+  // Delivery address (if provided) - outside the box
   if (data.deliveryAddress) {
     page.drawText('Delivery Address:', {
-      x: leftColX,
+      x: margin,
       y: yPosition,
       size: labelSize,
       font: helvetica,
       color: lightGray,
     })
     
-    // Wrap long addresses
-    const addressLines = wrapText(data.deliveryAddress, 60)
+    const addressLines = wrapText(data.deliveryAddress, 80)
     addressLines.forEach((line, index) => {
       page.drawText(line, {
-        x: leftColX,
-        y: yPosition - 12 - (index * 14),
+        x: margin,
+        y: yPosition - 13 - (index * 13),
         size: valueSize,
         font: helvetica,
         color: textColor,
       })
     })
     
-    yPosition -= rowHeight + (addressLines.length * 14) + 10
+    yPosition -= 15 + (addressLines.length * 13) + 10
   }
   
-  yPosition -= 15
-  
   // ==========================================================================
-  // EQUIPMENT LIST SECTION
+  // EQUIPMENT LIST SECTION - in a bordered box
   // ==========================================================================
   
   // Section header
@@ -307,76 +387,104 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   
   yPosition -= 20
   
-  // Table header background
-  const tableHeaderHeight = 25
+  // Calculate table height needed
+  const rowHeight = 22
+  const headerHeight = 28
+  const itemCount = data.items.length
+  const estimatedTableHeight = headerHeight + (itemCount * rowHeight) + 20
+  
+  // Draw table border
+  const tableTop = yPosition
+  const tableBottom = Math.max(yPosition - estimatedTableHeight, margin + 150) // Leave room for signature
+  
   page.drawRectangle({
     x: margin,
-    y: yPosition - tableHeaderHeight + 5,
+    y: tableBottom,
     width: contentWidth,
-    height: tableHeaderHeight,
-    color: tableHeaderBg,
+    height: tableTop - tableBottom,
+    borderColor: borderColor,
+    borderWidth: 1,
   })
   
-  // Table headers
+  // Table header
   const qtyColWidth = 50
-  const itemColWidth = contentWidth - qtyColWidth
+  const itemColX = margin + 10
+  const qtyColX = pageWidth - margin - qtyColWidth
+  
+  page.drawRectangle({
+    x: margin,
+    y: yPosition - headerHeight,
+    width: contentWidth,
+    height: headerHeight,
+    color: headerBg,
+    borderColor: borderColor,
+    borderWidth: 1,
+  })
   
   page.drawText('Item', {
-    x: margin + 10,
-    y: yPosition - 12,
+    x: itemColX,
+    y: yPosition - 18,
     size: 10,
     font: helveticaBold,
     color: textColor,
   })
   
   page.drawText('Qty', {
-    x: margin + itemColWidth + 15,
-    y: yPosition - 12,
+    x: qtyColX + 10,
+    y: yPosition - 18,
     size: 10,
     font: helveticaBold,
     color: textColor,
   })
   
-  yPosition -= tableHeaderHeight + 5
+  yPosition -= headerHeight
   
   // Table rows
-  const rowPadding = 8
-  const itemFontSize = 10
   let currentCategory = ''
   
   for (const item of data.items) {
     // Check if we need a new page
-    if (yPosition < margin + 100) {
+    if (yPosition < margin + 150) {
+      // Draw closing border for current table
+      page.drawLine({
+        start: { x: margin, y: yPosition },
+        end: { x: pageWidth - margin, y: yPosition },
+        thickness: 1,
+        color: borderColor,
+      })
+      
       page = pdfDoc.addPage([pageWidth, pageHeight])
       yPosition = pageHeight - margin
       
       // Re-draw table header on new page
       page.drawRectangle({
         x: margin,
-        y: yPosition - tableHeaderHeight + 5,
+        y: yPosition - headerHeight,
         width: contentWidth,
-        height: tableHeaderHeight,
-        color: tableHeaderBg,
+        height: headerHeight,
+        color: headerBg,
+        borderColor: borderColor,
+        borderWidth: 1,
       })
       
-      page.drawText('Item', {
-        x: margin + 10,
-        y: yPosition - 12,
+      page.drawText('Item (continued)', {
+        x: itemColX,
+        y: yPosition - 18,
         size: 10,
         font: helveticaBold,
         color: textColor,
       })
       
       page.drawText('Qty', {
-        x: margin + itemColWidth + 15,
-        y: yPosition - 12,
+        x: qtyColX + 10,
+        y: yPosition - 18,
         size: 10,
         font: helveticaBold,
         color: textColor,
       })
       
-      yPosition -= tableHeaderHeight + 5
-      currentCategory = '' // Reset category on new page
+      yPosition -= headerHeight
+      currentCategory = ''
     }
     
     // Category header (if category changed)
@@ -385,8 +493,8 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
       yPosition -= 5
       
       page.drawText(item.category, {
-        x: margin + 5,
-        y: yPosition - rowPadding,
+        x: itemColX,
+        y: yPosition - 12,
         size: 9,
         font: helveticaBold,
         color: primaryColor,
@@ -396,17 +504,15 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     }
     
     // Item row
-    // Wrap long item names
-    const maxItemChars = 70
-    const itemLines = item.name.length > maxItemChars 
-      ? wrapText(item.name, maxItemChars)
+    const itemLines = item.name.length > 65 
+      ? wrapText(item.name, 65)
       : [item.name]
     
     itemLines.forEach((line, index) => {
       page.drawText(line, {
-        x: margin + 15,
-        y: yPosition - rowPadding - (index * 12),
-        size: itemFontSize,
+        x: itemColX + 10,
+        y: yPosition - 12 - (index * 12),
+        size: 10,
         font: helvetica,
         color: textColor,
       })
@@ -414,102 +520,111 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     
     // Quantity (only on first line)
     page.drawText(String(item.quantity), {
-      x: margin + itemColWidth + 20,
-      y: yPosition - rowPadding,
-      size: itemFontSize,
+      x: qtyColX + 15,
+      y: yPosition - 12,
+      size: 10,
       font: helvetica,
       color: textColor,
     })
     
-    // Draw subtle row separator
-    const rowBottom = yPosition - rowPadding - ((itemLines.length - 1) * 12) - 8
+    // Row separator
+    const rowBottom = yPosition - 10 - ((itemLines.length - 1) * 12) - 8
     page.drawLine({
-      start: { x: margin, y: rowBottom },
-      end: { x: pageWidth - margin, y: rowBottom },
+      start: { x: margin + 5, y: rowBottom },
+      end: { x: pageWidth - margin - 5, y: rowBottom },
       thickness: 0.5,
-      color: rgb(0.9, 0.9, 0.9),
+      color: rgb(0.92, 0.92, 0.92),
     })
     
-    yPosition = rowBottom - 5
+    yPosition = rowBottom - 2
   }
   
+  // Close the table box
+  yPosition -= 10
+  
   // ==========================================================================
-  // SIGNATURE SECTION
+  // SIGNATURE SECTION - in a bordered box
   // ==========================================================================
   
-  yPosition -= 30
+  yPosition -= 20
   
   // Check if we need a new page for signature
-  if (yPosition < margin + 120) {
+  if (yPosition < margin + 100) {
     page = pdfDoc.addPage([pageWidth, pageHeight])
     yPosition = pageHeight - margin
   }
   
-  // Signature section header
-  page.drawText('Acknowledgement of Delivery', {
+  // Signature box
+  const sigBoxTop = yPosition
+  const sigBoxHeight = 100
+  
+  page.drawRectangle({
     x: margin,
-    y: yPosition,
-    size: 12,
+    y: yPosition - sigBoxHeight,
+    width: contentWidth,
+    height: sigBoxHeight,
+    borderColor: borderColor,
+    borderWidth: 1,
+  })
+  
+  // Section header inside box
+  page.drawText('Acknowledgement of Delivery', {
+    x: margin + 15,
+    y: yPosition - 20,
+    size: 11,
     font: helveticaBold,
     color: textColor,
   })
   
-  yPosition -= 25
+  yPosition -= 35
   
   // If we have a signature, embed it
   if (data.signatureBase64) {
     try {
-      // Remove data URL prefix if present
       const base64Data = data.signatureBase64.replace(/^data:image\/\w+;base64,/, '')
       const signatureBytes = Buffer.from(base64Data, 'base64')
-      
-      // Embed the PNG image
       const signatureImage = await pdfDoc.embedPng(signatureBytes)
       
-      // Scale signature to fit (max 200x80)
-      const maxWidth = 200
-      const maxHeight = 80
+      // Scale signature to fit
+      const maxWidth = 180
+      const maxHeight = 50
       const scale = Math.min(maxWidth / signatureImage.width, maxHeight / signatureImage.height)
       const scaledWidth = signatureImage.width * scale
       const scaledHeight = signatureImage.height * scale
       
-      // Draw signature image
       page.drawImage(signatureImage, {
-        x: margin,
+        x: margin + 15,
         y: yPosition - scaledHeight,
         width: scaledWidth,
         height: scaledHeight,
       })
       
-      yPosition -= scaledHeight + 10
+      // "Received by customer" text
+      const receivedText = data.driverName 
+        ? `Received by customer - delivered by ${data.driverName}`
+        : 'Received by customer'
       
-      // "Signed by" text
-      if (data.driverName) {
-        page.drawText(`Received by customer - delivered by ${data.driverName}`, {
-          x: margin,
-          y: yPosition,
-          size: 9,
-          font: helvetica,
-          color: lightGray,
-        })
-      }
+      page.drawText(receivedText, {
+        x: margin + 15,
+        y: sigBoxTop - sigBoxHeight + 12,
+        size: 9,
+        font: helvetica,
+        color: lightGray,
+      })
     } catch (err) {
       console.error('Failed to embed signature image:', err)
-      // Fall back to signature line
-      drawSignatureLine(page, margin, yPosition, helvetica, lightGray)
+      drawSignatureLines(page, margin + 15, yPosition, sigBoxTop - sigBoxHeight + 12, helvetica, lightGray)
     }
   } else {
-    // No signature - draw signature line
-    drawSignatureLine(page, margin, yPosition, helvetica, lightGray)
-    yPosition -= 50
+    // No signature - draw signature and date lines
+    drawSignatureLines(page, margin + 15, yPosition, sigBoxTop - sigBoxHeight + 12, helvetica, lightGray)
   }
   
   // ==========================================================================
   // FOOTER
   // ==========================================================================
   
-  // Footer at bottom of last page
-  const footerY = margin
+  const footerY = margin - 10
   page.drawText('Thank you for choosing Ooosh Tours', {
     x: margin,
     y: footerY,
@@ -518,8 +633,9 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     color: lightGray,
   })
   
-  page.drawText('www.oooshtours.co.uk', {
-    x: pageWidth - margin - helvetica.widthOfTextAtSize('www.oooshtours.co.uk', 9),
+  const websiteText = 'www.oooshtours.co.uk'
+  page.drawText(websiteText, {
+    x: pageWidth - margin - helvetica.widthOfTextAtSize(websiteText, 9),
     y: footerY,
     size: 9,
     font: helvetica,
@@ -533,26 +649,27 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
 }
 
 /**
- * Helper to draw signature line when no signature provided
+ * Helper to draw signature and date lines when no signature provided
  */
-function drawSignatureLine(
+function drawSignatureLines(
   page: ReturnType<PDFDocument['addPage']>,
   x: number,
   y: number,
+  bottomY: number,
   font: Awaited<ReturnType<PDFDocument['embedFont']>>,
   color: ReturnType<typeof rgb>
 ): void {
   // Signature line
   page.drawLine({
-    start: { x, y: y - 30 },
-    end: { x: x + 200, y: y - 30 },
+    start: { x, y: y - 25 },
+    end: { x: x + 180, y: y - 25 },
     thickness: 1,
-    color: rgb(0.7, 0.7, 0.7),
+    color: rgb(0.75, 0.75, 0.75),
   })
   
   page.drawText('Signature', {
     x,
-    y: y - 45,
+    y: bottomY,
     size: 9,
     font,
     color,
@@ -560,15 +677,15 @@ function drawSignatureLine(
   
   // Date line
   page.drawLine({
-    start: { x: x + 250, y: y - 30 },
-    end: { x: x + 400, y: y - 30 },
+    start: { x: x + 220, y: y - 25 },
+    end: { x: x + 350, y: y - 25 },
     thickness: 1,
-    color: rgb(0.7, 0.7, 0.7),
+    color: rgb(0.75, 0.75, 0.75),
   })
   
   page.drawText('Date', {
-    x: x + 250,
-    y: y - 45,
+    x: x + 220,
+    y: bottomY,
     size: 9,
     font,
     color,
