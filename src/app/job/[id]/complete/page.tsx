@@ -1109,7 +1109,7 @@ export default function CompletePage() {
 
   const isDelivery = job.type === 'delivery'
   const typeLabel = isDelivery ? 'Delivery' : 'Collection'
-  const typeIcon = isDelivery ? '📦' : '🚚'
+  const typeIcon = isDelivery ? '📦' : '📥'
 
   // Only show client email section for equipment jobs (not vehicles, for now)
   const showClientEmailSection = job.whatIsIt === 'equipment' || !job.whatIsIt

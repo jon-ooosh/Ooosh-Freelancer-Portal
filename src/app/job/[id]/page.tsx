@@ -508,7 +508,7 @@ export default function JobDetailsPage() {
   }
 
   const isDelivery = job.type === 'delivery'
-  const typeIcon = isDelivery ? '📦' : '🚚'
+  const typeIcon = isDelivery ? '📦' : '📥'
   const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
   const googleMapsUrl = getGoogleMapsUrl(venue?.address)
   const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)

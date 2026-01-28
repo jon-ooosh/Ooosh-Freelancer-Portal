@@ -418,6 +418,10 @@ export interface FreelancerRecord {
  * OPTIMIZED: Uses items_page_by_column_values to filter on Monday's server
  * instead of fetching all items and filtering locally.
  * This reduces query time from 6+ seconds to <1 second.
+ * 
+ * FALLBACK: If server-side filtering returns no results, falls back to
+ * fetching all freelancers and filtering locally. This handles Monday.com's
+ * occasional search index inconsistencies with Email columns.
  */
 export async function findFreelancerByEmail(email: string): Promise<FreelancerRecord | null> {
   const boardId = getBoardIds().freelancers
@@ -457,25 +461,77 @@ export async function findFreelancerByEmail(email: string): Promise<FreelancerRe
     }
   `
 
+  interface FreelancerItem {
+    id: string
+    name: string
+    column_values: Array<{
+      id: string
+      text: string
+      value: string
+    }>
+  }
+
   interface QueryResult {
     items_page_by_column_values: {
-      items: Array<{
-        id: string
-        name: string
-        column_values: Array<{
-          id: string
-          text: string
-          value: string
-        }>
-      }>
+      items: FreelancerItem[]
     }
   }
 
   const result = await mondayQuery<QueryResult>(query)
   
   const queryTime = Date.now() - startTime
-  const items = result.items_page_by_column_values?.items || []
+  let items = result.items_page_by_column_values?.items || []
   console.log('Monday: Freelancer query completed in', queryTime, 'ms, found', items.length, 'matches')
+
+  // FALLBACK: If optimized query returns no results, fetch all and filter locally
+  // This handles Monday.com's occasional search index inconsistencies with Email columns
+  if (items.length === 0) {
+    console.log('Monday: Optimized query found no matches, trying fallback fetch-all method...')
+    const fallbackStartTime = Date.now()
+    
+    const fallbackQuery = `
+      query {
+        boards(ids: ["${boardId}"]) {
+          items_page(limit: 500) {
+            items {
+              id
+              name
+              column_values(ids: ${JSON.stringify(FREELANCER_COLUMNS_TO_FETCH)}) {
+                id
+                text
+                value
+              }
+            }
+          }
+        }
+      }
+    `
+    
+    interface FallbackResult {
+      boards: Array<{
+        items_page: {
+          items: FreelancerItem[]
+        }
+      }>
+    }
+    
+    const fallbackResult = await mondayQuery<FallbackResult>(fallbackQuery)
+    const allItems = fallbackResult.boards?.[0]?.items_page?.items || []
+    
+    // Filter locally by email
+    items = allItems.filter(item => {
+      const emailCol = item.column_values.find(col => col.id === FREELANCER_COLUMNS.email)
+      const itemEmail = emailCol?.text?.toLowerCase().trim() || ''
+      return itemEmail === normalizedEmail
+    })
+    
+    const fallbackTime = Date.now() - fallbackStartTime
+    console.log(`Monday: Fallback query completed in ${fallbackTime}ms, found ${items.length} matches out of ${allItems.length} total freelancers`)
+    
+    if (items.length > 0) {
+      console.warn(`Monday: NOTICE - Freelancer "${normalizedEmail}" found via fallback but NOT via optimized query. Monday.com search index may need time to update.`)
+    }
+  }
 
   if (items.length === 0) {
     return null

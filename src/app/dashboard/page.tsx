@@ -76,6 +76,12 @@ function formatDate(dateStr: string): string {
 function formatTime(timeStr: string | undefined): string {
   if (!timeStr) return ''
   
+  // If already contains AM/PM, return as-is (it's already formatted)
+  if (/[AP]M/i.test(timeStr)) {
+    return timeStr
+  }
+  
+  // Otherwise, parse as 24-hour and convert
   const match = timeStr.match(/(\d{1,2}):(\d{2})/)
   if (!match) return timeStr
   
@@ -194,7 +200,7 @@ function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStar
             isDelivery ? 'bg-blue-100' : 'bg-orange-100'
           }`}>
             <span className={isDelivery ? 'text-blue-600' : 'text-orange-600'}>
-              {isDelivery ? '📦' : '🚚'}
+              {isDelivery ? '📦' : '📥'}
             </span>
           </div>
           <div>
