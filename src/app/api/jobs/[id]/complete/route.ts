@@ -50,25 +50,28 @@ interface CompleteJobRequest {
 }
 
 // =============================================================================
-// HELPER: Fetch client name from mirrored column
+// HELPER: Fetch client name and venue from mirrored columns
 // =============================================================================
 
 /**
- * Fetch client name from the D&C board's mirrored client column
- * Column ID: lookup_mm01477j
+ * Fetch client name and venue from the D&C board's mirrored columns
+ * - Client: lookup_mm01477j
+ * - Venue: mirror467
+ * 
+ * Uses MirrorValue fragment with display_value as per Monday.com API requirements
  */
-async function getClientNameForJob(jobId: string): Promise<string | undefined> {
+async function getJobMirrorData(jobId: string): Promise<{ clientName?: string; venueName?: string }> {
   try {
     const boardId = getBoardIds().deliveries
     
-    // For mirrored columns, we need to fetch with display_value
+    // For mirrored columns, we need to use the MirrorValue fragment with display_value
     const query = `
       query ($boardId: [ID!]!, $itemId: [ID!]!) {
         boards(ids: $boardId) {
           items_page(query_params: { ids: $itemId }) {
             items {
               id
-              column_values(ids: ["lookup_mm01477j"]) {
+              column_values(ids: ["lookup_mm01477j", "mirror467"]) {
                 id
                 text
                 ... on MirrorValue {
@@ -97,21 +100,29 @@ async function getClientNameForJob(jobId: string): Promise<string | undefined> {
     }>(query, { boardId: [boardId], itemId: [jobId] })
     
     const item = result.boards[0]?.items_page?.items?.[0]
-    if (!item) return undefined
+    if (!item) return {}
     
-    const clientCol = item.column_values.find(col => col.id === 'lookup_mm01477j')
-    // Try display_value first (for mirror columns), fall back to text
-    const clientName = clientCol?.display_value || clientCol?.text
+    const result_data: { clientName?: string; venueName?: string } = {}
     
-    if (clientName && clientName.trim()) {
-      console.log(`Complete API: Found client name: ${clientName}`)
-      return clientName.trim()
+    for (const col of item.column_values) {
+      // Use display_value for mirror columns, fall back to text
+      const value = col.display_value !== undefined ? col.display_value : col.text
+      
+      if (col.id === 'lookup_mm01477j' && value?.trim()) {
+        result_data.clientName = value.trim()
+        console.log(`Complete API: Found client name: ${result_data.clientName}`)
+      }
+      
+      if (col.id === 'mirror467' && value?.trim()) {
+        result_data.venueName = value.trim()
+        console.log(`Complete API: Found venue name: ${result_data.venueName}`)
+      }
     }
     
-    return undefined
+    return result_data
   } catch (err) {
-    console.error('Failed to fetch client name:', err)
-    return undefined
+    console.error('Failed to fetch job mirror data:', err)
+    return {}
   }
 }
 
@@ -296,6 +307,11 @@ export async function POST(
 
     console.log(`Complete API: Job ${jobId} completed successfully`)
 
+    // Fetch mirrored data for client name and venue name
+    const mirrorData = await getJobMirrorData(jobId)
+    const venueName = mirrorData.venueName || job.venueName || job.name
+    const clientName = mirrorData.clientName
+
     // 4. Send driver notes alert if notes were provided
     // Only send if there are actual notes (not just "Customer not present")
     const actualNotes = notes?.trim()
@@ -325,7 +341,7 @@ export async function POST(
             name: job.name,
             type: job.type,
             date: job.date || '',
-            venue: job.venueName || job.name,
+            venue: venueName,
           },
           notesForEmail,
           relatedJobs
@@ -350,9 +366,6 @@ export async function POST(
       console.log(`Complete API: Sending client email for job ${jobId} (type: ${job.type})`)
       
       try {
-        // Fetch client name for personalization
-        const clientName = await getClientNameForJob(jobId)
-        
         if (job.type === 'delivery') {
           // For deliveries: Generate PDF and send with attachment
           await sendDeliveryNoteToClient(
@@ -362,13 +375,14 @@ export async function POST(
             completedDate,
             session.email,
             clientName,
+            venueName,
             errors
           )
         } else {
           // For collections: Send simple confirmation email
           const emailResult = await sendClientCollectionConfirmation(
             clientEmails,
-            job.venueName || job.name,
+            venueName,
             job.date || completedDate.toISOString(),
             job.hhRef || 'N/A',
             clientName
@@ -418,7 +432,6 @@ async function sendDeliveryNoteToClient(
     name: string
     type: 'delivery' | 'collection'
     date?: string
-    venueName?: string
     hhRef?: string
     venueAddress?: string
   },
@@ -427,6 +440,7 @@ async function sendDeliveryNoteToClient(
   completedDate: Date,
   driverEmail: string,
   clientName: string | undefined,
+  venueName: string,
   errors: string[]
 ): Promise<void> {
   // Fetch equipment list from HireHop
@@ -468,7 +482,7 @@ async function sendDeliveryNoteToClient(
       jobDate: job.date || completedDate.toISOString(),
       completedAt: completedDate.toISOString(),
       clientName,
-      venueName: job.venueName || job.name,
+      venueName,
       deliveryAddress: job.venueAddress,
       items: equipmentItems.map(item => ({
         name: item.name,
@@ -484,7 +498,7 @@ async function sendDeliveryNoteToClient(
     // Send email with PDF attachment
     const emailResult = await sendClientDeliveryNote(
       clientEmails,
-      job.venueName || job.name,
+      venueName,
       job.date || completedDate.toISOString(),
       job.hhRef || 'N/A',
       pdfBuffer,

@@ -151,8 +151,8 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   const margin = 40
   const contentWidth = pageWidth - (margin * 2)
   
-  // Colors
-  const primaryColor = rgb(0.4, 0.49, 0.92)  // Ooosh purple
+  // Colors - Ooosh purple (matching logo)
+  const primaryColor = rgb(0.486, 0.361, 0.906)  // #7c5ce7 - Ooosh purple
   const textColor = rgb(0.2, 0.2, 0.2)
   const lightGray = rgb(0.5, 0.5, 0.5)
   const borderColor = rgb(0.85, 0.85, 0.85)
@@ -206,7 +206,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     })
   }
   
-  // "Delivery Note" title on the right - larger and bolder
+  // "Delivery Note" title on the right - SOLID PURPLE to match logo
   const titleText = 'Delivery Note'
   const titleSize = 24
   const titleWidth = helveticaBold.widthOfTextAtSize(titleText, titleSize)
@@ -215,7 +215,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     y: yPosition - 30,
     size: titleSize,
     font: helveticaBold,
-    color: primaryColor,
+    color: primaryColor,  // Solid purple - matching logo
   })
   
   yPosition -= logoHeight + 10

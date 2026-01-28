@@ -31,6 +31,9 @@ const EMAIL_CONFIG = {
 const FROM_ADDRESS = process.env.EMAIL_FROM || 'Ooosh Tours <noreply@oooshtours.co.uk>'
 const STAFF_ALERT_EMAIL = 'info@oooshtours.co.uk'
 
+// Ooosh brand purple color
+const OOOSH_PURPLE = '#7c5ce7'
+
 // Helper to get app URL without trailing slash
 function getAppUrl(): string {
   const url = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
@@ -163,7 +166,7 @@ function generateJobConfirmationEmail(jobDetails: JobDetails, freelancerName: st
       <title>Job Confirmed</title>
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+      <div style="background: ${OOOSH_PURPLE}; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
         <h1 style="color: white; margin: 0; font-size: 24px;">${typeIcon} ${typeLabel} Confirmed</h1>
       </div>
       
@@ -172,7 +175,7 @@ function generateJobConfirmationEmail(jobDetails: JobDetails, freelancerName: st
         
         <p style="font-size: 16px; margin-bottom: 20px;">You have been assigned a new ${typeLabel.toLowerCase()}:</p>
         
-        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid #667eea;">
+        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid ${OOOSH_PURPLE};">
           <h2 style="margin: 0 0 15px 0; color: #333; font-size: 18px;">${jobDetails.venue}</h2>
           
           <p style="margin: 8px 0; color: #555;">
@@ -200,7 +203,7 @@ function generateJobConfirmationEmail(jobDetails: JobDetails, freelancerName: st
         
         <div style="text-align: center; margin-top: 25px;">
           <a href="${appUrl}/job/${jobDetails.id}" 
-             style="display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; text-decoration: none; padding: 12px 30px; border-radius: 6px; font-weight: 600;">
+             style="display: inline-block; background: ${OOOSH_PURPLE}; color: white; text-decoration: none; padding: 12px 30px; border-radius: 6px; font-weight: 600;">
             View Job Details
           </a>
         </div>
@@ -333,7 +336,7 @@ function generateDriverNotesAlertEmail(
         <li style="margin: 8px 0; padding: 8px 0; border-bottom: 1px solid #eee;">
           ${rjTypeIcon} <strong>${rjTypeLabel}</strong> - ${rj.venue}<br>
           <span style="color: #666; font-size: 13px;">📅 ${rjFormattedDate}</span>
-          <a href="${appUrl}/job/${rj.id}" style="color: #667eea; text-decoration: none; font-size: 13px; margin-left: 10px;">View →</a>
+          <a href="${appUrl}/job/${rj.id}" style="color: ${OOOSH_PURPLE}; text-decoration: none; font-size: 13px; margin-left: 10px;">View →</a>
         </li>
       `
     }).join('')
@@ -401,7 +404,7 @@ function generateDriverNotesAlertEmail(
 
 /**
  * Generate client delivery note email HTML
- * Updated with purple header and tweaked wording
+ * SOLID PURPLE header to match Ooosh branding
  */
 function generateClientDeliveryNoteEmail(
   venueName: string,
@@ -421,7 +424,7 @@ function generateClientDeliveryNoteEmail(
       <title>Delivery Note - Ooosh Tours</title>
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+      <div style="background: ${OOOSH_PURPLE}; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
         <h1 style="color: white; margin: 0; font-size: 24px;">📦 Delivery Note</h1>
       </div>
       
@@ -432,7 +435,7 @@ function generateClientDeliveryNoteEmail(
           Please find attached the delivery note for your recent equipment hire from Ooosh Tours.
         </p>
         
-        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid #667eea;">
+        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid ${OOOSH_PURPLE};">
           <p style="margin: 8px 0; color: #555;">
             <strong>📍 Venue:</strong> ${venueName}
           </p>
@@ -458,7 +461,7 @@ function generateClientDeliveryNoteEmail(
             Ooosh Tours Ltd | Compass House, 7 East Street, Portslade, BN41 1DL
           </p>
           <p style="font-size: 12px; color: #999; margin: 5px 0 0 0;">
-            <a href="https://www.oooshtours.co.uk" style="color: #667eea; text-decoration: none;">www.oooshtours.co.uk</a>
+            <a href="https://www.oooshtours.co.uk" style="color: ${OOOSH_PURPLE}; text-decoration: none;">www.oooshtours.co.uk</a>
           </p>
         </div>
       </div>
@@ -488,7 +491,7 @@ function generateClientCollectionConfirmationEmail(
       <title>Collection Confirmation - Ooosh Tours</title>
     </head>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+      <div style="background: ${OOOSH_PURPLE}; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
         <h1 style="color: white; margin: 0; font-size: 24px;">🚚 Collection Complete</h1>
       </div>
       
@@ -499,7 +502,7 @@ function generateClientCollectionConfirmationEmail(
           Just to let you know - we've collected the equipment for job <strong>${hhRef}</strong> from <strong>${venueName}</strong>.
         </p>
         
-        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid #667eea;">
+        <div style="background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; border-left: 4px solid ${OOOSH_PURPLE};">
           <p style="margin: 8px 0; color: #555;">
             <strong>📍 Venue:</strong> ${venueName}
           </p>
@@ -531,7 +534,7 @@ function generateClientCollectionConfirmationEmail(
             Ooosh Tours Ltd | Compass House, 7 East Street, Portslade, BN41 1DL
           </p>
           <p style="font-size: 12px; color: #999; margin: 5px 0 0 0;">
-            <a href="https://www.oooshtours.co.uk" style="color: #667eea; text-decoration: none;">www.oooshtours.co.uk</a>
+            <a href="https://www.oooshtours.co.uk" style="color: ${OOOSH_PURPLE}; text-decoration: none;">www.oooshtours.co.uk</a>
           </p>
         </div>
       </div>
@@ -841,7 +844,7 @@ export async function sendVerificationEmail(
         <title>Verify Your Email</title>
       </head>
       <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+        <div style="background: ${OOOSH_PURPLE}; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
           <h1 style="color: white; margin: 0; font-size: 24px;">🔐 Verify Your Email</h1>
         </div>
         
@@ -852,7 +855,7 @@ export async function sendVerificationEmail(
             Thanks for registering with Ooosh Tours! Please use the code below to verify your email address:
           </p>
           
-          <div style="background: white; border-radius: 8px; padding: 30px; margin: 25px 0; text-align: center; border: 2px dashed #667eea;">
+          <div style="background: white; border-radius: 8px; padding: 30px; margin: 25px 0; text-align: center; border: 2px dashed ${OOOSH_PURPLE};">
             <p style="font-size: 36px; font-weight: bold; letter-spacing: 8px; color: #333; margin: 0;">
               ${code}
             </p>

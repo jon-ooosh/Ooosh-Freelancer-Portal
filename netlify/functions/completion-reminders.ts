@@ -35,7 +35,7 @@ const DC_COLUMNS = {
   status: 'status90',
   deliverCollect: 'status_1',              // "Delivery" or "Collection" - use this for job type!
   driverEmailMirror: 'driver_email__gc_',
-  venueConnect: 'connect_boards6',
+  venueMirror: 'mirror467',                // Mirrored venue name from Address Book
   completedAtDate: 'date_mkywpv0h',
   completionReminderLevel: 'text_mm00jreb',
 }
@@ -74,7 +74,7 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
     headers: {
       'Content-Type': 'application/json',
       'Authorization': token,
-      'API-Version': '2025-04',
+      'API-Version': '2024-10',  // Required for MirrorValue support
     },
     body: JSON.stringify({ query, variables }),
   })
@@ -91,39 +91,6 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
   }
 
   return data.data as T
-}
-
-/**
- * Fetch venue name from linked venue item
- * The venueConnect column links to the Address Book board
- */
-async function getVenueName(linkedItemIds: string[]): Promise<string> {
-  if (!linkedItemIds || linkedItemIds.length === 0) {
-    return 'Unknown Venue'
-  }
-
-  try {
-    const query = `
-      query ($itemIds: [ID!]!) {
-        items(ids: $itemIds) {
-          id
-          name
-        }
-      }
-    `
-
-    const result = await mondayQuery<{
-      items: Array<{ id: string; name: string }>
-    }>(query, { itemIds: linkedItemIds })
-
-    if (result.items && result.items.length > 0) {
-      return result.items[0].name
-    }
-  } catch (err) {
-    console.error('Failed to fetch venue name:', err)
-  }
-
-  return 'Unknown Venue'
 }
 
 // =============================================================================
@@ -350,7 +317,7 @@ interface JobItem {
     id: string
     text: string
     value: string
-    linked_item_ids?: string[]
+    display_value?: string  // For mirror columns
   }>
 }
 
@@ -521,8 +488,7 @@ export default async function handler(req: Request, context: Context) {
 
     console.log(`Completion Reminders: Checking jobs for ${yesterdayStr} and ${todayStr}`)
 
-    // Query for jobs - now including deliverCollect column for job type
-    // Using BoardRelationValue to get linked_item_ids for venue
+    // Query for jobs - using MirrorValue fragment for venue name
     const query = `
       query {
         boards(ids: [${boardId}]) {
@@ -530,12 +496,12 @@ export default async function handler(req: Request, context: Context) {
             items {
               id
               name
-              column_values(ids: ["${DC_COLUMNS.date}", "${DC_COLUMNS.timeToArrive}", "${DC_COLUMNS.status}", "${DC_COLUMNS.deliverCollect}", "${DC_COLUMNS.driverEmailMirror}", "${DC_COLUMNS.venueConnect}", "${DC_COLUMNS.completedAtDate}", "${DC_COLUMNS.completionReminderLevel}"]) {
+              column_values(ids: ["${DC_COLUMNS.date}", "${DC_COLUMNS.timeToArrive}", "${DC_COLUMNS.status}", "${DC_COLUMNS.deliverCollect}", "${DC_COLUMNS.driverEmailMirror}", "${DC_COLUMNS.venueMirror}", "${DC_COLUMNS.completedAtDate}", "${DC_COLUMNS.completionReminderLevel}"]) {
                 id
                 text
                 value
-                ... on BoardRelationValue {
-                  linked_item_ids
+                ... on MirrorValue {
+                  display_value
                 }
               }
             }
@@ -560,21 +526,21 @@ export default async function handler(req: Request, context: Context) {
     let jobsChecked = 0
 
     for (const item of allItems) {
-      // Build column map for text values
-      const columnMap = item.column_values.reduce((acc, col) => {
-        acc[col.id] = col.text || ''
-        return acc
-      }, {} as Record<string, string>)
-
-      // Get linked_item_ids for venue separately
-      const venueCol = item.column_values.find(col => col.id === DC_COLUMNS.venueConnect)
-      const venueLinkedIds = venueCol?.linked_item_ids || []
+      // Build column map, handling mirror columns with display_value
+      const columnMap: Record<string, string> = {}
+      
+      for (const col of item.column_values) {
+        // For mirror columns, use display_value; otherwise use text
+        const value = col.display_value !== undefined ? col.display_value : col.text
+        columnMap[col.id] = value || ''
+      }
 
       const jobDate = columnMap[DC_COLUMNS.date]
       const jobTime = columnMap[DC_COLUMNS.timeToArrive]
       const status = columnMap[DC_COLUMNS.status]?.toLowerCase() || ''
       const deliverCollectText = columnMap[DC_COLUMNS.deliverCollect]?.toLowerCase() || ''
       const driverEmail = columnMap[DC_COLUMNS.driverEmailMirror]
+      const venueName = columnMap[DC_COLUMNS.venueMirror] || item.name  // Fall back to item name
       const completedAt = columnMap[DC_COLUMNS.completedAtDate]
       const currentReminderLevel = parseInt(columnMap[DC_COLUMNS.completionReminderLevel] || '0') || 0
 
@@ -618,13 +584,10 @@ export default async function handler(req: Request, context: Context) {
         continue
       }
 
-      console.log(`Completion Reminders: Job ${item.id} - ${hoursSince.toFixed(1)}h since job time, sending level ${nextLevel} reminder`)
+      console.log(`Completion Reminders: Job ${item.id} (${venueName}) - ${hoursSince.toFixed(1)}h since job time, sending level ${nextLevel} reminder`)
 
       // Get driver name
       const driverName = await getDriverName(driverEmail)
-
-      // Fetch venue name from linked item
-      const venueName = await getVenueName(venueLinkedIds)
 
       // Determine job type from deliverCollect column (not item name!)
       const jobType: 'delivery' | 'collection' = deliverCollectText.includes('delivery') ? 'delivery' : 'collection'

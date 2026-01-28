@@ -5,7 +5,8 @@
  * 
  * Called by Monday.com automation when a job's date, time, or venue changes.
  * 
- * IMPORTANT: Only sends notifications if job status is "Arranged" (confirmed).
+ * IMPORTANT: Only sends notifications if job status is "All arranged & email driver".
+ * Does NOT send notifications for jobs still in "Working on it" status.
  * This prevents spam while the job is still being set up.
  * 
  * Set up 3 Monday automations pointing to this endpoint:
@@ -29,11 +30,11 @@ const WATCHED_COLUMNS = {
   venue: 'connect_boards6',
 }
 
-// Status values that mean "job is confirmed"
+// Status values that mean "job is confirmed" - ONLY send notifications for these
+// IMPORTANT: "Working on it" is intentionally excluded - jobs in setup don't get update notifications
 const CONFIRMED_STATUSES = [
   'all arranged & email driver',
   'arranged',
-  'working on it',
 ]
 
 /**
@@ -77,6 +78,8 @@ function isJobMuted(mutedJobIds: string | undefined, jobId: string): boolean {
 
 /**
  * Check if the job status indicates it's confirmed/arranged
+ * Only returns true for "All arranged & email driver" or similar
+ * Returns false for "Working on it" - we don't want to notify for those
  */
 function isJobConfirmed(status: string): boolean {
   const normalizedStatus = status.toLowerCase().trim()
@@ -143,7 +146,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Job not found' }, { status: 404 })
     }
     
-    // Only notify if job is in "confirmed" status
+    // Only notify if job is in "confirmed" status (NOT "Working on it")
     if (!isJobConfirmed(job.status)) {
       console.log(`Webhook (updated): Skipped - job ${itemId} not yet confirmed (status: ${job.status})`)
       return NextResponse.json({
