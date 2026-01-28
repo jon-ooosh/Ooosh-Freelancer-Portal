@@ -7,6 +7,7 @@
  * - Job update notifications
  * - Job cancellation notifications
  * - Email verification during registration
+ * - Password reset emails
  * - Driver notes alerts to staff
  * - Client delivery notes (with PDF attachment)
  * - Client collection confirmations
@@ -884,6 +885,96 @@ export async function sendVerificationEmail(
     return { success: true }
   } catch (error) {
     console.error('Failed to send verification email:', error)
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Failed to send email' 
+    }
+  }
+}
+
+/**
+ * Send password reset email
+ */
+export async function sendPasswordResetEmail(
+  email: string,
+  resetUrl: string,
+  name: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
+      console.error('Email configuration missing')
+      return { success: false, error: 'Email service not configured' }
+    }
+
+    const transport = getTransporter()
+    const firstName = name.split(' ')[0]
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Reset Your Password</title>
+      </head>
+      <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background: ${OOOSH_PURPLE}; padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+          <h1 style="color: white; margin: 0; font-size: 24px;">🔑 Reset Your Password</h1>
+        </div>
+        
+        <div style="background: #f8f9fa; padding: 30px; border-radius: 0 0 12px 12px;">
+          <p style="font-size: 16px; margin-bottom: 20px;">Hi ${firstName},</p>
+          
+          <p style="font-size: 16px; margin-bottom: 20px;">
+            We received a request to reset your password for your Ooosh Freelancer Portal account.
+          </p>
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetUrl}" 
+               style="display: inline-block; background: ${OOOSH_PURPLE}; color: white; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-weight: bold; font-size: 16px;">
+              Reset Password
+            </a>
+          </div>
+          
+          <p style="font-size: 14px; color: #666; margin-bottom: 10px;">
+            Or copy and paste this link into your browser:
+          </p>
+          <p style="font-size: 12px; color: ${OOOSH_PURPLE}; word-break: break-all; margin-bottom: 20px;">
+            ${resetUrl}
+          </p>
+          
+          <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 8px; padding: 15px; margin: 20px 0;">
+            <p style="font-size: 14px; color: #856404; margin: 0;">
+              ⏰ This link will expire in <strong>1 hour</strong>.
+            </p>
+          </div>
+          
+          <p style="font-size: 14px; color: #666; margin-bottom: 20px;">
+            If you didn't request a password reset, you can safely ignore this email. Your password will remain unchanged.
+          </p>
+          
+          <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;" />
+          
+          <p style="font-size: 12px; color: #999; text-align: center;">
+            This is an automated message from Ooosh Tours Ltd.<br/>
+            Please do not reply to this email.
+          </p>
+        </div>
+      </body>
+      </html>
+    `
+
+    await transport.sendMail({
+      from: FROM_ADDRESS,
+      to: email,
+      subject: `Reset your Ooosh password`,
+      html,
+    })
+
+    console.log(`Password reset email sent to ${email}`)
+    return { success: true }
+  } catch (error) {
+    console.error('Failed to send password reset email:', error)
     return { 
       success: false, 
       error: error instanceof Error ? error.message : 'Failed to send email' 
