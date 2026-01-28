@@ -256,7 +256,7 @@ export async function POST(
       clientEmails: clientEmails || [],
       sendClientEmail: sendClientEmail || false,
       completedAt: completedDate.toISOString(),
-      signatureBase64: customerPresent ? signature : null,
+      signatureBase64: customerPresent && signature ? signature : null,
       photos: photos || [],
     }
 
