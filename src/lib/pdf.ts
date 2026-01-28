@@ -36,6 +36,9 @@ export interface DeliveryNoteData {
   // Signature (optional - base64 PNG)
   signatureBase64?: string
   
+  // Photos (optional - array of base64 images)
+  photos?: string[]
+  
   // Driver info
   driverName?: string
 }
@@ -215,7 +218,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     y: yPosition - 30,
     size: titleSize,
     font: helveticaBold,
-    color: primaryColor,  // Solid purple - matching logo
+    color: primaryColor,
   })
   
   yPosition -= logoHeight + 10
@@ -253,11 +256,11 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   yPosition -= 25
   
   // ==========================================================================
-  // JOB DETAILS SECTION - in a bordered box
+  // JOB DETAILS SECTION - in a bordered box with proper two-column layout
   // ==========================================================================
   
   const detailsBoxTop = yPosition
-  const detailsBoxHeight = data.clientName ? 100 : 85
+  const detailsBoxHeight = 80  // Fixed height for consistent layout
   
   // Draw box border
   page.drawRectangle({
@@ -270,77 +273,94 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     color: headerBg,
   })
   
-  yPosition -= 20
-  
-  // Two-column layout
+  // Two-column layout - calculate positions
   const leftColX = margin + 15
-  const rightColX = pageWidth / 2 + 10
+  const rightColX = pageWidth / 2 + 20
   const labelSize = 9
   const valueSize = 11
+  const rowHeight = 32  // Height for each row (label + value)
   
-  // Left column - Client & Venue
+  // Row 1: Client (left) and Job Date (right)
+  const row1Y = detailsBoxTop - 18
+  
   if (data.clientName) {
     page.drawText('Client:', {
       x: leftColX,
-      y: yPosition,
+      y: row1Y,
       size: labelSize,
       font: helvetica,
       color: lightGray,
     })
     page.drawText(data.clientName, {
       x: leftColX,
-      y: yPosition - 13,
+      y: row1Y - 13,
       size: valueSize,
       font: helveticaBold,
       color: textColor,
     })
-    yPosition -= 30
+  } else {
+    // If no client, put venue in row 1
+    page.drawText('Venue:', {
+      x: leftColX,
+      y: row1Y,
+      size: labelSize,
+      font: helvetica,
+      color: lightGray,
+    })
+    page.drawText(data.venueName || 'N/A', {
+      x: leftColX,
+      y: row1Y - 13,
+      size: valueSize,
+      font: helveticaBold,
+      color: textColor,
+    })
   }
   
-  page.drawText('Venue:', {
-    x: leftColX,
-    y: yPosition,
-    size: labelSize,
-    font: helvetica,
-    color: lightGray,
-  })
-  page.drawText(data.venueName || 'N/A', {
-    x: leftColX,
-    y: yPosition - 13,
-    size: valueSize,
-    font: helveticaBold,
-    color: textColor,
-  })
-  
-  // Reset Y for right column
-  const rightColStartY = detailsBoxTop - 20
-  
-  // Right column - Job Date & Completed
   page.drawText('Job Date:', {
     x: rightColX,
-    y: data.clientName ? rightColStartY - 30 : rightColStartY,
+    y: row1Y,
     size: labelSize,
     font: helvetica,
     color: lightGray,
   })
   page.drawText(formatDateNice(data.jobDate), {
     x: rightColX,
-    y: (data.clientName ? rightColStartY - 30 : rightColStartY) - 13,
+    y: row1Y - 13,
     size: valueSize,
     font: helveticaBold,
     color: textColor,
   })
   
+  // Row 2: Venue (left) and Completed (right) - only if we have client name
+  const row2Y = row1Y - rowHeight
+  
+  if (data.clientName) {
+    page.drawText('Venue:', {
+      x: leftColX,
+      y: row2Y,
+      size: labelSize,
+      font: helvetica,
+      color: lightGray,
+    })
+    page.drawText(data.venueName || 'N/A', {
+      x: leftColX,
+      y: row2Y - 13,
+      size: valueSize,
+      font: helveticaBold,
+      color: textColor,
+    })
+  }
+  
   page.drawText('Completed:', {
     x: rightColX,
-    y: (data.clientName ? rightColStartY - 60 : rightColStartY - 30),
+    y: row2Y,
     size: labelSize,
     font: helvetica,
     color: lightGray,
   })
   page.drawText(formatDateTime(data.completedAt), {
     x: rightColX,
-    y: (data.clientName ? rightColStartY - 60 : rightColStartY - 30) - 13,
+    y: row2Y - 13,
     size: valueSize,
     font: helveticaBold,
     color: textColor,
@@ -388,10 +408,10 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   yPosition -= 20
   
   // Calculate table height needed
-  const rowHeight = 22
-  const headerHeight = 28
+  const tableRowHeight = 22
+  const tableHeaderHeight = 28
   const itemCount = data.items.length
-  const estimatedTableHeight = headerHeight + (itemCount * rowHeight) + 20
+  const estimatedTableHeight = tableHeaderHeight + (itemCount * tableRowHeight) + 20
   
   // Draw table border
   const tableTop = yPosition
@@ -413,9 +433,9 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   
   page.drawRectangle({
     x: margin,
-    y: yPosition - headerHeight,
+    y: yPosition - tableHeaderHeight,
     width: contentWidth,
-    height: headerHeight,
+    height: tableHeaderHeight,
     color: headerBg,
     borderColor: borderColor,
     borderWidth: 1,
@@ -437,7 +457,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     color: textColor,
   })
   
-  yPosition -= headerHeight
+  yPosition -= tableHeaderHeight
   
   // Table rows
   let currentCategory = ''
@@ -459,9 +479,9 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
       // Re-draw table header on new page
       page.drawRectangle({
         x: margin,
-        y: yPosition - headerHeight,
+        y: yPosition - tableHeaderHeight,
         width: contentWidth,
-        height: headerHeight,
+        height: tableHeaderHeight,
         color: headerBg,
         borderColor: borderColor,
         borderWidth: 1,
@@ -483,7 +503,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
         color: textColor,
       })
       
-      yPosition -= headerHeight
+      yPosition -= tableHeaderHeight
       currentCategory = ''
     }
     
@@ -620,12 +640,119 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     drawSignatureLines(page, margin + 15, yPosition, sigBoxTop - sigBoxHeight + 12, helvetica, lightGray)
   }
   
+  yPosition = sigBoxTop - sigBoxHeight - 20
+  
+  // ==========================================================================
+  // PHOTOS SECTION (if any photos provided)
+  // ==========================================================================
+  
+  if (data.photos && data.photos.length > 0) {
+    // Check if we need a new page for photos
+    if (yPosition < margin + 200) {
+      page = pdfDoc.addPage([pageWidth, pageHeight])
+      yPosition = pageHeight - margin
+    }
+    
+    // Section header
+    page.drawText('Delivery Photos', {
+      x: margin,
+      y: yPosition,
+      size: 14,
+      font: helveticaBold,
+      color: textColor,
+    })
+    
+    yPosition -= 25
+    
+    // Embed each photo
+    const maxPhotoWidth = 250
+    const maxPhotoHeight = 200
+    const photosPerRow = 2
+    const photoSpacing = 20
+    
+    for (let i = 0; i < data.photos.length; i++) {
+      try {
+        const photoBase64 = data.photos[i].replace(/^data:image\/\w+;base64,/, '')
+        const photoBytes = Buffer.from(photoBase64, 'base64')
+        
+        // Try to embed as JPEG first, then PNG
+        let photoImage
+        try {
+          photoImage = await pdfDoc.embedJpg(photoBytes)
+        } catch {
+          // If JPEG fails, try PNG
+          photoImage = await pdfDoc.embedPng(photoBytes)
+        }
+        
+        // Calculate scaled dimensions
+        const photoAspect = photoImage.width / photoImage.height
+        let scaledWidth = maxPhotoWidth
+        let scaledHeight = scaledWidth / photoAspect
+        
+        if (scaledHeight > maxPhotoHeight) {
+          scaledHeight = maxPhotoHeight
+          scaledWidth = scaledHeight * photoAspect
+        }
+        
+        // Calculate position (2 photos per row)
+        const colIndex = i % photosPerRow
+        const xPos = margin + (colIndex * (maxPhotoWidth + photoSpacing))
+        
+        // Check if we need a new row or new page
+        if (colIndex === 0 && i > 0) {
+          yPosition -= maxPhotoHeight + photoSpacing + 20
+        }
+        
+        if (yPosition - scaledHeight < margin) {
+          page = pdfDoc.addPage([pageWidth, pageHeight])
+          yPosition = pageHeight - margin
+        }
+        
+        // Draw photo with border
+        page.drawRectangle({
+          x: xPos - 2,
+          y: yPosition - scaledHeight - 2,
+          width: scaledWidth + 4,
+          height: scaledHeight + 4,
+          borderColor: borderColor,
+          borderWidth: 1,
+        })
+        
+        page.drawImage(photoImage, {
+          x: xPos,
+          y: yPosition - scaledHeight,
+          width: scaledWidth,
+          height: scaledHeight,
+        })
+        
+        // Photo label
+        page.drawText(`Photo ${i + 1}`, {
+          x: xPos,
+          y: yPosition - scaledHeight - 15,
+          size: 9,
+          font: helvetica,
+          color: lightGray,
+        })
+        
+      } catch (err) {
+        console.error(`Failed to embed photo ${i + 1}:`, err)
+        // Continue with other photos
+      }
+    }
+    
+    yPosition -= maxPhotoHeight + 30
+  }
+  
   // ==========================================================================
   // FOOTER
   // ==========================================================================
   
+  // Get the last page for footer
+  const pages = pdfDoc.getPages()
+  const lastPage = pages[pages.length - 1]
+  
   const footerY = margin - 10
-  page.drawText('Thank you for choosing Ooosh Tours', {
+  lastPage.drawText('Thank you for choosing Ooosh Tours', {
     x: margin,
     y: footerY,
     size: 9,
@@ -634,7 +761,7 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
   })
   
   const websiteText = 'www.oooshtours.co.uk'
-  page.drawText(websiteText, {
+  lastPage.drawText(websiteText, {
     x: pageWidth - margin - helvetica.widthOfTextAtSize(websiteText, 9),
     y: footerY,
     size: 9,

@@ -1027,7 +1027,33 @@ export default function CompletePage() {
         }),
       })
 
-      const data = await response.json()
+      // Handle timeout/HTML responses gracefully
+      const contentType = response.headers.get('content-type') || ''
+      
+      if (!contentType.includes('application/json')) {
+        // Server returned HTML (likely a timeout error page)
+        // The completion may have still succeeded on the server
+        console.warn('Server returned non-JSON response (possible timeout)')
+        
+        if (response.status >= 500 || !response.ok) {
+          // Show a friendly message that acknowledges uncertainty
+          throw new Error(
+            'The server took too long to respond. Your completion may have been saved - please check the job status before trying again.'
+          )
+        }
+      }
+
+      // Try to parse JSON response
+      let data
+      try {
+        data = await response.json()
+      } catch (parseError) {
+        // JSON parse failed - likely HTML response from timeout
+        console.error('Failed to parse response:', parseError)
+        throw new Error(
+          'The server took too long to respond. Your completion may have been saved - please check the job status before trying again.'
+        )
+      }
 
       if (!response.ok) {
         throw new Error(data.error || 'Failed to complete job')
@@ -1237,6 +1263,14 @@ export default function CompletePage() {
         {submitError && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-4">
             <p className="text-red-700 text-sm">{submitError}</p>
+            {submitError.includes('may have been saved') && (
+              <Link 
+                href={`/job/${jobId}`}
+                className="inline-block mt-2 text-sm text-purple-600 hover:text-purple-700 font-medium"
+              >
+                → Check job status
+              </Link>
+            )}
           </div>
         )}
 

@@ -3,14 +3,18 @@
  * 
  * POST /api/jobs/[id]/complete
  * 
- * Completes a delivery/collection job:
+ * FAST SYNCHRONOUS OPERATIONS (~8 seconds):
  * - Uploads signature image to Monday file column (when customer present)
- * - Uploads photo(s) to Monday file column (required when customer not present, optional otherwise)
+ * - Uploads photo(s) to Monday file column
  * - Saves completion notes
  * - Updates status to "All done!"
  * - Sets completion timestamp
- * - Sends driver notes alert to staff if notes were provided
- * - Sends client delivery note (PDF) or collection confirmation email if requested
+ * - Returns success to user immediately
+ * 
+ * BACKGROUND OPERATIONS (triggered async, user doesn't wait):
+ * - Fetch mirror data (client name, venue)
+ * - Send client delivery note (PDF) or collection confirmation
+ * - Send driver notes alert to staff
  * 
  * Validation:
  * - Customer present: signature required, photos optional (0-5)
@@ -25,16 +29,8 @@ import {
   uploadBase64ImageToColumn,
   getBoardIds,
   mondayQuery,
-  getRelatedUpcomingJobs,
   getFreelancerNameByEmail
 } from '@/lib/monday'
-import { 
-  sendDriverNotesAlert,
-  sendClientDeliveryNote,
-  sendClientCollectionConfirmation
-} from '@/lib/email'
-import { getJobItemsFiltered, HireHopItem } from '@/lib/hirehop'
-import { generateDeliveryNotePdf } from '@/lib/pdf'
 
 // =============================================================================
 // TYPES
@@ -47,83 +43,6 @@ interface CompleteJobRequest {
   customerPresent: boolean
   clientEmails?: string[]   // Array of client email addresses to send delivery note/confirmation
   sendClientEmail?: boolean // Whether to send client email
-}
-
-// =============================================================================
-// HELPER: Fetch client name and venue from mirrored columns
-// =============================================================================
-
-/**
- * Fetch client name and venue from the D&C board's mirrored columns
- * - Client: lookup_mm01477j
- * - Venue: mirror467
- * 
- * Uses MirrorValue fragment with display_value as per Monday.com API requirements
- */
-async function getJobMirrorData(jobId: string): Promise<{ clientName?: string; venueName?: string }> {
-  try {
-    const boardId = getBoardIds().deliveries
-    
-    // For mirrored columns, we need to use the MirrorValue fragment with display_value
-    const query = `
-      query ($boardId: [ID!]!, $itemId: [ID!]!) {
-        boards(ids: $boardId) {
-          items_page(query_params: { ids: $itemId }) {
-            items {
-              id
-              column_values(ids: ["lookup_mm01477j", "mirror467"]) {
-                id
-                text
-                ... on MirrorValue {
-                  display_value
-                }
-              }
-            }
-          }
-        }
-      }
-    `
-    
-    const result = await mondayQuery<{
-      boards: Array<{
-        items_page: {
-          items: Array<{
-            id: string
-            column_values: Array<{
-              id: string
-              text: string
-              display_value?: string
-            }>
-          }>
-        }
-      }>
-    }>(query, { boardId: [boardId], itemId: [jobId] })
-    
-    const item = result.boards[0]?.items_page?.items?.[0]
-    if (!item) return {}
-    
-    const result_data: { clientName?: string; venueName?: string } = {}
-    
-    for (const col of item.column_values) {
-      // Use display_value for mirror columns, fall back to text
-      const value = col.display_value !== undefined ? col.display_value : col.text
-      
-      if (col.id === 'lookup_mm01477j' && value?.trim()) {
-        result_data.clientName = value.trim()
-        console.log(`Complete API: Found client name: ${result_data.clientName}`)
-      }
-      
-      if (col.id === 'mirror467' && value?.trim()) {
-        result_data.venueName = value.trim()
-        console.log(`Complete API: Found venue name: ${result_data.venueName}`)
-      }
-    }
-    
-    return result_data
-  } catch (err) {
-    console.error('Failed to fetch job mirror data:', err)
-    return {}
-  }
 }
 
 // =============================================================================
@@ -191,8 +110,7 @@ export async function POST(
     }
 
     console.log(`Complete API: Processing completion for job ${jobId} by ${session.email}`)
-    console.log(`Complete API: customerPresent=${customerPresent}, signature=${!!signature}, photos=${photos?.length || 0}, hasNotes=${!!(notes && notes.trim())}`)
-    console.log(`Complete API: sendClientEmail=${sendClientEmail}, clientEmails=${clientEmails?.length || 0}`)
+    console.log(`Complete API: customerPresent=${customerPresent}, signature=${!!signature}, photos=${photos?.length || 0}`)
 
     // Verify the job exists and is assigned to this user
     const job = await getJobById(jobId, session.email)
@@ -214,6 +132,10 @@ export async function POST(
 
     const completedDate = new Date()
     const errors: string[] = []
+
+    // =========================================================================
+    // PHASE 1: FAST SYNCHRONOUS OPERATIONS (user waits for these)
+    // =========================================================================
 
     // 1. Upload signature if provided (customer present)
     if (signature) {
@@ -305,108 +227,58 @@ export async function POST(
       )
     }
 
-    console.log(`Complete API: Job ${jobId} completed successfully`)
+    console.log(`Complete API: Job ${jobId} marked complete - triggering background processing`)
 
-    // Fetch mirrored data for client name and venue name
-    const mirrorData = await getJobMirrorData(jobId)
-    const venueName = mirrorData.venueName || job.venueName || job.name
-    const clientName = mirrorData.clientName
-
-    // 4. Send driver notes alert if notes were provided
-    // Only send if there are actual notes (not just "Customer not present")
-    const actualNotes = notes?.trim()
-    if (actualNotes) {
-      console.log(`Complete API: Sending driver notes alert for job ${jobId}`)
-      try {
-        // Get driver name
-        const driverName = await getFreelancerNameByEmail(session.email) || session.email
-
-        // Find related upcoming jobs (same venue or same HH ref)
-        const relatedJobs = await getRelatedUpcomingJobs(
-          jobId,
-          job.venueId,
-          job.hhRef
-        )
-
-        // Build final notes (include "Customer not present" prefix if applicable)
-        const notesForEmail = customerPresent 
-          ? actualNotes
-          : `Customer not present\n\n${actualNotes}`
-
-        // Send the alert email
-        const emailResult = await sendDriverNotesAlert(
-          driverName,
-          {
-            id: job.id,
-            name: job.name,
-            type: job.type,
-            date: job.date || '',
-            venue: venueName,
-          },
-          notesForEmail,
-          relatedJobs
-        )
-
-        if (!emailResult.success) {
-          console.error('Failed to send driver notes alert:', emailResult.error)
-          // Don't fail the whole request, just log the error
-          errors.push(`Driver notes alert: ${emailResult.error}`)
-        } else {
-          console.log(`Complete API: Driver notes alert sent successfully`)
-        }
-      } catch (err) {
-        console.error('Error sending driver notes alert:', err)
-        // Don't fail the whole request
-        errors.push('Driver notes alert failed')
-      }
+    // =========================================================================
+    // PHASE 2: TRIGGER BACKGROUND PROCESSING (user doesn't wait)
+    // =========================================================================
+    
+    // Get driver name for background function
+    let driverName = session.email
+    try {
+      driverName = await getFreelancerNameByEmail(session.email) || session.email
+    } catch {
+      // Non-critical
     }
 
-    // 5. Send client email if requested
-    if (sendClientEmail && clientEmails && clientEmails.length > 0) {
-      console.log(`Complete API: Sending client email for job ${jobId} (type: ${job.type})`)
-      
-      try {
-        if (job.type === 'delivery') {
-          // For deliveries: Generate PDF and send with attachment
-          await sendDeliveryNoteToClient(
-            job,
-            clientEmails,
-            signature || null,
-            completedDate,
-            session.email,
-            clientName,
-            venueName,
-            errors
-          )
-        } else {
-          // For collections: Send simple confirmation email
-          const emailResult = await sendClientCollectionConfirmation(
-            clientEmails,
-            venueName,
-            job.date || completedDate.toISOString(),
-            job.hhRef || 'N/A',
-            clientName
-          )
-          
-          if (!emailResult.success) {
-            console.error('Failed to send client collection confirmation:', emailResult.error)
-            errors.push(`Client email: ${emailResult.error}`)
-          } else {
-            console.log(`Complete API: Client collection confirmation sent to ${clientEmails.join(', ')}`)
-          }
-        }
-      } catch (err) {
-        console.error('Error sending client email:', err)
-        errors.push('Client email failed')
-      }
+    // Fire off background function - don't await!
+    const backgroundPayload = {
+      jobId,
+      jobName: job.name,
+      jobType: job.type,
+      jobDate: job.date || completedDate.toISOString(),
+      jobHhRef: job.hhRef,
+      jobVenueId: job.venueId,
+      jobVenueAddress: job.venueAddress,
+      driverEmail: session.email,
+      driverName,
+      notes: notes?.trim() || null,
+      customerPresent,
+      clientEmails: clientEmails || [],
+      sendClientEmail: sendClientEmail || false,
+      completedAt: completedDate.toISOString(),
+      signatureBase64: customerPresent ? signature : null,
+      photos: photos || [],
     }
 
-    // Return success, but include any file upload warnings
+    // Trigger background function (fire and forget)
+    triggerBackgroundProcessing(backgroundPayload).catch(err => {
+      // Log but don't fail - the main completion succeeded
+      console.error('Failed to trigger background processing:', err)
+    })
+
+    // =========================================================================
+    // RETURN SUCCESS IMMEDIATELY
+    // =========================================================================
+
+    console.log(`Complete API: Returning success for job ${jobId}`)
+
     return NextResponse.json({
       success: true,
       jobId,
       completedAt: completedDate.toISOString(),
-      warnings: errors.length > 0 ? errors : undefined
+      warnings: errors.length > 0 ? errors : undefined,
+      backgroundProcessing: true, // Indicate that emails etc are processing in background
     })
 
   } catch (error) {
@@ -419,100 +291,64 @@ export async function POST(
 }
 
 // =============================================================================
-// HELPER FUNCTIONS
+// BACKGROUND TRIGGER
 // =============================================================================
 
+interface BackgroundPayload {
+  jobId: string
+  jobName: string
+  jobType: 'delivery' | 'collection'
+  jobDate: string
+  jobHhRef?: string
+  jobVenueId?: string
+  jobVenueAddress?: string
+  driverEmail: string
+  driverName: string
+  notes: string | null
+  customerPresent: boolean
+  clientEmails: string[]
+  sendClientEmail: boolean
+  completedAt: string
+  signatureBase64: string | null
+  photos: string[]
+}
+
 /**
- * Helper to send delivery note PDF to client
- * Separated for cleaner code flow
+ * Trigger the background function to handle:
+ * - Mirror data fetch
+ * - Client emails (with PDF for deliveries)
+ * - Driver notes alerts
+ * 
+ * This is fire-and-forget - we don't await the result
  */
-async function sendDeliveryNoteToClient(
-  job: {
-    id: string
-    name: string
-    type: 'delivery' | 'collection'
-    date?: string
-    hhRef?: string
-    venueAddress?: string
-  },
-  clientEmails: string[],
-  signatureBase64: string | null,
-  completedDate: Date,
-  driverEmail: string,
-  clientName: string | undefined,
-  venueName: string,
-  errors: string[]
-): Promise<void> {
-  // Fetch equipment list from HireHop
-  let equipmentItems: HireHopItem[] = []
+async function triggerBackgroundProcessing(payload: BackgroundPayload): Promise<void> {
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
+  const backgroundSecret = process.env.BACKGROUND_FUNCTION_SECRET || process.env.MONDAY_WEBHOOK_SECRET
   
-  if (job.hhRef) {
-    console.log(`Complete API: Fetching equipment from HireHop job ${job.hhRef}`)
-    try {
-      const hhResult = await getJobItemsFiltered(job.hhRef, 'equipment')
-      if (hhResult.success && hhResult.items.length > 0) {
-        equipmentItems = hhResult.items
-        console.log(`Complete API: Fetched ${equipmentItems.length} equipment items`)
-      } else {
-        console.warn('Complete API: No equipment items found for HireHop job')
-      }
-    } catch (err) {
-      console.error('Failed to fetch HireHop equipment:', err)
-      errors.push('Could not fetch equipment list for delivery note')
-    }
-  } else {
-    console.warn('Complete API: No HireHop ref on job, skipping equipment fetch')
-    errors.push('No HireHop reference - delivery note will not include equipment list')
+  if (!backgroundSecret) {
+    console.warn('No BACKGROUND_FUNCTION_SECRET configured, skipping background processing')
+    return
   }
+
+  const backgroundUrl = `${appUrl.replace(/\/$/, '')}/.netlify/functions/completion-background`
   
-  // Get driver name for PDF
-  let driverName: string | undefined
-  try {
-    const { getFreelancerNameByEmail } = await import('@/lib/monday')
-    driverName = await getFreelancerNameByEmail(driverEmail) || undefined
-  } catch {
-    // Non-critical, continue without driver name
-  }
-  
-  // Generate PDF
-  console.log(`Complete API: Generating delivery note PDF`)
-  try {
-    const pdfBuffer = await generateDeliveryNotePdf({
-      hhRef: job.hhRef || 'N/A',
-      jobDate: job.date || completedDate.toISOString(),
-      completedAt: completedDate.toISOString(),
-      clientName,
-      venueName,
-      deliveryAddress: job.venueAddress,
-      items: equipmentItems.map(item => ({
-        name: item.name,
-        quantity: item.quantity,
-        category: item.category,
-      })),
-      signatureBase64: signatureBase64 || undefined,
-      driverName,
-    })
-    
-    console.log(`Complete API: PDF generated (${pdfBuffer.length} bytes)`)
-    
-    // Send email with PDF attachment
-    const emailResult = await sendClientDeliveryNote(
-      clientEmails,
-      venueName,
-      job.date || completedDate.toISOString(),
-      job.hhRef || 'N/A',
-      pdfBuffer,
-      clientName
-    )
-    
-    if (!emailResult.success) {
-      console.error('Failed to send client delivery note:', emailResult.error)
-      errors.push(`Client email: ${emailResult.error}`)
+  console.log(`Complete API: Triggering background function at ${backgroundUrl}`)
+
+  // Fire and forget - don't await
+  fetch(backgroundUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Background-Secret': backgroundSecret,
+    },
+    body: JSON.stringify(payload),
+  }).then(response => {
+    if (!response.ok) {
+      console.error(`Background function returned ${response.status}`)
     } else {
-      console.log(`Complete API: Client delivery note sent to ${clientEmails.join(', ')}`)
+      console.log('Background function triggered successfully')
     }
-  } catch (err) {
-    console.error('Failed to generate/send delivery note PDF:', err)
-    errors.push('Failed to generate delivery note PDF')
-  }
+  }).catch(err => {
+    console.error('Failed to call background function:', err)
+  })
 }

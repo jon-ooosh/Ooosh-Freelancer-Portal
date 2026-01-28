@@ -15,6 +15,9 @@
  * After level 3: Staff notification sent to info@oooshtours.co.uk
  * 
  * Business hours: Only sends between 7am and 10pm
+ * 
+ * IDEMPOTENCY: Updates Monday BEFORE sending email to prevent duplicates
+ * if the function runs twice in quick succession.
  */
 
 import type { Config, Context } from '@netlify/functions'
@@ -394,28 +397,39 @@ function shouldSendReminder(currentLevel: number, hoursSinceJob: number): number
   return null
 }
 
-async function updateReminderLevel(itemId: string, level: number): Promise<void> {
-  const boardId = process.env.MONDAY_BOARD_ID_DELIVERIES
-  
-  const mutation = `
-    mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
-      change_simple_column_value(
-        board_id: $boardId, 
-        item_id: $itemId, 
-        column_id: $columnId, 
-        value: $value
-      ) {
-        id
+/**
+ * Update reminder level in Monday.com
+ * Returns true if successful
+ */
+async function updateReminderLevel(itemId: string, level: number): Promise<boolean> {
+  try {
+    const boardId = process.env.MONDAY_BOARD_ID_DELIVERIES
+    
+    const mutation = `
+      mutation ($boardId: ID!, $itemId: ID!, $columnId: String!, $value: String!) {
+        change_simple_column_value(
+          board_id: $boardId, 
+          item_id: $itemId, 
+          column_id: $columnId, 
+          value: $value
+        ) {
+          id
+        }
       }
-    }
-  `
+    `
 
-  await mondayQuery(mutation, {
-    boardId,
-    itemId,
-    columnId: DC_COLUMNS.completionReminderLevel,
-    value: level.toString(),
-  })
+    await mondayQuery(mutation, {
+      boardId,
+      itemId,
+      columnId: DC_COLUMNS.completionReminderLevel,
+      value: level.toString(),
+    })
+    
+    return true
+  } catch (error) {
+    console.error(`Failed to update reminder level for job ${itemId}:`, error)
+    return false
+  }
 }
 
 async function getDriverName(email: string): Promise<string> {
@@ -586,6 +600,15 @@ export default async function handler(req: Request, context: Context) {
 
       console.log(`Completion Reminders: Job ${item.id} (${venueName}) - ${hoursSince.toFixed(1)}h since job time, sending level ${nextLevel} reminder`)
 
+      // IDEMPOTENCY FIX: Update Monday FIRST before sending email
+      // This prevents duplicate emails if the function runs twice
+      const updateSuccess = await updateReminderLevel(item.id, nextLevel)
+      
+      if (!updateSuccess) {
+        console.error(`Completion Reminders: Failed to update level for job ${item.id}, skipping email`)
+        continue
+      }
+
       // Get driver name
       const driverName = await getDriverName(driverEmail)
 
@@ -600,7 +623,7 @@ export default async function handler(req: Request, context: Context) {
         year: 'numeric'
       })
 
-      // Send reminder
+      // Send reminder (Monday already updated, so even if this fails we won't send duplicate)
       const sent = await sendCompletionReminderEmail(
         driverEmail,
         driverName,
@@ -616,8 +639,6 @@ export default async function handler(req: Request, context: Context) {
       )
 
       if (sent) {
-        // Update reminder level in Monday
-        await updateReminderLevel(item.id, nextLevel)
         remindersSent++
 
         // If this was the 3rd reminder, also send staff notification
@@ -637,6 +658,9 @@ export default async function handler(req: Request, context: Context) {
             staffNotificationsSent++
           }
         }
+      } else {
+        // Email failed but level was updated - log this
+        console.warn(`Completion Reminders: Email failed for job ${item.id} but level was updated to ${nextLevel}`)
       }
     }
 
