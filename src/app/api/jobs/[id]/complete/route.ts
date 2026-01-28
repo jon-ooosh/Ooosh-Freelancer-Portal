@@ -249,7 +249,6 @@ export async function POST(
       jobDate: job.date || completedDate.toISOString(),
       jobHhRef: job.hhRef,
       jobVenueId: job.venueId,
-      jobVenueAddress: job.venueAddress,
       driverEmail: session.email,
       driverName,
       notes: notes?.trim() || null,
