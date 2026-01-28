@@ -197,14 +197,33 @@ async function getRelatedUpcomingJobs(excludeJobId: string, venueId?: string, hh
   }
 }
 
+/**
+ * Fetch equipment items from HireHop via our internal API
+ * 
+ * NOTE: We pass the background secret header to authenticate,
+ * since this server-to-server call doesn't have a user session.
+ */
 async function getHireHopItems(hhRef: string): Promise<HireHopItem[]> {
   try {
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
-    const response = await fetch(`${appUrl}/api/hirehop/items/${hhRef}?filter=equipment`)
-    if (!response.ok) return []
+    const secret = process.env.BACKGROUND_FUNCTION_SECRET || process.env.MONDAY_WEBHOOK_SECRET
+    
+    console.log(`Background: Fetching HireHop items for job ${hhRef}`)
+    
+    const response = await fetch(`${appUrl}/api/hirehop/items/${hhRef}?filter=equipment`, {
+      headers: secret ? { 'x-background-secret': secret } : {},
+    })
+    
+    if (!response.ok) {
+      console.error(`Background: HireHop fetch failed with status ${response.status}`)
+      return []
+    }
+    
     const data = await response.json()
+    console.log(`Background: HireHop returned ${data.items?.length || 0} items`)
     return data.items || []
-  } catch {
+  } catch (err) {
+    console.error('Background: HireHop fetch error:', err)
     return []
   }
 }
@@ -487,7 +506,7 @@ export const handler: Handler = async (event) => {
       
       if (jobType === 'delivery') {
         const items = jobHhRef ? await getHireHopItems(jobHhRef) : []
-        console.log(`Background: Fetched ${items.length} equipment items`)
+        console.log(`Background: Fetched ${items.length} equipment items for PDF`)
         
         const pdfBuffer = await generateDeliveryNotePdf({
           hhRef: jobHhRef || 'N/A',

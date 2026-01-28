@@ -4,7 +4,7 @@
  * GET /api/hirehop/items/[jobId]?filter=equipment|vehicles|all
  * 
  * Fetches equipment/supply list for a HireHop job.
- * Requires authentication - only returns items if user is logged in.
+ * Requires authentication - either user session OR internal secret header.
  * 
  * Query params:
  *   filter: 'equipment' | 'vehicles' | 'all' (default: 'all')
@@ -32,14 +32,26 @@ export async function GET(
       )
     }
 
-    // Check session - user must be authenticated
-    const session = await getSessionUser()
-    
-    if (!session) {
-      return NextResponse.json(
-        { success: false, error: 'Not authenticated' },
-        { status: 401 }
-      )
+    // Check for internal authentication (background functions)
+    // This allows server-to-server calls without a user session
+    const internalSecret = request.headers.get('x-background-secret')
+    const expectedSecret = process.env.BACKGROUND_FUNCTION_SECRET || process.env.MONDAY_WEBHOOK_SECRET
+    const isInternalCall = internalSecret && expectedSecret && internalSecret === expectedSecret
+
+    // Check session - user must be authenticated (unless internal call)
+    if (!isInternalCall) {
+      const session = await getSessionUser()
+      
+      if (!session) {
+        return NextResponse.json(
+          { success: false, error: 'Not authenticated' },
+          { status: 401 }
+        )
+      }
+      
+      console.log(`HireHop Items API: Fetching items for HH job ${jobId} with filter (user: ${session.email})`)
+    } else {
+      console.log(`HireHop Items API: Fetching items for HH job ${jobId} (internal call)`)
     }
 
     // Get filter mode from query params (default to 'all')
@@ -51,8 +63,6 @@ export async function GET(
     const filterMode: ItemFilterMode = validFilters.includes(filterParam as ItemFilterMode) 
       ? (filterParam as ItemFilterMode) 
       : 'all'
-
-    console.log(`HireHop Items API: Fetching items for HH job ${jobId} with filter '${filterMode}' (user: ${session.email})`)
 
     // Fetch items from HireHop with filtering
     const result = await getJobItemsFiltered(jobId, filterMode)

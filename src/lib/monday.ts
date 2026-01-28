@@ -413,6 +413,29 @@ export interface FreelancerRecord {
 }
 
 /**
+ * Sanitize and normalize an email address
+ * 
+ * Removes hidden Unicode characters that can sneak in from copy-paste,
+ * normalizes to lowercase, and trims whitespace.
+ * 
+ * This prevents matching failures caused by invisible characters like:
+ * - Zero-width spaces (U+200B)
+ * - Non-breaking spaces (U+00A0)
+ * - Soft hyphens (U+00AD)
+ * - Other invisible formatting characters
+ */
+function sanitizeEmail(email: string): string {
+  return email
+    // Remove any character that isn't a standard email character
+    // Allowed: a-z, A-Z, 0-9, @, ., +, -, _
+    .replace(/[^\w@.+\-]/g, '')
+    // Normalize to lowercase
+    .toLowerCase()
+    // Trim any remaining whitespace (shouldn't be any after the replace, but safe)
+    .trim()
+}
+
+/**
  * Find a freelancer by email address
  * 
  * OPTIMIZED: Uses items_page_by_column_values to filter on Monday's server
@@ -422,6 +445,9 @@ export interface FreelancerRecord {
  * FALLBACK: If server-side filtering returns no results, falls back to
  * fetching all freelancers and filtering locally. This handles Monday.com's
  * occasional search index inconsistencies with Email columns.
+ * 
+ * SANITIZATION: Emails are sanitized to remove hidden Unicode characters
+ * that can cause matching failures (e.g., zero-width spaces from copy-paste).
  */
 export async function findFreelancerByEmail(email: string): Promise<FreelancerRecord | null> {
   const boardId = getBoardIds().freelancers
@@ -430,7 +456,13 @@ export async function findFreelancerByEmail(email: string): Promise<FreelancerRe
     throw new Error('MONDAY_BOARD_ID_FREELANCERS is not configured')
   }
 
-  const normalizedEmail = email.toLowerCase().trim()
+  const normalizedEmail = sanitizeEmail(email)
+  
+  // Log if sanitization changed anything (helps debug future issues)
+  if (email.toLowerCase().trim() !== normalizedEmail) {
+    console.warn(`Monday: Email sanitized - original had hidden characters. Length: ${email.length} -> ${normalizedEmail.length}`)
+  }
+  
   console.log('Monday: Finding freelancer by email:', normalizedEmail)
   const startTime = Date.now()
 
@@ -518,10 +550,10 @@ export async function findFreelancerByEmail(email: string): Promise<FreelancerRe
     const fallbackResult = await mondayQuery<FallbackResult>(fallbackQuery)
     const allItems = fallbackResult.boards?.[0]?.items_page?.items || []
     
-    // Filter locally by email
+    // Filter locally by email - also sanitize the stored email for comparison
     items = allItems.filter(item => {
       const emailCol = item.column_values.find(col => col.id === FREELANCER_COLUMNS.email)
-      const itemEmail = emailCol?.text?.toLowerCase().trim() || ''
+      const itemEmail = sanitizeEmail(emailCol?.text || '')
       return itemEmail === normalizedEmail
     })
     
@@ -529,7 +561,7 @@ export async function findFreelancerByEmail(email: string): Promise<FreelancerRe
     console.log(`Monday: Fallback query completed in ${fallbackTime}ms, found ${items.length} matches out of ${allItems.length} total freelancers`)
     
     if (items.length > 0) {
-      console.warn(`Monday: NOTICE - Freelancer "${normalizedEmail}" found via fallback but NOT via optimized query. Monday.com search index may need time to update.`)
+      console.warn(`Monday: NOTICE - Freelancer "${normalizedEmail}" found via fallback but NOT via optimized query. Monday.com search index may need time to update, or stored email may contain hidden characters.`)
     }
   }
 
