@@ -1,4 +1,4 @@
-/**
+/** 
  * Warehouse Collections List API
  * 
  * Fetches jobs from the Q&H board that are ready for in-person collection:

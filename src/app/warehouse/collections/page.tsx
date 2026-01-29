@@ -10,9 +10,6 @@
  * Staff can tap a job to start the collection/sign-off process.
  */
 
-// Force dynamic rendering - this page always needs fresh data
-export const dynamic = 'force-dynamic'
-
 import { useState, useEffect, useCallback, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Image from 'next/image'
@@ -36,26 +33,32 @@ interface ApiResponse {
   error?: string
 }
 
-export default function CollectionsListPage() {
-  const router = useRouter()
+/**
+ * Inner component that handles the search params logic
+ * Must be wrapped in Suspense
+ */
+function SuccessHandler({ onSuccess }: { onSuccess: () => void }) {
   const searchParams = useSearchParams()
+  const router = useRouter()
+
+  useEffect(() => {
+    if (searchParams.get('completed') === 'true') {
+      onSuccess()
+      // Clear the param from URL
+      router.replace('/warehouse/collections', { scroll: false })
+    }
+  }, [searchParams, router, onSuccess])
+
+  return null
+}
+
+function CollectionsListContent() {
+  const router = useRouter()
   const [jobs, setJobs] = useState<CollectionJob[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
   const [showSuccess, setShowSuccess] = useState(false)
-
-  // Check for completed param (success message)
-  useEffect(() => {
-    if (searchParams.get('completed') === 'true') {
-      setShowSuccess(true)
-      // Clear the param from URL
-      router.replace('/warehouse/collections', { scroll: false })
-      // Auto-hide after 5 seconds
-      const timer = setTimeout(() => setShowSuccess(false), 5000)
-      return () => clearTimeout(timer)
-    }
-  }, [searchParams, router])
 
   // Check PIN and fetch jobs
   const fetchJobs = useCallback(async () => {
@@ -104,6 +107,14 @@ export default function CollectionsListPage() {
     fetchJobs()
   }, [fetchJobs])
 
+  // Handle success callback from SuccessHandler
+  const handleSuccess = useCallback(() => {
+    setShowSuccess(true)
+    // Auto-hide after 5 seconds
+    const timer = setTimeout(() => setShowSuccess(false), 5000)
+    return () => clearTimeout(timer)
+  }, [])
+
   function handleLogout() {
     sessionStorage.removeItem('warehouse_pin')
     router.push('/warehouse')
@@ -145,6 +156,11 @@ export default function CollectionsListPage() {
 
   return (
     <div className="min-h-screen bg-gray-100">
+      {/* Success handler wrapped in Suspense */}
+      <Suspense fallback={null}>
+        <SuccessHandler onSuccess={handleSuccess} />
+      </Suspense>
+
       {/* Header */}
       <header className="bg-white shadow-sm sticky top-0 z-10">
         <div className="max-w-3xl mx-auto px-4 py-4 flex items-center justify-between">
@@ -320,4 +336,9 @@ export default function CollectionsListPage() {
       </main>
     </div>
   )
+}
+
+// Main export - wraps everything
+export default function CollectionsListPage() {
+  return <CollectionsListContent />
 }

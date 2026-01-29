@@ -27,7 +27,7 @@ export default function WarehousePage() {
       verifyPin(storedPin, true)
     } else {
       setIsCheckingSession(false)
-    }
+    } 
   }, [])
 
   async function verifyPin(pinToVerify: string, isAutoRedirect: boolean = false) {
