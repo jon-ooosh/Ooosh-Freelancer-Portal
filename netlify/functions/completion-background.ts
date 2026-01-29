@@ -344,8 +344,27 @@ async function sendClientCollectionConfirmation(clientEmails: string[], venueNam
 }
 
 // =============================================================================
-// PDF GENERATION (simplified - uses pdf-lib)
+// PDF GENERATION
 // =============================================================================
+
+/**
+ * Fetch logo image from the portal URL
+ */
+async function fetchLogoImage(): Promise<Uint8Array | null> {
+  try {
+    const logoUrl = 'https://ooosh-freelancer-portal.netlify.app/ooosh-tours-logo-small.png'
+    const response = await fetch(logoUrl)
+    if (!response.ok) {
+      console.warn('Background: Failed to fetch logo:', response.status)
+      return null
+    }
+    const arrayBuffer = await response.arrayBuffer()
+    return new Uint8Array(arrayBuffer)
+  } catch (err) {
+    console.warn('Background: Error fetching logo:', err)
+    return null
+  }
+}
 
 async function generateDeliveryNotePdf(data: {
   hhRef: string; jobDate: string; completedAt: string; clientName?: string; venueName: string;
@@ -357,9 +376,14 @@ async function generateDeliveryNotePdf(data: {
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica)
   const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold)
   
-  const pageWidth = 595.28, pageHeight = 841.89, margin = 40
+  // Page settings
+  const pageWidth = 595.28  // A4 width in points
+  const pageHeight = 841.89 // A4 height in points
+  const margin = 40
   const contentWidth = pageWidth - margin * 2
-  const primaryColor = rgb(0.486, 0.361, 0.906)
+  
+  // Colors - Ooosh purple
+  const primaryColor = rgb(0.486, 0.361, 0.906)  // #7c5ce7
   const textColor = rgb(0.2, 0.2, 0.2)
   const lightGray = rgb(0.5, 0.5, 0.5)
   const borderColor = rgb(0.85, 0.85, 0.85)
@@ -368,53 +392,233 @@ async function generateDeliveryNotePdf(data: {
   let page = pdfDoc.addPage([pageWidth, pageHeight])
   let y = pageHeight - margin
   
-  // Header
-  page.drawText('OOOSH TOURS', { x: margin, y: y - 25, size: 22, font: helveticaBold, color: primaryColor })
-  page.drawText('Delivery Note', { x: pageWidth - margin - 140, y: y - 30, size: 24, font: helveticaBold, color: primaryColor })
-  y -= 60
-  page.drawText(`Job Number: ${data.hhRef}`, { x: pageWidth - margin - 100, y, size: 9, font: helvetica, color: lightGray })
-  y -= 15
-  page.drawLine({ start: { x: margin, y }, end: { x: pageWidth - margin, y }, thickness: 2, color: primaryColor })
-  y -= 25
+  // ==========================================================================
+  // HEADER SECTION - Logo, Title, Address, Job Number
+  // ==========================================================================
   
-  // Details box
-  page.drawRectangle({ x: margin, y: y - 80, width: contentWidth, height: 80, borderColor, borderWidth: 1, color: headerBg })
-  const row1Y = y - 18
-  if (data.clientName) {
-    page.drawText('Client:', { x: margin + 15, y: row1Y, size: 9, font: helvetica, color: lightGray })
-    page.drawText(data.clientName, { x: margin + 15, y: row1Y - 13, size: 11, font: helveticaBold, color: textColor })
+  // Try to fetch and embed logo
+  const logoBytes = await fetchLogoImage()
+  let logoBottomY = y - 50  // Default if no logo
+  
+  if (logoBytes) {
+    try {
+      const logoImage = await pdfDoc.embedPng(logoBytes)
+      const logoAspect = logoImage.width / logoImage.height
+      const logoDisplayHeight = 50
+      const logoDisplayWidth = logoDisplayHeight * logoAspect
+      
+      page.drawImage(logoImage, {
+        x: margin,
+        y: y - logoDisplayHeight,
+        width: logoDisplayWidth,
+        height: logoDisplayHeight,
+      })
+      logoBottomY = y - logoDisplayHeight
+      console.log('Background: Logo embedded in PDF')
+    } catch (err) {
+      console.warn('Background: Failed to embed logo, using text fallback:', err)
+      // Fallback to text
+      page.drawText('OOOSH TOURS', {
+        x: margin,
+        y: y - 25,
+        size: 22,
+        font: helveticaBold,
+        color: primaryColor,
+      })
+      logoBottomY = y - 30
+    }
+  } else {
+    // Text fallback if logo fetch failed
+    page.drawText('OOOSH TOURS', {
+      x: margin,
+      y: y - 25,
+      size: 22,
+      font: helveticaBold,
+      color: primaryColor,
+    })
+    logoBottomY = y - 30
   }
-  page.drawText('Job Date:', { x: pageWidth / 2 + 20, y: row1Y, size: 9, font: helvetica, color: lightGray })
-  page.drawText(new Date(data.jobDate).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }), { x: pageWidth / 2 + 20, y: row1Y - 13, size: 11, font: helveticaBold, color: textColor })
   
-  const row2Y = row1Y - 32
-  page.drawText('Venue:', { x: margin + 15, y: row2Y, size: 9, font: helvetica, color: lightGray })
-  page.drawText(data.venueName || 'N/A', { x: margin + 15, y: row2Y - 13, size: 11, font: helveticaBold, color: textColor })
-  page.drawText('Completed:', { x: pageWidth / 2 + 20, y: row2Y, size: 9, font: helvetica, color: lightGray })
-  const cd = new Date(data.completedAt)
-  page.drawText(`${cd.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })} at ${cd.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`, { x: pageWidth / 2 + 20, y: row2Y - 13, size: 11, font: helveticaBold, color: textColor })
-  y -= 100
+  // "Delivery Note" title on the right - aligned with logo bottom
+  const titleText = 'Delivery Note'
+  const titleSize = 24
+  const titleWidth = helveticaBold.widthOfTextAtSize(titleText, titleSize)
+  page.drawText(titleText, {
+    x: pageWidth - margin - titleWidth,
+    y: logoBottomY + 5,  // Slightly above logo bottom for visual alignment
+    size: titleSize,
+    font: helveticaBold,
+    color: primaryColor,
+  })
   
-  // Equipment
-  page.drawText('Equipment Delivered', { x: margin, y, size: 14, font: helveticaBold, color: textColor })
+  // Company address under the logo
+  const addressY = logoBottomY - 12
+  page.drawText('Compass House, 7 East Street, Portslade, BN41 1DL', {
+    x: margin,
+    y: addressY,
+    size: 9,
+    font: helvetica,
+    color: lightGray,
+  })
+  
+  // Job number on the right, below "Delivery Note"
+  const jobNumText = `Job Number: ${data.hhRef}`
+  const jobNumWidth = helvetica.widthOfTextAtSize(jobNumText, 9)
+  page.drawText(jobNumText, {
+    x: pageWidth - margin - jobNumWidth,
+    y: addressY,
+    size: 9,
+    font: helvetica,
+    color: lightGray,
+  })
+  
+  y = addressY - 20
+  
+  // Thick purple divider line
+  page.drawLine({
+    start: { x: margin, y },
+    end: { x: pageWidth - margin, y },
+    thickness: 2,
+    color: primaryColor,
+  })
+  
   y -= 25
-  page.drawRectangle({ x: margin, y: y - 28, width: contentWidth, height: 28, color: headerBg, borderColor, borderWidth: 1 })
+  
+  // ==========================================================================
+  // JOB DETAILS BOX
+  // ==========================================================================
+  
+  const detailsBoxHeight = 80
+  
+  page.drawRectangle({
+    x: margin,
+    y: y - detailsBoxHeight,
+    width: contentWidth,
+    height: detailsBoxHeight,
+    borderColor,
+    borderWidth: 1,
+    color: headerBg,
+  })
+  
+  // Two-column layout
+  const leftColX = margin + 15
+  const rightColX = pageWidth / 2 + 20
+  const labelSize = 9
+  const valueSize = 11
+  
+  // Row 1: Client (left) and Job Date (right)
+  const row1Y = y - 18
+  
+  if (data.clientName) {
+    page.drawText('Client:', { x: leftColX, y: row1Y, size: labelSize, font: helvetica, color: lightGray })
+    page.drawText(data.clientName, { x: leftColX, y: row1Y - 13, size: valueSize, font: helveticaBold, color: textColor })
+  }
+  
+  page.drawText('Job Date:', { x: rightColX, y: row1Y, size: labelSize, font: helvetica, color: lightGray })
+  page.drawText(new Date(data.jobDate).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }), {
+    x: rightColX, y: row1Y - 13, size: valueSize, font: helveticaBold, color: textColor
+  })
+  
+  // Row 2: Venue (left) and Completed (right)
+  const row2Y = row1Y - 32
+  
+  page.drawText('Venue:', { x: leftColX, y: row2Y, size: labelSize, font: helvetica, color: lightGray })
+  page.drawText(data.venueName || 'N/A', { x: leftColX, y: row2Y - 13, size: valueSize, font: helveticaBold, color: textColor })
+  
+  page.drawText('Completed:', { x: rightColX, y: row2Y, size: labelSize, font: helvetica, color: lightGray })
+  const completedDate = new Date(data.completedAt)
+  page.drawText(`${completedDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })} at ${completedDate.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`, {
+    x: rightColX, y: row2Y - 13, size: valueSize, font: helveticaBold, color: textColor
+  })
+  
+  // Move past the details box with extra space before Equipment section
+  y = y - detailsBoxHeight - 35  // Increased gap (was 20, now 35) for clear section separation
+  
+  // ==========================================================================
+  // EQUIPMENT SECTION
+  // ==========================================================================
+  
+  page.drawText('Equipment Delivered', {
+    x: margin,
+    y,
+    size: 14,
+    font: helveticaBold,
+    color: textColor,
+  })
+  
+  y -= 20  // Reduced gap between header and table (was 25)
+  
+  // Table header
+  const tableHeaderHeight = 28
+  page.drawRectangle({
+    x: margin,
+    y: y - tableHeaderHeight,
+    width: contentWidth,
+    height: tableHeaderHeight,
+    color: headerBg,
+    borderColor,
+    borderWidth: 1,
+  })
+  
   page.drawText('Item', { x: margin + 10, y: y - 18, size: 10, font: helveticaBold, color: textColor })
   page.drawText('Qty', { x: pageWidth - margin - 40, y: y - 18, size: 10, font: helveticaBold, color: textColor })
-  y -= 28
+  y -= tableHeaderHeight
   
+  // Equipment rows
   for (const item of data.items) {
-    if (y < margin + 150) { page = pdfDoc.addPage([pageWidth, pageHeight]); y = pageHeight - margin }
+    if (y < margin + 150) {
+      page = pdfDoc.addPage([pageWidth, pageHeight])
+      y = pageHeight - margin
+    }
+    
+    // Draw row separator line
+    page.drawLine({
+      start: { x: margin, y },
+      end: { x: pageWidth - margin, y },
+      thickness: 0.5,
+      color: borderColor,
+    })
+    
     page.drawText(item.name.substring(0, 70), { x: margin + 10, y: y - 15, size: 10, font: helvetica, color: textColor })
     page.drawText(String(item.quantity), { x: pageWidth - margin - 35, y: y - 15, size: 10, font: helvetica, color: textColor })
     y -= 22
   }
   
-  // Signature
+  // Close the table with bottom border
+  page.drawLine({
+    start: { x: margin, y },
+    end: { x: pageWidth - margin, y },
+    thickness: 1,
+    color: borderColor,
+  })
+  
+  // ==========================================================================
+  // SIGNATURE SECTION
+  // ==========================================================================
+  
   y -= 30
-  if (y < margin + 120) { page = pdfDoc.addPage([pageWidth, pageHeight]); y = pageHeight - margin }
-  page.drawRectangle({ x: margin, y: y - 100, width: contentWidth, height: 100, borderColor, borderWidth: 1 })
-  page.drawText('Acknowledgement of Delivery', { x: margin + 15, y: y - 20, size: 11, font: helveticaBold, color: textColor })
+  if (y < margin + 120) {
+    page = pdfDoc.addPage([pageWidth, pageHeight])
+    y = pageHeight - margin
+  }
+  
+  const sigBoxHeight = 100
+  page.drawRectangle({
+    x: margin,
+    y: y - sigBoxHeight,
+    width: contentWidth,
+    height: sigBoxHeight,
+    borderColor,
+    borderWidth: 1,
+  })
+  
+  page.drawText('Acknowledgement of Delivery', {
+    x: margin + 15,
+    y: y - 20,
+    size: 11,
+    font: helveticaBold,
+    color: textColor,
+  })
   
   if (data.signatureBase64) {
     try {
@@ -422,45 +626,114 @@ async function generateDeliveryNotePdf(data: {
       const sigBytes = Buffer.from(sigData, 'base64')
       const sigImg = await pdfDoc.embedPng(sigBytes)
       const scale = Math.min(180 / sigImg.width, 50 / sigImg.height)
-      page.drawImage(sigImg, { x: margin + 15, y: y - 80, width: sigImg.width * scale, height: sigImg.height * scale })
-    } catch { /* ignore */ }
+      page.drawImage(sigImg, {
+        x: margin + 15,
+        y: y - 80,
+        width: sigImg.width * scale,
+        height: sigImg.height * scale,
+      })
+    } catch (err) {
+      console.warn('Background: Failed to embed signature:', err)
+    }
   }
-  page.drawText(data.driverName ? `Received by customer - delivered by ${data.driverName}` : 'Received by customer', { x: margin + 15, y: y - 95, size: 9, font: helvetica, color: lightGray })
-  y -= 120
   
-  // Photos
+  const receivedText = data.driverName
+    ? `Received by customer - delivered by ${data.driverName}`
+    : 'Received by customer'
+  page.drawText(receivedText, {
+    x: margin + 15,
+    y: y - sigBoxHeight + 12,
+    size: 9,
+    font: helvetica,
+    color: lightGray,
+  })
+  
+  y -= sigBoxHeight + 20
+  
+  // ==========================================================================
+  // PHOTOS SECTION (if any)
+  // ==========================================================================
+  
   if (data.photos && data.photos.length > 0) {
-    if (y < margin + 250) { page = pdfDoc.addPage([pageWidth, pageHeight]); y = pageHeight - margin }
-    page.drawText('Delivery Photos', { x: margin, y, size: 14, font: helveticaBold, color: textColor })
+    if (y < margin + 250) {
+      page = pdfDoc.addPage([pageWidth, pageHeight])
+      y = pageHeight - margin
+    }
+    
+    page.drawText('Delivery Photos', {
+      x: margin,
+      y,
+      size: 14,
+      font: helveticaBold,
+      color: textColor,
+    })
     y -= 25
+    
+    const maxPhotoWidth = 250
+    const maxPhotoHeight = 200
     
     for (let i = 0; i < data.photos.length; i++) {
       try {
         const photoData = data.photos[i].replace(/^data:image\/\w+;base64,/, '')
         const photoBytes = Buffer.from(photoData, 'base64')
+        
         let photoImg
-        try { photoImg = await pdfDoc.embedJpg(photoBytes) } catch { photoImg = await pdfDoc.embedPng(photoBytes) }
+        try {
+          photoImg = await pdfDoc.embedJpg(photoBytes)
+        } catch {
+          photoImg = await pdfDoc.embedPng(photoBytes)
+        }
         
-        const maxW = 250, maxH = 200
-        const scale = Math.min(maxW / photoImg.width, maxH / photoImg.height)
-        const w = photoImg.width * scale, h = photoImg.height * scale
+        const scale = Math.min(maxPhotoWidth / photoImg.width, maxPhotoHeight / photoImg.height)
+        const w = photoImg.width * scale
+        const h = photoImg.height * scale
+        
         const col = i % 2
-        const xPos = margin + col * (maxW + 20)
+        const xPos = margin + col * (maxPhotoWidth + 20)
         
-        if (col === 0 && i > 0) y -= maxH + 30
-        if (y - h < margin) { page = pdfDoc.addPage([pageWidth, pageHeight]); y = pageHeight - margin }
+        if (col === 0 && i > 0) y -= maxPhotoHeight + 30
+        if (y - h < margin) {
+          page = pdfDoc.addPage([pageWidth, pageHeight])
+          y = pageHeight - margin
+        }
         
-        page.drawRectangle({ x: xPos - 2, y: y - h - 2, width: w + 4, height: h + 4, borderColor, borderWidth: 1 })
+        page.drawRectangle({
+          x: xPos - 2,
+          y: y - h - 2,
+          width: w + 4,
+          height: h + 4,
+          borderColor,
+          borderWidth: 1,
+        })
         page.drawImage(photoImg, { x: xPos, y: y - h, width: w, height: h })
         page.drawText(`Photo ${i + 1}`, { x: xPos, y: y - h - 15, size: 9, font: helvetica, color: lightGray })
-      } catch { /* skip failed photo */ }
+      } catch (err) {
+        console.warn(`Background: Failed to embed photo ${i + 1}:`, err)
+      }
     }
   }
   
-  // Footer
+  // ==========================================================================
+  // FOOTER
+  // ==========================================================================
+  
   const lastPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1]
-  lastPage.drawText('Thank you for choosing Ooosh Tours', { x: margin, y: margin - 10, size: 9, font: helvetica, color: lightGray })
-  lastPage.drawText('www.oooshtours.co.uk', { x: pageWidth - margin - 90, y: margin - 10, size: 9, font: helvetica, color: primaryColor })
+  lastPage.drawText('Thank you for choosing Ooosh Tours', {
+    x: margin,
+    y: margin - 10,
+    size: 9,
+    font: helvetica,
+    color: lightGray,
+  })
+  
+  const websiteText = 'www.oooshtours.co.uk'
+  lastPage.drawText(websiteText, {
+    x: pageWidth - margin - helvetica.widthOfTextAtSize(websiteText, 9),
+    y: margin - 10,
+    size: 9,
+    font: helvetica,
+    color: primaryColor,
+  })
   
   return Buffer.from(await pdfDoc.save())
 }
