@@ -10,7 +10,10 @@
  * Staff can tap a job to start the collection/sign-off process.
  */
 
-import { useState, useEffect, useCallback } from 'react'
+// Force dynamic rendering - this page always needs fresh data
+export const dynamic = 'force-dynamic'
+
+import { useState, useEffect, useCallback, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Image from 'next/image'
 

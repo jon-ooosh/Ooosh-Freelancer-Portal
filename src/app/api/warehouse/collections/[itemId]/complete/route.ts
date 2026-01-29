@@ -53,13 +53,14 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
 }
 
 /**
- * Add an update (comment) to a Monday item with signature info
+ * Add an update (comment) to a Monday item with signature info and image
  */
-async function addSignatureUpdate(itemId: string, clientName: string, timestamp: string): Promise<boolean> {
+async function addSignatureUpdate(itemId: string, clientName: string, timestamp: string, signatureBase64: string): Promise<boolean> {
   try {
     const updateText = `📝 **Collected in-person**\n\n👤 Collected by: ${clientName || 'Customer'}\n📅 Date/Time: ${timestamp}\n\n_Signature captured via Warehouse Portal_`
 
-    const mutation = `
+    // First create the update
+    const createMutation = `
       mutation ($itemId: ID!, $body: String!) {
         create_update(item_id: $itemId, body: $body) {
           id
@@ -67,8 +68,59 @@ async function addSignatureUpdate(itemId: string, clientName: string, timestamp:
       }
     `
 
-    await mondayQuery(mutation, { itemId, body: updateText })
-    console.log(`Warehouse: Added signature update to item ${itemId}`)
+    const updateResult = await mondayQuery<{ create_update: { id: string } }>(createMutation, { itemId, body: updateText })
+    const updateId = updateResult.create_update?.id
+
+    if (!updateId) {
+      console.error('Warehouse: Failed to create update - no ID returned')
+      return false
+    }
+
+    console.log(`Warehouse: Created update ${updateId} for item ${itemId}`)
+
+    // Now upload the signature image to the update
+    if (signatureBase64) {
+      try {
+        // Convert base64 to buffer
+        const base64Data = signatureBase64.replace(/^data:image\/\w+;base64,/, '')
+        const imageBuffer = Buffer.from(base64Data, 'base64')
+
+        // Create form data for file upload
+        const FormData = (await import('form-data')).default
+        const form = new FormData()
+
+        // Monday.com file upload requires specific format
+        const query = `mutation ($updateId: ID!) { add_file_to_update(update_id: $updateId, file: $file) { id } }`
+        form.append('query', query)
+        form.append('variables[updateId]', updateId)
+        form.append('map', JSON.stringify({ file: 'variables.file' }))
+        form.append('file', imageBuffer, {
+          filename: `signature_${itemId}_${Date.now()}.png`,
+          contentType: 'image/png',
+        })
+
+        const token = process.env.MONDAY_API_TOKEN
+        const uploadResponse = await fetch(MONDAY_API_URL, {
+          method: 'POST',
+          headers: {
+            'Authorization': token!,
+            ...form.getHeaders(),
+          },
+          body: form as unknown as BodyInit,
+        })
+
+        const uploadResult = await uploadResponse.json()
+        if (uploadResult.errors) {
+          console.warn('Warehouse: Signature upload had errors:', uploadResult.errors)
+        } else {
+          console.log('Warehouse: Signature image uploaded to update')
+        }
+      } catch (uploadErr) {
+        // Log but don't fail - the text update is more important
+        console.warn('Warehouse: Failed to upload signature image:', uploadErr)
+      }
+    }
+
     return true
   } catch (err) {
     console.error('Failed to add signature update:', err)
@@ -371,8 +423,8 @@ export async function POST(
 
     const results: Record<string, boolean> = {}
 
-    // 1. Add signature update to Monday
-    results.signatureUpdate = await addSignatureUpdate(itemId, clientName, timestamp)
+    // 1. Add signature update to Monday (with image)
+    results.signatureUpdate = await addSignatureUpdate(itemId, clientName, timestamp, signatureBase64)
 
     // 2. Update status to "On hire!"
     results.statusUpdate = await updateOnHireStatus(itemId)
