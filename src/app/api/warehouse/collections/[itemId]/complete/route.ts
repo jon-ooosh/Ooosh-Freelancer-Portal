@@ -74,7 +74,7 @@ async function addSignatureUpdate(itemId: string, clientName: string, timestamp:
     if (!updateId) {
       console.error('Warehouse: Failed to create update - no ID returned')
       return false
-    }
+    } 
 
     console.log(`Warehouse: Created update ${updateId} for item ${itemId}`)
 

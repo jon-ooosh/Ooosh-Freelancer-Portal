@@ -1,6 +1,6 @@
 'use client'
 
-/**
+/** 
  * Warehouse Collections List Page
  * 
  * Displays jobs that are ready for in-person collection:

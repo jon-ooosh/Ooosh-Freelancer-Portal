@@ -826,4 +826,4 @@ export const handler: Handler = async (event) => {
     console.error('Background: Error:', err)
     return { statusCode: 500, body: JSON.stringify({ error: err instanceof Error ? err.message : 'Unknown error', results }) }
   }
-} 
+}

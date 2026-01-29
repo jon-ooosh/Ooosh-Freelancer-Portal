@@ -1,4 +1,4 @@
-/** 
+/**
  * Warehouse PIN Authentication API
  * 
  * Simple PIN verification for warehouse tablet access.

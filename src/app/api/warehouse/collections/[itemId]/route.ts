@@ -1,4 +1,4 @@
-/** 
+/**
  * Warehouse Single Job Details API
  * 
  * Fetches full details for a specific job including:

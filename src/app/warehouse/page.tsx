@@ -1,6 +1,6 @@
 'use client'
 
-/**
+/** 
  * Warehouse PIN Entry Page
  * 
  * Simple PIN-based authentication for in-house tablet use.

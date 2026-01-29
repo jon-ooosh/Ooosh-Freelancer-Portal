@@ -1,6 +1,6 @@
-'use client' 
+'use client'
 
-/**
+/** 
  * Warehouse Collection Completion Page
  * 
  * Shows equipment list for client to review, captures signature,
