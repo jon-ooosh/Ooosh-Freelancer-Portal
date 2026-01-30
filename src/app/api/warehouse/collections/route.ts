@@ -10,6 +10,8 @@
  * - HireHop: COLLECT=0 (customer collects) - excludes deliveries
  * 
  * Sorted by hire date ascending (yesterday → today → tomorrow)
+ * 
+ * OPTIMIZED: Only fetches specific columns to reduce API response time
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -21,13 +23,22 @@ const QH_BOARD_ID = '2431480012' // Quotes & Hires board
 const HIREHOP_DOMAIN = process.env.HIREHOP_DOMAIN || 'hirehop.net'
 const HIREHOP_API_TOKEN = process.env.HIREHOP_API_TOKEN || ''
 
+// Column IDs we need from Q&H board
+const COLUMNS = {
+  hireStartDate: 'date',      // Hire start date
+  quoteStatus: 'status6',     // Quote status (e.g., "Confirmed quote")
+  onHireStatus: 'status51',   // On hire status (e.g., "On hire!")
+  clientName: 'text6',        // Client name
+  clientEmail: 'text1',       // Client email
+  hhRef: 'text7',             // HireHop job reference
+}
+
 interface MondayItem {
   id: string
   name: string
   column_values: Array<{
     id: string
     text: string | null
-    value: string | null
   }>
 }
 
@@ -170,8 +181,10 @@ export async function GET(request: NextRequest) {
 
     console.log('Warehouse: Fetching collections from Monday.com')
 
-    // Fetch all items from Q&H board
-    // We'll filter client-side for date range and status
+    // OPTIMIZED: Only fetch the specific columns we need
+    // This dramatically reduces response size and parsing time
+    const columnIds = Object.values(COLUMNS)
+    
     const query = `
       query {
         boards(ids: [${QH_BOARD_ID}]) {
@@ -179,10 +192,9 @@ export async function GET(request: NextRequest) {
             items {
               id
               name
-              column_values {
+              column_values(ids: ${JSON.stringify(columnIds)}) {
                 id
                 text
-                value
               }
             }
           }
@@ -190,6 +202,7 @@ export async function GET(request: NextRequest) {
       }
     `
 
+    const mondayStartTime = Date.now()
     const data = await mondayQuery<{
       boards: Array<{
         items_page: {
@@ -197,20 +210,21 @@ export async function GET(request: NextRequest) {
         }
       }>
     }>(query)
+    const mondayElapsed = Date.now() - mondayStartTime
 
     const items = data.boards?.[0]?.items_page?.items || []
-    console.log(`Warehouse: Fetched ${items.length} items from Monday`)
+    console.log(`Warehouse: Fetched ${items.length} items from Monday in ${mondayElapsed}ms`)
 
     // First pass: Filter by Monday criteria
     const mondayFiltered: CollectionJob[] = []
     
     for (const item of items) {
-      const hireStartDate = getColumnValue(item, 'date')
-      const quoteStatus = getColumnValue(item, 'status6')
-      const onHireStatus = getColumnValue(item, 'status51')
-      const clientName = getColumnValue(item, 'text6')
-      const clientEmail = getColumnValue(item, 'text1')
-      const hhRef = getColumnValue(item, 'text7')
+      const hireStartDate = getColumnValue(item, COLUMNS.hireStartDate)
+      const quoteStatus = getColumnValue(item, COLUMNS.quoteStatus)
+      const onHireStatus = getColumnValue(item, COLUMNS.onHireStatus)
+      const clientName = getColumnValue(item, COLUMNS.clientName)
+      const clientEmail = getColumnValue(item, COLUMNS.clientEmail)
+      const hhRef = getColumnValue(item, COLUMNS.hhRef)
 
       // Filter 1: Date must be within ±1 day
       if (!isWithinDateRange(hireStartDate)) {
@@ -242,18 +256,20 @@ export async function GET(request: NextRequest) {
     console.log(`Warehouse: ${mondayFiltered.length} jobs passed Monday filters`)
 
     // Second pass: Filter by HireHop COLLECT status (in parallel for speed)
+    const hirehopStartTime = Date.now()
     const hirehopChecks = await Promise.all(
       mondayFiltered.map(async (job) => {
         const isCollection = await isCustomerCollection(job.hhRef)
         return { job, isCollection }
       })
     )
+    const hirehopElapsed = Date.now() - hirehopStartTime
 
     const jobs = hirehopChecks
       .filter(({ isCollection }) => isCollection)
       .map(({ job }) => job)
 
-    console.log(`Warehouse: ${jobs.length} jobs passed HireHop COLLECT filter`)
+    console.log(`Warehouse: ${jobs.length} jobs passed HireHop COLLECT filter in ${hirehopElapsed}ms`)
 
     // Sort by hire date ascending (yesterday → today → tomorrow)
     jobs.sort((a, b) => {
@@ -263,7 +279,7 @@ export async function GET(request: NextRequest) {
     })
 
     const elapsed = Date.now() - startTime
-    console.log(`Warehouse: Collections API completed in ${elapsed}ms`)
+    console.log(`Warehouse: Collections API completed in ${elapsed}ms (Monday: ${mondayElapsed}ms, HireHop: ${hirehopElapsed}ms)`)
 
     return NextResponse.json({
       success: true,
@@ -271,6 +287,8 @@ export async function GET(request: NextRequest) {
       fetchedAt: new Date().toISOString(),
       timing: {
         totalMs: elapsed,
+        mondayMs: mondayElapsed,
+        hirehopMs: hirehopElapsed,
         jobCount: jobs.length,
       },
     })
