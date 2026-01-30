@@ -1,27 +1,34 @@
 /**
- * Warehouse Collections List API
+ * Warehouse Collections API
  * 
- * Fetches jobs from the Q&H board that are ready for in-person collection:
- * - Hire start date is within ±1 day of today
- * - Quote status (status6) = "Confirmed quote"
- * - On hire status (status51) is NOT "On hire!"
+ * GET /api/warehouse/collections
  * 
- * Returns job details including client name, email, and HireHop reference.
+ * Returns jobs ready for in-person collection at the warehouse.
+ * 
+ * Filters applied:
+ * - Monday.com: Confirmed quotes with hire date ±1 day, not yet "On hire!"
+ * - HireHop: COLLECT=0 (customer collects) - excludes deliveries
+ * 
+ * Sorted by hire date ascending (yesterday → today → tomorrow)
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 
 const MONDAY_API_URL = 'https://api.monday.com/v2'
-const QH_BOARD_ID = '2431480012'
+const QH_BOARD_ID = '2431480012' // Quotes & Hires board
 
-// Column IDs on Q&H board
-const COLUMNS = {
-  HIRE_START_DATE: 'date',
-  QUOTE_STATUS: 'status6',
-  ON_HIRE_STATUS: 'status51',
-  CLIENT_EMAIL: 'text1',
-  CLIENT_NAME: 'text6',
-  HIREHOP_REF: 'text7',
+// HireHop config (matches existing src/lib/hirehop.ts)
+const HIREHOP_DOMAIN = process.env.HIREHOP_DOMAIN || 'hirehop.net'
+const HIREHOP_API_TOKEN = process.env.HIREHOP_API_TOKEN || ''
+
+interface MondayItem {
+  id: string
+  name: string
+  column_values: Array<{
+    id: string
+    text: string | null
+    value: string | null
+  }>
 }
 
 interface CollectionJob {
@@ -35,75 +42,144 @@ interface CollectionJob {
   onHireStatus: string
 }
 
+/**
+ * Query Monday.com GraphQL API
+ */
 async function mondayQuery<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const token = process.env.MONDAY_API_TOKEN
-  if (!token) throw new Error('MONDAY_API_TOKEN not configured')
+  if (!token) {
+    throw new Error('MONDAY_API_TOKEN not configured')
+  }
 
   const response = await fetch(MONDAY_API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': token,
-      'API-Version': '2024-10',
+      'API-Version': '2024-01',
     },
     body: JSON.stringify({ query, variables }),
   })
 
-  const data = await response.json()
-  if (data.errors) {
-    console.error('Monday API errors:', data.errors)
-    throw new Error(JSON.stringify(data.errors))
+  const result = await response.json()
+  
+  if (result.errors) {
+    console.error('Monday API errors:', result.errors)
+    throw new Error(result.errors[0]?.message || 'Monday API error')
   }
-  return data.data as T
+
+  return result.data as T
 }
 
 /**
- * Get date range for filtering (yesterday, today, tomorrow)
+ * Check HireHop job to see if it's a customer collection (COLLECT=0)
  */
-function getDateRange(): { start: string; end: string } {
-  const today = new Date()
+async function isCustomerCollection(hhRef: string): Promise<boolean> {
+  if (!hhRef || !HIREHOP_API_TOKEN) {
+    // If no HireHop ref or token, include by default (fail open)
+    console.log(`Warehouse: No HH ref or token for job, including by default`)
+    return true
+  }
+
+  try {
+    const url = `https://${HIREHOP_DOMAIN}/api/job_data.php?job=${encodeURIComponent(hhRef)}&token=${encodeURIComponent(HIREHOP_API_TOKEN)}`
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+      },
+    })
+
+    const text = await response.text()
+    
+    // Check for HTML error response
+    if (text.trim().startsWith('<')) {
+      console.warn(`Warehouse: HireHop returned HTML for job ${hhRef}, including by default`)
+      return true
+    }
+
+    const data = JSON.parse(text)
+    
+    if (data.error) {
+      console.warn(`Warehouse: HireHop error for job ${hhRef}: ${data.error}, including by default`)
+      return true
+    }
+
+    // COLLECT field: 0 = customer collect, 1 = we deliver, 2 = courier, 3 = other
+    const collectStatus = parseInt(data.COLLECT, 10)
+    const isCollection = collectStatus === 0
+    
+    console.log(`Warehouse: HH job ${hhRef} COLLECT=${collectStatus}, isCustomerCollection=${isCollection}`)
+    
+    return isCollection
+  } catch (err) {
+    console.error(`Warehouse: Failed to check HireHop for job ${hhRef}:`, err)
+    // Fail open - include the job if we can't check
+    return true
+  }
+}
+
+/**
+ * Get column value by ID from Monday item
+ */
+function getColumnValue(item: MondayItem, columnId: string): string {
+  const col = item.column_values.find(c => c.id === columnId)
+  return col?.text || ''
+}
+
+/**
+ * Check if a date is within range of today (±1 day)
+ */
+function isWithinDateRange(dateStr: string): boolean {
+  if (!dateStr) return false
   
-  const yesterday = new Date(today)
-  yesterday.setDate(yesterday.getDate() - 1)
-  
-  const tomorrow = new Date(today)
-  tomorrow.setDate(tomorrow.getDate() + 1)
-  
-  // Format as YYYY-MM-DD
-  const formatDate = (d: Date) => d.toISOString().split('T')[0]
-  
-  return {
-    start: formatDate(yesterday),
-    end: formatDate(tomorrow),
+  try {
+    const jobDate = new Date(dateStr)
+    jobDate.setHours(0, 0, 0, 0)
+    
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    
+    const yesterday = new Date(today)
+    yesterday.setDate(yesterday.getDate() - 1)
+    
+    const tomorrow = new Date(today)
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    
+    return jobDate >= yesterday && jobDate <= tomorrow
+  } catch {
+    return false
   }
 }
 
 export async function GET(request: NextRequest) {
+  const startTime = Date.now()
+  
   try {
-    // Verify PIN from header (simple auth check)
+    // Verify PIN authentication
     const pin = request.headers.get('x-warehouse-pin')
     const expectedPin = process.env.WAREHOUSE_PIN
     
-    if (!expectedPin || pin !== expectedPin) {
+    if (!pin || pin !== expectedPin) {
       return NextResponse.json(
         { success: false, error: 'Unauthorized' },
         { status: 401 }
       )
     }
 
-    const dateRange = getDateRange()
-    console.log(`Warehouse: Fetching collections for date range ${dateRange.start} to ${dateRange.end}`)
+    console.log('Warehouse: Fetching collections from Monday.com')
 
-    // Fetch items from Q&H board
-    // We'll fetch all items and filter client-side for flexibility
+    // Fetch all items from Q&H board
+    // We'll filter client-side for date range and status
     const query = `
-      query ($boardId: [ID!]!) {
-        boards(ids: $boardId) {
+      query {
+        boards(ids: [${QH_BOARD_ID}]) {
           items_page(limit: 500) {
             items {
               id
               name
-              column_values(ids: ["${COLUMNS.HIRE_START_DATE}", "${COLUMNS.QUOTE_STATUS}", "${COLUMNS.ON_HIRE_STATUS}", "${COLUMNS.CLIENT_EMAIL}", "${COLUMNS.CLIENT_NAME}", "${COLUMNS.HIREHOP_REF}"]) {
+              column_values {
                 id
                 text
                 value
@@ -114,80 +190,98 @@ export async function GET(request: NextRequest) {
       }
     `
 
-    const result = await mondayQuery<{
+    const data = await mondayQuery<{
       boards: Array<{
         items_page: {
-          items: Array<{
-            id: string
-            name: string
-            column_values: Array<{ id: string; text: string; value: string }>
-          }>
+          items: MondayItem[]
         }
       }>
-    }>(query, { boardId: [QH_BOARD_ID] })
+    }>(query)
 
-    const items = result.boards[0]?.items_page?.items || []
-    console.log(`Warehouse: Retrieved ${items.length} total items from Q&H board`)
+    const items = data.boards?.[0]?.items_page?.items || []
+    console.log(`Warehouse: Fetched ${items.length} items from Monday`)
 
-    // Filter for ready-to-collect jobs
-    const readyJobs: CollectionJob[] = []
+    // First pass: Filter by Monday criteria
+    const mondayFiltered: CollectionJob[] = []
     
     for (const item of items) {
-      // Extract column values into a map
-      const cols: Record<string, string> = {}
-      for (const col of item.column_values) {
-        cols[col.id] = col.text || ''
-      }
+      const hireStartDate = getColumnValue(item, 'date')
+      const quoteStatus = getColumnValue(item, 'status6')
+      const onHireStatus = getColumnValue(item, 'status51')
+      const clientName = getColumnValue(item, 'text6')
+      const clientEmail = getColumnValue(item, 'text1')
+      const hhRef = getColumnValue(item, 'text7')
 
-      const hireStartDate = cols[COLUMNS.HIRE_START_DATE]
-      const quoteStatus = cols[COLUMNS.QUOTE_STATUS]
-      const onHireStatus = cols[COLUMNS.ON_HIRE_STATUS]
-
-      // Apply filters:
-      // 1. Must have a hire start date within range
-      if (!hireStartDate || hireStartDate < dateRange.start || hireStartDate > dateRange.end) {
+      // Filter 1: Date must be within ±1 day
+      if (!isWithinDateRange(hireStartDate)) {
         continue
       }
 
-      // 2. Quote status must be "Confirmed quote"
-      if (!quoteStatus || !quoteStatus.toLowerCase().includes('confirmed')) {
+      // Filter 2: Must be confirmed quote
+      if (quoteStatus !== 'Confirmed quote') {
         continue
       }
 
-      // 3. On hire status must NOT be "On hire!"
-      if (onHireStatus && onHireStatus.toLowerCase().includes('on hire')) {
+      // Filter 3: Must NOT already be on hire
+      if (onHireStatus === 'On hire!') {
         continue
       }
 
-      // This job is ready for collection
-      readyJobs.push({
+      mondayFiltered.push({
         id: item.id,
         name: item.name,
         hireStartDate,
-        clientName: cols[COLUMNS.CLIENT_NAME] || '',
-        clientEmail: cols[COLUMNS.CLIENT_EMAIL] || '',
-        hhRef: cols[COLUMNS.HIREHOP_REF] || '',
+        clientName,
+        clientEmail,
+        hhRef,
         quoteStatus,
-        onHireStatus: onHireStatus || 'Not on hire',
+        onHireStatus,
       })
     }
 
-    // Sort by name (which typically includes job number)
-    readyJobs.sort((a, b) => a.name.localeCompare(b.name))
+    console.log(`Warehouse: ${mondayFiltered.length} jobs passed Monday filters`)
 
-    console.log(`Warehouse: Found ${readyJobs.length} jobs ready for collection`)
+    // Second pass: Filter by HireHop COLLECT status (in parallel for speed)
+    const hirehopChecks = await Promise.all(
+      mondayFiltered.map(async (job) => {
+        const isCollection = await isCustomerCollection(job.hhRef)
+        return { job, isCollection }
+      })
+    )
+
+    const jobs = hirehopChecks
+      .filter(({ isCollection }) => isCollection)
+      .map(({ job }) => job)
+
+    console.log(`Warehouse: ${jobs.length} jobs passed HireHop COLLECT filter`)
+
+    // Sort by hire date ascending (yesterday → today → tomorrow)
+    jobs.sort((a, b) => {
+      const dateA = new Date(a.hireStartDate).getTime()
+      const dateB = new Date(b.hireStartDate).getTime()
+      return dateA - dateB
+    })
+
+    const elapsed = Date.now() - startTime
+    console.log(`Warehouse: Collections API completed in ${elapsed}ms`)
 
     return NextResponse.json({
       success: true,
-      jobs: readyJobs,
-      dateRange,
+      jobs,
       fetchedAt: new Date().toISOString(),
+      timing: {
+        totalMs: elapsed,
+        jobCount: jobs.length,
+      },
     })
 
   } catch (error) {
     console.error('Warehouse collections API error:', error)
     return NextResponse.json(
-      { success: false, error: error instanceof Error ? error.message : 'Failed to fetch collections' },
+      { 
+        success: false, 
+        error: error instanceof Error ? error.message : 'Failed to fetch collections' 
+      },
       { status: 500 }
     )
   }
