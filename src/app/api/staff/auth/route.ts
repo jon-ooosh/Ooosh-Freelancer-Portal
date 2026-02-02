@@ -47,20 +47,4 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     )
   }
-}
-
-/**
- * Helper function to verify staff PIN from request headers
- * Used by other staff API routes
- */
-export function verifyStaffPin(request: NextRequest): boolean {
-  const pin = request.headers.get('x-staff-pin')
-  const staffPin = process.env.STAFF_PIN
-  
-  if (!staffPin) {
-    console.error('Staff Auth: STAFF_PIN not configured')
-    return false
-  }
-  
-  return pin === staffPin
-}
+} 

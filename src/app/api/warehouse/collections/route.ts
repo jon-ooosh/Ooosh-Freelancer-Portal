@@ -234,7 +234,7 @@ export async function GET(request: NextRequest) {
       // Filter 2: Must be confirmed quote
       if (quoteStatus !== 'Confirmed quote') {
         continue
-      }
+      } 
 
       // Filter 3: Must NOT already be on hire
       if (onHireStatus === 'On hire!') {

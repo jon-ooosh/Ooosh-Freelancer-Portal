@@ -178,7 +178,7 @@ export async function GET(request: NextRequest) {
       settings,
       source: 'monday'
     })
-
+ 
   } catch (error) {
     console.error('Staff Settings error:', error)
     return NextResponse.json({
