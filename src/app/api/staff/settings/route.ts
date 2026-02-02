@@ -44,7 +44,8 @@ export interface CostingSettings {
   expenseVarianceThreshold: number
 }
 
-// Default values in case board fetch fails
+// Default values - ONLY used as fallback when board fetch fails
+// These should match what's in the D&C Settings board
 const DEFAULT_SETTINGS: CostingSettings = {
   fuelPricePerLitre: 1.35,
   expenseMarkupPercent: 10,
@@ -141,11 +142,12 @@ export async function GET(request: NextRequest) {
     const items = result.boards?.[0]?.items_page?.items || []
     
     if (items.length === 0) {
-      console.warn('Staff Settings: No settings found, using defaults')
+      console.warn('Staff Settings: No settings found in board, using defaults')
       return NextResponse.json({
         success: true,
         settings: DEFAULT_SETTINGS,
-        source: 'defaults'
+        source: 'defaults',
+        warning: 'D&C Settings board is empty - please add an item with your rates'
       })
     }
 
@@ -155,7 +157,7 @@ export async function GET(request: NextRequest) {
       return acc
     }, {} as Record<string, string>)
 
-    // Map column values to settings object
+    // Map column values to settings object, falling back to defaults for missing values
     const settings: CostingSettings = {
       fuelPricePerLitre: parseNumericValue(columns[COLUMN_IDS.fuelPricePerLitre]) ?? DEFAULT_SETTINGS.fuelPricePerLitre,
       expenseMarkupPercent: parseNumericValue(columns[COLUMN_IDS.expenseMarkupPercent]) ?? DEFAULT_SETTINGS.expenseMarkupPercent,
@@ -171,21 +173,33 @@ export async function GET(request: NextRequest) {
       expenseVarianceThreshold: parseNumericValue(columns[COLUMN_IDS.expenseVarianceThreshold]) ?? DEFAULT_SETTINGS.expenseVarianceThreshold,
     }
 
-    console.log('Staff Settings: Loaded settings:', settings)
+    // Check if any settings came from defaults (missing in board)
+    const missingFields: string[] = []
+    if (!columns[COLUMN_IDS.fuelPricePerLitre]) missingFields.push('Fuel Price')
+    if (!columns[COLUMN_IDS.hourlyRateFreelancerDay]) missingFields.push('Freelancer Day Rate')
+    if (!columns[COLUMN_IDS.hourlyRateClientDay]) missingFields.push('Client Day Rate')
+    if (!columns[COLUMN_IDS.driverDayRate]) missingFields.push('Driver Day Rate')
+
+    console.log('Staff Settings: Loaded settings from Monday.com', 
+      missingFields.length > 0 ? `(missing: ${missingFields.join(', ')})` : '')
 
     return NextResponse.json({
       success: true,
       settings,
-      source: 'monday'
+      source: missingFields.length > 0 ? 'partial' : 'monday',
+      ...(missingFields.length > 0 && { 
+        warning: `Some settings missing from board (using defaults): ${missingFields.join(', ')}` 
+      })
     })
- 
+
   } catch (error) {
     console.error('Staff Settings error:', error)
+    // Return defaults but flag it clearly as a fallback
     return NextResponse.json({
       success: true,
       settings: DEFAULT_SETTINGS,
       source: 'defaults',
-      warning: 'Failed to fetch from Monday.com, using defaults'
+      warning: 'Failed to fetch from Monday.com - using defaults'
     })
   }
 }

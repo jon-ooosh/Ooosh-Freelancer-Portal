@@ -23,10 +23,24 @@ interface CostingSettings {
   expenseVarianceThreshold: number
 }
 
+interface JobInfo {
+  id: string
+  name: string
+  clientName: string
+  hireStartDate: string
+  hireEndDate: string
+}
+
 interface FormData {
   // Core info
   hirehopJobNumber: string
+  clientName: string
   jobType: 'delivery' | 'collection' | 'crewed_job' | ''
+  
+  // Dates (moved to step 1)
+  jobDate: string
+  addCollection: boolean
+  collectionDate: string
   
   // Transport details
   transportMode: 'one_way' | 'there_and_back' | 'na' | ''
@@ -37,13 +51,13 @@ interface FormData {
   returnTravelTimeMins: number
   returnTravelCost: number
   
-  // Work details (for crewed jobs)
-  workType: 'backline_tech' | 'general_assist' | 'load_in_out' | 'driving_only' | 'other' | ''
+  // Work details (for crewed jobs only)
+  workType: string
+  workTypeOther: string
   workDurationHours: number
   workDescription: string
   
   // Scheduling
-  jobDate: string
   calculationMode: 'hourly' | 'day_rate'
   numberOfDays: number
   earlyStartMinutes: number
@@ -61,29 +75,18 @@ interface FormData {
   
   // Notes
   costingNotes: string
-  
-  // Add collection option
-  addCollection: boolean
-  collectionDate: string
 }
 
 interface CalculatedCosts {
-  // What we charge client
   clientChargeLabour: number
   clientChargeFuel: number
   clientChargeExpenses: number
   clientChargeTotal: number
-  
-  // What we pay
   freelancerFee: number
   expectedFuelCost: number
   expectedOtherExpenses: number
   ourTotalCost: number
-  
-  // Margin
   ourMargin: number
-  
-  // Breakdown for display
   estimatedTimeMinutes: number
   estimatedTimeHours: number
 }
@@ -94,7 +97,11 @@ interface CalculatedCosts {
 
 const initialFormData: FormData = {
   hirehopJobNumber: '',
+  clientName: '',
   jobType: '',
+  jobDate: '',
+  addCollection: false,
+  collectionDate: '',
   transportMode: '',
   destination: '',
   distanceMiles: 0,
@@ -103,9 +110,9 @@ const initialFormData: FormData = {
   returnTravelTimeMins: 0,
   returnTravelCost: 0,
   workType: '',
+  workTypeOther: '',
   workDurationHours: 0,
   workDescription: '',
-  jobDate: new Date().toISOString().split('T')[0],
   calculationMode: 'hourly',
   numberOfDays: 1,
   earlyStartMinutes: 0,
@@ -117,9 +124,21 @@ const initialFormData: FormData = {
   pdAmount: 0,
   expenseNotes: '',
   costingNotes: '',
-  addCollection: false,
-  collectionDate: '',
 }
+
+// Work type options matching Monday board
+const WORK_TYPE_OPTIONS = [
+  { value: 'backline_tech', label: 'Backline Tech' },
+  { value: 'general_assist', label: 'General Assist' },
+  { value: 'load_in', label: 'Load-in' },
+  { value: 'load_out', label: 'Load-out' },
+  { value: 'set_up', label: 'Set-up' },
+  { value: 'pack_down', label: 'Pack-down' },
+  { value: 'engineer_foh', label: 'Engineer - FOH' },
+  { value: 'engineer_mons', label: 'Engineer - mons' },
+  { value: 'driving_only', label: 'Driving Only' },
+  { value: 'other', label: 'Other' },
+]
 
 // =============================================================================
 // CALCULATION FUNCTIONS
@@ -158,27 +177,18 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     driverDayRate,
   } = settings
 
-  // Markup multiplier
   const markupMultiplier = 1 + (expenseMarkupPercent / 100)
 
   // =========================================================================
   // DAY RATE MODE
   // =========================================================================
   if (calculationMode === 'day_rate') {
-    // Fuel: (mileage × fuel price) / 5 (rough MPG conversion)
     const fuelCost = (distanceMiles * fuelPricePerLitre) / 5
-    
-    // Labour
     const freelancerFee = driverDayRate * numberOfDays
     const clientChargeLabour = freelancerFee * markupMultiplier
-    
-    // Expenses
     const totalExpenses = tollsParking + additionalCosts + returnTravelCost
     const clientChargeExpenses = totalExpenses * markupMultiplier
-    
-    // Fuel (client gets marked up)
     const clientChargeFuel = fuelCost * markupMultiplier
-    
     const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses
     const ourTotalCost = freelancerFee + fuelCost + totalExpenses
     
@@ -192,7 +202,7 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
       expectedOtherExpenses: Math.round(totalExpenses * 100) / 100,
       ourTotalCost: Math.round(ourTotalCost * 100) / 100,
       ourMargin: Math.round((clientChargeTotal - ourTotalCost) * 100) / 100,
-      estimatedTimeMinutes: numberOfDays * 8 * 60, // Assume 8hr days
+      estimatedTimeMinutes: numberOfDays * 8 * 60,
       estimatedTimeHours: numberOfDays * 8,
     }
   }
@@ -201,66 +211,53 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   // HOURLY MODE
   // =========================================================================
   
-  // Calculate total drive time based on transport mode
   let totalDriveMinutes = 0
   let handoverOrUnload = 0
   
   if (transportMode === 'there_and_back' || addCollection) {
-    // Round trip: drive time × 2 + unload time
     totalDriveMinutes = driveTimeMinutes * 2
     handoverOrUnload = unloadTimeMinutes
   } else if (transportMode === 'one_way') {
-    // One way: drive time + return travel time (if public transport) + handover time
     totalDriveMinutes = driveTimeMinutes + (returnMethod === 'public_transport' ? returnTravelTimeMins : 0)
     handoverOrUnload = handoverTimeMinutes
   }
   
-  // Add work duration for crewed jobs
+  // Add work duration for crewed jobs only
   const workMinutes = jobType === 'crewed_job' ? workDurationHours * 60 : 0
   
-  // Total time on job
   const totalMinutes = totalDriveMinutes + handoverOrUnload + workMinutes
   const totalHours = totalMinutes / 60
   
-  // Out of hours calculations
   const normalMinutes = totalMinutes - earlyStartMinutes - lateFinishMinutes
   const outOfHoursMinutes = earlyStartMinutes + lateFinishMinutes
   
-  // Freelancer pay calculation
   const normalHours = Math.max(0, normalMinutes) / 60
   const outOfHoursHrs = outOfHoursMinutes / 60
   
   let freelancerLabourPay = (normalHours * hourlyRateFreelancerDay) + (outOfHoursHrs * hourlyRateFreelancerNight)
   
-  // Apply minimum hours threshold
   const minPay = minHoursThreshold * hourlyRateFreelancerDay
   if (freelancerLabourPay < minPay && totalHours > 0) {
     freelancerLabourPay = minPay
   }
   
-  // Client charge for labour
   let clientLabourCharge = (normalHours * hourlyRateClientDay) + (outOfHoursHrs * hourlyRateClientNight)
   const minClientCharge = minHoursThreshold * hourlyRateClientDay
   if (clientLabourCharge < minClientCharge && totalHours > 0) {
     clientLabourCharge = minClientCharge
   }
   
-  // Add admin cost
   clientLabourCharge += totalHours * adminCostPerHour
   
-  // Fuel calculation
-  // For there-and-back: miles × 2, for one-way: miles × 1 (or × 2 if collection added)
   const totalMiles = (transportMode === 'there_and_back' || addCollection) 
     ? distanceMiles * 2 
     : distanceMiles
   const fuelCost = (totalMiles * fuelPricePerLitre) / 5
-  const clientFuelCharge = fuelCost // Fuel not marked up in hourly mode (per Jotform logic)
+  const clientFuelCharge = fuelCost
   
-  // Other expenses
   const otherExpenses = tollsParking + additionalCosts + returnTravelCost
   const clientExpenseCharge = otherExpenses * markupMultiplier
   
-  // Totals
   const clientChargeTotal = clientLabourCharge + clientFuelCharge + clientExpenseCharge
   const ourTotalCost = freelancerLabourPay + fuelCost + otherExpenses
   
@@ -288,15 +285,47 @@ function CrewTransportWizard() {
   const searchParams = useSearchParams()
   
   const [loading, setLoading] = useState(true)
+  const [loadingJob, setLoadingJob] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [settings, setSettings] = useState<CostingSettings | null>(null)
+  const [settingsSource, setSettingsSource] = useState<string>('')
   const [formData, setFormData] = useState<FormData>(initialFormData)
+  const [jobInfo, setJobInfo] = useState<JobInfo | null>(null)
   const [step, setStep] = useState(1)
 
-  // Get job number from URL
   const jobNumber = searchParams.get('job') || ''
+
+  // Fetch job info from Q&H board
+  const fetchJobInfo = useCallback(async (jobNum: string) => {
+    const pin = sessionStorage.getItem('staffPin')
+    if (!pin || !jobNum) return
+
+    setLoadingJob(true)
+    try {
+      const response = await fetch(`/api/staff/crew-transport?jobNumber=${jobNum}`, {
+        headers: { 'x-staff-pin': pin }
+      })
+      const data = await response.json()
+      
+      if (data.success && data.jobInfo) {
+        setJobInfo(data.jobInfo)
+        // Auto-populate dates from the job
+        setFormData(prev => ({
+          ...prev,
+          hirehopJobNumber: jobNum,
+          clientName: data.jobInfo.clientName || '',
+          jobDate: prev.jobDate || data.jobInfo.hireStartDate || '',
+          collectionDate: prev.collectionDate || data.jobInfo.hireEndDate || '',
+        }))
+      }
+    } catch (err) {
+      console.error('Failed to fetch job info:', err)
+    } finally {
+      setLoadingJob(false)
+    }
+  }, [])
 
   // Check auth and load settings
   useEffect(() => {
@@ -306,7 +335,6 @@ function CrewTransportWizard() {
       return
     }
 
-    // Load settings
     async function loadSettings() {
       try {
         const response = await fetch('/api/staff/settings', {
@@ -324,31 +352,42 @@ function CrewTransportWizard() {
         }
         
         setSettings(data.settings)
+        setSettingsSource(data.source)
         
-        // Pre-fill job number from URL
+        // If settings came from defaults, show a warning
+        if (data.source === 'defaults') {
+          setError('⚠️ Could not load settings from Monday.com - using defaults. Please populate the D&C Settings board.')
+        }
+        
+        // Pre-fill job number from URL and fetch job info
         if (jobNumber) {
           setFormData(prev => ({ ...prev, hirehopJobNumber: jobNumber }))
+          fetchJobInfo(jobNumber)
         }
       } catch (err) {
         console.error('Failed to load settings:', err)
-        setError('Failed to load costing settings')
+        setError('Failed to load costing settings. Please check the D&C Settings board is populated.')
       } finally {
         setLoading(false)
       }
     }
 
     loadSettings()
-  }, [router, jobNumber])
+  }, [router, jobNumber, fetchJobInfo])
 
-  // Calculate costs whenever form data changes
   const costs = settings ? calculateCosts(formData, settings) : null
 
-  // Update form field
   const updateField = useCallback(<K extends keyof FormData>(field: K, value: FormData[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }))
   }, [])
 
-  // Handle save
+  // When job number changes manually, fetch job info
+  const handleJobNumberBlur = () => {
+    if (formData.hirehopJobNumber && formData.hirehopJobNumber !== jobInfo?.id) {
+      fetchJobInfo(formData.hirehopJobNumber)
+    }
+  }
+
   const handleSave = async () => {
     const pin = sessionStorage.getItem('staffPin')
     if (!pin || !costs) return
@@ -363,10 +402,7 @@ function CrewTransportWizard() {
           'Content-Type': 'application/json',
           'x-staff-pin': pin,
         },
-        body: JSON.stringify({
-          formData,
-          costs,
-        }),
+        body: JSON.stringify({ formData, costs }),
       })
 
       const data = await response.json()
@@ -375,10 +411,7 @@ function CrewTransportWizard() {
         throw new Error(data.error || 'Failed to save')
       }
 
-      setSuccess(`Saved successfully! Item ID: ${data.itemId}`)
-      
-      // Optionally redirect or reset form
-      // router.push('/staff/crew-transport/success')
+      setSuccess(`✅ Saved successfully! Item created in Monday.com`)
     } catch (err) {
       console.error('Save error:', err)
       setError(err instanceof Error ? err.message : 'Failed to save')
@@ -387,7 +420,6 @@ function CrewTransportWizard() {
     }
   }
 
-  // Loading state
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -399,12 +431,19 @@ function CrewTransportWizard() {
     )
   }
 
-  // Calculate step validity
-  const isStep1Valid = formData.jobType !== ''
-  const isStep2Valid = formData.jobType === 'crewed_job' 
-    ? true // Crewed jobs don't require transport 
-    : formData.transportMode !== '' && formData.destination !== '' && formData.distanceMiles > 0
-  const isStep3Valid = formData.jobType !== 'crewed_job' || formData.workType !== ''
+  // Determine number of steps based on job type
+  // Delivery/Collection: 4 steps (Job, Transport, Expenses, Review)
+  // Crewed Job: 5 steps (Job, Transport, Work, Expenses, Review)
+  const isCrewedJob = formData.jobType === 'crewed_job'
+  const totalSteps = isCrewedJob ? 5 : 4
+  const stepLabels = isCrewedJob 
+    ? ['Job', 'Transport', 'Work', 'Expenses', 'Review']
+    : ['Job', 'Transport', 'Expenses', 'Review']
+
+  // Step validation
+  const isStep1Valid = formData.jobType !== '' && formData.jobDate !== ''
+  const isStep2Valid = formData.transportMode !== '' && formData.destination !== '' && formData.distanceMiles > 0
+  const isStep3Valid = !isCrewedJob || formData.workType !== ''
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -420,8 +459,16 @@ function CrewTransportWizard() {
             </button>
             <h1 className="text-xl font-bold text-gray-900">Crew & Transport Costing</h1>
           </div>
-          {formData.hirehopJobNumber && (
-            <span className="text-sm text-gray-500">Job #{formData.hirehopJobNumber}</span>
+          {/* Job info badge */}
+          {(formData.hirehopJobNumber || jobInfo) && (
+            <div className="text-right">
+              <span className="text-sm font-medium text-gray-900">
+                Job #{formData.hirehopJobNumber}
+              </span>
+              {jobInfo?.clientName && (
+                <p className="text-sm text-gray-500">{jobInfo.clientName}</p>
+              )}
+            </div>
           )}
         </div>
       </header>
@@ -429,7 +476,7 @@ function CrewTransportWizard() {
       {/* Progress Steps */}
       <div className="max-w-4xl mx-auto px-4 py-4">
         <div className="flex items-center justify-between mb-8">
-          {['Job Type', 'Transport', 'Work', 'Expenses', 'Review'].map((label, idx) => (
+          {stepLabels.map((label, idx) => (
             <div key={label} className="flex items-center">
               <div
                 className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
@@ -442,10 +489,10 @@ function CrewTransportWizard() {
               >
                 {step > idx + 1 ? '✓' : idx + 1}
               </div>
-              <span className={`ml-2 text-sm ${step === idx + 1 ? 'text-blue-600 font-medium' : 'text-gray-500'}`}>
+              <span className={`ml-2 text-sm hidden sm:inline ${step === idx + 1 ? 'text-blue-600 font-medium' : 'text-gray-500'}`}>
                 {label}
               </span>
-              {idx < 4 && <div className="w-8 h-0.5 bg-gray-200 mx-2" />}
+              {idx < totalSteps - 1 && <div className="w-4 sm:w-8 h-0.5 bg-gray-200 mx-2" />}
             </div>
           ))}
         </div>
@@ -455,8 +502,14 @@ function CrewTransportWizard() {
       <div className="max-w-4xl mx-auto px-4 pb-8">
         <div className="bg-white rounded-xl shadow-sm p-6">
           
-          {/* Error/Success Messages */}
-          {error && (
+          {/* Settings source warning */}
+          {settingsSource === 'defaults' && (
+            <div className="mb-6 bg-yellow-50 text-yellow-800 px-4 py-3 rounded-lg text-sm">
+              ⚠️ Using default settings. Please populate the D&C Settings board for accurate calculations.
+            </div>
+          )}
+          
+          {error && !error.includes('defaults') && (
             <div className="mb-6 bg-red-50 text-red-600 px-4 py-3 rounded-lg">
               {error}
             </div>
@@ -467,71 +520,127 @@ function CrewTransportWizard() {
             </div>
           )}
 
-          {/* Step 1: Job Type */}
+          {/* Step 1: Job Type & Dates */}
           {step === 1 && (
             <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-gray-900">What type of job is this?</h2>
+              <h2 className="text-lg font-semibold text-gray-900">What are we doing?</h2>
               
-              <div className="space-y-4">
-                <label className="block text-sm font-medium text-gray-700">
-                  HireHop Job Number
-                </label>
-                <input
-                  type="text"
-                  value={formData.hirehopJobNumber}
-                  onChange={(e) => updateField('hirehopJobNumber', e.target.value)}
-                  placeholder="e.g. 15276"
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-                />
+              {/* Job number and client info */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    HireHop Job Number
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={formData.hirehopJobNumber}
+                      onChange={(e) => updateField('hirehopJobNumber', e.target.value)}
+                      onBlur={handleJobNumberBlur}
+                      placeholder="e.g. 15276"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                    {loadingJob && (
+                      <div className="absolute right-3 top-2.5">
+                        <div className="animate-spin h-5 w-5 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Client
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.clientName || jobInfo?.clientName || ''}
+                    onChange={(e) => updateField('clientName', e.target.value)}
+                    placeholder="Auto-filled from job"
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-gray-50"
+                    readOnly
+                  />
+                </div>
               </div>
 
+              {/* Job type selection */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {[
-                  { value: 'delivery', label: 'Delivery', icon: '📦', desc: 'Equipment going out' },
-                  { value: 'collection', label: 'Collection', icon: '📥', desc: 'Equipment coming back' },
+                  { value: 'delivery', label: 'Delivery', icon: '📦', desc: 'Equipment or vehicle going out' },
+                  { value: 'collection', label: 'Collection', icon: '📥', desc: 'Equipment or vehicle coming back' },
                   { value: 'crewed_job', label: 'Crewed Job', icon: '👷', desc: 'Transport + work on site' },
                 ].map((option) => (
                   <button
                     key={option.value}
                     onClick={() => updateField('jobType', option.value as FormData['jobType'])}
-                    className={`p-6 rounded-xl border-2 text-left transition-all ${
+                    className={`p-4 rounded-xl border-2 text-left transition-all ${
                       formData.jobType === option.value
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-gray-200 hover:border-gray-300'
                     }`}
                   >
-                    <span className="text-3xl">{option.icon}</span>
-                    <h3 className="mt-2 font-semibold text-gray-900">{option.label}</h3>
-                    <p className="text-sm text-gray-500">{option.desc}</p>
+                    <span className="text-2xl">{option.icon}</span>
+                    <h3 className="mt-1 font-semibold text-gray-900">{option.label}</h3>
+                    <p className="text-xs text-gray-500">{option.desc}</p>
                   </button>
                 ))}
               </div>
 
-              {/* Add collection option for deliveries */}
-              {formData.jobType === 'delivery' && (
-                <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-                  <label className="flex items-center space-x-3">
+              {/* Dates - always shown */}
+              <div className="border-t pt-6">
+                <h3 className="font-medium text-gray-900 mb-4">
+                  {formData.jobType === 'collection' ? 'Collection Date' : 'Date(s)'}
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      {formData.jobType === 'delivery' ? 'Delivery Date' : 
+                       formData.jobType === 'collection' ? 'Collection Date' : 
+                       'Job Date'}
+                    </label>
                     <input
-                      type="checkbox"
-                      checked={formData.addCollection}
-                      onChange={(e) => updateField('addCollection', e.target.checked)}
-                      className="w-5 h-5 text-blue-600 rounded"
+                      type="date"
+                      value={formData.jobDate}
+                      onChange={(e) => updateField('jobDate', e.target.value)}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                     />
-                    <span className="text-gray-700">Add collection from same location?</span>
-                  </label>
-                  {formData.addCollection && (
-                    <div className="mt-3">
-                      <label className="block text-sm text-gray-600 mb-1">Collection Date</label>
-                      <input
-                        type="date"
-                        value={formData.collectionDate}
-                        onChange={(e) => updateField('collectionDate', e.target.value)}
-                        className="px-4 py-2 border border-gray-300 rounded-lg"
-                      />
+                    {jobInfo?.hireStartDate && formData.jobDate !== jobInfo.hireStartDate && (
+                      <p className="text-xs text-gray-500 mt-1">
+                        Hire starts: {jobInfo.hireStartDate}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Collection date option for deliveries */}
+                  {formData.jobType === 'delivery' && (
+                    <div>
+                      <label className="flex items-center space-x-2 mb-2">
+                        <input
+                          type="checkbox"
+                          checked={formData.addCollection}
+                          onChange={(e) => updateField('addCollection', e.target.checked)}
+                          className="w-4 h-4 text-blue-600 rounded"
+                        />
+                        <span className="text-sm font-medium text-gray-700">
+                          Add collection from same location
+                        </span>
+                      </label>
+                      {formData.addCollection && (
+                        <input
+                          type="date"
+                          value={formData.collectionDate}
+                          onChange={(e) => updateField('collectionDate', e.target.value)}
+                          className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                        />
+                      )}
+                      {formData.addCollection && jobInfo?.hireEndDate && formData.collectionDate !== jobInfo.hireEndDate && (
+                        <p className="text-xs text-gray-500 mt-1">
+                          Hire ends: {jobInfo.hireEndDate}
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>
-              )}
+              </div>
             </div>
           )}
 
@@ -542,7 +651,7 @@ function CrewTransportWizard() {
 
               {formData.jobType === 'crewed_job' && (
                 <div className="p-4 bg-yellow-50 rounded-lg text-yellow-800 text-sm">
-                  For crewed jobs, transport is optional. Skip if they&apos;re making their own way.
+                  💡 For crewed jobs, transport is optional. Select &quot;N/A&quot; if they&apos;re making their own way.
                 </div>
               )}
 
@@ -558,7 +667,7 @@ function CrewTransportWizard() {
                   >
                     <option value="">Select...</option>
                     <option value="one_way">One-way (drop or collect)</option>
-                    <option value="there_and_back">There and back</option>
+                    <option value="there_and_back">There and back (same day)</option>
                     {formData.jobType === 'crewed_job' && <option value="na">N/A - No transport needed</option>}
                   </select>
                 </div>
@@ -574,6 +683,7 @@ function CrewTransportWizard() {
                     placeholder="Venue or address"
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                   />
+                  {/* TODO: Add venue dropdown from Address Book board */}
                 </div>
 
                 <div>
@@ -619,7 +729,7 @@ function CrewTransportWizard() {
                       >
                         <option value="">Select...</option>
                         <option value="public_transport">Public transport (train/bus)</option>
-                        <option value="same_vehicle">Same vehicle (collection)</option>
+                        <option value="same_vehicle">Same vehicle (e.g. collection run)</option>
                         <option value="stays_overnight">Stays with vehicle</option>
                       </select>
                     </div>
@@ -656,76 +766,74 @@ function CrewTransportWizard() {
             </div>
           )}
 
-          {/* Step 3: Work Details (primarily for crewed jobs) */}
-          {step === 3 && (
+          {/* Step 3: Work Details (Crewed Jobs only) */}
+          {step === 3 && isCrewedJob && (
             <div className="space-y-6">
-              <h2 className="text-lg font-semibold text-gray-900">
-                {formData.jobType === 'crewed_job' ? 'Work Details' : 'Scheduling & Timing'}
-              </h2>
+              <h2 className="text-lg font-semibold text-gray-900">Work Details</h2>
 
-              {formData.jobType === 'crewed_job' && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Work Type
-                    </label>
-                    <select
-                      value={formData.workType}
-                      onChange={(e) => updateField('workType', e.target.value as FormData['workType'])}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                    >
-                      <option value="">Select...</option>
-                      <option value="backline_tech">Backline Tech</option>
-                      <option value="general_assist">General Assist</option>
-                      <option value="load_in_out">Load-in/Load-out</option>
-                      <option value="driving_only">Driving Only</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Work Duration (hours)
-                    </label>
-                    <input
-                      type="number"
-                      value={formData.workDurationHours || ''}
-                      onChange={(e) => updateField('workDurationHours', parseFloat(e.target.value) || 0)}
-                      placeholder="Time on site"
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
-
-                  <div className="md:col-span-2">
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Work Description
-                    </label>
-                    <textarea
-                      value={formData.workDescription}
-                      onChange={(e) => updateField('workDescription', e.target.value)}
-                      placeholder="What will they be doing?"
-                      rows={3}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                    />
-                  </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Work Type
+                  </label>
+                  <select
+                    value={formData.workType}
+                    onChange={(e) => updateField('workType', e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                  >
+                    <option value="">Select...</option>
+                    {WORK_TYPE_OPTIONS.map(opt => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
                 </div>
-              )}
 
-              <div className="border-t pt-6">
-                <h3 className="font-medium text-gray-900 mb-4">Scheduling</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {formData.workType === 'other' && (
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Job Date
+                      Describe the work
                     </label>
                     <input
-                      type="date"
-                      value={formData.jobDate}
-                      onChange={(e) => updateField('jobDate', e.target.value)}
+                      type="text"
+                      value={formData.workTypeOther}
+                      onChange={(e) => updateField('workTypeOther', e.target.value)}
+                      placeholder="What are they doing?"
                       className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                     />
                   </div>
+                )}
 
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Work Duration (hours)
+                  </label>
+                  <input
+                    type="number"
+                    value={formData.workDurationHours || ''}
+                    onChange={(e) => updateField('workDurationHours', parseFloat(e.target.value) || 0)}
+                    placeholder="Time on site"
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Additional Notes
+                  </label>
+                  <textarea
+                    value={formData.workDescription}
+                    onChange={(e) => updateField('workDescription', e.target.value)}
+                    placeholder="Any specific details about the work..."
+                    rows={2}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                  />
+                </div>
+              </div>
+
+              {/* Calculation mode and timing */}
+              <div className="border-t pt-6">
+                <h3 className="font-medium text-gray-900 mb-4">Rate Calculation</h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       Calculation Mode
@@ -760,6 +868,7 @@ function CrewTransportWizard() {
               {/* Out of hours */}
               <div className="border-t pt-6">
                 <h3 className="font-medium text-gray-900 mb-4">Out of Hours (optional)</h3>
+                <p className="text-sm text-gray-500 mb-4">Extra pay for work before 8am or after 11pm</p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -790,8 +899,8 @@ function CrewTransportWizard() {
             </div>
           )}
 
-          {/* Step 4: Expenses & Arrangements */}
-          {step === 4 && (
+          {/* Step 3/4: Expenses (step number depends on job type) */}
+          {((step === 3 && !isCrewedJob) || (step === 4 && isCrewedJob)) && (
             <div className="space-y-6">
               <h2 className="text-lg font-semibold text-gray-900">Expenses & Arrangements</h2>
 
@@ -888,8 +997,8 @@ function CrewTransportWizard() {
             </div>
           )}
 
-          {/* Step 5: Review */}
-          {step === 5 && costs && (
+          {/* Final Step: Review */}
+          {step === totalSteps && costs && (
             <div className="space-y-6">
               <h2 className="text-lg font-semibold text-gray-900">Review & Save</h2>
 
@@ -929,13 +1038,19 @@ function CrewTransportWizard() {
                 </div>
                 <div className="px-4 py-3 grid grid-cols-2 gap-4 text-sm">
                   <div>
-                    <span className="text-gray-500">Job Type:</span>
+                    <span className="text-gray-500">Type:</span>
                     <span className="ml-2 text-gray-900 capitalize">{formData.jobType.replace('_', ' ')}</span>
                   </div>
                   <div>
                     <span className="text-gray-500">HireHop #:</span>
                     <span className="ml-2 text-gray-900">{formData.hirehopJobNumber || 'Not set'}</span>
                   </div>
+                  {jobInfo?.clientName && (
+                    <div>
+                      <span className="text-gray-500">Client:</span>
+                      <span className="ml-2 text-gray-900">{jobInfo.clientName}</span>
+                    </div>
+                  )}
                   <div>
                     <span className="text-gray-500">Destination:</span>
                     <span className="ml-2 text-gray-900">{formData.destination || 'Not set'}</span>
@@ -944,12 +1059,8 @@ function CrewTransportWizard() {
                     <span className="text-gray-500">Date:</span>
                     <span className="ml-2 text-gray-900">{formData.jobDate}</span>
                   </div>
-                  <div>
-                    <span className="text-gray-500">Calculation:</span>
-                    <span className="ml-2 text-gray-900 capitalize">{formData.calculationMode.replace('_', ' ')}</span>
-                  </div>
                   {formData.addCollection && (
-                    <div className="col-span-2">
+                    <div>
                       <span className="text-gray-500">+ Collection:</span>
                       <span className="ml-2 text-gray-900">{formData.collectionDate}</span>
                     </div>
@@ -986,13 +1097,13 @@ function CrewTransportWizard() {
               <div />
             )}
 
-            {step < 5 ? (
+            {step < totalSteps ? (
               <button
                 onClick={() => setStep(step + 1)}
                 disabled={
                   (step === 1 && !isStep1Valid) ||
                   (step === 2 && !isStep2Valid) ||
-                  (step === 3 && !isStep3Valid)
+                  (step === 3 && isCrewedJob && !isStep3Valid)
                 }
                 className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -1001,17 +1112,17 @@ function CrewTransportWizard() {
             ) : (
               <button
                 onClick={handleSave}
-                disabled={saving}
+                disabled={saving || !!success}
                 className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
               >
-                {saving ? 'Saving...' : 'Save to Monday.com'}
+                {saving ? 'Saving...' : success ? 'Saved ✓' : 'Save to Monday.com'}
               </button>
             )}
           </div>
         </div>
 
         {/* Live Cost Preview (floating) */}
-        {costs && step > 1 && step < 5 && (
+        {costs && step > 1 && step < totalSteps && (
           <div className="fixed bottom-4 right-4 bg-white rounded-xl shadow-lg border p-4 max-w-xs">
             <p className="text-sm text-gray-500 mb-2">Live Preview</p>
             <div className="grid grid-cols-2 gap-2 text-sm">
@@ -1034,7 +1145,7 @@ function CrewTransportWizard() {
 // =============================================================================
 // MAIN PAGE WITH SUSPENSE
 // =============================================================================
- 
+
 export default function CrewTransportPage() {
   return (
     <Suspense fallback={
