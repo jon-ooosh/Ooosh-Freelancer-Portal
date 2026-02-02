@@ -91,6 +91,16 @@ interface CalculatedCosts {
   estimatedTimeHours: number
 }
 
+interface SaveResult {
+  success: boolean
+  itemId?: string
+  itemName?: string
+  board?: string
+  collectionItemId?: string
+  collectionItemName?: string
+  error?: string
+}
+
 // =============================================================================
 // INITIAL STATE
 // =============================================================================
@@ -289,6 +299,7 @@ function CrewTransportWizard() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+  const [saveResult, setSaveResult] = useState<SaveResult | null>(null)
   const [settings, setSettings] = useState<CostingSettings | null>(null)
   const [settingsSource, setSettingsSource] = useState<string>('')
   const [formData, setFormData] = useState<FormData>(initialFormData)
@@ -394,6 +405,7 @@ function CrewTransportWizard() {
 
     setSaving(true)
     setError(null)
+    setSaveResult(null)
 
     try {
       const response = await fetch('/api/staff/crew-transport', {
@@ -405,19 +417,44 @@ function CrewTransportWizard() {
         body: JSON.stringify({ formData, costs }),
       })
 
-      const data = await response.json()
+      const data: SaveResult = await response.json()
 
       if (!response.ok) {
         throw new Error(data.error || 'Failed to save')
       }
 
-      setSuccess(`✅ Saved successfully! Item created in Monday.com`)
+      setSaveResult(data)
+      
+      // Build success message based on what was created
+      let message = '✅ '
+      if (data.board === 'dc') {
+        message += `Created on D&C Board: ${data.itemName}`
+        if (data.collectionItemName) {
+          message += ` + Collection: ${data.collectionItemName}`
+        }
+      } else if (data.board === 'crewed_jobs') {
+        message += `Created on Crewed Jobs Board: ${data.itemName}`
+      } else {
+        message += `Saved successfully: ${data.itemName}`
+      }
+      
+      setSuccess(message)
     } catch (err) {
       console.error('Save error:', err)
       setError(err instanceof Error ? err.message : 'Failed to save')
     } finally {
       setSaving(false)
     }
+  }
+
+  // Start new quote
+  const handleStartNew = () => {
+    setFormData(initialFormData)
+    setJobInfo(null)
+    setSuccess(null)
+    setSaveResult(null)
+    setError(null)
+    setStep(1)
   }
 
   if (loading) {
@@ -514,9 +551,29 @@ function CrewTransportWizard() {
               {error}
             </div>
           )}
+          
+          {/* Success message with more detail */}
           {success && (
-            <div className="mb-6 bg-green-50 text-green-600 px-4 py-3 rounded-lg">
-              {success}
+            <div className="mb-6 bg-green-50 text-green-700 px-4 py-3 rounded-lg">
+              <p className="font-medium">{success}</p>
+              {saveResult && (
+                <div className="mt-2 text-sm">
+                  <p>
+                    {saveResult.board === 'dc' ? '📦 D&C Board' : '👷 Crewed Jobs Board'}
+                    {' → '}
+                    Item ID: {saveResult.itemId}
+                  </p>
+                  {saveResult.collectionItemId && (
+                    <p>📥 Collection → Item ID: {saveResult.collectionItemId}</p>
+                  )}
+                </div>
+              )}
+              <button
+                onClick={handleStartNew}
+                className="mt-3 text-sm text-green-800 underline hover:no-underline"
+              >
+                Create another quote →
+              </button>
             </div>
           )}
 
@@ -585,6 +642,20 @@ function CrewTransportWizard() {
                 ))}
               </div>
 
+              {/* Board indicator */}
+              {formData.jobType && (
+                <div className={`text-sm px-3 py-2 rounded-lg ${
+                  formData.jobType === 'crewed_job' 
+                    ? 'bg-purple-50 text-purple-700' 
+                    : 'bg-blue-50 text-blue-700'
+                }`}>
+                  {formData.jobType === 'crewed_job' 
+                    ? '👷 This will be saved to the Crewed Jobs board'
+                    : '📦 This will be saved to the D&C board'
+                  }
+                </div>
+              )}
+
               {/* Dates - always shown */}
               <div className="border-t pt-6">
                 <h3 className="font-medium text-gray-900 mb-4">
@@ -625,12 +696,17 @@ function CrewTransportWizard() {
                         </span>
                       </label>
                       {formData.addCollection && (
-                        <input
-                          type="date"
-                          value={formData.collectionDate}
-                          onChange={(e) => updateField('collectionDate', e.target.value)}
-                          className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                        />
+                        <>
+                          <input
+                            type="date"
+                            value={formData.collectionDate}
+                            onChange={(e) => updateField('collectionDate', e.target.value)}
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                          />
+                          <p className="text-xs text-blue-600 mt-1">
+                            ℹ️ This will create 2 items on the D&C board
+                          </p>
+                        </>
                       )}
                       {formData.addCollection && jobInfo?.hireEndDate && formData.collectionDate !== jobInfo.hireEndDate && (
                         <p className="text-xs text-gray-500 mt-1">
@@ -1002,6 +1078,23 @@ function CrewTransportWizard() {
             <div className="space-y-6">
               <h2 className="text-lg font-semibold text-gray-900">Review & Save</h2>
 
+              {/* Board destination indicator */}
+              <div className={`text-sm px-4 py-3 rounded-lg flex items-center gap-2 ${
+                formData.jobType === 'crewed_job' 
+                  ? 'bg-purple-50 text-purple-700 border border-purple-200' 
+                  : 'bg-blue-50 text-blue-700 border border-blue-200'
+              }`}>
+                <span className="text-lg">
+                  {formData.jobType === 'crewed_job' ? '👷' : '📦'}
+                </span>
+                <span>
+                  {formData.jobType === 'crewed_job' 
+                    ? 'Will save to Crewed Jobs board'
+                    : `Will save to D&C board${formData.addCollection ? ' (2 items: delivery + collection)' : ''}`
+                  }
+                </span>
+              </div>
+
               {/* Cost Summary Cards */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="bg-green-50 rounded-xl p-4">
@@ -1045,10 +1138,10 @@ function CrewTransportWizard() {
                     <span className="text-gray-500">HireHop #:</span>
                     <span className="ml-2 text-gray-900">{formData.hirehopJobNumber || 'Not set'}</span>
                   </div>
-                  {jobInfo?.clientName && (
+                  {(jobInfo?.clientName || formData.clientName) && (
                     <div>
                       <span className="text-gray-500">Client:</span>
-                      <span className="ml-2 text-gray-900">{jobInfo.clientName}</span>
+                      <span className="ml-2 text-gray-900">{formData.clientName || jobInfo?.clientName}</span>
                     </div>
                   )}
                   <div>
@@ -1089,7 +1182,8 @@ function CrewTransportWizard() {
             {step > 1 ? (
               <button
                 onClick={() => setStep(step - 1)}
-                className="px-6 py-2 text-gray-600 hover:text-gray-800"
+                disabled={!!success}
+                className="px-6 py-2 text-gray-600 hover:text-gray-800 disabled:opacity-50"
               >
                 ← Back
               </button>

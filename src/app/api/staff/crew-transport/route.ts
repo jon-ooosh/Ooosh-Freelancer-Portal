@@ -4,16 +4,25 @@
  * POST /api/staff/crew-transport - Create new item
  * GET /api/staff/crew-transport?jobNumber=X - Fetch job info from Q&H board
  * GET /api/staff/crew-transport?itemId=X - Fetch existing crew job item
+ * 
+ * ROUTING LOGIC:
+ * - Delivery or Collection → D&C Board (2028045828)
+ * - Crewed Job → Crewed Jobs Board (18398014629)
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 
 const MONDAY_API_URL = 'https://api.monday.com/v2'
+
+// Board IDs
 const CREW_JOBS_BOARD_ID = process.env.MONDAY_BOARD_ID_CREW_JOBS || '18398014629'
+const DC_BOARD_ID = process.env.MONDAY_BOARD_ID_DELIVERIES || '2028045828'
 const QH_BOARD_ID = '2431480012'
 
-// Column IDs for Crewed Jobs board
-const COLUMNS = {
+// =============================================================================
+// COLUMN IDS - CREWED JOBS BOARD
+// =============================================================================
+const CREW_COLUMNS = {
   name: 'name',
   hirehopJobNumber: 'numeric_mm06wbtm',
   jobType: 'color_mm062e1x',
@@ -46,8 +55,36 @@ const COLUMNS = {
   actualExpensesClaimed: 'numeric_mm06q1nr',
 }
 
-// Map form values to Monday status labels - MUST match exactly what's in Monday
-const JOB_TYPE_LABELS: Record<string, string> = {
+// =============================================================================
+// COLUMN IDS - D&C BOARD (Deliveries & Collections)
+// =============================================================================
+const DC_COLUMNS = {
+  name: 'name',
+  hirehopJobNumber: 'text2',           // HireHop job number
+  deliverCollect: 'status_1',          // Delivery / Collection status
+  date: 'date4',                       // Job date
+  arriveAt: 'hour',                    // Arrival time
+  status: 'status90',                  // Job status (TO DO!, Arranging, etc.)
+  keyPoints: 'key_points___summary',   // Key points / Flight # etc
+  clientCharge: 'numeric_mm06wq2n',    // NEW: Client charge (what we bill)
+  driverFee: 'numeric_mm0688f9',       // NEW: Driver fee (what we pay)
+  // Note: venue/address (connect_boards6) is a linked column - skipping for now
+}
+
+// =============================================================================
+// LABEL MAPPINGS - Must match Monday.com exactly
+// =============================================================================
+
+// D&C Board labels
+const DC_DELIVER_COLLECT_LABELS: Record<string, string> = {
+  'delivery': 'Delivery',
+  'collection': 'Collection',
+}
+
+const DC_STATUS_DEFAULT = 'TO DO!'  // Default status for new D&C items
+
+// Crewed Jobs Board labels
+const CREW_JOB_TYPE_LABELS: Record<string, string> = {
   'delivery': 'Transport Only',
   'collection': 'Transport Only',
   'crewed_job': 'Transport + Crew',
@@ -67,7 +104,6 @@ const RETURN_METHOD_LABELS: Record<string, string> = {
   'na': 'N/A',
 }
 
-// Work type labels - matching the Monday board exactly (from Jon's screenshot)
 const WORK_TYPE_LABELS: Record<string, string> = {
   'backline_tech': 'Backline Tech',
   'general_assist': 'General Assist',
@@ -98,6 +134,10 @@ const PD_ARRANGEMENT_LABELS: Record<string, string> = {
   'client_pays_direct': 'Client pays direct',
   'in_fee': 'In fee',
 }
+
+// =============================================================================
+// TYPES
+// =============================================================================
 
 interface FormData {
   hirehopJobNumber: string
@@ -138,6 +178,10 @@ interface Costs {
   ourMargin: number
 }
 
+// =============================================================================
+// MONDAY API HELPER
+// =============================================================================
+
 async function mondayQuery<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const token = process.env.MONDAY_API_TOKEN
   if (!token) throw new Error('MONDAY_API_TOKEN not configured')
@@ -160,6 +204,201 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
   return data.data as T
 }
 
+// =============================================================================
+// CREATE D&C ITEM (Delivery or Collection)
+// =============================================================================
+
+async function createDCItem(
+  formData: FormData,
+  costs: Costs,
+  itemType: 'delivery' | 'collection',
+  jobDate: string
+): Promise<{ id: string; name: string }> {
+  
+  // Build item name: "DEL: ClientName - Destination" or "COL: ClientName - Destination"
+  const prefix = itemType === 'delivery' ? 'DEL' : 'COL'
+  const clientPart = formData.clientName || `Job ${formData.hirehopJobNumber}`
+  const destPart = formData.destination || 'TBC'
+  const itemName = `${prefix}: ${clientPart} - ${destPart}`
+
+  // Build column values
+  const columnValues: Record<string, unknown> = {}
+
+  // HireHop job number (text column)
+  if (formData.hirehopJobNumber) {
+    columnValues[DC_COLUMNS.hirehopJobNumber] = formData.hirehopJobNumber
+  }
+
+  // Delivery or Collection status
+  columnValues[DC_COLUMNS.deliverCollect] = { 
+    label: DC_DELIVER_COLLECT_LABELS[itemType] 
+  }
+
+  // Job date
+  if (jobDate) {
+    columnValues[DC_COLUMNS.date] = { date: jobDate }
+  }
+
+  // Status - default to "TO DO!"
+  columnValues[DC_COLUMNS.status] = { label: DC_STATUS_DEFAULT }
+
+  // Key points / notes - combine destination and any notes
+  const keyPointsParts = []
+  if (formData.destination) keyPointsParts.push(`📍 ${formData.destination}`)
+  if (formData.expenseNotes) keyPointsParts.push(formData.expenseNotes)
+  if (formData.costingNotes) keyPointsParts.push(`Notes: ${formData.costingNotes}`)
+  if (keyPointsParts.length > 0) {
+    columnValues[DC_COLUMNS.keyPoints] = keyPointsParts.join('\n')
+  }
+
+  // Financial columns
+  columnValues[DC_COLUMNS.clientCharge] = costs.clientChargeTotal
+  columnValues[DC_COLUMNS.driverFee] = costs.freelancerFee
+
+  console.log('D&C: Creating item:', itemName)
+  console.log('D&C: Column values:', JSON.stringify(columnValues, null, 2))
+
+  // Create item mutation
+  const mutation = `
+    mutation ($boardId: ID!, $itemName: String!, $columnValues: JSON!) {
+      create_item(
+        board_id: $boardId
+        item_name: $itemName
+        column_values: $columnValues
+      ) {
+        id
+        name
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    create_item: { id: string; name: string }
+  }>(mutation, {
+    boardId: DC_BOARD_ID,
+    itemName,
+    columnValues: JSON.stringify(columnValues),
+  })
+
+  console.log('D&C: Created item', result.create_item.id, '-', result.create_item.name)
+  return result.create_item
+}
+
+// =============================================================================
+// CREATE CREWED JOB ITEM
+// =============================================================================
+
+async function createCrewedJobItem(
+  formData: FormData,
+  costs: Costs
+): Promise<{ id: string; name: string }> {
+  
+  // Determine the job type label based on transport
+  let mondayJobType = 'Transport + Crew'
+  if (formData.transportMode === 'na' || !formData.transportMode) {
+    mondayJobType = 'Crew Only'
+  }
+
+  // Build item name
+  const itemName = formData.hirehopJobNumber 
+    ? `Job ${formData.hirehopJobNumber} - Crewed Job - ${formData.destination || 'TBC'}`
+    : `Crewed Job - ${formData.destination || 'New Job'}`
+
+  // Calculate total expected expenses
+  const totalExpectedExpenses = costs.expectedFuelCost + costs.expectedOtherExpenses
+
+  // Build column values object
+  const columnValues: Record<string, unknown> = {}
+  
+  // Text columns
+  if (formData.destination) columnValues[CREW_COLUMNS.destination] = formData.destination
+  if (formData.workDescription) columnValues[CREW_COLUMNS.workDescription] = formData.workDescription
+  if (formData.workType === 'other' && formData.workTypeOther) {
+    columnValues[CREW_COLUMNS.workTypeOther] = formData.workTypeOther
+  }
+  
+  // Combine notes
+  const combinedNotes = [formData.expenseNotes, formData.costingNotes ? `Notes: ${formData.costingNotes}` : '']
+    .filter(Boolean).join('\n\n')
+  if (combinedNotes) columnValues[CREW_COLUMNS.expenseNotes] = combinedNotes
+  
+  // Numeric columns - only set if > 0
+  if (formData.hirehopJobNumber) columnValues[CREW_COLUMNS.hirehopJobNumber] = parseInt(formData.hirehopJobNumber)
+  if (formData.distanceMiles > 0) columnValues[CREW_COLUMNS.distanceMiles] = formData.distanceMiles
+  if (formData.driveTimeMinutes > 0) columnValues[CREW_COLUMNS.driveTimeMinutes] = formData.driveTimeMinutes
+  if (formData.returnTravelTimeMins > 0) columnValues[CREW_COLUMNS.returnTravelTimeMins] = formData.returnTravelTimeMins
+  if (formData.returnTravelCost > 0) columnValues[CREW_COLUMNS.returnTravelCost] = formData.returnTravelCost
+  if (formData.workDurationHours > 0) columnValues[CREW_COLUMNS.workDurationHours] = formData.workDurationHours
+  if (formData.numberOfDays > 0) columnValues[CREW_COLUMNS.numberOfDays] = formData.numberOfDays
+  if (formData.earlyStartMinutes > 0) columnValues[CREW_COLUMNS.earlyStartMinutes] = formData.earlyStartMinutes
+  if (formData.lateFinishMinutes > 0) columnValues[CREW_COLUMNS.lateFinishMinutes] = formData.lateFinishMinutes
+  if (formData.pdAmount > 0) columnValues[CREW_COLUMNS.pdAmount] = formData.pdAmount
+  
+  // Financial columns - always set these
+  columnValues[CREW_COLUMNS.clientChargeTotal] = costs.clientChargeTotal
+  columnValues[CREW_COLUMNS.freelancerFee] = costs.freelancerFee
+  columnValues[CREW_COLUMNS.expectedExpenses] = totalExpectedExpenses
+  columnValues[CREW_COLUMNS.ourMargin] = costs.ourMargin
+  
+  // Date column
+  if (formData.jobDate) columnValues[CREW_COLUMNS.jobDate] = { date: formData.jobDate }
+  
+  // Status columns
+  columnValues[CREW_COLUMNS.jobType] = { label: mondayJobType }
+  columnValues[CREW_COLUMNS.status] = { label: 'Working on it' }
+  
+  if (formData.transportMode && TRANSPORT_MODE_LABELS[formData.transportMode]) {
+    columnValues[CREW_COLUMNS.transportMode] = { label: TRANSPORT_MODE_LABELS[formData.transportMode] }
+  }
+  if (formData.returnMethod && RETURN_METHOD_LABELS[formData.returnMethod]) {
+    columnValues[CREW_COLUMNS.returnMethod] = { label: RETURN_METHOD_LABELS[formData.returnMethod] }
+  }
+  if (formData.workType && WORK_TYPE_LABELS[formData.workType]) {
+    columnValues[CREW_COLUMNS.workType] = { label: WORK_TYPE_LABELS[formData.workType] }
+  }
+  if (formData.calculationMode && CALC_MODE_LABELS[formData.calculationMode]) {
+    columnValues[CREW_COLUMNS.calculationMode] = { label: CALC_MODE_LABELS[formData.calculationMode] }
+  }
+  if (formData.expenseArrangement && EXPENSE_ARRANGEMENT_LABELS[formData.expenseArrangement]) {
+    columnValues[CREW_COLUMNS.expenseArrangement] = { label: EXPENSE_ARRANGEMENT_LABELS[formData.expenseArrangement] }
+  }
+  if (formData.pdArrangement && PD_ARRANGEMENT_LABELS[formData.pdArrangement]) {
+    columnValues[CREW_COLUMNS.pdArrangement] = { label: PD_ARRANGEMENT_LABELS[formData.pdArrangement] }
+  }
+
+  console.log('Crewed Job: Creating item:', itemName)
+  console.log('Crewed Job: Column values:', JSON.stringify(columnValues, null, 2))
+
+  // Create item mutation
+  const mutation = `
+    mutation ($boardId: ID!, $itemName: String!, $columnValues: JSON!) {
+      create_item(
+        board_id: $boardId
+        item_name: $itemName
+        column_values: $columnValues
+      ) {
+        id
+        name
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    create_item: { id: string; name: string }
+  }>(mutation, {
+    boardId: CREW_JOBS_BOARD_ID,
+    itemName,
+    columnValues: JSON.stringify(columnValues),
+  })
+
+  console.log('Crewed Job: Created item', result.create_item.id)
+  return result.create_item
+}
+
+// =============================================================================
+// POST HANDLER - Create new item(s)
+// =============================================================================
+
 export async function POST(request: NextRequest) {
   try {
     // Verify staff PIN
@@ -175,143 +414,68 @@ export async function POST(request: NextRequest) {
 
     const { formData, costs } = await request.json() as { formData: FormData; costs: Costs }
 
-    console.log('Crew Transport: Creating item for job', formData.hirehopJobNumber)
+    console.log('='.repeat(60))
+    console.log('Crew & Transport: Processing', formData.jobType, 'for job', formData.hirehopJobNumber)
+    console.log('='.repeat(60))
 
-    // Determine the actual job type for Monday based on selection
-    let mondayJobType = JOB_TYPE_LABELS[formData.jobType] || 'Transport Only'
-    
-    // For crewed jobs, check if there's transport or not
+    // Route to appropriate board based on job type
     if (formData.jobType === 'crewed_job') {
-      if (formData.transportMode === 'na' || !formData.transportMode) {
-        mondayJobType = 'Crew Only'
-      } else {
-        mondayJobType = 'Transport + Crew'
-      }
-    }
+      // =========================================================================
+      // CREWED JOB → Crewed Jobs Board
+      // =========================================================================
+      const result = await createCrewedJobItem(formData, costs)
 
-    console.log('Crew Transport: Job type mapping:', formData.jobType, '->', mondayJobType)
-
-    // Build item name
-    const typeLabel = formData.jobType === 'delivery' ? 'Delivery' : 
-                      formData.jobType === 'collection' ? 'Collection' : 
-                      'Crewed Job'
-    const itemName = formData.hirehopJobNumber 
-      ? `Job ${formData.hirehopJobNumber} - ${typeLabel} - ${formData.destination || 'TBC'}`
-      : `${typeLabel} - ${formData.destination || 'New Job'}`
-
-    // Calculate total expected expenses
-    const totalExpectedExpenses = costs.expectedFuelCost + costs.expectedOtherExpenses
-
-    // Build column values object - only include non-null values
-    const columnValues: Record<string, unknown> = {}
-    
-    // Text columns
-    if (formData.destination) columnValues[COLUMNS.destination] = formData.destination
-    if (formData.workDescription) columnValues[COLUMNS.workDescription] = formData.workDescription
-    if (formData.workType === 'other' && formData.workTypeOther) {
-      columnValues[COLUMNS.workTypeOther] = formData.workTypeOther
-    }
-    
-    // Combine notes
-    const combinedNotes = [formData.expenseNotes, formData.costingNotes ? `Notes: ${formData.costingNotes}` : '']
-      .filter(Boolean).join('\n\n')
-    if (combinedNotes) columnValues[COLUMNS.expenseNotes] = combinedNotes
-    
-    // Numeric columns - only set if > 0
-    if (formData.hirehopJobNumber) columnValues[COLUMNS.hirehopJobNumber] = parseInt(formData.hirehopJobNumber)
-    if (formData.distanceMiles > 0) columnValues[COLUMNS.distanceMiles] = formData.distanceMiles
-    if (formData.driveTimeMinutes > 0) columnValues[COLUMNS.driveTimeMinutes] = formData.driveTimeMinutes
-    if (formData.returnTravelTimeMins > 0) columnValues[COLUMNS.returnTravelTimeMins] = formData.returnTravelTimeMins
-    if (formData.returnTravelCost > 0) columnValues[COLUMNS.returnTravelCost] = formData.returnTravelCost
-    if (formData.workDurationHours > 0) columnValues[COLUMNS.workDurationHours] = formData.workDurationHours
-    if (formData.numberOfDays > 0) columnValues[COLUMNS.numberOfDays] = formData.numberOfDays
-    if (formData.earlyStartMinutes > 0) columnValues[COLUMNS.earlyStartMinutes] = formData.earlyStartMinutes
-    if (formData.lateFinishMinutes > 0) columnValues[COLUMNS.lateFinishMinutes] = formData.lateFinishMinutes
-    if (formData.pdAmount > 0) columnValues[COLUMNS.pdAmount] = formData.pdAmount
-    
-    // Financial columns - always set these
-    columnValues[COLUMNS.clientChargeTotal] = costs.clientChargeTotal
-    columnValues[COLUMNS.freelancerFee] = costs.freelancerFee
-    columnValues[COLUMNS.expectedExpenses] = totalExpectedExpenses
-    columnValues[COLUMNS.ourMargin] = costs.ourMargin
-    
-    // Date column
-    if (formData.jobDate) columnValues[COLUMNS.jobDate] = { date: formData.jobDate }
-    
-    // Status columns - only set if we have valid values
-    columnValues[COLUMNS.jobType] = { label: mondayJobType }
-    columnValues[COLUMNS.status] = { label: 'Working on it' }
-    
-    if (formData.transportMode && TRANSPORT_MODE_LABELS[formData.transportMode]) {
-      columnValues[COLUMNS.transportMode] = { label: TRANSPORT_MODE_LABELS[formData.transportMode] }
-    }
-    if (formData.returnMethod && RETURN_METHOD_LABELS[formData.returnMethod]) {
-      columnValues[COLUMNS.returnMethod] = { label: RETURN_METHOD_LABELS[formData.returnMethod] }
-    }
-    if (formData.workType && WORK_TYPE_LABELS[formData.workType]) {
-      columnValues[COLUMNS.workType] = { label: WORK_TYPE_LABELS[formData.workType] }
-    }
-    if (formData.calculationMode && CALC_MODE_LABELS[formData.calculationMode]) {
-      columnValues[COLUMNS.calculationMode] = { label: CALC_MODE_LABELS[formData.calculationMode] }
-    }
-    if (formData.expenseArrangement && EXPENSE_ARRANGEMENT_LABELS[formData.expenseArrangement]) {
-      columnValues[COLUMNS.expenseArrangement] = { label: EXPENSE_ARRANGEMENT_LABELS[formData.expenseArrangement] }
-    }
-    if (formData.pdArrangement && PD_ARRANGEMENT_LABELS[formData.pdArrangement]) {
-      columnValues[COLUMNS.pdArrangement] = { label: PD_ARRANGEMENT_LABELS[formData.pdArrangement] }
-    }
-
-    console.log('Crew Transport: Column values:', JSON.stringify(columnValues, null, 2))
-
-    // Create item mutation
-    const mutation = `
-      mutation ($boardId: ID!, $itemName: String!, $columnValues: JSON!) {
-        create_item(
-          board_id: $boardId
-          item_name: $itemName
-          column_values: $columnValues
-        ) {
-          id
-          name
-        }
-      }
-    `
-
-    const result = await mondayQuery<{
-      create_item: { id: string; name: string }
-    }>(mutation, {
-      boardId: CREW_JOBS_BOARD_ID,
-      itemName,
-      columnValues: JSON.stringify(columnValues),
-    })
-
-    console.log('Crew Transport: Created item', result.create_item.id)
-
-    // If addCollection is true, create a second item for the collection
-    if (formData.addCollection && formData.collectionDate) {
-      const collectionName = formData.hirehopJobNumber 
-        ? `Job ${formData.hirehopJobNumber} - Collection - ${formData.destination}`
-        : `Collection - ${formData.destination}`
-
-      // Collection is also Transport Only, with the collection date
-      const collectionColumnValues: Record<string, unknown> = { ...columnValues }
-      collectionColumnValues[COLUMNS.jobType] = { label: 'Transport Only' }
-      collectionColumnValues[COLUMNS.jobDate] = { date: formData.collectionDate }
-
-      await mondayQuery(mutation, {
-        boardId: CREW_JOBS_BOARD_ID,
-        itemName: collectionName,
-        columnValues: JSON.stringify(collectionColumnValues),
+      return NextResponse.json({
+        success: true,
+        itemId: result.id,
+        itemName: result.name,
+        board: 'crewed_jobs',
       })
 
-      console.log('Crew Transport: Also created collection item for', formData.collectionDate)
-    }
+    } else if (formData.jobType === 'delivery' || formData.jobType === 'collection') {
+      // =========================================================================
+      // DELIVERY or COLLECTION → D&C Board
+      // =========================================================================
+      
+      // Create the primary item (delivery or collection)
+      const primaryResult = await createDCItem(
+        formData, 
+        costs, 
+        formData.jobType as 'delivery' | 'collection',
+        formData.jobDate
+      )
 
-    return NextResponse.json({
-      success: true,
-      itemId: result.create_item.id,
-      itemName: result.create_item.name,
-    })
+      let collectionResult = null
+
+      // If "Add collection from same location" is checked, create a second item
+      if (formData.jobType === 'delivery' && formData.addCollection && formData.collectionDate) {
+        console.log('D&C: Also creating collection for', formData.collectionDate)
+        collectionResult = await createDCItem(
+          formData,
+          costs,
+          'collection',
+          formData.collectionDate
+        )
+      }
+
+      return NextResponse.json({
+        success: true,
+        itemId: primaryResult.id,
+        itemName: primaryResult.name,
+        board: 'dc',
+        // Include collection info if created
+        ...(collectionResult && {
+          collectionItemId: collectionResult.id,
+          collectionItemName: collectionResult.name,
+        }),
+      })
+
+    } else {
+      return NextResponse.json(
+        { success: false, error: 'Invalid job type' },
+        { status: 400 }
+      )
+    }
 
   } catch (error) {
     console.error('Crew Transport API error:', error)
@@ -322,7 +486,10 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET endpoint to fetch job info from Q&H board
+// =============================================================================
+// GET HANDLER - Fetch job info from Q&H board
+// =============================================================================
+
 export async function GET(request: NextRequest) {
   try {
     // Verify staff PIN
