@@ -14,6 +14,39 @@ import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
 const MONDAY_API_URL = 'https://api.monday.com/v2'
 const QH_BOARD_ID = '2431480012'
 
+// Retry configuration
+const RETRY_CONFIG = {
+  maxAttempts: 3,
+  baseDelayMs: 1000,  // 1 second, then 2s, then 4s
+  retryableStatusCodes: [429, 500, 502, 503, 504],
+}
+
+/**
+ * Sleep helper for retry delays
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Check if an error is retryable
+ */
+function isRetryableError(error: unknown): boolean {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase()
+    // Retry on rate limits, timeouts, and server errors
+    return (
+      message.includes('rate limit') ||
+      message.includes('timeout') ||
+      message.includes('econnreset') ||
+      message.includes('econnrefused') ||
+      message.includes('socket hang up') ||
+      RETRY_CONFIG.retryableStatusCodes.some(code => message.includes(String(code)))
+    )
+  }
+  return false
+}
+
 // Column IDs
 const COLUMNS = {
   ON_HIRE_STATUS: 'status51',
@@ -34,22 +67,77 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
   const token = process.env.MONDAY_API_TOKEN
   if (!token) throw new Error('MONDAY_API_TOKEN not configured')
 
-  const response = await fetch(MONDAY_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': token,
-      'API-Version': '2024-10',
-    },
-    body: JSON.stringify({ query, variables }),
-  })
+  let lastError: Error | null = null
 
-  const data = await response.json()
-  if (data.errors) {
-    console.error('Monday API errors:', data.errors)
-    throw new Error(JSON.stringify(data.errors))
+  for (let attempt = 1; attempt <= RETRY_CONFIG.maxAttempts; attempt++) {
+    try {
+      const response = await fetch(MONDAY_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': token,
+          'API-Version': '2024-10',
+        },
+        body: JSON.stringify({ query, variables }),
+      })
+
+      // Check for HTTP-level errors that might be retryable
+      if (!response.ok) {
+        const errorText = await response.text()
+        const error = new Error(`HTTP ${response.status}: ${errorText}`)
+        
+        if (RETRY_CONFIG.retryableStatusCodes.includes(response.status) && attempt < RETRY_CONFIG.maxAttempts) {
+          const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+          console.warn(`Warehouse: Monday API returned ${response.status}, retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts})`)
+          await sleep(delay)
+          lastError = error
+          continue
+        }
+        throw error
+      }
+
+      const data = await response.json()
+      
+      // Check for GraphQL-level errors
+      if (data.errors) {
+        const errorMessage = JSON.stringify(data.errors)
+        const error = new Error(errorMessage)
+        
+        // Check if it's a rate limit error (retryable)
+        if (errorMessage.toLowerCase().includes('rate limit') && attempt < RETRY_CONFIG.maxAttempts) {
+          const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+          console.warn(`Warehouse: Monday API rate limited, retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts})`)
+          await sleep(delay)
+          lastError = error
+          continue
+        }
+        
+        console.error('Monday API errors:', data.errors)
+        throw error
+      }
+
+      // Success!
+      if (attempt > 1) {
+        console.log(`Warehouse: Monday API succeeded on attempt ${attempt}`)
+      }
+      return data.data as T
+
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      
+      if (isRetryableError(err) && attempt < RETRY_CONFIG.maxAttempts) {
+        const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+        console.warn(`Warehouse: Monday API error (${lastError.message}), retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts})`)
+        await sleep(delay)
+        continue
+      }
+      
+      throw lastError
+    }
   }
-  return data.data as T
+
+  // Should not reach here, but just in case
+  throw lastError || new Error('Monday API failed after retries')
 }
 
 /**
@@ -74,11 +162,12 @@ async function addSignatureUpdate(itemId: string, clientName: string, timestamp:
     if (!updateId) {
       console.error('Warehouse: Failed to create update - no ID returned')
       return false
-    } 
+    }
 
     console.log(`Warehouse: Created update ${updateId} for item ${itemId}`)
 
     // Now upload the signature image to the update
+    // IMPORTANT: File uploads use a different endpoint and format!
     if (signatureBase64) {
       try {
         // Convert base64 to buffer
@@ -87,33 +176,82 @@ async function addSignatureUpdate(itemId: string, clientName: string, timestamp:
 
         // Create form data for file upload
         const FormData = (await import('form-data')).default
-        const form = new FormData()
 
-        // Monday.com file upload requires specific format
-        const query = `mutation ($updateId: ID!) { add_file_to_update(update_id: $updateId, file: $file) { id } }`
-        form.append('query', query)
-        form.append('variables[updateId]', updateId)
-        form.append('map', JSON.stringify({ file: 'variables.file' }))
-        form.append('file', imageBuffer, {
-          filename: `signature_${itemId}_${Date.now()}.png`,
-          contentType: 'image/png',
-        })
+        // Monday.com file upload format (from their docs):
+        // - Endpoint: /v2/file (not /v2)
+        // - map: maps form field name to GraphQL variable path
+        // - The mutation has update_id hardcoded, file as variable
+        const query = `mutation ($file: File!) { add_file_to_update (update_id: ${updateId}, file: $file) { id } }`
 
         const token = process.env.MONDAY_API_TOKEN
-        const uploadResponse = await fetch(MONDAY_API_URL, {
-          method: 'POST',
-          headers: {
-            'Authorization': token!,
-            ...form.getHeaders(),
-          },
-          body: form as unknown as BodyInit,
-        })
+        
+        // Use the FILE endpoint, not the regular GraphQL endpoint
+        // With retry logic for transient failures
+        let uploadSuccess = false
+        for (let attempt = 1; attempt <= RETRY_CONFIG.maxAttempts; attempt++) {
+          try {
+            // Need to recreate form for each attempt (streams can only be read once)
+            const retryForm = new FormData()
+            retryForm.append('query', query)
+            retryForm.append('map', JSON.stringify({ image: 'variables.file' }))
+            retryForm.append('image', imageBuffer, {
+              filename: `signature_${itemId}_${Date.now()}.png`,
+              contentType: 'image/png',
+            })
 
-        const uploadResult = await uploadResponse.json()
-        if (uploadResult.errors) {
-          console.warn('Warehouse: Signature upload had errors:', uploadResult.errors)
-        } else {
-          console.log('Warehouse: Signature image uploaded to update')
+            const uploadResponse = await fetch('https://api.monday.com/v2/file', {
+              method: 'POST',
+              headers: {
+                'Authorization': token!,
+                ...retryForm.getHeaders(),
+              },
+              body: retryForm as unknown as BodyInit,
+            })
+
+            // Check for HTTP errors
+            if (!uploadResponse.ok && RETRY_CONFIG.retryableStatusCodes.includes(uploadResponse.status)) {
+              if (attempt < RETRY_CONFIG.maxAttempts) {
+                const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+                console.warn(`Warehouse: File upload returned ${uploadResponse.status}, retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts})`)
+                await sleep(delay)
+                continue
+              }
+            }
+
+            const uploadResult = await uploadResponse.json()
+            
+            if (uploadResult.errors) {
+              // Check if rate limited
+              const errorStr = JSON.stringify(uploadResult.errors)
+              if (errorStr.toLowerCase().includes('rate limit') && attempt < RETRY_CONFIG.maxAttempts) {
+                const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+                console.warn(`Warehouse: File upload rate limited, retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts})`)
+                await sleep(delay)
+                continue
+              }
+              console.warn('Warehouse: Signature upload had errors:', errorStr)
+            } else if (uploadResult.data?.add_file_to_update?.id) {
+              console.log('Warehouse: Signature image uploaded to update successfully')
+              uploadSuccess = true
+            } else {
+              console.warn('Warehouse: Signature upload response:', JSON.stringify(uploadResult))
+            }
+            break  // Exit retry loop on success or non-retryable error
+
+          } catch (uploadErr) {
+            if (isRetryableError(uploadErr) && attempt < RETRY_CONFIG.maxAttempts) {
+              const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+              console.warn(`Warehouse: File upload error, retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts}):`, uploadErr)
+              await sleep(delay)
+              continue
+            }
+            console.warn('Warehouse: Failed to upload signature image:', uploadErr)
+            break
+          }
+        }
+        
+        if (!uploadSuccess) {
+          console.warn('Warehouse: Signature upload did not succeed after retries, but continuing with completion')
         }
       } catch (uploadErr) {
         // Log but don't fail - the text update is more important
@@ -332,7 +470,7 @@ async function generateDeliveryNotePdf(data: {
 }
 
 /**
- * Send delivery note email
+ * Send delivery note email (with retry logic)
  */
 async function sendDeliveryEmail(
   clientEmails: string[],
@@ -341,51 +479,79 @@ async function sendDeliveryEmail(
   hhRef: string,
   pdfBuffer: Buffer
 ): Promise<boolean> {
-  try {
-    const nodemailer = await import('nodemailer')
-    const transporter = nodemailer.default.createTransport({
-      host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-      port: parseInt(process.env.EMAIL_PORT || '587'),
-      secure: false,
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_APP_PASSWORD },
-    })
+  const nodemailer = await import('nodemailer')
+  
+  const transporter = nodemailer.default.createTransport({
+    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.EMAIL_PORT || '587'),
+    secure: false,
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_APP_PASSWORD },
+  })
 
-    const greeting = clientName ? `Hello ${clientName.split(' ')[0]},` : 'Hello,'
-    const formattedDate = new Date(jobDate).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
+  const greeting = clientName ? `Hello ${clientName.split(' ')[0]},` : 'Hello,'
+  const formattedDate = new Date(jobDate).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })
 
-    const html = `<!DOCTYPE html><html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
-      <div style="background:#7c5ce7;padding:30px;border-radius:12px 12px 0 0;text-align:center;"><h1 style="color:white;margin:0;font-size:24px;">📦 Delivery Note</h1></div>
-      <div style="background:#f8f9fa;padding:30px;border-radius:0 0 12px 12px;">
-        <p style="font-size:16px;margin-bottom:20px;">${greeting}</p>
-        <p style="font-size:16px;margin-bottom:20px;">Please find attached the delivery note for equipment you collected from Ooosh Tours.</p>
-        <div style="background:white;border-radius:8px;padding:20px;margin-bottom:20px;border-left:4px solid #7c5ce7;">
-          <p style="margin:8px 0;color:#555;"><strong>📍 Collection:</strong> In-person at Ooosh warehouse</p>
-          <p style="margin:8px 0;color:#555;"><strong>📅 Hire Start Date:</strong> ${formattedDate}</p>
-          <p style="margin:8px 0;color:#555;"><strong>🔖 Job Reference:</strong> ${hhRef}</p>
-        </div>
-        <p style="font-size:14px;color:#666;">If you have any questions or notice any discrepancies, please get in touch asap.</p>
-        <p style="font-size:14px;color:#555;margin-top:25px;">Many thanks,<br><strong>The Ooosh Tours Team</strong></p>
-      </div></body></html>`
+  const html = `<!DOCTYPE html><html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:600px;margin:0 auto;padding:20px;">
+    <div style="background:#7c5ce7;padding:30px;border-radius:12px 12px 0 0;text-align:center;"><h1 style="color:white;margin:0;font-size:24px;">📦 Delivery Note</h1></div>
+    <div style="background:#f8f9fa;padding:30px;border-radius:0 0 12px 12px;">
+      <p style="font-size:16px;margin-bottom:20px;">${greeting}</p>
+      <p style="font-size:16px;margin-bottom:20px;">Please find attached the delivery note for equipment you collected from Ooosh Tours.</p>
+      <div style="background:white;border-radius:8px;padding:20px;margin-bottom:20px;border-left:4px solid #7c5ce7;">
+        <p style="margin:8px 0;color:#555;"><strong>📍 Collection:</strong> In-person at Ooosh warehouse</p>
+        <p style="margin:8px 0;color:#555;"><strong>📅 Hire Start Date:</strong> ${formattedDate}</p>
+        <p style="margin:8px 0;color:#555;"><strong>🔖 Job Reference:</strong> ${hhRef}</p>
+      </div>
+      <p style="font-size:14px;color:#666;">If you have any questions or notice any discrepancies, please get in touch asap.</p>
+      <p style="font-size:14px;color:#555;margin-top:25px;">Many thanks,<br><strong>The Ooosh Tours Team</strong></p>
+    </div></body></html>`
 
-    const safeRef = hhRef.replace(/[^a-zA-Z0-9]/g, '_')
-    await transporter.sendMail({
-      from: process.env.EMAIL_FROM || 'Ooosh Tours <noreply@oooshtours.co.uk>',
-      to: clientEmails.join(', '),
-      subject: `📦 Delivery Note - Job ${hhRef} - ${formattedDate}`,
-      html,
-      attachments: [{
-        filename: `Ooosh_Delivery_Note_${safeRef}.pdf`,
-        content: pdfBuffer,
-        contentType: 'application/pdf',
-      }],
-    })
-
-    console.log(`Warehouse: Email sent to ${clientEmails.join(', ')}`)
-    return true
-  } catch (err) {
-    console.error('Warehouse: Email send failed:', err)
-    return false
+  const safeRef = hhRef.replace(/[^a-zA-Z0-9]/g, '_')
+  const mailOptions = {
+    from: process.env.EMAIL_FROM || 'Ooosh Tours <noreply@oooshtours.co.uk>',
+    to: clientEmails.join(', '),
+    subject: `📦 Delivery Note - Job ${hhRef} - ${formattedDate}`,
+    html,
+    attachments: [{
+      filename: `Ooosh_Delivery_Note_${safeRef}.pdf`,
+      content: pdfBuffer,
+      contentType: 'application/pdf',
+    }],
   }
+
+  // Retry logic for email sending
+  let lastError: Error | null = null
+  
+  for (let attempt = 1; attempt <= RETRY_CONFIG.maxAttempts; attempt++) {
+    try {
+      await transporter.sendMail(mailOptions)
+      console.log(`Warehouse: Email sent to ${clientEmails.join(', ')}${attempt > 1 ? ` (attempt ${attempt})` : ''}`)
+      return true
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      
+      // Check if retryable (connection errors, timeouts)
+      const errorMessage = lastError.message.toLowerCase()
+      const isRetryable = 
+        errorMessage.includes('econnreset') ||
+        errorMessage.includes('econnrefused') ||
+        errorMessage.includes('etimedout') ||
+        errorMessage.includes('socket') ||
+        errorMessage.includes('timeout')
+      
+      if (isRetryable && attempt < RETRY_CONFIG.maxAttempts) {
+        const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+        console.warn(`Warehouse: Email send failed (${lastError.message}), retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts})`)
+        await sleep(delay)
+        continue
+      }
+      
+      console.error('Warehouse: Email send failed:', lastError)
+      return false
+    }
+  }
+
+  console.error('Warehouse: Email send failed after all retries:', lastError)
+  return false
 }
 
 export async function POST(
