@@ -146,7 +146,21 @@ export async function GET(request: NextRequest) {
         }
       }>(query, variables)
 
-      const itemsPage = cursor 
+      // Explicitly type to avoid TypeScript inference issue
+      type ItemsPageType = {
+        cursor: string | null
+        items: Array<{
+          id: string
+          name: string
+          column_values: Array<{
+            id: string
+            text: string
+            value: string
+          }>
+        }>
+      } | undefined
+
+      const itemsPage: ItemsPageType = cursor 
         ? result.next_items_page 
         : result.boards?.[0]?.items_page
 
