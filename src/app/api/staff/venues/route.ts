@@ -18,6 +18,25 @@ const VENUE_COLUMNS = {
   driveTime: 'numeric_mm074a1k',     // Drive Time (minutes, one-way)
 }
 
+// Venue item type from Monday API
+interface VenueItem {
+  id: string
+  name: string
+  column_values: Array<{
+    id: string
+    text: string
+    value: string
+  }>
+}
+
+// Processed venue type for frontend
+interface ProcessedVenue {
+  id: string
+  name: string
+  distance: number | null
+  driveTime: number | null
+}
+
 // =============================================================================
 // MONDAY API HELPER
 // =============================================================================
@@ -31,7 +50,7 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
     headers: {
       'Content-Type': 'application/json',
       'Authorization': token,
-      'API-Version': '2024-10',
+      'API-Version': '2024-10',  // Latest stable version
     },
     body: JSON.stringify({ query, variables }),
   })
@@ -42,6 +61,101 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
     throw new Error(JSON.stringify(data.errors))
   }
   return data.data as T
+}
+
+// =============================================================================
+// HELPER: Process venue items into clean format
+// =============================================================================
+
+function processVenueItems(items: VenueItem[]): ProcessedVenue[] {
+  return items.map(item => {
+    const columns = item.column_values.reduce((acc, col) => {
+      acc[col.id] = col.text
+      return acc
+    }, {} as Record<string, string>)
+
+    return {
+      id: item.id,
+      name: item.name,
+      distance: columns[VENUE_COLUMNS.distance] ? parseFloat(columns[VENUE_COLUMNS.distance]) : null,
+      driveTime: columns[VENUE_COLUMNS.driveTime] ? parseFloat(columns[VENUE_COLUMNS.driveTime]) : null,
+    }
+  })
+}
+
+// =============================================================================
+// HELPER: Fetch first page of venues
+// =============================================================================
+
+async function fetchFirstPage(): Promise<{ items: VenueItem[]; cursor: string | null }> {
+  const query = `
+    query ($boardId: ID!) {
+      boards(ids: [$boardId]) {
+        items_page(limit: 500) {
+          cursor
+          items {
+            id
+            name
+            column_values(ids: ["${VENUE_COLUMNS.distance}", "${VENUE_COLUMNS.driveTime}"]) {
+              id
+              text
+              value
+            }
+          }
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    boards: Array<{
+      items_page: {
+        cursor: string | null
+        items: VenueItem[]
+      }
+    }>
+  }>(query, { boardId: VENUES_BOARD_ID })
+
+  const itemsPage = result.boards?.[0]?.items_page
+  return {
+    items: itemsPage?.items || [],
+    cursor: itemsPage?.cursor || null,
+  }
+}
+
+// =============================================================================
+// HELPER: Fetch next page of venues
+// =============================================================================
+
+async function fetchNextPage(cursor: string): Promise<{ items: VenueItem[]; cursor: string | null }> {
+  const query = `
+    query ($cursor: String!) {
+      next_items_page(cursor: $cursor, limit: 500) {
+        cursor
+        items {
+          id
+          name
+          column_values(ids: ["${VENUE_COLUMNS.distance}", "${VENUE_COLUMNS.driveTime}"]) {
+            id
+            text
+            value
+          }
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    next_items_page: {
+      cursor: string | null
+      items: VenueItem[]
+    }
+  }>(query, { cursor })
+
+  return {
+    items: result.next_items_page?.items || [],
+    cursor: result.next_items_page?.cursor || null,
+  }
 }
 
 // =============================================================================
@@ -63,133 +177,25 @@ export async function GET(request: NextRequest) {
 
     console.log('Venues API: Fetching all venues from board', VENUES_BOARD_ID)
 
-    // Fetch all venues with pagination support
-    // We'll fetch up to 500 at a time and combine if needed
-    const allVenues: Array<{
-      id: string
-      name: string
-      distance: number | null
-      driveTime: number | null
-    }> = []
-
-    let cursor: string | null = null
-    let pageCount = 0
+    const allVenues: ProcessedVenue[] = []
     const maxPages = 5 // Safety limit: 5 pages × 500 = 2500 venues max
 
-    do {
-      const query = cursor
-        ? `
-          query ($cursor: String!) {
-            next_items_page(cursor: $cursor, limit: 500) {
-              cursor
-              items {
-                id
-                name
-                column_values(ids: ["${VENUE_COLUMNS.distance}", "${VENUE_COLUMNS.driveTime}"]) {
-                  id
-                  text
-                  value
-                }
-              }
-            }
-          }
-        `
-        : `
-          query ($boardId: ID!) {
-            boards(ids: [$boardId]) {
-              items_page(limit: 500) {
-                cursor
-                items {
-                  id
-                  name
-                  column_values(ids: ["${VENUE_COLUMNS.distance}", "${VENUE_COLUMNS.driveTime}"]) {
-                    id
-                    text
-                    value
-                  }
-                }
-              }
-            }
-          }
-        `
+    // Fetch first page
+    const firstPage = await fetchFirstPage()
+    allVenues.push(...processVenueItems(firstPage.items))
+    console.log(`Venues API: Fetched page 1, got ${firstPage.items.length} items`)
 
-      const variables = cursor 
-        ? { cursor }
-        : { boardId: VENUES_BOARD_ID }
-
-      const result = await mondayQuery<{
-        boards?: Array<{
-          items_page: {
-            cursor: string | null
-            items: Array<{
-              id: string
-              name: string
-              column_values: Array<{
-                id: string
-                text: string
-                value: string
-              }>
-            }>
-          }
-        }>
-        next_items_page?: {
-          cursor: string | null
-          items: Array<{
-            id: string
-            name: string
-            column_values: Array<{
-              id: string
-              text: string
-              value: string
-            }>
-          }>
-        }
-      }>(query, variables)
-
-      // Explicitly type to avoid TypeScript inference issue
-      type ItemsPageType = {
-        cursor: string | null
-        items: Array<{
-          id: string
-          name: string
-          column_values: Array<{
-            id: string
-            text: string
-            value: string
-          }>
-        }>
-      } | undefined
-
-      const itemsPage: ItemsPageType = cursor 
-        ? result.next_items_page 
-        : result.boards?.[0]?.items_page
-
-      if (!itemsPage) {
-        console.error('Venues API: No items_page in response')
-        break
-      }
-
-      // Process items
-      for (const item of itemsPage.items) {
-        const columns = item.column_values.reduce((acc, col) => {
-          acc[col.id] = col.text
-          return acc
-        }, {} as Record<string, string>)
-
-        allVenues.push({
-          id: item.id,
-          name: item.name,
-          distance: columns[VENUE_COLUMNS.distance] ? parseFloat(columns[VENUE_COLUMNS.distance]) : null,
-          driveTime: columns[VENUE_COLUMNS.driveTime] ? parseFloat(columns[VENUE_COLUMNS.driveTime]) : null,
-        })
-      }
-
-      cursor = itemsPage.cursor
+    // Fetch additional pages if needed
+    let currentCursor = firstPage.cursor
+    let pageCount = 1
+    
+    while (currentCursor && pageCount < maxPages) {
+      const nextPage = await fetchNextPage(currentCursor)
+      allVenues.push(...processVenueItems(nextPage.items))
+      currentCursor = nextPage.cursor
       pageCount++
-
-      console.log(`Venues API: Fetched page ${pageCount}, got ${itemsPage.items.length} items, total: ${allVenues.length}`)
-
-    } while (cursor && pageCount < maxPages)
+      console.log(`Venues API: Fetched page ${pageCount}, got ${nextPage.items.length} items, total: ${allVenues.length}`)
+    }
 
     // Sort alphabetically by name
     allVenues.sort((a, b) => a.name.localeCompare(b.name))
