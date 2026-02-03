@@ -18,6 +18,7 @@ const MONDAY_API_URL = 'https://api.monday.com/v2'
 const CREW_JOBS_BOARD_ID = process.env.MONDAY_BOARD_ID_CREW_JOBS || '18398014629'
 const DC_BOARD_ID = process.env.MONDAY_BOARD_ID_DELIVERIES || '2028045828'
 const QH_BOARD_ID = '2431480012'
+const VENUES_BOARD_ID = process.env.MONDAY_BOARD_ID_VENUES || '2406443142'
 
 // =============================================================================
 // COLUMN IDS - CREWED JOBS BOARD
@@ -39,7 +40,7 @@ const CREW_COLUMNS = {
   workDurationHours: 'numeric_mm06qxty',
   workDescription: 'text_mm06f0bj',
   jobDate: 'date_mm067tnh',
-  arrivalTime: 'hour_mm06y636',  // NEW: First Day Arrival Time
+  arrivalTime: 'hour_mm06y636',
   calculationMode: 'color_mm06r0np',
   numberOfDays: 'numeric_mm063z0y',
   earlyStartMinutes: 'numeric_mm069427',
@@ -63,13 +64,22 @@ const DC_COLUMNS = {
   name: 'name',
   hirehopJobNumber: 'text2',           // HireHop job number
   deliverCollect: 'status_1',          // Delivery / Collection status
-  whatIsIt: 'status4',                 // A Vehicle / Equipment / People
+  whatIsIt: 'status4',                 // A vehicle / Equipment / People
   date: 'date4',                       // Job date
   arriveAt: 'hour',                    // Arrival time
   status: 'status90',                  // Job status (TO DO!, Arranging, etc.)
   keyPoints: 'key_points___summary',   // Key points / Flight # etc
   clientCharge: 'numeric_mm06wq2n',    // Client charge (what we bill)
   driverFee: 'numeric_mm0688f9',       // Driver fee (what we pay)
+}
+
+// =============================================================================
+// COLUMN IDS - VENUES BOARD
+// =============================================================================
+const VENUE_COLUMNS = {
+  name: 'text43',
+  distance: 'numeric_mm07y9eq',
+  driveTime: 'numeric_mm074a1k',
 }
 
 // =============================================================================
@@ -83,7 +93,7 @@ const DC_DELIVER_COLLECT_LABELS: Record<string, string> = {
 }
 
 const DC_WHAT_IS_IT_LABELS: Record<string, string> = {
-  'vehicle': 'A Vehicle', 
+  'vehicle': 'A vehicle',      // FIXED: lowercase 'v'
   'equipment': 'Equipment',
   'people': 'People',
 }
@@ -126,9 +136,10 @@ const CALC_MODE_LABELS: Record<string, string> = {
   'day_rate': 'Day Rate',
 }
 
+// FIXED: These labels now match Monday.com exactly
 const EXPENSE_ARRANGEMENT_LABELS: Record<string, string> = {
-  'all_in_fixed': 'All-in fixed',
-  'fee_plus_reimbursed': 'Fee + reimbursed',
+  'all_in_fixed': 'Fixed fee all-in',           // FIXED: was 'All-in fixed'
+  'fee_plus_reimbursed': 'Fee + expenses reimbursed',  // FIXED: was 'Fee + reimbursed'
   'dry_hire_actuals': 'Dry hire + actuals',
 }
 
@@ -147,21 +158,21 @@ interface FormData {
   hirehopJobNumber: string
   clientName: string
   jobType: string
-  whatIsIt: string  // NEW: vehicle / equipment / people
+  whatIsIt: string
   destination: string
   distanceMiles: number
   driveTimeMinutes: number
-  travelMethod: string  // Renamed from returnMethod
-  travelTimeMins: number  // Renamed from returnTravelTimeMins
-  travelCost: number  // Renamed from returnTravelCost
+  travelMethod: string
+  travelTimeMins: number
+  travelCost: number
   workType: string
   workTypeOther: string
   workDurationHours: number
   workDescription: string
   jobDate: string
-  arrivalTime: string  // NEW
+  arrivalTime: string
   collectionDate: string
-  collectionArrivalTime: string  // NEW
+  collectionArrivalTime: string
   calculationMode: string
   numberOfDays: number
   earlyStartMinutes: number
@@ -174,6 +185,11 @@ interface FormData {
   expenseNotes: string
   costingNotes: string
   addCollection: boolean
+  // Venue tracking
+  selectedVenueId: string | null
+  isNewVenue: boolean
+  venueDistanceChanged: boolean
+  venueDriveTimeChanged: boolean
 }
 
 interface Costs {
@@ -211,6 +227,87 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
 }
 
 // =============================================================================
+// VENUE HELPERS
+// =============================================================================
+
+async function createVenue(name: string, distance: number, driveTime: number): Promise<string> {
+  console.log('Creating new venue:', name)
+  
+  const columnValues: Record<string, unknown> = {
+    [VENUE_COLUMNS.name]: name,
+  }
+  
+  if (distance > 0) {
+    columnValues[VENUE_COLUMNS.distance] = distance
+  }
+  if (driveTime > 0) {
+    columnValues[VENUE_COLUMNS.driveTime] = driveTime
+  }
+
+  const mutation = `
+    mutation ($boardId: ID!, $itemName: String!, $columnValues: JSON!) {
+      create_item(
+        board_id: $boardId
+        item_name: $itemName
+        column_values: $columnValues
+      ) {
+        id
+        name
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    create_item: { id: string; name: string }
+  }>(mutation, {
+    boardId: VENUES_BOARD_ID,
+    itemName: name,
+    columnValues: JSON.stringify(columnValues),
+  })
+
+  console.log('Created venue:', result.create_item.id, '-', result.create_item.name)
+  return result.create_item.id
+}
+
+async function updateVenue(venueId: string, distance: number | null, driveTime: number | null): Promise<void> {
+  console.log('Updating venue:', venueId, '- Distance:', distance, 'Drive Time:', driveTime)
+  
+  const columnValues: Record<string, unknown> = {}
+  
+  if (distance !== null) {
+    columnValues[VENUE_COLUMNS.distance] = distance
+  }
+  if (driveTime !== null) {
+    columnValues[VENUE_COLUMNS.driveTime] = driveTime
+  }
+
+  if (Object.keys(columnValues).length === 0) {
+    console.log('No venue changes to update')
+    return
+  }
+
+  const mutation = `
+    mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
+      change_multiple_column_values(
+        board_id: $boardId
+        item_id: $itemId
+        column_values: $columnValues
+      ) {
+        id
+      }
+    }
+  `
+
+  await mondayQuery<{ change_multiple_column_values: { id: string } }>(mutation, {
+    boardId: VENUES_BOARD_ID,
+    itemId: venueId,
+    columnValues: JSON.stringify(columnValues),
+  })
+
+  console.log('Updated venue:', venueId)
+}
+
+// =============================================================================
 // CREATE D&C ITEM (Delivery or Collection)
 // =============================================================================
 
@@ -241,7 +338,7 @@ async function createDCItem(
     label: DC_DELIVER_COLLECT_LABELS[itemType] 
   }
 
-  // What is it? (A Vehicle / Equipment / People)
+  // What is it? (A vehicle / Equipment / People) - FIXED: lowercase 'v'
   if (formData.whatIsIt && DC_WHAT_IS_IT_LABELS[formData.whatIsIt]) {
     columnValues[DC_COLUMNS.whatIsIt] = { 
       label: DC_WHAT_IS_IT_LABELS[formData.whatIsIt] 
@@ -255,7 +352,6 @@ async function createDCItem(
 
   // Arrival time (hour column format)
   if (arrivalTime) {
-    // Monday expects hour columns in format: { hour: 14, minute: 30 }
     const [hours, minutes] = arrivalTime.split(':').map(Number)
     columnValues[DC_COLUMNS.arriveAt] = { hour: hours, minute: minutes }
   }
@@ -370,11 +466,11 @@ async function createCrewedJobItem(
   
   // Status columns
   columnValues[CREW_COLUMNS.jobType] = { label: mondayJobType }
-  columnValues[CREW_COLUMNS.status] = { label: 'TBC' }  // Default status for new items
+  columnValues[CREW_COLUMNS.status] = { label: 'TBC' }
   
   // Transport mode - determine from context
   if (hasTransport) {
-    columnValues[CREW_COLUMNS.transportMode] = { label: 'There and back' }  // Crewed jobs typically there and back
+    columnValues[CREW_COLUMNS.transportMode] = { label: 'There and back' }
   } else {
     columnValues[CREW_COLUMNS.transportMode] = { label: 'N/A' }
   }
@@ -388,6 +484,7 @@ async function createCrewedJobItem(
   if (formData.calculationMode && CALC_MODE_LABELS[formData.calculationMode]) {
     columnValues[CREW_COLUMNS.calculationMode] = { label: CALC_MODE_LABELS[formData.calculationMode] }
   }
+  // FIXED: Expense arrangement labels now match Monday.com exactly
   if (formData.expenseArrangement && EXPENSE_ARRANGEMENT_LABELS[formData.expenseArrangement]) {
     columnValues[CREW_COLUMNS.expenseArrangement] = { label: EXPENSE_ARRANGEMENT_LABELS[formData.expenseArrangement] }
   }
@@ -446,6 +543,29 @@ export async function POST(request: NextRequest) {
     console.log('='.repeat(60))
     console.log('Crew & Transport: Processing', formData.jobType, 'for job', formData.hirehopJobNumber)
     console.log('='.repeat(60))
+
+    // =========================================================================
+    // HANDLE VENUE CREATION/UPDATE
+    // =========================================================================
+    if (formData.destination) {
+      if (formData.isNewVenue) {
+        // Create new venue
+        console.log('Creating new venue:', formData.destination)
+        await createVenue(
+          formData.destination,
+          formData.distanceMiles,
+          formData.driveTimeMinutes
+        )
+      } else if (formData.selectedVenueId && (formData.venueDistanceChanged || formData.venueDriveTimeChanged)) {
+        // Update existing venue if values changed
+        console.log('Updating venue:', formData.selectedVenueId)
+        await updateVenue(
+          formData.selectedVenueId,
+          formData.venueDistanceChanged ? formData.distanceMiles : null,
+          formData.venueDriveTimeChanged ? formData.driveTimeMinutes : null
+        )
+      }
+    }
 
     // Route to appropriate board based on job type
     if (formData.jobType === 'crewed_job') {

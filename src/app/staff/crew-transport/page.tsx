@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
 
@@ -31,24 +31,37 @@ interface JobInfo {
   hireEndDate: string
 }
 
+interface Venue {
+  id: string
+  name: string
+  distance: number | null
+  driveTime: number | null
+}
+
 interface FormData {
   // Core info
   hirehopJobNumber: string
   clientName: string
   jobType: 'delivery' | 'collection' | 'crewed_job' | ''
-  whatIsIt: 'vehicle' | 'equipment' | 'people' | ''  // NEW: What are we moving?
+  whatIsIt: 'vehicle' | 'equipment' | 'people' | ''
   
   // Dates and times
   jobDate: string
-  arrivalTime: string  // NEW: Time to arrive by
+  arrivalTime: string
   addCollection: boolean
   collectionDate: string
-  collectionArrivalTime: string  // NEW: Collection arrival time
+  collectionArrivalTime: string
   
   // Transport details
   destination: string
   distanceMiles: number
   driveTimeMinutes: number
+  
+  // Venue tracking
+  selectedVenueId: string | null
+  isNewVenue: boolean
+  originalVenueDistance: number | null
+  originalVenueDriveTime: number | null
   
   // Return/travel method (for vehicle jobs only)
   travelMethod: 'public_transport' | 'own_way' | ''
@@ -67,9 +80,9 @@ interface FormData {
   earlyStartMinutes: number
   lateFinishMinutes: number
   
-  // Overridable settings (for quoting flexibility)
-  dayRateOverride: number | null  // null = use settings default
-  applyMinHours: boolean  // Toggle for minimum hours threshold
+  // Overridable settings
+  dayRateOverride: number | null
+  applyMinHours: boolean
   
   // Additional costs
   tollsParking: number
@@ -90,6 +103,7 @@ interface CalculatedCosts {
   clientChargeFuel: number
   clientChargeExpenses: number
   clientChargeTotal: number
+  clientChargeTotalRounded: number  // NEW: Rounded to nearest £1
   freelancerFee: number
   freelancerFeeRounded: number
   expectedFuelCost: number
@@ -115,7 +129,7 @@ interface SaveResult {
 // =============================================================================
 
 /**
- * Round to nearest £5 with £1 tolerance
+ * Round to nearest £5 with £1 tolerance (for freelancer fee)
  */
 function roundToNearestFive(amount: number): number {
   const lower = Math.floor(amount / 5) * 5
@@ -159,13 +173,6 @@ function formatTime12h(time: string): string {
   return `${h12}:${minutes}${ampm}`
 }
 
-/**
- * Determine if this is a one-way trip (vehicle) or there-and-back (equipment/people)
- */
-function isOneWayTrip(whatIsIt: string): boolean {
-  return whatIsIt === 'vehicle'
-}
-
 // =============================================================================
 // INITIAL STATE
 // =============================================================================
@@ -183,6 +190,10 @@ const initialFormData: FormData = {
   destination: '',
   distanceMiles: 0,
   driveTimeMinutes: 0,
+  selectedVenueId: null,
+  isNewVenue: false,
+  originalVenueDistance: null,
+  originalVenueDriveTime: null,
   travelMethod: '',
   travelTimeMins: 0,
   travelCost: 0,
@@ -194,8 +205,8 @@ const initialFormData: FormData = {
   numberOfDays: 1,
   earlyStartMinutes: 0,
   lateFinishMinutes: 0,
-  dayRateOverride: null,  // null = use settings default
-  applyMinHours: true,    // Default ON - apply minimum hours threshold
+  dayRateOverride: null,
+  applyMinHours: true,
   tollsParking: 0,
   additionalCosts: 0,
   expenseArrangement: '',
@@ -259,13 +270,9 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   } = settings
 
   const markupMultiplier = 1 + (expenseMarkupPercent / 100)
-  
-  // Use override day rate if provided, otherwise use settings
   const effectiveDayRate = dayRateOverride !== null ? dayRateOverride : driverDayRate
-  
-  // Determine transport mode based on what we're moving
   const isVehicle = whatIsIt === 'vehicle'
-  const isThereAndBack = !isVehicle || addCollection  // Equipment/People always there-and-back
+  const isThereAndBack = !isVehicle || addCollection
 
   // =========================================================================
   // DAY RATE MODE
@@ -279,6 +286,7 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     const clientChargeExpenses = totalExpenses * markupMultiplier
     const clientChargeFuel = fuelCost * markupMultiplier
     const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses
+    const clientChargeTotalRounded = Math.round(clientChargeTotal)  // Round to nearest £1
     const ourTotalCost = freelancerFeeRounded + fuelCost + totalExpenses
     
     return {
@@ -286,12 +294,13 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
       clientChargeFuel: Math.round(clientChargeFuel * 100) / 100,
       clientChargeExpenses: Math.round(clientChargeExpenses * 100) / 100,
       clientChargeTotal: Math.round(clientChargeTotal * 100) / 100,
+      clientChargeTotalRounded,
       freelancerFee: Math.round(freelancerFee * 100) / 100,
       freelancerFeeRounded,
       expectedFuelCost: Math.round(fuelCost * 100) / 100,
       expectedOtherExpenses: Math.round(totalExpenses * 100) / 100,
       ourTotalCost: Math.round(ourTotalCost * 100) / 100,
-      ourMargin: Math.round((clientChargeTotal - ourTotalCost) * 100) / 100,
+      ourMargin: Math.round((clientChargeTotalRounded - ourTotalCost) * 100) / 100,
       estimatedTimeMinutes: numberOfDays * 8 * 60,
       estimatedTimeHours: numberOfDays * 8,
     }
@@ -305,16 +314,13 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   let handlingTime = 0
   
   if (isThereAndBack) {
-    // Equipment/People: Drive there, unload/load, drive back
     totalDriveMinutes = driveTimeMinutes * 2
-    handlingTime = unloadTimeMinutes  // Use unload time for equipment
+    handlingTime = unloadTimeMinutes
   } else {
-    // Vehicle one-way: Drive there, handover, then travel back (if public transport)
     totalDriveMinutes = driveTimeMinutes + (travelMethod === 'public_transport' ? travelTimeMins : 0)
-    handlingTime = handoverTimeMinutes  // Use handover time for vehicles
+    handlingTime = handoverTimeMinutes
   }
   
-  // Add work duration for crewed jobs only
   const workMinutes = jobType === 'crewed_job' ? workDurationHours * 60 : 0
   
   const totalMinutes = totalDriveMinutes + handlingTime + workMinutes
@@ -328,7 +334,6 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   
   let freelancerLabourPay = (normalHours * hourlyRateFreelancerDay) + (outOfHoursHrs * hourlyRateFreelancerNight)
   
-  // Apply minimum hours threshold only if toggle is ON
   if (applyMinHours) {
     const minPay = minHoursThreshold * hourlyRateFreelancerDay
     if (freelancerLabourPay < minPay && totalHours > 0) {
@@ -340,7 +345,6 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   
   let clientLabourCharge = (normalHours * hourlyRateClientDay) + (outOfHoursHrs * hourlyRateClientNight)
   
-  // Apply minimum hours threshold to client charge too, if toggle is ON
   if (applyMinHours) {
     const minClientCharge = minHoursThreshold * hourlyRateClientDay
     if (clientLabourCharge < minClientCharge && totalHours > 0) {
@@ -348,10 +352,8 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     }
   }
   
-  // Add admin cost per hour
   clientLabourCharge += totalHours * adminCostPerHour
   
-  // Fuel: double miles for there-and-back, single for one-way vehicle
   const totalMiles = isThereAndBack ? distanceMiles * 2 : distanceMiles
   const fuelCost = (totalMiles * fuelPricePerLitre) / 5
   const clientFuelCharge = fuelCost
@@ -360,6 +362,7 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   const clientExpenseCharge = otherExpenses * markupMultiplier
   
   const clientChargeTotal = clientLabourCharge + clientFuelCharge + clientExpenseCharge
+  const clientChargeTotalRounded = Math.round(clientChargeTotal)  // Round to nearest £1
   const ourTotalCost = freelancerFeeRounded + fuelCost + otherExpenses
   
   return {
@@ -367,15 +370,135 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     clientChargeFuel: Math.round(clientFuelCharge * 100) / 100,
     clientChargeExpenses: Math.round(clientExpenseCharge * 100) / 100,
     clientChargeTotal: Math.round(clientChargeTotal * 100) / 100,
+    clientChargeTotalRounded,
     freelancerFee: Math.round(freelancerLabourPay * 100) / 100,
     freelancerFeeRounded,
     expectedFuelCost: Math.round(fuelCost * 100) / 100,
     expectedOtherExpenses: Math.round(otherExpenses * 100) / 100,
     ourTotalCost: Math.round(ourTotalCost * 100) / 100,
-    ourMargin: Math.round((clientChargeTotal - ourTotalCost) * 100) / 100,
+    ourMargin: Math.round((clientChargeTotalRounded - ourTotalCost) * 100) / 100,
     estimatedTimeMinutes: totalMinutes,
     estimatedTimeHours: Math.round(totalHours * 100) / 100,
   }
+}
+
+// =============================================================================
+// VENUE DROPDOWN COMPONENT
+// =============================================================================
+
+interface VenueDropdownProps {
+  value: string
+  venues: Venue[]
+  loading: boolean
+  onSelect: (venue: Venue | null, isNew: boolean, newName?: string) => void
+}
+
+function VenueDropdown({ value, venues, loading, onSelect }: VenueDropdownProps) {
+  const [isOpen, setIsOpen] = useState(false)
+  const [searchTerm, setSearchTerm] = useState(value)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const dropdownRef = useRef<HTMLDivElement>(null)
+
+  // Update search term when value changes externally
+  useEffect(() => {
+    setSearchTerm(value)
+  }, [value])
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Filter venues based on search term
+  const filteredVenues = venues.filter(venue =>
+    venue.name.toLowerCase().includes(searchTerm.toLowerCase())
+  ).slice(0, 10)  // Limit to 10 results for performance
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newValue = e.target.value
+    setSearchTerm(newValue)
+    setIsOpen(true)
+    // When typing, clear the selection
+    onSelect(null, false, newValue)
+  }
+
+  const handleSelectVenue = (venue: Venue) => {
+    setSearchTerm(venue.name)
+    setIsOpen(false)
+    onSelect(venue, false)
+  }
+
+  const handleAddNew = () => {
+    setIsOpen(false)
+    onSelect(null, true, searchTerm)
+  }
+
+  const showAddNew = searchTerm.length > 0 && 
+    !venues.some(v => v.name.toLowerCase() === searchTerm.toLowerCase())
+
+  return (
+    <div ref={dropdownRef} className="relative">
+      <input
+        ref={inputRef}
+        type="text"
+        value={searchTerm}
+        onChange={handleInputChange}
+        onFocus={() => setIsOpen(true)}
+        placeholder={loading ? 'Loading venues...' : 'Search or enter venue name...'}
+        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+        disabled={loading}
+      />
+      
+      {isOpen && !loading && (searchTerm.length > 0 || venues.length > 0) && (
+        <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+          {filteredVenues.length > 0 && (
+            <>
+              {filteredVenues.map(venue => (
+                <button
+                  key={venue.id}
+                  type="button"
+                  onClick={() => handleSelectVenue(venue)}
+                  className="w-full px-4 py-2 text-left hover:bg-gray-100 flex justify-between items-center"
+                >
+                  <span className="font-medium text-gray-900">{venue.name}</span>
+                  {(venue.distance || venue.driveTime) && (
+                    <span className="text-xs text-gray-500">
+                      {venue.distance && `${venue.distance}mi`}
+                      {venue.distance && venue.driveTime && ' · '}
+                      {venue.driveTime && `${venue.driveTime}min`}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </>
+          )}
+          
+          {showAddNew && (
+            <button
+              type="button"
+              onClick={handleAddNew}
+              className="w-full px-4 py-2 text-left hover:bg-blue-50 text-blue-600 border-t border-gray-100 flex items-center gap-2"
+            >
+              <span className="text-lg">➕</span>
+              <span>Add &quot;{searchTerm}&quot; as new venue</span>
+            </button>
+          )}
+          
+          {filteredVenues.length === 0 && !showAddNew && searchTerm.length > 0 && (
+            <div className="px-4 py-2 text-gray-500 text-sm">
+              No venues found
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // =============================================================================
@@ -388,6 +511,7 @@ function CrewTransportWizard() {
   
   const [loading, setLoading] = useState(true)
   const [loadingJob, setLoadingJob] = useState(false)
+  const [loadingVenues, setLoadingVenues] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -396,10 +520,33 @@ function CrewTransportWizard() {
   const [settingsSource, setSettingsSource] = useState<string>('')
   const [formData, setFormData] = useState<FormData>(initialFormData)
   const [jobInfo, setJobInfo] = useState<JobInfo | null>(null)
+  const [venues, setVenues] = useState<Venue[]>([])
   const [step, setStep] = useState(1)
 
-  // Get job number from URL
   const jobNumberFromUrl = searchParams.get('job') || ''
+
+  // Fetch venues from Monday.com
+  const fetchVenues = useCallback(async () => {
+    const pin = sessionStorage.getItem('staffPin')
+    if (!pin) return
+
+    setLoadingVenues(true)
+    try {
+      const response = await fetch('/api/staff/venues', {
+        headers: { 'x-staff-pin': pin }
+      })
+      const data = await response.json()
+      
+      if (data.success && data.venues) {
+        setVenues(data.venues)
+        console.log(`Loaded ${data.venues.length} venues`)
+      }
+    } catch (err) {
+      console.error('Failed to fetch venues:', err)
+    } finally {
+      setLoadingVenues(false)
+    }
+  }, [])
 
   // Fetch job info from Q&H board
   const fetchJobInfo = useCallback(async (jobNum: string) => {
@@ -418,10 +565,7 @@ function CrewTransportWizard() {
         setFormData(prev => ({
           ...prev,
           clientName: data.jobInfo.clientName || '',
-          // For job date, keep existing or use hire start as default
-          // (will be overridden when job type is set to collection)
           jobDate: prev.jobDate || data.jobInfo.hireStartDate || '',
-          // Collection date always defaults to hire end
           collectionDate: prev.collectionDate || data.jobInfo.hireEndDate || '',
         }))
       }
@@ -432,11 +576,10 @@ function CrewTransportWizard() {
     }
   }, [])
 
-  // Check auth and load settings
+  // Check auth and load settings + venues
   useEffect(() => {
     const pin = sessionStorage.getItem('staffPin')
     if (!pin) {
-      // Store the intended destination so we can return after login
       const currentUrl = window.location.href
       sessionStorage.setItem('staffReturnUrl', currentUrl)
       router.push('/staff')
@@ -476,7 +619,8 @@ function CrewTransportWizard() {
     }
 
     loadSettings()
-  }, [router])
+    fetchVenues()
+  }, [router, fetchVenues])
 
   // Pre-fill job number from URL
   useEffect(() => {
@@ -499,6 +643,43 @@ function CrewTransportWizard() {
     }
   }
 
+  // Handle venue selection
+  const handleVenueSelect = (venue: Venue | null, isNew: boolean, newName?: string) => {
+    if (venue) {
+      // Selected existing venue - auto-fill distance and time
+      setFormData(prev => ({
+        ...prev,
+        destination: venue.name,
+        selectedVenueId: venue.id,
+        isNewVenue: false,
+        distanceMiles: venue.distance || prev.distanceMiles,
+        driveTimeMinutes: venue.driveTime || prev.driveTimeMinutes,
+        originalVenueDistance: venue.distance,
+        originalVenueDriveTime: venue.driveTime,
+      }))
+    } else if (isNew && newName) {
+      // Adding new venue
+      setFormData(prev => ({
+        ...prev,
+        destination: newName,
+        selectedVenueId: null,
+        isNewVenue: true,
+        originalVenueDistance: null,
+        originalVenueDriveTime: null,
+      }))
+    } else if (newName !== undefined) {
+      // Just typing, not selected yet
+      setFormData(prev => ({
+        ...prev,
+        destination: newName,
+        selectedVenueId: null,
+        isNewVenue: false,
+        originalVenueDistance: null,
+        originalVenueDriveTime: null,
+      }))
+    }
+  }
+
   const handleSave = async () => {
     const pin = sessionStorage.getItem('staffPin')
     if (!pin || !costs) return
@@ -508,9 +689,24 @@ function CrewTransportWizard() {
     setSaveResult(null)
 
     try {
+      // Prepare form data with venue change tracking
+      const dataToSave = {
+        ...formData,
+        // Track if distance/time changed from original venue values
+        venueDistanceChanged: formData.selectedVenueId !== null && 
+          formData.originalVenueDistance !== null &&
+          formData.distanceMiles !== formData.originalVenueDistance,
+        venueDriveTimeChanged: formData.selectedVenueId !== null && 
+          formData.originalVenueDriveTime !== null &&
+          formData.driveTimeMinutes !== formData.originalVenueDriveTime,
+      }
+
       const costsToSave = {
-        ...costs,
+        clientChargeTotal: costs.clientChargeTotalRounded,  // Use rounded value
         freelancerFee: costs.freelancerFeeRounded,
+        expectedFuelCost: costs.expectedFuelCost,
+        expectedOtherExpenses: costs.expectedOtherExpenses,
+        ourMargin: costs.ourMargin,
       }
 
       const response = await fetch('/api/staff/crew-transport', {
@@ -519,7 +715,7 @@ function CrewTransportWizard() {
           'Content-Type': 'application/json',
           'x-staff-pin': pin,
         },
-        body: JSON.stringify({ formData, costs: costsToSave }),
+        body: JSON.stringify({ formData: dataToSave, costs: costsToSave }),
       })
 
       const data: SaveResult = await response.json()
@@ -540,6 +736,13 @@ function CrewTransportWizard() {
         message += `Created on Crewed Jobs Board: ${data.itemName}`
       } else {
         message += `Saved successfully: ${data.itemName}`
+      }
+      
+      // Add venue info to success message
+      if (formData.isNewVenue) {
+        message += ' (New venue added to database)'
+      } else if (dataToSave.venueDistanceChanged || dataToSave.venueDriveTimeChanged) {
+        message += ' (Venue distance/time updated)'
       }
       
       setSuccess(message)
@@ -582,7 +785,7 @@ function CrewTransportWizard() {
   // Validation
   const isStep1Valid = formData.jobType !== '' && 
                        formData.jobDate !== '' && 
-                       (isCrewedJob || formData.whatIsIt !== '')  // whatIsIt required for D&C
+                       (isCrewedJob || formData.whatIsIt !== '')
   const isStep2Valid = formData.destination !== '' && formData.distanceMiles > 0
   const isStep3Valid = !isCrewedJob || formData.workType !== ''
 
@@ -737,15 +940,12 @@ function CrewTransportWizard() {
                     key={option.value}
                     onClick={() => {
                       updateField('jobType', option.value as FormData['jobType'])
-                      // Reset whatIsIt when changing job type
                       if (option.value === 'crewed_job') {
                         updateField('whatIsIt', '')
                       }
-                      // For collection jobs, default date to hire END
                       if (option.value === 'collection' && jobInfo?.hireEndDate && !formData.jobDate) {
                         updateField('jobDate', jobInfo.hireEndDate)
                       }
-                      // For delivery jobs, default date to hire START
                       if (option.value === 'delivery' && jobInfo?.hireStartDate && !formData.jobDate) {
                         updateField('jobDate', jobInfo.hireStartDate)
                       }
@@ -811,7 +1011,6 @@ function CrewTransportWizard() {
               <div className="border-t pt-6">
                 <h3 className="font-medium text-gray-900 mb-4">When?</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* Primary date */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       {formData.jobType === 'delivery' ? 'Delivery Date' : 
@@ -831,7 +1030,6 @@ function CrewTransportWizard() {
                     )}
                   </div>
 
-                  {/* Arrival time */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       Arrive by (optional)
@@ -844,7 +1042,6 @@ function CrewTransportWizard() {
                     />
                   </div>
 
-                  {/* Add collection option - for deliveries only */}
                   {formData.jobType === 'delivery' && (
                     <>
                       <div className="md:col-span-2">
@@ -917,7 +1114,6 @@ function CrewTransportWizard() {
                 </div>
               )}
 
-              {/* Transport summary for D&C */}
               {isDC && (
                 <div className={`p-3 rounded-lg text-sm ${
                   isVehicle ? 'bg-orange-50 text-orange-700' : 'bg-green-50 text-green-700'
@@ -935,17 +1131,26 @@ function CrewTransportWizard() {
               )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
+                <div className="md:col-span-2">
                   <label className="block text-sm font-medium text-gray-700 mb-2">
                     Destination
                   </label>
-                  <input
-                    type="text"
+                  <VenueDropdown
                     value={formData.destination}
-                    onChange={(e) => updateField('destination', e.target.value)}
-                    placeholder="Venue or address"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    venues={venues}
+                    loading={loadingVenues}
+                    onSelect={handleVenueSelect}
                   />
+                  {formData.selectedVenueId && (
+                    <p className="text-xs text-green-600 mt-1">
+                      ✓ Selected from venues database
+                    </p>
+                  )}
+                  {formData.isNewVenue && formData.destination && (
+                    <p className="text-xs text-blue-600 mt-1">
+                      ➕ Will be added to venues database on save
+                    </p>
+                  )}
                 </div>
 
                 <div>
@@ -959,6 +1164,12 @@ function CrewTransportWizard() {
                     placeholder="From Google Maps"
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                   />
+                  {formData.selectedVenueId && formData.originalVenueDistance !== null && 
+                   formData.distanceMiles !== formData.originalVenueDistance && (
+                    <p className="text-xs text-orange-600 mt-1">
+                      ⚠️ Changed from {formData.originalVenueDistance}mi - venue will be updated
+                    </p>
+                  )}
                 </div>
 
                 <div>
@@ -972,10 +1183,15 @@ function CrewTransportWizard() {
                     placeholder="From Google Maps"
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                   />
+                  {formData.selectedVenueId && formData.originalVenueDriveTime !== null && 
+                   formData.driveTimeMinutes !== formData.originalVenueDriveTime && (
+                    <p className="text-xs text-orange-600 mt-1">
+                      ⚠️ Changed from {formData.originalVenueDriveTime}min - venue will be updated
+                    </p>
+                  )}
                 </div>
               </div>
 
-              {/* Travel method question - only for vehicle jobs */}
               {needsTravelQuestion && (
                 <div className="border-t pt-6 mt-6">
                   <h3 className="font-medium text-gray-900 mb-2">
@@ -1105,7 +1321,6 @@ function CrewTransportWizard() {
                 </div>
               </div>
 
-              {/* Calculation mode */}
               <div className="border-t pt-6">
                 <h3 className="font-medium text-gray-900 mb-4">Rate Calculation</h3>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -1180,7 +1395,6 @@ function CrewTransportWizard() {
                 </div>
               </div>
 
-              {/* Out of hours */}
               <div className="border-t pt-6">
                 <h3 className="font-medium text-gray-900 mb-4">Out of Hours (optional)</h3>
                 <p className="text-sm text-gray-500 mb-4">Extra pay for work before 8am or after 11pm</p>
@@ -1221,7 +1435,6 @@ function CrewTransportWizard() {
             <div className="space-y-6">
               <h2 className="text-lg font-semibold text-gray-900">Expenses & Arrangements</h2>
 
-              {/* Min hours toggle for D&C jobs */}
               {!isCrewedJob && (
                 <div className="p-4 bg-gray-50 rounded-lg">
                   <label className="flex items-center space-x-2">
@@ -1356,39 +1569,93 @@ function CrewTransportWizard() {
                 </span>
               </div>
 
-              {/* Cost Summary Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-green-50 rounded-xl p-4">
-                  <p className="text-sm text-green-600 font-medium">Client Charge</p>
-                  <p className="text-2xl font-bold text-green-700">£{costs.clientChargeTotal.toFixed(2)}</p>
-                  <div className="mt-2 text-xs text-green-600 space-y-1">
-                    <p>Labour: £{costs.clientChargeLabour.toFixed(2)}</p>
-                    <p>Fuel: £{costs.clientChargeFuel.toFixed(2)}</p>
-                    <p>Expenses: £{costs.clientChargeExpenses.toFixed(2)}</p>
+              {/* Cost Summary Cards - UPDATED for delivery + collection */}
+              {formData.addCollection ? (
+                // Show separate costs for delivery and collection
+                <div className="space-y-4">
+                  {/* Delivery costs */}
+                  <div className="border rounded-lg p-4">
+                    <h3 className="font-medium text-gray-900 mb-3 flex items-center gap-2">
+                      <span>📦</span> Delivery ({formatDateUK(formData.jobDate)})
+                    </h3>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="bg-green-50 rounded-lg p-3">
+                        <p className="text-xs text-green-600 font-medium">Client Charge</p>
+                        <p className="text-xl font-bold text-green-700">£{costs.clientChargeTotalRounded}</p>
+                      </div>
+                      <div className="bg-blue-50 rounded-lg p-3">
+                        <p className="text-xs text-blue-600 font-medium">Freelancer Fee</p>
+                        <p className="text-xl font-bold text-blue-700">£{costs.freelancerFeeRounded}</p>
+                      </div>
+                    </div>
                   </div>
-                </div>
 
-                <div className="bg-blue-50 rounded-xl p-4">
-                  <p className="text-sm text-blue-600 font-medium">Freelancer Fee</p>
-                  <p className="text-2xl font-bold text-blue-700">£{costs.freelancerFeeRounded.toFixed(2)}</p>
-                  <div className="mt-2 text-xs text-blue-600 space-y-1">
-                    <p>Est. time: {costs.estimatedTimeHours.toFixed(1)} hours</p>
-                    {costs.freelancerFee !== costs.freelancerFeeRounded && (
-                      <p className="text-blue-500">
-                        (Calc: £{costs.freelancerFee.toFixed(2)} → rounded)
-                      </p>
-                    )}
+                  {/* Collection costs */}
+                  <div className="border rounded-lg p-4">
+                    <h3 className="font-medium text-gray-900 mb-3 flex items-center gap-2">
+                      <span>📥</span> Collection ({formatDateUK(formData.collectionDate)})
+                    </h3>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="bg-green-50 rounded-lg p-3">
+                        <p className="text-xs text-green-600 font-medium">Client Charge</p>
+                        <p className="text-xl font-bold text-green-700">£{costs.clientChargeTotalRounded}</p>
+                      </div>
+                      <div className="bg-blue-50 rounded-lg p-3">
+                        <p className="text-xs text-blue-600 font-medium">Freelancer Fee</p>
+                        <p className="text-xl font-bold text-blue-700">£{costs.freelancerFeeRounded}</p>
+                      </div>
+                    </div>
                   </div>
-                </div>
 
-                <div className="bg-purple-50 rounded-xl p-4">
-                  <p className="text-sm text-purple-600 font-medium">Our Margin</p>
-                  <p className="text-2xl font-bold text-purple-700">£{costs.ourMargin.toFixed(2)}</p>
-                  <div className="mt-2 text-xs text-purple-600">
-                    <p>Total cost: £{costs.ourTotalCost.toFixed(2)}</p>
+                  {/* Combined totals */}
+                  <div className="bg-gray-100 rounded-lg p-4">
+                    <h3 className="font-medium text-gray-900 mb-3">Combined Total (Both Legs)</h3>
+                    <div className="grid grid-cols-3 gap-4">
+                      <div>
+                        <p className="text-xs text-gray-500">Client Total</p>
+                        <p className="text-xl font-bold text-gray-900">£{costs.clientChargeTotalRounded * 2}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500">Freelancer Total</p>
+                        <p className="text-xl font-bold text-gray-900">£{costs.freelancerFeeRounded * 2}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500">Our Margin</p>
+                        <p className="text-xl font-bold text-purple-700">£{costs.ourMargin * 2}</p>
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                // Single job cost display - UPDATED: rounded client charge, no "(Calc → rounded)"
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-green-50 rounded-xl p-4">
+                    <p className="text-sm text-green-600 font-medium">Client Charge</p>
+                    <p className="text-2xl font-bold text-green-700">£{costs.clientChargeTotalRounded}</p>
+                    <div className="mt-2 text-xs text-green-600 space-y-1">
+                      <p>Labour: £{costs.clientChargeLabour.toFixed(2)}</p>
+                      <p>Fuel: £{costs.clientChargeFuel.toFixed(2)}</p>
+                      <p>Expenses: £{costs.clientChargeExpenses.toFixed(2)}</p>
+                    </div>
+                  </div>
+
+                  <div className="bg-blue-50 rounded-xl p-4">
+                    <p className="text-sm text-blue-600 font-medium">Freelancer Fee</p>
+                    <p className="text-2xl font-bold text-blue-700">£{costs.freelancerFeeRounded}</p>
+                    <div className="mt-2 text-xs text-blue-600 space-y-1">
+                      <p>Est. time: {costs.estimatedTimeHours.toFixed(1)} hours</p>
+                    </div>
+                  </div>
+
+                  <div className="bg-purple-50 rounded-xl p-4">
+                    <p className="text-sm text-purple-600 font-medium">Our Margin</p>
+                    <p className="text-2xl font-bold text-purple-700">£{costs.ourMargin.toFixed(2)}</p>
+                    <div className="mt-2 text-xs text-purple-600">
+                      <p>Total cost: £{costs.ourTotalCost.toFixed(2)}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Job Summary */}
               <div className="border rounded-lg divide-y">
@@ -1497,13 +1764,16 @@ function CrewTransportWizard() {
             <div className="grid grid-cols-2 gap-2 text-sm">
               <div>
                 <span className="text-gray-500">Client:</span>
-                <span className="ml-1 font-medium">£{costs.clientChargeTotal.toFixed(0)}</span>
+                <span className="ml-1 font-medium">£{costs.clientChargeTotalRounded}</span>
               </div>
               <div>
                 <span className="text-gray-500">Freelancer:</span>
-                <span className="ml-1 font-medium">£{costs.freelancerFeeRounded.toFixed(0)}</span>
+                <span className="ml-1 font-medium">£{costs.freelancerFeeRounded}</span>
               </div>
             </div>
+            {formData.addCollection && (
+              <p className="text-xs text-blue-600 mt-1">× 2 (delivery + collection)</p>
+            )}
           </div>
         )}
       </div>
