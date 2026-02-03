@@ -8,6 +8,9 @@ import { useRouter } from 'next/navigation'
  * 
  * Similar to the warehouse PIN entry, this provides access to staff-only features
  * like the Crew & Transport costing wizard.
+ * 
+ * Supports return URL - if the user was redirected here from another staff page
+ * (e.g., /staff/crew-transport?job=15273), we'll redirect them back there after login.
  */
 export default function StaffLoginPage() {
   const router = useRouter()
@@ -15,6 +18,29 @@ export default function StaffLoginPage() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [checkingSession, setCheckingSession] = useState(true)
+
+  // Get the return URL (stored by the page that redirected here)
+  const getReturnUrl = (): string => {
+    if (typeof window === 'undefined') return '/staff/crew-transport'
+    const returnUrl = sessionStorage.getItem('staffReturnUrl')
+    // Clear it so we don't keep redirecting to old URLs
+    sessionStorage.removeItem('staffReturnUrl')
+    
+    if (returnUrl && returnUrl.includes('/staff/')) {
+      try {
+        // Extract just the path + query string from the full URL
+        const url = new URL(returnUrl)
+        return url.pathname + url.search
+      } catch {
+        // If URL parsing fails, try to extract path manually
+        const staffIndex = returnUrl.indexOf('/staff/')
+        if (staffIndex !== -1) {
+          return returnUrl.substring(staffIndex)
+        }
+      }
+    }
+    return '/staff/crew-transport'
+  }
 
   // Check if already authenticated
   useEffect(() => {
@@ -42,7 +68,10 @@ export default function StaffLoginPage() {
 
       if (data.success) {
         sessionStorage.setItem('staffPin', pinToVerify)
-        router.push('/staff/crew-transport')
+        // Redirect to return URL (with job number) or default
+        const returnUrl = getReturnUrl()
+        console.log('Staff auth success, redirecting to:', returnUrl)
+        router.push(returnUrl)
       } else {
         if (!isAutoCheck) {
           setError('Incorrect PIN')
@@ -151,4 +180,4 @@ export default function StaffLoginPage() {
       </div>
     </div>
   )
-} 
+}

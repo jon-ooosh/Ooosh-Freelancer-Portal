@@ -39,6 +39,7 @@ const CREW_COLUMNS = {
   workDurationHours: 'numeric_mm06qxty',
   workDescription: 'text_mm06f0bj',
   jobDate: 'date_mm067tnh',
+  arrivalTime: 'hour_mm06y636',  // NEW: First Day Arrival Time
   calculationMode: 'color_mm06r0np',
   numberOfDays: 'numeric_mm063z0y',
   earlyStartMinutes: 'numeric_mm069427',
@@ -62,13 +63,13 @@ const DC_COLUMNS = {
   name: 'name',
   hirehopJobNumber: 'text2',           // HireHop job number
   deliverCollect: 'status_1',          // Delivery / Collection status
+  whatIsIt: 'status4',                 // A vehicle / Equipment / People
   date: 'date4',                       // Job date
   arriveAt: 'hour',                    // Arrival time
   status: 'status90',                  // Job status (TO DO!, Arranging, etc.)
   keyPoints: 'key_points___summary',   // Key points / Flight # etc
-  clientCharge: 'numeric_mm06wq2n',    // NEW: Client charge (what we bill)
-  driverFee: 'numeric_mm0688f9',       // NEW: Driver fee (what we pay)
-  // Note: venue/address (connect_boards6) is a linked column - skipping for now
+  clientCharge: 'numeric_mm06wq2n',    // Client charge (what we bill)
+  driverFee: 'numeric_mm0688f9',       // Driver fee (what we pay)
 }
 
 // =============================================================================
@@ -81,26 +82,29 @@ const DC_DELIVER_COLLECT_LABELS: Record<string, string> = {
   'collection': 'Collection',
 }
 
-const DC_STATUS_DEFAULT = 'TO DO!'  // Default status for new D&C items
+const DC_WHAT_IS_IT_LABELS: Record<string, string> = {
+  'vehicle': 'A Vehicle',  // Capital V to match Monday board
+  'equipment': 'Equipment',
+  'people': 'People',
+}
+
+const DC_STATUS_DEFAULT = 'TO DO!'
 
 // Crewed Jobs Board labels
 const CREW_JOB_TYPE_LABELS: Record<string, string> = {
-  'delivery': 'Transport Only',
-  'collection': 'Transport Only',
   'crewed_job': 'Transport + Crew',
   'crew_only': 'Crew Only',
 }
 
 const TRANSPORT_MODE_LABELS: Record<string, string> = {
-  'one_way': 'One-way',
   'there_and_back': 'There and back',
+  'one_way': 'One-way',
   'na': 'N/A',
 }
 
-const RETURN_METHOD_LABELS: Record<string, string> = {
-  'same_vehicle': 'Same vehicle',
+const TRAVEL_METHOD_LABELS: Record<string, string> = {
   'public_transport': 'Public transport',
-  'stays_overnight': 'Stays overnight',
+  'own_way': 'Own way back',
   'na': 'N/A',
 }
 
@@ -143,19 +147,21 @@ interface FormData {
   hirehopJobNumber: string
   clientName: string
   jobType: string
-  transportMode: string
+  whatIsIt: string  // NEW: vehicle / equipment / people
   destination: string
   distanceMiles: number
   driveTimeMinutes: number
-  returnMethod: string
-  returnTravelTimeMins: number
-  returnTravelCost: number
+  travelMethod: string  // Renamed from returnMethod
+  travelTimeMins: number  // Renamed from returnTravelTimeMins
+  travelCost: number  // Renamed from returnTravelCost
   workType: string
   workTypeOther: string
   workDurationHours: number
   workDescription: string
   jobDate: string
+  arrivalTime: string  // NEW
   collectionDate: string
+  collectionArrivalTime: string  // NEW
   calculationMode: string
   numberOfDays: number
   earlyStartMinutes: number
@@ -212,7 +218,8 @@ async function createDCItem(
   formData: FormData,
   costs: Costs,
   itemType: 'delivery' | 'collection',
-  jobDate: string
+  jobDate: string,
+  arrivalTime: string
 ): Promise<{ id: string; name: string }> {
   
   // Build item name: "DEL: ClientName - Destination" or "COL: ClientName - Destination"
@@ -234,9 +241,23 @@ async function createDCItem(
     label: DC_DELIVER_COLLECT_LABELS[itemType] 
   }
 
+  // What is it? (A vehicle / Equipment / People)
+  if (formData.whatIsIt && DC_WHAT_IS_IT_LABELS[formData.whatIsIt]) {
+    columnValues[DC_COLUMNS.whatIsIt] = { 
+      label: DC_WHAT_IS_IT_LABELS[formData.whatIsIt] 
+    }
+  }
+
   // Job date
   if (jobDate) {
     columnValues[DC_COLUMNS.date] = { date: jobDate }
+  }
+
+  // Arrival time (hour column format)
+  if (arrivalTime) {
+    // Monday expects hour columns in format: { hour: 14, minute: 30 }
+    const [hours, minutes] = arrivalTime.split(':').map(Number)
+    columnValues[DC_COLUMNS.arriveAt] = { hour: hours, minute: minutes }
   }
 
   // Status - default to "TO DO!"
@@ -294,10 +315,8 @@ async function createCrewedJobItem(
 ): Promise<{ id: string; name: string }> {
   
   // Determine the job type label based on transport
-  let mondayJobType = 'Transport + Crew'
-  if (formData.transportMode === 'na' || !formData.transportMode) {
-    mondayJobType = 'Crew Only'
-  }
+  const hasTransport = formData.distanceMiles > 0
+  const mondayJobType = hasTransport ? 'Transport + Crew' : 'Crew Only'
 
   // Build item name
   const itemName = formData.hirehopJobNumber 
@@ -322,19 +341,19 @@ async function createCrewedJobItem(
     .filter(Boolean).join('\n\n')
   if (combinedNotes) columnValues[CREW_COLUMNS.expenseNotes] = combinedNotes
   
-  // Numeric columns - only set if > 0
+  // Numeric columns
   if (formData.hirehopJobNumber) columnValues[CREW_COLUMNS.hirehopJobNumber] = parseInt(formData.hirehopJobNumber)
   if (formData.distanceMiles > 0) columnValues[CREW_COLUMNS.distanceMiles] = formData.distanceMiles
   if (formData.driveTimeMinutes > 0) columnValues[CREW_COLUMNS.driveTimeMinutes] = formData.driveTimeMinutes
-  if (formData.returnTravelTimeMins > 0) columnValues[CREW_COLUMNS.returnTravelTimeMins] = formData.returnTravelTimeMins
-  if (formData.returnTravelCost > 0) columnValues[CREW_COLUMNS.returnTravelCost] = formData.returnTravelCost
+  if (formData.travelTimeMins > 0) columnValues[CREW_COLUMNS.returnTravelTimeMins] = formData.travelTimeMins
+  if (formData.travelCost > 0) columnValues[CREW_COLUMNS.returnTravelCost] = formData.travelCost
   if (formData.workDurationHours > 0) columnValues[CREW_COLUMNS.workDurationHours] = formData.workDurationHours
   if (formData.numberOfDays > 0) columnValues[CREW_COLUMNS.numberOfDays] = formData.numberOfDays
   if (formData.earlyStartMinutes > 0) columnValues[CREW_COLUMNS.earlyStartMinutes] = formData.earlyStartMinutes
   if (formData.lateFinishMinutes > 0) columnValues[CREW_COLUMNS.lateFinishMinutes] = formData.lateFinishMinutes
   if (formData.pdAmount > 0) columnValues[CREW_COLUMNS.pdAmount] = formData.pdAmount
   
-  // Financial columns - always set these
+  // Financial columns
   columnValues[CREW_COLUMNS.clientChargeTotal] = costs.clientChargeTotal
   columnValues[CREW_COLUMNS.freelancerFee] = costs.freelancerFee
   columnValues[CREW_COLUMNS.expectedExpenses] = totalExpectedExpenses
@@ -342,16 +361,26 @@ async function createCrewedJobItem(
   
   // Date column
   if (formData.jobDate) columnValues[CREW_COLUMNS.jobDate] = { date: formData.jobDate }
+
+  // Arrival time (hour column)
+  if (formData.arrivalTime) {
+    const [hours, minutes] = formData.arrivalTime.split(':').map(Number)
+    columnValues[CREW_COLUMNS.arrivalTime] = { hour: hours, minute: minutes }
+  }
   
   // Status columns
   columnValues[CREW_COLUMNS.jobType] = { label: mondayJobType }
   columnValues[CREW_COLUMNS.status] = { label: 'Working on it' }
   
-  if (formData.transportMode && TRANSPORT_MODE_LABELS[formData.transportMode]) {
-    columnValues[CREW_COLUMNS.transportMode] = { label: TRANSPORT_MODE_LABELS[formData.transportMode] }
+  // Transport mode - determine from context
+  if (hasTransport) {
+    columnValues[CREW_COLUMNS.transportMode] = { label: 'There and back' }  // Crewed jobs typically there and back
+  } else {
+    columnValues[CREW_COLUMNS.transportMode] = { label: 'N/A' }
   }
-  if (formData.returnMethod && RETURN_METHOD_LABELS[formData.returnMethod]) {
-    columnValues[CREW_COLUMNS.returnMethod] = { label: RETURN_METHOD_LABELS[formData.returnMethod] }
+
+  if (formData.travelMethod && TRAVEL_METHOD_LABELS[formData.travelMethod]) {
+    columnValues[CREW_COLUMNS.returnMethod] = { label: TRAVEL_METHOD_LABELS[formData.travelMethod] }
   }
   if (formData.workType && WORK_TYPE_LABELS[formData.workType]) {
     columnValues[CREW_COLUMNS.workType] = { label: WORK_TYPE_LABELS[formData.workType] }
@@ -437,12 +466,13 @@ export async function POST(request: NextRequest) {
       // DELIVERY or COLLECTION → D&C Board
       // =========================================================================
       
-      // Create the primary item (delivery or collection)
+      // Create the primary item
       const primaryResult = await createDCItem(
         formData, 
         costs, 
         formData.jobType as 'delivery' | 'collection',
-        formData.jobDate
+        formData.jobDate,
+        formData.arrivalTime
       )
 
       let collectionResult = null
@@ -454,7 +484,8 @@ export async function POST(request: NextRequest) {
           formData,
           costs,
           'collection',
-          formData.collectionDate
+          formData.collectionDate,
+          formData.collectionArrivalTime || ''
         )
       }
 
@@ -463,7 +494,6 @@ export async function POST(request: NextRequest) {
         itemId: primaryResult.id,
         itemName: primaryResult.name,
         board: 'dc',
-        // Include collection info if created
         ...(collectionResult && {
           collectionItemId: collectionResult.id,
           collectionItemName: collectionResult.name,
@@ -552,8 +582,6 @@ export async function GET(request: NextRequest) {
     if (jobNumber) {
       console.log('Crew Transport: Looking up job', jobNumber, 'in Q&H board')
       
-      // Use items_page_by_column_values for efficient lookup
-      // text7 is the HireHop Ref column in Q&H board
       const query = `
         query ($boardId: ID!, $columnId: String!, $value: String!) {
           items_page_by_column_values(
@@ -588,7 +616,7 @@ export async function GET(request: NextRequest) {
         }
       }>(query, { 
         boardId: QH_BOARD_ID, 
-        columnId: 'text7', // HireHop Ref column
+        columnId: 'text7',
         value: jobNumber 
       })
 
