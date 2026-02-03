@@ -67,6 +67,10 @@ interface FormData {
   earlyStartMinutes: number
   lateFinishMinutes: number
   
+  // Overridable settings (for quoting flexibility)
+  dayRateOverride: number | null  // null = use settings default
+  applyMinHours: boolean  // Toggle for minimum hours threshold
+  
   // Additional costs
   tollsParking: number
   additionalCosts: number
@@ -190,6 +194,8 @@ const initialFormData: FormData = {
   numberOfDays: 1,
   earlyStartMinutes: 0,
   lateFinishMinutes: 0,
+  dayRateOverride: null,  // null = use settings default
+  applyMinHours: true,    // Default ON - apply minimum hours threshold
   tollsParking: 0,
   additionalCosts: 0,
   expenseArrangement: '',
@@ -234,6 +240,8 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     tollsParking,
     additionalCosts,
     addCollection,
+    dayRateOverride,
+    applyMinHours,
   } = formData
 
   const {
@@ -252,6 +260,9 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
 
   const markupMultiplier = 1 + (expenseMarkupPercent / 100)
   
+  // Use override day rate if provided, otherwise use settings
+  const effectiveDayRate = dayRateOverride !== null ? dayRateOverride : driverDayRate
+  
   // Determine transport mode based on what we're moving
   const isVehicle = whatIsIt === 'vehicle'
   const isThereAndBack = !isVehicle || addCollection  // Equipment/People always there-and-back
@@ -261,7 +272,7 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   // =========================================================================
   if (calculationMode === 'day_rate') {
     const fuelCost = (distanceMiles * fuelPricePerLitre) / 5
-    const freelancerFee = driverDayRate * numberOfDays
+    const freelancerFee = effectiveDayRate * numberOfDays
     const freelancerFeeRounded = roundToNearestFive(freelancerFee)
     const clientChargeLabour = freelancerFeeRounded * markupMultiplier
     const totalExpenses = tollsParking + additionalCosts + travelCost
@@ -291,22 +302,22 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   // =========================================================================
   
   let totalDriveMinutes = 0
-  let handoverOrUnload = 0
+  let handlingTime = 0
   
   if (isThereAndBack) {
     // Equipment/People: Drive there, unload/load, drive back
     totalDriveMinutes = driveTimeMinutes * 2
-    handoverOrUnload = unloadTimeMinutes
+    handlingTime = unloadTimeMinutes  // Use unload time for equipment
   } else {
     // Vehicle one-way: Drive there, handover, then travel back (if public transport)
     totalDriveMinutes = driveTimeMinutes + (travelMethod === 'public_transport' ? travelTimeMins : 0)
-    handoverOrUnload = handoverTimeMinutes
+    handlingTime = handoverTimeMinutes  // Use handover time for vehicles
   }
   
   // Add work duration for crewed jobs only
   const workMinutes = jobType === 'crewed_job' ? workDurationHours * 60 : 0
   
-  const totalMinutes = totalDriveMinutes + handoverOrUnload + workMinutes
+  const totalMinutes = totalDriveMinutes + handlingTime + workMinutes
   const totalHours = totalMinutes / 60
   
   const normalMinutes = totalMinutes - earlyStartMinutes - lateFinishMinutes
@@ -317,19 +328,27 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   
   let freelancerLabourPay = (normalHours * hourlyRateFreelancerDay) + (outOfHoursHrs * hourlyRateFreelancerNight)
   
-  const minPay = minHoursThreshold * hourlyRateFreelancerDay
-  if (freelancerLabourPay < minPay && totalHours > 0) {
-    freelancerLabourPay = minPay
+  // Apply minimum hours threshold only if toggle is ON
+  if (applyMinHours) {
+    const minPay = minHoursThreshold * hourlyRateFreelancerDay
+    if (freelancerLabourPay < minPay && totalHours > 0) {
+      freelancerLabourPay = minPay
+    }
   }
   
   const freelancerFeeRounded = roundToNearestFive(freelancerLabourPay)
   
   let clientLabourCharge = (normalHours * hourlyRateClientDay) + (outOfHoursHrs * hourlyRateClientNight)
-  const minClientCharge = minHoursThreshold * hourlyRateClientDay
-  if (clientLabourCharge < minClientCharge && totalHours > 0) {
-    clientLabourCharge = minClientCharge
+  
+  // Apply minimum hours threshold to client charge too, if toggle is ON
+  if (applyMinHours) {
+    const minClientCharge = minHoursThreshold * hourlyRateClientDay
+    if (clientLabourCharge < minClientCharge && totalHours > 0) {
+      clientLabourCharge = minClientCharge
+    }
   }
   
+  // Add admin cost per hour
   clientLabourCharge += totalHours * adminCostPerHour
   
   // Fuel: double miles for there-and-back, single for one-way vehicle
@@ -399,7 +418,10 @@ function CrewTransportWizard() {
         setFormData(prev => ({
           ...prev,
           clientName: data.jobInfo.clientName || '',
+          // For job date, keep existing or use hire start as default
+          // (will be overridden when job type is set to collection)
           jobDate: prev.jobDate || data.jobInfo.hireStartDate || '',
+          // Collection date always defaults to hire end
           collectionDate: prev.collectionDate || data.jobInfo.hireEndDate || '',
         }))
       }
@@ -719,6 +741,14 @@ function CrewTransportWizard() {
                       if (option.value === 'crewed_job') {
                         updateField('whatIsIt', '')
                       }
+                      // For collection jobs, default date to hire END
+                      if (option.value === 'collection' && jobInfo?.hireEndDate && !formData.jobDate) {
+                        updateField('jobDate', jobInfo.hireEndDate)
+                      }
+                      // For delivery jobs, default date to hire START
+                      if (option.value === 'delivery' && jobInfo?.hireStartDate && !formData.jobDate) {
+                        updateField('jobDate', jobInfo.hireStartDate)
+                      }
                     }}
                     className={`p-4 rounded-xl border-2 text-left transition-all ${
                       formData.jobType === option.value
@@ -741,7 +771,7 @@ function CrewTransportWizard() {
                   </label>
                   <div className="grid grid-cols-3 gap-3">
                     {[
-                      { value: 'vehicle', label: 'A vehicle', icon: '🚐', hint: 'Driver returns separately' },
+                      { value: 'vehicle', label: 'A Vehicle', icon: '🚐', hint: 'Driver returns separately' },
                       { value: 'equipment', label: 'Equipment', icon: '🎸', hint: 'Driver returns with van' },
                       { value: 'people', label: 'People', icon: '👥', hint: 'Driver returns with van' },
                     ].map((option) => (
@@ -894,7 +924,9 @@ function CrewTransportWizard() {
                 }`}>
                   {isVehicle ? (
                     formData.jobType === 'delivery' 
-                      ? '🚐 Vehicle delivery: Driver will need to get home after dropping off'
+                      ? formData.addCollection
+                        ? '🚐 Vehicle delivery + collection: Driver returns by transport after delivery, travels there by transport for collection'
+                        : '🚐 Vehicle delivery: Driver will need to get home after dropping off'
                       : '🚐 Vehicle collection: Driver will need to get there first'
                   ) : (
                     '📦 Equipment/People: Driver goes there and back with the van'
@@ -1092,17 +1124,57 @@ function CrewTransportWizard() {
                   </div>
 
                   {formData.calculationMode === 'day_rate' && (
+                    <>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Number of Days
+                        </label>
+                        <input
+                          type="number"
+                          value={formData.numberOfDays || ''}
+                          onChange={(e) => updateField('numberOfDays', parseInt(e.target.value) || 1)}
+                          min={1}
+                          className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Day Rate (£) 
+                          <span className="text-gray-400 font-normal ml-1">
+                            {settings && `Default: £${settings.driverDayRate}`}
+                          </span>
+                        </label>
+                        <input
+                          type="number"
+                          value={formData.dayRateOverride ?? settings?.driverDayRate ?? ''}
+                          onChange={(e) => {
+                            const val = e.target.value
+                            updateField('dayRateOverride', val ? parseFloat(val) : null)
+                          }}
+                          placeholder={settings ? `${settings.driverDayRate}` : '180'}
+                          className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                        />
+                        <p className="text-xs text-gray-500 mt-1">Override for this quote only</p>
+                      </div>
+                    </>
+                  )}
+
+                  {formData.calculationMode === 'hourly' && (
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Number of Days
+                      <label className="flex items-center space-x-2">
+                        <input
+                          type="checkbox"
+                          checked={formData.applyMinHours}
+                          onChange={(e) => updateField('applyMinHours', e.target.checked)}
+                          className="w-4 h-4 text-blue-600 rounded"
+                        />
+                        <span className="text-sm font-medium text-gray-700">
+                          Apply minimum hours ({settings?.minHoursThreshold || 5}hr)
+                        </span>
                       </label>
-                      <input
-                        type="number"
-                        value={formData.numberOfDays || ''}
-                        onChange={(e) => updateField('numberOfDays', parseInt(e.target.value) || 1)}
-                        min={1}
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                      />
+                      <p className="text-xs text-gray-500 mt-1 ml-6">
+                        Ensures freelancer gets at least {settings?.minHoursThreshold || 5} hours pay
+                      </p>
                     </div>
                   )}
                 </div>
@@ -1148,6 +1220,26 @@ function CrewTransportWizard() {
           {((step === 3 && !isCrewedJob) || (step === 4 && isCrewedJob)) && (
             <div className="space-y-6">
               <h2 className="text-lg font-semibold text-gray-900">Expenses & Arrangements</h2>
+
+              {/* Min hours toggle for D&C jobs */}
+              {!isCrewedJob && (
+                <div className="p-4 bg-gray-50 rounded-lg">
+                  <label className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      checked={formData.applyMinHours}
+                      onChange={(e) => updateField('applyMinHours', e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded"
+                    />
+                    <span className="text-sm font-medium text-gray-700">
+                      Apply minimum hours ({settings?.minHoursThreshold || 5}hr call)
+                    </span>
+                  </label>
+                  <p className="text-xs text-gray-500 mt-1 ml-6">
+                    Ensures freelancer gets at least {settings?.minHoursThreshold || 5} hours pay even for shorter jobs
+                  </p>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>

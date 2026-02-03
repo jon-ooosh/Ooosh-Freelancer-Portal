@@ -63,7 +63,7 @@ const DC_COLUMNS = {
   name: 'name',
   hirehopJobNumber: 'text2',           // HireHop job number
   deliverCollect: 'status_1',          // Delivery / Collection status
-  whatIsIt: 'status4',                 // A vehicle / Equipment / People
+  whatIsIt: 'status4',                 // A Vehicle / Equipment / People
   date: 'date4',                       // Job date
   arriveAt: 'hour',                    // Arrival time
   status: 'status90',                  // Job status (TO DO!, Arranging, etc.)
@@ -83,7 +83,7 @@ const DC_DELIVER_COLLECT_LABELS: Record<string, string> = {
 }
 
 const DC_WHAT_IS_IT_LABELS: Record<string, string> = {
-  'vehicle': 'A Vehicle',  // Capital V to match Monday board
+  'vehicle': 'A Vehicle', 
   'equipment': 'Equipment',
   'people': 'People',
 }
@@ -241,7 +241,7 @@ async function createDCItem(
     label: DC_DELIVER_COLLECT_LABELS[itemType] 
   }
 
-  // What is it? (A vehicle / Equipment / People)
+  // What is it? (A Vehicle / Equipment / People)
   if (formData.whatIsIt && DC_WHAT_IS_IT_LABELS[formData.whatIsIt]) {
     columnValues[DC_COLUMNS.whatIsIt] = { 
       label: DC_WHAT_IS_IT_LABELS[formData.whatIsIt] 
@@ -370,7 +370,7 @@ async function createCrewedJobItem(
   
   // Status columns
   columnValues[CREW_COLUMNS.jobType] = { label: mondayJobType }
-  columnValues[CREW_COLUMNS.status] = { label: 'Working on it' }
+  columnValues[CREW_COLUMNS.status] = { label: 'TBC' }  // Default status for new items
   
   // Transport mode - determine from context
   if (hasTransport) {

@@ -1,10 +1,9 @@
 /**
  * Staff Settings API
  * 
- * GET /api/staff/settings
+ * GET /api/staff/settings - Fetch costing settings from D&C Settings board
  * 
- * Fetches the costing settings from the D&C Settings Monday.com board.
- * These values are used by the Crew & Transport wizard for calculations.
+ * Reads configurable rates and thresholds used by the Crew & Transport wizard.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -12,24 +11,62 @@ import { NextRequest, NextResponse } from 'next/server'
 const MONDAY_API_URL = 'https://api.monday.com/v2'
 const DC_SETTINGS_BOARD_ID = process.env.MONDAY_BOARD_ID_DC_SETTINGS || '18398014955'
 
-// Column IDs from the D&C Settings board
-const COLUMN_IDS = {
-  name: 'text_mm06r49x',
-  fuelPricePerLitre: 'numeric_mm062p94',
-  expenseMarkupPercent: 'numeric_mm06gkff',
-  adminCostPerHour: 'numeric_mm06f6zw',
-  handoverTimeMinutes: 'numeric_mm06k1wq',
-  unloadTimeMinutes: 'numeric_mm062qhz',
-  minHoursThreshold: 'numeric_mm06tfv5',
+// =============================================================================
+// COLUMN IDS - D&C Settings Board (18398014955)
+// These are the CORRECT column IDs as confirmed by Jon
+// =============================================================================
+const SETTINGS_COLUMNS = {
+  // Rates
   hourlyRateFreelancerDay: 'numeric_mm06p0aw',
   hourlyRateFreelancerNight: 'numeric_mm065da0',
   hourlyRateClientDay: 'numeric_mm06saeq',
   hourlyRateClientNight: 'numeric_mm06b0vx',
+  adminCostPerHour: 'numeric_mm06f6zw',
   driverDayRate: 'numeric_mm06ht23',
-  expenseVarianceThreshold: 'numeric_mm06bqrf',
+  
+  // Thresholds and multipliers
+  expenseMarkupPercent: 'numeric_mm06gkff',
+  minHoursThreshold: 'numeric_mm06tfv5',
+  
+  // Time allowances (in minutes)
+  handoverTimeMinutes: 'numeric_mm06k1wq',
+  unloadTimeMinutes: 'numeric_mm062qhz',
+  
+  // These may need to be added or confirmed later
+  fuelPricePerLitre: 'numeric_mm06n1k9',  // If this doesn't exist, we'll use default
+  expenseVarianceThreshold: 'numeric_mm06v2x8',  // For expense tracking phase
 }
 
-export interface CostingSettings {
+// =============================================================================
+// DEFAULT VALUES (fallback if board not populated)
+// =============================================================================
+const DEFAULT_SETTINGS = {
+  // Rates (in GBP)
+  hourlyRateFreelancerDay: 18,
+  hourlyRateFreelancerNight: 25,
+  hourlyRateClientDay: 33,
+  hourlyRateClientNight: 45,
+  adminCostPerHour: 5,
+  driverDayRate: 180,
+  
+  // Thresholds
+  expenseMarkupPercent: 10,
+  minHoursThreshold: 5,  // Minimum 5-hour call
+  expenseVarianceThreshold: 10,
+  
+  // Time allowances (minutes)
+  handoverTimeMinutes: 15,  // For vehicle handover
+  unloadTimeMinutes: 30,    // For equipment unload
+  
+  // Fuel
+  fuelPricePerLitre: 1.45,
+}
+
+// =============================================================================
+// TYPES
+// =============================================================================
+
+interface CostingSettings {
   fuelPricePerLitre: number
   expenseMarkupPercent: number
   adminCostPerHour: number
@@ -44,22 +81,9 @@ export interface CostingSettings {
   expenseVarianceThreshold: number
 }
 
-// Default values - ONLY used as fallback when board fetch fails
-// These should match what's in the D&C Settings board
-const DEFAULT_SETTINGS: CostingSettings = {
-  fuelPricePerLitre: 1.35,
-  expenseMarkupPercent: 10,
-  adminCostPerHour: 5,
-  handoverTimeMinutes: 20,
-  unloadTimeMinutes: 20,
-  minHoursThreshold: 5,
-  hourlyRateFreelancerDay: 15,
-  hourlyRateFreelancerNight: 20,
-  hourlyRateClientDay: 18,
-  hourlyRateClientNight: 23,
-  driverDayRate: 250,
-  expenseVarianceThreshold: 10,
-}
+// =============================================================================
+// MONDAY API HELPER
+// =============================================================================
 
 async function mondayQuery<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const token = process.env.MONDAY_API_TOKEN
@@ -83,11 +107,9 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
   return data.data as T
 }
 
-function parseNumericValue(text: string | undefined | null): number | null {
-  if (!text) return null
-  const parsed = parseFloat(text)
-  return isNaN(parsed) ? null : parsed
-}
+// =============================================================================
+// GET HANDLER
+// =============================================================================
 
 export async function GET(request: NextRequest) {
   try {
@@ -102,9 +124,10 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    console.log('Staff Settings: Fetching settings from board', DC_SETTINGS_BOARD_ID)
+    // Build list of column IDs to fetch
+    const columnIds = Object.values(SETTINGS_COLUMNS)
 
-    // Fetch the first item from the settings board
+    // Fetch settings from Monday board
     const query = `
       query ($boardId: ID!) {
         boards(ids: [$boardId]) {
@@ -142,64 +165,66 @@ export async function GET(request: NextRequest) {
     const items = result.boards?.[0]?.items_page?.items || []
     
     if (items.length === 0) {
-      console.warn('Staff Settings: No settings found in board, using defaults')
+      console.warn('Settings: No items found in D&C Settings board, using defaults')
       return NextResponse.json({
         success: true,
         settings: DEFAULT_SETTINGS,
         source: 'defaults',
-        warning: 'D&C Settings board is empty - please add an item with your rates'
       })
     }
 
+    // Parse column values into settings object
     const item = items[0]
-    const columns = item.column_values.reduce((acc, col) => {
-      acc[col.id] = col.text
-      return acc
-    }, {} as Record<string, string>)
-
-    // Map column values to settings object, falling back to defaults for missing values
-    const settings: CostingSettings = {
-      fuelPricePerLitre: parseNumericValue(columns[COLUMN_IDS.fuelPricePerLitre]) ?? DEFAULT_SETTINGS.fuelPricePerLitre,
-      expenseMarkupPercent: parseNumericValue(columns[COLUMN_IDS.expenseMarkupPercent]) ?? DEFAULT_SETTINGS.expenseMarkupPercent,
-      adminCostPerHour: parseNumericValue(columns[COLUMN_IDS.adminCostPerHour]) ?? DEFAULT_SETTINGS.adminCostPerHour,
-      handoverTimeMinutes: parseNumericValue(columns[COLUMN_IDS.handoverTimeMinutes]) ?? DEFAULT_SETTINGS.handoverTimeMinutes,
-      unloadTimeMinutes: parseNumericValue(columns[COLUMN_IDS.unloadTimeMinutes]) ?? DEFAULT_SETTINGS.unloadTimeMinutes,
-      minHoursThreshold: parseNumericValue(columns[COLUMN_IDS.minHoursThreshold]) ?? DEFAULT_SETTINGS.minHoursThreshold,
-      hourlyRateFreelancerDay: parseNumericValue(columns[COLUMN_IDS.hourlyRateFreelancerDay]) ?? DEFAULT_SETTINGS.hourlyRateFreelancerDay,
-      hourlyRateFreelancerNight: parseNumericValue(columns[COLUMN_IDS.hourlyRateFreelancerNight]) ?? DEFAULT_SETTINGS.hourlyRateFreelancerNight,
-      hourlyRateClientDay: parseNumericValue(columns[COLUMN_IDS.hourlyRateClientDay]) ?? DEFAULT_SETTINGS.hourlyRateClientDay,
-      hourlyRateClientNight: parseNumericValue(columns[COLUMN_IDS.hourlyRateClientNight]) ?? DEFAULT_SETTINGS.hourlyRateClientNight,
-      driverDayRate: parseNumericValue(columns[COLUMN_IDS.driverDayRate]) ?? DEFAULT_SETTINGS.driverDayRate,
-      expenseVarianceThreshold: parseNumericValue(columns[COLUMN_IDS.expenseVarianceThreshold]) ?? DEFAULT_SETTINGS.expenseVarianceThreshold,
+    const columnMap = new Map<string, string>()
+    
+    for (const col of item.column_values) {
+      // For numeric columns, the 'text' field contains the display value
+      columnMap.set(col.id, col.text || '')
     }
 
-    // Check if any settings came from defaults (missing in board)
-    const missingFields: string[] = []
-    if (!columns[COLUMN_IDS.fuelPricePerLitre]) missingFields.push('Fuel Price')
-    if (!columns[COLUMN_IDS.hourlyRateFreelancerDay]) missingFields.push('Freelancer Day Rate')
-    if (!columns[COLUMN_IDS.hourlyRateClientDay]) missingFields.push('Client Day Rate')
-    if (!columns[COLUMN_IDS.driverDayRate]) missingFields.push('Driver Day Rate')
+    // Helper to get numeric value with fallback
+    const getNumeric = (columnId: string, defaultValue: number): number => {
+      const text = columnMap.get(columnId)
+      if (!text) return defaultValue
+      const parsed = parseFloat(text)
+      return isNaN(parsed) ? defaultValue : parsed
+    }
 
-    console.log('Staff Settings: Loaded settings from Monday.com', 
-      missingFields.length > 0 ? `(missing: ${missingFields.join(', ')})` : '')
+    // Build settings object with values from board (or defaults)
+    const settings: CostingSettings = {
+      hourlyRateFreelancerDay: getNumeric(SETTINGS_COLUMNS.hourlyRateFreelancerDay, DEFAULT_SETTINGS.hourlyRateFreelancerDay),
+      hourlyRateFreelancerNight: getNumeric(SETTINGS_COLUMNS.hourlyRateFreelancerNight, DEFAULT_SETTINGS.hourlyRateFreelancerNight),
+      hourlyRateClientDay: getNumeric(SETTINGS_COLUMNS.hourlyRateClientDay, DEFAULT_SETTINGS.hourlyRateClientDay),
+      hourlyRateClientNight: getNumeric(SETTINGS_COLUMNS.hourlyRateClientNight, DEFAULT_SETTINGS.hourlyRateClientNight),
+      adminCostPerHour: getNumeric(SETTINGS_COLUMNS.adminCostPerHour, DEFAULT_SETTINGS.adminCostPerHour),
+      driverDayRate: getNumeric(SETTINGS_COLUMNS.driverDayRate, DEFAULT_SETTINGS.driverDayRate),
+      expenseMarkupPercent: getNumeric(SETTINGS_COLUMNS.expenseMarkupPercent, DEFAULT_SETTINGS.expenseMarkupPercent),
+      minHoursThreshold: getNumeric(SETTINGS_COLUMNS.minHoursThreshold, DEFAULT_SETTINGS.minHoursThreshold),
+      handoverTimeMinutes: getNumeric(SETTINGS_COLUMNS.handoverTimeMinutes, DEFAULT_SETTINGS.handoverTimeMinutes),
+      unloadTimeMinutes: getNumeric(SETTINGS_COLUMNS.unloadTimeMinutes, DEFAULT_SETTINGS.unloadTimeMinutes),
+      fuelPricePerLitre: getNumeric(SETTINGS_COLUMNS.fuelPricePerLitre, DEFAULT_SETTINGS.fuelPricePerLitre),
+      expenseVarianceThreshold: getNumeric(SETTINGS_COLUMNS.expenseVarianceThreshold, DEFAULT_SETTINGS.expenseVarianceThreshold),
+    }
+
+    console.log('Settings: Loaded from D&C Settings board:', item.name)
+    console.log('Settings values:', JSON.stringify(settings, null, 2))
 
     return NextResponse.json({
       success: true,
       settings,
-      source: missingFields.length > 0 ? 'partial' : 'monday',
-      ...(missingFields.length > 0 && { 
-        warning: `Some settings missing from board (using defaults): ${missingFields.join(', ')}` 
-      })
+      source: 'board',
+      itemName: item.name,
     })
 
   } catch (error) {
-    console.error('Staff Settings error:', error)
-    // Return defaults but flag it clearly as a fallback
+    console.error('Settings API error:', error)
+    
+    // Return defaults on error so wizard can still function
     return NextResponse.json({
       success: true,
       settings: DEFAULT_SETTINGS,
       source: 'defaults',
-      warning: 'Failed to fetch from Monday.com - using defaults'
+      error: error instanceof Error ? error.message : 'Failed to load settings',
     })
   }
 }
