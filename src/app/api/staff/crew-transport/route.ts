@@ -25,7 +25,7 @@ const VENUES_BOARD_ID = process.env.MONDAY_BOARD_ID_VENUES || '2406443142'
 // =============================================================================
 const CREW_COLUMNS = {
   name: 'name',
-  hirehopJobNumber: 'numeric_mm06wbtm',
+  hirehopJobNumber: 'text_mm081gk5',  // TEXT column (was numeric_mm06wbtm)
   jobType: 'color_mm062e1x',
   status: 'color_mm06zxg3',
   transportMode: 'color_mm06w09w',
@@ -40,6 +40,7 @@ const CREW_COLUMNS = {
   workDurationHours: 'numeric_mm06qxty',
   workDescription: 'text_mm06f0bj',
   jobDate: 'date_mm067tnh',
+  jobFinishDate: 'date_mm085d7c',  // NEW: Job finish date for multi-day jobs
   arrivalTime: 'hour_mm06y636',
   calculationMode: 'color_mm06r0np',
   numberOfDays: 'numeric_mm063z0y',
@@ -71,7 +72,7 @@ const DC_COLUMNS = {
   keyPoints: 'key_points___summary',   // Key points / Flight # etc
   clientCharge: 'numeric_mm06wq2n',    // Client charge (what we bill)
   driverFee: 'numeric_mm0688f9',       // Driver fee (what we pay)
-  venueLink: 'connect_boards',         // PLACEHOLDER - update with actual venue link column ID!
+  venueLink: 'connect_boards6',        // Link to venue in Address Book
 }
 
 // =============================================================================
@@ -168,6 +169,7 @@ interface FormData {
   workDurationHours: number
   workDescription: string
   jobDate: string
+  jobFinishDate: string
   arrivalTime: string
   collectionDate: string
   collectionArrivalTime: string
@@ -387,10 +389,8 @@ async function createDCItem(
   columnValues[DC_COLUMNS.clientCharge] = costs.clientChargeTotal
   columnValues[DC_COLUMNS.driverFee] = costs.freelancerFee
 
-  // Venue link - if we have a venue ID and the column is configured, link it
-  // NOTE: Update DC_COLUMNS.venueLink with the actual column ID from your D&C board
-  // The format for connect_boards columns is: {"item_ids": [123456789]}
-  if (venueId && DC_COLUMNS.venueLink !== 'connect_boards') {
+  // Venue link - if we have a venue ID, link it
+  if (venueId) {
     columnValues[DC_COLUMNS.venueLink] = { item_ids: [parseInt(venueId)] }
   }
 
@@ -454,13 +454,17 @@ async function createCrewedJobItem(
     columnValues[CREW_COLUMNS.workTypeOther] = formData.workTypeOther
   }
   
+  // HireHop job number - TEXT column (not numeric!)
+  if (formData.hirehopJobNumber) {
+    columnValues[CREW_COLUMNS.hirehopJobNumber] = formData.hirehopJobNumber
+  }
+  
   // Combine notes
   const combinedNotes = [formData.expenseNotes, formData.costingNotes ? `Notes: ${formData.costingNotes}` : '']
     .filter(Boolean).join('\n\n')
   if (combinedNotes) columnValues[CREW_COLUMNS.expenseNotes] = combinedNotes
   
   // Numeric columns
-  if (formData.hirehopJobNumber) columnValues[CREW_COLUMNS.hirehopJobNumber] = parseInt(formData.hirehopJobNumber)
   if (formData.distanceMiles > 0) columnValues[CREW_COLUMNS.distanceMiles] = formData.distanceMiles
   if (formData.driveTimeMinutes > 0) columnValues[CREW_COLUMNS.driveTimeMinutes] = formData.driveTimeMinutes
   if (formData.travelTimeMins > 0) columnValues[CREW_COLUMNS.returnTravelTimeMins] = formData.travelTimeMins
@@ -477,8 +481,9 @@ async function createCrewedJobItem(
   columnValues[CREW_COLUMNS.expectedExpenses] = totalExpectedExpenses
   columnValues[CREW_COLUMNS.ourMargin] = costs.ourMargin
   
-  // Date column
+  // Date columns
   if (formData.jobDate) columnValues[CREW_COLUMNS.jobDate] = { date: formData.jobDate }
+  if (formData.jobFinishDate) columnValues[CREW_COLUMNS.jobFinishDate] = { date: formData.jobFinishDate }
 
   // Arrival time (hour column)
   if (formData.arrivalTime) {

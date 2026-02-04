@@ -27,6 +27,7 @@ const SETTINGS_COLUMNS = {
   // Thresholds and multipliers
   expenseMarkupPercent: 'numeric_mm06gkff',
   minHoursThreshold: 'numeric_mm06tfv5',
+  minClientCharge: 'numeric_mm086t74',  // Minimum client charge floor
   
   // Time allowances (in minutes)
   handoverTimeMinutes: 'numeric_mm06k1wq',
@@ -52,6 +53,7 @@ const DEFAULT_SETTINGS = {
   // Thresholds
   expenseMarkupPercent: 10,
   minHoursThreshold: 5,  // Minimum 5-hour call
+  minClientCharge: 0,    // No minimum by default (0 = disabled)
   expenseVarianceThreshold: 10,
   
   // Time allowances (minutes)
@@ -73,6 +75,7 @@ interface CostingSettings {
   handoverTimeMinutes: number
   unloadTimeMinutes: number
   minHoursThreshold: number
+  minClientCharge: number
   hourlyRateFreelancerDay: number
   hourlyRateFreelancerNight: number
   hourlyRateClientDay: number
@@ -200,6 +203,7 @@ export async function GET(request: NextRequest) {
       driverDayRate: getNumeric(SETTINGS_COLUMNS.driverDayRate, DEFAULT_SETTINGS.driverDayRate),
       expenseMarkupPercent: getNumeric(SETTINGS_COLUMNS.expenseMarkupPercent, DEFAULT_SETTINGS.expenseMarkupPercent),
       minHoursThreshold: getNumeric(SETTINGS_COLUMNS.minHoursThreshold, DEFAULT_SETTINGS.minHoursThreshold),
+      minClientCharge: getNumeric(SETTINGS_COLUMNS.minClientCharge, DEFAULT_SETTINGS.minClientCharge),
       handoverTimeMinutes: getNumeric(SETTINGS_COLUMNS.handoverTimeMinutes, DEFAULT_SETTINGS.handoverTimeMinutes),
       unloadTimeMinutes: getNumeric(SETTINGS_COLUMNS.unloadTimeMinutes, DEFAULT_SETTINGS.unloadTimeMinutes),
       fuelPricePerLitre: getNumeric(SETTINGS_COLUMNS.fuelPricePerLitre, DEFAULT_SETTINGS.fuelPricePerLitre),
