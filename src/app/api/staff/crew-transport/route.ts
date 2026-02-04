@@ -40,7 +40,7 @@ const CREW_COLUMNS = {
   workDurationHours: 'numeric_mm06qxty',
   workDescription: 'text_mm06f0bj',
   jobDate: 'date_mm067tnh',
-  jobFinishDate: 'date_mm085d7c',  // NEW: Job finish date for multi-day jobs
+  jobFinishDate: 'date_mm085d7c',  // Job finish date for multi-day jobs
   arrivalTime: 'hour_mm06y636',
   calculationMode: 'color_mm06r0np',
   numberOfDays: 'numeric_mm063z0y',
@@ -56,6 +56,10 @@ const CREW_COLUMNS = {
   expenseNotes: 'text_mm06hyba',
   actualFeeClaimed: 'numeric_mm06hkkn',
   actualExpensesClaimed: 'numeric_mm06q1nr',
+  // NEW: Expense breakdown columns (Phase 3)
+  expensesIncluded: 'numeric_mm0815zc',
+  expensesNotIncluded: 'numeric_mm086asx',
+  expenseBreakdown: 'long_text_mm086bts',
 }
 
 // =============================================================================
@@ -73,6 +77,10 @@ const DC_COLUMNS = {
   clientCharge: 'numeric_mm06wq2n',    // Client charge (what we bill)
   driverFee: 'numeric_mm0688f9',       // Driver fee (what we pay)
   venueLink: 'connect_boards6',        // Link to venue in Address Book
+  // NEW: Expense breakdown columns (Phase 3)
+  expensesIncluded: 'numeric_mm08av8f',
+  expensesNotIncluded: 'numeric_mm08jhcw',
+  expenseBreakdown: 'long_text_mm08cpst',
 }
 
 // =============================================================================
@@ -185,6 +193,10 @@ interface FormData {
   expenseNotes: string
   costingNotes: string
   addCollection: boolean
+  // NEW: Expense breakdown data (Phase 3)
+  expenseBreakdown: string
+  expensesIncludedTotal: number
+  expensesNotIncludedTotal: number
   // Venue tracking
   selectedVenueId: string | null
   isNewVenue: boolean
@@ -389,6 +401,17 @@ async function createDCItem(
   columnValues[DC_COLUMNS.clientCharge] = costs.clientChargeTotal
   columnValues[DC_COLUMNS.driverFee] = costs.freelancerFee
 
+  // NEW: Expense breakdown columns (Phase 3)
+  if (formData.expensesIncludedTotal > 0) {
+    columnValues[DC_COLUMNS.expensesIncluded] = formData.expensesIncludedTotal
+  }
+  if (formData.expensesNotIncludedTotal > 0) {
+    columnValues[DC_COLUMNS.expensesNotIncluded] = formData.expensesNotIncludedTotal
+  }
+  if (formData.expenseBreakdown) {
+    columnValues[DC_COLUMNS.expenseBreakdown] = formData.expenseBreakdown
+  }
+
   // Venue link - if we have a venue ID, link it
   if (venueId) {
     columnValues[DC_COLUMNS.venueLink] = { item_ids: [parseInt(venueId)] }
@@ -480,6 +503,17 @@ async function createCrewedJobItem(
   columnValues[CREW_COLUMNS.freelancerFee] = costs.freelancerFee
   columnValues[CREW_COLUMNS.expectedExpenses] = totalExpectedExpenses
   columnValues[CREW_COLUMNS.ourMargin] = costs.ourMargin
+  
+  // NEW: Expense breakdown columns (Phase 3)
+  if (formData.expensesIncludedTotal > 0) {
+    columnValues[CREW_COLUMNS.expensesIncluded] = formData.expensesIncludedTotal
+  }
+  if (formData.expensesNotIncludedTotal > 0) {
+    columnValues[CREW_COLUMNS.expensesNotIncluded] = formData.expensesNotIncludedTotal
+  }
+  if (formData.expenseBreakdown) {
+    columnValues[CREW_COLUMNS.expenseBreakdown] = formData.expenseBreakdown
+  }
   
   // Date columns
   if (formData.jobDate) columnValues[CREW_COLUMNS.jobDate] = { date: formData.jobDate }
