@@ -34,8 +34,12 @@ interface JobInfo {
 interface Venue {
   id: string
   name: string
+  address: string | null
   distance: number | null
   driveTime: number | null
+  travelTime: number | null
+  ticketCost: number | null
+  tollsParking: number | null
 }
 
 interface FormData {
@@ -62,11 +66,17 @@ interface FormData {
   isNewVenue: boolean
   originalVenueDistance: number | null
   originalVenueDriveTime: number | null
+  originalVenueTravelTime: number | null
+  originalVenueTicketCost: number | null
+  originalVenueTollsParking: number | null
   
   // Return/travel method (for vehicle jobs only)
   travelMethod: 'public_transport' | 'own_way' | ''
   travelTimeMins: number
   travelCost: number
+  
+  // Tolls/parking (can be venue default or manual)
+  tollsParking: number
   
   // Work details (for crewed jobs only)
   workType: string
@@ -85,7 +95,6 @@ interface FormData {
   applyMinHours: boolean
   
   // Additional costs
-  tollsParking: number
   additionalCosts: number
   
   // Expense arrangements
@@ -103,7 +112,7 @@ interface CalculatedCosts {
   clientChargeFuel: number
   clientChargeExpenses: number
   clientChargeTotal: number
-  clientChargeTotalRounded: number  // NEW: Rounded to nearest £1
+  clientChargeTotalRounded: number
   freelancerFee: number
   freelancerFeeRounded: number
   expectedFuelCost: number
@@ -119,6 +128,7 @@ interface SaveResult {
   itemId?: string
   itemName?: string
   board?: string
+  venueId?: string
   collectionItemId?: string
   collectionItemName?: string
   error?: string
@@ -173,6 +183,67 @@ function formatTime12h(time: string): string {
   return `${h12}:${minutes}${ampm}`
 }
 
+/**
+ * Normalize partial time input to HH:MM format
+ * "11" → "11:00", "9" → "09:00", "12:3" → "12:30", "1430" → "14:30"
+ */
+function normalizeTimeInput(value: string): string {
+  if (!value) return ''
+  
+  // Remove any non-digit/colon characters
+  const cleaned = value.replace(/[^\d:]/g, '')
+  
+  // If already valid HH:MM format, return as-is
+  if (/^\d{2}:\d{2}$/.test(cleaned)) {
+    return cleaned
+  }
+  
+  // Handle various partial formats
+  if (/^\d{1,2}$/.test(cleaned)) {
+    // Just hour: "11" → "11:00", "9" → "09:00"
+    const hour = parseInt(cleaned)
+    if (hour >= 0 && hour <= 23) {
+      return hour.toString().padStart(2, '0') + ':00'
+    }
+  }
+  
+  if (/^\d{3,4}$/.test(cleaned)) {
+    // No colon: "930" → "09:30", "1430" → "14:30"
+    const hour = cleaned.length === 3 
+      ? parseInt(cleaned[0]) 
+      : parseInt(cleaned.slice(0, 2))
+    const mins = cleaned.length === 3 
+      ? cleaned.slice(1) 
+      : cleaned.slice(2)
+    if (hour >= 0 && hour <= 23 && parseInt(mins) >= 0 && parseInt(mins) <= 59) {
+      return hour.toString().padStart(2, '0') + ':' + mins.padStart(2, '0')
+    }
+  }
+  
+  if (/^\d{1,2}:\d{1}$/.test(cleaned)) {
+    // Partial minutes: "12:3" → "12:30"
+    const [hourStr, minStr] = cleaned.split(':')
+    const hour = parseInt(hourStr)
+    const mins = parseInt(minStr) * 10 // "3" becomes 30
+    if (hour >= 0 && hour <= 23 && mins >= 0 && mins <= 50) {
+      return hour.toString().padStart(2, '0') + ':' + mins.toString().padStart(2, '0')
+    }
+  }
+  
+  // Return empty if can't parse
+  return ''
+}
+
+/**
+ * Get first line of address (truncate for display)
+ */
+function getAddressSnippet(address: string | null, maxLength: number = 60): string {
+  if (!address) return ''
+  const firstLine = address.split('\n')[0].trim()
+  if (firstLine.length <= maxLength) return firstLine
+  return firstLine.substring(0, maxLength) + '...'
+}
+
 // =============================================================================
 // INITIAL STATE
 // =============================================================================
@@ -194,9 +265,13 @@ const initialFormData: FormData = {
   isNewVenue: false,
   originalVenueDistance: null,
   originalVenueDriveTime: null,
+  originalVenueTravelTime: null,
+  originalVenueTicketCost: null,
+  originalVenueTollsParking: null,
   travelMethod: '',
   travelTimeMins: 0,
   travelCost: 0,
+  tollsParking: 0,
   workType: '',
   workTypeOther: '',
   workDurationHours: 0,
@@ -207,7 +282,6 @@ const initialFormData: FormData = {
   lateFinishMinutes: 0,
   dayRateOverride: null,
   applyMinHours: true,
-  tollsParking: 0,
   additionalCosts: 0,
   expenseArrangement: '',
   pdArrangement: 'no_pd',
@@ -243,12 +317,12 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     travelMethod,
     travelTimeMins,
     travelCost,
+    tollsParking,
     workDurationHours,
     calculationMode,
     numberOfDays,
     earlyStartMinutes,
     lateFinishMinutes,
-    tollsParking,
     additionalCosts,
     addCollection,
     dayRateOverride,
@@ -286,7 +360,7 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     const clientChargeExpenses = totalExpenses * markupMultiplier
     const clientChargeFuel = fuelCost * markupMultiplier
     const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses
-    const clientChargeTotalRounded = Math.round(clientChargeTotal)  // Round to nearest £1
+    const clientChargeTotalRounded = Math.round(clientChargeTotal)
     const ourTotalCost = freelancerFeeRounded + fuelCost + totalExpenses
     
     return {
@@ -362,7 +436,7 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   const clientExpenseCharge = otherExpenses * markupMultiplier
   
   const clientChargeTotal = clientLabourCharge + clientFuelCharge + clientExpenseCharge
-  const clientChargeTotalRounded = Math.round(clientChargeTotal)  // Round to nearest £1
+  const clientChargeTotalRounded = Math.round(clientChargeTotal)
   const ourTotalCost = freelancerFeeRounded + fuelCost + otherExpenses
   
   return {
@@ -380,6 +454,50 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     estimatedTimeMinutes: totalMinutes,
     estimatedTimeHours: Math.round(totalHours * 100) / 100,
   }
+}
+
+// =============================================================================
+// TIME INPUT COMPONENT
+// =============================================================================
+
+interface TimeInputProps {
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+  className?: string
+}
+
+function TimeInput({ value, onChange, placeholder, className }: TimeInputProps) {
+  const [localValue, setLocalValue] = useState(value)
+
+  useEffect(() => {
+    setLocalValue(value)
+  }, [value])
+
+  const handleBlur = () => {
+    const normalized = normalizeTimeInput(localValue)
+    if (normalized !== localValue) {
+      setLocalValue(normalized)
+      onChange(normalized)
+    }
+  }
+
+  return (
+    <input
+      type="text"
+      value={localValue}
+      onChange={(e) => {
+        setLocalValue(e.target.value)
+        // Also pass through if it looks complete
+        if (/^\d{2}:\d{2}$/.test(e.target.value)) {
+          onChange(e.target.value)
+        }
+      }}
+      onBlur={handleBlur}
+      placeholder={placeholder || 'HH:MM'}
+      className={className || 'w-full px-4 py-2 border border-gray-300 rounded-lg'}
+    />
+  )
 }
 
 // =============================================================================
@@ -418,7 +536,7 @@ function VenueDropdown({ value, venues, loading, onSelect }: VenueDropdownProps)
   // Filter venues based on search term
   const filteredVenues = venues.filter(venue =>
     venue.name.toLowerCase().includes(searchTerm.toLowerCase())
-  ).slice(0, 10)  // Limit to 10 results for performance
+  ).slice(0, 10)
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newValue = e.target.value
@@ -456,7 +574,7 @@ function VenueDropdown({ value, venues, loading, onSelect }: VenueDropdownProps)
       />
       
       {isOpen && !loading && (searchTerm.length > 0 || venues.length > 0) && (
-        <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+        <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-72 overflow-y-auto">
           {filteredVenues.length > 0 && (
             <>
               {filteredVenues.map(venue => (
@@ -464,15 +582,22 @@ function VenueDropdown({ value, venues, loading, onSelect }: VenueDropdownProps)
                   key={venue.id}
                   type="button"
                   onClick={() => handleSelectVenue(venue)}
-                  className="w-full px-4 py-2 text-left hover:bg-gray-100 flex justify-between items-center"
+                  className="w-full px-4 py-2 text-left hover:bg-gray-100 border-b border-gray-50"
                 >
-                  <span className="font-medium text-gray-900">{venue.name}</span>
-                  {(venue.distance || venue.driveTime) && (
-                    <span className="text-xs text-gray-500">
-                      {venue.distance && `${venue.distance}mi`}
-                      {venue.distance && venue.driveTime && ' · '}
-                      {venue.driveTime && `${venue.driveTime}min`}
-                    </span>
+                  <div className="flex justify-between items-start">
+                    <span className="font-medium text-gray-900">{venue.name}</span>
+                    {(venue.distance || venue.driveTime) && (
+                      <span className="text-xs text-gray-500 ml-2 whitespace-nowrap">
+                        {venue.distance && `${venue.distance}mi`}
+                        {venue.distance && venue.driveTime && ' · '}
+                        {venue.driveTime && `${venue.driveTime}min`}
+                      </span>
+                    )}
+                  </div>
+                  {venue.address && (
+                    <p className="text-xs text-gray-500 mt-0.5 truncate">
+                      📍 {getAddressSnippet(venue.address)}
+                    </p>
                   )}
                 </button>
               ))}
@@ -521,6 +646,7 @@ function CrewTransportWizard() {
   const [formData, setFormData] = useState<FormData>(initialFormData)
   const [jobInfo, setJobInfo] = useState<JobInfo | null>(null)
   const [venues, setVenues] = useState<Venue[]>([])
+  const [selectedVenueAddress, setSelectedVenueAddress] = useState<string | null>(null)
   const [step, setStep] = useState(1)
 
   const jobNumberFromUrl = searchParams.get('job') || ''
@@ -646,19 +772,31 @@ function CrewTransportWizard() {
   // Handle venue selection
   const handleVenueSelect = (venue: Venue | null, isNew: boolean, newName?: string) => {
     if (venue) {
-      // Selected existing venue - auto-fill distance and time
+      // Selected existing venue - auto-fill all available fields
+      setSelectedVenueAddress(venue.address)
       setFormData(prev => ({
         ...prev,
         destination: venue.name,
         selectedVenueId: venue.id,
         isNewVenue: false,
+        // Distance and drive time
         distanceMiles: venue.distance || prev.distanceMiles,
         driveTimeMinutes: venue.driveTime || prev.driveTimeMinutes,
+        // Travel details (for vehicle jobs)
+        travelTimeMins: venue.travelTime || prev.travelTimeMins,
+        travelCost: venue.ticketCost || prev.travelCost,
+        // Tolls/parking
+        tollsParking: venue.tollsParking || prev.tollsParking,
+        // Store originals for change detection
         originalVenueDistance: venue.distance,
         originalVenueDriveTime: venue.driveTime,
+        originalVenueTravelTime: venue.travelTime,
+        originalVenueTicketCost: venue.ticketCost,
+        originalVenueTollsParking: venue.tollsParking,
       }))
     } else if (isNew && newName) {
       // Adding new venue
+      setSelectedVenueAddress(null)
       setFormData(prev => ({
         ...prev,
         destination: newName,
@@ -666,9 +804,13 @@ function CrewTransportWizard() {
         isNewVenue: true,
         originalVenueDistance: null,
         originalVenueDriveTime: null,
+        originalVenueTravelTime: null,
+        originalVenueTicketCost: null,
+        originalVenueTollsParking: null,
       }))
     } else if (newName !== undefined) {
       // Just typing, not selected yet
+      setSelectedVenueAddress(null)
       setFormData(prev => ({
         ...prev,
         destination: newName,
@@ -676,6 +818,9 @@ function CrewTransportWizard() {
         isNewVenue: false,
         originalVenueDistance: null,
         originalVenueDriveTime: null,
+        originalVenueTravelTime: null,
+        originalVenueTicketCost: null,
+        originalVenueTollsParking: null,
       }))
     }
   }
@@ -692,17 +837,26 @@ function CrewTransportWizard() {
       // Prepare form data with venue change tracking
       const dataToSave = {
         ...formData,
-        // Track if distance/time changed from original venue values
+        // Track if any venue fields changed from original values
         venueDistanceChanged: formData.selectedVenueId !== null && 
           formData.originalVenueDistance !== null &&
           formData.distanceMiles !== formData.originalVenueDistance,
         venueDriveTimeChanged: formData.selectedVenueId !== null && 
           formData.originalVenueDriveTime !== null &&
           formData.driveTimeMinutes !== formData.originalVenueDriveTime,
+        venueTravelTimeChanged: formData.selectedVenueId !== null && 
+          formData.originalVenueTravelTime !== null &&
+          formData.travelTimeMins !== formData.originalVenueTravelTime,
+        venueTicketCostChanged: formData.selectedVenueId !== null && 
+          formData.originalVenueTicketCost !== null &&
+          formData.travelCost !== formData.originalVenueTicketCost,
+        venueTollsParkingChanged: formData.selectedVenueId !== null && 
+          formData.originalVenueTollsParking !== null &&
+          formData.tollsParking !== formData.originalVenueTollsParking,
       }
 
       const costsToSave = {
-        clientChargeTotal: costs.clientChargeTotalRounded,  // Use rounded value
+        clientChargeTotal: costs.clientChargeTotalRounded,
         freelancerFee: costs.freelancerFeeRounded,
         expectedFuelCost: costs.expectedFuelCost,
         expectedOtherExpenses: costs.expectedOtherExpenses,
@@ -741,8 +895,10 @@ function CrewTransportWizard() {
       // Add venue info to success message
       if (formData.isNewVenue) {
         message += ' (New venue added to database)'
-      } else if (dataToSave.venueDistanceChanged || dataToSave.venueDriveTimeChanged) {
-        message += ' (Venue distance/time updated)'
+      } else if (dataToSave.venueDistanceChanged || dataToSave.venueDriveTimeChanged || 
+                 dataToSave.venueTravelTimeChanged || dataToSave.venueTicketCostChanged ||
+                 dataToSave.venueTollsParkingChanged) {
+        message += ' (Venue details updated)'
       }
       
       setSuccess(message)
@@ -760,6 +916,7 @@ function CrewTransportWizard() {
     setSuccess(null)
     setSaveResult(null)
     setError(null)
+    setSelectedVenueAddress(null)
     setStep(1)
   }
 
@@ -1034,11 +1191,10 @@ function CrewTransportWizard() {
                     <label className="block text-sm font-medium text-gray-700 mb-2">
                       Arrive by (optional)
                     </label>
-                    <input
-                      type="time"
+                    <TimeInput
                       value={formData.arrivalTime}
-                      onChange={(e) => updateField('arrivalTime', e.target.value)}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                      onChange={(v) => updateField('arrivalTime', v)}
+                      placeholder="e.g. 11 or 11:30"
                     />
                   </div>
 
@@ -1085,11 +1241,10 @@ function CrewTransportWizard() {
                             <label className="block text-sm font-medium text-gray-700 mb-2">
                               Collection arrive by (optional)
                             </label>
-                            <input
-                              type="time"
+                            <TimeInput
                               value={formData.collectionArrivalTime}
-                              onChange={(e) => updateField('collectionArrivalTime', e.target.value)}
-                              className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                              onChange={(v) => updateField('collectionArrivalTime', v)}
+                              placeholder="e.g. 14 or 14:30"
                             />
                           </div>
                         </>
@@ -1149,6 +1304,11 @@ function CrewTransportWizard() {
                   {formData.isNewVenue && formData.destination && (
                     <p className="text-xs text-blue-600 mt-1">
                       ➕ Will be added to venues database on save
+                    </p>
+                  )}
+                  {selectedVenueAddress && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      📍 {getAddressSnippet(selectedVenueAddress, 80)}
                     </p>
                   )}
                 </div>
@@ -1234,6 +1394,12 @@ function CrewTransportWizard() {
                             placeholder="Journey time"
                             className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                           />
+                          {formData.selectedVenueId && formData.originalVenueTravelTime !== null && 
+                           formData.travelTimeMins !== formData.originalVenueTravelTime && (
+                            <p className="text-xs text-orange-600 mt-1">
+                              ⚠️ Changed from {formData.originalVenueTravelTime}min - venue will be updated
+                            </p>
+                          )}
                         </div>
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -1246,6 +1412,12 @@ function CrewTransportWizard() {
                             placeholder="Train/bus fare"
                             className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                           />
+                          {formData.selectedVenueId && formData.originalVenueTicketCost !== null && 
+                           formData.travelCost !== formData.originalVenueTicketCost && (
+                            <p className="text-xs text-orange-600 mt-1">
+                              ⚠️ Changed from £{formData.originalVenueTicketCost} - venue will be updated
+                            </p>
+                          )}
                         </div>
                       </>
                     )}
@@ -1294,18 +1466,21 @@ function CrewTransportWizard() {
                   </div>
                 )}
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Work Duration (hours)
-                  </label>
-                  <input
-                    type="number"
-                    value={formData.workDurationHours || ''}
-                    onChange={(e) => updateField('workDurationHours', parseFloat(e.target.value) || 0)}
-                    placeholder="Time on site"
-                    className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                  />
-                </div>
+                {/* Only show Work Duration for hourly rate */}
+                {formData.calculationMode === 'hourly' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Work Duration (hours)
+                    </label>
+                    <input
+                      type="number"
+                      value={formData.workDurationHours || ''}
+                      onChange={(e) => updateField('workDurationHours', parseFloat(e.target.value) || 0)}
+                      placeholder="Time on site"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
+                )}
 
                 <div className="md:col-span-2">
                   <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -1466,6 +1641,18 @@ function CrewTransportWizard() {
                     placeholder="0"
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                   />
+                  {formData.selectedVenueId && formData.originalVenueTollsParking !== null && 
+                   formData.tollsParking !== formData.originalVenueTollsParking && (
+                    <p className="text-xs text-orange-600 mt-1">
+                      ⚠️ Changed from £{formData.originalVenueTollsParking} - venue will be updated
+                    </p>
+                  )}
+                  {formData.selectedVenueId && formData.originalVenueTollsParking !== null && 
+                   formData.tollsParking === formData.originalVenueTollsParking && formData.tollsParking > 0 && (
+                    <p className="text-xs text-green-600 mt-1">
+                      ✓ Auto-filled from venue
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -1569,7 +1756,7 @@ function CrewTransportWizard() {
                 </span>
               </div>
 
-              {/* Cost Summary Cards - UPDATED for delivery + collection */}
+              {/* Cost Summary Cards */}
               {formData.addCollection ? (
                 // Show separate costs for delivery and collection
                 <div className="space-y-4">
@@ -1627,7 +1814,7 @@ function CrewTransportWizard() {
                   </div>
                 </div>
               ) : (
-                // Single job cost display - UPDATED: rounded client charge, no "(Calc → rounded)"
+                // Single job cost display
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="bg-green-50 rounded-xl p-4">
                     <p className="text-sm text-green-600 font-medium">Client Charge</p>

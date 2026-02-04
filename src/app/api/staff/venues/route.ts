@@ -3,7 +3,7 @@
  * 
  * GET /api/staff/venues - Fetch all venues for dropdown
  * POST /api/staff/venues - Create new venue
- * PATCH /api/staff/venues - Update venue distance/time
+ * PATCH /api/staff/venues - Update venue distance/time/expenses
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -13,10 +13,24 @@ const VENUES_BOARD_ID = process.env.MONDAY_BOARD_ID_VENUES || '2406443142'
 
 // Column IDs for Venues board
 const VENUE_COLUMNS = {
-  name: 'text43',                    // Venue name (also item name)
-  distance: 'numeric_mm07y9eq',      // Distance (miles, one-way)
-  driveTime: 'numeric_mm074a1k',     // Drive Time (minutes, one-way)
+  name: 'text43',                            // Venue name (also item name)
+  address: 'long_text',                      // Address (long text)
+  distance: 'numeric_mm07y9eq',              // Distance (miles, one-way)
+  driveTime: 'numeric_mm074a1k',             // Drive Time (minutes, one-way)
+  publicTransportTime: 'numeric_mm0735e',    // Public transport - Travel Time (mins)
+  publicTransportCost: 'numeric_mm07jwvc',   // Public transport - Ticket Cost (£)
+  tollsParking: 'numeric_mm07cvgv',          // Tolls / Parking / Crossings (£)
 }
+
+// All column IDs we need to fetch
+const FETCH_COLUMN_IDS = [
+  VENUE_COLUMNS.address,
+  VENUE_COLUMNS.distance,
+  VENUE_COLUMNS.driveTime,
+  VENUE_COLUMNS.publicTransportTime,
+  VENUE_COLUMNS.publicTransportCost,
+  VENUE_COLUMNS.tollsParking,
+]
 
 // Venue item type from Monday API
 interface VenueItem {
@@ -33,8 +47,12 @@ interface VenueItem {
 interface ProcessedVenue {
   id: string
   name: string
+  address: string | null
   distance: number | null
   driveTime: number | null
+  publicTransportTime: number | null
+  publicTransportCost: number | null
+  tollsParking: number | null
 }
 
 // =============================================================================
@@ -50,7 +68,7 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
     headers: {
       'Content-Type': 'application/json',
       'Authorization': token,
-      'API-Version': '2024-10',  // Latest stable version
+      'API-Version': '2024-10',
     },
     body: JSON.stringify({ query, variables }),
   })
@@ -77,8 +95,12 @@ function processVenueItems(items: VenueItem[]): ProcessedVenue[] {
     return {
       id: item.id,
       name: item.name,
+      address: columns[VENUE_COLUMNS.address] || null,
       distance: columns[VENUE_COLUMNS.distance] ? parseFloat(columns[VENUE_COLUMNS.distance]) : null,
       driveTime: columns[VENUE_COLUMNS.driveTime] ? parseFloat(columns[VENUE_COLUMNS.driveTime]) : null,
+      publicTransportTime: columns[VENUE_COLUMNS.publicTransportTime] ? parseFloat(columns[VENUE_COLUMNS.publicTransportTime]) : null,
+      publicTransportCost: columns[VENUE_COLUMNS.publicTransportCost] ? parseFloat(columns[VENUE_COLUMNS.publicTransportCost]) : null,
+      tollsParking: columns[VENUE_COLUMNS.tollsParking] ? parseFloat(columns[VENUE_COLUMNS.tollsParking]) : null,
     }
   })
 }
@@ -88,6 +110,8 @@ function processVenueItems(items: VenueItem[]): ProcessedVenue[] {
 // =============================================================================
 
 async function fetchFirstPage(): Promise<{ items: VenueItem[]; cursor: string | null }> {
+  const columnIds = FETCH_COLUMN_IDS.map(id => `"${id}"`).join(', ')
+  
   const query = `
     query ($boardId: ID!) {
       boards(ids: [$boardId]) {
@@ -96,7 +120,7 @@ async function fetchFirstPage(): Promise<{ items: VenueItem[]; cursor: string | 
           items {
             id
             name
-            column_values(ids: ["${VENUE_COLUMNS.distance}", "${VENUE_COLUMNS.driveTime}"]) {
+            column_values(ids: [${columnIds}]) {
               id
               text
               value
@@ -128,6 +152,8 @@ async function fetchFirstPage(): Promise<{ items: VenueItem[]; cursor: string | 
 // =============================================================================
 
 async function fetchNextPage(cursor: string): Promise<{ items: VenueItem[]; cursor: string | null }> {
+  const columnIds = FETCH_COLUMN_IDS.map(id => `"${id}"`).join(', ')
+  
   const query = `
     query ($cursor: String!) {
       next_items_page(cursor: $cursor, limit: 500) {
@@ -135,7 +161,7 @@ async function fetchNextPage(cursor: string): Promise<{ items: VenueItem[]; curs
         items {
           id
           name
-          column_values(ids: ["${VENUE_COLUMNS.distance}", "${VENUE_COLUMNS.driveTime}"]) {
+          column_values(ids: [${columnIds}]) {
             id
             text
             value
@@ -233,7 +259,14 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { name, distance, driveTime } = await request.json()
+    const { 
+      name, 
+      distance, 
+      driveTime,
+      publicTransportTime,
+      publicTransportCost,
+      tollsParking,
+    } = await request.json()
 
     if (!name) {
       return NextResponse.json(
@@ -255,6 +288,15 @@ export async function POST(request: NextRequest) {
     }
     if (driveTime && driveTime > 0) {
       columnValues[VENUE_COLUMNS.driveTime] = driveTime
+    }
+    if (publicTransportTime && publicTransportTime > 0) {
+      columnValues[VENUE_COLUMNS.publicTransportTime] = publicTransportTime
+    }
+    if (publicTransportCost && publicTransportCost > 0) {
+      columnValues[VENUE_COLUMNS.publicTransportCost] = publicTransportCost
+    }
+    if (tollsParking && tollsParking > 0) {
+      columnValues[VENUE_COLUMNS.tollsParking] = tollsParking
     }
 
     const mutation = `
@@ -287,6 +329,9 @@ export async function POST(request: NextRequest) {
         name: result.create_item.name,
         distance,
         driveTime,
+        publicTransportTime,
+        publicTransportCost,
+        tollsParking,
       },
     })
 
@@ -300,7 +345,7 @@ export async function POST(request: NextRequest) {
 }
 
 // =============================================================================
-// PATCH - Update venue distance/time
+// PATCH - Update venue fields
 // =============================================================================
 
 export async function PATCH(request: NextRequest) {
@@ -316,7 +361,14 @@ export async function PATCH(request: NextRequest) {
       )
     }
 
-    const { venueId, distance, driveTime } = await request.json()
+    const { 
+      venueId, 
+      distance, 
+      driveTime,
+      publicTransportTime,
+      publicTransportCost,
+      tollsParking,
+    } = await request.json()
 
     if (!venueId) {
       return NextResponse.json(
@@ -325,7 +377,7 @@ export async function PATCH(request: NextRequest) {
       )
     }
 
-    console.log('Venues API: Updating venue', venueId, '- Distance:', distance, 'Drive Time:', driveTime)
+    console.log('Venues API: Updating venue', venueId)
 
     // Build column values - only update fields that are provided
     const columnValues: Record<string, unknown> = {}
@@ -336,6 +388,15 @@ export async function PATCH(request: NextRequest) {
     if (driveTime !== undefined && driveTime !== null) {
       columnValues[VENUE_COLUMNS.driveTime] = driveTime
     }
+    if (publicTransportTime !== undefined && publicTransportTime !== null) {
+      columnValues[VENUE_COLUMNS.publicTransportTime] = publicTransportTime
+    }
+    if (publicTransportCost !== undefined && publicTransportCost !== null) {
+      columnValues[VENUE_COLUMNS.publicTransportCost] = publicTransportCost
+    }
+    if (tollsParking !== undefined && tollsParking !== null) {
+      columnValues[VENUE_COLUMNS.tollsParking] = tollsParking
+    }
 
     if (Object.keys(columnValues).length === 0) {
       return NextResponse.json({
@@ -343,6 +404,8 @@ export async function PATCH(request: NextRequest) {
         message: 'No changes to update',
       })
     }
+
+    console.log('Venues API: Updating columns:', Object.keys(columnValues))
 
     const mutation = `
       mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {

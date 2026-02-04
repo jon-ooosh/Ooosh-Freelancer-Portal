@@ -71,6 +71,7 @@ const DC_COLUMNS = {
   keyPoints: 'key_points___summary',   // Key points / Flight # etc
   clientCharge: 'numeric_mm06wq2n',    // Client charge (what we bill)
   driverFee: 'numeric_mm0688f9',       // Driver fee (what we pay)
+  venueLink: 'connect_boards',         // PLACEHOLDER - update with actual venue link column ID!
 }
 
 // =============================================================================
@@ -80,6 +81,9 @@ const VENUE_COLUMNS = {
   name: 'text43',
   distance: 'numeric_mm07y9eq',
   driveTime: 'numeric_mm074a1k',
+  publicTransportTime: 'numeric_mm0735e',
+  publicTransportCost: 'numeric_mm07jwvc',
+  tollsParking: 'numeric_mm07cvgv',
 }
 
 // =============================================================================
@@ -93,7 +97,7 @@ const DC_DELIVER_COLLECT_LABELS: Record<string, string> = {
 }
 
 const DC_WHAT_IS_IT_LABELS: Record<string, string> = {
-  'vehicle': 'A vehicle',      // FIXED: lowercase 'v'
+  'vehicle': 'A vehicle',
   'equipment': 'Equipment',
   'people': 'People',
 }
@@ -101,11 +105,6 @@ const DC_WHAT_IS_IT_LABELS: Record<string, string> = {
 const DC_STATUS_DEFAULT = 'TO DO!'
 
 // Crewed Jobs Board labels
-const CREW_JOB_TYPE_LABELS: Record<string, string> = {
-  'crewed_job': 'Transport + Crew',
-  'crew_only': 'Crew Only',
-}
-
 const TRANSPORT_MODE_LABELS: Record<string, string> = {
   'there_and_back': 'There and back',
   'one_way': 'One-way',
@@ -136,10 +135,9 @@ const CALC_MODE_LABELS: Record<string, string> = {
   'day_rate': 'Day Rate',
 }
 
-// FIXED: These labels now match Monday.com exactly
 const EXPENSE_ARRANGEMENT_LABELS: Record<string, string> = {
-  'all_in_fixed': 'Fixed fee all-in',           // FIXED: was 'All-in fixed'
-  'fee_plus_reimbursed': 'Fee + expenses reimbursed',  // FIXED: was 'Fee + reimbursed'
+  'all_in_fixed': 'Fixed fee all-in',
+  'fee_plus_reimbursed': 'Fee + expenses reimbursed',
   'dry_hire_actuals': 'Dry hire + actuals',
 }
 
@@ -190,6 +188,9 @@ interface FormData {
   isNewVenue: boolean
   venueDistanceChanged: boolean
   venueDriveTimeChanged: boolean
+  venuePublicTransportTimeChanged: boolean
+  venuePublicTransportCostChanged: boolean
+  venueTollsParkingChanged: boolean
 }
 
 interface Costs {
@@ -230,19 +231,25 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
 // VENUE HELPERS
 // =============================================================================
 
-async function createVenue(name: string, distance: number, driveTime: number): Promise<string> {
+async function createVenue(
+  name: string, 
+  distance: number, 
+  driveTime: number,
+  publicTransportTime: number,
+  publicTransportCost: number,
+  tollsParking: number
+): Promise<string> {
   console.log('Creating new venue:', name)
   
   const columnValues: Record<string, unknown> = {
     [VENUE_COLUMNS.name]: name,
   }
   
-  if (distance > 0) {
-    columnValues[VENUE_COLUMNS.distance] = distance
-  }
-  if (driveTime > 0) {
-    columnValues[VENUE_COLUMNS.driveTime] = driveTime
-  }
+  if (distance > 0) columnValues[VENUE_COLUMNS.distance] = distance
+  if (driveTime > 0) columnValues[VENUE_COLUMNS.driveTime] = driveTime
+  if (publicTransportTime > 0) columnValues[VENUE_COLUMNS.publicTransportTime] = publicTransportTime
+  if (publicTransportCost > 0) columnValues[VENUE_COLUMNS.publicTransportCost] = publicTransportCost
+  if (tollsParking > 0) columnValues[VENUE_COLUMNS.tollsParking] = tollsParking
 
   const mutation = `
     mutation ($boardId: ID!, $itemName: String!, $columnValues: JSON!) {
@@ -269,22 +276,30 @@ async function createVenue(name: string, distance: number, driveTime: number): P
   return result.create_item.id
 }
 
-async function updateVenue(venueId: string, distance: number | null, driveTime: number | null): Promise<void> {
-  console.log('Updating venue:', venueId, '- Distance:', distance, 'Drive Time:', driveTime)
+async function updateVenue(
+  venueId: string, 
+  distance: number | null, 
+  driveTime: number | null,
+  publicTransportTime: number | null,
+  publicTransportCost: number | null,
+  tollsParking: number | null
+): Promise<void> {
+  console.log('Updating venue:', venueId)
   
   const columnValues: Record<string, unknown> = {}
   
-  if (distance !== null) {
-    columnValues[VENUE_COLUMNS.distance] = distance
-  }
-  if (driveTime !== null) {
-    columnValues[VENUE_COLUMNS.driveTime] = driveTime
-  }
+  if (distance !== null) columnValues[VENUE_COLUMNS.distance] = distance
+  if (driveTime !== null) columnValues[VENUE_COLUMNS.driveTime] = driveTime
+  if (publicTransportTime !== null) columnValues[VENUE_COLUMNS.publicTransportTime] = publicTransportTime
+  if (publicTransportCost !== null) columnValues[VENUE_COLUMNS.publicTransportCost] = publicTransportCost
+  if (tollsParking !== null) columnValues[VENUE_COLUMNS.tollsParking] = tollsParking
 
   if (Object.keys(columnValues).length === 0) {
     console.log('No venue changes to update')
     return
   }
+
+  console.log('Updating venue columns:', Object.keys(columnValues))
 
   const mutation = `
     mutation ($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
@@ -316,7 +331,8 @@ async function createDCItem(
   costs: Costs,
   itemType: 'delivery' | 'collection',
   jobDate: string,
-  arrivalTime: string
+  arrivalTime: string,
+  venueId: string | null
 ): Promise<{ id: string; name: string }> {
   
   // Build item name: "DEL: ClientName - Destination" or "COL: ClientName - Destination"
@@ -338,7 +354,7 @@ async function createDCItem(
     label: DC_DELIVER_COLLECT_LABELS[itemType] 
   }
 
-  // What is it? (A vehicle / Equipment / People) - FIXED: lowercase 'v'
+  // What is it? (A vehicle / Equipment / People)
   if (formData.whatIsIt && DC_WHAT_IS_IT_LABELS[formData.whatIsIt]) {
     columnValues[DC_COLUMNS.whatIsIt] = { 
       label: DC_WHAT_IS_IT_LABELS[formData.whatIsIt] 
@@ -359,9 +375,8 @@ async function createDCItem(
   // Status - default to "TO DO!"
   columnValues[DC_COLUMNS.status] = { label: DC_STATUS_DEFAULT }
 
-  // Key points / notes - combine destination and any notes
+  // Key points / notes - only include actual notes, NOT venue name (we have the link now)
   const keyPointsParts = []
-  if (formData.destination) keyPointsParts.push(`📍 ${formData.destination}`)
   if (formData.expenseNotes) keyPointsParts.push(formData.expenseNotes)
   if (formData.costingNotes) keyPointsParts.push(`Notes: ${formData.costingNotes}`)
   if (keyPointsParts.length > 0) {
@@ -371,6 +386,13 @@ async function createDCItem(
   // Financial columns
   columnValues[DC_COLUMNS.clientCharge] = costs.clientChargeTotal
   columnValues[DC_COLUMNS.driverFee] = costs.freelancerFee
+
+  // Venue link - if we have a venue ID and the column is configured, link it
+  // NOTE: Update DC_COLUMNS.venueLink with the actual column ID from your D&C board
+  // The format for connect_boards columns is: {"item_ids": [123456789]}
+  if (venueId && DC_COLUMNS.venueLink !== 'connect_boards') {
+    columnValues[DC_COLUMNS.venueLink] = { item_ids: [parseInt(venueId)] }
+  }
 
   console.log('D&C: Creating item:', itemName)
   console.log('D&C: Column values:', JSON.stringify(columnValues, null, 2))
@@ -484,7 +506,6 @@ async function createCrewedJobItem(
   if (formData.calculationMode && CALC_MODE_LABELS[formData.calculationMode]) {
     columnValues[CREW_COLUMNS.calculationMode] = { label: CALC_MODE_LABELS[formData.calculationMode] }
   }
-  // FIXED: Expense arrangement labels now match Monday.com exactly
   if (formData.expenseArrangement && EXPENSE_ARRANGEMENT_LABELS[formData.expenseArrangement]) {
     columnValues[CREW_COLUMNS.expenseArrangement] = { label: EXPENSE_ARRANGEMENT_LABELS[formData.expenseArrangement] }
   }
@@ -547,23 +568,39 @@ export async function POST(request: NextRequest) {
     // =========================================================================
     // HANDLE VENUE CREATION/UPDATE
     // =========================================================================
+    let venueId = formData.selectedVenueId
+    
     if (formData.destination) {
       if (formData.isNewVenue) {
         // Create new venue
         console.log('Creating new venue:', formData.destination)
-        await createVenue(
+        venueId = await createVenue(
           formData.destination,
           formData.distanceMiles,
-          formData.driveTimeMinutes
+          formData.driveTimeMinutes,
+          formData.travelTimeMins || 0,
+          formData.travelCost || 0,
+          formData.tollsParking || 0
         )
-      } else if (formData.selectedVenueId && (formData.venueDistanceChanged || formData.venueDriveTimeChanged)) {
-        // Update existing venue if values changed
-        console.log('Updating venue:', formData.selectedVenueId)
-        await updateVenue(
-          formData.selectedVenueId,
-          formData.venueDistanceChanged ? formData.distanceMiles : null,
-          formData.venueDriveTimeChanged ? formData.driveTimeMinutes : null
-        )
+      } else if (formData.selectedVenueId) {
+        // Check if any venue values changed
+        const hasChanges = formData.venueDistanceChanged || 
+                          formData.venueDriveTimeChanged ||
+                          formData.venuePublicTransportTimeChanged ||
+                          formData.venuePublicTransportCostChanged ||
+                          formData.venueTollsParkingChanged
+
+        if (hasChanges) {
+          console.log('Updating venue:', formData.selectedVenueId)
+          await updateVenue(
+            formData.selectedVenueId,
+            formData.venueDistanceChanged ? formData.distanceMiles : null,
+            formData.venueDriveTimeChanged ? formData.driveTimeMinutes : null,
+            formData.venuePublicTransportTimeChanged ? formData.travelTimeMins : null,
+            formData.venuePublicTransportCostChanged ? formData.travelCost : null,
+            formData.venueTollsParkingChanged ? formData.tollsParking : null
+          )
+        }
       }
     }
 
@@ -579,6 +616,7 @@ export async function POST(request: NextRequest) {
         itemId: result.id,
         itemName: result.name,
         board: 'crewed_jobs',
+        venueId,
       })
 
     } else if (formData.jobType === 'delivery' || formData.jobType === 'collection') {
@@ -592,7 +630,8 @@ export async function POST(request: NextRequest) {
         costs, 
         formData.jobType as 'delivery' | 'collection',
         formData.jobDate,
-        formData.arrivalTime
+        formData.arrivalTime,
+        venueId
       )
 
       let collectionResult = null
@@ -605,7 +644,8 @@ export async function POST(request: NextRequest) {
           costs,
           'collection',
           formData.collectionDate,
-          formData.collectionArrivalTime || ''
+          formData.collectionArrivalTime || '',
+          venueId
         )
       }
 
@@ -614,6 +654,7 @@ export async function POST(request: NextRequest) {
         itemId: primaryResult.id,
         itemName: primaryResult.name,
         board: 'dc',
+        venueId,
         ...(collectionResult && {
           collectionItemId: collectionResult.id,
           collectionItemName: collectionResult.name,
