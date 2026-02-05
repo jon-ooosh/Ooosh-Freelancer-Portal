@@ -1242,6 +1242,10 @@ function CrewTransportWizard() {
                           <label className="block text-sm font-medium text-gray-700 mb-2">Finish Date</label>
                           <input type="date" value={formData.jobFinishDate} onChange={(e) => updateField('jobFinishDate', e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
                           {formData.jobDate && formData.jobFinishDate && <p className="text-xs text-blue-600 mt-1">📅 {calculatedDays} day{calculatedDays !== 1 ? 's' : ''} (used for day rate)</p>}
+                          {/* Hire end date hint */}
+                          {jobInfo?.hireEndDate && formData.jobFinishDate && formData.jobFinishDate !== jobInfo.hireEndDate && (
+                            <p className="text-xs text-amber-600 mt-1">⚠️ Hire ends: {formatDateUK(jobInfo.hireEndDate)}</p>
+                          )}
                           {/* Finish before start validation */}
                           {formData.jobDate && formData.jobFinishDate && formData.jobFinishDate < formData.jobDate && (
                             <p className="text-xs text-red-600 mt-1">⚠️ Finish date is before start date — is this right?</p>
