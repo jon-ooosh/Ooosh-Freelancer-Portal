@@ -8,6 +8,11 @@
  * ROUTING LOGIC:
  * - Delivery or Collection → D&C Board (2028045828)
  * - Crewed Job → Crewed Jobs Board (18398014629)
+ * 
+ * ITEM NAMING:
+ * - D&C (no setup):    "DEL: Client Name" / "COL: Client Name"
+ * - D&C (with setup):  "DEL and set up: Client Name" / "COL and pack-down: Client Name"
+ * - Crewed:            "Work Type Label - Client Name"
  */
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -56,7 +61,7 @@ const CREW_COLUMNS = {
   expenseNotes: 'text_mm06hyba',
   actualFeeClaimed: 'numeric_mm06hkkn',
   actualExpensesClaimed: 'numeric_mm06q1nr',
-  // NEW: Expense breakdown columns (Phase 3)
+  // Expense breakdown columns (Phase 3)
   expensesIncluded: 'numeric_mm0815zc',
   expensesNotIncluded: 'numeric_mm086asx',
   expenseBreakdown: 'long_text_mm086bts',
@@ -77,7 +82,7 @@ const DC_COLUMNS = {
   clientCharge: 'numeric_mm06wq2n',    // Client charge (what we bill)
   driverFee: 'numeric_mm0688f9',       // Driver fee (what we pay)
   venueLink: 'connect_boards6',        // Link to venue in Address Book
-  // NEW: Expense breakdown columns (Phase 3)
+  // Expense breakdown columns (Phase 3)
   expensesIncluded: 'numeric_mm08av8f',
   expensesNotIncluded: 'numeric_mm08jhcw',
   expenseBreakdown: 'long_text_mm08cpst',
@@ -193,7 +198,12 @@ interface FormData {
   expenseNotes: string
   costingNotes: string
   addCollection: boolean
-  // NEW: Expense breakdown data (Phase 3)
+  // Setup work extension (D&C jobs)
+  includesSetupWork: boolean
+  setupWorkDescription: string
+  setupExtraTimeHours: number
+  setupFixedPremium: number
+  // Expense breakdown data (Phase 3)
   expenseBreakdown: string
   expensesIncludedTotal: number
   expensesNotIncludedTotal: number
@@ -349,11 +359,16 @@ async function createDCItem(
   venueId: string | null
 ): Promise<{ id: string; name: string }> {
   
-  // Build item name: "DEL: ClientName - Destination" or "COL: ClientName - Destination"
+  // Build item name: 
+  //   No setup:    "DEL: Client Name" / "COL: Client Name"
+  //   With setup:  "DEL and set up: Client Name" / "COL and pack-down: Client Name"
+  //   No venue in name (venue is linked via connect_boards column)
   const prefix = itemType === 'delivery' ? 'DEL' : 'COL'
+  const setupFlag = formData.includesSetupWork
+    ? (itemType === 'delivery' ? ' and set up' : ' and pack-down')
+    : ''
   const clientPart = formData.clientName || `Job ${formData.hirehopJobNumber}`
-  const destPart = formData.destination || 'TBC'
-  const itemName = `${prefix}: ${clientPart} - ${destPart}`
+  const itemName = `${prefix}${setupFlag}: ${clientPart}`
 
   // Build column values
   const columnValues: Record<string, unknown> = {}
@@ -389,8 +404,11 @@ async function createDCItem(
   // Status - default to "TO DO!"
   columnValues[DC_COLUMNS.status] = { label: DC_STATUS_DEFAULT }
 
-  // Key points / notes - only include actual notes, NOT venue name (we have the link now)
+  // Key points / notes - include setup work description if present
   const keyPointsParts = []
+  if (formData.includesSetupWork && formData.setupWorkDescription) {
+    keyPointsParts.push(`${itemType === 'delivery' ? 'Setup' : 'Pack-down'}: ${formData.setupWorkDescription}`)
+  }
   if (formData.expenseNotes) keyPointsParts.push(formData.expenseNotes)
   if (formData.costingNotes) keyPointsParts.push(`Notes: ${formData.costingNotes}`)
   if (keyPointsParts.length > 0) {
@@ -401,7 +419,7 @@ async function createDCItem(
   columnValues[DC_COLUMNS.clientCharge] = costs.clientChargeTotal
   columnValues[DC_COLUMNS.driverFee] = costs.freelancerFee
 
-  // NEW: Expense breakdown columns (Phase 3)
+  // Expense breakdown columns (Phase 3)
   if (formData.expensesIncludedTotal > 0) {
     columnValues[DC_COLUMNS.expensesIncluded] = formData.expensesIncludedTotal
   }
@@ -459,13 +477,20 @@ async function createCrewedJobItem(
   const hasTransport = formData.distanceMiles > 0
   const mondayJobType = hasTransport ? 'Transport + Crew' : 'Crew Only'
 
-  // Build item name
-  const itemName = formData.hirehopJobNumber 
-    ? `Job ${formData.hirehopJobNumber} - Crewed Job - ${formData.destination || 'TBC'}`
-    : `Crewed Job - ${formData.destination || 'New Job'}`
+  // Build item name: "Work Type Label - Client Name"
+  // e.g. "Backline Tech - Acme Corp" or "Engineer - FOH - Acme Corp"
+  const workLabel = formData.workType 
+    ? (WORK_TYPE_LABELS[formData.workType] || formData.workType)
+    : 'Crewed Job'
+  // If work type is "other", use the custom description if available
+  const displayWorkLabel = formData.workType === 'other' && formData.workTypeOther
+    ? formData.workTypeOther
+    : workLabel
+  const clientPart = formData.clientName || `Job ${formData.hirehopJobNumber || 'New'}`
+  const itemName = `${displayWorkLabel} - ${clientPart}`
 
   // Calculate total expected expenses
-  const totalExpectedExpenses = costs.expectedFuelCost + costs.expectedOtherExpenses
+  const totalExpectedExpenses = costs.expectedFuelCost + (costs.expectedOtherExpenses || 0)
 
   // Build column values object
   const columnValues: Record<string, unknown> = {}
@@ -504,7 +529,7 @@ async function createCrewedJobItem(
   columnValues[CREW_COLUMNS.expectedExpenses] = totalExpectedExpenses
   columnValues[CREW_COLUMNS.ourMargin] = costs.ourMargin
   
-  // NEW: Expense breakdown columns (Phase 3)
+  // Expense breakdown columns (Phase 3)
   if (formData.expensesIncludedTotal > 0) {
     columnValues[CREW_COLUMNS.expensesIncluded] = formData.expensesIncludedTotal
   }
