@@ -297,10 +297,6 @@ const initialFormData: FormData = {
 const WORK_TYPE_OPTIONS = [
   { value: 'backline_tech', label: 'Backline Tech' },
   { value: 'general_assist', label: 'General Assist' },
-  { value: 'load_in', label: 'Load-in' },
-  { value: 'load_out', label: 'Load-out' },
-  { value: 'set_up', label: 'Set-up' },
-  { value: 'pack_down', label: 'Pack-down' },
   { value: 'engineer_foh', label: 'Engineer - FOH' },
   { value: 'engineer_mons', label: 'Engineer - mons' },
   { value: 'driving_only', label: 'Driving Only' },
@@ -1115,10 +1111,27 @@ function CrewTransportWizard() {
                   { value: 'crewed_job', label: 'Crewed Job', icon: '👷', desc: 'Freelancer stays on site to work the event' },
                 ].map((option) => (
                   <button key={option.value} onClick={() => {
-                    updateField('jobType', option.value as FormData['jobType'])
-                    if (option.value === 'crewed_job') { updateField('whatIsIt', ''); updateField('calculationMode', 'day_rate') }
-                    if (option.value === 'collection' && jobInfo?.hireEndDate && !formData.jobDate) updateField('jobDate', jobInfo.hireEndDate)
-                    if ((option.value === 'delivery' || option.value === 'crewed_job') && jobInfo?.hireStartDate && !formData.jobDate) updateField('jobDate', jobInfo.hireStartDate)
+                    // Reset calculation-relevant state when job type changes
+                    setFormData(prev => ({
+                      ...prev,
+                      jobType: option.value as FormData['jobType'],
+                      addCollection: false,
+                      whatIsIt: option.value === 'crewed_job' ? '' as const : prev.whatIsIt,
+                      calculationMode: option.value === 'crewed_job' ? 'day_rate' as const : 'hourly' as const,
+                      travelMethod: '' as const,
+                      travelTimeMins: 0,
+                      travelCost: 0,
+                      includesSetupWork: false,
+                      setupWorkDescription: '',
+                      setupExtraTimeHours: 0,
+                      setupFixedPremium: 0,
+                      oohManualOverride: false,
+                      earlyStartMinutes: 0,
+                      lateFinishMinutes: 0,
+                      jobDate: option.value === 'collection' && jobInfo?.hireEndDate && !prev.jobDate ? jobInfo.hireEndDate :
+                               (option.value === 'delivery' || option.value === 'crewed_job') && jobInfo?.hireStartDate && !prev.jobDate ? jobInfo.hireStartDate :
+                               prev.jobDate,
+                    }))
                   }} className={`p-4 rounded-xl border-2 text-left transition-all ${formData.jobType === option.value ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
                     <span className="text-2xl">{option.icon}</span>
                     <h3 className="mt-1 font-semibold text-gray-900">{option.label}</h3>
@@ -1299,10 +1312,30 @@ function CrewTransportWizard() {
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Distance (miles, one-way)</label>
                   <input type="number" value={formData.distanceMiles === 0 ? '0' : formData.distanceMiles || ''} onChange={(e) => updateField('distanceMiles', parseFloat(e.target.value) || 0)} placeholder="From Google Maps" min="0" className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                  {/* Venue field indicators for distance */}
+                  {formData.selectedVenueId && formData.originalVenueDistance !== null && formData.distanceMiles === formData.originalVenueDistance && formData.distanceMiles > 0 && (
+                    <p className="text-xs text-green-600 mt-1">✓ From venue database</p>
+                  )}
+                  {formData.selectedVenueId && formData.originalVenueDistance === null && formData.distanceMiles > 0 && (
+                    <p className="text-xs text-blue-600 mt-1">➕ Will be saved to venue</p>
+                  )}
+                  {formData.selectedVenueId && formData.originalVenueDistance !== null && formData.distanceMiles !== formData.originalVenueDistance && (
+                    <p className="text-xs text-orange-600 mt-1">⚠️ Changed from {formData.originalVenueDistance}mi — venue will be updated</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Drive Time (minutes, one-way)</label>
                   <input type="number" value={formData.driveTimeMinutes || ''} onChange={(e) => updateField('driveTimeMinutes', parseFloat(e.target.value) || 0)} placeholder="From Google Maps" min="0" className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                  {/* Venue field indicators for drive time */}
+                  {formData.selectedVenueId && formData.originalVenueDriveTime !== null && formData.driveTimeMinutes === formData.originalVenueDriveTime && formData.driveTimeMinutes > 0 && (
+                    <p className="text-xs text-green-600 mt-1">✓ From venue database</p>
+                  )}
+                  {formData.selectedVenueId && formData.originalVenueDriveTime === null && formData.driveTimeMinutes > 0 && (
+                    <p className="text-xs text-blue-600 mt-1">➕ Will be saved to venue</p>
+                  )}
+                  {formData.selectedVenueId && formData.originalVenueDriveTime !== null && formData.driveTimeMinutes !== formData.originalVenueDriveTime && (
+                    <p className="text-xs text-orange-600 mt-1">⚠️ Changed from {formData.originalVenueDriveTime}min — venue will be updated</p>
+                  )}
                 </div>
               </div>
 
@@ -1323,10 +1356,30 @@ function CrewTransportWizard() {
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-2">Travel Time (mins)</label>
                           <input type="number" value={formData.travelTimeMins || ''} onChange={(e) => updateField('travelTimeMins', parseFloat(e.target.value) || 0)} placeholder="Journey time" className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                          {/* Venue field indicators for travel time */}
+                          {formData.selectedVenueId && formData.originalVenueTravelTime !== null && formData.travelTimeMins === formData.originalVenueTravelTime && formData.travelTimeMins > 0 && (
+                            <p className="text-xs text-green-600 mt-1">✓ From venue database</p>
+                          )}
+                          {formData.selectedVenueId && formData.originalVenueTravelTime === null && formData.travelTimeMins > 0 && (
+                            <p className="text-xs text-blue-600 mt-1">➕ Will be saved to venue</p>
+                          )}
+                          {formData.selectedVenueId && formData.originalVenueTravelTime !== null && formData.travelTimeMins !== formData.originalVenueTravelTime && (
+                            <p className="text-xs text-orange-600 mt-1">⚠️ Changed from {formData.originalVenueTravelTime}min — venue will be updated</p>
+                          )}
                         </div>
                         <div>
                           <label className="block text-sm font-medium text-gray-700 mb-2">Ticket Cost (£)</label>
                           <input type="number" value={formData.travelCost || ''} onChange={(e) => updateField('travelCost', parseFloat(e.target.value) || 0)} placeholder="Train/bus fare" className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                          {/* Venue field indicators for ticket cost */}
+                          {formData.selectedVenueId && formData.originalVenueTicketCost !== null && formData.travelCost === formData.originalVenueTicketCost && formData.travelCost > 0 && (
+                            <p className="text-xs text-green-600 mt-1">✓ From venue database</p>
+                          )}
+                          {formData.selectedVenueId && formData.originalVenueTicketCost === null && formData.travelCost > 0 && (
+                            <p className="text-xs text-blue-600 mt-1">➕ Will be saved to venue</p>
+                          )}
+                          {formData.selectedVenueId && formData.originalVenueTicketCost !== null && formData.travelCost !== formData.originalVenueTicketCost && (
+                            <p className="text-xs text-orange-600 mt-1">⚠️ Changed from £{formData.originalVenueTicketCost} — venue will be updated</p>
+                          )}
                         </div>
                       </>
                     )}
@@ -1536,6 +1589,31 @@ function CrewTransportWizard() {
                 </div>
               </div>
 
+              {/* Delivery + Collection dual breakdown */}
+              {formData.addCollection && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="border border-blue-200 rounded-xl p-4 bg-blue-50/50">
+                    <p className="text-sm font-medium text-blue-700 mb-1">📦 Delivery</p>
+                    <p className="text-xs text-blue-600">{formatDateUK(formData.jobDate)}{formData.arrivalTime && ` @ ${formatTime12h(formData.arrivalTime)}`}</p>
+                    <div className="mt-2 text-sm">
+                      <p>Client: <span className="font-medium">£{costs.clientChargeTotalRounded}</span></p>
+                      <p>Freelancer: <span className="font-medium">£{costs.freelancerFeeRounded}</span></p>
+                    </div>
+                  </div>
+                  <div className="border border-orange-200 rounded-xl p-4 bg-orange-50/50">
+                    <p className="text-sm font-medium text-orange-700 mb-1">📥 Collection</p>
+                    <p className="text-xs text-orange-600">{formatDateUK(formData.collectionDate)}{formData.collectionArrivalTime && ` @ ${formatTime12h(formData.collectionArrivalTime)}`}</p>
+                    <div className="mt-2 text-sm">
+                      <p>Client: <span className="font-medium">£{costs.clientChargeTotalRounded}</span></p>
+                      <p>Freelancer: <span className="font-medium">£{costs.freelancerFeeRounded}</span></p>
+                    </div>
+                  </div>
+                  <div className="md:col-span-2 bg-gray-100 rounded-lg p-3 text-sm text-center">
+                    <span className="font-medium">Combined totals:</span> Client £{costs.clientChargeTotalRounded * 2} · Freelancer £{costs.freelancerFeeRounded * 2} · Margin £{(costs.ourMargin * 2).toFixed(2)}
+                  </div>
+                </div>
+              )}
+
               <div className="border rounded-lg divide-y">
                 <div className="px-4 py-3 bg-gray-50"><h3 className="font-medium text-gray-900">Job Summary</h3></div>
                 <div className="px-4 py-3 grid grid-cols-2 gap-4 text-sm">
@@ -1543,7 +1621,10 @@ function CrewTransportWizard() {
                   <div><span className="text-gray-500">HireHop #:</span> <span className="ml-2 text-gray-900">{formData.hirehopJobNumber || 'Not set'}</span></div>
                   {formData.clientName && <div><span className="text-gray-500">Client:</span> <span className="ml-2 text-gray-900">{formData.clientName}</span></div>}
                   {formData.destination && <div><span className="text-gray-500">Destination:</span> <span className="ml-2 text-gray-900">{formData.destination}</span></div>}
-                  <div><span className="text-gray-500">Date:</span> <span className="ml-2 text-gray-900">{formatDateUK(formData.jobDate)}{formData.arrivalTime && ` @ ${formatTime12h(formData.arrivalTime)}`}</span></div>
+                  <div><span className="text-gray-500">{formData.addCollection ? 'Delivery:' : 'Date:'}</span> <span className="ml-2 text-gray-900">{formatDateUK(formData.jobDate)}{formData.arrivalTime && ` @ ${formatTime12h(formData.arrivalTime)}`}</span></div>
+                  {formData.addCollection && formData.collectionDate && (
+                    <div><span className="text-gray-500">Collection:</span> <span className="ml-2 text-gray-900">{formatDateUK(formData.collectionDate)}{formData.collectionArrivalTime && ` @ ${formatTime12h(formData.collectionArrivalTime)}`}</span></div>
+                  )}
                   {isCrewedJob && formData.isMultiDay && formData.jobFinishDate && (
                     <div><span className="text-gray-500">Finish:</span> <span className="ml-2 text-gray-900">{formatDateUK(formData.jobFinishDate)} ({formData.numberOfDays} days)</span></div>
                   )}
@@ -1574,9 +1655,9 @@ function CrewTransportWizard() {
           </div>
         </div>
 
-        {/* Live preview floating panel */}
+        {/* Live preview floating panel - hidden on mobile to avoid overlapping Continue button */}
         {costs && step > 1 && step < totalSteps && (
-          <div className="fixed bottom-4 right-4 bg-white rounded-xl shadow-lg border p-4 max-w-xs">
+          <div className="hidden md:block fixed bottom-4 right-4 bg-white rounded-xl shadow-lg border p-4 max-w-xs">
             <p className="text-sm text-gray-500 mb-2">Live Preview</p>
             <div className="grid grid-cols-2 gap-2 text-sm">
               <div><span className="text-gray-500">Client:</span> <span className="ml-1 font-medium">£{costs.clientChargeTotalRounded}</span></div>

@@ -65,6 +65,7 @@ const CREW_COLUMNS = {
   expensesIncluded: 'numeric_mm0815zc',
   expensesNotIncluded: 'numeric_mm086asx',
   expenseBreakdown: 'long_text_mm086bts',
+  venueLink: 'board_relation_mm09vpr1',  // Link to venue in Address Book
 }
 
 // =============================================================================
@@ -404,13 +405,11 @@ async function createDCItem(
   // Status - default to "TO DO!"
   columnValues[DC_COLUMNS.status] = { label: DC_STATUS_DEFAULT }
 
-  // Key points / notes - include setup work description if present
+  // Key points - only setup/pack-down work descriptions (expense info goes in breakdown)
   const keyPointsParts = []
   if (formData.includesSetupWork && formData.setupWorkDescription) {
     keyPointsParts.push(`${itemType === 'delivery' ? 'Setup' : 'Pack-down'}: ${formData.setupWorkDescription}`)
   }
-  if (formData.expenseNotes) keyPointsParts.push(formData.expenseNotes)
-  if (formData.costingNotes) keyPointsParts.push(`Notes: ${formData.costingNotes}`)
   if (keyPointsParts.length > 0) {
     columnValues[DC_COLUMNS.keyPoints] = keyPointsParts.join('\n')
   }
@@ -420,14 +419,19 @@ async function createDCItem(
   columnValues[DC_COLUMNS.driverFee] = costs.freelancerFee
 
   // Expense breakdown columns (Phase 3)
+  // Consolidate: structured breakdown + expense notes + costing notes into one field
   if (formData.expensesIncludedTotal > 0) {
     columnValues[DC_COLUMNS.expensesIncluded] = formData.expensesIncludedTotal
   }
   if (formData.expensesNotIncludedTotal > 0) {
     columnValues[DC_COLUMNS.expensesNotIncluded] = formData.expensesNotIncludedTotal
   }
-  if (formData.expenseBreakdown) {
-    columnValues[DC_COLUMNS.expenseBreakdown] = formData.expenseBreakdown
+  const dcBreakdownParts: string[] = []
+  if (formData.expenseBreakdown) dcBreakdownParts.push(formData.expenseBreakdown)
+  if (formData.expenseNotes) dcBreakdownParts.push(`\nExpenses: ${formData.expenseNotes}`)
+  if (formData.costingNotes) dcBreakdownParts.push(`\nNotes: ${formData.costingNotes}`)
+  if (dcBreakdownParts.length > 0) {
+    columnValues[DC_COLUMNS.expenseBreakdown] = dcBreakdownParts.join('\n')
   }
 
   // Venue link - if we have a venue ID, link it
@@ -470,7 +474,8 @@ async function createDCItem(
 
 async function createCrewedJobItem(
   formData: FormData,
-  costs: Costs
+  costs: Costs,
+  venueId: string | null
 ): Promise<{ id: string; name: string }> {
   
   // Determine the job type label based on transport
@@ -507,10 +512,7 @@ async function createCrewedJobItem(
     columnValues[CREW_COLUMNS.hirehopJobNumber] = formData.hirehopJobNumber
   }
   
-  // Combine notes
-  const combinedNotes = [formData.expenseNotes, formData.costingNotes ? `Notes: ${formData.costingNotes}` : '']
-    .filter(Boolean).join('\n\n')
-  if (combinedNotes) columnValues[CREW_COLUMNS.expenseNotes] = combinedNotes
+  // Expense notes and costing notes will be consolidated into expenseBreakdown below
   
   // Numeric columns
   if (formData.distanceMiles > 0) columnValues[CREW_COLUMNS.distanceMiles] = formData.distanceMiles
@@ -526,18 +528,22 @@ async function createCrewedJobItem(
   // Financial columns
   columnValues[CREW_COLUMNS.clientChargeTotal] = costs.clientChargeTotal
   columnValues[CREW_COLUMNS.freelancerFee] = costs.freelancerFee
-  columnValues[CREW_COLUMNS.expectedExpenses] = totalExpectedExpenses
   columnValues[CREW_COLUMNS.ourMargin] = costs.ourMargin
   
   // Expense breakdown columns (Phase 3)
+  // Consolidate: structured breakdown + expense notes + costing notes into one field
   if (formData.expensesIncludedTotal > 0) {
     columnValues[CREW_COLUMNS.expensesIncluded] = formData.expensesIncludedTotal
   }
   if (formData.expensesNotIncludedTotal > 0) {
     columnValues[CREW_COLUMNS.expensesNotIncluded] = formData.expensesNotIncludedTotal
   }
-  if (formData.expenseBreakdown) {
-    columnValues[CREW_COLUMNS.expenseBreakdown] = formData.expenseBreakdown
+  const crewBreakdownParts: string[] = []
+  if (formData.expenseBreakdown) crewBreakdownParts.push(formData.expenseBreakdown)
+  if (formData.expenseNotes) crewBreakdownParts.push(`\nExpenses: ${formData.expenseNotes}`)
+  if (formData.costingNotes) crewBreakdownParts.push(`\nNotes: ${formData.costingNotes}`)
+  if (crewBreakdownParts.length > 0) {
+    columnValues[CREW_COLUMNS.expenseBreakdown] = crewBreakdownParts.join('\n')
   }
   
   // Date columns
@@ -552,7 +558,7 @@ async function createCrewedJobItem(
   
   // Status columns
   columnValues[CREW_COLUMNS.jobType] = { label: mondayJobType }
-  columnValues[CREW_COLUMNS.status] = { label: 'TBC' }
+  columnValues[CREW_COLUMNS.status] = { label: 'TO DO!' }
   
   // Transport mode - determine from context
   if (hasTransport) {
@@ -577,14 +583,20 @@ async function createCrewedJobItem(
     columnValues[CREW_COLUMNS.pdArrangement] = { label: PD_ARRANGEMENT_LABELS[formData.pdArrangement] }
   }
 
+  // Venue link - if we have a venue ID, link it
+  if (venueId) {
+    columnValues[CREW_COLUMNS.venueLink] = { item_ids: [parseInt(venueId)] }
+  }
+
   console.log('Crewed Job: Creating item:', itemName)
   console.log('Crewed Job: Column values:', JSON.stringify(columnValues, null, 2))
 
-  // Create item mutation
+  // Create item mutation - place in "TBC" group
   const mutation = `
-    mutation ($boardId: ID!, $itemName: String!, $columnValues: JSON!) {
+    mutation ($boardId: ID!, $groupId: String!, $itemName: String!, $columnValues: JSON!) {
       create_item(
         board_id: $boardId
+        group_id: $groupId
         item_name: $itemName
         column_values: $columnValues
       ) {
@@ -598,6 +610,7 @@ async function createCrewedJobItem(
     create_item: { id: string; name: string }
   }>(mutation, {
     boardId: CREW_JOBS_BOARD_ID,
+    groupId: 'group_title',
     itemName,
     columnValues: JSON.stringify(columnValues),
   })
@@ -673,7 +686,7 @@ export async function POST(request: NextRequest) {
       // =========================================================================
       // CREWED JOB → Crewed Jobs Board
       // =========================================================================
-      const result = await createCrewedJobItem(formData, costs)
+      const result = await createCrewedJobItem(formData, costs, venueId)
 
       return NextResponse.json({
         success: true,
