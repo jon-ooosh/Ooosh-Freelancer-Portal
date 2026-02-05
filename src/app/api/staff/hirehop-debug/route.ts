@@ -55,7 +55,7 @@ export async function GET(request: NextRequest) {
       totalItems: Array.isArray(items) ? items.length : 'unknown',
       // All unique keys across all items (so we can see every field HireHop sends)
       allFieldsFound: Array.isArray(items)
-        ? [...new Set(items.flatMap((item: Record<string, unknown>) => Object.keys(item)))]
+        ? Array.from(new Set(items.flatMap((item: Record<string, unknown>) => Object.keys(item))))
         : [],
       // Raw items - the full unfiltered response
       rawItems: items,
