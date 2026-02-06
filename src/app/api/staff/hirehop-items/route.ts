@@ -251,6 +251,10 @@ async function addLabourItem(
   console.log(`HireHop Items: Price=${price}, Note="${note}"`)
   
   // Build the request parameters (matching the format from the network sniff)
+  // Get current local datetime in required format
+  const now = new Date()
+  const localDateTime = now.toISOString().slice(0, 19).replace('T', ' ')
+  
   const params = new URLSearchParams({
     job: jobId,
     kind: '4',                    // 4 = labour item
@@ -266,10 +270,13 @@ async function addLabourItem(
     name: '',                     // Leave empty - uses default from list_id
     price_type: '0',              // One-off price
     vat_rate: '0',
+    value: '0',
     weight: '0',
+    cost_price: '0',
     no_shortfall: '1',
     no_availability: '0',
     ignore: '0',
+    local: localDateTime,         // Current datetime - may be required
     token: token,
   })
   
@@ -292,15 +299,31 @@ async function addLabourItem(
     
     const text = await response.text()
     
+    // Log the raw response for debugging
+    console.log(`HireHop Items: Raw response for ${itemType}:`, text.substring(0, 500))
+    
     if (text.trim().startsWith('<')) {
       return { 
         itemId: '', 
         success: false, 
-        error: 'Authentication failed' 
+        error: 'Authentication failed - received HTML' 
       }
     }
     
     const result = JSON.parse(text)
+    
+    // Log the parsed structure
+    console.log(`HireHop Items: Parsed response keys:`, Object.keys(result))
+    
+    // Check for error in response
+    if (result.error) {
+      console.log(`HireHop Items: Error in response:`, result.error)
+      return {
+        itemId: '',
+        success: false,
+        error: `HireHop error: ${result.error}`
+      }
+    }
     
     if (result.items && result.items.length > 0) {
       const createdItem = result.items[0]
@@ -311,10 +334,11 @@ async function addLabourItem(
       }
     }
     
+    // Return the raw response structure in the error for debugging
     return { 
       itemId: '', 
       success: false, 
-      error: 'Item created but no ID returned' 
+      error: `No items in response. Keys: ${Object.keys(result).join(', ')}. Full: ${JSON.stringify(result).substring(0, 200)}` 
     }
     
   } catch (error) {
