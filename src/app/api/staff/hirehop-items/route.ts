@@ -97,7 +97,17 @@ async function fetchJobItems(jobId: string): Promise<HireHopRawItem[]> {
     throw new Error('HireHop authentication failed - received HTML')
   }
   
-  return JSON.parse(text) as HireHopRawItem[]
+  const parsed = JSON.parse(text)
+  
+  // Handle both array response and object with items property
+  if (Array.isArray(parsed)) {
+    return parsed as HireHopRawItem[]
+  } else if (parsed && Array.isArray(parsed.items)) {
+    return parsed.items as HireHopRawItem[]
+  } else {
+    console.log('HireHop Items: Unexpected response structure:', Object.keys(parsed || {}))
+    return []
+  }
 }
 
 /**
