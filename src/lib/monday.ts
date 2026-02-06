@@ -70,6 +70,35 @@ export const RESOURCES_COLUMNS = {
   files: 'files',                           // Files column
 } as const
 
+// Crewed Jobs board columns
+export const CREW_JOB_COLUMNS = {
+  freelancerEmailGC: 'text_mm09da3v',      // Text column populated by General Caster from mirror
+  freelancerEmailMirror: 'lookup_mm09gzyh', // Mirror column (not used directly — GC text is more reliable)
+  hhRef: 'text_mm081gk5',                  // HireHop job number (text column)
+  jobType: 'color_mm062e1x',               // "Transport + Crew" or "Crew Only"
+  status: 'color_mm06zxg3',                // TO DO!, Working on it, All arranged & email crew, etc.
+  destination: 'text_mm065ytz',             // Venue name (text)
+  venueLink: 'board_relation_mm09vpr1',     // Connect column linking to Address Book/Venues
+  jobDate: 'date_mm067tnh',                // Job start date
+  jobFinishDate: 'date_mm085d7c',          // Job end date (multi-day jobs)
+  arrivalTime: 'hour_mm06y636',            // When to arrive
+  workType: 'color_mm063qgs',              // Backline Tech, General Assist, etc.
+  workTypeOther: 'text_mm06542v',           // Custom description if "Other"
+  workDurationHours: 'numeric_mm06qxty',    // Hours of on-site work
+  workDescription: 'text_mm06f0bj',         // Details of the work
+  freelancerFee: 'numeric_mm06fx2z',        // What we pay them (direct — no mirror needed)
+  transportMode: 'color_mm06w09w',          // "There and back" / "One-way" / "N/A"
+  distanceMiles: 'numeric_mm06sxeb',        // One-way distance
+  driveTimeMinutes: 'numeric_mm06d4d0',     // One-way drive time
+  expenseArrangement: 'color_mm06em94',     // How expenses are handled
+  pdArrangement: 'color_mm06v3fg',          // Per diem arrangement
+  pdAmount: 'numeric_mm06f93p',             // Per diem daily rate
+  numberOfDays: 'numeric_mm063z0y',         // For multi-day/day rate jobs
+  expenseBreakdown: 'long_text_mm086bts',   // Itemised expense detail
+  expensesIncluded: 'numeric_mm0815zc',     // £ included in quote
+  expensesNotIncluded: 'numeric_mm086asx',  // £ on top of quote
+} as const
+
 // List of column IDs we need to fetch for jobs
 // This dramatically reduces response size and speeds up queries
 const DC_COLUMNS_TO_FETCH = [
@@ -107,6 +136,35 @@ const VENUE_COLUMNS_TO_FETCH = [
 const RESOURCES_COLUMNS_TO_FETCH = [
   RESOURCES_COLUMNS.shareWithFreelancers,
   RESOURCES_COLUMNS.files,
+]
+
+// List of column IDs we need to fetch for crew jobs
+// Only fetch what we need — dramatically reduces response size
+const CREW_JOB_COLUMNS_TO_FETCH = [
+  CREW_JOB_COLUMNS.freelancerEmailGC,
+  CREW_JOB_COLUMNS.hhRef,
+  CREW_JOB_COLUMNS.jobType,
+  CREW_JOB_COLUMNS.status,
+  CREW_JOB_COLUMNS.destination,
+  CREW_JOB_COLUMNS.venueLink,
+  CREW_JOB_COLUMNS.jobDate,
+  CREW_JOB_COLUMNS.jobFinishDate,
+  CREW_JOB_COLUMNS.arrivalTime,
+  CREW_JOB_COLUMNS.workType,
+  CREW_JOB_COLUMNS.workTypeOther,
+  CREW_JOB_COLUMNS.workDurationHours,
+  CREW_JOB_COLUMNS.workDescription,
+  CREW_JOB_COLUMNS.freelancerFee,
+  CREW_JOB_COLUMNS.transportMode,
+  CREW_JOB_COLUMNS.distanceMiles,
+  CREW_JOB_COLUMNS.driveTimeMinutes,
+  CREW_JOB_COLUMNS.expenseArrangement,
+  CREW_JOB_COLUMNS.pdArrangement,
+  CREW_JOB_COLUMNS.pdAmount,
+  CREW_JOB_COLUMNS.numberOfDays,
+  CREW_JOB_COLUMNS.expenseBreakdown,
+  CREW_JOB_COLUMNS.expensesIncluded,
+  CREW_JOB_COLUMNS.expensesNotIncluded,
 ]
 
 // List of column IDs we need to fetch for freelancers
@@ -167,6 +225,7 @@ export function getBoardIds() {
     freelancers: process.env.MONDAY_BOARD_ID_FREELANCERS || '',
     costings: process.env.MONDAY_BOARD_ID_COSTINGS || '',
     venues: process.env.MONDAY_BOARD_ID_VENUES || '',
+    crewJobs: process.env.MONDAY_BOARD_ID_CREW_JOBS || '',          // Crewed Jobs board
     resources: '1829209673',  // Staff Training board - hardcoded as it's stable
   }
 }
@@ -832,6 +891,36 @@ export interface JobRecord {
   clientEmail?: string          // Client email for delivery notes
 }
 
+export interface CrewJobRecord {
+  id: string
+  name: string
+  board: 'crew'                    // Distinguishes from D&C jobs in combined lists
+  hhRef?: string                   // HireHop job number
+  jobType: string                  // "Transport + Crew" or "Crew Only"
+  status: string
+  date?: string                    // Job start date
+  finishDate?: string              // Job end date (multi-day)
+  time?: string                    // Arrival time
+  destination?: string             // Venue name (text)
+  venueId?: string                 // Linked venue ID for fetching details
+  workType?: string                // Backline Tech, General Assist, etc.
+  workTypeOther?: string           // Custom if "Other"
+  workDurationHours?: number       // Hours on site
+  workDescription?: string         // What the work involves
+  freelancerFee?: number           // What we pay them
+  freelancerEmail?: string         // For ownership verification
+  transportMode?: string           // There and back / One-way / N/A
+  distanceMiles?: number           // One-way distance
+  driveTimeMinutes?: number        // One-way drive time
+  expenseArrangement?: string      // How expenses handled
+  pdArrangement?: string           // Per diem arrangement
+  pdAmount?: number                // Per diem daily rate
+  numberOfDays?: number            // Multi-day job count
+  expenseBreakdown?: string        // Itemised expense text
+  expensesIncluded?: number        // £ included in quote
+  expensesNotIncluded?: number     // £ on top of quote
+}
+
 /**
  * Parse the "What is it?" status column into a normalized value
  */
@@ -980,6 +1069,129 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
 }
 
 /**
+ * Get all crewed jobs for a specific freelancer (by email)
+ * 
+ * Same pattern as getJobsForFreelancer() but queries the Crewed Jobs board.
+ * Uses items_page_by_column_values to filter on Monday's server.
+ */
+export async function getCrewJobsForFreelancer(freelancerEmail: string): Promise<CrewJobRecord[]> {
+  const boardId = getBoardIds().crewJobs
+
+  if (!boardId) {
+    console.log('Monday: MONDAY_BOARD_ID_CREW_JOBS not configured, skipping crew jobs')
+    return []
+  }
+
+  const normalizedEmail = freelancerEmail.toLowerCase().trim()
+  console.log('Monday: Fetching crew jobs for', normalizedEmail, 'from board', boardId)
+  const startTime = Date.now()
+
+  // Filter on the GC text column (same pattern as D&C driver email)
+  const query = `
+    query {
+      items_page_by_column_values (
+        board_id: ${boardId},
+        columns: [
+          {
+            column_id: "${CREW_JOB_COLUMNS.freelancerEmailGC}",
+            column_values: ["${normalizedEmail}"]
+          }
+        ],
+        limit: 100
+      ) {
+        items {
+          id
+          name
+          column_values(ids: ${JSON.stringify(CREW_JOB_COLUMNS_TO_FETCH)}) {
+            id
+            text
+            value
+            ... on BoardRelationValue {
+              linked_item_ids
+            }
+          }
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    items_page_by_column_values: {
+      items: Array<{
+        id: string
+        name: string
+        column_values: Array<{
+          id: string
+          text: string
+          value: string
+          linked_item_ids?: string[]
+        }>
+      }>
+    }
+  }>(query)
+
+  const queryTime = Date.now() - startTime
+  const items = result.items_page_by_column_values?.items || []
+  console.log('Monday: Crew jobs query completed in', queryTime, 'ms, found', items.length, 'jobs')
+
+  // Transform to CrewJobRecord format
+  return items.map(item => {
+    const columnMap = item.column_values.reduce((acc, col) => {
+      acc[col.id] = {
+        text: col.text,
+        value: col.value,
+        linked_item_ids: col.linked_item_ids
+      }
+      return acc
+    }, {} as Record<string, { text: string; value: string; linked_item_ids?: string[] }>)
+
+    const getColText = (colId: string) => columnMap[colId]?.text || ''
+    const getColNumber = (colId: string) => {
+      const text = columnMap[colId]?.text
+      return text ? parseFloat(text) : undefined
+    }
+
+    // Extract venue ID from connect column
+    // API 2025-04: Use linked_item_ids from BoardRelationValue fragment
+    let venueId: string | undefined
+    const venueCol = columnMap[CREW_JOB_COLUMNS.venueLink]
+    if (venueCol?.linked_item_ids && venueCol.linked_item_ids.length > 0) {
+      venueId = venueCol.linked_item_ids[0]
+    }
+
+    return {
+      id: item.id,
+      name: item.name,
+      board: 'crew' as const,
+      hhRef: getColText(CREW_JOB_COLUMNS.hhRef),
+      jobType: getColText(CREW_JOB_COLUMNS.jobType) || 'Crew Only',
+      status: getColText(CREW_JOB_COLUMNS.status) || 'unknown',
+      date: getColText(CREW_JOB_COLUMNS.jobDate),
+      finishDate: getColText(CREW_JOB_COLUMNS.jobFinishDate),
+      time: getColText(CREW_JOB_COLUMNS.arrivalTime),
+      destination: getColText(CREW_JOB_COLUMNS.destination),
+      venueId,
+      workType: getColText(CREW_JOB_COLUMNS.workType),
+      workTypeOther: getColText(CREW_JOB_COLUMNS.workTypeOther),
+      workDurationHours: getColNumber(CREW_JOB_COLUMNS.workDurationHours),
+      workDescription: getColText(CREW_JOB_COLUMNS.workDescription),
+      freelancerFee: getColNumber(CREW_JOB_COLUMNS.freelancerFee),
+      freelancerEmail: getColText(CREW_JOB_COLUMNS.freelancerEmailGC),
+      transportMode: getColText(CREW_JOB_COLUMNS.transportMode),
+      distanceMiles: getColNumber(CREW_JOB_COLUMNS.distanceMiles),
+      driveTimeMinutes: getColNumber(CREW_JOB_COLUMNS.driveTimeMinutes),
+      expenseArrangement: getColText(CREW_JOB_COLUMNS.expenseArrangement),
+      pdArrangement: getColText(CREW_JOB_COLUMNS.pdArrangement),
+      pdAmount: getColNumber(CREW_JOB_COLUMNS.pdAmount),
+      numberOfDays: getColNumber(CREW_JOB_COLUMNS.numberOfDays),
+      expenseBreakdown: getColText(CREW_JOB_COLUMNS.expenseBreakdown),
+      expensesIncluded: getColNumber(CREW_JOB_COLUMNS.expensesIncluded),
+      expensesNotIncluded: getColNumber(CREW_JOB_COLUMNS.expensesNotIncluded),
+    }
+  })
+}
+
+/**
  * Get a single job by ID
  * 
  * Only returns the job if the specified email matches the assigned driver.
@@ -1102,6 +1314,121 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
     completedAtDate: getColText(DC_COLUMNS.completedAtDate),
     completionNotes: getColText(DC_COLUMNS.completionNotes),
     clientEmail: getColText(DC_COLUMNS.clientEmail),
+  }
+}
+
+/**
+ * Get a single crewed job by ID
+ * 
+ * Only returns the job if the specified email matches the assigned freelancer.
+ * This ensures users can only view their own jobs.
+ */
+export async function getCrewJobById(jobId: string, freelancerEmail: string): Promise<CrewJobRecord | null> {
+  const boardId = getBoardIds().crewJobs
+
+  if (!boardId) {
+    throw new Error('MONDAY_BOARD_ID_CREW_JOBS is not configured')
+  }
+
+  console.log('Monday: Fetching crew job', jobId, 'for', freelancerEmail)
+
+  const query = `
+    query ($itemIds: [ID!]!) {
+      items(ids: $itemIds) {
+        id
+        name
+        column_values(ids: ${JSON.stringify(CREW_JOB_COLUMNS_TO_FETCH)}) {
+          id
+          text
+          value
+          ... on BoardRelationValue {
+            linked_item_ids
+          }
+        }
+      }
+    }
+  `
+
+  const result = await mondayQuery<{
+    items: Array<{
+      id: string
+      name: string
+      column_values: Array<{
+        id: string
+        text: string
+        value: string
+        linked_item_ids?: string[]
+      }>
+    }>
+  }>(query, { itemIds: [jobId] })
+
+  const item = result.items?.[0]
+
+  if (!item) {
+    console.log('Monday: Crew job not found:', jobId)
+    return null
+  }
+
+  // Build column map
+  const columnMap = item.column_values.reduce((acc, col) => {
+    acc[col.id] = {
+      text: col.text,
+      value: col.value,
+      linked_item_ids: col.linked_item_ids
+    }
+    return acc
+  }, {} as Record<string, { text: string; value: string; linked_item_ids?: string[] }>)
+
+  const getColText = (colId: string) => columnMap[colId]?.text || ''
+  const getColNumber = (colId: string) => {
+    const text = columnMap[colId]?.text
+    return text ? parseFloat(text) : undefined
+  }
+
+  // Check if this job is assigned to the requesting user
+  const assignedEmail = getColText(CREW_JOB_COLUMNS.freelancerEmailGC).toLowerCase().trim()
+  const normalizedEmail = freelancerEmail.toLowerCase().trim()
+
+  if (assignedEmail !== normalizedEmail) {
+    console.log('Monday: Crew job', jobId, 'not assigned to', freelancerEmail, '(assigned to', assignedEmail, ')')
+    return null
+  }
+
+  // Extract venue ID from connect column
+  let venueId: string | undefined
+  const venueCol = columnMap[CREW_JOB_COLUMNS.venueLink]
+  if (venueCol?.linked_item_ids && venueCol.linked_item_ids.length > 0) {
+    venueId = venueCol.linked_item_ids[0]
+  }
+
+  return {
+    id: item.id,
+    name: item.name,
+    board: 'crew' as const,
+    hhRef: getColText(CREW_JOB_COLUMNS.hhRef),
+    jobType: getColText(CREW_JOB_COLUMNS.jobType) || 'Crew Only',
+    status: getColText(CREW_JOB_COLUMNS.status) || 'unknown',
+    date: getColText(CREW_JOB_COLUMNS.jobDate),
+    finishDate: getColText(CREW_JOB_COLUMNS.jobFinishDate),
+    time: getColText(CREW_JOB_COLUMNS.arrivalTime),
+    destination: getColText(CREW_JOB_COLUMNS.destination),
+    venueId,
+    workType: getColText(CREW_JOB_COLUMNS.workType),
+    workTypeOther: getColText(CREW_JOB_COLUMNS.workTypeOther),
+    workDurationHours: getColNumber(CREW_JOB_COLUMNS.workDurationHours),
+    workDescription: getColText(CREW_JOB_COLUMNS.workDescription),
+    freelancerFee: getColNumber(CREW_JOB_COLUMNS.freelancerFee),
+    freelancerEmail: assignedEmail,
+    transportMode: getColText(CREW_JOB_COLUMNS.transportMode),
+    distanceMiles: getColNumber(CREW_JOB_COLUMNS.distanceMiles),
+    driveTimeMinutes: getColNumber(CREW_JOB_COLUMNS.driveTimeMinutes),
+    expenseArrangement: getColText(CREW_JOB_COLUMNS.expenseArrangement),
+    pdArrangement: getColText(CREW_JOB_COLUMNS.pdArrangement),
+    pdAmount: getColNumber(CREW_JOB_COLUMNS.pdAmount),
+    numberOfDays: getColNumber(CREW_JOB_COLUMNS.numberOfDays),
+    expenseBreakdown: getColText(CREW_JOB_COLUMNS.expenseBreakdown),
+    expensesIncluded: getColNumber(CREW_JOB_COLUMNS.expensesIncluded),
+    expensesNotIncluded: getColNumber(CREW_JOB_COLUMNS.expensesNotIncluded),
   }
 }
 
