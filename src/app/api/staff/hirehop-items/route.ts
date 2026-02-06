@@ -35,6 +35,7 @@ interface AddItemRequest {
     type: 'delivery' | 'collection' | 'crew'
     price: number
     date?: string      // Job date for the note (YYYY-MM-DD)
+    endDate?: string   // End date for multi-day jobs (YYYY-MM-DD)
     time?: string      // Arrival time for the note (HH:MM)
     venue?: string     // Venue name for the note
   }>
@@ -188,17 +189,41 @@ async function createHeader(jobId: string, headerName: string): Promise<string> 
 }
 
 /**
- * Build the item note in format: "6 Feb - 09:30 - Venue Name"
+ * Build the item note in format: "16th June - 09:30 - Venue Name"
+ * For multi-day: "16th - 18th June - 09:30 - Venue Name"
  */
-function buildItemNote(date?: string, time?: string, venue?: string): string {
+function buildItemNote(date?: string, endDate?: string, time?: string, venue?: string): string {
   const parts: string[] = []
   
+  // Add ordinal suffix to a number
+  const ordinal = (n: number): string => {
+    const s = ['th', 'st', 'nd', 'rd']
+    const v = n % 100
+    return n + (s[(v - 20) % 10] || s[v] || s[0])
+  }
+  
   if (date) {
-    // Convert YYYY-MM-DD to "6 Feb" format
     const d = new Date(date + 'T12:00:00')
     const day = d.getDate()
-    const month = d.toLocaleDateString('en-GB', { month: 'short' })
-    parts.push(`${day} ${month}`)
+    const month = d.toLocaleDateString('en-GB', { month: 'long' })
+    
+    // Check if multi-day with different end date
+    if (endDate && endDate !== date) {
+      const ed = new Date(endDate + 'T12:00:00')
+      const endDay = ed.getDate()
+      const endMonth = ed.toLocaleDateString('en-GB', { month: 'long' })
+      
+      if (month === endMonth) {
+        // Same month: "16th - 18th June"
+        parts.push(`${ordinal(day)} - ${ordinal(endDay)} ${month}`)
+      } else {
+        // Different months: "28th June - 2nd July"
+        parts.push(`${ordinal(day)} ${month} - ${ordinal(endDay)} ${endMonth}`)
+      }
+    } else {
+      // Single day: "16th June"
+      parts.push(`${ordinal(day)} ${month}`)
+    }
   }
   
   if (time) {
@@ -482,7 +507,7 @@ export async function POST(request: NextRequest) {
     const results: ItemResult[] = []
     
     for (const item of items) {
-      const note = buildItemNote(item.date, item.time, item.venue)
+      const note = buildItemNote(item.date, item.endDate, item.time, item.venue)
       
       const result = await addLabourItem(
         jobId,

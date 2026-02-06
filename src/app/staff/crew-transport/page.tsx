@@ -89,6 +89,7 @@ interface FormData {
   earlyStartMinutes: number
   lateFinishMinutes: number
   dayRateOverride: number | null
+  clientDayRateOverride: number | null
   applyMinHours: boolean
   // Setup work extension (D&C jobs)
   includesSetupWork: boolean
@@ -287,6 +288,7 @@ const initialFormData: FormData = {
   earlyStartMinutes: 0,
   lateFinishMinutes: 0,
   dayRateOverride: null,
+  clientDayRateOverride: null,
   applyMinHours: true,
   includesSetupWork: false,
   setupWorkDescription: '',
@@ -357,7 +359,7 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   const {
     jobType, whatIsIt, distanceMiles, driveTimeMinutes, travelMethod, travelTimeMins,
     workDurationHours, calculationMode, numberOfDays,
-    addCollection, dayRateOverride, applyMinHours, expenses,
+    addCollection, dayRateOverride, clientDayRateOverride, applyMinHours, expenses,
     includesSetupWork, setupExtraTimeHours, setupFixedPremium,
     arrivalTime, oohManualOverride, earlyStartMinutes: manualEarlyStart, lateFinishMinutes: manualLateFinish,
   } = formData
@@ -398,8 +400,19 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
       freelancerFee += setupFixedPremium
     }
     const freelancerFeeRounded = roundToNearestFive(freelancerFee)
-    let clientChargeLabour = freelancerFeeRounded * markupMultiplier
-    // Setup premium already in freelancerFee, markup already applied via multiplier
+    
+    // Client charge: use override if set, otherwise apply markup
+    let clientChargeLabour: number
+    if (clientDayRateOverride !== null) {
+      clientChargeLabour = clientDayRateOverride * numberOfDays
+      // Setup premium still added with markup on top of client day rate override
+      if (isDC && includesSetupWork && setupFixedPremium > 0) {
+        clientChargeLabour += setupFixedPremium * markupMultiplier
+      }
+    } else {
+      clientChargeLabour = freelancerFeeRounded * markupMultiplier
+    }
+    
     const clientChargeExpenses = expensesIncluded * markupMultiplier
     const clientChargeFuel = fuelIncluded ? fuelCost * markupMultiplier : 0
     const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses
@@ -971,6 +984,9 @@ function CrewTransportWizard() {
     if (!pin || !costs) return
     setSaving(true); setError(null); setSaveResult(null)
 
+    const isCrewedJob = formData.jobType === 'crewed_job'
+    const isDC = formData.jobType === 'delivery' || formData.jobType === 'collection'
+
     try {
       const tollsExpense = formData.expenses.find(e => e.category === 'tolls')
       const tollsParking = tollsExpense?.amount || 0
@@ -1023,6 +1039,7 @@ function CrewTransportWizard() {
           type: 'delivery' | 'collection' | 'crew'
           price: number
           date?: string
+          endDate?: string
           time?: string
           venue?: string
         }> = []
@@ -1053,6 +1070,7 @@ function CrewTransportWizard() {
             type: 'crew',
             price: costs.clientChargeTotalRounded,
             date: formData.jobDate,
+            endDate: formData.isMultiDay ? formData.jobFinishDate : undefined,
             time: formData.arrivalTime,
             venue: formData.destination,
           })
@@ -1497,7 +1515,7 @@ function CrewTransportWizard() {
                 {formData.isMultiDay && formData.calculationMode === 'hourly' && (
                   <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">⚠️ Hourly rate is unusual for multi-day jobs. Consider using Day Rate instead.</div>
                 )}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Calculation Mode</label>
                     <select value={formData.calculationMode} onChange={(e) => updateField('calculationMode', e.target.value as FormData['calculationMode'])} className="w-full px-4 py-2 border border-gray-300 rounded-lg">
@@ -1506,18 +1524,10 @@ function CrewTransportWizard() {
                     </select>
                   </div>
                   {formData.calculationMode === 'hourly' && (
-                    <>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Work Duration (hours)</label>
-                        <input type="number" value={formData.workDurationHours || ''} onChange={(e) => updateField('workDurationHours', parseFloat(e.target.value) || 0)} placeholder="Time on site" min="0" step="0.5" className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
-                      </div>
-                      <div>
-                        <label className="flex items-center space-x-2 mt-6">
-                          <input type="checkbox" checked={formData.applyMinHours} onChange={(e) => updateField('applyMinHours', e.target.checked)} className="w-4 h-4 text-blue-600 rounded" />
-                          <span className="text-sm font-medium text-gray-700">Apply min hours ({settings?.minHoursThreshold || 5}hr)</span>
-                        </label>
-                      </div>
-                    </>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Work Duration (hours)</label>
+                      <input type="number" value={formData.workDurationHours || ''} onChange={(e) => updateField('workDurationHours', parseFloat(e.target.value) || 0)} placeholder="Time on site" min="0" step="0.5" className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                    </div>
                   )}
                   {formData.calculationMode === 'day_rate' && (
                     <>
@@ -1527,13 +1537,26 @@ function CrewTransportWizard() {
                         {formData.isMultiDay && formData.numberOfDays !== calculatedDays && <p className="text-xs text-amber-600 mt-1">⚠️ Dates suggest {calculatedDays} days</p>}
                       </div>
                       <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">Day Rate (£) <span className="text-gray-400 font-normal">{settings && `Default: £${settings.driverDayRate}`}</span></label>
-                        <input type="number" value={formData.dayRateOverride ?? settings?.driverDayRate ?? ''} onChange={(e) => updateField('dayRateOverride', e.target.value ? parseFloat(e.target.value) : null)} placeholder={settings ? `${settings.driverDayRate}` : '180'} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
-                        <p className="text-xs text-gray-500 mt-1">Override for this quote only</p>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Freelancer Day Rate (£)</label>
+                        <input type="number" value={formData.dayRateOverride ?? settings?.driverDayRate ?? ''} onChange={(e) => updateField('dayRateOverride', e.target.value ? parseFloat(e.target.value) : null)} placeholder={settings ? `${settings.driverDayRate}` : '225'} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                        <p className="text-xs text-gray-500 mt-1">What we pay freelancer</p>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">Client Day Rate (£) <span className="text-gray-400 font-normal">optional</span></label>
+                        <input type="number" value={formData.clientDayRateOverride ?? ''} onChange={(e) => updateField('clientDayRateOverride', e.target.value ? parseFloat(e.target.value) : null)} placeholder="Auto (markup)" className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                        <p className="text-xs text-gray-500 mt-1">Override client charge per day</p>
                       </div>
                     </>
                   )}
                 </div>
+                {formData.calculationMode === 'hourly' && (
+                  <div className="mt-4">
+                    <label className="flex items-center space-x-2">
+                      <input type="checkbox" checked={formData.applyMinHours} onChange={(e) => updateField('applyMinHours', e.target.checked)} className="w-4 h-4 text-blue-600 rounded" />
+                      <span className="text-sm font-medium text-gray-700">Apply min hours ({settings?.minHoursThreshold || 5}hr)</span>
+                    </label>
+                  </div>
+                )}
               </div>
 
               {/* OOH auto-calculated display (crewed jobs, hourly mode only) */}
@@ -1631,55 +1654,6 @@ function CrewTransportWizard() {
                 <span>{isCrewedJob ? 'Will save to Crewed Jobs board' : `Will save to D&C board${formData.addCollection ? ' (2 items)' : ''}`}</span>
               </div>
 
-{/* HireHop Integration Checkboxes */}
-              {formData.hirehopJobNumber && (
-                <div className="border border-gray-200 rounded-lg p-4 space-y-3">
-                  <p className="text-sm font-medium text-gray-700">Add to HireHop Quote</p>
-                  {isDC && (
-                    <>
-                      <label className="flex items-center space-x-3">
-                        <input
-                          type="checkbox"
-                          checked={formData.addDeliveryToHireHop}
-                          onChange={(e) => updateField('addDeliveryToHireHop', e.target.checked)}
-                          className="w-4 h-4 text-blue-600 rounded"
-                        />
-                        <span className="text-sm text-gray-700">
-                          Add {formData.jobType === 'collection' ? 'collection' : 'delivery'} to HireHop (£{costs.clientChargeTotalRounded})
-                        </span>
-                      </label>
-                      {formData.addCollection && (
-                        <label className="flex items-center space-x-3">
-                          <input
-                            type="checkbox"
-                            checked={formData.addCollectionToHireHop}
-                            onChange={(e) => updateField('addCollectionToHireHop', e.target.checked)}
-                            className="w-4 h-4 text-blue-600 rounded"
-                          />
-                          <span className="text-sm text-gray-700">
-                            Add collection to HireHop (£{costs.clientChargeTotalRounded})
-                          </span>
-                        </label>
-                      )}
-                    </>
-                  )}
-                  {isCrewedJob && (
-                    <label className="flex items-center space-x-3">
-                      <input
-                        type="checkbox"
-                        checked={formData.addCrewToHireHop}
-                        onChange={(e) => updateField('addCrewToHireHop', e.target.checked)}
-                        className="w-4 h-4 text-blue-600 rounded"
-                      />
-                      <span className="text-sm text-gray-700">
-                        Add crew item to HireHop (£{costs.clientChargeTotalRounded})
-                      </span>
-                    </label>
-                  )}
-                  <p className="text-xs text-gray-500">Labour items will be added to job #{formData.hirehopJobNumber}</p>
-                </div>
-              )}
-
               {settings && settings.minClientCharge > 0 && costs.clientChargeTotal < settings.minClientCharge && (
                 <div className="text-sm px-4 py-3 rounded-lg bg-amber-50 text-amber-700 border border-amber-200">
                   ⬆️ Client charge bumped to minimum £{settings.minClientCharge} (calculated: £{Math.round(costs.clientChargeTotal)})
@@ -1764,6 +1738,55 @@ function CrewTransportWizard() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">Costing Notes (internal)</label>
                 <textarea value={formData.costingNotes} onChange={(e) => updateField('costingNotes', e.target.value)} placeholder="Any notes about this quote..." rows={3} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
               </div>
+
+              {/* HireHop Integration Checkboxes - positioned after costing notes, before save */}
+              {formData.hirehopJobNumber && (
+                <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+                  <p className="text-sm font-medium text-gray-700">Add to HireHop Quote</p>
+                  {isDC && (
+                    <>
+                      <label className="flex items-center space-x-3">
+                        <input
+                          type="checkbox"
+                          checked={formData.addDeliveryToHireHop}
+                          onChange={(e) => updateField('addDeliveryToHireHop', e.target.checked)}
+                          className="w-4 h-4 text-blue-600 rounded"
+                        />
+                        <span className="text-sm text-gray-700">
+                          Add {formData.jobType === 'collection' ? 'collection' : 'delivery'} to HireHop (£{costs.clientChargeTotalRounded})
+                        </span>
+                      </label>
+                      {formData.addCollection && (
+                        <label className="flex items-center space-x-3">
+                          <input
+                            type="checkbox"
+                            checked={formData.addCollectionToHireHop}
+                            onChange={(e) => updateField('addCollectionToHireHop', e.target.checked)}
+                            className="w-4 h-4 text-blue-600 rounded"
+                          />
+                          <span className="text-sm text-gray-700">
+                            Add collection to HireHop (£{costs.clientChargeTotalRounded})
+                          </span>
+                        </label>
+                      )}
+                    </>
+                  )}
+                  {isCrewedJob && (
+                    <label className="flex items-center space-x-3">
+                      <input
+                        type="checkbox"
+                        checked={formData.addCrewToHireHop}
+                        onChange={(e) => updateField('addCrewToHireHop', e.target.checked)}
+                        className="w-4 h-4 text-blue-600 rounded"
+                      />
+                      <span className="text-sm text-gray-700">
+                        Add crew item to HireHop (£{costs.clientChargeTotalRounded})
+                      </span>
+                    </label>
+                  )}
+                  <p className="text-xs text-gray-500">Labour items will be added to job #{formData.hirehopJobNumber}</p>
+                </div>
+              )}
             </div>
           )}
 

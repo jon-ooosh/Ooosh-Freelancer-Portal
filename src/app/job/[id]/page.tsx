@@ -4,7 +4,12 @@
  * Job Details Page
  * 
  * Displays full details for a single job including venue information.
+ * Supports both D&C jobs and Crew jobs.
  * Route: /job/[id]
+ * 
+ * Query params:
+ * - ?board=crew → fetch from Crewed Jobs board
+ * - ?run=X → multi-drop run view (D&C only)
  */
 
 import { useEffect, useState, useCallback } from 'react'
@@ -31,6 +36,23 @@ interface Job {
   driverPay?: number
   completedAtDate?: string
   completionNotes?: string
+  // Crew job fields
+  board?: 'dc' | 'crew'
+  jobType?: string                    // "Transport + Crew" or "Crew Only"
+  destination?: string                // Venue name (text)
+  finishDate?: string                 // End date for multi-day jobs
+  workType?: string                   // "Backline Tech", "General Assist", etc.
+  workTypeOther?: string              // Custom description if "Other"
+  workDurationHours?: number          // Hours of on-site work
+  workDescription?: string            // Details of the work
+  freelancerFee?: number              // What we pay them
+  numberOfDays?: number               // For multi-day jobs
+  expenseBreakdown?: string           // Itemised expense detail
+  expensesIncluded?: number           // £ included in quote
+  expensesNotIncluded?: number        // £ on top of quote
+  expenseArrangement?: string         // How expenses are handled
+  pdArrangement?: string              // Per diem arrangement
+  pdAmount?: number                   // Per diem daily rate
 }
 
 interface Venue {
@@ -54,6 +76,7 @@ interface JobApiResponse {
   job?: Job
   venue?: Venue | null
   contactsVisible?: boolean
+  boardType?: string
   error?: string
 }
 
@@ -82,6 +105,17 @@ function formatDate(dateStr?: string): string {
   })
 }
 
+function formatShortDate(dateStr?: string): string {
+  if (!dateStr) return 'TBC'
+  const date = new Date(dateStr)
+  if (isNaN(date.getTime())) return dateStr
+  return date.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  })
+}
+
 function formatTime(timeStr?: string): string {
   if (!timeStr) return 'TBC'
   return timeStr
@@ -101,11 +135,12 @@ function getWhat3WordsUrl(w3w?: string): string | null {
 
 /**
  * Translate Monday.com status to user-friendly display
+ * Works for both D&C and Crew job statuses
  */
 function translateStatus(status: string): { label: string; style: string; icon: string } {
   const normalised = status.toLowerCase().trim()
   
-  // Confirmed / Arranged
+  // Confirmed / Arranged (matches both "email driver" and "email crew")
   if (normalised.includes('arranged')) {
     return { label: 'Confirmed', style: 'bg-green-100 text-green-800', icon: '✓' }
   }
@@ -143,6 +178,37 @@ function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehic
   }
 }
 
+/**
+ * Translate crew job type for freelancer-friendly display
+ */
+function translateJobType(jobType?: string): string {
+  if (!jobType) return ''
+  if (jobType.toLowerCase().includes('transport')) return 'Driving + Crew'
+  return jobType
+}
+
+/**
+ * Format crew job duration intelligently
+ */
+function formatDuration(hours?: number, days?: number): string {
+  if (days && days > 1) {
+    return `${days} days`
+  }
+  if (hours) {
+    return `${hours} hour${hours !== 1 ? 's' : ''}`
+  }
+  return ''
+}
+
+/**
+ * Get display work type — if "Other", use work description
+ */
+function getDisplayWorkType(workType?: string, workDescription?: string): string {
+  if (!workType) return 'Crew Work'
+  if (workType.toLowerCase() === 'other' && workDescription) return workDescription
+  return workType
+}
+
 // =============================================================================
 // SIMPLE EQUIPMENT LIST COMPONENT (Read-only, no tickboxes)
 // =============================================================================
@@ -150,13 +216,17 @@ function getFilterMode(whatIsIt?: 'equipment' | 'vehicle'): 'equipment' | 'vehic
 interface EquipmentListProps {
   hhRef: string
   whatIsIt?: 'equipment' | 'vehicle'
+  isReference?: boolean             // If true, label as "Equipment Reference" instead of "Equipment List"
 }
 
-function EquipmentList({ hhRef, whatIsIt }: EquipmentListProps) {
+function EquipmentList({ hhRef, whatIsIt, isReference = false }: EquipmentListProps) {
   const [items, setItems] = useState<EquipmentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
+
+  const title = isReference ? 'Equipment Reference' : 'Equipment List'
+  const icon = isReference ? '📋' : '📦'
 
   useEffect(() => {
     async function fetchItems() {
@@ -191,7 +261,7 @@ function EquipmentList({ hhRef, whatIsIt }: EquipmentListProps) {
     return (
       <div className="bg-white rounded-xl shadow-sm p-6">
         <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📦</span> Equipment List
+          <span>{icon}</span> {title}
         </h2>
         <div className="animate-pulse space-y-2">
           <div className="h-4 bg-gray-200 rounded w-3/4"></div>
@@ -206,7 +276,7 @@ function EquipmentList({ hhRef, whatIsIt }: EquipmentListProps) {
     return (
       <div className="bg-white rounded-xl shadow-sm p-6">
         <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📦</span> Equipment List
+          <span>{icon}</span> {title}
         </h2>
         <div className="bg-red-50 border border-red-200 rounded-lg p-3">
           <p className="text-red-700 text-sm">{error}</p>
@@ -219,7 +289,7 @@ function EquipmentList({ hhRef, whatIsIt }: EquipmentListProps) {
     return (
       <div className="bg-white rounded-xl shadow-sm p-6">
         <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <span>📦</span> Equipment List
+          <span>{icon}</span> {title}
         </h2>
         <p className="text-gray-500 text-sm">No equipment items found for this job.</p>
       </div>
@@ -234,7 +304,7 @@ function EquipmentList({ hhRef, whatIsIt }: EquipmentListProps) {
     <div className="bg-white rounded-xl shadow-sm p-6">
       <div className="flex items-center justify-between mb-3">
         <h2 className="font-semibold text-gray-900 flex items-center gap-2">
-          <span>📦</span> Equipment List
+          <span>{icon}</span> {title}
           <span className="text-sm font-normal text-gray-500">
             ({items.length} item{items.length !== 1 ? 's' : ''})
           </span>
@@ -242,9 +312,15 @@ function EquipmentList({ hhRef, whatIsIt }: EquipmentListProps) {
       </div>
 
       {/* Filter indicator */}
-      {whatIsIt === 'equipment' && (
+      {whatIsIt === 'equipment' && !isReference && (
         <p className="text-xs text-gray-400 mb-3">
           Showing equipment only (vehicles filtered out)
+        </p>
+      )}
+
+      {isReference && (
+        <p className="text-xs text-gray-400 mb-3">
+          For reference — equipment on this HireHop job
         </p>
       )}
 
@@ -363,6 +439,326 @@ function NotificationMuteToggle({ jobId }: { jobId: string }) {
 }
 
 // =============================================================================
+// CREW JOB DETAIL VIEW
+// =============================================================================
+
+function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
+  const displayWorkType = getDisplayWorkType(job.workType, job.workDescription)
+  const displayJobType = translateJobType(job.jobType)
+  const duration = formatDuration(job.workDurationHours, job.numberOfDays)
+  const statusInfo = translateStatus(job.status)
+  const googleMapsUrl = getGoogleMapsUrl(venue?.address)
+  const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
+  
+  // Multi-day date display
+  const isMultiDay = job.finishDate && job.finishDate !== job.date
+  const dateDisplay = isMultiDay
+    ? `${formatDate(job.date)} – ${formatShortDate(job.finishDate)}`
+    : formatDate(job.date)
+
+  // Fee — crew jobs use freelancerFee directly
+  const fee = job.freelancerFee || job.driverPay
+
+  return (
+    <>
+      {/* Job Header */}
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <div className="flex items-start gap-3 mb-4">
+          <span className="text-3xl">👷</span>
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-semibold text-yellow-700 uppercase tracking-wide">
+                {displayWorkType}
+              </span>
+              {displayJobType && (
+                <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                  {displayJobType}
+                </span>
+              )}
+              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.style}`}>
+                <span>{statusInfo.icon}</span>
+                {statusInfo.label}
+              </span>
+            </div>
+            <h1 className="text-xl font-bold text-gray-900 mt-1">
+              {venue?.name || job.destination || job.venueName || job.name}
+            </h1>
+          </div>
+        </div>
+
+        <hr className="my-4 border-gray-100" />
+
+        <div className="space-y-3">
+          {/* Date */}
+          <div className="flex items-center gap-3">
+            <span className="text-gray-400 w-6 text-center">📅</span>
+            <div>
+              <p className="text-sm text-gray-500">Date</p>
+              <p className="font-medium text-gray-900">{dateDisplay}</p>
+            </div>
+          </div>
+
+          {/* Arrival time */}
+          <div className="flex items-center gap-3">
+            <span className="text-gray-400 w-6 text-center">⏰</span>
+            <div>
+              <p className="text-sm text-gray-500">Arrive by</p>
+              <p className="font-medium text-gray-900">{formatTime(job.time)}</p>
+            </div>
+          </div>
+
+          {/* Duration */}
+          {duration && (
+            <div className="flex items-center gap-3">
+              <span className="text-gray-400 w-6 text-center">⏱️</span>
+              <div>
+                <p className="text-sm text-gray-500">Duration</p>
+                <p className="font-medium text-gray-900">{duration}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Fee */}
+          {fee && fee > 0 && (
+            <div className="flex items-center gap-3">
+              <span className="text-gray-400 w-6 text-center">💷</span>
+              <div>
+                <p className="text-sm text-gray-500">Agreed fee</p>
+                <p className="font-medium text-green-600">£{fee.toFixed(0)}</p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Work Description */}
+      {job.workDescription && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>🔧</span> Work Details
+          </h2>
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p className="text-gray-700 whitespace-pre-wrap">{job.workDescription}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Expense Info — only show if there's a breakdown */}
+      {job.expenseBreakdown && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>💰</span> Expenses
+          </h2>
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <p className="text-gray-700 whitespace-pre-wrap text-sm">{job.expenseBreakdown}</p>
+          </div>
+          {/* Summary amounts if available */}
+          {(job.expensesIncluded || job.expensesNotIncluded) && (
+            <div className="mt-3 flex gap-4 text-sm">
+              {job.expensesIncluded !== undefined && job.expensesIncluded > 0 && (
+                <div>
+                  <span className="text-gray-500">Included in fee: </span>
+                  <span className="font-medium text-gray-900">£{job.expensesIncluded.toFixed(0)}</span>
+                </div>
+              )}
+              {job.expensesNotIncluded !== undefined && job.expensesNotIncluded > 0 && (
+                <div>
+                  <span className="text-gray-500">On top: </span>
+                  <span className="font-medium text-orange-600">£{job.expensesNotIncluded.toFixed(0)}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Reference */}
+      {job.hhRef && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>🔗</span> Reference
+          </h2>
+          <p className="text-gray-600">
+            HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
+          </p>
+        </div>
+      )}
+
+      {/* Location */}
+      {venue && (venue.address || venue.whatThreeWords) && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <span>📍</span> Location
+          </h2>
+          
+          <div className="space-y-2">
+            {venue.address && (
+              <p className="text-gray-700">{venue.address}</p>
+            )}
+            
+            {venue.whatThreeWords && (
+              <p className="text-gray-500 text-sm font-mono">
+                ///{venue.whatThreeWords}
+              </p>
+            )}
+          </div>
+          
+          <div className="mt-4 flex flex-wrap gap-3">
+            {googleMapsUrl && (
+              <a
+                href={googleMapsUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Google Maps
+              </a>
+            )}
+            
+            {what3WordsUrl && (
+              <a
+                href={what3WordsUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm"
+              >
+                <span className="font-bold">///</span>
+                What3Words
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Contact */}
+      {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <span>👤</span> Contact
+            {venue.phoneHidden && venue.phoneVisibleFrom && (
+              <span className="text-xs font-normal text-gray-400 ml-2">
+                (phone visible from {venue.phoneVisibleFrom})
+              </span>
+            )}
+          </h2>
+          
+          <div className="space-y-3">
+            {venue.contact1 && (
+              <div className="flex items-center gap-3">
+                <span className="text-gray-400 w-6 text-center">👤</span>
+                <span className="text-gray-700">{venue.contact1}</span>
+              </div>
+            )}
+            
+            {venue.contact2 && (
+              <div className="flex items-center gap-3">
+                <span className="text-gray-400 w-6 text-center">👤</span>
+                <span className="text-gray-700">{venue.contact2}</span>
+              </div>
+            )}
+            
+            {venue.phoneHidden ? (
+              <div className="flex items-center gap-3">
+                <span className="text-gray-400 w-6 text-center">📞</span>
+                <span className="text-gray-400 italic">
+                  Available from {venue.phoneVisibleFrom}
+                </span>
+              </div>
+            ) : (
+              <>
+                {venue.phone && (
+                  <a
+                    href={`tel:${venue.phone}`}
+                    className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                  >
+                    <span className="w-6 text-center">📞</span>
+                    <span className="font-medium">{venue.phone}</span>
+                  </a>
+                )}
+                
+                {venue.phone2 && (
+                  <a
+                    href={`tel:${venue.phone2}`}
+                    className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                  >
+                    <span className="w-6 text-center">📞</span>
+                    <span className="font-medium">{venue.phone2}</span>
+                  </a>
+                )}
+              </>
+            )}
+            
+            {venue.email && (
+              <a
+                href={`mailto:${venue.email}`}
+                className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+              >
+                <span className="w-6 text-center">✉️</span>
+                <span className="font-medium">{venue.email}</span>
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Equipment Reference — same HireHop integration, labelled as reference */}
+      {job.hhRef && (
+        <EquipmentList hhRef={job.hhRef} isReference={true} />
+      )}
+
+      {/* Access Info */}
+      {venue?.accessNotes && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>🚪</span> Access Info
+          </h2>
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+            <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Stage Notes */}
+      {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
+        <div className="bg-white rounded-xl shadow-sm p-6">
+          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+            <span>🎭</span> Stage Notes
+          </h2>
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+            <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Notification Toggle */}
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>🔔</span> Notifications
+        </h2>
+        <NotificationMuteToggle jobId={job.id} />
+        <p className="text-xs text-gray-500 mt-2">
+          Turn off to stop receiving email updates about this specific job
+        </p>
+      </div>
+
+      {/* Action Buttons — no "Start delivery" for crew jobs */}
+      <div className="space-y-3 pt-2">
+        <button
+          className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+          onClick={() => alert('Calendar export coming soon!')}
+        >
+          <span>📅</span> Add to Calendar
+        </button>
+      </div>
+    </>
+  )
+}
+
+// =============================================================================
 // MAIN PAGE COMPONENT
 // =============================================================================
 
@@ -372,23 +768,29 @@ export default function JobDetailsPage() {
   const searchParams = useSearchParams()
   const jobId = params.id as string
   const runGroup = searchParams.get('run')
+  const boardType = searchParams.get('board') || 'dc'   // 'dc' or 'crew'
 
   const [job, setJob] = useState<Job | null>(null)
   const [venue, setVenue] = useState<Venue | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   
-  // Multi-drop run state
+  // Multi-drop run state (D&C only)
   const [runJobs, setRunJobs] = useState<Job[]>([])
   const [runVenues, setRunVenues] = useState<Map<string, Venue>>(new Map())
   const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set())
   const [loadingRun, setLoadingRun] = useState(false)
 
-  // Fetch primary job
+  // Fetch primary job — pass board type to API
   useEffect(() => {
     async function fetchJob() {
       try {
-        const response = await fetch(`/api/jobs/${jobId}`)
+        // Build API URL with board type parameter
+        const apiUrl = boardType === 'crew' 
+          ? `/api/jobs/${jobId}?board=crew`
+          : `/api/jobs/${jobId}`
+        
+        const response = await fetch(apiUrl)
         const data: JobApiResponse = await response.json()
 
         if (!response.ok) {
@@ -402,8 +804,8 @@ export default function JobDetailsPage() {
         setJob(data.job || null)
         setVenue(data.venue || null)
         
-        // If this is a grouped run, fetch all jobs in the run
-        if (runGroup && data.job?.date) {
+        // If this is a grouped run (D&C only), fetch all jobs in the run
+        if (runGroup && data.job?.date && boardType !== 'crew') {
           fetchRunJobs(runGroup, data.job.date)
         }
       } catch (err) {
@@ -417,9 +819,9 @@ export default function JobDetailsPage() {
     if (jobId) {
       fetchJob()
     }
-  }, [jobId, router, runGroup])
+  }, [jobId, router, runGroup, boardType])
 
-  // Fetch all jobs in a run group
+  // Fetch all jobs in a run group (D&C only)
   const fetchRunJobs = async (group: string, date: string) => {
     setLoadingRun(true)
     try {
@@ -507,14 +909,16 @@ export default function JobDetailsPage() {
     )
   }
 
+  // ── Crew Job View ──────────────────────────────────────────────────────────
+  const isCrewJob = boardType === 'crew'
+  
+  // D&C job variables (only used for D&C rendering)
   const isDelivery = job.type === 'delivery'
   const typeIcon = isDelivery ? '📦' : '📥'
   const typeLabel = isDelivery ? 'DELIVERY' : 'COLLECTION'
   const googleMapsUrl = getGoogleMapsUrl(venue?.address)
   const what3WordsUrl = getWhat3WordsUrl(venue?.whatThreeWords)
   const statusInfo = translateStatus(job.status)
-  
-  // Check if this is a multi-stop view
   const isMultiStop = runGroup && runJobs.length > 1
 
   return (
@@ -544,427 +948,437 @@ export default function JobDetailsPage() {
 
       <main className="max-w-lg mx-auto p-4 space-y-4">
         
-        {/* Multi-stop header */}
-        {isMultiStop && (
-          <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
-            <h2 className="font-semibold text-purple-800 mb-1">
-              📦 Multi-drop Run ({runJobs.length} stops)
-            </h2>
-            <p className="text-sm text-purple-600">
-              {formatDate(job.date)}
-            </p>
-          </div>
+        {/* ── CREW JOB DETAIL ── */}
+        {isCrewJob && (
+          <CrewJobDetail job={job} venue={venue} />
         )}
 
-        {/* Single job or first stop header */}
-        {!isMultiStop && (
+        {/* ── D&C JOB DETAIL (existing) ── */}
+        {!isCrewJob && (
           <>
-            {/* Job Header */}
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <div className="flex items-start gap-3 mb-4">
-                <span className="text-3xl">{typeIcon}</span>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">
-                      {typeLabel}
-                    </span>
-                    {job.whatIsIt && (
-                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                        job.whatIsIt === 'vehicle' 
-                          ? 'bg-blue-100 text-blue-700' 
-                          : 'bg-gray-100 text-gray-600'
-                      }`}>
-                        {job.whatIsIt === 'vehicle' ? '🚐 Vehicle' : '🎸 Equipment'}
-                      </span>
-                    )}
-                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.style}`}>
-                      <span>{statusInfo.icon}</span>
-                      {statusInfo.label}
-                    </span>
-                  </div>
-                  <h1 className="text-xl font-bold text-gray-900 mt-1">
-                    {venue?.name || job.venueName || job.name}
-                  </h1>
-                </div>
-              </div>
-
-              <hr className="my-4 border-gray-100" />
-
-              <div className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">📅</span>
-                  <div>
-                    <p className="text-sm text-gray-500">Date</p>
-                    <p className="font-medium text-gray-900">{formatDate(job.date)}</p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <span className="text-gray-400 w-6 text-center">⏰</span>
-                  <div>
-                    <p className="text-sm text-gray-500">Arrive by</p>
-                    <p className="font-medium text-gray-900">{formatTime(job.time)}</p>
-                  </div>
-                </div>
-
-                {job.driverPay && job.driverPay > 0 && (
-                  <div className="flex items-center gap-3">
-                    <span className="text-gray-400 w-6 text-center">💷</span>
-                    <div>
-                      <p className="text-sm text-gray-500">Agreed fee</p>
-                      <p className="font-medium text-green-600">£{job.driverPay.toFixed(0)} + expenses</p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Reference */}
-            {job.hhRef && (
-              <div className="bg-white rounded-xl shadow-sm p-6">
-                <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span>🔗</span> Reference
+            {/* Multi-stop header */}
+            {isMultiStop && (
+              <div className="bg-purple-50 border border-purple-200 rounded-xl p-4">
+                <h2 className="font-semibold text-purple-800 mb-1">
+                  📦 Multi-drop Run ({runJobs.length} stops)
                 </h2>
-                <p className="text-gray-600">
-                  HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
+                <p className="text-sm text-purple-600">
+                  {formatDate(job.date)}
                 </p>
               </div>
             )}
 
-            {/* Location */}
-            {venue && (venue.address || venue.whatThreeWords) && (
-              <div className="bg-white rounded-xl shadow-sm p-6">
-                <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                  <span>📍</span> Location
-                </h2>
-                
-                <div className="space-y-2">
-                  {venue.address && (
-                    <p className="text-gray-700">{venue.address}</p>
-                  )}
-                  
-                  {venue.whatThreeWords && (
-                    <p className="text-gray-500 text-sm font-mono">
-                      ///{venue.whatThreeWords}
-                    </p>
-                  )}
-                </div>
-                
-                <div className="mt-4 flex flex-wrap gap-3">
-                  {googleMapsUrl && (
-                    <a
-                      href={googleMapsUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                      Google Maps
-                    </a>
-                  )}
-                  
-                  {what3WordsUrl && (
-                    <a
-                      href={what3WordsUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm"
-                    >
-                      <span className="font-bold">///</span>
-                      What3Words
-                    </a>
-                  )}
-                </div>
-              </div>
-            )}
+            {/* Single job or first stop header */}
+            {!isMultiStop && (
+              <>
+                {/* Job Header */}
+                <div className="bg-white rounded-xl shadow-sm p-6">
+                  <div className="flex items-start gap-3 mb-4">
+                    <span className="text-3xl">{typeIcon}</span>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">
+                          {typeLabel}
+                        </span>
+                        {job.whatIsIt && (
+                          <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                            job.whatIsIt === 'vehicle' 
+                              ? 'bg-blue-100 text-blue-700' 
+                              : 'bg-gray-100 text-gray-600'
+                          }`}>
+                            {job.whatIsIt === 'vehicle' ? '🚐 Vehicle' : '🎸 Equipment'}
+                          </span>
+                        )}
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${statusInfo.style}`}>
+                          <span>{statusInfo.icon}</span>
+                          {statusInfo.label}
+                        </span>
+                      </div>
+                      <h1 className="text-xl font-bold text-gray-900 mt-1">
+                        {venue?.name || job.venueName || job.name}
+                      </h1>
+                    </div>
+                  </div>
 
-            {/* Contact */}
-            {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
-              <div className="bg-white rounded-xl shadow-sm p-6">
-                <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                  <span>👤</span> Contact
-                  {venue.phoneHidden && venue.phoneVisibleFrom && (
-                    <span className="text-xs font-normal text-gray-400 ml-2">
-                      (phone visible from {venue.phoneVisibleFrom})
-                    </span>
-                  )}
-                </h2>
-                
-                <div className="space-y-3">
-                  {venue.contact1 && (
+                  <hr className="my-4 border-gray-100" />
+
+                  <div className="space-y-3">
                     <div className="flex items-center gap-3">
-                      <span className="text-gray-400 w-6 text-center">👤</span>
-                      <span className="text-gray-700">{venue.contact1}</span>
+                      <span className="text-gray-400 w-6 text-center">📅</span>
+                      <div>
+                        <p className="text-sm text-gray-500">Date</p>
+                        <p className="font-medium text-gray-900">{formatDate(job.date)}</p>
+                      </div>
                     </div>
-                  )}
-                  
-                  {venue.contact2 && (
+
                     <div className="flex items-center gap-3">
-                      <span className="text-gray-400 w-6 text-center">👤</span>
-                      <span className="text-gray-700">{venue.contact2}</span>
+                      <span className="text-gray-400 w-6 text-center">⏰</span>
+                      <div>
+                        <p className="text-sm text-gray-500">Arrive by</p>
+                        <p className="font-medium text-gray-900">{formatTime(job.time)}</p>
+                      </div>
                     </div>
-                  )}
-                  
-                  {venue.phoneHidden ? (
-                    <div className="flex items-center gap-3">
-                      <span className="text-gray-400 w-6 text-center">📞</span>
-                      <span className="text-gray-400 italic">
-                        Available from {venue.phoneVisibleFrom}
-                      </span>
+
+                    {job.driverPay && job.driverPay > 0 && (
+                      <div className="flex items-center gap-3">
+                        <span className="text-gray-400 w-6 text-center">💷</span>
+                        <div>
+                          <p className="text-sm text-gray-500">Agreed fee</p>
+                          <p className="font-medium text-green-600">£{job.driverPay.toFixed(0)} + expenses</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Reference */}
+                {job.hhRef && (
+                  <div className="bg-white rounded-xl shadow-sm p-6">
+                    <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                      <span>🔗</span> Reference
+                    </h2>
+                    <p className="text-gray-600">
+                      HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
+                    </p>
+                  </div>
+                )}
+
+                {/* Location */}
+                {venue && (venue.address || venue.whatThreeWords) && (
+                  <div className="bg-white rounded-xl shadow-sm p-6">
+                    <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                      <span>📍</span> Location
+                    </h2>
+                    
+                    <div className="space-y-2">
+                      {venue.address && (
+                        <p className="text-gray-700">{venue.address}</p>
+                      )}
+                      
+                      {venue.whatThreeWords && (
+                        <p className="text-gray-500 text-sm font-mono">
+                          ///{venue.whatThreeWords}
+                        </p>
+                      )}
                     </div>
-                  ) : (
-                    <>
-                      {venue.phone && (
+                    
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      {googleMapsUrl && (
                         <a
-                          href={`tel:${venue.phone}`}
-                          className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                          href={googleMapsUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm"
                         >
-                          <span className="w-6 text-center">📞</span>
-                          <span className="font-medium">{venue.phone}</span>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                          </svg>
+                          Google Maps
                         </a>
                       )}
                       
-                      {venue.phone2 && (
+                      {what3WordsUrl && (
                         <a
-                          href={`tel:${venue.phone2}`}
-                          className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                          href={what3WordsUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm"
                         >
-                          <span className="w-6 text-center">📞</span>
-                          <span className="font-medium">{venue.phone2}</span>
+                          <span className="font-bold">///</span>
+                          What3Words
                         </a>
                       )}
-                    </>
-                  )}
-                  
-                  {venue.email && (
-                    <a
-                      href={`mailto:${venue.email}`}
-                      className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
-                    >
-                      <span className="w-6 text-center">✉️</span>
-                      <span className="font-medium">{venue.email}</span>
-                    </a>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Equipment List - simple read-only with filtering */}
-            {job.hhRef && (
-              <EquipmentList hhRef={job.hhRef} whatIsIt={job.whatIsIt} />
-            )}
-
-            {/* Access Info */}
-            {venue?.accessNotes && (
-              <div className="bg-white rounded-xl shadow-sm p-6">
-                <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span>🚪</span> Access Info
-                </h2>
-                <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-                  <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Key Notes */}
-            {job.keyNotes && (
-              <div className="bg-white rounded-xl shadow-sm p-6">
-                <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span>📋</span> Key Notes
-                </h2>
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                  <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Stage Notes */}
-            {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
-              <div className="bg-white rounded-xl shadow-sm p-6">
-                <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                  <span>🎭</span> Stage Notes
-                </h2>
-                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                  <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Notification Toggle */}
-            <div className="bg-white rounded-xl shadow-sm p-6">
-              <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                <span>🔔</span> Notifications
-              </h2>
-              <NotificationMuteToggle jobId={job.id} />
-              <p className="text-xs text-gray-500 mt-2">
-                Turn off to stop receiving email updates about this specific job
-              </p>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="space-y-3 pt-2">
-              <button
-                className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
-                onClick={() => alert('Calendar export coming soon!')}
-              >
-                <span>📅</span> Add to Calendar
-              </button>
-
-              {!job.completedAtDate && (
-                <Link
-                  href={`/job/${job.id}/complete`}
-                  className="w-full bg-purple-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-purple-600 transition-colors flex items-center justify-center gap-2 text-lg"
-                >
-                  <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
-                </Link>
-              )}
-
-              {job.completedAtDate && (
-                <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
-                  <span className="text-green-600 font-medium">
-                    ✅ Completed on {formatDate(job.completedAtDate)}
-                  </span>
-                </div>
-              )}
-            </div>
-          </>
-        )}
-
-        {/* Multi-stop accordion view */}
-        {isMultiStop && !loadingRun && (
-          <div className="space-y-3">
-            {runJobs.map((stopJob, index) => {
-              const stopVenue = runVenues.get(stopJob.venueId || '') || null
-              const isExpanded = expandedStops.has(stopJob.id)
-              const stopStatusInfo = translateStatus(stopJob.status)
-              
-              return (
-                <div key={stopJob.id} className="bg-white rounded-xl shadow-sm overflow-hidden">
-                  {/* Stop header - always visible */}
-                  <button
-                    onClick={() => toggleStopExpanded(stopJob.id)}
-                    className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center font-bold text-sm">
-                        {index + 1}
-                      </div>
-                      <div className="text-left">
-                        <p className="font-medium text-gray-900">
-                          {stopVenue?.name || stopJob.venueName || stopJob.name}
-                        </p>
-                        <p className="text-sm text-gray-500">
-                          {stopJob.time || 'TBC'} · {stopJob.type === 'delivery' ? 'Delivery' : 'Collection'}
-                        </p>
-                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${stopStatusInfo.style}`}>
-                        {stopStatusInfo.icon}
-                      </span>
-                      <svg 
-                        className={`w-5 h-5 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} 
-                        fill="none" 
-                        stroke="currentColor" 
-                        viewBox="0 0 24 24"
-                      >
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                      </svg>
-                    </div>
-                  </button>
-                  
-                  {/* Expanded details */}
-                  {isExpanded && (
-                    <div className="px-6 pb-4 border-t border-gray-100">
-                      <div className="pt-4 space-y-4">
-                        {/* Location */}
-                        {stopVenue?.address && (
-                          <div>
-                            <p className="text-sm text-gray-500 mb-1">📍 Location</p>
-                            <p className="text-gray-700">{stopVenue.address}</p>
-                            {stopVenue.whatThreeWords && (
-                              <p className="text-gray-500 text-sm font-mono mt-1">
-                                ///{stopVenue.whatThreeWords}
-                              </p>
-                            )}
-                            <div className="mt-2 flex gap-2">
-                              {getGoogleMapsUrl(stopVenue.address) && (
-                                <a
-                                  href={getGoogleMapsUrl(stopVenue.address)!}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-sm text-blue-600 hover:underline"
-                                >
-                                  Open in Maps →
-                                </a>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                        
-                        {/* Contact */}
-                        {(stopVenue?.contact1 || stopVenue?.phone) && (
-                          <div>
-                            <p className="text-sm text-gray-500 mb-1">👤 Contact</p>
-                            {stopVenue.contact1 && <p className="text-gray-700">{stopVenue.contact1}</p>}
-                            {stopVenue.phone && (
-                              <a href={`tel:${stopVenue.phone}`} className="text-purple-600 hover:underline">
-                                {stopVenue.phone}
-                              </a>
-                            )}
-                          </div>
-                        )}
-                        
-                        {/* Access Notes */}
-                        {stopVenue?.accessNotes && (
-                          <div>
-                            <p className="text-sm text-gray-500 mb-1">🚪 Access</p>
-                            <p className="text-gray-700 text-sm">{stopVenue.accessNotes}</p>
-                          </div>
-                        )}
-                        
-                        {/* Key Notes */}
-                        {stopJob.keyNotes && (
-                          <div>
-                            <p className="text-sm text-gray-500 mb-1">📋 Notes</p>
-                            <p className="text-gray-700 text-sm">{stopJob.keyNotes}</p>
-                          </div>
-                        )}
-                        
-                        {/* View full details link */}
-                        <Link
-                          href={`/job/${stopJob.id}`}
-                          className="inline-block text-sm font-medium text-purple-600 hover:text-purple-500"
+                  </div>
+                )}
+
+                {/* Contact */}
+                {venue && (venue.contact1 || venue.contact2 || venue.phone || venue.phone2 || venue.email) && (
+                  <div className="bg-white rounded-xl shadow-sm p-6">
+                    <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                      <span>👤</span> Contact
+                      {venue.phoneHidden && venue.phoneVisibleFrom && (
+                        <span className="text-xs font-normal text-gray-400 ml-2">
+                          (phone visible from {venue.phoneVisibleFrom})
+                        </span>
+                      )}
+                    </h2>
+                    
+                    <div className="space-y-3">
+                      {venue.contact1 && (
+                        <div className="flex items-center gap-3">
+                          <span className="text-gray-400 w-6 text-center">👤</span>
+                          <span className="text-gray-700">{venue.contact1}</span>
+                        </div>
+                      )}
+                      
+                      {venue.contact2 && (
+                        <div className="flex items-center gap-3">
+                          <span className="text-gray-400 w-6 text-center">👤</span>
+                          <span className="text-gray-700">{venue.contact2}</span>
+                        </div>
+                      )}
+                      
+                      {venue.phoneHidden ? (
+                        <div className="flex items-center gap-3">
+                          <span className="text-gray-400 w-6 text-center">📞</span>
+                          <span className="text-gray-400 italic">
+                            Available from {venue.phoneVisibleFrom}
+                          </span>
+                        </div>
+                      ) : (
+                        <>
+                          {venue.phone && (
+                            <a
+                              href={`tel:${venue.phone}`}
+                              className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                            >
+                              <span className="w-6 text-center">📞</span>
+                              <span className="font-medium">{venue.phone}</span>
+                            </a>
+                          )}
+                          
+                          {venue.phone2 && (
+                            <a
+                              href={`tel:${venue.phone2}`}
+                              className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
+                            >
+                              <span className="w-6 text-center">📞</span>
+                              <span className="font-medium">{venue.phone2}</span>
+                            </a>
+                          )}
+                        </>
+                      )}
+                      
+                      {venue.email && (
+                        <a
+                          href={`mailto:${venue.email}`}
+                          className="flex items-center gap-3 text-purple-600 hover:text-purple-700"
                         >
-                          View full details →
-                        </Link>
-                      </div>
+                          <span className="w-6 text-center">✉️</span>
+                          <span className="font-medium">{venue.email}</span>
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Equipment List - simple read-only with filtering */}
+                {job.hhRef && (
+                  <EquipmentList hhRef={job.hhRef} whatIsIt={job.whatIsIt} />
+                )}
+
+                {/* Access Info */}
+                {venue?.accessNotes && (
+                  <div className="bg-white rounded-xl shadow-sm p-6">
+                    <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                      <span>🚪</span> Access Info
+                    </h2>
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                      <p className="text-gray-700 whitespace-pre-wrap">{venue.accessNotes}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Key Notes */}
+                {job.keyNotes && (
+                  <div className="bg-white rounded-xl shadow-sm p-6">
+                    <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                      <span>📋</span> Key Notes
+                    </h2>
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                      <p className="text-gray-700 whitespace-pre-wrap">{job.keyNotes}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Stage Notes */}
+                {venue?.stageNotes && venue.stageNotes !== venue.accessNotes && (
+                  <div className="bg-white rounded-xl shadow-sm p-6">
+                    <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                      <span>🎭</span> Stage Notes
+                    </h2>
+                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                      <p className="text-gray-700 whitespace-pre-wrap">{venue.stageNotes}</p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Notification Toggle */}
+                <div className="bg-white rounded-xl shadow-sm p-6">
+                  <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                    <span>🔔</span> Notifications
+                  </h2>
+                  <NotificationMuteToggle jobId={job.id} />
+                  <p className="text-xs text-gray-500 mt-2">
+                    Turn off to stop receiving email updates about this specific job
+                  </p>
+                </div>
+
+                {/* Action Buttons */}
+                <div className="space-y-3 pt-2">
+                  <button
+                    className="w-full bg-white border border-gray-200 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+                    onClick={() => alert('Calendar export coming soon!')}
+                  >
+                    <span>📅</span> Add to Calendar
+                  </button>
+
+                  {!job.completedAtDate && (
+                    <Link
+                      href={`/job/${job.id}/complete`}
+                      className="w-full bg-purple-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-purple-600 transition-colors flex items-center justify-center gap-2 text-lg"
+                    >
+                      <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
+                    </Link>
+                  )}
+
+                  {job.completedAtDate && (
+                    <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
+                      <span className="text-green-600 font-medium">
+                        ✅ Completed on {formatDate(job.completedAtDate)}
+                      </span>
                     </div>
                   )}
                 </div>
-              )
-            })}
-            
-            {/* Total fee for run */}
-            {runJobs.length > 0 && (
-              <div className="bg-white rounded-xl shadow-sm p-4 flex items-center justify-between">
-                <span className="text-gray-600">Total agreed fee</span>
-                <span className="font-bold text-green-600">
-                  £{runJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0).toFixed(0)}
-                </span>
+              </>
+            )}
+
+            {/* Multi-stop accordion view */}
+            {isMultiStop && !loadingRun && (
+              <div className="space-y-3">
+                {runJobs.map((stopJob, index) => {
+                  const stopVenue = runVenues.get(stopJob.venueId || '') || null
+                  const isExpanded = expandedStops.has(stopJob.id)
+                  const stopStatusInfo = translateStatus(stopJob.status)
+                  
+                  return (
+                    <div key={stopJob.id} className="bg-white rounded-xl shadow-sm overflow-hidden">
+                      {/* Stop header - always visible */}
+                      <button
+                        onClick={() => toggleStopExpanded(stopJob.id)}
+                        className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center font-bold text-sm">
+                            {index + 1}
+                          </div>
+                          <div className="text-left">
+                            <p className="font-medium text-gray-900">
+                              {stopVenue?.name || stopJob.venueName || stopJob.name}
+                            </p>
+                            <p className="text-sm text-gray-500">
+                              {stopJob.time || 'TBC'} · {stopJob.type === 'delivery' ? 'Delivery' : 'Collection'}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${stopStatusInfo.style}`}>
+                            {stopStatusInfo.icon}
+                          </span>
+                          <svg 
+                            className={`w-5 h-5 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`} 
+                            fill="none" 
+                            stroke="currentColor" 
+                            viewBox="0 0 24 24"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </div>
+                      </button>
+                      
+                      {/* Expanded details */}
+                      {isExpanded && (
+                        <div className="px-6 pb-4 border-t border-gray-100">
+                          <div className="pt-4 space-y-4">
+                            {/* Location */}
+                            {stopVenue?.address && (
+                              <div>
+                                <p className="text-sm text-gray-500 mb-1">📍 Location</p>
+                                <p className="text-gray-700">{stopVenue.address}</p>
+                                {stopVenue.whatThreeWords && (
+                                  <p className="text-gray-500 text-sm font-mono mt-1">
+                                    ///{stopVenue.whatThreeWords}
+                                  </p>
+                                )}
+                                <div className="mt-2 flex gap-2">
+                                  {getGoogleMapsUrl(stopVenue.address) && (
+                                    <a
+                                      href={getGoogleMapsUrl(stopVenue.address)!}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-sm text-blue-600 hover:underline"
+                                    >
+                                      Open in Maps →
+                                    </a>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                            
+                            {/* Contact */}
+                            {(stopVenue?.contact1 || stopVenue?.phone) && (
+                              <div>
+                                <p className="text-sm text-gray-500 mb-1">👤 Contact</p>
+                                {stopVenue.contact1 && <p className="text-gray-700">{stopVenue.contact1}</p>}
+                                {stopVenue.phone && (
+                                  <a href={`tel:${stopVenue.phone}`} className="text-purple-600 hover:underline">
+                                    {stopVenue.phone}
+                                  </a>
+                                )}
+                              </div>
+                            )}
+                            
+                            {/* Access Notes */}
+                            {stopVenue?.accessNotes && (
+                              <div>
+                                <p className="text-sm text-gray-500 mb-1">🚪 Access</p>
+                                <p className="text-gray-700 text-sm">{stopVenue.accessNotes}</p>
+                              </div>
+                            )}
+                            
+                            {/* Key Notes */}
+                            {stopJob.keyNotes && (
+                              <div>
+                                <p className="text-sm text-gray-500 mb-1">📋 Notes</p>
+                                <p className="text-gray-700 text-sm">{stopJob.keyNotes}</p>
+                              </div>
+                            )}
+                            
+                            {/* View full details link */}
+                            <Link
+                              href={`/job/${stopJob.id}`}
+                              className="inline-block text-sm font-medium text-purple-600 hover:text-purple-500"
+                            >
+                              View full details →
+                            </Link>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+                
+                {/* Total fee for run */}
+                {runJobs.length > 0 && (
+                  <div className="bg-white rounded-xl shadow-sm p-4 flex items-center justify-between">
+                    <span className="text-gray-600">Total agreed fee</span>
+                    <span className="font-bold text-green-600">
+                      £{runJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0).toFixed(0)}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
-          </div>
-        )}
 
-        {loadingRun && (
-          <div className="text-center py-8">
-            <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="text-gray-600">Loading run details...</p>
-          </div>
+            {loadingRun && (
+              <div className="text-center py-8">
+                <div className="w-8 h-8 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                <p className="text-gray-600">Loading run details...</p>
+              </div>
+            )}
+          </>
         )}
 
       </main>
