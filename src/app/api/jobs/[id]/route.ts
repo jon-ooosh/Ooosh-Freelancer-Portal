@@ -3,6 +3,10 @@
  * 
  * GET /api/jobs/[id] - Fetch a specific job by Monday.com item ID
  * 
+ * Supports both D&C jobs and Crew jobs:
+ * - Default (no query param): Fetches from D&C board
+ * - ?board=crew: Fetches from Crewed Jobs board
+ * 
  * Returns job details including venue information if the logged-in user is assigned to it.
  * Security: Users can only view jobs assigned to them.
  * Privacy: Contact phone numbers are only visible within 48 hours of the job date.
@@ -10,7 +14,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
-import { getJobById, getVenueById, VenueRecord } from '@/lib/monday'
+import { getJobById, getCrewJobById, getVenueById, VenueRecord } from '@/lib/monday'
 
 /**
  * Check if a date is within 48 hours of now (before or after)
@@ -62,6 +66,10 @@ export async function GET(
       )
     }
 
+    // Check for board type in query params
+    const searchParams = request.nextUrl.searchParams
+    const boardType = searchParams.get('board') || 'dc'
+
     // Check session
     const session = await getSessionUser()
     
@@ -72,10 +80,16 @@ export async function GET(
       )
     }
 
-    console.log('Job API: Fetching job', jobId, 'for user', session.email)
+    console.log('Job API: Fetching', boardType, 'job', jobId, 'for user', session.email)
 
-    // Fetch the job from Monday.com
-    const job = await getJobById(jobId, session.email)
+    // Fetch the job from the appropriate Monday.com board
+    let job: Awaited<ReturnType<typeof getJobById>> | Awaited<ReturnType<typeof getCrewJobById>> = null
+
+    if (boardType === 'crew') {
+      job = await getCrewJobById(jobId, session.email)
+    } else {
+      job = await getJobById(jobId, session.email)
+    }
 
     if (!job) {
       return NextResponse.json(
@@ -85,6 +99,7 @@ export async function GET(
     }
 
     // Fetch venue details if we have a venue ID
+    // Both D&C and Crew jobs can have a venueId from their connect columns
     let venue: VenueRecord | null = null
     if (job.venueId) {
       console.log('Job API: Fetching venue', job.venueId)
@@ -92,8 +107,9 @@ export async function GET(
     }
 
     // Apply 48-hour privacy rule for contact phone numbers
-    const contactsVisible = isWithin48Hours(job.date)
-    const contactVisibleFrom = !contactsVisible ? getContactVisibleDate(job.date) : null
+    const jobDate = job.date
+    const contactsVisible = isWithin48Hours(jobDate)
+    const contactVisibleFrom = !contactsVisible ? getContactVisibleDate(jobDate) : null
 
     // Build the response with venue details
     // Phone numbers are redacted if outside the 48-hour window
@@ -121,6 +137,7 @@ export async function GET(
       job,
       venue: venueDetails,
       contactsVisible,
+      boardType,
     })
 
   } catch (error) {

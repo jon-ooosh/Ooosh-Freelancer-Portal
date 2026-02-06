@@ -1,55 +1,70 @@
 /**
- * HireHop Items API - Add Labour Items to Jobs
+ * HireHop Labour Items API
  * 
- * POST /api/staff/hirehop-items
+ * POST /api/staff/hirehop-items - Add labour items (Delivery/Collection/Crew) to a HireHop job
  * 
- * Adds Delivery, Collection, or Crew labour items to a HireHop job.
- * Automatically finds or creates a "Crew & transport" header section.
+ * This uses a TWO-STEP APPROACH (same pattern as deposits/payments):
+ * 1. Add item via save_job.php with items parameter (creates with defaults)
+ * 2. Edit the item via items_save.php to set price and note
  * 
- * Request body:
- * {
- *   jobId: string,           // HireHop job number
- *   items: [{
- *     type: 'delivery' | 'collection' | 'crew',
- *     price: number,         // Total price for this item
- *     date: string,          // ISO date string
- *     time: string,          // Time in HH:MM format  
- *     venue: string,         // Venue name
- *   }]
- * }
- * 
- * Response:
- * {
- *   success: boolean,
- *   results: [{ type, itemId, note }],
- *   headerId: string,
- *   error?: string
- * }
+ * Items are placed under a "Crew & transport" header (created if needed).
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 
 // =============================================================================
-// CONFIGURATION
+// TYPES
 // =============================================================================
 
-// Labour item IDs in HireHop (from your stock list)
-const LABOUR_ITEM_IDS = {
+interface HireHopRawItem {
+  ID: string
+  NAME?: string
+  title?: string
+  kind: string
+  LFT?: string
+  RGT?: string
+  parent?: string
+  LIST_ID?: string
+  UNIT_PRICE?: string
+  ADDITIONAL?: string
+}
+
+interface AddItemRequest {
+  jobId: string
+  items: Array<{
+    type: 'delivery' | 'collection' | 'crew'
+    price: number
+    date?: string      // Job date for the note (YYYY-MM-DD)
+    time?: string      // Arrival time for the note (HH:MM)
+    venue?: string     // Venue name for the note
+  }>
+}
+
+interface ItemResult {
+  type: 'delivery' | 'collection' | 'crew'
+  itemId: string
+  note: string
+  success: boolean
+  error?: string
+}
+
+// Labour item list IDs (from HireHop depot)
+const LABOUR_ITEM_IDS: Record<string, number> = {
   delivery: 5,
   collection: 6,
   crew: 86,
 }
 
-// Keywords to search for when finding an existing header
-const HEADER_KEYWORDS = ['crew', 'transport', 'delivery', 'collection', 'deliveries', 'collections']
+// Keywords to find existing "Crew & transport" type headers
+const HEADER_KEYWORDS = ['crew', 'transport', 'delivery', 'collection']
 
-// Default header name if we need to create one
-const DEFAULT_HEADER_NAME = 'Crew & transport'
+// =============================================================================
+// CONFIG HELPERS
+// =============================================================================
 
-// Get HireHop credentials from environment
 function getHireHopConfig() {
   const token = process.env.HIREHOP_API_TOKEN
-  const domain = process.env.HIREHOP_DOMAIN || 'hirehop.net'
+  const domain = process.env.HIREHOP_DOMAIN || 'myhirehop.com'
   
   if (!token) {
     throw new Error('HIREHOP_API_TOKEN not configured')
@@ -59,123 +74,54 @@ function getHireHopConfig() {
 }
 
 // =============================================================================
-// TYPES
-// =============================================================================
-
-interface HireHopRawItem {
-  ID: string
-  kind: string  // "0" = header, "4" = labour item
-  title: string
-  parent: string
-  LFT: string
-  RGT: string
-  [key: string]: unknown
-}
-
-interface AddItemRequest {
-  type: 'delivery' | 'collection' | 'crew'
-  price: number
-  date: string      // ISO date string e.g. "2026-02-06"
-  time: string      // HH:MM format e.g. "09:30"
-  venue: string     // Venue name
-}
-
-interface RequestBody {
-  jobId: string
-  items: AddItemRequest[]
-}
-
-interface ItemResult {
-  type: string
-  itemId: string
-  note: string
-  success: boolean
-  error?: string
-}
-
-// =============================================================================
-// HELPER FUNCTIONS
+// HIREHOP API FUNCTIONS
 // =============================================================================
 
 /**
- * Format a date for the item note (e.g., "6 Feb")
- */
-function formatDateForNote(isoDate: string): string {
-  try {
-    const date = new Date(isoDate)
-    const day = date.getDate()
-    const month = date.toLocaleString('en-GB', { month: 'short' })
-    return `${day} ${month}`
-  } catch {
-    return isoDate
-  }
-}
-
-/**
- * Build the item note in the format: "6 Feb - 09:30 - Royal Albert Hall"
- */
-function buildItemNote(date: string, time: string, venue: string): string {
-  const formattedDate = formatDateForNote(date)
-  const parts = [formattedDate]
-  
-  if (time) {
-    parts.push(time)
-  }
-  
-  if (venue) {
-    parts.push(venue)
-  }
-  
-  return parts.join(' - ')
-}
-
-/**
- * Fetch all items from a HireHop job
+ * Fetch all items for a job to find headers and existing items
  */
 async function fetchJobItems(jobId: string): Promise<HireHopRawItem[]> {
   const { token, domain } = getHireHopConfig()
-  const encodedToken = encodeURIComponent(token)
   
-  const url = `https://${domain}/frames/items_to_supply_list.php?job=${jobId}&token=${encodedToken}`
-  
-  console.log(`HireHop Items: Fetching items for job ${jobId}`)
+  const url = `https://${domain}/frames/items_to_supply_list.php?job=${jobId}&token=${encodeURIComponent(token)}`
   
   const response = await fetch(url)
   
   if (!response.ok) {
-    throw new Error(`Failed to fetch items: HTTP ${response.status}`)
+    throw new Error(`Failed to fetch job items: HTTP ${response.status}`)
   }
   
   const text = await response.text()
   
-  // Check for HTML error (auth failure)
   if (text.trim().startsWith('<')) {
-    throw new Error('HireHop authentication failed - received HTML instead of JSON')
+    throw new Error('HireHop authentication failed - received HTML')
   }
   
-  const parsed = JSON.parse(text)
-  return Array.isArray(parsed) ? parsed : (parsed.items || [])
+  return JSON.parse(text) as HireHopRawItem[]
 }
 
 /**
  * Find an existing header that matches our keywords
- * Returns the header ID if found, null otherwise
  */
-function findExistingHeader(items: HireHopRawItem[]): string | null {
-  // Headers have kind="0" and parent="0" (top-level)
+function findExistingHeader(items: HireHopRawItem[]): { id: string; name: string } | null {
+  // Headers have kind: "0" and no parent (or parent: "0")
   const headers = items.filter(item => 
-    item.kind === '0' && item.parent === '0'
+    item.kind === '0' && 
+    (!item.parent || item.parent === '0')
   )
   
   console.log(`HireHop Items: Found ${headers.length} top-level headers`)
   
   for (const header of headers) {
-    const title = (header.title || '').toLowerCase()
+    const headerName = (header.NAME || header.title || '').toLowerCase()
     
     for (const keyword of HEADER_KEYWORDS) {
-      if (title.includes(keyword)) {
-        console.log(`HireHop Items: Found matching header "${header.title}" (ID: ${header.ID})`)
-        return header.ID
+      if (headerName.includes(keyword)) {
+        console.log(`HireHop Items: Found matching header "${header.NAME || header.title}" (ID: ${header.ID})`)
+        return { 
+          id: header.ID, 
+          name: header.NAME || header.title || '' 
+        }
       }
     }
   }
@@ -192,7 +138,6 @@ async function createHeader(jobId: string, headerName: string): Promise<string> 
   
   console.log(`HireHop Items: Creating header "${headerName}" in job ${jobId}`)
   
-  // To create a header, we use items_save.php with kind=0
   const params = new URLSearchParams({
     job: jobId,
     kind: '0',           // 0 = header
@@ -223,7 +168,6 @@ async function createHeader(jobId: string, headerName: string): Promise<string> 
   
   const result = JSON.parse(text)
   
-  // The response contains the created items
   if (result.items && result.items.length > 0) {
     const createdHeader = result.items[0]
     console.log(`HireHop Items: Created header with ID ${createdHeader.ID}`)
@@ -234,7 +178,34 @@ async function createHeader(jobId: string, headerName: string): Promise<string> 
 }
 
 /**
- * Add a labour item to a job under a specific header
+ * Build the item note in format: "6 Feb - 09:30 - Venue Name"
+ */
+function buildItemNote(date?: string, time?: string, venue?: string): string {
+  const parts: string[] = []
+  
+  if (date) {
+    // Convert YYYY-MM-DD to "6 Feb" format
+    const d = new Date(date + 'T12:00:00')
+    const day = d.getDate()
+    const month = d.toLocaleDateString('en-GB', { month: 'short' })
+    parts.push(`${day} ${month}`)
+  }
+  
+  if (time) {
+    parts.push(time)
+  }
+  
+  if (venue) {
+    parts.push(venue)
+  }
+  
+  return parts.join(' - ')
+}
+
+/**
+ * Add a labour item using TWO-STEP approach:
+ * Step 1: Add via save_job.php with items parameter
+ * Step 2: Edit via items_save.php to set price and note
  */
 async function addLabourItem(
   jobId: string,
@@ -247,128 +218,195 @@ async function addLabourItem(
   
   const listId = LABOUR_ITEM_IDS[itemType]
   
-  console.log(`HireHop Items: Adding ${itemType} (list_id=${listId}) to job ${jobId} under header ${headerId}`)
+  console.log(`HireHop Items: Adding ${itemType} (list_id=${listId}) to job ${jobId}`)
   console.log(`HireHop Items: Price=${price}, Note="${note}"`)
   
-  // Build the request parameters (matching the format from the network sniff)
-  // Get current local datetime in required format
-  const now = new Date()
-  const localDateTime = now.toISOString().slice(0, 19).replace('T', ' ')
-  
-  const params = new URLSearchParams({
-    // Required identifiers
-    job: jobId,
-    kind: '4',                    // 4 = labour item
-    id: '0',                      // 0 = new item
-    list_id: String(listId),      // The labour item template ID
-    
-    // Quantity and pricing
-    qty: '1',
-    unit_price: String(price),
-    price: String(price),
-    price_type: '0',              // One-off price
-    
-    // Notes and descriptions
-    add: note,                    // This becomes the ADDITIONAL field (item note)
-    cust_add: '',                 // Custom additional
-    memo: '',                     // Labour item memo (TECHNICAL field)
-    name: '',                     // Leave empty - uses default from list_id
-    
-    // Hierarchy
-    parent: headerId,             // Put under this header
-    
-    // Accounting codes (from your sniff - these seem required)
-    acc_nominal: '29',            // Nominal code from your response
-    acc_nominal_po: '30',         // PO nominal code
-    
-    // Tax and costs
-    vat_rate: '0',
-    value: '0',
-    cost_price: '0',
-    weight: '0',
-    
-    // Dates (empty for labour items)
-    start: '',
-    end: '',
-    duration: '0',
-    
-    // Origin/trade info
-    country_origin: '',
-    hs_code: '',
-    
-    // Flags
-    flag: '0',
-    priority_confirm: '0',
-    no_shortfall: '1',
-    no_availability: '0',
-    ignore: '0',
-    
-    // Timestamp
-    local: localDateTime,
-    
-    // Auth
-    token: token,
-  })
-  
   try {
-    const response = await fetch(`https://${domain}/php_functions/items_save.php`, {
+    // =========================================================================
+    // STEP 1: Get current items to track what exists
+    // =========================================================================
+    const itemsBefore = await fetchJobItems(jobId)
+    const existingIds = new Set(itemsBefore.map(i => i.ID))
+    console.log(`HireHop Items: Job has ${itemsBefore.length} items before adding`)
+    
+    // =========================================================================
+    // STEP 2: Add the item using save_job.php with items parameter
+    // =========================================================================
+    // Format: items = { "c{list_id}": quantity } where c = labour/crew item
+    const itemsToAdd = { [`c${listId}`]: 1 }
+    
+    console.log(`HireHop Items: Step 1 - Adding via save_job.php:`, JSON.stringify(itemsToAdd))
+    
+    const step1Params = new URLSearchParams({
+      job: jobId,
+      items: JSON.stringify(itemsToAdd),
+      token: token,
+    })
+    
+    const step1Response = await fetch(`https://${domain}/api/save_job.php`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: params.toString(),
+      body: step1Params.toString(),
     })
     
-    if (!response.ok) {
+    if (!step1Response.ok) {
       return { 
         itemId: '', 
         success: false, 
-        error: `HTTP ${response.status}` 
+        error: `Step 1 failed: HTTP ${step1Response.status}` 
       }
     }
     
-    const text = await response.text()
+    const step1Text = await step1Response.text()
+    console.log(`HireHop Items: Step 1 response (first 300 chars):`, step1Text.substring(0, 300))
     
-    // Log the raw response for debugging
-    console.log(`HireHop Items: Raw response for ${itemType}:`, text.substring(0, 500))
-    
-    if (text.trim().startsWith('<')) {
+    if (step1Text.trim().startsWith('<')) {
       return { 
         itemId: '', 
         success: false, 
-        error: 'Authentication failed - received HTML' 
+        error: 'Step 1: Authentication failed - received HTML' 
       }
     }
     
-    const result = JSON.parse(text)
+    const step1Result = JSON.parse(step1Text)
     
-    // Log the parsed structure
-    console.log(`HireHop Items: Parsed response keys:`, Object.keys(result))
-    
-    // Check for error in response
-    if (result.error) {
-      console.log(`HireHop Items: Error in response:`, result.error)
+    if (step1Result.error) {
       return {
         itemId: '',
         success: false,
-        error: `HireHop error: ${result.error}`
+        error: `Step 1 error: ${step1Result.error}`
       }
     }
     
-    if (result.items && result.items.length > 0) {
-      const createdItem = result.items[0]
-      console.log(`HireHop Items: Created ${itemType} with ID ${createdItem.ID}`)
+    // =========================================================================
+    // STEP 3: Fetch items again to find the new one
+    // =========================================================================
+    const itemsAfter = await fetchJobItems(jobId)
+    console.log(`HireHop Items: Job has ${itemsAfter.length} items after adding`)
+    
+    // Find the new item (ID that didn't exist before, matching list_id and kind=4)
+    const newItem = itemsAfter.find(item => 
+      !existingIds.has(item.ID) && 
+      item.LIST_ID === String(listId) && 
+      item.kind === '4'
+    )
+    
+    if (!newItem) {
+      // Maybe the response contains it directly?
+      if (step1Result.items && Array.isArray(step1Result.items)) {
+        const fromResponse = step1Result.items.find((i: HireHopRawItem) => 
+          i.LIST_ID === String(listId) && i.kind === '4' && !existingIds.has(i.ID)
+        )
+        if (fromResponse) {
+          console.log(`HireHop Items: Found new item in response: ${fromResponse.ID}`)
+        }
+      }
+      
+      console.log(`HireHop Items: Could not find new item. Looking for LIST_ID=${listId}, kind=4`)
+      console.log(`HireHop Items: New items after add:`, 
+        itemsAfter.filter(i => !existingIds.has(i.ID)).map(i => ({ 
+          ID: i.ID, 
+          LIST_ID: i.LIST_ID, 
+          kind: i.kind,
+          name: i.NAME || i.title 
+        }))
+      )
+      
+      return {
+        itemId: '',
+        success: false,
+        error: 'Item may have been added but could not find its ID'
+      }
+    }
+    
+    const newItemId = newItem.ID
+    console.log(`HireHop Items: Found new item ID: ${newItemId}`)
+    
+    // =========================================================================
+    // STEP 4: Edit the item to set price, note, and parent header
+    // =========================================================================
+    console.log(`HireHop Items: Step 2 - Editing item ${newItemId}`)
+    
+    const now = new Date()
+    const localDateTime = now.toISOString().slice(0, 19).replace('T', ' ')
+    
+    const step2Params = new URLSearchParams({
+      job: jobId,
+      kind: '4',                    // Labour item
+      id: newItemId,                // Edit this existing item
+      list_id: String(listId),
+      qty: '1',
+      unit_price: String(price),
+      price: String(price),
+      price_type: '0',
+      add: note,                    // Item note (ADDITIONAL field)
+      cust_add: '',
+      memo: '',
+      name: '',
+      parent: headerId,             // Move under this header
+      acc_nominal: '29',
+      acc_nominal_po: '30',
+      vat_rate: '0',
+      value: '0',
+      cost_price: '0',
+      weight: '0',
+      start: '',
+      end: '',
+      duration: '0',
+      country_origin: '',
+      hs_code: '',
+      flag: '0',
+      priority_confirm: '0',
+      no_shortfall: '1',
+      no_availability: '0',
+      ignore: '0',
+      local: localDateTime,
+      token: token,
+    })
+    
+    const step2Response = await fetch(`https://${domain}/php_functions/items_save.php`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: step2Params.toString(),
+    })
+    
+    if (!step2Response.ok) {
       return { 
-        itemId: createdItem.ID, 
-        success: true 
+        itemId: newItemId, 
+        success: true,  // Item was created, just couldn't edit
+        error: `Item created but edit failed: HTTP ${step2Response.status}` 
       }
     }
     
-    // Return the raw response structure in the error for debugging
+    const step2Text = await step2Response.text()
+    console.log(`HireHop Items: Step 2 response (first 200 chars):`, step2Text.substring(0, 200))
+    
+    if (step2Text.trim().startsWith('<')) {
+      return { 
+        itemId: newItemId, 
+        success: true,
+        error: 'Item created but edit auth failed' 
+      }
+    }
+    
+    const step2Result = JSON.parse(step2Text)
+    
+    if (step2Result.error) {
+      return {
+        itemId: newItemId,
+        success: true,
+        error: `Item created but edit error: ${step2Result.error}`
+      }
+    }
+    
+    console.log(`HireHop Items: Successfully added and edited item ${newItemId}`)
     return { 
-      itemId: '', 
-      success: false, 
-      error: `No items in response. Keys: ${Object.keys(result).join(', ')}. Full: ${JSON.stringify(result).substring(0, 200)}` 
+      itemId: newItemId, 
+      success: true 
     }
     
   } catch (error) {
@@ -382,7 +420,7 @@ async function addLabourItem(
 }
 
 // =============================================================================
-// API HANDLER
+// POST HANDLER
 // =============================================================================
 
 export async function POST(request: NextRequest) {
@@ -397,62 +435,49 @@ export async function POST(request: NextRequest) {
         { status: 401 }
       )
     }
-    
-    // Parse request body
-    const body: RequestBody = await request.json()
-    
-    if (!body.jobId) {
+
+    const body = await request.json() as AddItemRequest
+    const { jobId, items } = body
+
+    if (!jobId || !items || items.length === 0) {
       return NextResponse.json(
-        { success: false, error: 'jobId is required' },
+        { success: false, error: 'Missing jobId or items' },
         { status: 400 }
       )
     }
-    
-    if (!body.items || body.items.length === 0) {
-      return NextResponse.json(
-        { success: false, error: 'At least one item is required' },
-        { status: 400 }
-      )
-    }
-    
+
     console.log('='.repeat(60))
-    console.log(`HireHop Items: Adding ${body.items.length} item(s) to job ${body.jobId}`)
+    console.log(`HireHop Items: Adding ${items.length} item(s) to job ${jobId}`)
     console.log('='.repeat(60))
+
+    // =========================================================================
+    // Find or create header
+    // =========================================================================
+    console.log('HireHop Items: Fetching items for job', jobId)
+    const existingItems = await fetchJobItems(jobId)
     
-    // Step 1: Fetch existing items to find a suitable header
-    const existingItems = await fetchJobItems(body.jobId)
+    let headerId: string
+    const existingHeader = findExistingHeader(existingItems)
     
-    // Step 2: Find or create a header
-    let headerId = findExistingHeader(existingItems)
-    
-    if (!headerId) {
-      headerId = await createHeader(body.jobId, DEFAULT_HEADER_NAME)
+    if (existingHeader) {
+      headerId = existingHeader.id
+    } else {
+      console.log('HireHop Items: Creating new "Crew & transport" header')
+      headerId = await createHeader(jobId, 'Crew & transport')
     }
-    
-    // Step 3: Add each item
+
+    // =========================================================================
+    // Add each item
+    // =========================================================================
     const results: ItemResult[] = []
     
-    for (const item of body.items) {
-      // Validate item type
-      if (!['delivery', 'collection', 'crew'].includes(item.type)) {
-        results.push({
-          type: item.type,
-          itemId: '',
-          note: '',
-          success: false,
-          error: `Invalid item type: ${item.type}`,
-        })
-        continue
-      }
-      
-      // Build the note
+    for (const item of items) {
       const note = buildItemNote(item.date, item.time, item.venue)
       
-      // Add the item
       const result = await addLabourItem(
-        body.jobId,
+        jobId,
         headerId,
-        item.type as 'delivery' | 'collection' | 'crew',
+        item.type,
         item.price,
         note
       )
@@ -465,22 +490,19 @@ export async function POST(request: NextRequest) {
         error: result.error,
       })
     }
-    
-    // Check if all items succeeded
-    const allSucceeded = results.every(r => r.success)
-    const anySucceeded = results.some(r => r.success)
-    
-    console.log(`HireHop Items: Completed - ${results.filter(r => r.success).length}/${results.length} items added`)
-    
+
+    const successCount = results.filter(r => r.success).length
+    console.log(`HireHop Items: Completed - ${successCount}/${items.length} items added`)
+
     return NextResponse.json({
-      success: allSucceeded,
-      partial: !allSucceeded && anySucceeded,
+      success: successCount === items.length,
+      partial: successCount > 0 && successCount < items.length,
       headerId,
       results,
     })
-    
+
   } catch (error) {
-    console.error('HireHop Items API error:', error)
+    console.error('HireHop Items: Fatal error:', error)
     return NextResponse.json(
       { 
         success: false, 

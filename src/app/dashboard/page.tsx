@@ -11,8 +11,10 @@ import Link from 'next/link'
 interface OrganisedJob {
   id: string
   name: string
+  board: 'dc' | 'crew'
   type: 'delivery' | 'collection'
   date: string
+  finishDate?: string           // For multi-day crew jobs
   time?: string
   venueName?: string
   driverPay?: number
@@ -20,6 +22,11 @@ interface OrganisedJob {
   hhRef?: string
   keyNotes?: string
   completedAtDate?: string
+  // Crew job specific fields
+  workType?: string             // e.g. "BACKLINE TECH"
+  workDurationHours?: number
+  numberOfDays?: number
+  jobType?: string              // "Driving + Crew" or "Crew Only"
 }
 
 interface GroupedRun {
@@ -71,6 +78,21 @@ function formatDate(dateStr: string): string {
 }
 
 /**
+ * Format a short date (e.g., "Thu 12 Feb") — used for multi-day end dates
+ */
+function formatShortDate(dateStr: string): string {
+  if (!dateStr) return ''
+  
+  const date = new Date(dateStr)
+  if (isNaN(date.getTime())) return dateStr
+  
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+  
+  return `${days[date.getDay()]} ${date.getDate()} ${months[date.getMonth()]}`
+}
+
+/**
  * Format a time string for display (e.g., "10:00 AM")
  */
 function formatTime(timeStr: string | undefined): string {
@@ -116,16 +138,50 @@ function getDisplayName(name: string, venueName?: string): string {
   return name.replace(/^(DEL|COL)\s*[-:]\s*/i, '').trim()
 }
 
+/**
+ * Format crew job duration intelligently
+ * - Multi-day: "3 days"
+ * - Single day with hours: "8 hrs"
+ * - Neither: empty string
+ */
+function formatDuration(hours?: number, days?: number): string {
+  if (days && days > 1) {
+    return `${days} days`
+  }
+  if (hours) {
+    return `${hours} hrs`
+  }
+  return ''
+}
+
+/**
+ * Format date range for multi-day crew jobs
+ * If finishDate differs from start date, show as range
+ */
+function formatDateRange(dateStr: string, finishDateStr?: string): string {
+  if (!finishDateStr || finishDateStr === dateStr) {
+    return formatDate(dateStr)
+  }
+  
+  // Show as range: "Friday 10 Feb – Sun 12 Feb"
+  return `${formatDate(dateStr)} – ${formatShortDate(finishDateStr)}`
+}
+
 // =============================================================================
 // COMPONENTS
 // =============================================================================
 
 /**
  * Job Card Component - displays a single job or grouped run
+ * 
+ * Handles three card types:
+ * 1. D&C single job (delivery or collection)
+ * 2. D&C grouped run (multi-drop)
+ * 3. Crew job (always individual, never grouped)
  */
 function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStartButton?: boolean }) {
   if (item.isGrouped) {
-    // Multi-drop run card
+    // Multi-drop run card (D&C only — crew jobs are never grouped)
     const firstJob = item.jobs[0]
     const isCompleted = item.jobs.every(j => j.completedAtDate)
     
@@ -188,7 +244,56 @@ function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStar
     )
   }
   
-  // Single job card
+  // ── Crew Job Card ──────────────────────────────────────────────────────────
+  if (item.board === 'crew') {
+    const duration = formatDuration(item.workDurationHours, item.numberOfDays)
+    const dateDisplay = formatDateRange(item.date, item.finishDate)
+    
+    return (
+      <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+        <div className="flex items-start justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="w-10 h-10 bg-yellow-100 rounded-lg flex items-center justify-center">
+              <span className="text-yellow-700">👷</span>
+            </div>
+            <div>
+              <p className="font-medium text-gray-900">
+                {item.workType || 'Crew Work'} – {getDisplayName(item.name, item.venueName)}
+              </p>
+              <p className="text-sm text-gray-500">
+                {dateDisplay}
+                {item.time && ` · ${formatTime(item.time)}`}
+                {duration && ` · ${duration}`}
+              </p>
+              {/* Show job type tag (Driving + Crew / Crew Only) */}
+              {item.jobType && (
+                <span className="inline-block mt-1 text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                  {item.jobType}
+                </span>
+              )}
+            </div>
+          </div>
+          {item.driverPay !== undefined && item.driverPay > 0 && (
+            <span className="text-sm font-medium text-green-600">
+              {formatFee(item.driverPay)}
+            </span>
+          )}
+        </div>
+        
+        {/* Action button — View details only, no "Start" for crew jobs */}
+        <div className="mt-3 flex justify-between items-center">
+          <Link 
+            href={`/job/${item.id}?board=crew`} 
+            className="text-sm font-medium text-ooosh-600 hover:text-ooosh-500"
+          >
+            View details →
+          </Link>
+        </div>
+      </div>
+    )
+  }
+  
+  // ── D&C Single Job Card ────────────────────────────────────────────────────
   const isDelivery = item.type === 'delivery'
   const isCompleted = !!item.completedAtDate
   
