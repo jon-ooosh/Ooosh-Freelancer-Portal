@@ -1065,16 +1065,22 @@ function CrewTransportWizard() {
           }
         }
 
-        if (isCrewedJob && formData.addCrewToHireHop) {
-          hirehopItems.push({
-            type: 'crew',
-            price: costs.clientChargeTotalRounded,
-            date: formData.jobDate,
-            endDate: formData.isMultiDay ? formData.jobFinishDate : undefined,
-            time: formData.arrivalTime,
-            venue: formData.destination,
-          })
-        }
+       if (isCrewedJob && formData.addCrewToHireHop) {
+  // Get the display label for the work type
+  const workTypeLabel = formData.workType === 'other'
+    ? (formData.workTypeOther || 'Other')
+    : (WORK_TYPE_OPTIONS.find(o => o.value === formData.workType)?.label || '')
+
+  hirehopItems.push({
+    type: 'crew',
+    price: costs.clientChargeTotalRounded,
+    date: formData.jobDate,
+    endDate: formData.isMultiDay ? formData.jobFinishDate : undefined,
+    time: formData.arrivalTime,
+    venue: formData.destination,
+    workType: workTypeLabel,
+  })
+}
 
         if (hirehopItems.length > 0) {
           try {
@@ -1515,7 +1521,7 @@ function CrewTransportWizard() {
                 {formData.isMultiDay && formData.calculationMode === 'hourly' && (
                   <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">⚠️ Hourly rate is unusual for multi-day jobs. Consider using Day Rate instead.</div>
                 )}
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 items-end">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">Calculation Mode</label>
                     <select value={formData.calculationMode} onChange={(e) => updateField('calculationMode', e.target.value as FormData['calculationMode'])} className="w-full px-4 py-2 border border-gray-300 rounded-lg">

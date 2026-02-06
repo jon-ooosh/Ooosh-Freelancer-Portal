@@ -38,6 +38,7 @@ interface AddItemRequest {
     endDate?: string   // End date for multi-day jobs (YYYY-MM-DD)
     time?: string      // Arrival time for the note (HH:MM)
     venue?: string     // Venue name for the note
+    workType?: string
   }>
 }
 
@@ -192,8 +193,11 @@ async function createHeader(jobId: string, headerName: string): Promise<string> 
  * Build the item note in format: "16th June - 09:30 - Venue Name"
  * For multi-day: "16th - 18th June - 09:30 - Venue Name"
  */
-function buildItemNote(date?: string, endDate?: string, time?: string, venue?: string): string {
+function buildItemNote(date?: string, endDate?: string, time?: string, venue?: string, workType?: string): string {
   const parts: string[] = []
+  if (workType) {
+    parts.push(workType)
+  }
   
   // Add ordinal suffix to a number
   const ordinal = (n: number): string => {
@@ -507,7 +511,7 @@ export async function POST(request: NextRequest) {
     const results: ItemResult[] = []
     
     for (const item of items) {
-      const note = buildItemNote(item.date, item.endDate, item.time, item.venue)
+      const note = buildItemNote(item.date, item.endDate, item.time, item.venue, item.workType)
       
       const result = await addLabourItem(
         jobId,
