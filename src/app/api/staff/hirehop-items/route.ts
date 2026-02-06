@@ -256,27 +256,57 @@ async function addLabourItem(
   const localDateTime = now.toISOString().slice(0, 19).replace('T', ' ')
   
   const params = new URLSearchParams({
+    // Required identifiers
     job: jobId,
     kind: '4',                    // 4 = labour item
     id: '0',                      // 0 = new item
     list_id: String(listId),      // The labour item template ID
+    
+    // Quantity and pricing
     qty: '1',
     unit_price: String(price),
     price: String(price),
-    add: note,                    // This becomes the ADDITIONAL field (item note)
-    parent: headerId,             // Put under this header
-    flag: '0',
-    priority_confirm: '0',
-    name: '',                     // Leave empty - uses default from list_id
     price_type: '0',              // One-off price
+    
+    // Notes and descriptions
+    add: note,                    // This becomes the ADDITIONAL field (item note)
+    cust_add: '',                 // Custom additional
+    memo: '',                     // Labour item memo (TECHNICAL field)
+    name: '',                     // Leave empty - uses default from list_id
+    
+    // Hierarchy
+    parent: headerId,             // Put under this header
+    
+    // Accounting codes (from your sniff - these seem required)
+    acc_nominal: '29',            // Nominal code from your response
+    acc_nominal_po: '30',         // PO nominal code
+    
+    // Tax and costs
     vat_rate: '0',
     value: '0',
-    weight: '0',
     cost_price: '0',
+    weight: '0',
+    
+    // Dates (empty for labour items)
+    start: '',
+    end: '',
+    duration: '0',
+    
+    // Origin/trade info
+    country_origin: '',
+    hs_code: '',
+    
+    // Flags
+    flag: '0',
+    priority_confirm: '0',
     no_shortfall: '1',
     no_availability: '0',
     ignore: '0',
-    local: localDateTime,         // Current datetime - may be required
+    
+    // Timestamp
+    local: localDateTime,
+    
+    // Auth
     token: token,
   })
   
