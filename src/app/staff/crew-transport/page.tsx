@@ -245,7 +245,7 @@ function generateExpenseId(): string {
 
 // All expenses default to unchecked. Fuel auto-checks when a venue with distance is selected.
 const createInitialExpenses = (): ExpenseItem[] => [
-  { id: generateExpenseId(), category: 'fuel', label: 'Fuel', amount: 0, included: false, isAutoCalculated: true },
+  { id: generateExpenseId(), category: 'fuel', label: 'Fuel', amount: 0, included: true, isAutoCalculated: true },
   { id: generateExpenseId(), category: 'parking', label: 'Parking', amount: 0, included: false },
   { id: generateExpenseId(), category: 'tolls', label: 'Tolls / Crossings', amount: 0, included: false },
   { id: generateExpenseId(), category: 'transport_out', label: 'Transport (outbound)', amount: 0, included: false },
@@ -1129,7 +1129,7 @@ function CrewTransportWizard() {
 
   const isStep1Valid = formData.jobType !== '' && formData.jobDate !== '' && (isCrewedJob || formData.whatIsIt !== '')
   const isStep2Valid = isCrewedJob ? true : (formData.destination !== '' && formData.distanceMiles >= 0)
-  const isStep3Valid = !isCrewedJob || formData.workType !== ''
+  const isStep3Valid = !isCrewedJob || (formData.workType !== '' && (formData.workType !== 'other' || formData.workTypeOther.trim() !== ''))
 
   const isVehicle = formData.whatIsIt === 'vehicle'
   const needsTravelQuestion = isDC && isVehicle
@@ -1529,6 +1529,7 @@ function CrewTransportWizard() {
                       <option value="day_rate">Day rate</option>
                       <option value="hourly">Hourly rate</option>
                     </select>
+                    <p className="text-xs mt-1 invisible">&nbsp;</p>
                   </div>
                   {formData.calculationMode === 'hourly' && (
                     <div>
@@ -1541,7 +1542,11 @@ function CrewTransportWizard() {
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Number of Days {formData.isMultiDay && <span className="text-gray-400 font-normal">(from dates)</span>}</label>
                         <input type="number" value={formData.numberOfDays || ''} onChange={(e) => updateField('numberOfDays', parseInt(e.target.value) || 1)} min={1} className={`w-full px-4 py-2 border border-gray-300 rounded-lg ${formData.isMultiDay ? 'bg-gray-50' : ''}`} />
-                        {formData.isMultiDay && formData.numberOfDays !== calculatedDays && <p className="text-xs text-amber-600 mt-1">⚠️ Dates suggest {calculatedDays} days</p>}
+                       {formData.isMultiDay && formData.numberOfDays !== calculatedDays ? (
+  <p className="text-xs text-amber-600 mt-1">⚠️ Dates suggest {calculatedDays} days</p>
+) : (
+  <p className="text-xs mt-1 invisible">&nbsp;</p>
+)}
                       </div>
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Freelancer Day Rate (£)</label>
