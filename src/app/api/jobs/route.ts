@@ -1,513 +1,470 @@
 /**
- * HireHop Labour Items API
+ * Jobs API Endpoint
  * 
- * POST /api/staff/hirehop-items - Add labour items (Delivery/Collection/Crew) to a HireHop job
+ * GET /api/jobs
  * 
- * This uses a TWO-STEP APPROACH (same pattern as deposits/payments):
- * 1. Add item via save_job.php with items parameter (creates with defaults)
- * 2. Edit the item via items_save.php to set price and note
+ * Fetches all jobs for the logged-in freelancer from Monday.com,
+ * including both D&C (Delivery & Collection) jobs and Crewed Jobs.
+ * Filters by visibility rules, and organises them into categories:
+ * - today: jobs scheduled for today
+ * - upcoming: future jobs (next 30 days)
+ * - completed: finished jobs (last 30 days)
+ * - cancelled: cancelled jobs (last 30 days)
  * 
- * Items are placed under a "Crew & transport" header (created if needed).
+ * Multi-drop runs (same date + Run Group) are grouped together (D&C only).
+ * Crew jobs are always displayed individually (no run grouping).
  */
 
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
+import { getSessionUser } from '@/lib/session'
+import { getJobsForFreelancer, JobRecord, getCrewJobsForFreelancer, CrewJobRecord } from '@/lib/monday'
 
 // =============================================================================
 // TYPES
 // =============================================================================
 
-interface HireHopRawItem {
-  ID: string
-  NAME?: string
-  title?: string
-  kind: string
-  LFT?: string
-  RGT?: string
-  parent?: string
-  LIST_ID?: string
-  UNIT_PRICE?: string
-  ADDITIONAL?: string
+interface OrganisedJob {
+  id: string
+  name: string
+  board: 'dc' | 'crew'
+  type: 'delivery' | 'collection'
+  date: string
+  finishDate?: string           // For multi-day crew jobs
+  time?: string
+  venueName?: string
+  driverPay?: number
+  runGroup?: string
+  hhRef?: string
+  keyNotes?: string
+  completedAtDate?: string
+  // Crew job specific fields
+  workType?: string             // e.g. "BACKLINE TECH", or work description if "Other"
+  workDurationHours?: number    // Hours of on-site work
+  numberOfDays?: number         // For multi-day jobs
+  jobType?: string              // "Driving + Crew" or "Crew Only"
 }
 
-interface AddItemRequest {
-  jobId: string
-  items: Array<{
-    type: 'delivery' | 'collection' | 'crew'
-    price: number
-    date?: string      // Job date for the note (YYYY-MM-DD)
-    time?: string      // Arrival time for the note (HH:MM)
-    venue?: string     // Venue name for the note
-  }>
+interface GroupedRun {
+  isGrouped: true
+  runGroup: string
+  date: string
+  jobs: OrganisedJob[]
+  totalFee: number
+  jobCount: number
 }
 
-interface ItemResult {
-  type: 'delivery' | 'collection' | 'crew'
-  itemId: string
-  note: string
+interface SingleJob extends OrganisedJob {
+  isGrouped: false
+}
+
+type DisplayItem = GroupedRun | SingleJob
+
+interface JobsApiResponse {
   success: boolean
+  user?: {
+    id: string
+    name: string
+    email: string
+  }
+  today?: DisplayItem[]
+  upcoming?: DisplayItem[]
+  completed?: DisplayItem[]
+  cancelled?: DisplayItem[]
   error?: string
 }
 
-// Labour item list IDs (from HireHop depot)
-const LABOUR_ITEM_IDS: Record<string, number> = {
-  delivery: 5,
-  collection: 6,
-  crew: 86,
-}
-
-// Keywords to find existing "Crew & transport" type headers
-const HEADER_KEYWORDS = ['crew', 'transport', 'delivery', 'collection']
-
 // =============================================================================
-// CONFIG HELPERS
-// =============================================================================
-
-function getHireHopConfig() {
-  const token = process.env.HIREHOP_API_TOKEN
-  const domain = process.env.HIREHOP_DOMAIN || 'myhirehop.com'
-  
-  if (!token) {
-    throw new Error('HIREHOP_API_TOKEN not configured')
-  }
-  
-  return { token, domain }
-}
-
-// =============================================================================
-// HIREHOP API FUNCTIONS
+// HELPERS
 // =============================================================================
 
 /**
- * Fetch all items for a job to find headers and existing items
+ * Parse a date string and return a Date object (midnight local time)
  */
-async function fetchJobItems(jobId: string): Promise<HireHopRawItem[]> {
-  const { token, domain } = getHireHopConfig()
+function parseJobDate(dateStr: string | undefined): Date | null {
+  if (!dateStr) return null
   
-  const url = `https://${domain}/frames/items_to_supply_list.php?job=${jobId}&token=${encodeURIComponent(token)}`
+  // Monday.com dates come as "YYYY-MM-DD" or similar
+  const parsed = new Date(dateStr)
+  if (isNaN(parsed.getTime())) return null
   
-  const response = await fetch(url)
-  
-  if (!response.ok) {
-    throw new Error(`Failed to fetch job items: HTTP ${response.status}`)
-  }
-  
-  const text = await response.text()
-  
-  if (text.trim().startsWith('<')) {
-    throw new Error('HireHop authentication failed - received HTML')
-  }
-  
-  return JSON.parse(text) as HireHopRawItem[]
+  return parsed
 }
 
 /**
- * Find an existing header that matches our keywords
+ * Check if a date is today
  */
-function findExistingHeader(items: HireHopRawItem[]): { id: string; name: string } | null {
-  // Headers have kind: "0" and no parent (or parent: "0")
-  const headers = items.filter(item => 
-    item.kind === '0' && 
-    (!item.parent || item.parent === '0')
+function isToday(date: Date): boolean {
+  const today = new Date()
+  return (
+    date.getFullYear() === today.getFullYear() &&
+    date.getMonth() === today.getMonth() &&
+    date.getDate() === today.getDate()
   )
+}
+
+/**
+ * Check if a date is in the future (after today)
+ */
+function isFuture(date: Date): boolean {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const compareDate = new Date(date)
+  compareDate.setHours(0, 0, 0, 0)
+  return compareDate > today
+}
+
+/**
+ * Check if a date is within the last N days
+ */
+function isWithinLastDays(date: Date, days: number): boolean {
+  const now = new Date()
+  const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000)
+  return date >= cutoff && date <= now
+}
+
+/**
+ * Check if a date is within the next N days
+ */
+function isWithinNextDays(date: Date, days: number): boolean {
+  const now = new Date()
+  now.setHours(0, 0, 0, 0)
+  const cutoff = new Date(now.getTime() + days * 24 * 60 * 60 * 1000)
+  return date >= now && date <= cutoff
+}
+
+/**
+ * Map Monday.com status to our visibility/category rules
+ * Returns: 'upcoming' | 'completed' | 'cancelled' | null (hidden)
+ * 
+ * Works for BOTH D&C and Crew job statuses:
+ * - D&C: "All arranged & email driver" → upcoming
+ * - Crew: "All arranged & email crew" → upcoming
+ * - Both: "Working on it" → upcoming
+ * - Both: "All done!" → completed
+ * - Both: "Now not needed" → cancelled
+ * - Both: "TO DO!" → null (hidden from freelancers)
+ * 
+ * Note: Uses includes() for flexible matching across both boards.
+ */
+function getJobCategory(status: string): 'upcoming' | 'completed' | 'cancelled' | null {
+  const normalised = status.toLowerCase().trim()
   
-  console.log(`HireHop Items: Found ${headers.length} top-level headers`)
-  
-  for (const header of headers) {
-    const headerName = (header.NAME || header.title || '').toLowerCase()
-    
-    for (const keyword of HEADER_KEYWORDS) {
-      if (headerName.includes(keyword)) {
-        console.log(`HireHop Items: Found matching header "${header.NAME || header.title}" (ID: ${header.ID})`)
-        return { 
-          id: header.ID, 
-          name: header.NAME || header.title || '' 
-        }
-      }
-    }
+  // Visible statuses - using includes() for flexible matching
+  // "All arranged & email driver" and "All arranged & email crew" both contain "arranged"
+  // "Working on it" matches exactly
+  if (normalised.includes('arranged') || normalised.includes('working on it')) {
+    return 'upcoming'
   }
   
-  console.log('HireHop Items: No matching header found')
+  // "All done" or "All done!" - completed jobs
+  if (normalised.includes('all done') || normalised.includes('done')) {
+    return 'completed'
+  }
+  
+  // "Now not needed" - cancelled jobs
+  if (normalised.includes('not needed') || normalised.includes('cancelled')) {
+    return 'cancelled'
+  }
+  
+  // Hidden statuses (TO DO!, Arranging, TBC, etc.)
   return null
 }
 
 /**
- * Create a new header section in the job
+ * Convert a D&C JobRecord from Monday to our display format
  */
-async function createHeader(jobId: string, headerName: string): Promise<string> {
-  const { token, domain } = getHireHopConfig()
-  
-  console.log(`HireHop Items: Creating header "${headerName}" in job ${jobId}`)
-  
-  const params = new URLSearchParams({
-    job: jobId,
-    kind: '0',           // 0 = header
-    id: '0',             // 0 = new item
-    name: headerName,
-    qty: '0',
-    parent: '0',         // Top-level (no parent)
-    token: token,
-  })
-  
-  const response = await fetch(`https://${domain}/php_functions/items_save.php`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: params.toString(),
-  })
-  
-  if (!response.ok) {
-    throw new Error(`Failed to create header: HTTP ${response.status}`)
+function toOrganisedJob(job: JobRecord): OrganisedJob {
+  return {
+    id: job.id,
+    name: job.name,
+    board: 'dc',
+    type: job.type,
+    date: job.date || '',
+    time: job.time,
+    venueName: job.venueName,
+    driverPay: job.driverPay,
+    runGroup: job.runGroup,
+    hhRef: job.hhRef,
+    keyNotes: job.keyNotes,
+    completedAtDate: job.completedAtDate,
   }
-  
-  const text = await response.text()
-  
-  if (text.trim().startsWith('<')) {
-    throw new Error('HireHop authentication failed when creating header')
-  }
-  
-  const result = JSON.parse(text)
-  
-  if (result.items && result.items.length > 0) {
-    const createdHeader = result.items[0]
-    console.log(`HireHop Items: Created header with ID ${createdHeader.ID}`)
-    return createdHeader.ID
-  }
-  
-  throw new Error('Header created but no ID returned')
 }
 
 /**
- * Build the item note in format: "6 Feb - 09:30 - Venue Name"
+ * Convert a Crew JobRecord from Monday to our display format
+ * 
+ * Key differences from D&C:
+ * - Uses workType as the display title (not delivery/collection)
+ * - If workType is "Other", falls back to workDescription
+ * - Translates jobType for freelancer-friendly display
+ * - Maps freelancerFee → driverPay for unified fee display
+ * - No runGroup (crew jobs don't participate in multi-drop grouping)
  */
-function buildItemNote(date?: string, time?: string, venue?: string): string {
-  const parts: string[] = []
-  
-  if (date) {
-    // Convert YYYY-MM-DD to "6 Feb" format
-    const d = new Date(date + 'T12:00:00')
-    const day = d.getDate()
-    const month = d.toLocaleDateString('en-GB', { month: 'short' })
-    parts.push(`${day} ${month}`)
+function toOrganisedCrewJob(job: CrewJobRecord): OrganisedJob {
+  // Determine display work type — if "Other", use the work description instead
+  let displayWorkType = job.workType || 'Crew Work'
+  if (displayWorkType.toLowerCase() === 'other' && job.workDescription) {
+    displayWorkType = job.workDescription
   }
   
-  if (time) {
-    parts.push(time)
+  // Translate job type for freelancer-friendly display
+  // "Transport + Crew" → "Driving + Crew"
+  // "Crew Only" stays as-is
+  let displayJobType = job.jobType || ''
+  if (displayJobType.toLowerCase().includes('transport')) {
+    displayJobType = 'Driving + Crew'
   }
   
-  if (venue) {
-    parts.push(venue)
+  return {
+    id: job.id,
+    name: job.name,
+    board: 'crew',
+    type: 'delivery',             // Placeholder — not used for crew job rendering
+    date: job.date || '',
+    finishDate: job.finishDate,
+    time: job.time,
+    venueName: job.destination,   // Venue name from destination text column
+    driverPay: job.freelancerFee, // Map to same field for unified fee display
+    hhRef: job.hhRef,
+    completedAtDate: undefined,   // Crew jobs don't have enforced completion
+    // Crew-specific fields
+    workType: displayWorkType,
+    workDurationHours: job.workDurationHours,
+    numberOfDays: job.numberOfDays,
+    jobType: displayJobType,
   }
-  
-  return parts.join(' - ')
 }
 
 /**
- * Add a labour item using TWO-STEP approach:
- * Step 1: Add via save_job.php with items parameter
- * Step 2: Edit via items_save.php to set price and note
+ * Group jobs by Run Group (for multi-drop runs)
+ * Jobs with the same date AND Run Group are combined.
+ * 
+ * Note: Only D&C jobs participate in run grouping.
+ * Crew jobs are always passed through as individual items.
  */
-async function addLabourItem(
-  jobId: string,
-  headerId: string,
-  itemType: 'delivery' | 'collection' | 'crew',
-  price: number,
-  note: string
-): Promise<{ itemId: string; success: boolean; error?: string }> {
-  const { token, domain } = getHireHopConfig()
+function groupJobs(jobs: OrganisedJob[]): DisplayItem[] {
+  const result: DisplayItem[] = []
+  const groupMap = new Map<string, OrganisedJob[]>()
   
-  const listId = LABOUR_ITEM_IDS[itemType]
-  
-  console.log(`HireHop Items: Adding ${itemType} (list_id=${listId}) to job ${jobId}`)
-  console.log(`HireHop Items: Price=${price}, Note="${note}"`)
-  
-  try {
-    // =========================================================================
-    // STEP 1: Get current items to track what exists
-    // =========================================================================
-    const itemsBefore = await fetchJobItems(jobId)
-    const existingIds = new Set(itemsBefore.map(i => i.ID))
-    console.log(`HireHop Items: Job has ${itemsBefore.length} items before adding`)
-    
-    // =========================================================================
-    // STEP 2: Add the item using save_job.php with items parameter
-    // =========================================================================
-    // Format: items = { "c{list_id}": quantity } where c = labour/crew item
-    const itemsToAdd = { [`c${listId}`]: 1 }
-    
-    console.log(`HireHop Items: Step 1 - Adding via save_job.php:`, JSON.stringify(itemsToAdd))
-    
-    const step1Params = new URLSearchParams({
-      job: jobId,
-      items: JSON.stringify(itemsToAdd),
-      token: token,
-    })
-    
-    const step1Response = await fetch(`https://${domain}/api/save_job.php`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: step1Params.toString(),
-    })
-    
-    if (!step1Response.ok) {
-      return { 
-        itemId: '', 
-        success: false, 
-        error: `Step 1 failed: HTTP ${step1Response.status}` 
-      }
+  for (const job of jobs) {
+    // Crew jobs are always displayed individually (no run grouping)
+    // D&C jobs without a Run Group are also displayed individually
+    if (job.board === 'crew' || !job.runGroup) {
+      result.push({ ...job, isGrouped: false })
+      continue
     }
     
-    const step1Text = await step1Response.text()
-    console.log(`HireHop Items: Step 1 response (first 300 chars):`, step1Text.substring(0, 300))
+    // Create a key from date + runGroup
+    const groupKey = `${job.date}|${job.runGroup}`
     
-    if (step1Text.trim().startsWith('<')) {
-      return { 
-        itemId: '', 
-        success: false, 
-        error: 'Step 1: Authentication failed - received HTML' 
-      }
+    if (!groupMap.has(groupKey)) {
+      groupMap.set(groupKey, [])
     }
-    
-    const step1Result = JSON.parse(step1Text)
-    
-    if (step1Result.error) {
-      return {
-        itemId: '',
-        success: false,
-        error: `Step 1 error: ${step1Result.error}`
-      }
-    }
-    
-    // =========================================================================
-    // STEP 3: Fetch items again to find the new one
-    // =========================================================================
-    const itemsAfter = await fetchJobItems(jobId)
-    console.log(`HireHop Items: Job has ${itemsAfter.length} items after adding`)
-    
-    // Find the new item (ID that didn't exist before, matching list_id and kind=4)
-    const newItem = itemsAfter.find(item => 
-      !existingIds.has(item.ID) && 
-      item.LIST_ID === String(listId) && 
-      item.kind === '4'
-    )
-    
-    if (!newItem) {
-      // Maybe the response contains it directly?
-      if (step1Result.items && Array.isArray(step1Result.items)) {
-        const fromResponse = step1Result.items.find((i: HireHopRawItem) => 
-          i.LIST_ID === String(listId) && i.kind === '4' && !existingIds.has(i.ID)
-        )
-        if (fromResponse) {
-          console.log(`HireHop Items: Found new item in response: ${fromResponse.ID}`)
-        }
-      }
-      
-      console.log(`HireHop Items: Could not find new item. Looking for LIST_ID=${listId}, kind=4`)
-      console.log(`HireHop Items: New items after add:`, 
-        itemsAfter.filter(i => !existingIds.has(i.ID)).map(i => ({ 
-          ID: i.ID, 
-          LIST_ID: i.LIST_ID, 
-          kind: i.kind,
-          name: i.NAME || i.title 
-        }))
-      )
-      
-      return {
-        itemId: '',
-        success: false,
-        error: 'Item may have been added but could not find its ID'
-      }
-    }
-    
-    const newItemId = newItem.ID
-    console.log(`HireHop Items: Found new item ID: ${newItemId}`)
-    
-    // =========================================================================
-    // STEP 4: Edit the item to set price, note, and parent header
-    // =========================================================================
-    console.log(`HireHop Items: Step 2 - Editing item ${newItemId}`)
-    
-    const now = new Date()
-    const localDateTime = now.toISOString().slice(0, 19).replace('T', ' ')
-    
-    const step2Params = new URLSearchParams({
-      job: jobId,
-      kind: '4',                    // Labour item
-      id: newItemId,                // Edit this existing item
-      list_id: String(listId),
-      qty: '1',
-      unit_price: String(price),
-      price: String(price),
-      price_type: '0',
-      add: note,                    // Item note (ADDITIONAL field)
-      cust_add: '',
-      memo: '',
-      name: '',
-      parent: headerId,             // Move under this header
-      acc_nominal: '29',
-      acc_nominal_po: '30',
-      vat_rate: '0',
-      value: '0',
-      cost_price: '0',
-      weight: '0',
-      start: '',
-      end: '',
-      duration: '0',
-      country_origin: '',
-      hs_code: '',
-      flag: '0',
-      priority_confirm: '0',
-      no_shortfall: '1',
-      no_availability: '0',
-      ignore: '0',
-      local: localDateTime,
-      token: token,
-    })
-    
-    const step2Response = await fetch(`https://${domain}/php_functions/items_save.php`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: step2Params.toString(),
-    })
-    
-    if (!step2Response.ok) {
-      return { 
-        itemId: newItemId, 
-        success: true,  // Item was created, just couldn't edit
-        error: `Item created but edit failed: HTTP ${step2Response.status}` 
-      }
-    }
-    
-    const step2Text = await step2Response.text()
-    console.log(`HireHop Items: Step 2 response (first 200 chars):`, step2Text.substring(0, 200))
-    
-    if (step2Text.trim().startsWith('<')) {
-      return { 
-        itemId: newItemId, 
-        success: true,
-        error: 'Item created but edit auth failed' 
-      }
-    }
-    
-    const step2Result = JSON.parse(step2Text)
-    
-    if (step2Result.error) {
-      return {
-        itemId: newItemId,
-        success: true,
-        error: `Item created but edit error: ${step2Result.error}`
-      }
-    }
-    
-    console.log(`HireHop Items: Successfully added and edited item ${newItemId}`)
-    return { 
-      itemId: newItemId, 
-      success: true 
-    }
-    
-  } catch (error) {
-    console.error(`HireHop Items: Error adding ${itemType}:`, error)
-    return { 
-      itemId: '', 
-      success: false, 
-      error: error instanceof Error ? error.message : 'Unknown error' 
-    }
+    groupMap.get(groupKey)!.push(job)
   }
+  
+  // Convert grouped jobs into GroupedRun objects
+  // Using Array.from() for TypeScript compatibility
+  Array.from(groupMap.entries()).forEach(([key, groupedJobs]) => {
+    if (groupedJobs.length === 1) {
+      // Single job in a group - display as individual
+      result.push({ ...groupedJobs[0], isGrouped: false })
+    } else {
+      // Multiple jobs - create a grouped run
+      const [date, runGroup] = key.split('|')
+      const totalFee = groupedJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0)
+      
+      // Sort jobs within the group by time
+      groupedJobs.sort((a, b) => {
+        if (!a.time) return 1
+        if (!b.time) return -1
+        return a.time.localeCompare(b.time)
+      })
+      
+      result.push({
+        isGrouped: true,
+        runGroup,
+        date,
+        jobs: groupedJobs,
+        totalFee,
+        jobCount: groupedJobs.length,
+      })
+    }
+  })
+  
+  // Sort by date, then by time
+  result.sort((a, b) => {
+    const dateA = a.isGrouped ? a.date : a.date
+    const dateB = b.isGrouped ? b.date : b.date
+    
+    if (dateA !== dateB) {
+      return dateA.localeCompare(dateB)
+    }
+    
+    // If same date, sort by time (grouped runs use first job's time)
+    const timeA = a.isGrouped ? a.jobs[0]?.time : a.time
+    const timeB = b.isGrouped ? b.jobs[0]?.time : b.time
+    
+    if (!timeA) return 1
+    if (!timeB) return -1
+    return timeA.localeCompare(timeB)
+  })
+  
+  return result
 }
 
 // =============================================================================
-// POST HANDLER
+// API HANDLER
 // =============================================================================
 
-export async function POST(request: NextRequest) {
+export async function GET(): Promise<NextResponse<JobsApiResponse>> {
+  const startTime = Date.now()
+  console.log('Jobs API: Starting request')
+  
   try {
-    // Verify staff PIN
-    const pin = request.headers.get('x-staff-pin')
-    const staffPin = process.env.STAFF_PIN
+    // Get the logged-in user from session
+    const user = await getSessionUser()
+    console.log('Jobs API: Session check took', Date.now() - startTime, 'ms')
     
-    if (!staffPin || pin !== staffPin) {
+    if (!user) {
       return NextResponse.json(
-        { success: false, error: 'Unauthorized' },
+        { success: false, error: 'Authentication required' },
         { status: 401 }
       )
     }
-
-    const body = await request.json() as AddItemRequest
-    const { jobId, items } = body
-
-    if (!jobId || !items || items.length === 0) {
+    
+    console.log('Jobs API: Fetching jobs for', user.email)
+    
+    // Fetch D&C jobs and Crew jobs in parallel
+    // Crew job fetch is wrapped in try/catch so D&C jobs still load
+    // even if the crew board isn't configured or has issues
+    const mondayStart = Date.now()
+    let dcJobs: JobRecord[] = []
+    let crewJobs: CrewJobRecord[] = []
+    
+    try {
+      const [dcResult, crewResult] = await Promise.all([
+        getJobsForFreelancer(user.email).catch(err => {
+          console.error('D&C jobs fetch failed:', err)
+          return [] as JobRecord[]
+        }),
+        getCrewJobsForFreelancer(user.email).catch(err => {
+          console.error('Crew jobs fetch failed (non-critical):', err)
+          return [] as CrewJobRecord[]
+        }),
+      ])
+      
+      dcJobs = dcResult
+      crewJobs = crewResult
+      
+      console.log('Jobs API: Monday queries took', Date.now() - mondayStart, 'ms')
+      console.log('Jobs API: Found', dcJobs.length, 'D&C jobs and', crewJobs.length, 'crew jobs')
+    } catch (mondayError) {
+      console.error('Monday API error after', Date.now() - mondayStart, 'ms:', mondayError)
       return NextResponse.json(
-        { success: false, error: 'Missing jobId or items' },
-        { status: 400 }
+        { success: false, error: 'Failed to fetch jobs from Monday.com' },
+        { status: 502 }
       )
     }
-
-    console.log('='.repeat(60))
-    console.log(`HireHop Items: Adding ${items.length} item(s) to job ${jobId}`)
-    console.log('='.repeat(60))
-
-    // =========================================================================
-    // Find or create header
-    // =========================================================================
-    console.log('HireHop Items: Fetching items for job', jobId)
-    const existingItems = await fetchJobItems(jobId)
     
-    let headerId: string
-    const existingHeader = findExistingHeader(existingItems)
+    // Categorise jobs
+    const todayJobs: OrganisedJob[] = []
+    const upcomingJobs: OrganisedJob[] = []
+    const completedJobs: OrganisedJob[] = []
+    const cancelledJobs: OrganisedJob[] = []
     
-    if (existingHeader) {
-      headerId = existingHeader.id
-    } else {
-      console.log('HireHop Items: Creating new "Crew & transport" header')
-      headerId = await createHeader(jobId, 'Crew & transport')
-    }
-
-    // =========================================================================
-    // Add each item
-    // =========================================================================
-    const results: ItemResult[] = []
-    
-    for (const item of items) {
-      const note = buildItemNote(item.date, item.time, item.venue)
+    // Process D&C jobs
+    for (const job of dcJobs) {
+      console.log('Jobs API: Processing D&C job', job.id, '- status:', job.status, '- date:', job.date)
       
-      const result = await addLabourItem(
-        jobId,
-        headerId,
-        item.type,
-        item.price,
-        note
-      )
+      const category = getJobCategory(job.status)
       
-      results.push({
-        type: item.type,
-        itemId: result.itemId,
-        note: note,
-        success: result.success,
-        error: result.error,
-      })
+      if (category === null) {
+        console.log('Jobs API: D&C job', job.id, 'hidden (status not matched):', job.status)
+        continue
+      }
+      
+      const jobDate = parseJobDate(job.date)
+      const organisedJob = toOrganisedJob(job)
+      
+      if (category === 'completed') {
+        if (jobDate && isWithinLastDays(jobDate, 30)) {
+          completedJobs.push(organisedJob)
+        }
+      } else if (category === 'cancelled') {
+        if (jobDate && isWithinLastDays(jobDate, 30)) {
+          cancelledJobs.push(organisedJob)
+        }
+      } else if (category === 'upcoming') {
+        if (jobDate) {
+          if (isToday(jobDate)) {
+            todayJobs.push(organisedJob)
+          } else if (isFuture(jobDate) && isWithinNextDays(jobDate, 30)) {
+            upcomingJobs.push(organisedJob)
+          }
+        }
+      }
     }
-
-    const successCount = results.filter(r => r.success).length
-    console.log(`HireHop Items: Completed - ${successCount}/${items.length} items added`)
-
+    
+    // Process Crew jobs (same categorisation logic)
+    for (const job of crewJobs) {
+      console.log('Jobs API: Processing Crew job', job.id, '- status:', job.status, '- date:', job.date)
+      
+      const category = getJobCategory(job.status)
+      
+      if (category === null) {
+        console.log('Jobs API: Crew job', job.id, 'hidden (status not matched):', job.status)
+        continue
+      }
+      
+      const jobDate = parseJobDate(job.date)
+      const organisedJob = toOrganisedCrewJob(job)
+      
+      if (category === 'completed') {
+        if (jobDate && isWithinLastDays(jobDate, 30)) {
+          completedJobs.push(organisedJob)
+        }
+      } else if (category === 'cancelled') {
+        if (jobDate && isWithinLastDays(jobDate, 30)) {
+          cancelledJobs.push(organisedJob)
+        }
+      } else if (category === 'upcoming') {
+        if (jobDate) {
+          if (isToday(jobDate)) {
+            todayJobs.push(organisedJob)
+          } else if (isFuture(jobDate) && isWithinNextDays(jobDate, 30)) {
+            upcomingJobs.push(organisedJob)
+          }
+        }
+      }
+    }
+    
+    // Group multi-drop runs and sort
+    // (Crew jobs pass through groupJobs as individual items)
+    const today = groupJobs(todayJobs)
+    const upcoming = groupJobs(upcomingJobs)
+    const completed = groupJobs(completedJobs)
+    const cancelled = groupJobs(cancelledJobs)
+    
+    console.log('Jobs API: Total request took', Date.now() - startTime, 'ms')
+    
     return NextResponse.json({
-      success: successCount === items.length,
-      partial: successCount > 0 && successCount < items.length,
-      headerId,
-      results,
-    })
-
-  } catch (error) {
-    console.error('HireHop Items: Fatal error:', error)
-    return NextResponse.json(
-      { 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Unknown error' 
+      success: true,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
       },
+      today,
+      upcoming,
+      completed,
+      cancelled,
+    })
+    
+  } catch (error) {
+    console.error('Jobs API error after', Date.now() - startTime, 'ms:', error)
+    return NextResponse.json(
+      { success: false, error: 'An error occurred while fetching jobs' },
       { status: 500 }
     )
   }

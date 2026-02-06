@@ -100,6 +100,10 @@ interface FormData {
   expenses: ExpenseItem[]
   expenseNotes: string
   costingNotes: string
+  // HireHop integration
+  addDeliveryToHireHop: boolean
+  addCollectionToHireHop: boolean
+  addCrewToHireHop: boolean
 }
 
 interface CalculatedCosts {
@@ -292,6 +296,10 @@ const initialFormData: FormData = {
   expenses: createInitialExpenses(),
   expenseNotes: '',
   costingNotes: '',
+  // HireHop integration - default to checked
+  addDeliveryToHireHop: true,
+  addCollectionToHireHop: true,
+  addCrewToHireHop: true,
 }
 
 const WORK_TYPE_OPTIONS = [
@@ -1004,8 +1012,73 @@ function CrewTransportWizard() {
       } else if (data.board === 'crewed_jobs') {
         message += `Created on Crewed Jobs Board: ${data.itemName}`
       }
-      if (formData.isNewVenue) message += ' (New venue added)'
+     if (formData.isNewVenue) message += ' (New venue added)'
       setSuccess(message)
+
+      // =========================================================================
+      // HIREHOP INTEGRATION - Add labour items to HireHop quote
+      // =========================================================================
+      if (formData.hirehopJobNumber) {
+        const hirehopItems: Array<{
+          type: 'delivery' | 'collection' | 'crew'
+          price: number
+          date?: string
+          time?: string
+          venue?: string
+        }> = []
+
+        if (isDC) {
+          if (formData.addDeliveryToHireHop) {
+            hirehopItems.push({
+              type: formData.jobType === 'collection' ? 'collection' : 'delivery',
+              price: costs.clientChargeTotalRounded,
+              date: formData.jobDate,
+              time: formData.arrivalTime,
+              venue: formData.destination,
+            })
+          }
+          if (formData.addCollection && formData.addCollectionToHireHop) {
+            hirehopItems.push({
+              type: 'collection',
+              price: costs.clientChargeTotalRounded,
+              date: formData.collectionDate,
+              time: formData.collectionArrivalTime,
+              venue: formData.destination,
+            })
+          }
+        }
+
+        if (isCrewedJob && formData.addCrewToHireHop) {
+          hirehopItems.push({
+            type: 'crew',
+            price: costs.clientChargeTotalRounded,
+            date: formData.jobDate,
+            time: formData.arrivalTime,
+            venue: formData.destination,
+          })
+        }
+
+        if (hirehopItems.length > 0) {
+          try {
+            console.log('Adding items to HireHop:', hirehopItems)
+            const hhResponse = await fetch('/api/staff/hirehop-items', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-staff-pin': pin },
+              body: JSON.stringify({ jobId: formData.hirehopJobNumber, items: hirehopItems }),
+            })
+            const hhData = await hhResponse.json()
+            if (hhData.success) {
+              setSuccess(prev => prev + ' + HireHop updated')
+            } else if (hhData.partial) {
+              setSuccess(prev => prev + ' (HireHop: partial)')
+            } else {
+              console.error('HireHop error:', hhData.error)
+            }
+          } catch (hhErr) {
+            console.error('HireHop API error:', hhErr)
+          }
+        }
+      }
     } catch (err) { console.error('Save error:', err); setError(err instanceof Error ? err.message : 'Failed to save') }
     finally { setSaving(false) }
   }
@@ -1557,6 +1630,55 @@ function CrewTransportWizard() {
                 <span className="text-lg">{isCrewedJob ? '👷' : '📦'}</span>
                 <span>{isCrewedJob ? 'Will save to Crewed Jobs board' : `Will save to D&C board${formData.addCollection ? ' (2 items)' : ''}`}</span>
               </div>
+
+{/* HireHop Integration Checkboxes */}
+              {formData.hirehopJobNumber && (
+                <div className="border border-gray-200 rounded-lg p-4 space-y-3">
+                  <p className="text-sm font-medium text-gray-700">Add to HireHop Quote</p>
+                  {isDC && (
+                    <>
+                      <label className="flex items-center space-x-3">
+                        <input
+                          type="checkbox"
+                          checked={formData.addDeliveryToHireHop}
+                          onChange={(e) => updateField('addDeliveryToHireHop', e.target.checked)}
+                          className="w-4 h-4 text-blue-600 rounded"
+                        />
+                        <span className="text-sm text-gray-700">
+                          Add {formData.jobType === 'collection' ? 'collection' : 'delivery'} to HireHop (£{costs.clientChargeTotalRounded})
+                        </span>
+                      </label>
+                      {formData.addCollection && (
+                        <label className="flex items-center space-x-3">
+                          <input
+                            type="checkbox"
+                            checked={formData.addCollectionToHireHop}
+                            onChange={(e) => updateField('addCollectionToHireHop', e.target.checked)}
+                            className="w-4 h-4 text-blue-600 rounded"
+                          />
+                          <span className="text-sm text-gray-700">
+                            Add collection to HireHop (£{costs.clientChargeTotalRounded})
+                          </span>
+                        </label>
+                      )}
+                    </>
+                  )}
+                  {isCrewedJob && (
+                    <label className="flex items-center space-x-3">
+                      <input
+                        type="checkbox"
+                        checked={formData.addCrewToHireHop}
+                        onChange={(e) => updateField('addCrewToHireHop', e.target.checked)}
+                        className="w-4 h-4 text-blue-600 rounded"
+                      />
+                      <span className="text-sm text-gray-700">
+                        Add crew item to HireHop (£{costs.clientChargeTotalRounded})
+                      </span>
+                    </label>
+                  )}
+                  <p className="text-xs text-gray-500">Labour items will be added to job #{formData.hirehopJobNumber}</p>
+                </div>
+              )}
 
               {settings && settings.minClientCharge > 0 && costs.clientChargeTotal < settings.minClientCharge && (
                 <div className="text-sm px-4 py-3 rounded-lg bg-amber-50 text-amber-700 border border-amber-200">
