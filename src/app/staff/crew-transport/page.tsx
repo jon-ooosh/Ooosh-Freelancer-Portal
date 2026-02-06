@@ -1042,6 +1042,7 @@ function CrewTransportWizard() {
           endDate?: string
           time?: string
           venue?: string
+          workType?: string
         }> = []
 
         if (isDC) {
