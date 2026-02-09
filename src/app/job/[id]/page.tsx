@@ -518,71 +518,81 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
             </div>
           )}
 
-          {/* Fee */}
-          {fee && fee > 0 && (
+          {/* HireHop Reference */}
+          {job.hhRef && (
             <div className="flex items-center gap-3">
-              <span className="text-gray-400 w-6 text-center">💷</span>
+              <span className="text-gray-400 w-6 text-center">🔗</span>
               <div>
-                <p className="text-sm text-gray-500">Agreed fee</p>
-                <p className="font-medium text-green-600">£{fee.toFixed(0)}</p>
+                <p className="text-sm text-gray-500">HireHop Job</p>
+                <p className="font-mono font-medium text-gray-900">#{job.hhRef}</p>
               </div>
             </div>
           )}
         </div>
-      </div>
 
-      {/* Work Description */}
-      {job.workDescription && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>🔧</span> Work Details
-          </h2>
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <p className="text-gray-700 whitespace-pre-wrap">{job.workDescription}</p>
-          </div>
-        </div>
-      )}
+        {/* Fee & Expenses — combined section */}
+        {(fee && fee > 0) || job.expenseBreakdown ? (
+          <>
+            <hr className="my-4 border-gray-100" />
+            <div className="space-y-3">
+              {/* Fee */}
+              {fee && fee > 0 && (
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400 w-6 text-center">💷</span>
+                  <div>
+                    <p className="text-sm text-gray-500">Agreed fee</p>
+                    <p className="font-medium text-green-600">£{fee.toFixed(0)}</p>
+                  </div>
+                </div>
+              )}
 
-      {/* Expense Info — only show if there's a breakdown */}
-      {job.expenseBreakdown && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>💰</span> Expenses
-          </h2>
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
-            <p className="text-gray-700 whitespace-pre-wrap text-sm">{job.expenseBreakdown}</p>
-          </div>
-          {/* Summary amounts if available */}
-          {(job.expensesIncluded || job.expensesNotIncluded) && (
-            <div className="mt-3 flex gap-4 text-sm">
+              {/* Expense summary amounts */}
               {job.expensesIncluded !== undefined && job.expensesIncluded > 0 && (
-                <div>
-                  <span className="text-gray-500">Included in fee: </span>
-                  <span className="font-medium text-gray-900">£{job.expensesIncluded.toFixed(0)}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400 w-6 text-center">✓</span>
+                  <div>
+                    <p className="text-sm text-gray-500">Expenses included in fee</p>
+                    <p className="font-medium text-gray-900">£{job.expensesIncluded.toFixed(0)}</p>
+                  </div>
                 </div>
               )}
               {job.expensesNotIncluded !== undefined && job.expensesNotIncluded > 0 && (
-                <div>
-                  <span className="text-gray-500">On top: </span>
-                  <span className="font-medium text-orange-600">£{job.expensesNotIncluded.toFixed(0)}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-gray-400 w-6 text-center">+</span>
+                  <div>
+                    <p className="text-sm text-gray-500">Additional expenses (on top)</p>
+                    <p className="font-medium text-orange-600">£{job.expensesNotIncluded.toFixed(0)}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Expense breakdown detail */}
+              {job.expenseBreakdown && (
+                <div className="mt-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <p className="text-gray-700 whitespace-pre-wrap text-sm">{job.expenseBreakdown}</p>
                 </div>
               )}
             </div>
-          )}
-        </div>
-      )}
+          </>
+        ) : null}
+      </div>
 
-      {/* Reference */}
-      {job.hhRef && (
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-            <span>🔗</span> Reference
-          </h2>
-          <p className="text-gray-600">
-            HireHop Job: <span className="font-mono font-medium text-gray-900">#{job.hhRef}</span>
-          </p>
-        </div>
-      )}
+      {/* Work Description — always shown, with fallback if empty */}
+      <div className="bg-white rounded-xl shadow-sm p-6">
+        <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+          <span>🔧</span> Work Details
+        </h2>
+        {job.workDescription ? (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+            <p className="text-gray-700 whitespace-pre-wrap">{job.workDescription}</p>
+          </div>
+        ) : (
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+            <p className="text-gray-500 italic">No additional details in the system yet — please contact Ooosh if you need more information.</p>
+          </div>
+        )}
+      </div>
+
 
       {/* Location */}
       {venue && (venue.address || venue.whatThreeWords) && (
