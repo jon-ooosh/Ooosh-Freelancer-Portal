@@ -218,7 +218,31 @@ async function addSignatureUpdate(itemId: string, clientName: string, timestamp:
               }
             }
 
-            const uploadResult = await uploadResponse.json()
+            // SAFE JSON PARSING: Read as text first to handle empty/malformed responses
+            const responseText = await uploadResponse.text()
+            
+            if (!responseText) {
+              console.warn(`Warehouse: File upload returned empty response (HTTP ${uploadResponse.status}), attempt ${attempt}/${RETRY_CONFIG.maxAttempts}`)
+              if (attempt < RETRY_CONFIG.maxAttempts) {
+                const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+                await sleep(delay)
+                continue
+              }
+              break
+            }
+
+            let uploadResult: Record<string, unknown>
+            try {
+              uploadResult = JSON.parse(responseText)
+            } catch {
+              console.warn(`Warehouse: File upload returned non-JSON response (HTTP ${uploadResponse.status}): ${responseText.substring(0, 200)}`)
+              if (attempt < RETRY_CONFIG.maxAttempts) {
+                const delay = RETRY_CONFIG.baseDelayMs * Math.pow(2, attempt - 1)
+                await sleep(delay)
+                continue
+              }
+              break
+            }
             
             if (uploadResult.errors) {
               // Check if rate limited
@@ -230,7 +254,7 @@ async function addSignatureUpdate(itemId: string, clientName: string, timestamp:
                 continue
               }
               console.warn('Warehouse: Signature upload had errors:', errorStr)
-            } else if (uploadResult.data?.add_file_to_update?.id) {
+            } else if ((uploadResult.data as Record<string, Record<string, string>>)?.add_file_to_update?.id) {
               console.log('Warehouse: Signature image uploaded to update successfully')
               uploadSuccess = true
             } else {
@@ -628,4 +652,4 @@ export async function POST(
       { status: 500 }
     )
   }
-} 
+}
