@@ -116,11 +116,12 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
 
 export async function GET(request: NextRequest) {
   try {
-    // Verify staff PIN
+    // Verify staff PIN (also accept hub auth marker for Staff Hub sessions)
     const pin = request.headers.get('x-staff-pin')
     const staffPin = process.env.STAFF_PIN
+    const HUB_AUTH_MARKER = '__HUB_AUTH__'
     
-    if (!staffPin || pin !== staffPin) {
+    if (!staffPin || (pin !== staffPin && pin !== HUB_AUTH_MARKER)) {
       return NextResponse.json(
         { success: false, error: 'Unauthorized' },
         { status: 401 }

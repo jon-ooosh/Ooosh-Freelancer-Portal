@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, useEffect, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 
 /**
  * Staff Area - PIN Entry Page
@@ -9,11 +9,15 @@ import { useRouter } from 'next/navigation'
  * Similar to the warehouse PIN entry, this provides access to staff-only features
  * like the Crew & Transport costing wizard.
  * 
- * Supports return URL - if the user was redirected here from another staff page
- * (e.g., /staff/crew-transport?job=15273), we'll redirect them back there after login.
+ * Supports:
+ * - Return URL - redirects back to the page that sent user here after login
+ * - Hub token - if arriving from Staff Hub with valid token, skip PIN entry
  */
-export default function StaffLoginPage() {
+
+// Inner component that uses useSearchParams (must be wrapped in Suspense)
+function StaffLoginContent() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [pin, setPin] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -42,16 +46,83 @@ export default function StaffLoginPage() {
     return '/staff/crew-transport'
   }
 
+  // Build return URL from current URL params (for hub token flow)
+  const buildReturnUrlFromParams = (): string => {
+    const job = searchParams.get('job')
+    if (job) {
+      return `/staff/crew-transport?job=${job}`
+    }
+    return '/staff/crew-transport'
+  }
+
+  // Validate hub token against the Staff Hub
+  const validateHubToken = async (token: string): Promise<boolean> => {
+    try {
+      const response = await fetch('https://ooosh-utilities.netlify.app/.netlify/functions/validate-tool-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          token, 
+          toolId: 'crew-transport'  // This tool's ID
+        }),
+      })
+
+      const data = await response.json()
+      
+      if (data.valid) {
+        console.log('Hub token valid, job:', data.jobId)
+        // Store a marker that indicates hub-authenticated session
+        sessionStorage.setItem('staffPin', '__HUB_AUTH__')
+        sessionStorage.setItem('hubJobId', data.jobId || '')
+        return true
+      }
+      
+      console.log('Hub token invalid:', data.error)
+      return false
+    } catch (err) {
+      console.error('Hub token validation error:', err)
+      return false
+    }
+  }
+
   // Check if already authenticated
   useEffect(() => {
-    const savedPin = sessionStorage.getItem('staffPin')
-    if (savedPin) {
-      // Verify the saved PIN is still valid
-      verifyPin(savedPin, true)
-    } else {
-      setCheckingSession(false)
+    const checkAuth = async () => {
+      // FIRST: Check for hub token in URL
+      const hubToken = searchParams.get('hubToken')
+      if (hubToken) {
+        console.log('Hub token found, validating...')
+        const isValid = await validateHubToken(hubToken)
+        if (isValid) {
+          // Get job ID from URL or from token validation
+          const jobId = searchParams.get('job') || sessionStorage.getItem('hubJobId')
+          const returnUrl = jobId ? `/staff/crew-transport?job=${jobId}` : '/staff/crew-transport'
+          console.log('Hub auth success, redirecting to:', returnUrl)
+          router.push(returnUrl)
+          return
+        }
+        // If hub token invalid, fall through to normal PIN check
+        console.log('Hub token invalid, falling back to PIN entry')
+      }
+
+      // SECOND: Check for existing PIN session
+      const savedPin = sessionStorage.getItem('staffPin')
+      if (savedPin) {
+        // If it's a hub session marker, redirect directly (already validated)
+        if (savedPin === '__HUB_AUTHENTICATED__') {
+          const returnUrl = getReturnUrl() || buildReturnUrlFromParams()
+          router.push(returnUrl)
+          return
+        }
+        // Otherwise verify the saved PIN is still valid
+        verifyPin(savedPin, true)
+      } else {
+        setCheckingSession(false)
+      }
     }
-  }, [])
+
+    checkAuth()
+  }, [searchParams])
 
   const verifyPin = async (pinToVerify: string, isAutoCheck = false) => {
     setLoading(true)
@@ -179,5 +250,21 @@ export default function StaffLoginPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+// Main export - wraps content in Suspense for useSearchParams
+export default function StaffLoginPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading...</p>
+        </div>
+      </div>
+    }>
+      <StaffLoginContent />
+    </Suspense>
   )
 }
