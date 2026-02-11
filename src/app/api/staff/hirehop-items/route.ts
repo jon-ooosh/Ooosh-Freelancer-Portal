@@ -464,7 +464,7 @@ async function addLabourItem(
 
 export async function POST(request: NextRequest) {
   try {
-    // Verify staff PIN (also accept hub auth marker for Staff Hub sessions)
+    // Verify staff PIN (also accept hub auth marker for Staff Hub sessions) 
     const pin = request.headers.get('x-staff-pin')
     const staffPin = process.env.STAFF_PIN
     const HUB_AUTH_MARKER = '__HUB_AUTH__'

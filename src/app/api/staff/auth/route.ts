@@ -17,7 +17,7 @@ import { NextRequest, NextResponse } from 'next/server'
 
 // Special marker for hub-authenticated sessions
 // When a user authenticates via the Staff Hub, this marker is stored instead of the PIN
-export const HUB_AUTH_MARKER = '__HUB_AUTH__'
+const HUB_AUTH_MARKER = '__HUB_AUTH__'
 
 // =============================================================================
 // RATE LIMITING (In-Memory)
@@ -129,25 +129,6 @@ function clearRateLimit(ip: string): void {
 }
 
 // =============================================================================
-// HELPER: Validate staff PIN (exported for use by other routes)
-// =============================================================================
-
-/**
- * Check if a PIN value is valid (either real PIN or hub auth marker)
- * Use this in other staff API routes to support hub authentication
- */
-export function isValidStaffAuth(pin: string | null): boolean {
-  if (!pin) return false
-  
-  // Accept hub-authenticated sessions
-  if (pin === HUB_AUTH_MARKER) return true
-  
-  // Accept real PIN
-  const staffPin = process.env.STAFF_PIN
-  return staffPin ? pin === staffPin : false
-}
-
-// =============================================================================
 // POST HANDLER
 // =============================================================================
 
@@ -191,7 +172,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Verify PIN (also accept hub auth marker)
+    // Verify PIN (also accept hub auth marker for Staff Hub sessions)
     if (pin === staffPin || pin === HUB_AUTH_MARKER) {
       // Success - clear any rate limiting for this IP
       clearRateLimit(clientIP)

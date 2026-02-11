@@ -72,7 +72,7 @@ function StaffLoginContent() {
       if (data.valid) {
         console.log('Hub token valid, job:', data.jobId)
         // Store a marker that indicates hub-authenticated session
-        sessionStorage.setItem('staffPin', '__HUB_AUTH__')
+        sessionStorage.setItem('staffPin', '__HUB_AUTH__') 
         sessionStorage.setItem('hubJobId', data.jobId || '')
         return true
       }
