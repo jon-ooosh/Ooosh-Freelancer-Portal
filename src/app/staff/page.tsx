@@ -6,9 +6,6 @@ import { useRouter, useSearchParams } from 'next/navigation'
 /**
  * Staff Area - PIN Entry Page
  * 
- * Similar to the warehouse PIN entry, this provides access to staff-only features
- * like the Crew & Transport costing wizard.
- * 
  * Supports:
  * - Return URL - redirects back to the page that sent user here after login
  * - Hub token - if arriving from Staff Hub with valid token, skip PIN entry
@@ -58,21 +55,23 @@ function StaffLoginContent() {
   // Validate hub token against the Staff Hub
   const validateHubToken = async (token: string): Promise<boolean> => {
     try {
+      console.log('Validating hub token...')
       const response = await fetch('https://ooosh-utilities.netlify.app/.netlify/functions/validate-tool-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           token, 
-          toolId: 'crew-transport'  // This tool's ID
+          toolId: 'crew-transport'
         }),
       })
 
       const data = await response.json()
+      console.log('Hub token validation response:', data)
       
       if (data.valid) {
         console.log('Hub token valid, job:', data.jobId)
-        // Store a marker that indicates hub-authenticated session
-        sessionStorage.setItem('staffPin', '__HUB_AUTH__') 
+        // Store the hub auth marker - API routes will accept this
+        sessionStorage.setItem('staffPin', '__HUB_AUTH__')
         sessionStorage.setItem('hubJobId', data.jobId || '')
         return true
       }
@@ -91,7 +90,7 @@ function StaffLoginContent() {
       // FIRST: Check for hub token in URL
       const hubToken = searchParams.get('hubToken')
       if (hubToken) {
-        console.log('Hub token found, validating...')
+        console.log('Hub token found in URL, validating...')
         const isValid = await validateHubToken(hubToken)
         if (isValid) {
           // Get job ID from URL or from token validation
@@ -108,8 +107,8 @@ function StaffLoginContent() {
       // SECOND: Check for existing PIN session
       const savedPin = sessionStorage.getItem('staffPin')
       if (savedPin) {
-        // If it's a hub session marker, redirect directly (already validated)
-        if (savedPin === '__HUB_AUTHENTICATED__') {
+        // If it's a hub session marker, redirect directly
+        if (savedPin === '__HUB_AUTH__') {
           const returnUrl = getReturnUrl() || buildReturnUrlFromParams()
           router.push(returnUrl)
           return
@@ -122,7 +121,7 @@ function StaffLoginContent() {
     }
 
     checkAuth()
-  }, [searchParams])
+  }, [searchParams, router])
 
   const verifyPin = async (pinToVerify: string, isAutoCheck = false) => {
     setLoading(true)
