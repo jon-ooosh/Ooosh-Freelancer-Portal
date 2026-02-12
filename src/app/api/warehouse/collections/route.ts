@@ -168,11 +168,14 @@ export async function GET(request: NextRequest) {
   const startTime = Date.now()
   
   try {
-    // Verify PIN authentication
+   // Verify PIN authentication
+    // Also accepts __HUB_AUTH__ marker from Staff Hub authenticated sessions
+    const HUB_AUTH_MARKER = '__HUB_AUTH__'
+    
     const pin = request.headers.get('x-warehouse-pin')
     const expectedPin = process.env.WAREHOUSE_PIN
     
-    if (!pin || pin !== expectedPin) {
+    if (!pin || (pin !== expectedPin && pin !== HUB_AUTH_MARKER)) {
       return NextResponse.json(
         { success: false, error: 'Unauthorized' },
         { status: 401 }
@@ -303,4 +306,5 @@ export async function GET(request: NextRequest) {
       { status: 500 }
     )
   }
+
 }
