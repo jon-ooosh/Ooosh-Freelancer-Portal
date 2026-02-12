@@ -227,4 +227,4 @@ export default function WarehousePage() {
       <WarehouseContent />
     </Suspense>
   )
-}
+} 
