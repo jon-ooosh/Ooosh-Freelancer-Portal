@@ -60,6 +60,23 @@ const LABOUR_ITEM_IDS: Record<string, number> = {
 // Keywords to find existing "Crew & transport" type headers
 const HEADER_KEYWORDS = ['crew', 'transport', 'delivery', 'collection']
 
+// Delay between processing multiple items (ms) - gives HireHop time to settle
+const INTER_ITEM_DELAY_MS = 1500
+
+// Retry config for Step 2 edit failures
+const STEP2_RETRY = {
+  maxAttempts: 3,
+  delayMs: 1000,  // Wait 1s before first retry, doubles each time
+}
+
+// =============================================================================
+// UTILITY HELPERS
+// =============================================================================
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 // =============================================================================
 // CONFIG HELPERS
 // =============================================================================
@@ -242,9 +259,112 @@ function buildItemNote(date?: string, endDate?: string, time?: string, venue?: s
 }
 
 /**
+ * Execute the Step 2 edit call with retry logic.
+ * HireHop can return transient errors (e.g. 327) if the item hasn't fully
+ * settled after creation, so we retry with exponential backoff.
+ */
+async function editItemWithRetry(
+  jobId: string,
+  itemId: string,
+  listId: number,
+  price: number,
+  note: string,
+  headerId: string,
+  token: string,
+  domain: string
+): Promise<{ success: boolean; error?: string; responseText?: string }> {
+  
+  for (let attempt = 1; attempt <= STEP2_RETRY.maxAttempts; attempt++) {
+    const now = new Date()
+    const localDateTime = now.toISOString().slice(0, 19).replace('T', ' ')
+    
+    const step2Params = new URLSearchParams({
+      job: jobId,
+      kind: '4',                    // Labour item
+      id: itemId,                   // Edit this existing item
+      list_id: String(listId),
+      qty: '1',
+      unit_price: String(price),
+      price: String(price),
+      price_type: '0',
+      add: note,                    // Item note (ADDITIONAL field)
+      cust_add: '',
+      memo: '',
+      name: '',
+      parent: headerId,             // Move under this header
+      acc_nominal: '29',
+      acc_nominal_po: '30',
+      vat_rate: '0',
+      value: '0',
+      cost_price: '0',
+      weight: '0',
+      start: '',
+      end: '',
+      duration: '0',
+      country_origin: '',
+      hs_code: '',
+      flag: '0',
+      priority_confirm: '0',
+      no_shortfall: '1',
+      no_availability: '0',
+      ignore: '0',
+      local: localDateTime,
+      token: token,
+    })
+    
+    const step2Response = await fetch(`https://${domain}/php_functions/items_save.php`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: step2Params.toString(),
+    })
+    
+    if (!step2Response.ok) {
+      const errMsg = `Step 2 failed: HTTP ${step2Response.status}`
+      if (attempt < STEP2_RETRY.maxAttempts) {
+        const delay = STEP2_RETRY.delayMs * Math.pow(2, attempt - 1)
+        console.warn(`HireHop Items: ${errMsg}, retrying in ${delay}ms (attempt ${attempt}/${STEP2_RETRY.maxAttempts})`)
+        await sleep(delay)
+        continue
+      }
+      return { success: false, error: errMsg }
+    }
+    
+    const step2Text = await step2Response.text()
+    
+    if (step2Text.trim().startsWith('<')) {
+      return { success: false, error: 'Step 2: Authentication failed - received HTML' }
+    }
+    
+    const step2Result = JSON.parse(step2Text)
+    
+    if (step2Result.error) {
+      const errMsg = `Step 2 error: ${step2Result.error}`
+      if (attempt < STEP2_RETRY.maxAttempts) {
+        const delay = STEP2_RETRY.delayMs * Math.pow(2, attempt - 1)
+        console.warn(`HireHop Items: ${errMsg}, retrying in ${delay}ms (attempt ${attempt}/${STEP2_RETRY.maxAttempts})`)
+        await sleep(delay)
+        continue
+      }
+      return { success: false, error: errMsg, responseText: step2Text }
+    }
+    
+    // Success
+    if (attempt > 1) {
+      console.log(`HireHop Items: Step 2 succeeded on retry attempt ${attempt}`)
+    }
+    return { success: true, responseText: step2Text.substring(0, 200) }
+  }
+  
+  // Should not reach here, but safety net
+  return { success: false, error: 'Step 2 failed after all retries' }
+}
+
+/**
  * Add a labour item using TWO-STEP approach:
  * Step 1: Add via save_job.php with items parameter
- * Step 2: Edit via items_save.php to set price and note
+ * Step 2: Edit via items_save.php to set price and note (with retry logic)
  */
 async function addLabourItem(
   jobId: string,
@@ -364,88 +484,34 @@ async function addLabourItem(
     console.log(`HireHop Items: Found new item ID: ${newItemId}`)
     
     // =========================================================================
-    // STEP 4: Edit the item to set price, note, and parent header
+    // STEP 4: Edit the item to set price, note, and parent header (with retry)
     // =========================================================================
     console.log(`HireHop Items: Step 2 - Editing item ${newItemId}`)
     
-    const now = new Date()
-    const localDateTime = now.toISOString().slice(0, 19).replace('T', ' ')
+    const editResult = await editItemWithRetry(
+      jobId,
+      newItemId,
+      listId,
+      price,
+      note,
+      headerId,
+      token,
+      domain
+    )
     
-    const step2Params = new URLSearchParams({
-      job: jobId,
-      kind: '4',                    // Labour item
-      id: newItemId,                // Edit this existing item
-      list_id: String(listId),
-      qty: '1',
-      unit_price: String(price),
-      price: String(price),
-      price_type: '0',
-      add: note,                    // Item note (ADDITIONAL field)
-      cust_add: '',
-      memo: '',
-      name: '',
-      parent: headerId,             // Move under this header
-      acc_nominal: '29',
-      acc_nominal_po: '30',
-      vat_rate: '0',
-      value: '0',
-      cost_price: '0',
-      weight: '0',
-      start: '',
-      end: '',
-      duration: '0',
-      country_origin: '',
-      hs_code: '',
-      flag: '0',
-      priority_confirm: '0',
-      no_shortfall: '1',
-      no_availability: '0',
-      ignore: '0',
-      local: localDateTime,
-      token: token,
-    })
-    
-    const step2Response = await fetch(`https://${domain}/php_functions/items_save.php`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: step2Params.toString(),
-    })
-    
-    if (!step2Response.ok) {
-      return { 
-        itemId: newItemId, 
-        success: true,  // Item was created, just couldn't edit
-        error: `Item created but edit failed: HTTP ${step2Response.status}` 
+    if (editResult.success) {
+      console.log(`HireHop Items: Successfully added and edited item ${newItemId}`)
+      if (editResult.responseText) {
+        console.log(`HireHop Items: Step 2 response (first 200 chars):`, editResult.responseText)
       }
-    }
-    
-    const step2Text = await step2Response.text()
-    console.log(`HireHop Items: Step 2 response (first 200 chars):`, step2Text.substring(0, 200))
-    
-    if (step2Text.trim().startsWith('<')) {
-      return { 
-        itemId: newItemId, 
-        success: true,
-        error: 'Item created but edit auth failed' 
-      }
-    }
-    
-    const step2Result = JSON.parse(step2Text)
-    
-    if (step2Result.error) {
+      return { itemId: newItemId, success: true }
+    } else {
+      console.warn(`HireHop Items: Item ${newItemId} created but edit failed: ${editResult.error}`)
       return {
         itemId: newItemId,
-        success: true,
-        error: `Item created but edit error: ${step2Result.error}`
+        success: true,  // Item was created, just couldn't edit
+        error: `Item created but edit failed after ${STEP2_RETRY.maxAttempts} attempts: ${editResult.error}`
       }
-    }
-    
-    console.log(`HireHop Items: Successfully added and edited item ${newItemId}`)
-    return { 
-      itemId: newItemId, 
-      success: true 
     }
     
   } catch (error) {
@@ -507,11 +573,19 @@ export async function POST(request: NextRequest) {
     }
 
     // =========================================================================
-    // Add each item 
+    // Add each item with a delay between them to let HireHop settle
     // =========================================================================
     const results: ItemResult[] = []
     
-    for (const item of items) {
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      
+      // Add delay between items (not before the first one)
+      if (i > 0) {
+        console.log(`HireHop Items: Waiting ${INTER_ITEM_DELAY_MS}ms before next item...`)
+        await sleep(INTER_ITEM_DELAY_MS)
+      }
+      
       const note = buildItemNote(item.date, item.endDate, item.time, item.venue, item.workType)
       
       const result = await addLabourItem(

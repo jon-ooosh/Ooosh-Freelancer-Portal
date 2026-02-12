@@ -6,29 +6,86 @@
  * Simple PIN-based authentication for in-house tablet use.
  * Once PIN is entered correctly, redirects to collections list.
  * PIN is stored in sessionStorage so it persists during the browser session.
+ * 
+ * Also supports authentication via Staff Hub token.
  */
 
-import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
+import { useState, useEffect, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Image from 'next/image'
 
-export default function WarehousePage() {
+function WarehouseContent() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [pin, setPin] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [isCheckingSession, setIsCheckingSession] = useState(true)
 
+  // Validate hub token against the Staff Hub
+  const validateHubToken = async (token: string): Promise<boolean> => {
+    try {
+      console.log('Validating hub token for warehouse...')
+      const response = await fetch('https://ooosh-utilities.netlify.app/.netlify/functions/validate-tool-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          token, 
+          toolId: 'warehouse'
+        }),
+      })
+
+      const data = await response.json()
+      console.log('Hub token validation response:', data)
+      
+      if (data.valid) {
+        console.log('Hub token valid')
+        // Store a marker so we know this is a hub-authenticated session
+        sessionStorage.setItem('warehouse_pin', '__HUB_AUTH__')
+        return true
+      }
+      
+      console.log('Hub token invalid:', data.error)
+      return false
+    } catch (err) {
+      console.error('Hub token validation error:', err)
+      return false
+    }
+  }
+
   // Check if already authenticated
   useEffect(() => {
-    const storedPin = sessionStorage.getItem('warehouse_pin')
-    if (storedPin) {
-      // Verify the stored PIN is still valid
-      verifyPin(storedPin, true)
-    } else {
-      setIsCheckingSession(false)
-    } 
-  }, [])
+    const checkAuth = async () => {
+      // FIRST: Check for hub token in URL
+      const hubToken = searchParams.get('hubToken')
+      if (hubToken) {
+        console.log('Hub token found in URL, validating...')
+        const isValid = await validateHubToken(hubToken)
+        if (isValid) {
+          console.log('Hub auth success, redirecting to collections')
+          router.push('/warehouse/collections')
+          return
+        }
+        console.log('Hub token invalid, falling back to PIN entry')
+      }
+
+      // SECOND: Check for existing session
+      const storedPin = sessionStorage.getItem('warehouse_pin')
+      if (storedPin) {
+        // If it's a hub session marker, redirect directly
+        if (storedPin === '__HUB_AUTH__') {
+          router.push('/warehouse/collections')
+          return
+        }
+        // Otherwise verify the stored PIN is still valid
+        verifyPin(storedPin, true)
+      } else {
+        setIsCheckingSession(false)
+      }
+    }
+
+    checkAuth()
+  }, [searchParams, router])
 
   async function verifyPin(pinToVerify: string, isAutoRedirect: boolean = false) {
     setIsLoading(true)
@@ -154,5 +211,20 @@ export default function WarehousePage() {
         </p>
       </div>
     </div>
+  )
+}
+
+export default function WarehousePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading...</p>
+        </div>
+      </div>
+    }>
+      <WarehouseContent />
+    </Suspense>
   )
 }
