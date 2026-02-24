@@ -38,7 +38,8 @@ export const DC_COLUMNS = {
   status: 'status90',
   keyPoints: 'key_points___summary',
   runGroup: 'color_mkxvwn11',              // Status: A, B, C, D, E
-  driverPayMirror: 'lookup_mkzsfkg2',      // Mirror column: driver pay from D&C Costings
+  driverPayMirror: 'lookup_mkzsfkg2',      // Mirror column: driver pay from D&C Costings (fallback)
+  driverPayDirect: 'numeric_mm0688f9',     // Direct fee column on D&C board (primary source)
   groupedRunFee: 'numeric_mky3z4gm',       // Reserved for future: aggregated fee for grouped runs
   completionNotes: 'long_text_mkyweafm',
   completionPhotos: 'file_mkyww89n',
@@ -113,6 +114,7 @@ const DC_COLUMNS_TO_FETCH = [
   DC_COLUMNS.keyPoints,
   DC_COLUMNS.runGroup,
   DC_COLUMNS.driverPayMirror,
+  DC_COLUMNS.driverPayDirect,
   DC_COLUMNS.completedAtDate,
   DC_COLUMNS.completionNotes,
   DC_COLUMNS.clientEmail,
@@ -1033,8 +1035,10 @@ export async function getJobsForFreelancer(freelancerEmail: string): Promise<Job
     // Determine what is it (equipment or vehicle)
     const whatIsIt = parseWhatIsIt(getColText(DC_COLUMNS.whatIsIt))
 
-     // Parse driver pay from mirror column
-    const feeText = getColText(DC_COLUMNS.driverPayMirror)
+    // Parse driver pay — prefer direct fee column, fall back to mirror from D&C Costings
+    const directFeeText = getColText(DC_COLUMNS.driverPayDirect)
+    const mirrorFeeText = getColText(DC_COLUMNS.driverPayMirror)
+    const feeText = directFeeText || mirrorFeeText
     const driverPay = feeText ? parseFloat(feeText) : undefined
 
     // Extract venue ID from connect column
@@ -1283,9 +1287,11 @@ export async function getJobById(jobId: string, freelancerEmail: string): Promis
   // Determine what is it (equipment or vehicle)
   const whatIsIt = parseWhatIsIt(getColText(DC_COLUMNS.whatIsIt))
 
-  // Parse driver pay from mirror column
-  const feeText = getColText(DC_COLUMNS.driverPayMirror)
-  const driverPay = feeText ? parseFloat(feeText) : undefined
+ // Parse driver pay — prefer direct fee column, fall back to mirror from D&C Costings
+    const directFeeText = getColText(DC_COLUMNS.driverPayDirect)
+    const mirrorFeeText = getColText(DC_COLUMNS.driverPayMirror)
+    const feeText = directFeeText || mirrorFeeText
+    const driverPay = feeText ? parseFloat(feeText) : undefined
 
   // Extract venue ID from connect column
   // API 2025-04: Use linked_item_ids from BoardRelationValue fragment
@@ -1648,9 +1654,11 @@ export async function getJobByIdInternal(jobId: string): Promise<JobRecord | nul
   // Determine what is it (equipment or vehicle)
   const whatIsIt = parseWhatIsIt(getColText(DC_COLUMNS.whatIsIt))
 
-  // Parse driver pay from mirror column
-  const feeText = getColText(DC_COLUMNS.driverPayMirror)
-  const driverPay = feeText ? parseFloat(feeText) : undefined
+  // Parse driver pay — prefer direct fee column, fall back to mirror from D&C Costings
+    const directFeeText = getColText(DC_COLUMNS.driverPayDirect)
+    const mirrorFeeText = getColText(DC_COLUMNS.driverPayMirror)
+    const feeText = directFeeText || mirrorFeeText
+    const driverPay = feeText ? parseFloat(feeText) : undefined
 
   // Extract venue ID from connect column
   // API 2025-04: Use linked_item_ids from BoardRelationValue fragment
