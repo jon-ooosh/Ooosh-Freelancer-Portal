@@ -357,7 +357,7 @@ function calculateAutoOOH(
 
 function calculateCosts(formData: FormData, settings: CostingSettings): CalculatedCosts {
   const {
-    jobType, whatIsIt, distanceMiles, driveTimeMinutes, travelMethod, travelTimeMins,
+    jobType, whatIsIt, distanceMiles, driveTimeMinutes, travelMethod, travelTimeMins, travelCost,
     workDurationHours, calculationMode, numberOfDays,
     addCollection, dayRateOverride, clientDayRateOverride, applyMinHours, expenses,
     includesSetupWork, setupExtraTimeHours, setupFixedPremium,
@@ -375,6 +375,7 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
   const isVehicle = whatIsIt === 'vehicle'
   const isThereAndBack = !isVehicle || addCollection
   const isDC = jobType === 'delivery' || jobType === 'collection'
+  const transportCost = travelMethod === 'public_transport' ? travelCost : 0
 
   const totalMiles = isThereAndBack ? distanceMiles * 2 : distanceMiles
   const fuelCost = (totalMiles * fuelPricePerLitre) / 5
@@ -415,9 +416,10 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
     
     const clientChargeExpenses = expensesIncluded * markupMultiplier
     const clientChargeFuel = fuelIncluded ? fuelCost * markupMultiplier : 0
-    const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses
+    const clientChargeTransport = transportCost * markupMultiplier
+    const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses + clientChargeTransport
     const clientChargeTotalRounded = Math.max(minClientCharge || 0, Math.round(clientChargeTotal))
-    const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded
+    const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded + transportCost
 
     return {
       clientChargeLabour: Math.round(clientChargeLabour * 100) / 100,
@@ -518,10 +520,11 @@ function calculateCosts(formData: FormData, settings: CostingSettings): Calculat
 
   const clientFuelCharge = fuelIncluded ? fuelCost : 0
   const clientExpenseCharge = expensesIncluded * markupMultiplier
+  const clientTransportCharge = transportCost * markupMultiplier
 
-  const clientChargeTotal = clientLabourCharge + clientFuelCharge + clientExpenseCharge
+  const clientChargeTotal = clientLabourCharge + clientFuelCharge + clientExpenseCharge + clientTransportCharge
   const clientChargeTotalRounded = Math.max(minClientCharge || 0, Math.round(clientChargeTotal))
-  const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded
+  const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded + transportCost
 
   return {
     clientChargeLabour: Math.round(clientLabourCharge * 100) / 100,
