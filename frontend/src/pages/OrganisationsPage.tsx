@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import SlidePanel from '../components/SlidePanel';
+import OrganisationForm from '../components/OrganisationForm';
 
 interface Organisation {
   id: string;
@@ -34,6 +36,7 @@ export default function OrganisationsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
+  const [showForm, setShowForm] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -64,7 +67,10 @@ export default function OrganisationsPage() {
           <h1 className="text-2xl font-bold text-gray-900">Organisations</h1>
           <p className="mt-1 text-sm text-gray-500">{pagination.total} organisations</p>
         </div>
-        <button className="bg-ooosh-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors">
+        <button
+          onClick={() => setShowForm(true)}
+          className="bg-ooosh-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors"
+        >
           Add Organisation
         </button>
       </div>
@@ -126,6 +132,14 @@ export default function OrganisationsPage() {
           </tbody>
         </table>
       </div>
+
+      {/* Add Organisation Panel */}
+      <SlidePanel open={showForm} onClose={() => setShowForm(false)} title="Add Organisation">
+        <OrganisationForm
+          onSaved={() => { setShowForm(false); loadOrgs(); }}
+          onCancel={() => setShowForm(false)}
+        />
+      </SlidePanel>
     </div>
   );
 }

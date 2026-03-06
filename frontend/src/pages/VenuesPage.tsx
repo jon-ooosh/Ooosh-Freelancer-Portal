@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import SlidePanel from '../components/SlidePanel';
+import VenueForm from '../components/VenueForm';
 
 interface Venue {
   id: string;
@@ -21,6 +23,7 @@ export default function VenuesPage() {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
+  const [showForm, setShowForm] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -50,7 +53,10 @@ export default function VenuesPage() {
           <h1 className="text-2xl font-bold text-gray-900">Venues</h1>
           <p className="mt-1 text-sm text-gray-500">{pagination.total} venues</p>
         </div>
-        <button className="bg-ooosh-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors">
+        <button
+          onClick={() => setShowForm(true)}
+          className="bg-ooosh-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors"
+        >
           Add Venue
         </button>
       </div>
@@ -90,6 +96,14 @@ export default function VenuesPage() {
           ))
         )}
       </div>
+
+      {/* Add Venue Panel */}
+      <SlidePanel open={showForm} onClose={() => setShowForm(false)} title="Add Venue" wide>
+        <VenueForm
+          onSaved={() => { setShowForm(false); loadVenues(); }}
+          onCancel={() => setShowForm(false)}
+        />
+      </SlidePanel>
     </div>
   );
 }

@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import SlidePanel from '../components/SlidePanel';
+import VenueForm from '../components/VenueForm';
 
 interface VenueDetail {
   id: string;
@@ -57,6 +59,10 @@ export default function VenueDetailPage() {
   const [newNote, setNewNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  // Edit/delete
+  const [showEdit, setShowEdit] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
   useEffect(() => {
     if (id) {
       loadVenue();
@@ -104,6 +110,15 @@ export default function VenueDetailPage() {
     }
   }
 
+  async function handleDelete() {
+    try {
+      await api.delete(`/venues/${id}`);
+      navigate('/venues');
+    } catch (err) {
+      console.error('Failed to delete venue:', err);
+    }
+  }
+
   function formatDateTime(dateStr: string) {
     return new Date(dateStr).toLocaleDateString('en-GB', {
       day: 'numeric', month: 'short', year: 'numeric',
@@ -124,8 +139,37 @@ export default function VenueDetailPage() {
 
       {/* Header */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">{venue.name}</h1>
-        {fullAddress && <p className="mt-1 text-sm text-gray-500">{fullAddress}</p>}
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">{venue.name}</h1>
+            {fullAddress && <p className="mt-1 text-sm text-gray-500">{fullAddress}</p>}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowEdit(true)}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              Edit
+            </button>
+            <div className="relative">
+              <button
+                onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
+                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+              >
+                Delete
+              </button>
+              {showDeleteConfirm && (
+                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-10 w-56">
+                  <p className="text-sm text-gray-700 mb-2">Delete this venue?</p>
+                  <div className="flex gap-2">
+                    <button onClick={handleDelete} className="flex-1 bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Yes, delete</button>
+                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 border border-gray-300 px-3 py-1 rounded text-sm hover:bg-gray-50">Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
 
         {/* Quick stats */}
         <div className="mt-4 flex flex-wrap gap-6 text-sm">
@@ -183,7 +227,6 @@ export default function VenueDetailPage() {
 
       {activeTab === 'info' && (
         <div className="space-y-6">
-          {/* Load-in & Access */}
           <InfoSection title="Load-in & Access">
             <InfoBlock label="Load-in Address" value={venue.load_in_address} />
             <InfoBlock label="Loading Bay" value={venue.loading_bay_info} />
@@ -191,20 +234,17 @@ export default function VenueDetailPage() {
             <InfoBlock label="what3words" value={venue.w3w_address} />
           </InfoSection>
 
-          {/* Logistics */}
           <InfoSection title="Logistics">
             <InfoBlock label="Parking" value={venue.parking_info} />
             <InfoBlock label="Approach Notes" value={venue.approach_notes} />
           </InfoSection>
 
-          {/* Technical */}
           {venue.technical_notes && (
             <InfoSection title="Technical Notes">
               <p className="text-sm text-gray-700 whitespace-pre-wrap">{venue.technical_notes}</p>
             </InfoSection>
           )}
 
-          {/* General */}
           {venue.general_notes && (
             <InfoSection title="General Notes">
               <p className="text-sm text-gray-700 whitespace-pre-wrap">{venue.general_notes}</p>
@@ -260,6 +300,15 @@ export default function VenueDetailPage() {
           )}
         </div>
       )}
+
+      {/* Edit Panel */}
+      <SlidePanel open={showEdit} onClose={() => setShowEdit(false)} title="Edit Venue" wide>
+        <VenueForm
+          venueId={id}
+          onSaved={() => { setShowEdit(false); loadVenue(); }}
+          onCancel={() => setShowEdit(false)}
+        />
+      </SlidePanel>
     </div>
   );
 }

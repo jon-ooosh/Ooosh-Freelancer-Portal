@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import SlidePanel from '../components/SlidePanel';
+import PersonForm from '../components/PersonForm';
 
 interface PersonDetail {
   id: string;
@@ -78,6 +80,10 @@ export default function PersonDetailPage() {
   const [newNoteType, setNewNoteType] = useState<string>('note');
   const [submitting, setSubmitting] = useState(false);
 
+  // Edit panel
+  const [showEdit, setShowEdit] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
   useEffect(() => {
     if (id) {
       loadPerson();
@@ -122,6 +128,15 @@ export default function PersonDetailPage() {
       console.error('Failed to add interaction:', err);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleDelete() {
+    try {
+      await api.delete(`/people/${id}`);
+      navigate('/people');
+    } catch (err) {
+      console.error('Failed to delete person:', err);
     }
   }
 
@@ -184,11 +199,36 @@ export default function PersonDetailPage() {
               </div>
             </div>
           </div>
-          {isFreelancer && (
-            <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${person.is_approved ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
-              {person.is_approved ? 'Approved Freelancer' : 'Pending Approval'}
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {isFreelancer && (
+              <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${person.is_approved ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                {person.is_approved ? 'Approved Freelancer' : 'Pending Approval'}
+              </span>
+            )}
+            <button
+              onClick={() => setShowEdit(true)}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              Edit
+            </button>
+            <div className="relative">
+              <button
+                onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
+                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+              >
+                Delete
+              </button>
+              {showDeleteConfirm && (
+                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-10 w-56">
+                  <p className="text-sm text-gray-700 mb-2">Delete this person?</p>
+                  <div className="flex gap-2">
+                    <button onClick={handleDelete} className="flex-1 bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Yes, delete</button>
+                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 border border-gray-300 px-3 py-1 rounded text-sm hover:bg-gray-50">Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Contact details row */}
@@ -411,6 +451,15 @@ export default function PersonDetailPage() {
           )}
         </div>
       )}
+
+      {/* Edit Panel */}
+      <SlidePanel open={showEdit} onClose={() => setShowEdit(false)} title="Edit Person">
+        <PersonForm
+          personId={id}
+          onSaved={() => { setShowEdit(false); loadPerson(); }}
+          onCancel={() => setShowEdit(false)}
+        />
+      </SlidePanel>
     </div>
   );
 }

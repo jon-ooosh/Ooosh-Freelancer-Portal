@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import SlidePanel from '../components/SlidePanel';
+import OrganisationForm from '../components/OrganisationForm';
 
 interface OrgDetail {
   id: string;
@@ -80,6 +82,10 @@ export default function OrganisationDetailPage() {
   const [newNoteType, setNewNoteType] = useState<string>('note');
   const [submitting, setSubmitting] = useState(false);
 
+  // Edit/delete
+  const [showEdit, setShowEdit] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
   useEffect(() => {
     if (id) {
       loadOrg();
@@ -127,6 +133,15 @@ export default function OrganisationDetailPage() {
     }
   }
 
+  async function handleDelete() {
+    try {
+      await api.delete(`/organisations/${id}`);
+      navigate('/organisations');
+    } catch (err) {
+      console.error('Failed to delete organisation:', err);
+    }
+  }
+
   function formatDate(dateStr: string) {
     return new Date(dateStr).toLocaleDateString('en-GB', {
       day: 'numeric', month: 'short', year: 'numeric',
@@ -168,8 +183,33 @@ export default function OrganisationDetailPage() {
               </p>
             )}
           </div>
-          <div className="text-right text-sm text-gray-500">
-            {activePeople.length} active {activePeople.length === 1 ? 'person' : 'people'}
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-500 mr-2">
+              {activePeople.length} active {activePeople.length === 1 ? 'person' : 'people'}
+            </span>
+            <button
+              onClick={() => setShowEdit(true)}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              Edit
+            </button>
+            <div className="relative">
+              <button
+                onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
+                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+              >
+                Delete
+              </button>
+              {showDeleteConfirm && (
+                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-10 w-56">
+                  <p className="text-sm text-gray-700 mb-2">Delete this organisation?</p>
+                  <div className="flex gap-2">
+                    <button onClick={handleDelete} className="flex-1 bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Yes, delete</button>
+                    <button onClick={() => setShowDeleteConfirm(false)} className="flex-1 border border-gray-300 px-3 py-1 rounded text-sm hover:bg-gray-50">Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -384,6 +424,15 @@ export default function OrganisationDetailPage() {
           )}
         </div>
       )}
+
+      {/* Edit Panel */}
+      <SlidePanel open={showEdit} onClose={() => setShowEdit(false)} title="Edit Organisation">
+        <OrganisationForm
+          orgId={id}
+          onSaved={() => { setShowEdit(false); loadOrg(); }}
+          onCancel={() => setShowEdit(false)}
+        />
+      </SlidePanel>
     </div>
   );
 }

@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import SlidePanel from '../components/SlidePanel';
+import PersonForm from '../components/PersonForm';
 
 interface Person {
   id: string;
@@ -32,6 +34,7 @@ export default function PeoplePage() {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
+  const [showForm, setShowForm] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -63,7 +66,10 @@ export default function PeoplePage() {
             {pagination.total} contacts
           </p>
         </div>
-        <button className="bg-ooosh-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors">
+        <button
+          onClick={() => setShowForm(true)}
+          className="bg-ooosh-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors"
+        >
           Add Person
         </button>
       </div>
@@ -170,6 +176,14 @@ export default function PeoplePage() {
           </div>
         </div>
       )}
+
+      {/* Add Person Panel */}
+      <SlidePanel open={showForm} onClose={() => setShowForm(false)} title="Add Person">
+        <PersonForm
+          onSaved={() => { setShowForm(false); loadPeople(); }}
+          onCancel={() => setShowForm(false)}
+        />
+      </SlidePanel>
     </div>
   );
 }
