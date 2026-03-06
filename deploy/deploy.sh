@@ -36,9 +36,17 @@ git pull origin "${BRANCH}"
 echo ""
 echo "[2/5] Installing dependencies..."
 cd "${APP_DIR}/backend"
-npm ci --production=false  # Need devDeps for TypeScript build
+if [ -f package-lock.json ]; then
+  npm ci --production=false
+else
+  npm install
+fi
 cd "${APP_DIR}/frontend"
-npm ci
+if [ -f package-lock.json ]; then
+  npm ci
+else
+  npm install
+fi
 
 # --- Build backend ---
 echo ""
