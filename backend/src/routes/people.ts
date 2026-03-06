@@ -222,7 +222,7 @@ router.put('/:id', validate(updatePersonSchema), async (req: AuthRequest, res: R
       values
     );
 
-    await logAudit(req.user!.id, 'people', req.params.id, 'update', current.rows[0], result.rows[0]);
+    await logAudit(req.user!.id, 'people', req.params.id as string, 'update', current.rows[0], result.rows[0]);
 
     res.json(result.rows[0]);
   } catch (error) {
@@ -241,7 +241,7 @@ router.delete('/:id', authorize('admin', 'manager'), async (req: AuthRequest, re
     }
 
     await query('UPDATE people SET is_deleted = true, updated_at = NOW() WHERE id = $1', [req.params.id]);
-    await logAudit(req.user!.id, 'people', req.params.id, 'delete', current.rows[0], null);
+    await logAudit(req.user!.id, 'people', req.params.id as string, 'delete', current.rows[0], null);
 
     res.status(204).send();
   } catch (error) {
@@ -299,7 +299,7 @@ router.put('/:id/roles/:roleId/end', async (req: AuthRequest, res: Response) => 
       [req.params.roleId]
     );
 
-    await logAudit(req.user!.id, 'person_organisation_roles', req.params.roleId, 'update', current.rows[0], result.rows[0]);
+    await logAudit(req.user!.id, 'person_organisation_roles', req.params.roleId as string, 'update', current.rows[0], result.rows[0]);
 
     // NOTE: Phase 5 — trigger relationship movement detection alert here
 

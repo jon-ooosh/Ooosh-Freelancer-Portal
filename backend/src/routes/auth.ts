@@ -29,13 +29,13 @@ function generateTokens(user: { id: string; email: string; role: string }) {
   const accessToken = jwt.sign(
     { id: user.id, email: user.email, role: user.role },
     JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
+    { expiresIn: JWT_EXPIRES_IN as string | number }
   );
 
   const refreshToken = jwt.sign(
     { id: user.id, type: 'refresh' },
     JWT_SECRET,
-    { expiresIn: JWT_REFRESH_EXPIRES_IN }
+    { expiresIn: JWT_REFRESH_EXPIRES_IN as string | number }
   );
 
   return { accessToken, refreshToken };

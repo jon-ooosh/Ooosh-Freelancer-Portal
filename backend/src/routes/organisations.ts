@@ -176,7 +176,7 @@ router.put('/:id', validate(updateOrgSchema), async (req: AuthRequest, res: Resp
       values
     );
 
-    await logAudit(req.user!.id, 'organisations', req.params.id, 'update', current.rows[0], result.rows[0]);
+    await logAudit(req.user!.id, 'organisations', req.params.id as string, 'update', current.rows[0], result.rows[0]);
 
     res.json(result.rows[0]);
   } catch (error) {
@@ -195,7 +195,7 @@ router.delete('/:id', authorize('admin', 'manager'), async (req: AuthRequest, re
     }
 
     await query('UPDATE organisations SET is_deleted = true, updated_at = NOW() WHERE id = $1', [req.params.id]);
-    await logAudit(req.user!.id, 'organisations', req.params.id, 'delete', current.rows[0], null);
+    await logAudit(req.user!.id, 'organisations', req.params.id as string, 'delete', current.rows[0], null);
 
     res.status(204).send();
   } catch (error) {

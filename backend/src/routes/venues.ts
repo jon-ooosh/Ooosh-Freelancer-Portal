@@ -166,7 +166,7 @@ router.put('/:id', validate(updateVenueSchema), async (req: AuthRequest, res: Re
       values
     );
 
-    await logAudit(req.user!.id, 'venues', req.params.id, 'update', current.rows[0], result.rows[0]);
+    await logAudit(req.user!.id, 'venues', req.params.id as string, 'update', current.rows[0], result.rows[0]);
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Update venue error:', error);
@@ -184,7 +184,7 @@ router.delete('/:id', authorize('admin', 'manager'), async (req: AuthRequest, re
     }
 
     await query('UPDATE venues SET is_deleted = true, updated_at = NOW() WHERE id = $1', [req.params.id]);
-    await logAudit(req.user!.id, 'venues', req.params.id, 'delete', current.rows[0], null);
+    await logAudit(req.user!.id, 'venues', req.params.id as string, 'delete', current.rows[0], null);
     res.status(204).send();
   } catch (error) {
     console.error('Delete venue error:', error);
