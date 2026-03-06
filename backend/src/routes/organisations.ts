@@ -8,16 +8,26 @@ import { logAudit } from '../middleware/audit';
 const router = Router();
 router.use(authenticate);
 
+const fileSchema = z.object({
+  name: z.string(),
+  url: z.string().url(),
+  type: z.enum(['document', 'image', 'other']),
+  uploaded_at: z.string(),
+  uploaded_by: z.string(),
+});
+
 const createOrgSchema = z.object({
   name: z.string().min(1).max(500),
-  type: z.string().min(1), // band, management, label, agency, promoter, venue, festival, supplier, other
+  type: z.string().min(1), // band, management, label, agency, promoter, venue, festival, supplier, hire_company, booking_agent, unknown, other
   parent_id: z.string().uuid().optional().nullable(),
   website: z.string().url().optional().nullable(),
   email: z.string().email().optional().nullable(),
   phone: z.string().max(50).optional().nullable(),
   address: z.string().optional().nullable(),
+  location: z.string().max(500).optional().nullable(),
   notes: z.string().optional().nullable(),
   tags: z.array(z.string()).optional().default([]),
+  files: z.array(fileSchema).optional().default([]),
 });
 
 const updateOrgSchema = createOrgSchema.partial();
@@ -123,13 +133,13 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 // POST /api/organisations
 router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { name, type, parent_id, website, email, phone, address, notes, tags } = req.body;
+    const { name, type, parent_id, website, email, phone, address, location, notes, tags, files } = req.body;
 
     const result = await query(
-      `INSERT INTO organisations (name, type, parent_id, website, email, phone, address, notes, tags, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO organisations (name, type, parent_id, website, email, phone, address, location, notes, tags, files, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
-      [name, type, parent_id, website, email?.toLowerCase(), phone, address, notes, tags, req.user!.id]
+      [name, type, parent_id, website, email?.toLowerCase(), phone, address, location, notes, tags, JSON.stringify(files), req.user!.id]
     );
 
     await logAudit(req.user!.id, 'organisations', result.rows[0].id, 'create', null, result.rows[0]);

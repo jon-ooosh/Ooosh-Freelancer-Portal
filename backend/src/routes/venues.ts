@@ -8,20 +8,36 @@ import { logAudit } from '../middleware/audit';
 const router = Router();
 router.use(authenticate);
 
+const fileSchema = z.object({
+  name: z.string(),
+  url: z.string().url(),
+  type: z.enum(['document', 'image', 'other']),
+  uploaded_at: z.string(),
+  uploaded_by: z.string(),
+});
+
 const createVenueSchema = z.object({
   name: z.string().min(1).max(500),
+  organisation_id: z.string().uuid().optional().nullable(),
   address: z.string().optional().nullable(),
   city: z.string().max(255).optional().nullable(),
   postcode: z.string().max(20).optional().nullable(),
   country: z.string().max(100).optional().nullable(),
   latitude: z.number().optional().nullable(),
   longitude: z.number().optional().nullable(),
+  w3w_address: z.string().max(100).optional().nullable(),
+  load_in_address: z.string().optional().nullable(),
   loading_bay_info: z.string().optional().nullable(),
   access_codes: z.string().optional().nullable(),
   parking_info: z.string().optional().nullable(),
   approach_notes: z.string().optional().nullable(),
+  technical_notes: z.string().optional().nullable(),
   general_notes: z.string().optional().nullable(),
+  default_miles_from_base: z.number().optional().nullable(),
+  default_drive_time_mins: z.number().int().optional().nullable(),
+  default_return_cost: z.number().optional().nullable(),
   tags: z.array(z.string()).optional().default([]),
+  files: z.array(fileSchema).optional().default([]),
 });
 
 const updateVenueSchema = createVenueSchema.partial();
@@ -92,17 +108,29 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.post('/', validate(createVenueSchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
-      name, address, city, postcode, country, latitude, longitude,
-      loading_bay_info, access_codes, parking_info, approach_notes, general_notes, tags,
+      name, organisation_id, address, city, postcode, country, latitude, longitude,
+      w3w_address, load_in_address, loading_bay_info, access_codes, parking_info,
+      approach_notes, technical_notes, general_notes,
+      default_miles_from_base, default_drive_time_mins, default_return_cost,
+      tags, files,
     } = req.body;
 
     const result = await query(
-      `INSERT INTO venues (name, address, city, postcode, country, latitude, longitude,
-        loading_bay_info, access_codes, parking_info, approach_notes, general_notes, tags, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+      `INSERT INTO venues (
+        name, organisation_id, address, city, postcode, country, latitude, longitude,
+        w3w_address, load_in_address, loading_bay_info, access_codes, parking_info,
+        approach_notes, technical_notes, general_notes,
+        default_miles_from_base, default_drive_time_mins, default_return_cost,
+        tags, files, created_by
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
        RETURNING *`,
-      [name, address, city, postcode, country, latitude, longitude,
-        loading_bay_info, access_codes, parking_info, approach_notes, general_notes, tags, req.user!.id]
+      [
+        name, organisation_id, address, city, postcode, country, latitude, longitude,
+        w3w_address, load_in_address, loading_bay_info, access_codes, parking_info,
+        approach_notes, technical_notes, general_notes,
+        default_miles_from_base, default_drive_time_mins, default_return_cost,
+        tags, JSON.stringify(files), req.user!.id,
+      ]
     );
 
     await logAudit(req.user!.id, 'venues', result.rows[0].id, 'create', null, result.rows[0]);

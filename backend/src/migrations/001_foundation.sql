@@ -16,19 +16,43 @@ CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 -- PEOPLE — The central entity (Spec §2.1)
 -- ============================================================================
 -- Every person exists independently of any company, band, or role.
--- Personal contact details, communication preferences, and unified activity
--- timeline live here.
+-- A person can be a client contact, freelancer, staff member, venue contact,
+-- agent, accountant — or all of the above simultaneously.
+-- Personal contact details, communication preferences, freelancer details,
+-- and a unified activity timeline live here.
 CREATE TABLE people (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     first_name      VARCHAR(255) NOT NULL,
     last_name       VARCHAR(255) NOT NULL,
     email           VARCHAR(500),
-    phone           VARCHAR(50),
-    mobile          VARCHAR(50),
+    -- Three phone columns: UK landline/office, UK mobile, international
+    -- (touring TMs especially often have an international number)
+    phone           VARCHAR(50),          -- Primary / office / landline
+    mobile          VARCHAR(50),          -- UK mobile
+    international_phone VARCHAR(50),      -- International / touring number
     notes           TEXT,
     tags            TEXT[] DEFAULT '{}',
-    -- Communication preferences (Phase 2+)
-    preferred_contact_method VARCHAR(20) DEFAULT 'email',
+    -- Files: photos, documents, etc. stored as JSON array
+    -- Each entry: {"name": "...", "url": "https://r2...", "type": "document|image|other", "uploaded_at": "...", "uploaded_by": "..."}
+    files           JSONB DEFAULT '[]',
+    -- Communication preferences
+    preferred_contact_method VARCHAR(20) DEFAULT 'email', -- email, phone, mobile, whatsapp
+    -- Home address (needed for freelancers especially, useful for all)
+    home_address    TEXT,
+    date_of_birth   DATE,
+
+    -- ===== Freelancer-specific fields =====
+    -- These are null for non-freelancers. Freelancers are just people with
+    -- these fields populated + a 'freelancer' user role.
+    skills          TEXT[] DEFAULT '{}',           -- e.g. ['driving', 'sound_engineer', 'stage_hand', 'backline_tech']
+    is_insured_on_vehicles BOOLEAN DEFAULT false,  -- Insured to drive our vehicles?
+    is_approved     BOOLEAN DEFAULT false,         -- Approved to work for us?
+    has_tshirt      BOOLEAN DEFAULT false,         -- Got one of our T-shirts?
+    emergency_contact_name  VARCHAR(255),
+    emergency_contact_phone VARCHAR(50),
+    licence_details TEXT,                          -- Licence number, categories, expiry etc.
+    freelancer_references TEXT,                    -- Optional references / notes on reliability
+
     -- Soft delete
     is_deleted      BOOLEAN DEFAULT false,
     -- Metadata
@@ -43,23 +67,30 @@ CREATE INDEX idx_people_name ON people USING gin (
 );
 CREATE INDEX idx_people_email ON people (lower(email));
 CREATE INDEX idx_people_tags ON people USING gin (tags);
+CREATE INDEX idx_people_skills ON people USING gin (skills);
 CREATE INDEX idx_people_not_deleted ON people (is_deleted) WHERE is_deleted = false;
 
 -- ============================================================================
 -- ORGANISATIONS — Companies, bands, management firms, etc. (Spec §2.1)
 -- ============================================================================
 -- Typed and categorisable. Can have parent/subsidiary relationships.
+-- Has its own contact details, files (tech specs, riders, etc.), and location.
 CREATE TABLE organisations (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(500) NOT NULL,
-    type            VARCHAR(100) NOT NULL, -- band, management, label, agency, promoter, venue, festival, supplier, other
+    type            VARCHAR(100) NOT NULL, -- band, management, label, agency, promoter, venue, festival, supplier, hire_company, booking_agent, unknown, other
     parent_id       UUID REFERENCES organisations(id) ON DELETE SET NULL,
     website         VARCHAR(1000),
     email           VARCHAR(500),
     phone           VARCHAR(50),
     address         TEXT,
+    -- Location: city/region for quick filtering and display
+    location        VARCHAR(500),         -- e.g. "London", "Manchester", "Berlin"
     notes           TEXT,
     tags            TEXT[] DEFAULT '{}',
+    -- Files: tech specs, riders, logos, access photos, contracts, etc.
+    -- Same JSON structure as people.files
+    files           JSONB DEFAULT '[]',
     -- Soft delete
     is_deleted      BOOLEAN DEFAULT false,
     -- Metadata
@@ -71,6 +102,7 @@ CREATE TABLE organisations (
 CREATE INDEX idx_organisations_name ON organisations USING gin (name gin_trgm_ops);
 CREATE INDEX idx_organisations_type ON organisations (type);
 CREATE INDEX idx_organisations_parent ON organisations (parent_id);
+CREATE INDEX idx_organisations_location ON organisations (lower(location));
 CREATE INDEX idx_organisations_not_deleted ON organisations (is_deleted) WHERE is_deleted = false;
 
 -- ============================================================================
@@ -79,6 +111,12 @@ CREATE INDEX idx_organisations_not_deleted ON organisations (is_deleted) WHERE i
 -- Rich metadata: role, status, dates, primary flag, notes.
 -- This is the most important data structure in the system.
 -- Enables: relationship history, movement detection, multi-role tracking.
+--
+-- KEY POINT: One person can have UNLIMITED roles across UNLIMITED organisations.
+-- Sarah can be Tour Manager for Band A, Driver for Ooosh, and Rep for Label Y
+-- — all simultaneously. Each is a separate row. When a role ends, that row
+-- gets status='historical' with an end_date, while others stay 'active'.
+-- A person can even have multiple roles at the SAME organisation.
 CREATE TABLE person_organisation_roles (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     person_id       UUID NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -105,22 +143,41 @@ CREATE INDEX idx_por_person_active ON person_organisation_roles (person_id, stat
 -- ============================================================================
 -- VENUES — First-class entities with accumulated site intelligence (Spec §2.1)
 -- ============================================================================
+-- A Venue can optionally be linked to an Organisation (e.g. the O2 Arena is
+-- both a venue you deliver to AND an organisation with contacts/billing).
+-- Site intelligence persists across all clients and jobs.
 CREATE TABLE venues (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name            VARCHAR(500) NOT NULL,
+    -- Optional link to organisation (venue may also be an org)
+    organisation_id UUID REFERENCES organisations(id) ON DELETE SET NULL,
+    -- Primary / postal address
     address         TEXT,
     city            VARCHAR(255),
     postcode        VARCHAR(20),
     country         VARCHAR(100),
     latitude        DECIMAL(10, 7),
     longitude       DECIMAL(10, 7),
+    -- What3Words address (precise delivery/load-in location)
+    w3w_address     VARCHAR(100),
+    -- Load-in address (may differ from postal address — e.g. loading dock round the back)
+    load_in_address TEXT,
     -- Site intelligence — persists across all clients and jobs
-    loading_bay_info TEXT,
-    access_codes    TEXT,
-    parking_info    TEXT,
-    approach_notes  TEXT,
+    loading_bay_info TEXT,                -- Loading dock details, max heights, booking requirements
+    access_codes    TEXT,                 -- Gate codes, door codes, security contact
+    parking_info    TEXT,                 -- Crew parking, permits, nearest NCP
+    approach_notes  TEXT,                 -- Sat nav tips, avoid certain routes, allow extra time
+    -- Technical / production notes (power, house PA, staging constraints, etc.)
+    technical_notes TEXT,
     general_notes   TEXT,
+    -- Delivery/collection quoting defaults
+    -- Read by the transport quoting system to pre-populate quotes
+    default_miles_from_base   DECIMAL(8, 1),  -- One-way distance in miles
+    default_drive_time_mins   INT,            -- One-way drive time in minutes
+    default_return_cost       DECIMAL(10, 2), -- Default return transport cost (£)
     tags            TEXT[] DEFAULT '{}',
+    -- Files: access photos, site maps, loading bay photos, production docs
+    files           JSONB DEFAULT '[]',
     -- Soft delete
     is_deleted      BOOLEAN DEFAULT false,
     -- Metadata
@@ -131,6 +188,7 @@ CREATE TABLE venues (
 
 CREATE INDEX idx_venues_name ON venues USING gin (name gin_trgm_ops);
 CREATE INDEX idx_venues_city ON venues (lower(city));
+CREATE INDEX idx_venues_organisation ON venues (organisation_id);
 CREATE INDEX idx_venues_not_deleted ON venues (is_deleted) WHERE is_deleted = false;
 
 -- ============================================================================
@@ -138,6 +196,8 @@ CREATE INDEX idx_venues_not_deleted ON venues (is_deleted) WHERE is_deleted = fa
 -- ============================================================================
 -- Each user links to a Person. Users are the authentication layer;
 -- People are the identity layer.
+-- Freelancer-specific prefs (muted jobs, notification pauses) live here
+-- as user-level settings rather than person-level data.
 CREATE TABLE users (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     person_id       UUID NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -148,6 +208,9 @@ CREATE TABLE users (
     is_active       BOOLEAN DEFAULT true,
     last_login      TIMESTAMPTZ,
     refresh_token   TEXT,
+    -- User preferences (notification settings, UI prefs, etc.)
+    -- Includes freelancer-specific: muted_job_ids, notifications_paused_until
+    preferences     JSONB DEFAULT '{}',
     -- Metadata
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW()
@@ -173,6 +236,8 @@ CREATE TABLE interactions (
     venue_id        UUID REFERENCES venues(id) ON DELETE SET NULL,
     -- @mentions
     mentioned_user_ids UUID[] DEFAULT '{}',
+    -- Files attached to this interaction
+    files           JSONB DEFAULT '[]',
     -- Metadata
     created_by      UUID REFERENCES users(id),
     created_at      TIMESTAMPTZ DEFAULT NOW()
@@ -278,12 +343,15 @@ INSERT INTO picklist_items (category, value, label, sort_order) VALUES
     ('org_type', 'management', 'Management Company', 2),
     ('org_type', 'label', 'Record Label', 3),
     ('org_type', 'agency', 'Booking Agency', 4),
-    ('org_type', 'promoter', 'Promoter', 5),
-    ('org_type', 'venue', 'Venue', 6),
-    ('org_type', 'festival', 'Festival', 7),
-    ('org_type', 'supplier', 'Supplier', 8),
-    ('org_type', 'accountancy', 'Accountancy Firm', 9),
-    ('org_type', 'production', 'Production Company', 10),
+    ('org_type', 'booking_agent', 'Booking Agent', 5),
+    ('org_type', 'promoter', 'Promoter', 6),
+    ('org_type', 'venue', 'Venue', 7),
+    ('org_type', 'festival', 'Festival', 8),
+    ('org_type', 'supplier', 'Supplier', 9),
+    ('org_type', 'hire_company', 'Hire Company', 10),
+    ('org_type', 'accountancy', 'Accountancy Firm', 11),
+    ('org_type', 'production', 'Production Company', 12),
+    ('org_type', 'unknown', 'Unknown (To Be Confirmed)', 90),
     ('org_type', 'other', 'Other', 99);
 
 -- Relationship roles
@@ -300,7 +368,22 @@ INSERT INTO picklist_items (category, value, label, sort_order) VALUES
     ('relationship_role', 'band_member', 'Band Member', 10),
     ('relationship_role', 'tech', 'Tech / Crew', 11),
     ('relationship_role', 'owner', 'Owner / Director', 12),
+    ('relationship_role', 'general_contact', 'General Point of Contact', 13),
+    ('relationship_role', 'inactive', 'No Longer In Use', 90),
     ('relationship_role', 'other', 'Other', 99);
+
+-- Freelancer skills
+INSERT INTO picklist_items (category, value, label, sort_order) VALUES
+    ('freelancer_skill', 'driving', 'Driving', 1),
+    ('freelancer_skill', 'sound_engineer', 'Sound Engineer', 2),
+    ('freelancer_skill', 'backline_tech', 'Backline Tech', 3),
+    ('freelancer_skill', 'stage_hand', 'Stage Hand', 4),
+    ('freelancer_skill', 'lighting', 'Lighting', 5),
+    ('freelancer_skill', 'rigging', 'Rigging', 6),
+    ('freelancer_skill', 'production', 'Production', 7),
+    ('freelancer_skill', 'merch', 'Merch', 8),
+    ('freelancer_skill', 'tour_management', 'Tour Management', 9),
+    ('freelancer_skill', 'other', 'Other', 99);
 
 -- Interaction types
 INSERT INTO picklist_items (category, value, label, sort_order) VALUES

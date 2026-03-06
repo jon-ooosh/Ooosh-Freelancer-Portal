@@ -10,14 +10,36 @@ const router = Router();
 // All people routes require authentication
 router.use(authenticate);
 
+const fileSchema = z.object({
+  name: z.string(),
+  url: z.string().url(),
+  type: z.enum(['document', 'image', 'other']),
+  uploaded_at: z.string(),
+  uploaded_by: z.string(),
+});
+
 const createPersonSchema = z.object({
   first_name: z.string().min(1).max(255),
   last_name: z.string().min(1).max(255),
   email: z.string().email().optional().nullable(),
   phone: z.string().max(50).optional().nullable(),
   mobile: z.string().max(50).optional().nullable(),
+  international_phone: z.string().max(50).optional().nullable(),
   notes: z.string().optional().nullable(),
   tags: z.array(z.string()).optional().default([]),
+  files: z.array(fileSchema).optional().default([]),
+  preferred_contact_method: z.enum(['email', 'phone', 'mobile', 'whatsapp']).optional().default('email'),
+  home_address: z.string().optional().nullable(),
+  date_of_birth: z.string().optional().nullable(),
+  // Freelancer fields
+  skills: z.array(z.string()).optional().default([]),
+  is_insured_on_vehicles: z.boolean().optional().default(false),
+  is_approved: z.boolean().optional().default(false),
+  has_tshirt: z.boolean().optional().default(false),
+  emergency_contact_name: z.string().max(255).optional().nullable(),
+  emergency_contact_phone: z.string().max(50).optional().nullable(),
+  licence_details: z.string().optional().nullable(),
+  freelancer_references: z.string().optional().nullable(),
 });
 
 const updatePersonSchema = createPersonSchema.partial();
@@ -140,13 +162,29 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 // POST /api/people — create
 router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { first_name, last_name, email, phone, mobile, notes, tags } = req.body;
+    const {
+      first_name, last_name, email, phone, mobile, international_phone,
+      notes, tags, files, preferred_contact_method, home_address, date_of_birth,
+      skills, is_insured_on_vehicles, is_approved, has_tshirt,
+      emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
+    } = req.body;
 
     const result = await query(
-      `INSERT INTO people (first_name, last_name, email, phone, mobile, notes, tags, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO people (
+        first_name, last_name, email, phone, mobile, international_phone,
+        notes, tags, files, preferred_contact_method, home_address, date_of_birth,
+        skills, is_insured_on_vehicles, is_approved, has_tshirt,
+        emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
+        created_by
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
        RETURNING *`,
-      [first_name, last_name, email?.toLowerCase(), phone, mobile, notes, tags, req.user!.id]
+      [
+        first_name, last_name, email?.toLowerCase(), phone, mobile, international_phone,
+        notes, tags, JSON.stringify(files), preferred_contact_method, home_address, date_of_birth,
+        skills, is_insured_on_vehicles, is_approved, has_tshirt,
+        emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
+        req.user!.id,
+      ]
     );
 
     await logAudit(req.user!.id, 'people', result.rows[0].id, 'create', null, result.rows[0]);
