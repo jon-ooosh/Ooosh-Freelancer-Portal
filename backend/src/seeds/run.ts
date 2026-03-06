@@ -19,14 +19,15 @@ async function seed() {
     // Create admin person + user
     const adminPerson = await client.query(
       `INSERT INTO people (first_name, last_name, email, created_by)
-       VALUES ('Admin', 'User', 'admin@ooosh.co.uk', 'seed')
+       VALUES ('Admin', 'User', 'admin@oooshtours.co.uk', 'seed')
        RETURNING id`
     );
 
     const passwordHash = await bcrypt.hash('admin12345', 12);
-    await client.query(
+    const adminUser = await client.query(
       `INSERT INTO users (person_id, email, password_hash, role)
-       VALUES ($1, 'admin@ooosh.co.uk', $2, 'admin')`,
+       VALUES ($1, 'admin@oooshtours.co.uk', $2, 'admin')
+       RETURNING id`,
       [adminPerson.rows[0].id, passwordHash]
     );
 
@@ -160,14 +161,14 @@ async function seed() {
        ('note', 'Sarah confirmed she''ll be touring with The Rolling Tones again this summer. Looking at June/July dates for van hire + backline.', $1, $2),
        ('call', 'Quick call with Sarah — they''re looking at 2x Sprinters + full backline for a 3-week UK tour. Budget around £8k. Sending quote today.', $1, $2),
        ('note', 'Glastonfield site contacts updated for 2026. Dave Thompson still main production contact.', $3, $2)`,
-      [tourManager.rows[0].id, adminPerson.rows[0].id, siteContact.rows[0].id]
+      [tourManager.rows[0].id, adminUser.rows[0].id, siteContact.rows[0].id]
     );
 
     await client.query('COMMIT');
     console.log('Seed data created successfully.');
     console.log('');
     console.log('Demo login:');
-    console.log('  Email: admin@ooosh.co.uk');
+    console.log('  Email: admin@oooshtours.co.uk');
     console.log('  Password: admin12345');
   } catch (err) {
     await client.query('ROLLBACK');
