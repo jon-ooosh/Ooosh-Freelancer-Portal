@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 
 interface Person {
@@ -31,6 +32,7 @@ export default function PeoplePage() {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
+  const navigate = useNavigate();
 
   useEffect(() => {
     loadPeople();
@@ -111,7 +113,7 @@ export default function PeoplePage() {
               </tr>
             ) : (
               people.map((person) => (
-                <tr key={person.id} className="hover:bg-gray-50 cursor-pointer transition-colors">
+                <tr key={person.id} onClick={() => navigate(`/people/${person.id}`)} className="hover:bg-gray-50 cursor-pointer transition-colors">
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="text-sm font-medium text-gray-900">
                       {person.first_name} {person.last_name}

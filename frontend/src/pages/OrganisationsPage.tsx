@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 
 interface Organisation {
@@ -33,6 +34,7 @@ export default function OrganisationsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
+  const navigate = useNavigate();
 
   useEffect(() => {
     loadOrgs();
@@ -109,7 +111,7 @@ export default function OrganisationsPage() {
               <tr><td colSpan={4} className="px-6 py-8 text-center text-sm text-gray-500">No organisations found.</td></tr>
             ) : (
               orgs.map((org) => (
-                <tr key={org.id} className="hover:bg-gray-50 cursor-pointer transition-colors">
+                <tr key={org.id} onClick={() => navigate(`/organisations/${org.id}`)} className="hover:bg-gray-50 cursor-pointer transition-colors">
                   <td className="px-6 py-4 text-sm font-medium text-gray-900">{org.name}</td>
                   <td className="px-6 py-4">
                     <span className={`inline-flex px-2 py-0.5 rounded-full text-xs ${typeColors[org.type] || 'bg-gray-100 text-gray-700'}`}>

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 
 interface Venue {
@@ -20,6 +21,7 @@ export default function VenuesPage() {
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
+  const navigate = useNavigate();
 
   useEffect(() => {
     loadVenues();
@@ -72,6 +74,7 @@ export default function VenuesPage() {
           venues.map((venue) => (
             <div
               key={venue.id}
+              onClick={() => navigate(`/venues/${venue.id}`)}
               className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 hover:border-ooosh-300 cursor-pointer transition-colors"
             >
               <h3 className="font-semibold text-gray-900">{venue.name}</h3>

@@ -3,8 +3,11 @@ import { useAuthStore } from './hooks/useAuthStore';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import PeoplePage from './pages/PeoplePage';
+import PersonDetailPage from './pages/PersonDetailPage';
 import OrganisationsPage from './pages/OrganisationsPage';
+import OrganisationDetailPage from './pages/OrganisationDetailPage';
 import VenuesPage from './pages/VenuesPage';
+import VenueDetailPage from './pages/VenueDetailPage';
 import Layout from './components/Layout';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -25,8 +28,11 @@ export default function App() {
               <Routes>
                 <Route path="/" element={<DashboardPage />} />
                 <Route path="/people" element={<PeoplePage />} />
+                <Route path="/people/:id" element={<PersonDetailPage />} />
                 <Route path="/organisations" element={<OrganisationsPage />} />
+                <Route path="/organisations/:id" element={<OrganisationDetailPage />} />
                 <Route path="/venues" element={<VenuesPage />} />
+                <Route path="/venues/:id" element={<VenueDetailPage />} />
               </Routes>
             </Layout>
           </ProtectedRoute>

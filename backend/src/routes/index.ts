@@ -5,6 +5,7 @@ import peopleRouter from './people';
 import organisationsRouter from './organisations';
 import venuesRouter from './venues';
 import interactionsRouter from './interactions';
+import searchRouter from './search';
 
 const router = Router();
 
@@ -14,5 +15,6 @@ router.use('/people', peopleRouter);
 router.use('/organisations', organisationsRouter);
 router.use('/venues', venuesRouter);
 router.use('/interactions', interactionsRouter);
+router.use('/search', searchRouter);
 
 export default router;

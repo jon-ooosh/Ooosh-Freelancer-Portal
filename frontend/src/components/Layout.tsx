@@ -1,5 +1,6 @@
 import { Link, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../hooks/useAuthStore';
+import GlobalSearch from './GlobalSearch';
 
 const navItems = [
   { path: '/', label: 'Command Centre' },
@@ -40,6 +41,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               </nav>
             </div>
             <div className="flex items-center gap-4">
+              <GlobalSearch />
               <span className="text-sm text-ooosh-200">
                 {user?.first_name} {user?.last_name}
               </span>
