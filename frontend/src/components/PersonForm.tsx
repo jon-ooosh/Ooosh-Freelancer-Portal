@@ -29,6 +29,36 @@ interface PersonFormProps {
   onCancel: () => void;
 }
 
+const PRESET_SKILLS = [
+  'Sound Engineer',
+  'Lighting Engineer',
+  'Stage Manager',
+  'Backline Tech',
+  'Monitor Engineer',
+  'FOH Engineer',
+  'Rigger',
+  'Tour Manager',
+  'Production Manager',
+  'Driver',
+  'Truck Driver',
+  'Van Driver',
+  'Stage Hand',
+  'Carpenter',
+  'Electrician',
+  'Video Tech',
+  'LED Tech',
+  'Follow Spot Operator',
+  'Pyro Tech',
+  'SFX Tech',
+  'Wardrobe',
+  'Runner',
+  'Caterer',
+  'Security',
+  'First Aider',
+  'Site Manager',
+  'Event Manager',
+];
+
 const emptyForm: PersonFormData = {
   first_name: '',
   last_name: '',
@@ -171,7 +201,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
       {error && (
-        <div className="bg-red-50 text-red-700 px-4 py-2 rounded-lg text-sm">{error}</div>
+        <div className="bg-red-50 text-red-700 px-4 py-2 rounded text-sm">{error}</div>
       )}
 
       {/* Name */}
@@ -193,7 +223,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         <select
           value={form.preferred_contact_method}
           onChange={e => set('preferred_contact_method', e.target.value)}
-          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
         >
           <option value="email">Email</option>
           <option value="phone">Phone</option>
@@ -223,9 +253,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
             onChange={e => setTagInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }}
             placeholder="Add tag..."
-            className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
           />
-          <button type="button" onClick={addTag} className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Add</button>
+          <button type="button" onClick={addTag} className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Add</button>
         </div>
       </div>
 
@@ -236,7 +266,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
           value={form.notes}
           onChange={e => set('notes', e.target.value)}
           rows={3}
-          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+          className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
         />
       </div>
 
@@ -267,15 +297,40 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
               ))}
             </div>
             <div className="flex gap-2">
-              <input
-                value={skillInput}
-                onChange={e => setSkillInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSkill(); } }}
-                placeholder="Add skill..."
-                className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              />
-              <button type="button" onClick={addSkill} className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Add</button>
+              <select
+                value=""
+                onChange={e => {
+                  const val = e.target.value;
+                  if (val === '__custom__') {
+                    setSkillInput('');
+                    // Focus will shift to the input that appears
+                  } else if (val && !form.skills.includes(val)) {
+                    set('skills', [...form.skills, val]);
+                  }
+                  e.target.value = '';
+                }}
+                className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              >
+                <option value="">Select a skill...</option>
+                {PRESET_SKILLS.filter(s => !form.skills.includes(s)).map(s => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+                <option value="__custom__">+ Add custom skill</option>
+              </select>
             </div>
+            {skillInput !== null && (
+              <div className="flex gap-2 mt-2">
+                <input
+                  value={skillInput}
+                  onChange={e => setSkillInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addSkill(); } }}
+                  placeholder="Type custom skill..."
+                  autoFocus
+                  className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                />
+                <button type="button" onClick={addSkill} className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Add</button>
+              </div>
+            )}
           </div>
 
           <Field label="Licence Details" value={form.licence_details} onChange={v => set('licence_details', v)} />
@@ -298,14 +353,14 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         <button
           type="submit"
           disabled={saving}
-          className="flex-1 bg-ooosh-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+          className="flex-1 bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
         >
           {saving ? 'Saving...' : isEdit ? 'Update Person' : 'Create Person'}
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+          className="px-4 py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
         >
           Cancel
         </button>
@@ -326,7 +381,7 @@ function Field({ label, value, onChange, type = 'text', placeholder }: {
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
       />
     </div>
   );

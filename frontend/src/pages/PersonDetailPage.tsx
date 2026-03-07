@@ -84,6 +84,15 @@ export default function PersonDetailPage() {
   const [showEdit, setShowEdit] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  // Add relationship
+  const [showAddRole, setShowAddRole] = useState(false);
+  const [roleOrgSearch, setRoleOrgSearch] = useState('');
+  const [roleOrgResults, setRoleOrgResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [roleSelectedOrg, setRoleSelectedOrg] = useState<{ id: string; name: string } | null>(null);
+  const [roleTitle, setRoleTitle] = useState('');
+  const [roleIsPrimary, setRoleIsPrimary] = useState(false);
+  const [roleSubmitting, setRoleSubmitting] = useState(false);
+
   useEffect(() => {
     if (id) {
       loadPerson();
@@ -128,6 +137,48 @@ export default function PersonDetailPage() {
       console.error('Failed to add interaction:', err);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function searchOrgs(q: string) {
+    setRoleOrgSearch(q);
+    if (q.trim().length < 2) { setRoleOrgResults([]); return; }
+    try {
+      const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(`/organisations?search=${encodeURIComponent(q)}&limit=10`);
+      setRoleOrgResults(data.data);
+    } catch { /* ignore */ }
+  }
+
+  async function handleAddRole(e: React.FormEvent) {
+    e.preventDefault();
+    if (!roleSelectedOrg || !roleTitle.trim() || roleSubmitting) return;
+    setRoleSubmitting(true);
+    try {
+      await api.post(`/people/${id}/roles`, {
+        organisation_id: roleSelectedOrg.id,
+        role: roleTitle.trim(),
+        is_primary: roleIsPrimary,
+      });
+      setShowAddRole(false);
+      setRoleSelectedOrg(null);
+      setRoleTitle('');
+      setRoleIsPrimary(false);
+      setRoleOrgSearch('');
+      setRoleOrgResults([]);
+      loadPerson();
+    } catch (err) {
+      console.error('Failed to add role:', err);
+    } finally {
+      setRoleSubmitting(false);
+    }
+  }
+
+  async function handleEndRole(roleId: string) {
+    try {
+      await api.put(`/people/${id}/roles/${roleId}/end`, {});
+      loadPerson();
+    } catch (err) {
+      console.error('Failed to end role:', err);
     }
   }
 
@@ -207,19 +258,19 @@ export default function PersonDetailPage() {
             )}
             <button
               onClick={() => setShowEdit(true)}
-              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
             >
               Edit
             </button>
             <div className="relative">
               <button
                 onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
-                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
               >
                 Delete
               </button>
               {showDeleteConfirm && (
-                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-10 w-56">
+                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded shadow-lg p-3 z-10 w-56">
                   <p className="text-sm text-gray-700 mb-2">Delete this person?</p>
                   <div className="flex gap-2">
                     <button onClick={handleDelete} className="flex-1 bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Yes, delete</button>
@@ -308,7 +359,7 @@ export default function PersonDetailPage() {
               onChange={(e) => setNewNote(e.target.value)}
               placeholder={`Add a ${newNoteType}...`}
               rows={3}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
             />
             <div className="flex justify-between items-center mt-2">
               <span className="text-xs text-gray-400">
@@ -317,7 +368,7 @@ export default function PersonDetailPage() {
               <button
                 type="submit"
                 disabled={!newNote.trim() || submitting}
-                className="bg-ooosh-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+                className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
               >
                 {submitting ? 'Saving...' : 'Add'}
               </button>
@@ -390,31 +441,113 @@ export default function PersonDetailPage() {
 
       {activeTab === 'relationships' && (
         <div className="space-y-6">
+          {/* Add relationship button/form */}
+          {!showAddRole ? (
+            <button
+              onClick={() => setShowAddRole(true)}
+              className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
+            >
+              Add Relationship
+            </button>
+          ) : (
+            <form onSubmit={handleAddRole} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+              <h3 className="text-sm font-semibold text-gray-700 mb-3">Link to Organisation</h3>
+              {/* Org search */}
+              {!roleSelectedOrg ? (
+                <div className="relative">
+                  <input
+                    value={roleOrgSearch}
+                    onChange={e => searchOrgs(e.target.value)}
+                    placeholder="Search for an organisation..."
+                    autoFocus
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  />
+                  {roleOrgResults.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded shadow-lg max-h-48 overflow-y-auto z-10">
+                      {roleOrgResults.map(org => (
+                        <button
+                          key={org.id}
+                          type="button"
+                          onClick={() => { setRoleSelectedOrg({ id: org.id, name: org.name }); setRoleOrgResults([]); }}
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+                        >
+                          <span className="font-medium">{org.name}</span>
+                          <span className="text-xs text-gray-400">{org.type}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="text-sm font-medium text-gray-900 bg-ooosh-50 px-2 py-1 rounded">{roleSelectedOrg.name}</span>
+                  <button type="button" onClick={() => { setRoleSelectedOrg(null); setRoleOrgSearch(''); }} className="text-xs text-gray-400 hover:text-gray-600">Change</button>
+                </div>
+              )}
+
+              {roleSelectedOrg && (
+                <>
+                  <div className="mt-3">
+                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Role / Title</label>
+                    <input
+                      value={roleTitle}
+                      onChange={e => setRoleTitle(e.target.value)}
+                      placeholder="e.g. Tour Manager, Lead Vocalist, Account Manager"
+                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 mt-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={roleIsPrimary}
+                      onChange={e => setRoleIsPrimary(e.target.checked)}
+                      className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+                    />
+                    <span className="text-sm text-gray-700">Primary organisation</span>
+                  </label>
+                  <div className="flex gap-2 mt-4">
+                    <button
+                      type="submit"
+                      disabled={!roleTitle.trim() || roleSubmitting}
+                      className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+                    >
+                      {roleSubmitting ? 'Saving...' : 'Add Role'}
+                    </button>
+                    <button type="button" onClick={() => { setShowAddRole(false); setRoleSelectedOrg(null); setRoleOrgSearch(''); }} className="px-4 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+                  </div>
+                </>
+              )}
+            </form>
+          )}
+
           {activeOrgs.length > 0 && (
             <div>
               <h3 className="text-sm font-semibold text-gray-700 mb-3">Current</h3>
               <div className="space-y-2">
                 {activeOrgs.map((org) => (
-                  <Link
+                  <div
                     key={org.id}
-                    to={`/organisations/${org.organisation_id}`}
-                    className="block bg-white rounded-xl shadow-sm border border-gray-200 p-4 hover:border-ooosh-300 transition-colors"
+                    className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex items-center justify-between"
                   >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="font-medium text-gray-900">{org.organisation_name}</span>
-                        <span className="ml-2 text-sm text-gray-500">{org.role}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {org.is_primary && (
-                          <span className="text-xs bg-ooosh-100 text-ooosh-700 px-2 py-0.5 rounded-full">Primary</span>
-                        )}
-                        {org.start_date && (
-                          <span className="text-xs text-gray-400">Since {formatDate(org.start_date)}</span>
-                        )}
-                      </div>
+                    <Link to={`/organisations/${org.organisation_id}`} className="flex-1 hover:text-ooosh-600">
+                      <span className="font-medium text-gray-900">{org.organisation_name}</span>
+                      <span className="ml-2 text-sm text-gray-500">{org.role}</span>
+                      {org.is_primary && (
+                        <span className="ml-2 text-xs bg-ooosh-100 text-ooosh-700 px-2 py-0.5 rounded-full">Primary</span>
+                      )}
+                    </Link>
+                    <div className="flex items-center gap-2">
+                      {org.start_date && (
+                        <span className="text-xs text-gray-400">Since {formatDate(org.start_date)}</span>
+                      )}
+                      <button
+                        onClick={() => handleEndRole(org.id)}
+                        className="text-xs text-red-500 hover:text-red-700 px-2 py-1 border border-red-200 rounded hover:bg-red-50"
+                      >
+                        End
+                      </button>
                     </div>
-                  </Link>
+                  </div>
                 ))}
               </div>
             </div>
@@ -446,7 +579,7 @@ export default function PersonDetailPage() {
             </div>
           )}
 
-          {!person.organisations?.length && (
+          {!person.organisations?.length && !showAddRole && (
             <p className="text-center text-sm text-gray-400 py-8">No organisation relationships.</p>
           )}
         </div>

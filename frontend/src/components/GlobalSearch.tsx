@@ -133,7 +133,7 @@ export default function GlobalSearch() {
       </div>
 
       {isOpen && results.length > 0 && (
-        <div className="absolute top-full mt-1 w-80 lg:w-96 bg-white rounded-lg shadow-lg border border-gray-200 max-h-80 overflow-y-auto z-50 right-0">
+        <div className="absolute top-full mt-1 w-80 lg:w-96 bg-white rounded shadow-lg border border-gray-200 max-h-80 overflow-y-auto z-50 right-0">
           {results.map((result, index) => (
             <button
               key={`${result.type}-${result.id}`}
@@ -157,7 +157,7 @@ export default function GlobalSearch() {
       )}
 
       {isOpen && query.trim().length >= 2 && results.length === 0 && !loading && (
-        <div className="absolute top-full mt-1 w-80 lg:w-96 bg-white rounded-lg shadow-lg border border-gray-200 z-50 right-0 p-4">
+        <div className="absolute top-full mt-1 w-80 lg:w-96 bg-white rounded shadow-lg border border-gray-200 z-50 right-0 p-4">
           <p className="text-sm text-gray-500 text-center">No results found</p>
         </div>
       )}

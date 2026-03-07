@@ -155,7 +155,7 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
       {error && (
-        <div className="bg-red-50 text-red-700 px-4 py-2 rounded-lg text-sm">{error}</div>
+        <div className="bg-red-50 text-red-700 px-4 py-2 rounded text-sm">{error}</div>
       )}
 
       <Field label="Venue Name *" value={form.name} onChange={v => set('name', v)} />
@@ -209,9 +209,9 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
             onChange={e => setTagInput(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }}
             placeholder="Add tag..."
-            className="flex-1 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
           />
-          <button type="button" onClick={addTag} className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">Add</button>
+          <button type="button" onClick={addTag} className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Add</button>
         </div>
       </div>
 
@@ -220,14 +220,14 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
         <button
           type="submit"
           disabled={saving}
-          className="flex-1 bg-ooosh-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+          className="flex-1 bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
         >
           {saving ? 'Saving...' : isEdit ? 'Update Venue' : 'Create Venue'}
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+          className="px-4 py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
         >
           Cancel
         </button>
@@ -248,7 +248,7 @@ function Field({ label, value, onChange, type = 'text', placeholder }: {
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
       />
     </div>
   );
@@ -265,7 +265,7 @@ function TextArea({ label, value, onChange, placeholder }: {
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
         rows={2}
-        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
       />
     </div>
   );

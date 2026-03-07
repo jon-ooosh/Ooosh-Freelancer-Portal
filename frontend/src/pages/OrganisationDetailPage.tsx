@@ -189,19 +189,19 @@ export default function OrganisationDetailPage() {
             </span>
             <button
               onClick={() => setShowEdit(true)}
-              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
             >
               Edit
             </button>
             <div className="relative">
               <button
                 onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
-                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
               >
                 Delete
               </button>
               {showDeleteConfirm && (
-                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg p-3 z-10 w-56">
+                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded shadow-lg p-3 z-10 w-56">
                   <p className="text-sm text-gray-700 mb-2">Delete this organisation?</p>
                   <div className="flex gap-2">
                     <button onClick={handleDelete} className="flex-1 bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700">Yes, delete</button>
@@ -364,14 +364,14 @@ export default function OrganisationDetailPage() {
               onChange={(e) => setNewNote(e.target.value)}
               placeholder={`Add a ${newNoteType}...`}
               rows={3}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
             />
             <div className="flex justify-between items-center mt-2">
               <span className="text-xs text-gray-400">Posting as {user?.first_name} {user?.last_name}</span>
               <button
                 type="submit"
                 disabled={!newNote.trim() || submitting}
-                className="bg-ooosh-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+                className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
               >
                 {submitting ? 'Saving...' : 'Add'}
               </button>
