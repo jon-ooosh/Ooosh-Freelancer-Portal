@@ -1013,29 +1013,6 @@ export default function JobDetailsPage() {
   const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set())
   const [loadingRun, setLoadingRun] = useState(false)
 
-  // Vehicle book-out state
-  const [bookoutLoading, setBookoutLoading] = useState(false)
-  const [bookoutError, setBookoutError] = useState<string | null>(null)
-
-  // Handle vehicle book-out — generates a signed token and redirects to the vehicle app
-  const handleBookout = async () => {
-    setBookoutLoading(true)
-    setBookoutError(null)
-    try {
-      const res = await fetch(`/api/jobs/${jobId}/bookout-token`, { method: 'POST' })
-      const data = await res.json()
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'Failed to start book-out')
-      }
-      // Redirect to the vehicle management app
-      window.location.href = data.bookoutUrl
-    } catch (err) {
-      console.error('Book-out error:', err)
-      setBookoutError(err instanceof Error ? err.message : 'Failed to start book-out')
-      setBookoutLoading(false)
-    }
-  }
-
   // Fetch primary job — pass board type to API
   useEffect(() => {
     async function fetchJob() {
@@ -1490,36 +1467,9 @@ export default function JobDetailsPage() {
                     <span>📅</span> Add to Calendar
                   </button>
 
-                  {/* Vehicle Book Out — only for vehicle delivery jobs */}
-                  {!job.completedAtDate && job.whatIsIt === 'vehicle' && isDelivery && (
-                    <>
-                      <button
-                        onClick={handleBookout}
-                        disabled={bookoutLoading}
-                        className="w-full bg-blue-600 text-white px-6 py-4 rounded-xl font-semibold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {bookoutLoading ? (
-                          <>
-                            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                            Opening Book Out...
-                          </>
-                        ) : (
-                          <>
-                            <span>🚐</span> Start Vehicle Book Out
-                          </>
-                        )}
-                      </button>
-                      {bookoutError && (
-                        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
-                          <p className="text-red-600 text-sm">{bookoutError}</p>
-                        </div>
-                      )}
-                    </>
-                  )}
-
                   {!job.completedAtDate && (
                     <Link
-                      href={`/job/${job.id}/complete`}
+                      href={`/job/${job.id}/start`}
                       className="w-full bg-purple-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-purple-600 transition-colors flex items-center justify-center gap-2 text-lg"
                     >
                       <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
