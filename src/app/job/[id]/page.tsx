@@ -1013,7 +1013,8 @@ export default function JobDetailsPage() {
   const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set())
   const [loadingRun, setLoadingRun] = useState(false)
 
-  // Vehicle book-out state
+  // Delivery wizard state
+  const [showWizard, setShowWizard] = useState(false)
   const [bookoutLoading, setBookoutLoading] = useState(false)
   const [bookoutError, setBookoutError] = useState<string | null>(null)
 
@@ -1033,6 +1034,17 @@ export default function JobDetailsPage() {
       console.error('Book-out error:', err)
       setBookoutError(err instanceof Error ? err.message : 'Failed to start book-out')
       setBookoutLoading(false)
+    }
+  }
+
+  // Handle the "Start Delivery/Collection" button press
+  // If the job has a HireHop reference, show the wizard so the driver can choose what they're doing
+  // Otherwise, go straight to the completion page
+  const handleStartJob = (jobForAction: Job) => {
+    if (jobForAction.hhRef) {
+      setShowWizard(true)
+    } else {
+      router.push(`/job/${jobForAction.id}/complete`)
     }
   }
 
@@ -1490,40 +1502,13 @@ export default function JobDetailsPage() {
                     <span>📅</span> Add to Calendar
                   </button>
 
-                  {/* Vehicle Book Out — only for vehicle delivery jobs */}
-                  {!job.completedAtDate && job.whatIsIt === 'vehicle' && isDelivery && (
-                    <>
-                      <button
-                        onClick={handleBookout}
-                        disabled={bookoutLoading}
-                        className="w-full bg-blue-600 text-white px-6 py-4 rounded-xl font-semibold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2 text-lg disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {bookoutLoading ? (
-                          <>
-                            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                            Opening Book Out...
-                          </>
-                        ) : (
-                          <>
-                            <span>🚐</span> Start Vehicle Book Out
-                          </>
-                        )}
-                      </button>
-                      {bookoutError && (
-                        <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-center">
-                          <p className="text-red-600 text-sm">{bookoutError}</p>
-                        </div>
-                      )}
-                    </>
-                  )}
-
                   {!job.completedAtDate && (
-                    <Link
-                      href={`/job/${job.id}/complete`}
+                    <button
+                      onClick={() => handleStartJob(job)}
                       className="w-full bg-purple-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-purple-600 transition-colors flex items-center justify-center gap-2 text-lg"
                     >
                       <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}
-                    </Link>
+                    </button>
                   )}
 
                   {job.completedAtDate && (
@@ -1534,6 +1519,80 @@ export default function JobDetailsPage() {
                     </div>
                   )}
                 </div>
+
+                {/* Delivery Wizard Modal */}
+                {showWizard && (
+                  <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
+                    <div className="absolute inset-0 bg-black/50" onClick={() => { setShowWizard(false); setBookoutError(null) }} />
+                    <div className="relative bg-white rounded-t-2xl sm:rounded-2xl w-full max-w-md mx-auto p-6 pb-8 sm:mb-0 shadow-xl">
+                      <h2 className="text-lg font-bold text-gray-900 text-center mb-2">
+                        What are you {isDelivery ? 'delivering' : 'collecting'} today?
+                      </h2>
+                      <p className="text-sm text-gray-500 text-center mb-6">
+                        This helps us run the right process for you
+                      </p>
+
+                      <div className="space-y-3">
+                        {/* Van only */}
+                        <button
+                          onClick={handleBookout}
+                          disabled={bookoutLoading}
+                          className="w-full flex items-center gap-4 p-4 rounded-xl border-2 border-gray-200 hover:border-blue-400 hover:bg-blue-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <span className="text-3xl">🚐</span>
+                          <div className="flex-1">
+                            <p className="font-semibold text-gray-900">Van only</p>
+                            <p className="text-sm text-gray-500">Vehicle book-out process</p>
+                          </div>
+                          {bookoutLoading && (
+                            <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                          )}
+                        </button>
+
+                        {/* Backline only */}
+                        <Link
+                          href={`/job/${job.id}/complete`}
+                          className="w-full flex items-center gap-4 p-4 rounded-xl border-2 border-gray-200 hover:border-purple-400 hover:bg-purple-50 transition-colors text-left"
+                        >
+                          <span className="text-3xl">🎸</span>
+                          <div className="flex-1">
+                            <p className="font-semibold text-gray-900">Backline only</p>
+                            <p className="text-sm text-gray-500">Equipment checklist &amp; sign-off</p>
+                          </div>
+                        </Link>
+
+                        {/* Both */}
+                        <button
+                          onClick={handleBookout}
+                          disabled={bookoutLoading}
+                          className="w-full flex items-center gap-4 p-4 rounded-xl border-2 border-gray-200 hover:border-green-400 hover:bg-green-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <span className="text-3xl">🚐🎸</span>
+                          <div className="flex-1">
+                            <p className="font-semibold text-gray-900">Both</p>
+                            <p className="text-sm text-gray-500">Vehicle book-out, then equipment checklist</p>
+                          </div>
+                          {bookoutLoading && (
+                            <div className="w-5 h-5 border-2 border-green-500 border-t-transparent rounded-full animate-spin"></div>
+                          )}
+                        </button>
+                      </div>
+
+                      {bookoutError && (
+                        <div className="mt-4 bg-red-50 border border-red-200 rounded-lg p-3 text-center">
+                          <p className="text-red-600 text-sm">{bookoutError}</p>
+                        </div>
+                      )}
+
+                      <button
+                        onClick={() => { setShowWizard(false); setBookoutError(null) }}
+                        className="w-full mt-4 text-gray-500 text-sm font-medium py-2 hover:text-gray-700 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
               </>
             )}
 

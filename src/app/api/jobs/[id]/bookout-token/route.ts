@@ -98,7 +98,7 @@ export async function POST(
     const token = `${payload}.${signature}`
 
     // Build the return URL (where the driver goes after completing book-out)
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app'
+    const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app').replace(/\/$/, '')
     const returnUrl = `${appUrl}/job/${jobId}/complete`
 
     // Build the full deep-link URL
