@@ -50,18 +50,22 @@ export async function POST(
       )
     }
 
+    console.log(`Bookout: job ${jobId} — whatIsIt="${job.whatIsIt}", hhRef="${job.hhRef}", type="${job.type}"`)
+
     // Must be a vehicle job
     if (job.whatIsIt !== 'vehicle') {
       return NextResponse.json(
-        { success: false, error: 'Book-out is only available for vehicle jobs' },
+        { success: false, error: `Book-out is only available for vehicle jobs (this job: whatIsIt="${job.whatIsIt}")` },
         { status: 400 }
       )
     }
 
     // Must have a HireHop reference
-    if (!job.hhRef) {
+    // Strip any leading '#' or whitespace (Monday column may store "#12345")
+    const hhRef = job.hhRef?.replace(/^#?\s*/, '').trim()
+    if (!hhRef) {
       return NextResponse.json(
-        { success: false, error: 'No HireHop job reference found for this job' },
+        { success: false, error: `No HireHop job reference found for this job (raw hhRef: "${job.hhRef}")` },
         { status: 400 }
       )
     }
@@ -86,7 +90,7 @@ export async function POST(
 
     // Generate token: {expiry}.{hhJobNumber}.{driverEmail}.{signature}
     const expiry = Date.now() + 24 * 60 * 60 * 1000 // 24 hours
-    const payload = `${expiry}.${job.hhRef}.${session.email}`
+    const payload = `${expiry}.${hhRef}.${session.email}`
     const signature = createHmac('sha256', secret)
       .update(payload)
       .digest('hex')
