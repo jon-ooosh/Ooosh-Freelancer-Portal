@@ -1483,6 +1483,7 @@ export default function JobDetailsPage() {
                       </span>
                     </div>
                   )}
+                </div>
               </>
             )}
 
