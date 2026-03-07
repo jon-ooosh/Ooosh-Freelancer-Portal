@@ -50,10 +50,12 @@ export async function POST(
       )
     }
 
+    console.log(`Bookout: job ${jobId} — whatIsIt="${job.whatIsIt}", hhRef="${job.hhRef}", type="${job.type}"`)
+
     // Must be a vehicle job
     if (job.whatIsIt !== 'vehicle') {
       return NextResponse.json(
-        { success: false, error: 'Book-out is only available for vehicle jobs' },
+        { success: false, error: `Book-out is only available for vehicle jobs (this job: whatIsIt="${job.whatIsIt}")` },
         { status: 400 }
       )
     }
@@ -63,7 +65,7 @@ export async function POST(
     const hhRef = job.hhRef?.replace(/^#?\s*/, '').trim()
     if (!hhRef) {
       return NextResponse.json(
-        { success: false, error: 'No HireHop job reference found for this job' },
+        { success: false, error: `No HireHop job reference found for this job (raw hhRef: "${job.hhRef}")` },
         { status: 400 }
       )
     }
