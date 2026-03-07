@@ -59,7 +59,9 @@ export async function POST(
     }
 
     // Must have a HireHop reference
-    if (!job.hhRef) {
+    // Strip any leading '#' or whitespace (Monday column may store "#12345")
+    const hhRef = job.hhRef?.replace(/^#?\s*/, '').trim()
+    if (!hhRef) {
       return NextResponse.json(
         { success: false, error: 'No HireHop job reference found for this job' },
         { status: 400 }
@@ -86,7 +88,7 @@ export async function POST(
 
     // Generate token: {expiry}.{hhJobNumber}.{driverEmail}.{signature}
     const expiry = Date.now() + 24 * 60 * 60 * 1000 // 24 hours
-    const payload = `${expiry}.${job.hhRef}.${session.email}`
+    const payload = `${expiry}.${hhRef}.${session.email}`
     const signature = createHmac('sha256', secret)
       .update(payload)
       .digest('hex')
