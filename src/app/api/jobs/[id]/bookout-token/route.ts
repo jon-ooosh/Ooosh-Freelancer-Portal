@@ -52,14 +52,6 @@ export async function POST(
 
     console.log(`Bookout: job ${jobId} — whatIsIt="${job.whatIsIt}", hhRef="${job.hhRef}", type="${job.type}"`)
 
-    // Must be a vehicle job
-    if (job.whatIsIt !== 'vehicle') {
-      return NextResponse.json(
-        { success: false, error: `Book-out is only available for vehicle jobs (this job: whatIsIt="${job.whatIsIt}")` },
-        { status: 400 }
-      )
-    }
-
     // Must have a HireHop reference
     // Strip any leading '#' or whitespace (Monday column may store "#12345")
     const hhRef = job.hhRef?.replace(/^#?\s*/, '').trim()

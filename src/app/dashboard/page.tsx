@@ -233,7 +233,7 @@ function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStar
           </Link>
           {showStartButton && !isCompleted && (
             <Link
-              href={`/job/${firstJob?.id}?run=${item.runGroup}`}
+              href={`/job/${firstJob?.id}/start`}
               className="text-sm font-medium text-green-600 hover:text-green-500 flex items-center gap-1"
             >
               <span>▶</span> Start run
@@ -335,7 +335,7 @@ function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStar
         </Link>
         {showStartButton && !isCompleted && (
           <Link
-            href={`/job/${item.id}`}
+            href={`/job/${item.id}/start`}
             className="text-sm font-medium text-green-600 hover:text-green-500 flex items-center gap-1"
           >
             <span>▶</span> Start {isDelivery ? 'delivery' : 'collection'}
