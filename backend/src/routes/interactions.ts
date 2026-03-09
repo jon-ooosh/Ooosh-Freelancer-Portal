@@ -154,8 +154,7 @@ router.put('/:id/move', validate(moveInteractionSchema), async (req: AuthRequest
       `UPDATE interactions
        SET person_id = CASE WHEN $1 = 'person_id' THEN $2::uuid ELSE NULL END,
            organisation_id = CASE WHEN $1 = 'organisation_id' THEN $2::uuid ELSE NULL END,
-           venue_id = CASE WHEN $1 = 'venue_id' THEN $2::uuid ELSE NULL END,
-           updated_at = NOW()
+           venue_id = CASE WHEN $1 = 'venue_id' THEN $2::uuid ELSE NULL END
        WHERE id = $3
        RETURNING *`,
       [target_type, target_id, req.params.id]
