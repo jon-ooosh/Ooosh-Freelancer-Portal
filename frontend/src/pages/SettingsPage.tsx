@@ -11,6 +11,14 @@ interface TeamUser {
   last_name: string | null;
 }
 
+interface BackupEntry {
+  key: string;
+  filename: string;
+  size: number;
+  sizeMB: string;
+  created_at: string;
+}
+
 const ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'] as const;
 
 const ROLE_LABELS: Record<string, string> = {
@@ -458,6 +466,128 @@ function SettingsContent() {
             <p className="text-center text-sm text-gray-400 py-8">No users found.</p>
           )}
         </div>
+      </div>
+
+      {/* Database Backups section — admin only */}
+      {currentUser?.role === 'admin' && <BackupsSection />}
+    </div>
+  );
+}
+
+function BackupsSection() {
+  const [backups, setBackups] = useState<BackupEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
+
+  useEffect(() => {
+    loadBackups();
+  }, []);
+
+  async function loadBackups() {
+    try {
+      const data = await api.get<{ data: BackupEntry[] }>('/backups');
+      setBackups(data.data);
+    } catch (err) {
+      console.error('Failed to load backups:', err);
+      setError('Could not load backups. R2 may not be configured.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function triggerBackup() {
+    setRunning(true);
+    setError('');
+    setSuccessMsg('');
+    try {
+      await api.post('/backups/trigger', {});
+      setSuccessMsg('Backup created successfully');
+      loadBackups();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Backup failed');
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  function formatDate(iso: string) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString('en-GB', {
+      day: '2-digit', month: 'short', year: 'numeric',
+      hour: '2-digit', minute: '2-digit',
+    });
+  }
+
+  return (
+    <div className="mb-8">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Database Backups</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Automated daily at 02:00. Stored in Cloudflare R2.
+          </p>
+        </div>
+        <button
+          onClick={triggerBackup}
+          disabled={running}
+          className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+        >
+          {running ? 'Running...' : 'Backup Now'}
+        </button>
+      </div>
+
+      {successMsg && (
+        <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm mb-4">
+          {successMsg}
+        </div>
+      )}
+
+      {error && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-700 px-4 py-3 rounded-lg text-sm mb-4">
+          {error}
+        </div>
+      )}
+
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Backup</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {loading ? (
+              <tr>
+                <td colSpan={4} className="px-6 py-8 text-center text-sm text-gray-500">Loading...</td>
+              </tr>
+            ) : backups.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="px-6 py-8 text-center text-sm text-gray-500">No backups yet. Click "Backup Now" to create one.</td>
+              </tr>
+            ) : (
+              backups.map((b) => (
+                <tr key={b.key} className="hover:bg-gray-50">
+                  <td className="px-6 py-3 text-sm text-gray-900 font-mono text-xs">{b.filename}</td>
+                  <td className="px-6 py-3 text-sm text-gray-500">{formatDate(b.created_at)}</td>
+                  <td className="px-6 py-3 text-sm text-gray-500">{b.sizeMB} MB</td>
+                  <td className="px-6 py-3 text-right">
+                    <a
+                      href={`/api/backups/download?key=${encodeURIComponent(b.key)}`}
+                      className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                    >
+                      Download
+                    </a>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );

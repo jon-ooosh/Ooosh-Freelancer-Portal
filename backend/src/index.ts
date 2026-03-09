@@ -7,6 +7,7 @@ import { Server as SocketServer } from 'socket.io';
 import dotenv from 'dotenv';
 import routes from './routes';
 import { connectRedis } from './config/redis';
+import { startScheduler } from './config/scheduler';
 
 dotenv.config();
 
@@ -83,6 +84,7 @@ async function start() {
   httpServer.listen(PORT, () => {
     console.log(`Ooosh Operations API running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    startScheduler();
   });
 }
 

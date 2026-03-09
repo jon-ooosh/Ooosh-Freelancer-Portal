@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import SlidePanel from '../components/SlidePanel';
 import PersonForm from '../components/PersonForm';
@@ -66,12 +66,20 @@ export default function PeoplePage() {
             {pagination.total} contacts
           </p>
         </div>
-        <button
-          onClick={() => setShowForm(true)}
-          className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
-        >
-          Add Person
-        </button>
+        <div className="flex items-center gap-3">
+          <Link
+            to="/people/duplicates"
+            className="px-4 py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors text-gray-700"
+          >
+            Duplicates
+          </Link>
+          <button
+            onClick={() => setShowForm(true)}
+            className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
+          >
+            Add Person
+          </button>
+        </div>
       </div>
 
       {/* Search */}
