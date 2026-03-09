@@ -154,6 +154,20 @@ async function seed() {
         'seed')`
     );
 
+    // Create a second staff user (for @mention testing)
+    const staffPerson = await client.query(
+      `INSERT INTO people (first_name, last_name, email, created_by)
+       VALUES ('Jon', 'Staff', 'jon@oooshtours.co.uk', 'seed')
+       RETURNING id`
+    );
+
+    const staffPasswordHash = await bcrypt.hash('staff12345', 12);
+    await client.query(
+      `INSERT INTO users (person_id, email, password_hash, role)
+       VALUES ($1, 'jon@oooshtours.co.uk', $2, 'staff')`,
+      [staffPerson.rows[0].id, staffPasswordHash]
+    );
+
     // Create some demo interactions
     await client.query(
       `INSERT INTO interactions (type, content, person_id, created_by)

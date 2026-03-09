@@ -8,6 +8,7 @@ import interactionsRouter from './interactions';
 import searchRouter from './search';
 import filesRouter from './files';
 import backupsRouter from './backups';
+import usersRouter from './users';
 
 const router = Router();
 
@@ -20,5 +21,6 @@ router.use('/interactions', interactionsRouter);
 router.use('/search', searchRouter);
 router.use('/files', filesRouter);
 router.use('/backups', backupsRouter);
+router.use('/users', usersRouter);
 
 export default router;

@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
-import { useAuthStore } from '../hooks/useAuthStore';
 import SlidePanel from '../components/SlidePanel';
 import PersonForm from '../components/PersonForm';
 import FileUpload from '../components/FileUpload';
+import ActivityTimeline from '../components/ActivityTimeline';
 
 interface PersonDetail {
   id: string;
@@ -49,38 +49,17 @@ interface Interaction {
   created_at: string;
   created_by_name: string | null;
   created_by_email: string | null;
+  mentioned_user_ids: string[];
 }
-
-const typeIcons: Record<string, string> = {
-  note: 'N',
-  call: 'C',
-  email: 'E',
-  meeting: 'M',
-  mention: '@',
-};
-
-const typeColors: Record<string, string> = {
-  note: 'bg-blue-100 text-blue-700',
-  call: 'bg-green-100 text-green-700',
-  email: 'bg-purple-100 text-purple-700',
-  meeting: 'bg-amber-100 text-amber-700',
-  mention: 'bg-pink-100 text-pink-700',
-};
 
 export default function PersonDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const user = useAuthStore((s) => s.user);
 
   const [person, setPerson] = useState<PersonDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'timeline' | 'details' | 'relationships'>('timeline');
-
-  // New interaction form
-  const [newNote, setNewNote] = useState('');
-  const [newNoteType, setNewNoteType] = useState<string>('note');
-  const [submitting, setSubmitting] = useState(false);
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
@@ -119,26 +98,6 @@ export default function PersonDetailPage() {
       setInteractions(data.data);
     } catch (err) {
       console.error('Failed to load interactions:', err);
-    }
-  }
-
-  async function handleAddInteraction(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newNote.trim() || submitting) return;
-
-    setSubmitting(true);
-    try {
-      await api.post('/interactions', {
-        type: newNoteType,
-        content: newNote.trim(),
-        person_id: id,
-      });
-      setNewNote('');
-      loadInteractions();
-    } catch (err) {
-      console.error('Failed to add interaction:', err);
-    } finally {
-      setSubmitting(false);
     }
   }
 
@@ -196,13 +155,6 @@ export default function PersonDetailPage() {
   function formatDate(dateStr: string) {
     return new Date(dateStr).toLocaleDateString('en-GB', {
       day: 'numeric', month: 'short', year: 'numeric',
-    });
-  }
-
-  function formatDateTime(dateStr: string) {
-    return new Date(dateStr).toLocaleDateString('en-GB', {
-      day: 'numeric', month: 'short', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
     });
   }
 
@@ -336,73 +288,13 @@ export default function PersonDetailPage() {
       </div>
 
       {/* Tab Content */}
-      {activeTab === 'timeline' && (
-        <div>
-          {/* Add interaction form */}
-          <form onSubmit={handleAddInteraction} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
-            <div className="flex gap-3 mb-3">
-              {(['note', 'call', 'email', 'meeting'] as const).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setNewNoteType(t)}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                    newNoteType === t
-                      ? typeColors[t]
-                      : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-                  }`}
-                >
-                  {t.charAt(0).toUpperCase() + t.slice(1)}
-                </button>
-              ))}
-            </div>
-            <textarea
-              value={newNote}
-              onChange={(e) => setNewNote(e.target.value)}
-              placeholder={`Add a ${newNoteType}...`}
-              rows={3}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
-            />
-            <div className="flex justify-between items-center mt-2">
-              <span className="text-xs text-gray-400">
-                Posting as {user?.first_name} {user?.last_name}
-              </span>
-              <button
-                type="submit"
-                disabled={!newNote.trim() || submitting}
-                className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
-              >
-                {submitting ? 'Saving...' : 'Add'}
-              </button>
-            </div>
-          </form>
-
-          {/* Timeline */}
-          {interactions.length === 0 ? (
-            <p className="text-center text-sm text-gray-400 py-8">No activity yet. Add a note above to get started.</p>
-          ) : (
-            <div className="space-y-4">
-              {interactions.map((interaction) => (
-                <div key={interaction.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                  <div className="flex items-start gap-3">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${typeColors[interaction.type] || 'bg-gray-100 text-gray-600'}`}>
-                      {typeIcons[interaction.type] || '?'}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 text-xs text-gray-500">
-                        <span className="font-medium text-gray-700">{interaction.created_by_name || 'System'}</span>
-                        <span>logged a {interaction.type}</span>
-                        <span>&middot;</span>
-                        <span>{formatDateTime(interaction.created_at)}</span>
-                      </div>
-                      <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap">{interaction.content}</p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+      {activeTab === 'timeline' && id && (
+        <ActivityTimeline
+          entityType="person_id"
+          entityId={id}
+          interactions={interactions}
+          onInteractionAdded={loadInteractions}
+        />
       )}
 
       {activeTab === 'details' && (
