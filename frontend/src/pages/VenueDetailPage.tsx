@@ -185,8 +185,8 @@ export default function VenueDetailPage() {
             <div>
               <span className="text-gray-500">Drive time:</span>{' '}
               <span className="font-medium text-gray-900">
-                {venue.default_drive_time_mins >= 60
-                  ? `${Math.floor(venue.default_drive_time_mins / 60)}h ${venue.default_drive_time_mins % 60}m`
+                {Number(venue.default_drive_time_mins) >= 60
+                  ? `${Math.floor(Number(venue.default_drive_time_mins) / 60)}h ${Number(venue.default_drive_time_mins) % 60}m`
                   : `${venue.default_drive_time_mins} min`}
               </span>
             </div>
@@ -194,7 +194,7 @@ export default function VenueDetailPage() {
           {venue.default_return_cost != null && (
             <div>
               <span className="text-gray-500">Return cost:</span>{' '}
-              <span className="font-medium text-gray-900">£{venue.default_return_cost.toFixed(2)}</span>
+              <span className="font-medium text-gray-900">£{Number(venue.default_return_cost).toFixed(2)}</span>
             </div>
           )}
         </div>
