@@ -53,6 +53,11 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 io.on('connection', (socket) => {
   console.log(`Socket connected: ${socket.id}`);
 
+  // Join user-specific room for notifications
+  socket.on('auth', (userId: string) => {
+    socket.join(`user:${userId}`);
+  });
+
   socket.on('join-entity', (entityId: string) => {
     socket.join(`entity:${entityId}`);
   });

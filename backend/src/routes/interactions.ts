@@ -89,7 +89,41 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
 
-    // TODO: Phase 1 — send in-app + email notifications to mentioned_user_ids via Socket.io
+    // Send in-app notifications to mentioned users
+    if (mentioned_user_ids && mentioned_user_ids.length > 0) {
+      const creatorResult = await query(
+        `SELECT CONCAT(p.first_name, ' ', p.last_name) as name
+         FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
+        [req.user!.id]
+      );
+      const creatorName = creatorResult.rows[0]?.name || 'Someone';
+
+      const entityType = person_id ? 'people' : organisation_id ? 'organisations' : venue_id ? 'venues' : null;
+      const entityId = person_id || organisation_id || venue_id || null;
+
+      for (const userId of mentioned_user_ids) {
+        if (userId === req.user!.id) continue; // Don't notify yourself
+
+        const notifResult = await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
+           VALUES ($1, 'mention', $2, $3, $4, $5)
+           RETURNING *`,
+          [
+            userId,
+            `${creatorName} mentioned you`,
+            content.length > 200 ? content.slice(0, 200) + '...' : content,
+            entityType,
+            entityId,
+          ]
+        );
+
+        // Emit real-time notification via Socket.io
+        const io = req.app.get('io');
+        if (io) {
+          io.to(`user:${userId}`).emit('notification', notifResult.rows[0]);
+        }
+      }
+    }
 
     res.status(201).json(result.rows[0]);
   } catch (error) {

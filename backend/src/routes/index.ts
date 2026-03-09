@@ -9,6 +9,7 @@ import searchRouter from './search';
 import filesRouter from './files';
 import backupsRouter from './backups';
 import usersRouter from './users';
+import notificationsRouter from './notifications';
 
 const router = Router();
 
@@ -22,5 +23,6 @@ router.use('/search', searchRouter);
 router.use('/files', filesRouter);
 router.use('/backups', backupsRouter);
 router.use('/users', usersRouter);
+router.use('/notifications', notificationsRouter);
 
 export default router;

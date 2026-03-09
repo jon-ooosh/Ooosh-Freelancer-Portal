@@ -2,13 +2,17 @@ import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../hooks/useAuthStore';
 import GlobalSearch from './GlobalSearch';
+import NotificationBell from './NotificationBell';
 
 const navItems = [
   { path: '/', label: 'Command Centre' },
   { path: '/people', label: 'People' },
   { path: '/organisations', label: 'Organisations' },
   { path: '/venues', label: 'Venues' },
-  { path: '/team', label: 'Team' },
+];
+
+const adminNavItems = [
+  { path: '/settings', label: 'Settings' },
 ];
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -16,6 +20,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const isAdmin = user?.role === 'admin' || user?.role === 'manager';
+  const allNavItems = isAdmin ? [...navItems, ...adminNavItems] : navItems;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -29,7 +35,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <span className="text-lg font-bold tracking-tight">Ooosh</span>
               </Link>
               <nav className="hidden md:flex gap-1">
-                {navItems.map((item) => (
+                {allNavItems.map((item) => (
                   <Link
                     key={item.path}
                     to={item.path}
@@ -46,6 +52,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             </div>
             <div className="flex items-center gap-3">
               <GlobalSearch />
+              <NotificationBell />
               <span className="hidden sm:inline text-sm text-ooosh-200">
                 {user?.first_name} {user?.last_name}
               </span>
@@ -76,7 +83,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         {mobileMenuOpen && (
           <div className="md:hidden border-t border-ooosh-700">
             <div className="px-4 py-3 space-y-1">
-              {navItems.map((item) => (
+              {allNavItems.map((item) => (
                 <Link
                   key={item.path}
                   to={item.path}

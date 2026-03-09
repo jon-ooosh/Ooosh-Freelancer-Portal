@@ -8,7 +8,7 @@ import OrganisationsPage from './pages/OrganisationsPage';
 import OrganisationDetailPage from './pages/OrganisationDetailPage';
 import VenuesPage from './pages/VenuesPage';
 import VenueDetailPage from './pages/VenueDetailPage';
-import TeamPage from './pages/TeamPage';
+import SettingsPage from './pages/SettingsPage';
 import Layout from './components/Layout';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -34,7 +34,8 @@ export default function App() {
                 <Route path="/organisations/:id" element={<OrganisationDetailPage />} />
                 <Route path="/venues" element={<VenuesPage />} />
                 <Route path="/venues/:id" element={<VenueDetailPage />} />
-                <Route path="/team" element={<TeamPage />} />
+                <Route path="/team" element={<Navigate to="/settings" replace />} />
+                <Route path="/settings" element={<SettingsPage />} />
               </Routes>
             </Layout>
           </ProtectedRoute>
