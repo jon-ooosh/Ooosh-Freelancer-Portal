@@ -115,7 +115,7 @@ async function seed() {
     const freelancerPasswordHash = await bcrypt.hash('freelancer123', 12);
     await client.query(
       `INSERT INTO users (person_id, email, password_hash, role)
-       VALUES ($1, 'tom@example.com', $2, 'freelancer')`,
+       VALUES ($1, 'tom@example.com', $2, 'staff')`,
       [freelancer.rows[0].id, freelancerPasswordHash]
     );
 

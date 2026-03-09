@@ -131,7 +131,7 @@ export interface User {
   id: string;
   person_id: string;
   email: string;
-  role: 'admin' | 'manager' | 'staff' | 'warehouse' | 'driver' | 'freelancer' | 'client';
+  role: 'admin' | 'manager' | 'staff' | 'general_assistant' | 'weekend_manager';
   is_active: boolean;
   last_login: string | null;
   preferences: UserPreferences;

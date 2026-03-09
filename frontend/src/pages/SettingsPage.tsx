@@ -11,16 +11,22 @@ interface TeamUser {
   last_name: string | null;
 }
 
-const ROLES = ['admin', 'manager', 'staff', 'warehouse', 'driver', 'freelancer', 'client'] as const;
+const ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'] as const;
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: 'Admin',
+  manager: 'Manager',
+  staff: 'Staff',
+  general_assistant: 'General Assistant',
+  weekend_manager: 'Weekend Manager',
+};
 
 const roleBadgeColors: Record<string, string> = {
   admin: 'bg-red-100 text-red-700',
   manager: 'bg-blue-100 text-blue-700',
   staff: 'bg-green-100 text-green-700',
-  warehouse: 'bg-amber-100 text-amber-700',
-  driver: 'bg-purple-100 text-purple-700',
-  freelancer: 'bg-teal-100 text-teal-700',
-  client: 'bg-gray-100 text-gray-700',
+  general_assistant: 'bg-amber-100 text-amber-700',
+  weekend_manager: 'bg-purple-100 text-purple-700',
 };
 
 function getPasswordStrength(pw: string): { score: number; label: string; color: string; checks: string[] } {
@@ -53,7 +59,6 @@ function getPasswordStrength(pw: string): { score: number; label: string; color:
 export default function SettingsPage() {
   const user = useAuthStore((s) => s.user);
 
-  // Admin-only guard
   if (user?.role !== 'admin' && user?.role !== 'manager') {
     return <Navigate to="/" replace />;
   }
@@ -62,6 +67,7 @@ export default function SettingsPage() {
 }
 
 function SettingsContent() {
+  const currentUser = useAuthStore((s) => s.user);
   const [users, setUsers] = useState<TeamUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
@@ -76,6 +82,15 @@ function SettingsContent() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+
+  // Edit user
+  const [editingUser, setEditingUser] = useState<TeamUser | null>(null);
+  const [editFirstName, setEditFirstName] = useState('');
+  const [editLastName, setEditLastName] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editRole, setEditRole] = useState('');
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [editError, setEditError] = useState('');
 
   useEffect(() => {
     loadUsers();
@@ -116,7 +131,7 @@ function SettingsContent() {
         role,
       });
 
-      setSuccess(`${firstName} ${lastName} has been added as ${role}. Their password is visible above — share it with them now before closing this form.`);
+      setSuccess(`${firstName} ${lastName} has been added as ${ROLE_LABELS[role] || role}.`);
       setFirstName('');
       setLastName('');
       setEmail('');
@@ -128,6 +143,53 @@ function SettingsContent() {
       setError(err instanceof Error ? err.message : 'Failed to create user');
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  function startEdit(u: TeamUser) {
+    setEditingUser(u);
+    setEditFirstName(u.first_name || '');
+    setEditLastName(u.last_name || '');
+    setEditEmail(u.email);
+    setEditRole(u.role);
+    setEditError('');
+  }
+
+  function cancelEdit() {
+    setEditingUser(null);
+    setEditError('');
+  }
+
+  async function handleEditSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editingUser) return;
+    setEditError('');
+    setEditSubmitting(true);
+
+    try {
+      await api.put(`/users/${editingUser.id}`, {
+        first_name: editFirstName.trim(),
+        last_name: editLastName.trim(),
+        email: editEmail.trim().toLowerCase(),
+        role: editRole,
+      });
+
+      setEditingUser(null);
+      loadUsers();
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Failed to update user');
+    } finally {
+      setEditSubmitting(false);
+    }
+  }
+
+  async function handleDeactivate(userId: string) {
+    if (!confirm('Deactivate this user? They will no longer be able to log in.')) return;
+    try {
+      await api.put(`/users/${userId}`, { is_active: false });
+      loadUsers();
+    } catch (err) {
+      console.error('Failed to deactivate user:', err);
     }
   }
 
@@ -228,7 +290,6 @@ function SettingsContent() {
                   </button>
                 </div>
 
-                {/* Password strength meter */}
                 {password.length > 0 && (
                   <div className="mt-2">
                     <div className="flex items-center gap-2">
@@ -264,7 +325,7 @@ function SettingsContent() {
                 >
                   {ROLES.map((r) => (
                     <option key={r} value={r}>
-                      {r.charAt(0).toUpperCase() + r.slice(1)}
+                      {ROLE_LABELS[r]}
                     </option>
                   ))}
                 </select>
@@ -284,43 +345,118 @@ function SettingsContent() {
         )}
 
         {/* Users list */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Role</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {users.map((u) => (
-                <tr key={u.id} className="hover:bg-gray-50">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
-                        {(u.first_name || u.email)[0].toUpperCase()}
-                      </div>
-                      <span className="text-sm font-medium text-gray-900">
-                        {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
-                      </span>
+        <div className="space-y-3">
+          {users.map((u) => (
+            <div key={u.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+              {editingUser?.id === u.id ? (
+                /* Edit mode */
+                <form onSubmit={handleEditSubmit}>
+                  {editError && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm mb-3">
+                      {editError}
                     </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{u.email}</td>
-                  <td className="px-6 py-4 whitespace-nowrap">
+                  )}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 mb-1">First Name</label>
+                      <input
+                        type="text"
+                        required
+                        value={editFirstName}
+                        onChange={(e) => setEditFirstName(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Last Name</label>
+                      <input
+                        type="text"
+                        required
+                        value={editLastName}
+                        onChange={(e) => setEditLastName(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
+                      <input
+                        type="email"
+                        required
+                        value={editEmail}
+                        onChange={(e) => setEditEmail(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 mb-1">Role</label>
+                      <select
+                        value={editRole}
+                        onChange={(e) => setEditRole(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      >
+                        {ROLES.map((r) => (
+                          <option key={r} value={r}>{ROLE_LABELS[r]}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mt-3">
+                    <button
+                      type="submit"
+                      disabled={editSubmitting}
+                      className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+                    >
+                      {editSubmitting ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelEdit}
+                      className="px-4 py-1.5 rounded text-sm font-medium border border-gray-300 hover:bg-gray-50 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                /* View mode */
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-sm font-bold flex-shrink-0">
+                      {(u.first_name || u.email)[0].toUpperCase()}
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-gray-900">
+                        {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
+                      </div>
+                      <div className="text-xs text-gray-500">{u.email}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
                     <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${roleBadgeColors[u.role] || 'bg-gray-100 text-gray-700'}`}>
-                      {u.role}
+                      {ROLE_LABELS[u.role] || u.role}
                     </span>
-                  </td>
-                </tr>
-              ))}
-              {users.length === 0 && (
-                <tr>
-                  <td colSpan={3} className="px-6 py-8 text-center text-sm text-gray-400">No users found.</td>
-                </tr>
+                    <button
+                      onClick={() => startEdit(u)}
+                      className="text-xs text-gray-400 hover:text-ooosh-600 transition-colors px-2 py-1"
+                    >
+                      Edit
+                    </button>
+                    {u.id !== currentUser?.id && (
+                      <button
+                        onClick={() => handleDeactivate(u.id)}
+                        className="text-xs text-gray-400 hover:text-red-600 transition-colors px-2 py-1"
+                      >
+                        Deactivate
+                      </button>
+                    )}
+                  </div>
+                </div>
               )}
-            </tbody>
-          </table>
+            </div>
+          ))}
+          {users.length === 0 && (
+            <p className="text-center text-sm text-gray-400 py-8">No users found.</p>
+          )}
         </div>
       </div>
     </div>
