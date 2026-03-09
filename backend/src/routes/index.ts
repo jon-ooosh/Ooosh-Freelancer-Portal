@@ -10,6 +10,7 @@ import filesRouter from './files';
 import backupsRouter from './backups';
 import usersRouter from './users';
 import notificationsRouter from './notifications';
+import dashboardRouter from './dashboard';
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use('/files', filesRouter);
 router.use('/backups', backupsRouter);
 router.use('/users', usersRouter);
 router.use('/notifications', notificationsRouter);
+router.use('/dashboard', dashboardRouter);
 
 export default router;
