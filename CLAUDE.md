@@ -32,7 +32,13 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── organisations.ts
 │   │   │   ├── venues.ts
 │   │   │   ├── interactions.ts
+│   │   │   ├── duplicates.ts  # Duplicate detection & merge
+│   │   │   ├── hirehop.ts  # HireHop sync endpoints
 │   │   │   └── health.ts
+│   │   ├── config/
+│   │   │   └── hirehop.ts  # HireHop API configuration
+│   │   ├── services/
+│   │   │   └── hirehop-sync.ts  # HireHop contact sync (read-only)
 │   │   ├── middleware/      # Auth, RBAC, validation
 │   │   ├── migrations/     # PostgreSQL migrations
 │   │   │   └── 001_foundation.sql
@@ -77,9 +83,9 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 - **Admin:** admin@oooshtours.co.uk / admin12345
 - **Freelancer:** tom@example.com / freelancer123
 
-## Current Status — Phase 1 Build
+## Current Status — Phase 2 (started March 2026)
 
-### What's DONE (deployed and live)
+### Phase 1 COMPLETE
 
 - [x] Core data model: People, Organisations, Relationships, Venues, Interactions
 - [x] Database migration system (001_foundation.sql)
@@ -92,31 +98,71 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 - [x] Deployment scripts (setup-server.sh, deploy.sh)
 - [x] Demo seed data (organisations, people, venues, interactions)
 - [x] Live on Hetzner at 49.13.158.66
+- [x] HireHop contact sync (read-only pull from HireHop → Ooosh)
+- [x] Duplicate detection & merge tooling
+- [x] Search and filtering
+- [x] Activity timeline UI
 
-### What's NEXT (remaining Phase 1 items)
+### Phase 1 — Deferred / Ongoing
 
 - [ ] SSL certificate (Let's Encrypt via Certbot) — currently HTTP only
 - [ ] Domain name configuration
-- [ ] Activity timeline UI with @mentions and notes on person/org detail pages
-- [ ] Search and filtering (global search across entities)
-- [ ] Relationship graph/mapping (visual connections between people and orgs)
-- [ ] Duplicate detection for contacts
-- [ ] HireHop contact sync (two-way) — Phase 1 stretch goal
-- [ ] Command Centre dashboard (initial version with live data)
 - [ ] Database backup automation (pg_dump to R2)
 
-### Phase 2 (April–May 2026)
+### Phase 2 — In Progress
 
-- Opportunity/sales pipeline with Kanban board
-- HireHop job sync
-- Job close-out workflow
-- Win/loss tracking
-- Xero financial summary integration
-- Cold lead finder (Ticketmaster API)
+- [ ] **HireHop job sync (read-only pull)** ← NEXT UP
+- [ ] Opportunity/sales pipeline with Kanban board
+- [ ] Job close-out workflow
+- [ ] Win/loss tracking
+- [ ] Command Centre dashboard (live data from jobs + contacts)
+- [ ] HireHop write-back (contacts, then jobs) — after read sync is solid
+- [ ] Xero financial summary integration
+- [ ] Cold lead finder (Ticketmaster API)
 
 ### Phase 3–5
 
 See docs/SPEC.md for full phased plan.
+
+## HireHop Integration
+
+### Environment Variables
+
+```
+HIREHOP_DOMAIN=myhirehop.com        # Domain only, no https:// or trailing slash
+HIREHOP_API_TOKEN=your_token_here   # API token from HireHop settings
+```
+
+### Current Sync (Phase 1)
+
+- **Contacts:** Read-only pull from HireHop into `people` table, matched by email
+- Config: `backend/src/config/hirehop.ts`
+- Service: `backend/src/services/hirehop-sync.ts`
+- Routes: `backend/src/routes/hirehop.ts`
+
+### HireHop Job Status Codes
+
+| Code | Status | Description |
+|------|--------|-------------|
+| 0 | Enquiry | Initial enquiry/lead |
+| 1 | Provisional | Tentative booking |
+| 2 | Booked | Confirmed booking |
+| 3 | Prepped | Being prepared |
+| 4 | Part Dispatched | Partially dispatched |
+| 5 | Dispatched | Out on hire |
+| 6 | Returned Incomplete | Partially returned |
+| 7 | Returned | All equipment back |
+| 8 | Requires Attention | Needs manual review |
+| 9 | Cancelled | Job cancelled |
+| 10 | Not Interested | Lost lead |
+| 11 | Completed | Job fully completed |
+
+### HireHop API Patterns
+
+- **GET contacts:** `https://{domain}/api/contact_list.php?token={token}`
+- **GET jobs:** `https://{domain}/api/job_list.php?token={token}` (TBC)
+- **POST status update:** `https://{domain}/frames/status_save.php` (POST, form-encoded) — always include `no_webhook=1` to prevent loops
+- **Add note:** `https://{domain}/api/job_note.php?job={id}&note={text}&token={token}` (GET)
 
 ## Architecture Notes
 
