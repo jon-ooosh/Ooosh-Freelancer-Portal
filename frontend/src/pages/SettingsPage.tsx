@@ -468,8 +468,215 @@ function SettingsContent() {
         </div>
       </div>
 
+      {/* HireHop Sync section — admin only */}
+      {currentUser?.role === 'admin' && <HireHopSection />}
+
       {/* Database Backups section — admin only */}
       {currentUser?.role === 'admin' && <BackupsSection />}
+    </div>
+  );
+}
+
+interface SyncResult {
+  orgsCreated: number;
+  orgsUpdated: number;
+  peopleCreated: number;
+  peopleUpdated: number;
+  rolesCreated: number;
+  venuesCreated: number;
+  errors: string[];
+  total: number;
+}
+
+interface SyncPreview {
+  totalContacts: number;
+  totalCompanies: number;
+  alreadyMapped: { people: number; organisations: number };
+  newPeople: number;
+  newOrganisations: number;
+  sample: Array<{ name: string; company: string; email: string }>;
+}
+
+function HireHopSection() {
+  const [configured, setConfigured] = useState<boolean | null>(null);
+  const [preview, setPreview] = useState<SyncPreview | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [result, setResult] = useState<SyncResult | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    checkStatus();
+  }, []);
+
+  async function checkStatus() {
+    try {
+      const data = await api.get<{ configured: boolean }>('/hirehop/status');
+      setConfigured(data.configured);
+    } catch {
+      setConfigured(false);
+    }
+  }
+
+  async function loadPreview() {
+    setPreviewing(true);
+    setError('');
+    try {
+      const data = await api.get<SyncPreview>('/hirehop/preview');
+      setPreview(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Preview failed');
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function runSync() {
+    if (!confirm('This will import contacts from HireHop. Existing records will be updated. Continue?')) return;
+    setSyncing(true);
+    setError('');
+    setResult(null);
+    try {
+      const data = await api.post<SyncResult>('/hirehop/sync', {});
+      setResult(data);
+      setPreview(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sync failed');
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  return (
+    <div className="mb-8">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">HireHop Integration</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Sync contacts between HireHop and Ooosh.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {configured && !syncing && (
+            <button
+              onClick={loadPreview}
+              disabled={previewing}
+              className="px-4 py-2 text-sm border border-gray-300 rounded font-medium hover:bg-gray-50 transition-colors disabled:opacity-50"
+            >
+              {previewing ? 'Loading...' : 'Preview Sync'}
+            </button>
+          )}
+          {configured && preview && (
+            <button
+              onClick={runSync}
+              disabled={syncing}
+              className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+            >
+              {syncing ? 'Syncing...' : 'Sync Now'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {configured === false && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-700 px-4 py-3 rounded-lg text-sm">
+          HireHop API token not configured. Add <code className="bg-amber-100 px-1 rounded">HIREHOP_API_TOKEN</code> to the server .env file.
+        </div>
+      )}
+
+      {configured === true && !preview && !result && !error && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 text-center">
+          <p className="text-sm text-gray-500">
+            Click "Preview Sync" to see what will be imported from HireHop before running the sync.
+          </p>
+        </div>
+      )}
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm mb-4">
+          {error}
+        </div>
+      )}
+
+      {preview && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-4">
+          <h3 className="text-sm font-semibold text-gray-900 mb-3">Sync Preview</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
+            <div className="text-center">
+              <div className="text-2xl font-bold text-gray-900">{preview.totalContacts}</div>
+              <div className="text-xs text-gray-500">HireHop Contacts</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-gray-900">{preview.totalCompanies}</div>
+              <div className="text-xs text-gray-500">Companies</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-green-600">{preview.newPeople}</div>
+              <div className="text-xs text-gray-500">New People</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-green-600">{preview.newOrganisations}</div>
+              <div className="text-xs text-gray-500">New Organisations</div>
+            </div>
+          </div>
+
+          {preview.alreadyMapped.people > 0 && (
+            <p className="text-xs text-gray-500 mb-3">
+              Already synced: {preview.alreadyMapped.people} people, {preview.alreadyMapped.organisations} organisations (will be updated)
+            </p>
+          )}
+
+          {preview.sample.length > 0 && (
+            <div>
+              <p className="text-xs font-medium text-gray-500 mb-1">Sample contacts:</p>
+              <div className="space-y-1">
+                {preview.sample.map((s, i) => (
+                  <div key={i} className="flex items-center gap-3 text-xs text-gray-600 bg-gray-50 px-3 py-1.5 rounded">
+                    <span className="font-medium text-gray-800">{s.name || '(no name)'}</span>
+                    <span className="text-gray-400">@</span>
+                    <span>{s.company || '(no company)'}</span>
+                    {s.email && <span className="text-gray-400 ml-auto">{s.email}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {result && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <h3 className="text-sm font-semibold text-green-700 mb-3">Sync Complete</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-3">
+            <Stat label="People Created" value={result.peopleCreated} color="text-green-600" />
+            <Stat label="People Updated" value={result.peopleUpdated} color="text-blue-600" />
+            <Stat label="Orgs Created" value={result.orgsCreated} color="text-green-600" />
+            <Stat label="Orgs Updated" value={result.orgsUpdated} color="text-blue-600" />
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+            <Stat label="Roles Linked" value={result.rolesCreated} color="text-purple-600" />
+            <Stat label="Venues Created" value={result.venuesCreated} color="text-amber-600" />
+            <Stat label="Total Processed" value={result.total} color="text-gray-600" />
+          </div>
+          {result.errors.length > 0 && (
+            <div className="mt-3 bg-red-50 rounded p-3">
+              <p className="text-xs font-medium text-red-700 mb-1">{result.errors.length} error(s):</p>
+              <div className="text-xs text-red-600 max-h-32 overflow-y-auto space-y-1">
+                {result.errors.map((e, i) => <div key={i}>{e}</div>)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div className="text-center">
+      <div className={`text-xl font-bold ${color}`}>{value}</div>
+      <div className="text-xs text-gray-500">{label}</div>
     </div>
   );
 }

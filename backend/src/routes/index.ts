@@ -12,6 +12,7 @@ import usersRouter from './users';
 import notificationsRouter from './notifications';
 import dashboardRouter from './dashboard';
 import duplicatesRouter from './duplicates';
+import hirehopRouter from './hirehop';
 
 const router = Router();
 
@@ -28,5 +29,6 @@ router.use('/users', usersRouter);
 router.use('/notifications', notificationsRouter);
 router.use('/dashboard', dashboardRouter);
 router.use('/duplicates', duplicatesRouter);
+router.use('/hirehop', hirehopRouter);
 
 export default router;
