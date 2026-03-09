@@ -85,11 +85,15 @@ export default function StartDeliveryPage() {
   }, [jobId, router])
 
   // Handle vehicle book-out
-  const handleBookout = async () => {
+  const handleBookout = async (vanOnly: boolean) => {
     setBookoutLoading(true)
     setBookoutError(null)
     try {
-      const res = await fetch(`/api/jobs/${jobId}/bookout-token`, { method: 'POST' })
+      const res = await fetch(`/api/jobs/${jobId}/bookout-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vanOnly }),
+      })
       const data = await res.json()
       if (!res.ok || !data.success) {
         throw new Error(data.error || 'Failed to start book-out')
@@ -163,7 +167,7 @@ export default function StartDeliveryPage() {
         <div className="space-y-3">
           {/* Van only */}
           <button
-            onClick={handleBookout}
+            onClick={() => handleBookout(true)}
             disabled={bookoutLoading}
             className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-blue-400 hover:bg-blue-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
           >
@@ -191,7 +195,7 @@ export default function StartDeliveryPage() {
 
           {/* Both */}
           <button
-            onClick={handleBookout}
+            onClick={() => handleBookout(false)}
             disabled={bookoutLoading}
             className="w-full flex items-center gap-4 p-5 rounded-xl border-2 border-gray-200 bg-white hover:border-green-400 hover:bg-green-50 transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
           >

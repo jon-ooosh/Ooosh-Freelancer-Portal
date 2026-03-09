@@ -89,9 +89,18 @@ export async function POST(
       .substring(0, 32)
     const token = `${payload}.${signature}`
 
+    // Check if this is a van-only book-out (no equipment to follow)
+    let vanOnly = false
+    try {
+      const body = await request.json()
+      vanOnly = body.vanOnly === true
+    } catch {
+      // No body or invalid JSON — default to false
+    }
+
     // Build the return URL (where the driver goes after completing book-out)
     const appUrl = (process.env.NEXT_PUBLIC_APP_URL || 'https://ooosh-freelancer-portal.netlify.app').replace(/\/$/, '')
-    const returnUrl = `${appUrl}/job/${jobId}/complete`
+    const returnUrl = `${appUrl}/job/${jobId}/complete${vanOnly ? '?vanOnly=true' : ''}`
 
     // Build the full deep-link URL
     const bookoutUrl = `${vehicleAppUrl.replace(/\/$/, '')}/book-out?freelancerToken=${encodeURIComponent(token)}&returnUrl=${encodeURIComponent(returnUrl)}`
