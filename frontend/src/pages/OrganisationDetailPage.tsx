@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
+import FileUpload from '../components/FileUpload';
 
 interface OrgDetail {
   id: string;
@@ -16,6 +17,7 @@ interface OrgDetail {
   location: string | null;
   notes: string | null;
   tags: string[];
+  files: Array<{ name: string; url: string; type: 'document' | 'image' | 'other'; uploaded_at: string; uploaded_by: string }>;
   parent_name: string | null;
   parent_id: string | null;
   created_at: string;
@@ -422,6 +424,15 @@ export default function OrganisationDetailPage() {
               <p className="text-sm text-gray-600 whitespace-pre-wrap">{org.notes}</p>
             </div>
           )}
+
+          <div className="mt-6 pt-4 border-t">
+            <FileUpload
+              entityType="organisations"
+              entityId={org.id}
+              files={org.files || []}
+              onFilesChanged={(files) => setOrg(prev => prev ? { ...prev, files } : prev)}
+            />
+          </div>
         </div>
       )}
 

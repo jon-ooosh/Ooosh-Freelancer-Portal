@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import SlidePanel from '../components/SlidePanel';
 import VenueForm from '../components/VenueForm';
+import FileUpload from '../components/FileUpload';
 
 interface VenueDetail {
   id: string;
@@ -24,6 +25,7 @@ interface VenueDetail {
   default_drive_time_mins: number | null;
   default_return_cost: number | null;
   tags: string[];
+  files: Array<{ name: string; url: string; type: 'document' | 'image' | 'other'; uploaded_at: string; uploaded_by: string }>;
   created_at: string;
 }
 
@@ -250,6 +252,15 @@ export default function VenueDetailPage() {
               <p className="text-sm text-gray-700 whitespace-pre-wrap">{venue.general_notes}</p>
             </InfoSection>
           )}
+
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <FileUpload
+              entityType="venues"
+              entityId={venue.id}
+              files={venue.files || []}
+              onFilesChanged={(files) => setVenue(prev => prev ? { ...prev, files } : prev)}
+            />
+          </div>
         </div>
       )}
 

@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import SlidePanel from '../components/SlidePanel';
 import PersonForm from '../components/PersonForm';
+import FileUpload from '../components/FileUpload';
 
 interface PersonDetail {
   id: string;
@@ -25,6 +26,7 @@ interface PersonDetail {
   emergency_contact_name: string | null;
   emergency_contact_phone: string | null;
   licence_details: string | null;
+  files: Array<{ name: string; url: string; type: 'document' | 'image' | 'other'; uploaded_at: string; uploaded_by: string }>;
   created_at: string;
   organisations: Array<{
     id: string;
@@ -436,6 +438,15 @@ export default function PersonDetailPage() {
               <p className="text-sm text-gray-600 whitespace-pre-wrap">{person.notes}</p>
             </div>
           )}
+
+          <div className="mt-6 pt-4 border-t">
+            <FileUpload
+              entityType="people"
+              entityId={person.id}
+              files={person.files || []}
+              onFilesChanged={(files) => setPerson(prev => prev ? { ...prev, files } : prev)}
+            />
+          </div>
         </div>
       )}
 
