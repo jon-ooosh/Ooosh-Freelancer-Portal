@@ -7,6 +7,7 @@
 // Stored as JSONB array in PostgreSQL
 export interface FileAttachment {
   name: string;
+  label?: string;
   url: string;
   type: 'document' | 'image' | 'other';
   uploaded_at: string;

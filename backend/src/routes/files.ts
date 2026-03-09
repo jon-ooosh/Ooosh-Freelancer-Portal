@@ -39,6 +39,16 @@ function getFileType(ext: string): 'document' | 'image' | 'other' {
   return 'other';
 }
 
+// Map entity_type to the interaction FK column
+function getEntityFk(entityType: string): string | null {
+  const map: Record<string, string> = {
+    people: 'person_id',
+    organisations: 'organisation_id',
+    venues: 'venue_id',
+  };
+  return map[entityType] || null;
+}
+
 // POST /api/files/upload — upload a file to R2 and return metadata
 router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Response) => {
   try {
@@ -52,7 +62,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
       return;
     }
 
-    const { entity_type, entity_id } = req.body;
+    const { entity_type, entity_id, label } = req.body;
     if (!entity_type || !entity_id) {
       res.status(400).json({ error: 'entity_type and entity_id are required' });
       return;
@@ -70,7 +80,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
 
     await uploadToR2(key, req.file.buffer, req.file.mimetype);
 
-    const fileAttachment = {
+    const fileAttachment: Record<string, unknown> = {
       name: req.file.originalname,
       url: key,
       type: getFileType(ext),
@@ -78,11 +88,26 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
       uploaded_by: req.user!.email,
     };
 
+    if (label && label.trim()) {
+      fileAttachment.label = label.trim();
+    }
+
     // Append to entity's files JSONB array
     await query(
       `UPDATE ${entity_type} SET files = COALESCE(files, '[]'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
       [JSON.stringify([fileAttachment]), entity_id]
     );
+
+    // Record as activity interaction
+    const fkColumn = getEntityFk(entity_type);
+    if (fkColumn) {
+      const displayName = label && label.trim() ? `${label.trim()} (${req.file.originalname})` : req.file.originalname;
+      await query(
+        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at)
+         VALUES ($1, 'note', $2, $3, $4, NOW())`,
+        [uuid(), `📎 Uploaded file: ${displayName}`, entity_id, req.user!.id]
+      );
+    }
 
     res.status(201).json(fileAttachment);
   } catch (error) {
@@ -153,18 +178,36 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // Remove from R2
-    await deleteFromR2(key);
-
-    // Remove from entity's files JSONB array
+    // Get file info before deleting (for activity log)
+    let deletedFileName = 'file';
     const entity = await query(`SELECT files FROM ${entity_type} WHERE id = $1`, [entity_id]);
     if (entity.rows.length > 0) {
+      const matchingFile = (entity.rows[0].files || []).find(
+        (f: { url: string }) => f.url === key
+      );
+      if (matchingFile) {
+        deletedFileName = matchingFile.label || matchingFile.name;
+      }
+
       const files = (entity.rows[0].files || []).filter(
         (f: { url: string }) => f.url !== key
       );
       await query(
         `UPDATE ${entity_type} SET files = $1::jsonb, updated_at = NOW() WHERE id = $2`,
         [JSON.stringify(files), entity_id]
+      );
+    }
+
+    // Remove from R2
+    await deleteFromR2(key);
+
+    // Record as activity interaction
+    const fkColumn = getEntityFk(entity_type);
+    if (fkColumn) {
+      await query(
+        `INSERT INTO interactions (id, type, content, ${fkColumn}, created_by, created_at)
+         VALUES ($1, 'note', $2, $3, $4, NOW())`,
+        [uuid(), `🗑️ Deleted file: ${deletedFileName}`, entity_id, req.user!.id]
       );
     }
 

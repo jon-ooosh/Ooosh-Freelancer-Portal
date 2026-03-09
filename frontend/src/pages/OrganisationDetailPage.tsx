@@ -431,6 +431,7 @@ export default function OrganisationDetailPage() {
               entityId={org.id}
               files={org.files || []}
               onFilesChanged={(files) => setOrg(prev => prev ? { ...prev, files } : prev)}
+              onActivityCreated={loadInteractions}
             />
           </div>
         </div>

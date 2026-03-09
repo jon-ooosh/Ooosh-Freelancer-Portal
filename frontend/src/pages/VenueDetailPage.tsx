@@ -259,6 +259,7 @@ export default function VenueDetailPage() {
               entityId={venue.id}
               files={venue.files || []}
               onFilesChanged={(files) => setVenue(prev => prev ? { ...prev, files } : prev)}
+              onActivityCreated={loadInteractions}
             />
           </div>
         </div>

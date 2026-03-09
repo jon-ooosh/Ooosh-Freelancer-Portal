@@ -445,6 +445,7 @@ export default function PersonDetailPage() {
               entityId={person.id}
               files={person.files || []}
               onFilesChanged={(files) => setPerson(prev => prev ? { ...prev, files } : prev)}
+              onActivityCreated={loadInteractions}
             />
           </div>
         </div>
