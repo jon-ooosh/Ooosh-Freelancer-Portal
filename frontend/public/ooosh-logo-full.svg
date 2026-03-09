@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 120" fill="none">
+  <!-- Vinyl record -->
+  <circle cx="100" cy="42" r="36" fill="#7B5EA7"/>
+  <circle cx="100" cy="42" r="31" fill="#6B4F96"/>
+  <!-- Grooves -->
+  <circle cx="100" cy="42" r="27" fill="none" stroke="#7B5EA7" stroke-width="0.5" opacity="0.6"/>
+  <circle cx="100" cy="42" r="22" fill="none" stroke="#7B5EA7" stroke-width="0.5" opacity="0.6"/>
+  <circle cx="100" cy="42" r="17" fill="none" stroke="#7B5EA7" stroke-width="0.5" opacity="0.6"/>
+  <!-- Label -->
+  <circle cx="100" cy="42" r="12" fill="#8B6FB7"/>
+  <!-- Spindle hole -->
+  <circle cx="100" cy="42" r="3" fill="#F5F0FA"/>
+  <!-- Text -->
+  <text x="100" y="95" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="800" font-size="18" fill="#4A4A4A" letter-spacing="2">OOOSH! TOURS</text>
+  <text x="100" y="112" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="500" font-size="7" fill="#999" letter-spacing="3">TRANSPORT · BACKLINE · REHEARSALS</text>
+</svg>
