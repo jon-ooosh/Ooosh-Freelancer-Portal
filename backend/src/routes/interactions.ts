@@ -132,4 +132,42 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
   }
 });
 
+// PUT /api/interactions/:id/move — move an interaction to a different entity
+const moveInteractionSchema = z.object({
+  target_type: z.enum(['person_id', 'organisation_id', 'venue_id']),
+  target_id: z.string().uuid(),
+});
+
+router.put('/:id/move', validate(moveInteractionSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { target_type, target_id } = req.body;
+
+    // Verify interaction exists
+    const current = await query('SELECT * FROM interactions WHERE id = $1', [req.params.id]);
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Interaction not found' });
+      return;
+    }
+
+    // Clear all entity links and set the new one
+    const result = await query(
+      `UPDATE interactions
+       SET person_id = CASE WHEN $1 = 'person_id' THEN $2::uuid ELSE NULL END,
+           organisation_id = CASE WHEN $1 = 'organisation_id' THEN $2::uuid ELSE NULL END,
+           venue_id = CASE WHEN $1 = 'venue_id' THEN $2::uuid ELSE NULL END,
+           updated_at = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [target_type, target_id, req.params.id]
+    );
+
+    await logAudit(req.user!.id, 'interactions', req.params.id as string, 'update', current.rows[0], result.rows[0]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Move interaction error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

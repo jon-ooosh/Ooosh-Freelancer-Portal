@@ -121,6 +121,44 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /api/people/check-email — check if email already exists
+router.get('/check-email', async (req: AuthRequest, res: Response) => {
+  try {
+    const { email, exclude_id } = req.query;
+    if (!email || typeof email !== 'string') {
+      res.json({ exists: false });
+      return;
+    }
+
+    let sql = `SELECT id, first_name, last_name FROM people WHERE LOWER(email) = LOWER($1) AND is_deleted = false`;
+    const params: unknown[] = [email.trim()];
+
+    if (exclude_id && typeof exclude_id === 'string') {
+      sql += ` AND id != $2`;
+      params.push(exclude_id);
+    }
+
+    sql += ` LIMIT 1`;
+    const result = await query(sql, params);
+
+    if (result.rows.length > 0) {
+      const match = result.rows[0];
+      res.json({
+        exists: true,
+        match: {
+          id: match.id,
+          name: `${match.first_name} ${match.last_name}`,
+        },
+      });
+    } else {
+      res.json({ exists: false });
+    }
+  } catch (error) {
+    console.error('Check email error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET /api/people/:id — single person with full details
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {

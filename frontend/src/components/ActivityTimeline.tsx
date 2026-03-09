@@ -18,6 +18,13 @@ interface UserOption {
   last_name: string | null;
 }
 
+interface SearchResult {
+  id: string;
+  label: string;
+  type: 'person_id' | 'organisation_id' | 'venue_id';
+  entityLabel: string;
+}
+
 interface ActivityTimelineProps {
   entityType: 'person_id' | 'organisation_id' | 'venue_id';
   entityId: string;
@@ -50,6 +57,67 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
   const [content, setContent] = useState('');
   const [interactionType, setInteractionType] = useState<string>('note');
   const [submitting, setSubmitting] = useState(false);
+
+  // Move interaction
+  const [movingId, setMovingId] = useState<string | null>(null);
+  const [moveSearch, setMoveSearch] = useState('');
+  const [moveResults, setMoveResults] = useState<SearchResult[]>([]);
+  const [moveLoading, setMoveLoading] = useState(false);
+  const moveSearchRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function startMove(interactionId: string) {
+    setMovingId(movingId === interactionId ? null : interactionId);
+    setMoveSearch('');
+    setMoveResults([]);
+  }
+
+  function searchEntities(q: string) {
+    setMoveSearch(q);
+    if (moveSearchRef.current) clearTimeout(moveSearchRef.current);
+    if (q.trim().length < 2) { setMoveResults([]); return; }
+
+    moveSearchRef.current = setTimeout(async () => {
+      setMoveLoading(true);
+      try {
+        const results: SearchResult[] = [];
+        const [peopleRes, orgsRes, venuesRes] = await Promise.all([
+          api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>(`/people?search=${encodeURIComponent(q)}&limit=5`),
+          api.get<{ data: Array<{ id: string; name: string }> }>(`/organisations?search=${encodeURIComponent(q)}&limit=5`),
+          api.get<{ data: Array<{ id: string; name: string }> }>(`/venues?search=${encodeURIComponent(q)}&limit=5`),
+        ]);
+        for (const p of peopleRes.data) {
+          if (p.id === entityId) continue;
+          results.push({ id: p.id, label: `${p.first_name} ${p.last_name}`, type: 'person_id', entityLabel: 'Person' });
+        }
+        for (const o of orgsRes.data) {
+          if (o.id === entityId) continue;
+          results.push({ id: o.id, label: o.name, type: 'organisation_id', entityLabel: 'Organisation' });
+        }
+        for (const v of venuesRes.data) {
+          if (v.id === entityId) continue;
+          results.push({ id: v.id, label: v.name, type: 'venue_id', entityLabel: 'Venue' });
+        }
+        setMoveResults(results);
+      } catch {
+        setMoveResults([]);
+      } finally {
+        setMoveLoading(false);
+      }
+    }, 300);
+  }
+
+  async function confirmMove(interactionId: string, target: SearchResult) {
+    try {
+      await api.put(`/interactions/${interactionId}/move`, {
+        target_type: target.type,
+        target_id: target.id,
+      });
+      setMovingId(null);
+      onInteractionAdded(); // Refresh list
+    } catch (err) {
+      console.error('Move failed:', err);
+    }
+  }
 
   // @mentions
   const [users, setUsers] = useState<UserOption[]>([]);
@@ -277,15 +345,70 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                   {TYPE_ICONS[interaction.type] || '?'}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 text-xs text-gray-500">
-                    <span className="font-medium text-gray-700">{interaction.created_by_name || 'System'}</span>
-                    <span>logged a {interaction.type}</span>
-                    <span>&middot;</span>
-                    <span>{formatDateTime(interaction.created_at)}</span>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                      <span className="font-medium text-gray-700">{interaction.created_by_name || 'System'}</span>
+                      <span>logged a {interaction.type}</span>
+                      <span>&middot;</span>
+                      <span>{formatDateTime(interaction.created_at)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => startMove(interaction.id)}
+                      className={`text-xs px-2 py-0.5 rounded transition-colors ${
+                        movingId === interaction.id
+                          ? 'bg-ooosh-100 text-ooosh-700'
+                          : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                      }`}
+                      title="Move to another record"
+                    >
+                      Move
+                    </button>
                   </div>
                   <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap">{renderContent(interaction.content)}</p>
                 </div>
               </div>
+
+              {/* Move panel */}
+              {movingId === interaction.id && (
+                <div className="mt-3 ml-11 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                  <p className="text-xs text-gray-500 mb-2">Move this activity to a different person, organisation, or venue:</p>
+                  <input
+                    type="text"
+                    value={moveSearch}
+                    onChange={(e) => searchEntities(e.target.value)}
+                    placeholder="Search by name..."
+                    autoFocus
+                    className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  />
+                  {moveLoading && <p className="text-xs text-gray-400 mt-2">Searching...</p>}
+                  {moveResults.length > 0 && (
+                    <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
+                      {moveResults.map((r) => (
+                        <button
+                          key={`${r.type}-${r.id}`}
+                          type="button"
+                          onClick={() => confirmMove(interaction.id, r)}
+                          className="w-full text-left px-3 py-1.5 text-sm rounded hover:bg-ooosh-50 flex items-center justify-between group"
+                        >
+                          <span className="font-medium text-gray-800">{r.label}</span>
+                          <span className="text-xs text-gray-400 group-hover:text-ooosh-600">{r.entityLabel}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {moveSearch.length >= 2 && !moveLoading && moveResults.length === 0 && (
+                    <p className="text-xs text-gray-400 mt-2">No results found</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setMovingId(null)}
+                    className="mt-2 text-xs text-gray-400 hover:text-gray-600"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>

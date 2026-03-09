@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
+import { Link } from 'react-router-dom';
 
 interface PersonFormData {
   first_name: string;
@@ -88,6 +89,8 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!personId);
   const [showFreelancer, setShowFreelancer] = useState(false);
+  const [emailWarning, setEmailWarning] = useState<{ name: string; id: string } | null>(null);
+  const emailCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isEdit = !!personId;
 
@@ -129,8 +132,29 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
     }
   }
 
+  function checkEmail(email: string) {
+    if (emailCheckRef.current) clearTimeout(emailCheckRef.current);
+    if (!email || !email.includes('@')) {
+      setEmailWarning(null);
+      return;
+    }
+    emailCheckRef.current = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams({ email });
+        if (personId) params.set('exclude_id', personId);
+        const data = await api.get<{ exists: boolean; match?: { id: string; name: string } }>(
+          `/people/check-email?${params}`
+        );
+        setEmailWarning(data.exists && data.match ? data.match : null);
+      } catch {
+        setEmailWarning(null);
+      }
+    }, 400);
+  }
+
   function set(field: keyof PersonFormData, value: unknown) {
     setForm(prev => ({ ...prev, [field]: value }));
+    if (field === 'email') checkEmail(value as string);
   }
 
   function addTag() {
@@ -211,7 +235,21 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
       </div>
 
       {/* Contact */}
-      <Field label="Email" type="email" value={form.email} onChange={v => set('email', v)} />
+      <div>
+        <Field label="Email" type="email" value={form.email} onChange={v => set('email', v)} />
+        {emailWarning && (
+          <div className="mt-1 bg-amber-50 border border-amber-200 text-amber-700 px-3 py-2 rounded text-xs flex items-center gap-2">
+            <span className="font-bold text-amber-600">!</span>
+            <span>
+              This email already belongs to{' '}
+              <Link to={`/people/${emailWarning.id}`} className="font-medium underline hover:text-amber-800">
+                {emailWarning.name}
+              </Link>
+              . You can still save, but this may create a duplicate.
+            </span>
+          </div>
+        )}
+      </div>
       <div className="grid grid-cols-2 gap-4">
         <Field label="Mobile" value={form.mobile} onChange={v => set('mobile', v)} placeholder="UK mobile" />
         <Field label="Phone" value={form.phone} onChange={v => set('phone', v)} placeholder="Landline / office" />
