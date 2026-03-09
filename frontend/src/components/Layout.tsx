@@ -24,7 +24,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           <div className="flex items-center justify-between h-14">
             <div className="flex items-center gap-6">
               <Link to="/" className="flex items-center gap-2">
-                <img src="/ooosh-logo.svg" alt="Ooosh" className="h-7 w-7" />
+                <img src="/favicon-32x32.png" alt="Ooosh" className="h-7 w-7" />
                 <span className="text-lg font-bold tracking-tight">Ooosh</span>
               </Link>
               <nav className="hidden md:flex gap-1">
