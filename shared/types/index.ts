@@ -125,9 +125,47 @@ export const HH_JOB_STATUS_MAP: Record<number, string> = {
 // Active statuses worth syncing (not dead/done)
 export const HH_ACTIVE_STATUSES = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
+// Pipeline status values
+export type PipelineStatus = 'new_enquiry' | 'quoting' | 'chasing' | 'paused' | 'provisional' | 'confirmed' | 'lost';
+export type QuoteStatus = 'not_quoted' | 'quoted' | 'revised' | 'accepted';
+export type Likelihood = 'hot' | 'warm' | 'cold';
+export type HoldReason = 'under_minimum' | 'fully_booked' | 'client_undecided' | 'too_early' | 'other';
+export type ConfirmedMethod = 'deposit' | 'full_payment' | 'po' | 'manual';
+export type EnquirySource = 'phone' | 'email' | 'web_form' | 'referral' | 'cold_lead' | 'forum' | 'repeat' | 'other';
+export type ChaseMethod = 'phone' | 'email' | 'text' | 'whatsapp';
+
+// Pipeline status display config
+export const PIPELINE_STATUS_CONFIG: Record<PipelineStatus, { label: string; colour: string; order: number }> = {
+  new_enquiry:  { label: 'New Enquiry',     colour: '#3B82F6', order: 1 },  // Blue
+  quoting:      { label: 'Quoting',         colour: '#8B5CF6', order: 2 },  // Purple
+  chasing:      { label: 'Chasing',         colour: '#F59E0B', order: 3 },  // Amber
+  paused:       { label: 'Paused Enquiry',  colour: '#6B7280', order: 4 },  // Grey
+  provisional:  { label: 'Provisional',     colour: '#EF4444', order: 5 },  // Red
+  confirmed:    { label: 'Confirmed',       colour: '#10B981', order: 6 },  // Green
+  lost:         { label: 'Lost',            colour: '#374151', order: 7 },  // Dark grey
+};
+
+export const HOLD_REASON_LABELS: Record<HoldReason, string> = {
+  under_minimum:    'Under minimum terms',
+  fully_booked:     'Fully booked',
+  client_undecided: 'Client undecided',
+  too_early:        'Too early to confirm',
+  other:            'Other',
+};
+
+export const LOST_REASON_OPTIONS = [
+  'Price',
+  'Availability',
+  'Competitor',
+  'Timing',
+  'No Decision',
+  'Cancelled Event',
+  'Other',
+] as const;
+
 export interface Job {
   id: string;
-  hh_job_number: number;
+  hh_job_number: number | null;
   job_name: string | null;
   job_type: string | null;
   status: number;
@@ -164,6 +202,32 @@ export interface Job {
   custom_index: string | null;
   depot_name: string | null;
   is_internal: boolean;
+  // Pipeline
+  pipeline_status: PipelineStatus;
+  pipeline_status_changed_at: string | null;
+  quote_status: QuoteStatus | null;
+  likelihood: Likelihood | null;
+  // Chase tracking
+  chase_count: number;
+  last_chased_at: string | null;
+  next_chase_date: string | null;
+  chase_interval_days: number;
+  // Hold/pause
+  hold_reason: HoldReason | null;
+  hold_reason_detail: string | null;
+  // Confirmation
+  confirmed_method: ConfirmedMethod | null;
+  confirmed_at: string | null;
+  // Financial
+  job_value: number | null;
+  // Lost
+  lost_reason: string | null;
+  lost_detail: string | null;
+  lost_at: string | null;
+  // Source
+  enquiry_source: EnquirySource | null;
+  // HireHop status (separate from pipeline_status)
+  hh_status: number | null;
   // Metadata
   notes: string | null;
   tags: string[];
@@ -176,7 +240,7 @@ export interface Job {
 
 export interface Interaction {
   id: string;
-  type: 'note' | 'email' | 'call' | 'meeting' | 'mention';
+  type: 'note' | 'email' | 'call' | 'meeting' | 'mention' | 'chase' | 'status_transition';
   content: string;
   person_id: string | null;
   organisation_id: string | null;
@@ -185,6 +249,14 @@ export interface Interaction {
   venue_id: string | null;
   mentioned_user_ids: string[];
   files: FileAttachment[];
+  // Chase-specific
+  chase_method: ChaseMethod | null;
+  chase_response: string | null;
+  // Status snapshots
+  pipeline_status_at_creation: PipelineStatus | null;
+  job_status_at_creation: number | null;
+  job_status_name_at_creation: string | null;
+  // Metadata
   created_by: string;
   created_at: string;
 }

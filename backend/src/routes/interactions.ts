@@ -9,7 +9,7 @@ const router = Router();
 router.use(authenticate);
 
 const createInteractionSchema = z.object({
-  type: z.enum(['note', 'email', 'call', 'meeting', 'mention']),
+  type: z.enum(['note', 'email', 'call', 'meeting', 'mention', 'chase', 'status_transition']),
   content: z.string().min(1),
   // Polymorphic linking — at least one must be provided
   person_id: z.string().uuid().optional().nullable(),
@@ -19,6 +19,11 @@ const createInteractionSchema = z.object({
   venue_id: z.string().uuid().optional().nullable(),
   // @mentions
   mentioned_user_ids: z.array(z.string().uuid()).optional().default([]),
+  // Chase-specific fields
+  chase_method: z.enum(['phone', 'email', 'text', 'whatsapp']).optional().nullable(),
+  chase_response: z.string().optional().nullable(),
+  // Optional: override next chase date (otherwise auto-calculated)
+  next_chase_date: z.string().optional().nullable(),
 });
 
 // GET /api/interactions — timeline for an entity
@@ -72,36 +77,57 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /api/interactions — create a note, log a call, etc.
+// POST /api/interactions — create a note, log a call, chase, etc.
 router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
       type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-      mentioned_user_ids,
+      mentioned_user_ids, chase_method, chase_response, next_chase_date,
     } = req.body;
 
-    // If linked to a job, snapshot the current job status for chase tracking
+    // If linked to a job, snapshot current status for tracking
     let jobStatusAt: number | null = null;
     let jobStatusNameAt: string | null = null;
+    let pipelineStatusAt: string | null = null;
     if (job_id) {
       const jobResult = await query(
-        `SELECT status, status_name FROM jobs WHERE id = $1 AND is_deleted = false`,
+        `SELECT status, status_name, pipeline_status FROM jobs WHERE id = $1 AND is_deleted = false`,
         [job_id]
       );
       if (jobResult.rows.length > 0) {
         jobStatusAt = jobResult.rows[0].status;
         jobStatusNameAt = jobResult.rows[0].status_name;
+        pipelineStatusAt = jobResult.rows[0].pipeline_status;
       }
     }
 
     const result = await query(
       `INSERT INTO interactions (type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-        mentioned_user_ids, created_by, job_status_at_creation, job_status_name_at_creation)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        mentioned_user_ids, created_by, job_status_at_creation, job_status_name_at_creation,
+        pipeline_status_at_creation, chase_method, chase_response)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-        mentioned_user_ids, req.user!.id, jobStatusAt, jobStatusNameAt]
+        mentioned_user_ids, req.user!.id, jobStatusAt, jobStatusNameAt,
+        pipelineStatusAt, chase_method || null, chase_response || null]
     );
+
+    // Chase side-effects: auto-increment chase_count, set next_chase_date
+    if (type === 'chase' && job_id) {
+      const chaseDate = next_chase_date || null;
+      await query(
+        `UPDATE jobs SET
+          chase_count = chase_count + 1,
+          last_chased_at = NOW(),
+          next_chase_date = CASE
+            WHEN $1::date IS NOT NULL THEN $1::date
+            ELSE (CURRENT_DATE + (COALESCE(chase_interval_days, 3) || ' days')::interval)::date
+          END,
+          updated_at = NOW()
+        WHERE id = $2`,
+        [chaseDate, job_id]
+      );
+    }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
 

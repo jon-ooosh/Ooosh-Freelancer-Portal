@@ -195,7 +195,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
       }
 
       if (existing.rows.length > 0) {
-        // Update existing job
+        // Update existing job — HH-owned fields only (never overwrite pipeline fields)
         await client.query(
           `UPDATE jobs SET
              job_name = $1, job_type = $2, status = $3, status_name = $4,
@@ -204,8 +204,9 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
              venue_id = COALESCE($10, venue_id), venue_name = $11,
              out_date = $12, job_date = $13, job_end = $14, return_date = $15,
              created_date = $16, manager1_name = $17, manager2_name = $18,
-             custom_index = $19, updated_at = NOW()
-           WHERE hh_job_number = $20`,
+             custom_index = $19, job_value = $20, hh_status = $3,
+             updated_at = NOW()
+           WHERE hh_job_number = $21`,
           [
             job.JOB_NAME || null,
             job.JOB_TYPE || null,
@@ -226,21 +227,31 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
             job.MANAGER || null,
             job.MANAGER2 || null,
             job.CUSTOM_INDEX || null,
+            job.MONEY || null,
             jobNumber,
           ]
         );
         result.jobsUpdated++;
       } else {
-        // Create new job
+        // Create new job — set pipeline_status based on HH status
+        const initialPipelineStatus =
+          statusCode === 0 ? 'new_enquiry' :
+          statusCode === 1 ? 'provisional' :
+          statusCode >= 2 && statusCode <= 8 ? 'confirmed' :
+          statusCode === 9 || statusCode === 10 ? 'lost' :
+          statusCode === 11 ? 'confirmed' : 'new_enquiry';
+
         const jobResult = await client.query(
           `INSERT INTO jobs (
              hh_job_number, job_name, job_type, status, status_name,
              colour, client_id, client_name, company_name, client_ref,
              venue_id, venue_name, out_date, job_date, job_end, return_date,
-             created_date, manager1_name, manager2_name, custom_index, created_by
+             created_date, manager1_name, manager2_name, custom_index, created_by,
+             job_value, hh_status, pipeline_status, pipeline_status_changed_at
            ) VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+             $22, $4, $23, NOW()
            ) RETURNING id`,
           [
             jobNumber,
@@ -264,6 +275,8 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
             job.MANAGER2 || null,
             job.CUSTOM_INDEX || null,
             userId,
+            job.MONEY || null,
+            initialPipelineStatus,
           ]
         );
 

@@ -31,7 +31,8 @@ async function runMigrations(direction: 'up' | 'down') {
       const migrations = [
         '001_foundation.sql',
         '002_jobs.sql',
-        // Add future migrations here in order
+        '003_job_status_tracking.sql',
+        '004_pipeline.sql',
       ];
 
       for (const migration of migrations) {

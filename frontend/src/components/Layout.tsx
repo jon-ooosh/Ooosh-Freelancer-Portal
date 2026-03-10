@@ -10,6 +10,7 @@ const navItems = [
   { path: '/organisations', label: 'Organisations' },
   { path: '/venues', label: 'Venues' },
   { path: '/jobs', label: 'Jobs' },
+  { path: '/pipeline', label: 'Pipeline' },
 ];
 
 const adminNavItems = [
