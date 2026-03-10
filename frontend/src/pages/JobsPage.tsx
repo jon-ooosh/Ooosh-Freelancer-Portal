@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 
 const STATUS_MAP: Record<number, string> = {
@@ -50,6 +50,15 @@ interface JobsResponse {
   };
 }
 
+interface SyncLog {
+  id: string;
+  started_at: string;
+  completed_at: string | null;
+  status: string;
+  triggered_by: string;
+  result: { jobsCreated: number; jobsUpdated: number; total: number } | null;
+}
+
 const STATUS_FILTER_OPTIONS = [
   { label: 'All Active', value: '0,1,2,3,4,5,6,7,8' },
   { label: 'All', value: '' },
@@ -65,16 +74,25 @@ const STATUS_FILTER_OPTIONS = [
 ];
 
 export default function JobsPage() {
+  const [searchParams] = useSearchParams();
+  const initialStatus = searchParams.get('status') || '0,1,2,3,4,5,6,7,8';
+
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('0,1,2,3,4,5,6,7,8');
+  const [statusFilter, setStatusFilter] = useState(initialStatus);
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState<SyncLog | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
     loadJobs();
   }, [search, statusFilter]);
+
+  useEffect(() => {
+    loadLastSync();
+  }, []);
 
   async function loadJobs(page = 1) {
     setLoading(true);
@@ -93,12 +111,46 @@ export default function JobsPage() {
     }
   }
 
+  async function loadLastSync() {
+    try {
+      const data = await api.get<SyncLog | null>('/hirehop/jobs/last-sync');
+      setLastSync(data);
+    } catch {
+      // sync_log table might not exist yet
+    }
+  }
+
+  async function handleSyncNow() {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      await api.post('/hirehop/jobs/sync', {});
+      await Promise.all([loadJobs(), loadLastSync()]);
+    } catch (err) {
+      console.error('Sync failed:', err);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   function formatDateRange(start: string | null, end: string | null) {
     if (!start) return '—';
     const s = new Date(start).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
     if (!end || start === end) return s;
     const e = new Date(end).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
     return `${s} – ${e}`;
+  }
+
+  function formatSyncTime(dateStr: string) {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const diffMs = now.getTime() - d.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
   }
 
   return (
@@ -109,6 +161,20 @@ export default function JobsPage() {
           <p className="mt-1 text-sm text-gray-500">
             {pagination.total} jobs
           </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {lastSync?.completed_at && (
+            <span className="text-xs text-gray-400">
+              Last sync: {formatSyncTime(lastSync.completed_at)}
+            </span>
+          )}
+          <button
+            onClick={handleSyncNow}
+            disabled={syncing}
+            className="px-4 py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors text-gray-700 disabled:opacity-50"
+          >
+            {syncing ? 'Syncing...' : 'Sync Now'}
+          </button>
         </div>
       </div>
 
@@ -131,6 +197,13 @@ export default function JobsPage() {
           ))}
         </select>
       </div>
+
+      {/* Sync info bar */}
+      {syncing && (
+        <div className="mt-4 bg-ooosh-50 border border-ooosh-200 rounded-lg px-4 py-3 text-sm text-ooosh-700">
+          Syncing jobs from HireHop... This may take a few minutes.
+        </div>
+      )}
 
       {/* Table */}
       <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">

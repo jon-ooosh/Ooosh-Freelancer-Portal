@@ -80,11 +80,27 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       mentioned_user_ids,
     } = req.body;
 
+    // If linked to a job, snapshot the current job status for chase tracking
+    let jobStatusAt: number | null = null;
+    let jobStatusNameAt: string | null = null;
+    if (job_id) {
+      const jobResult = await query(
+        `SELECT status, status_name FROM jobs WHERE id = $1 AND is_deleted = false`,
+        [job_id]
+      );
+      if (jobResult.rows.length > 0) {
+        jobStatusAt = jobResult.rows[0].status;
+        jobStatusNameAt = jobResult.rows[0].status_name;
+      }
+    }
+
     const result = await query(
-      `INSERT INTO interactions (type, content, person_id, organisation_id, job_id, opportunity_id, venue_id, mentioned_user_ids, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO interactions (type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
+        mentioned_user_ids, created_by, job_status_at_creation, job_status_name_at_creation)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING *`,
-      [type, content, person_id, organisation_id, job_id, opportunity_id, venue_id, mentioned_user_ids, req.user!.id]
+      [type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
+        mentioned_user_ids, req.user!.id, jobStatusAt, jobStatusNameAt]
     );
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);

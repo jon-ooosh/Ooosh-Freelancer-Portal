@@ -9,7 +9,31 @@ interface Interaction {
   created_at: string;
   created_by_name: string | null;
   mentioned_user_ids: string[];
+  job_status_at_creation?: number | null;
+  job_status_name_at_creation?: string | null;
 }
+
+const JOB_STATUS_MAP: Record<number, string> = {
+  0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
+  4: 'Part Dispatched', 5: 'Dispatched', 6: 'Returned Incomplete',
+  7: 'Returned', 8: 'Requires Attention', 9: 'Cancelled',
+  10: 'Not Interested', 11: 'Completed',
+};
+
+const JOB_STATUS_COLOURS: Record<number, string> = {
+  0: 'bg-blue-50 text-blue-600 border-blue-200',
+  1: 'bg-amber-50 text-amber-600 border-amber-200',
+  2: 'bg-green-50 text-green-600 border-green-200',
+  3: 'bg-purple-50 text-purple-600 border-purple-200',
+  4: 'bg-orange-50 text-orange-600 border-orange-200',
+  5: 'bg-indigo-50 text-indigo-600 border-indigo-200',
+  6: 'bg-yellow-50 text-yellow-700 border-yellow-200',
+  7: 'bg-teal-50 text-teal-600 border-teal-200',
+  8: 'bg-red-50 text-red-600 border-red-200',
+  9: 'bg-gray-50 text-gray-400 border-gray-200',
+  10: 'bg-gray-50 text-gray-400 border-gray-200',
+  11: 'bg-emerald-50 text-emerald-600 border-emerald-200',
+};
 
 interface UserOption {
   id: string;
@@ -346,9 +370,17 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
+                    <div className="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
                       <span className="font-medium text-gray-700">{interaction.created_by_name || 'System'}</span>
                       <span>logged a {interaction.type}</span>
+                      {interaction.job_status_at_creation != null && (
+                        <>
+                          <span>&middot;</span>
+                          <span className={`inline-flex px-1.5 py-0.5 rounded border text-[10px] font-semibold ${JOB_STATUS_COLOURS[interaction.job_status_at_creation] || 'bg-gray-50 text-gray-500 border-gray-200'}`}>
+                            {JOB_STATUS_MAP[interaction.job_status_at_creation] || interaction.job_status_name_at_creation || `Status ${interaction.job_status_at_creation}`}
+                          </span>
+                        </>
+                      )}
                       <span>&middot;</span>
                       <span>{formatDateTime(interaction.created_at)}</span>
                     </div>

@@ -75,11 +75,36 @@ router.post('/jobs/sync', async (req: AuthRequest, res: Response) => {
       return;
     }
 
+    // Log sync start
+    const logResult = await query(
+      `INSERT INTO sync_log (sync_type, triggered_by) VALUES ('jobs', 'manual') RETURNING id`
+    );
+    const logId = logResult.rows[0].id;
+
     const result = await syncJobsFromHireHop(req.user!.id);
+
+    // Log sync completion
+    await query(
+      `UPDATE sync_log SET status = 'completed', completed_at = NOW(), result = $1 WHERE id = $2`,
+      [JSON.stringify(result), logId]
+    );
+
     res.json(result);
   } catch (error) {
     console.error('HireHop job sync error:', error);
     res.status(500).json({ error: error instanceof Error ? error.message : 'Job sync failed' });
+  }
+});
+
+// GET /api/hirehop/jobs/last-sync — get last sync info
+router.get('/jobs/last-sync', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT * FROM sync_log WHERE sync_type = 'jobs' ORDER BY started_at DESC LIMIT 1`
+    );
+    res.json(result.rows[0] || null);
+  } catch {
+    res.json(null);
   }
 });
 
