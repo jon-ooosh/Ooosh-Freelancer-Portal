@@ -34,6 +34,12 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── interactions.ts
 │   │   │   ├── duplicates.ts  # Duplicate detection & merge
 │   │   │   ├── hirehop.ts  # HireHop sync endpoints
+│   │   │   ├── dashboard.ts   # Dashboard stats/metrics
+│   │   │   ├── search.ts      # Global search
+│   │   │   ├── users.ts       # User/team management
+│   │   │   ├── files.ts       # File uploads (R2)
+│   │   │   ├── notifications.ts
+│   │   │   ├── backups.ts     # Database backup management
 │   │   │   └── health.ts
 │   │   ├── config/
 │   │   │   └── hirehop.ts  # HireHop API configuration
@@ -48,7 +54,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   └── .env.example        # Required env vars
 ├── frontend/               # React SPA (Vite)
 │   └── src/
-│       ├── pages/          # LoginPage, DashboardPage, PeoplePage, OrganisationsPage, VenuesPage
+│       ├── pages/          # Login, Dashboard, People, Organisations, Venues, Jobs, Team, Settings, Duplicates + detail pages
 │       ├── components/     # Reusable UI components
 │       └── contexts/       # AuthContext
 ├── shared/                 # Shared TypeScript types
@@ -93,8 +99,8 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 - [x] Database migration system (001_foundation.sql)
 - [x] JWT authentication (login, logout, token refresh)
 - [x] Role-based access control middleware
-- [x] Backend API routes: auth, people, organisations, venues, interactions, health
-- [x] Frontend pages: Login, Dashboard, People, Organisations, Venues
+- [x] Backend API routes: auth, people, organisations, venues, interactions, dashboard, search, users, files, notifications, backups, health
+- [x] Frontend pages: Login, Dashboard, People, Organisations, Venues, Team, Settings, Duplicates (+ detail pages)
 - [x] Shared TypeScript types
 - [x] Server setup: Nginx reverse proxy, systemd service, PostgreSQL, Redis
 - [x] Deployment scripts (setup-server.sh, deploy.sh)
@@ -114,8 +120,8 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 ### Phase 2 — In Progress
 
 - [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes
-- [ ] **Jobs UI** — jobs list page, job detail view, status badges ← NEXT UP
-- [ ] Opportunity/sales pipeline with Kanban board
+- [x] **Jobs UI** — jobs list page, job detail view, status badges, filtering by status
+- [ ] **Opportunity/sales pipeline with Kanban board** ← NEXT UP
 - [ ] Job close-out workflow
 - [ ] Win/loss tracking
 - [ ] Command Centre dashboard (live data from jobs + contacts)
