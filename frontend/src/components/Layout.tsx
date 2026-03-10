@@ -9,6 +9,7 @@ const navItems = [
   { path: '/people', label: 'People' },
   { path: '/organisations', label: 'Organisations' },
   { path: '/venues', label: 'Venues' },
+  { path: '/jobs', label: 'Jobs' },
 ];
 
 const adminNavItems = [

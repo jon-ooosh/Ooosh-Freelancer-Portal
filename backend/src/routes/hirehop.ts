@@ -86,15 +86,23 @@ router.post('/jobs/sync', async (req: AuthRequest, res: Response) => {
 // GET /api/hirehop/jobs — list synced jobs from our DB
 router.get('/jobs', async (req: AuthRequest, res: Response) => {
   try {
-    const { status, page = '1', limit = '50' } = req.query;
+    const { status, search, page = '1', limit = '50' } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let whereClause = 'WHERE is_deleted = false';
     const params: unknown[] = [];
 
-    if (status !== undefined) {
-      params.push(parseInt(status as string));
-      whereClause += ` AND status = $${params.length}`;
+    if (status !== undefined && status !== '') {
+      const statuses = (status as string).split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      if (statuses.length > 0) {
+        params.push(statuses);
+        whereClause += ` AND status = ANY($${params.length})`;
+      }
+    }
+
+    if (search && (search as string).trim()) {
+      params.push(`%${(search as string).trim()}%`);
+      whereClause += ` AND (job_name ILIKE $${params.length} OR client_name ILIKE $${params.length} OR company_name ILIKE $${params.length} OR venue_name ILIKE $${params.length} OR CAST(hh_job_number AS TEXT) ILIKE $${params.length})`;
     }
 
     const countResult = await query(
@@ -123,6 +131,27 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Jobs list error:', error);
     res.status(500).json({ error: 'Failed to load jobs' });
+  }
+});
+
+// GET /api/hirehop/jobs/:id — get a single job by ID
+router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const result = await query(
+      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Job detail error:', error);
+    res.status(500).json({ error: 'Failed to load job' });
   }
 });
 

@@ -26,7 +26,7 @@ interface SearchResult {
 }
 
 interface ActivityTimelineProps {
-  entityType: 'person_id' | 'organisation_id' | 'venue_id';
+  entityType: 'person_id' | 'organisation_id' | 'venue_id' | 'job_id';
   entityId: string;
   interactions: Interaction[];
   onInteractionAdded: () => void;
