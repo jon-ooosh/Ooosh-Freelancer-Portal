@@ -3,6 +3,21 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 
+interface JobSummary {
+  id: string;
+  hh_job_number: number;
+  job_name: string | null;
+  status: number;
+  client_name: string | null;
+  company_name: string | null;
+  venue_name: string | null;
+  job_date: string | null;
+  job_end: string | null;
+  out_date: string | null;
+  return_date: string | null;
+  created_date: string | null;
+}
+
 interface DashboardData {
   counts: {
     people_count: string;
@@ -10,6 +25,7 @@ interface DashboardData {
     venue_count: string;
     interaction_count: string;
     user_count: string;
+    active_job_count: string;
   };
   recent_activity: Array<{
     id: string;
@@ -29,6 +45,10 @@ interface DashboardData {
   this_week_activity: { this_week: string; last_week: string };
   team_activity: Array<{ name: string; user_id: string; interaction_count: string; last_active: string | null }>;
   unread_notifications: number;
+  job_status_breakdown: Array<{ status: number; count: string }>;
+  upcoming_jobs: JobSummary[];
+  overdue_returns: JobSummary[];
+  recent_enquiries: JobSummary[];
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -36,6 +56,24 @@ const TYPE_COLORS: Record<string, string> = {
   call: 'bg-green-100 text-green-700',
   email: 'bg-purple-100 text-purple-700',
   meeting: 'bg-amber-100 text-amber-700',
+};
+
+const JOB_STATUS_MAP: Record<number, string> = {
+  0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
+  4: 'Part Dispatched', 5: 'Dispatched', 6: 'Returned Incomplete',
+  7: 'Returned', 8: 'Requires Attention',
+};
+
+const JOB_STATUS_COLOURS: Record<number, string> = {
+  0: 'bg-blue-100 text-blue-700',
+  1: 'bg-amber-100 text-amber-700',
+  2: 'bg-green-100 text-green-700',
+  3: 'bg-purple-100 text-purple-700',
+  4: 'bg-orange-100 text-orange-700',
+  5: 'bg-indigo-100 text-indigo-700',
+  6: 'bg-yellow-100 text-yellow-800',
+  7: 'bg-teal-100 text-teal-700',
+  8: 'bg-red-100 text-red-700',
 };
 
 const TYPE_ICONS: Record<string, string> = {
@@ -93,7 +131,8 @@ export default function DashboardPage() {
       </div>
 
       {/* Stats bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+        <StatCard label="Active Jobs" value={data.counts.active_job_count} href="/jobs" color="bg-green-500" />
         <StatCard label="People" value={data.counts.people_count} href="/people" color="bg-blue-500" />
         <StatCard label="Organisations" value={data.counts.org_count} href="/organisations" color="bg-purple-500" />
         <StatCard label="Venues" value={data.counts.venue_count} href="/venues" color="bg-teal-500" />
@@ -172,18 +211,91 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* HireHop Integration Panels — Coming Soon */}
+          {/* Job Status Breakdown */}
+          {data.job_status_breakdown.length > 0 && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-gray-700">Job Pipeline</h2>
+                <Link to="/jobs" className="text-xs text-ooosh-600 hover:text-ooosh-700">View all jobs &rarr;</Link>
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                {data.job_status_breakdown.map((item) => (
+                  <Link
+                    key={item.status}
+                    to={`/jobs?status=${item.status}`}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-opacity hover:opacity-80 ${JOB_STATUS_COLOURS[item.status] || 'bg-gray-100 text-gray-600'}`}
+                  >
+                    <span className="font-bold">{item.count}</span>
+                    <span className="text-xs">{JOB_STATUS_MAP[item.status] || `Status ${item.status}`}</span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Live Job Panels */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <PlaceholderPanel
-              title="Active Hires"
-              items={['Hires out on the road', 'Deliveries & collections today', 'Equipment due back', 'Equipment due out']}
-              integration="HireHop"
-            />
-            <PlaceholderPanel
-              title="Enquiries & Quotes"
-              items={['Enquiries awaiting response', 'Response time tracking', 'Quotes pending confirmation', 'Follow-up due dates']}
-              integration="HireHop"
-            />
+            {/* Overdue Returns */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-gray-700">Overdue Returns</h3>
+                {data.overdue_returns.length > 0 && (
+                  <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
+                    {data.overdue_returns.length}
+                  </span>
+                )}
+              </div>
+              {data.overdue_returns.length === 0 ? (
+                <p className="text-sm text-gray-400">No overdue returns. All clear!</p>
+              ) : (
+                <div className="space-y-2">
+                  {data.overdue_returns.map((job) => (
+                    <Link key={job.id} to={`/jobs/${job.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1.5 rounded transition-colors">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-gray-900 truncate">
+                          <span className="font-mono text-gray-400 text-xs mr-1">#{job.hh_job_number}</span>
+                          {job.job_name || job.client_name || job.company_name || 'Untitled'}
+                        </div>
+                        <div className="text-xs text-gray-500">{job.venue_name || job.client_name || '—'}</div>
+                      </div>
+                      <div className="text-xs text-red-600 font-medium flex-shrink-0 ml-2">
+                        Due {formatDate(job.return_date || '')}
+                      </div>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Recent Enquiries */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-gray-700">Enquiries & Provisionals</h3>
+                <Link to="/jobs?status=0,1" className="text-xs text-ooosh-600 hover:text-ooosh-700">View all &rarr;</Link>
+              </div>
+              {data.recent_enquiries.length === 0 ? (
+                <p className="text-sm text-gray-400">No open enquiries.</p>
+              ) : (
+                <div className="space-y-2">
+                  {data.recent_enquiries.map((job) => (
+                    <Link key={job.id} to={`/jobs/${job.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1.5 rounded transition-colors">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-gray-900 truncate">
+                          <span className="font-mono text-gray-400 text-xs mr-1">#{job.hh_job_number}</span>
+                          {job.job_name || 'Untitled'}
+                        </div>
+                        <div className="text-xs text-gray-500">{job.client_name || job.company_name || '—'}</div>
+                      </div>
+                      <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-medium flex-shrink-0 ml-2 ${JOB_STATUS_COLOURS[job.status]}`}>
+                        {JOB_STATUS_MAP[job.status]}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Still-placeholder panels */}
             <PlaceholderPanel
               title="Operations"
               items={['Crewed jobs needing intros', 'Rehearsals needing studio sitters', 'Expected merch/deliveries', 'Overdue lost property']}
@@ -270,12 +382,28 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Coming Up — Placeholder */}
-          <PlaceholderPanel
-            title="Coming Up"
-            items={['Hires starting in 7 days', 'Vehicles due for MOT/service', 'Staff holidays & absences', 'Cold leads to follow up']}
-            integration="HireHop"
-          />
+          {/* Coming Up — real upcoming jobs */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-gray-700">Coming Up</h2>
+              <Link to="/jobs?status=1,2,3" className="text-xs text-ooosh-600 hover:text-ooosh-700">View all &rarr;</Link>
+            </div>
+            {data.upcoming_jobs.length === 0 ? (
+              <p className="text-sm text-gray-400">No jobs starting in the next 14 days.</p>
+            ) : (
+              <div className="space-y-2">
+                {data.upcoming_jobs.map((job) => (
+                  <Link key={job.id} to={`/jobs/${job.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1.5 rounded transition-colors">
+                    <div className="min-w-0">
+                      <div className="text-sm text-gray-700 truncate">{job.job_name || job.client_name || 'Untitled'}</div>
+                      <div className="text-xs text-gray-400">{job.venue_name || '—'}</div>
+                    </div>
+                    <span className="text-xs text-gray-500 flex-shrink-0 ml-2">{formatDate(job.job_date || '')}</span>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Quick Actions */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">

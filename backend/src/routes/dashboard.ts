@@ -18,15 +18,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       thisWeekActivityResult,
       teamActivityResult,
       notificationsResult,
+      jobStatusBreakdownResult,
+      upcomingJobsResult,
+      overdueReturnsResult,
+      recentEnquiriesResult,
     ] = await Promise.all([
-      // Entity counts
+      // Entity counts (including jobs)
       query(`
         SELECT
           (SELECT COUNT(*) FROM people WHERE is_deleted = false) as people_count,
           (SELECT COUNT(*) FROM organisations WHERE is_deleted = false) as org_count,
           (SELECT COUNT(*) FROM venues WHERE is_deleted = false) as venue_count,
           (SELECT COUNT(*) FROM interactions) as interaction_count,
-          (SELECT COUNT(*) FROM users WHERE is_active = true) as user_count
+          (SELECT COUNT(*) FROM users WHERE is_active = true) as user_count,
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (0,1,2,3,4,5,6,7,8)) as active_job_count
       `),
 
       // Recent activity (last 20 interactions across all entities)
@@ -107,6 +112,51 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         `SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND is_read = false`,
         [req.user!.id]
       ),
+
+      // Job status breakdown (active statuses)
+      query(`
+        SELECT status, COUNT(*) as count
+        FROM jobs
+        WHERE is_deleted = false AND status IN (0,1,2,3,4,5,6,7,8)
+        GROUP BY status
+        ORDER BY status
+      `),
+
+      // Upcoming jobs — starting in the next 14 days
+      query(`
+        SELECT id, hh_job_number, job_name, status, client_name, company_name,
+               venue_name, job_date, job_end, out_date
+        FROM jobs
+        WHERE is_deleted = false
+          AND status IN (1,2,3)
+          AND job_date >= NOW()
+          AND job_date <= NOW() + INTERVAL '14 days'
+        ORDER BY job_date ASC
+        LIMIT 10
+      `),
+
+      // Overdue returns — return_date in the past but status is still dispatched
+      query(`
+        SELECT id, hh_job_number, job_name, status, client_name, company_name,
+               venue_name, return_date, job_date
+        FROM jobs
+        WHERE is_deleted = false
+          AND status IN (4,5)
+          AND return_date < NOW()
+        ORDER BY return_date ASC
+        LIMIT 10
+      `),
+
+      // Recent enquiries — newest enquiries/provisionals
+      query(`
+        SELECT id, hh_job_number, job_name, status, client_name, company_name,
+               venue_name, job_date, created_date
+        FROM jobs
+        WHERE is_deleted = false
+          AND status IN (0,1)
+        ORDER BY created_date DESC
+        LIMIT 8
+      `),
     ]);
 
     res.json({
@@ -118,6 +168,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       this_week_activity: thisWeekActivityResult.rows[0],
       team_activity: teamActivityResult.rows,
       unread_notifications: parseInt(notificationsResult.rows[0].count),
+      job_status_breakdown: jobStatusBreakdownResult.rows,
+      upcoming_jobs: upcomingJobsResult.rows,
+      overdue_returns: overdueReturnsResult.rows,
+      recent_enquiries: recentEnquiriesResult.rows,
     });
   } catch (error) {
     console.error('Dashboard error:', error);
