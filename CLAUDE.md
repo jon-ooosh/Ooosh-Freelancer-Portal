@@ -38,10 +38,12 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   ├── config/
 │   │   │   └── hirehop.ts  # HireHop API configuration
 │   │   ├── services/
-│   │   │   └── hirehop-sync.ts  # HireHop contact sync (read-only)
+│   │   │   ├── hirehop-sync.ts      # HireHop contact sync (read-only)
+│   │   │   └── hirehop-job-sync.ts  # HireHop job sync (read-only)
 │   │   ├── middleware/      # Auth, RBAC, validation
 │   │   ├── migrations/     # PostgreSQL migrations
-│   │   │   └── 001_foundation.sql
+│   │   │   ├── 001_foundation.sql
+│   │   │   └── 002_jobs.sql
 │   │   └── seeds/          # Demo data seeder
 │   └── .env.example        # Required env vars
 ├── frontend/               # React SPA (Vite)
@@ -50,7 +52,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │       ├── components/     # Reusable UI components
 │       └── contexts/       # AuthContext
 ├── shared/                 # Shared TypeScript types
-│   └── types/index.ts      # Person, Organisation, Venue, Interaction, User, etc.
+│   └── types/index.ts      # Person, Organisation, Venue, Job, Interaction, User, etc.
 ├── deploy/                 # Server deployment scripts
 │   ├── setup-server.sh
 │   ├── deploy.sh
@@ -111,7 +113,8 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 
 ### Phase 2 — In Progress
 
-- [ ] **HireHop job sync (read-only pull)** ← NEXT UP
+- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes
+- [ ] **Jobs UI** — jobs list page, job detail view, status badges ← NEXT UP
 - [ ] Opportunity/sales pipeline with Kanban board
 - [ ] Job close-out workflow
 - [ ] Win/loss tracking
@@ -133,11 +136,13 @@ HIREHOP_DOMAIN=myhirehop.com        # Domain only, no https:// or trailing slash
 HIREHOP_API_TOKEN=your_token_here   # API token from HireHop settings
 ```
 
-### Current Sync (Phase 1)
+### Current Sync
 
-- **Contacts:** Read-only pull from HireHop into `people` table, matched by email
+- **Contacts (Phase 1):** Read-only pull from HireHop into `people` table, matched by email
+- **Jobs (Phase 2):** Read-only pull of active jobs (statuses 0-8) into `jobs` table
 - Config: `backend/src/config/hirehop.ts`
-- Service: `backend/src/services/hirehop-sync.ts`
+- Contact sync: `backend/src/services/hirehop-sync.ts`
+- Job sync: `backend/src/services/hirehop-job-sync.ts`
 - Routes: `backend/src/routes/hirehop.ts`
 
 ### HireHop Job Status Codes
@@ -157,10 +162,19 @@ HIREHOP_API_TOKEN=your_token_here   # API token from HireHop settings
 | 10 | Not Interested | Lost lead |
 | 11 | Completed | Job fully completed |
 
+### HireHop Rate Limits
+
+- Max 60 requests/minute, max 3/second
+- 429 response or HireHop error 327 when exceeded
+- Job sync uses 5-second delay between pages (as recommended by HH docs)
+- Contact sync uses 350ms delay between pages
+- Headers: `X-Request-Count` (requests in last 60s), `X-RateLimit-Available` (next available)
+
 ### HireHop API Patterns
 
 - **GET contacts:** `https://{domain}/api/contact_list.php?token={token}`
-- **GET jobs:** `https://{domain}/api/job_list.php?token={token}` (TBC)
+- **Search jobs:** `https://{domain}/php_functions/search_list.php?token={token}&jobs=1&status=0,1,2,...&page=1&rows=100`
+- **GET single job:** `https://{domain}/api/job_data.php?token={token}&job={id}`
 - **POST status update:** `https://{domain}/frames/status_save.php` (POST, form-encoded) — always include `no_webhook=1` to prevent loops
 - **Add note:** `https://{domain}/api/job_note.php?job={id}&note={text}&token={token}` (GET)
 

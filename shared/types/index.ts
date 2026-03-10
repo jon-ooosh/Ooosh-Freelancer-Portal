@@ -106,6 +106,74 @@ export interface Venue {
   updated_at: string;
 }
 
+// HireHop status code → human-readable name
+export const HH_JOB_STATUS_MAP: Record<number, string> = {
+  0: 'Enquiry',
+  1: 'Provisional',
+  2: 'Booked',
+  3: 'Prepped',
+  4: 'Part Dispatched',
+  5: 'Dispatched',
+  6: 'Returned Incomplete',
+  7: 'Returned',
+  8: 'Requires Attention',
+  9: 'Cancelled',
+  10: 'Not Interested',
+  11: 'Completed',
+};
+
+// Active statuses worth syncing (not dead/done)
+export const HH_ACTIVE_STATUSES = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+
+export interface Job {
+  id: string;
+  hh_job_number: number;
+  job_name: string | null;
+  job_type: string | null;
+  status: number;
+  status_name: string | null;
+  colour: string | null;
+  // Client
+  client_id: string | null;
+  client_name: string | null;
+  company_name: string | null;
+  client_ref: string | null;
+  // Venue
+  venue_id: string | null;
+  venue_name: string | null;
+  address: string | null;
+  // Dates
+  out_date: string | null;
+  job_date: string | null;
+  job_end: string | null;
+  return_date: string | null;
+  created_date: string | null;
+  // Duration
+  duration_days: number | null;
+  duration_hrs: number | null;
+  // Managers
+  manager1_name: string | null;
+  manager1_person_id: string | null;
+  manager2_name: string | null;
+  manager2_person_id: string | null;
+  // Project
+  hh_project_id: number | null;
+  project_name: string | null;
+  // Details
+  details: string | null;
+  custom_index: string | null;
+  depot_name: string | null;
+  is_internal: boolean;
+  // Metadata
+  notes: string | null;
+  tags: string[];
+  files: FileAttachment[];
+  is_deleted: boolean;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Interaction {
   id: string;
   type: 'note' | 'email' | 'call' | 'meeting' | 'mention';

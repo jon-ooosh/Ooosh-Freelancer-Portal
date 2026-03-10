@@ -30,6 +30,7 @@ async function runMigrations(direction: 'up' | 'down') {
       // Read migration files in order
       const migrations = [
         '001_foundation.sql',
+        '002_jobs.sql',
         // Add future migrations here in order
       ];
 
@@ -64,6 +65,7 @@ async function runMigrations(direction: 'up' | 'down') {
         await client.query(`
           DROP TABLE IF EXISTS notifications CASCADE;
           DROP TABLE IF EXISTS audit_log CASCADE;
+          DROP TABLE IF EXISTS jobs CASCADE;
           DROP TABLE IF EXISTS interactions CASCADE;
           DROP TABLE IF EXISTS external_id_map CASCADE;
           DROP TABLE IF EXISTS picklist_items CASCADE;
