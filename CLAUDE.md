@@ -121,11 +121,15 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 
 - [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes
 - [x] **Jobs UI** — jobs list page, job detail view, status badges, filtering by status
-- [ ] **Opportunity/sales pipeline with Kanban board** ← NEXT UP
+- [ ] **Enquiry & Sales Pipeline with Kanban board** ← BUILDING NOW (see docs/PIPELINE-SPEC.md)
+  - [ ] Phase A: Data layer (migration, pipeline fields, chase interaction type, job_value sync)
+  - [ ] Phase B: Backend API (pipeline endpoints, status transitions, chase logic)
+  - [ ] Phase C: Kanban board UI (columns, cards, drag-and-drop, filters)
+  - [ ] Phase D: Supporting UI (new enquiry form, chase logging, pipeline dashboard widgets)
+  - [ ] Phase E: HireHop write-back (push status changes, create HH jobs from Ooosh)
+- [ ] Win/loss analysis dashboard (depends on pipeline — lost_reason basics included in pipeline)
 - [ ] Job close-out workflow
-- [ ] Win/loss tracking
 - [ ] Command Centre dashboard (live data from jobs + contacts)
-- [ ] HireHop write-back (contacts, then jobs) — after read sync is solid
 - [ ] Xero financial summary integration
 - [ ] Cold lead finder (Ticketmaster API)
 
