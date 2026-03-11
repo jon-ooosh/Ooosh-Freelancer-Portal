@@ -2,11 +2,50 @@ import { useAuthStore } from '../hooks/useAuthStore';
 
 const API_BASE = '/api';
 
+// Token refresh mutex: only one refresh at a time, others wait for it
+let refreshPromise: Promise<{ accessToken: string; refreshToken: string }> | null = null;
+
+async function refreshAccessToken(): Promise<{ accessToken: string; refreshToken: string }> {
+  // If a refresh is already in progress, wait for it
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  const { refreshToken, setTokens, logout } = useAuthStore.getState();
+  if (!refreshToken) {
+    throw new Error('No refresh token');
+  }
+
+  refreshPromise = (async () => {
+    try {
+      const response = await fetch(`${API_BASE}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken }),
+      });
+
+      if (!response.ok) {
+        logout();
+        window.location.href = '/login';
+        throw new Error('Session expired');
+      }
+
+      const tokens = await response.json();
+      setTokens(tokens.accessToken, tokens.refreshToken);
+      return tokens;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
 async function request<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const { accessToken, refreshToken, setTokens, logout } = useAuthStore.getState();
+  const { accessToken, refreshToken } = useAuthStore.getState();
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -19,24 +58,13 @@ async function request<T>(
 
   let response = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
-  // If 401, try refreshing the token
+  // If 401, try refreshing the token (mutex ensures only one refresh at a time)
   if (response.status === 401 && refreshToken) {
-    const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken }),
-    });
-
-    if (refreshResponse.ok) {
-      const tokens = await refreshResponse.json();
-      setTokens(tokens.accessToken, tokens.refreshToken);
-
-      // Retry original request with new token
+    try {
+      const tokens = await refreshAccessToken();
       headers['Authorization'] = `Bearer ${tokens.accessToken}`;
       response = await fetch(`${API_BASE}${path}`, { ...options, headers });
-    } else {
-      logout();
-      window.location.href = '/login';
+    } catch {
       throw new Error('Session expired');
     }
   }
@@ -54,7 +82,7 @@ async function uploadRequest<T>(
   path: string,
   formData: FormData
 ): Promise<T> {
-  const { accessToken, refreshToken, setTokens, logout } = useAuthStore.getState();
+  const { accessToken, refreshToken } = useAuthStore.getState();
 
   const headers: Record<string, string> = {};
 
@@ -69,24 +97,15 @@ async function uploadRequest<T>(
   });
 
   if (response.status === 401 && refreshToken) {
-    const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken }),
-    });
-
-    if (refreshResponse.ok) {
-      const tokens = await refreshResponse.json();
-      setTokens(tokens.accessToken, tokens.refreshToken);
+    try {
+      const tokens = await refreshAccessToken();
       headers['Authorization'] = `Bearer ${tokens.accessToken}`;
       response = await fetch(`${API_BASE}${path}`, {
         method: 'POST',
         headers,
         body: formData,
       });
-    } else {
-      logout();
-      window.location.href = '/login';
+    } catch {
       throw new Error('Session expired');
     }
   }
@@ -101,7 +120,7 @@ async function uploadRequest<T>(
 
 // Fetch a file as a blob with auth headers (for inline viewing)
 async function blobRequest(path: string): Promise<{ blob: Blob; contentType: string }> {
-  const { accessToken, refreshToken, setTokens, logout } = useAuthStore.getState();
+  const { accessToken, refreshToken } = useAuthStore.getState();
 
   const headers: Record<string, string> = {};
   if (accessToken) {
@@ -111,19 +130,11 @@ async function blobRequest(path: string): Promise<{ blob: Blob; contentType: str
   let response = await fetch(`${API_BASE}${path}`, { headers });
 
   if (response.status === 401 && refreshToken) {
-    const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken }),
-    });
-    if (refreshResponse.ok) {
-      const tokens = await refreshResponse.json();
-      setTokens(tokens.accessToken, tokens.refreshToken);
+    try {
+      const tokens = await refreshAccessToken();
       headers['Authorization'] = `Bearer ${tokens.accessToken}`;
       response = await fetch(`${API_BASE}${path}`, { headers });
-    } else {
-      logout();
-      window.location.href = '/login';
+    } catch {
       throw new Error('Session expired');
     }
   }
