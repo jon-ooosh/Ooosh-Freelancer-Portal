@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 
@@ -75,6 +75,9 @@ interface Interaction {
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const backTo = (location.state as { from?: string })?.from || '/jobs';
+  const backLabel = backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
@@ -93,7 +96,7 @@ export default function JobDetailPage() {
       const data = await api.get<JobDetail>(`/hirehop/jobs/${id}`);
       setJob(data);
     } catch {
-      navigate('/jobs');
+      navigate(backTo);
     } finally {
       setLoading(false);
     }
@@ -137,8 +140,8 @@ export default function JobDetailPage() {
   return (
     <div>
       {/* Back link */}
-      <Link to="/jobs" className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
-        &larr; Back to Jobs
+      <Link to={backTo} className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
+        &larr; {backLabel}
       </Link>
 
       {/* Header Card */}

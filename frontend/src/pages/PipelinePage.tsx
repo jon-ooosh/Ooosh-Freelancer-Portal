@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
@@ -18,6 +18,15 @@ interface PipelineResponse {
   data: Job[];
   pagination: { page: number; limit: number; total: number; totalPages: number };
 }
+
+interface SearchResult {
+  id: string;
+  name: string;
+  subtitle: string | null;
+  type: 'person' | 'organisation' | 'venue';
+}
+
+type SortMode = 'chase_date' | 'job_date_nearest' | 'job_date_furthest' | 'value_high' | 'value_low' | 'newest';
 
 // ── Column order ───────────────────────────────────────────────────────────
 
@@ -66,16 +75,149 @@ function getInitials(name: string | null): string {
   return name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
 }
 
+function sortJobs(jobs: Job[], mode: SortMode): Job[] {
+  const sorted = [...jobs];
+  sorted.sort((a, b) => {
+    switch (mode) {
+      case 'chase_date': {
+        const aDate = a.next_chase_date ? new Date(a.next_chase_date).getTime() : Infinity;
+        const bDate = b.next_chase_date ? new Date(b.next_chase_date).getTime() : Infinity;
+        if (aDate !== bDate) return aDate - bDate;
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      }
+      case 'job_date_nearest': {
+        const aDate = a.job_date ? new Date(a.job_date).getTime() : Infinity;
+        const bDate = b.job_date ? new Date(b.job_date).getTime() : Infinity;
+        return aDate - bDate;
+      }
+      case 'job_date_furthest': {
+        const aDate = a.job_date ? new Date(a.job_date).getTime() : -Infinity;
+        const bDate = b.job_date ? new Date(b.job_date).getTime() : -Infinity;
+        return bDate - aDate;
+      }
+      case 'value_high': {
+        return (b.job_value || 0) - (a.job_value || 0);
+      }
+      case 'value_low': {
+        return (a.job_value || 0) - (b.job_value || 0);
+      }
+      case 'newest': {
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+      }
+      default:
+        return 0;
+    }
+  });
+  return sorted;
+}
+
+// ── Client Picker (search People & Organisations) ──────────────────────────
+
+function ClientPicker({
+  value,
+  onChange,
+  onSelect,
+}: {
+  value: string;
+  onChange: (name: string) => void;
+  onSelect: (result: SearchResult) => void;
+}) {
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const doSearch = useCallback(async (term: string) => {
+    if (term.length < 2) { setResults([]); setShowDropdown(false); return; }
+    setSearching(true);
+    try {
+      const data = await api.get<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(term)}&limit=10`);
+      // Only show people and organisations (not venues)
+      const filtered = data.results.filter(r => r.type === 'person' || r.type === 'organisation');
+      setResults(filtered);
+      setShowDropdown(filtered.length > 0);
+    } catch {
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, []);
+
+  const handleChange = (text: string) => {
+    onChange(text);
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => doSearch(text), 250);
+  };
+
+  const handleSelect = (result: SearchResult) => {
+    onSelect(result);
+    onChange(result.name);
+    setShowDropdown(false);
+  };
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => handleChange(e.target.value)}
+        onFocus={() => { if (results.length > 0) setShowDropdown(true); }}
+        placeholder="Search people or organisations..."
+        className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+      />
+      {searching && (
+        <div className="absolute right-3 top-2.5">
+          <div className="animate-spin h-4 w-4 border-2 border-ooosh-500 border-t-transparent rounded-full" />
+        </div>
+      )}
+      {showDropdown && (
+        <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+          {results.map((r) => (
+            <button
+              key={`${r.type}-${r.id}`}
+              onClick={() => handleSelect(r)}
+              className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2"
+            >
+              <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                r.type === 'organisation' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+              }`}>
+                {r.type === 'organisation' ? 'Org' : 'Person'}
+              </span>
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-gray-900 truncate">{r.name}</div>
+                {r.subtitle && <div className="text-xs text-gray-400 truncate">{r.subtitle}</div>}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Pipeline Card ──────────────────────────────────────────────────────────
 
 function PipelineCard({
   job,
   onDragStart,
   onClick,
+  onChase,
 }: {
   job: Job;
   onDragStart: (e: React.DragEvent, job: Job) => void;
   onClick: (job: Job) => void;
+  onChase: (job: Job) => void;
 }) {
   const chase = chaseDueLabel(job.next_chase_date);
   const borderClass =
@@ -132,16 +274,25 @@ function PipelineCard({
         )}
       </div>
 
-      {/* Row 6: Chase due + manager */}
+      {/* Row 6: Chase due + chase button + manager */}
       <div className="flex items-center justify-between">
-        {chase.text ? (
-          <span className={`text-xs font-medium ${
-            chase.urgency === 'overdue' ? 'text-red-600' :
-            chase.urgency === 'today' ? 'text-amber-600' : 'text-gray-400'
-          }`}>
-            {chase.text}
-          </span>
-        ) : <span />}
+        <div className="flex items-center gap-2">
+          {chase.text ? (
+            <span className={`text-xs font-medium ${
+              chase.urgency === 'overdue' ? 'text-red-600' :
+              chase.urgency === 'today' ? 'text-amber-600' : 'text-gray-400'
+            }`}>
+              {chase.text}
+            </span>
+          ) : <span />}
+          <button
+            onClick={(e) => { e.stopPropagation(); onChase(job); }}
+            className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
+            title="Log a chase"
+          >
+            Chase
+          </button>
+        </div>
         {job.manager1_name && (
           <span className="text-xs text-gray-400 font-medium">
             {getInitials(job.manager1_name)}
@@ -294,6 +445,154 @@ function TransitionModal({
   );
 }
 
+// ── Chase Modal ────────────────────────────────────────────────────────────
+
+function ChaseModal({
+  isOpen,
+  job,
+  onClose,
+  onChaseLogged,
+}: {
+  isOpen: boolean;
+  job: Job | null;
+  onClose: () => void;
+  onChaseLogged: () => void;
+}) {
+  const [chaseMethod, setChaseMethod] = useState<string>('phone');
+  const [content, setContent] = useState('');
+  const [chaseResponse, setChaseResponse] = useState('');
+  const [nextChaseDate, setNextChaseDate] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (isOpen && job) {
+      // Default next chase date from job's chase interval
+      const days = job.chase_interval_days || 3;
+      const next = new Date();
+      next.setDate(next.getDate() + days);
+      setNextChaseDate(next.toISOString().split('T')[0]);
+      setContent('');
+      setChaseResponse('');
+      setChaseMethod('phone');
+      setError('');
+    }
+  }, [isOpen, job]);
+
+  if (!isOpen || !job) return null;
+
+  const handleSubmit = async () => {
+    if (!content.trim()) {
+      setError('Please describe what happened');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      await api.post('/interactions', {
+        type: 'chase',
+        content: content.trim(),
+        job_id: job.id,
+        chase_method: chaseMethod,
+        chase_response: chaseResponse || undefined,
+        next_chase_date: nextChaseDate || undefined,
+      });
+      onChaseLogged();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to log chase');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
+        <h3 className="text-lg font-semibold mb-1">Log Chase</h3>
+        <p className="text-sm text-gray-500 mb-4">
+          {job.job_name} — {job.company_name || job.client_name}
+          {job.chase_count > 0 && <span className="ml-2 text-gray-400">(chase #{job.chase_count + 1})</span>}
+        </p>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
+        )}
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">How did you chase?</label>
+            <div className="flex gap-2">
+              {(['phone', 'email', 'text', 'whatsapp'] as const).map((method) => (
+                <button
+                  key={method}
+                  onClick={() => setChaseMethod(method)}
+                  className={`px-3 py-1.5 text-sm rounded-lg border ${
+                    chaseMethod === method
+                      ? 'bg-ooosh-600 text-white border-ooosh-600'
+                      : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  {method.charAt(0).toUpperCase() + method.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">What happened? *</label>
+            <textarea
+              value={content}
+              onChange={(e) => setContent(e.target.value)}
+              placeholder="e.g. Called, left voicemail. Will try again Thursday."
+              rows={3}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Response (optional)</label>
+            <input
+              type="text"
+              value={chaseResponse}
+              onChange={(e) => setChaseResponse(e.target.value)}
+              placeholder="e.g. No answer / Waiting on budget sign-off / Will confirm Friday"
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Next chase date</label>
+            <input
+              type="date"
+              value={nextChaseDate}
+              onChange={(e) => setNextChaseDate(e.target.value)}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            />
+          </div>
+        </div>
+
+        <div className="flex gap-3 justify-end mt-6">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
+          >
+            {saving ? 'Logging...' : 'Log Chase'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── New Enquiry Modal ──────────────────────────────────────────────────────
 
 function NewEnquiryModal({
@@ -306,6 +605,7 @@ function NewEnquiryModal({
   onCreated: () => void;
 }) {
   const [clientName, setClientName] = useState('');
+  const [clientId, setClientId] = useState<string | null>(null);
   const [details, setDetails] = useState('');
   const [jobDate, setJobDate] = useState('');
   const [jobEnd, setJobEnd] = useState('');
@@ -320,6 +620,16 @@ function NewEnquiryModal({
 
   if (!isOpen) return null;
 
+  const handleClientSelect = (result: SearchResult) => {
+    setClientName(result.name);
+    if (result.type === 'organisation') {
+      setClientId(result.id);
+    } else {
+      // Person selected — use their name as client, no org link
+      setClientId(null);
+    }
+  };
+
   const handleSave = async () => {
     if (!clientName || !details || !jobDate || !jobEnd) {
       setError('Client, description, and dates are required');
@@ -330,6 +640,7 @@ function NewEnquiryModal({
     try {
       await api.post('/pipeline/enquiry', {
         client_name: clientName,
+        client_id: clientId || undefined,
         details,
         job_date: jobDate,
         job_end: jobEnd,
@@ -340,7 +651,7 @@ function NewEnquiryModal({
         notes: notes || undefined,
       });
       // Reset form
-      setClientName(''); setDetails(''); setJobDate(''); setJobEnd('');
+      setClientName(''); setClientId(null); setDetails(''); setJobDate(''); setJobEnd('');
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       onCreated();
@@ -363,16 +674,17 @@ function NewEnquiryModal({
         )}
 
         <div className="space-y-4">
-          {/* Required fields */}
+          {/* Client picker */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Client *</label>
-            <input
-              type="text"
+            <ClientPicker
               value={clientName}
-              onChange={(e) => setClientName(e.target.value)}
-              placeholder="Client or company name"
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              onChange={(name) => { setClientName(name); setClientId(null); }}
+              onSelect={handleClientSelect}
             />
+            {clientId && (
+              <p className="text-xs text-green-600 mt-1">Linked to organisation</p>
+            )}
           </div>
 
           <div>
@@ -510,10 +822,14 @@ function NewEnquiryModal({
 
 export default function PipelinePage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [stats, setStats] = useState<PipelineStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
+
+  // Sort
+  const [sortMode, setSortMode] = useState<SortMode>('chase_date');
 
   // Filters
   const [filterLikelihood, setFilterLikelihood] = useState<string>('');
@@ -528,9 +844,17 @@ export default function PipelinePage() {
     jobId: string;
     targetStatus: PipelineStatus;
   } | null>(null);
+  const [chaseModal, setChaseModal] = useState<Job | null>(null);
 
   // Drag state
   const dragJobRef = useRef<Job | null>(null);
+
+  // Check if we came from a query param (e.g. ?newEnquiry=1)
+  useEffect(() => {
+    if (searchParams.get('newEnquiry')) {
+      setShowNewEnquiry(true);
+    }
+  }, [searchParams]);
 
   // ── Fetch data ─────────────────────────────────────────────────────────
 
@@ -570,7 +894,6 @@ export default function PipelinePage() {
   const handleDragStart = (e: React.DragEvent, job: Job) => {
     dragJobRef.current = job;
     e.dataTransfer.effectAllowed = 'move';
-    // Make the drag image slightly transparent
     const target = e.target as HTMLElement;
     target.style.opacity = '0.5';
     setTimeout(() => { target.style.opacity = '1'; }, 0);
@@ -586,13 +909,11 @@ export default function PipelinePage() {
     const job = dragJobRef.current;
     if (!job || job.pipeline_status === targetStatus) return;
 
-    // Statuses that need a modal prompt
     if (['paused', 'confirmed', 'lost'].includes(targetStatus)) {
       setTransitionModal({ jobId: job.id, targetStatus });
       return;
     }
 
-    // Direct transition for other statuses
     try {
       await api.patch(`/pipeline/${job.id}/status`, { pipeline_status: targetStatus });
       fetchPipeline();
@@ -616,7 +937,8 @@ export default function PipelinePage() {
   };
 
   const handleCardClick = (job: Job) => {
-    navigate(`/jobs/${job.id}`);
+    // Navigate with state so job detail can return here
+    navigate(`/jobs/${job.id}`, { state: { from: '/pipeline' } });
   };
 
   // ── Group jobs by status ───────────────────────────────────────────────
@@ -632,14 +954,9 @@ export default function PipelinePage() {
     }
   }
 
-  // Sort each column: overdue first, then by next_chase_date, then by created_at
+  // Sort each column
   for (const status of COLUMN_ORDER) {
-    jobsByStatus[status].sort((a, b) => {
-      const aDate = a.next_chase_date ? new Date(a.next_chase_date).getTime() : Infinity;
-      const bDate = b.next_chase_date ? new Date(b.next_chase_date).getTime() : Infinity;
-      if (aDate !== bDate) return aDate - bDate;
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-    });
+    jobsByStatus[status] = sortJobs(jobsByStatus[status], sortMode);
   }
 
   // ── Visible columns ───────────────────────────────────────────────────
@@ -713,6 +1030,18 @@ export default function PipelinePage() {
             onChange={(e) => setFilterSearch(e.target.value)}
             className="border border-gray-300 rounded px-3 py-1.5 text-sm w-48 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
           />
+          <select
+            value={sortMode}
+            onChange={(e) => setSortMode(e.target.value as SortMode)}
+            className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          >
+            <option value="chase_date">Sort: Chase date</option>
+            <option value="job_date_nearest">Sort: Nearest job date</option>
+            <option value="job_date_furthest">Sort: Furthest job date</option>
+            <option value="value_high">Sort: Highest value</option>
+            <option value="value_low">Sort: Lowest value</option>
+            <option value="newest">Sort: Newest first</option>
+          </select>
           <select
             value={filterLikelihood}
             onChange={(e) => setFilterLikelihood(e.target.value)}
@@ -804,6 +1133,7 @@ export default function PipelinePage() {
                           job={job}
                           onDragStart={handleDragStart}
                           onClick={handleCardClick}
+                          onChase={(j) => setChaseModal(j)}
                         />
                       ))
                     )}
@@ -830,7 +1160,7 @@ export default function PipelinePage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
-                {jobs.map((job) => {
+                {sortJobs(jobs, sortMode).map((job) => {
                   const statusConfig = PIPELINE_STATUS_CONFIG[job.pipeline_status || 'new_enquiry'];
                   const chase = chaseDueLabel(job.next_chase_date);
                   return (
@@ -870,7 +1200,7 @@ export default function PipelinePage() {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <div className="text-xs">
+                        <div className="flex items-center gap-2 text-xs">
                           {chase.text && (
                             <span className={`font-medium ${
                               chase.urgency === 'overdue' ? 'text-red-600' :
@@ -880,8 +1210,14 @@ export default function PipelinePage() {
                             </span>
                           )}
                           {job.chase_count > 0 && (
-                            <span className="text-gray-400 ml-2">x{job.chase_count}</span>
+                            <span className="text-gray-400">x{job.chase_count}</span>
                           )}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setChaseModal(job); }}
+                            className="text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
+                          >
+                            Chase
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -911,6 +1247,12 @@ export default function PipelinePage() {
         targetStatus={transitionModal?.targetStatus || null}
         onConfirm={handleTransitionConfirm}
         onCancel={() => setTransitionModal(null)}
+      />
+      <ChaseModal
+        isOpen={!!chaseModal}
+        job={chaseModal}
+        onClose={() => setChaseModal(null)}
+        onChaseLogged={fetchPipeline}
       />
     </div>
   );
