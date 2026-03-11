@@ -120,11 +120,12 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 
 - [ ] SSL certificate (Let's Encrypt via Certbot) — currently HTTP only
 - [ ] Domain name configuration
-- [ ] Database backup automation (pg_dump to R2)
+- [ ] Database backup automation (pg_dump to R2) — backups running but March 11 files are 0 MB. Added error detection + stderr capture to `scripts/backup.ts`. Check `journalctl -u ooosh-portal | grep -i backup` for errors. May be a pg_dump connection/permission issue on the server.
 
 ### Phase 2 — In Progress
 
 - [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes, job_value sync
+  - **Known issue:** job_value (money) not populating from HireHop. Fixed falsy check bug (`|| null` → `!= null`). Debug logging added to `hirehop-job-sync.ts` to capture raw MONEY field from API. Logs should appear in `journalctl -u ooosh-portal`. May need to check if `search_list.php` actually returns MONEY or if `job_data.php` is needed instead. Check `[HH Job Sync] Sample MONEY value:` in server logs after running a sync.
 - [x] **Jobs UI** — jobs list page, job detail view, status badges, filtering by status
 - [x] **Enquiry & Sales Pipeline (Phases A–D)** — see docs/PIPELINE-SPEC.md
   - [x] Phase A: Data layer (migrations 003-006, pipeline fields, chase interaction type)
