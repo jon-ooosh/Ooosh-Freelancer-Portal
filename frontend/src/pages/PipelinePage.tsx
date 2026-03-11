@@ -31,7 +31,7 @@ type SortMode = 'chase_date' | 'job_date_nearest' | 'job_date_furthest' | 'value
 // ── Column order ───────────────────────────────────────────────────────────
 
 const COLUMN_ORDER: PipelineStatus[] = [
-  'new_enquiry', 'quoting', 'chasing', 'provisional', 'paused', 'confirmed', 'lost',
+  'new_enquiry', 'chasing', 'provisional', 'paused', 'confirmed', 'lost',
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -677,6 +677,7 @@ function addHoursToNow(hours: number): string {
 interface StagedFile {
   file: File;
   tag: string;
+  comment: string;
 }
 
 interface TeamUser {
@@ -712,6 +713,7 @@ function NewEnquiryModal({
   // File staging
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const [fileTag, setFileTag] = useState('');
+  const [fileComment, setFileComment] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Chase scheduling
@@ -755,8 +757,9 @@ function NewEnquiryModal({
   const handleFileStage = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setStagedFiles(prev => [...prev, { file, tag: fileTag }]);
+    setStagedFiles(prev => [...prev, { file, tag: fileTag, comment: fileComment }]);
     setFileTag('');
+    setFileComment('');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -796,6 +799,7 @@ function NewEnquiryModal({
           formData.append('entity_type', 'jobs');
           formData.append('entity_id', created.id);
           if (staged.tag) formData.append('label', staged.tag);
+          if (staged.comment) formData.append('comment', staged.comment);
           try {
             await api.upload('/files/upload', formData);
           } catch (uploadErr) {
@@ -808,7 +812,7 @@ function NewEnquiryModal({
       setClientName(''); setClientId(null); setDetails(''); setJobDate(''); setJobEnd('');
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setEnquirySource(''); setNotes(''); setShowOptional(false);
-      setStagedFiles([]); setFileTag('');
+      setStagedFiles([]); setFileTag(''); setFileComment('');
       setNextChaseDate(addDaysToDate(3)); setChaseAlertUserId('');
       onCreated();
       onClose();
@@ -921,38 +925,52 @@ function NewEnquiryModal({
           {/* Files */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Files</label>
-            <div className="flex items-center gap-2">
-              <select
-                value={fileTag}
-                onChange={(e) => setFileTag(e.target.value)}
-                className="border border-gray-300 rounded px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              >
-                <option value="">No tag</option>
-                {FILE_TAGS.map(tag => (
-                  <option key={tag} value={tag}>{tag}</option>
-                ))}
-              </select>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                <select
+                  value={fileTag}
+                  onChange={(e) => setFileTag(e.target.value)}
+                  className="border border-gray-300 rounded px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                >
+                  <option value="">No tag</option>
+                  {FILE_TAGS.map(tag => (
+                    <option key={tag} value={tag}>{tag}</option>
+                  ))}
+                </select>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  onChange={handleFileStage}
+                  accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.jpg,.jpeg,.png,.gif,.webp,.svg,.zip,.rar"
+                  className="hidden"
+                  id="enquiry-file"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  + Add file
+                </button>
+              </div>
               <input
-                ref={fileInputRef}
-                type="file"
-                onChange={handleFileStage}
-                accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.jpg,.jpeg,.png,.gif,.webp,.svg,.zip,.rar"
-                className="hidden"
-                id="enquiry-file"
+                type="text"
+                value={fileComment}
+                onChange={(e) => setFileComment(e.target.value)}
+                placeholder="File comment (optional)"
+                className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
-                + Add file
-              </button>
             </div>
             {stagedFiles.length > 0 && (
               <div className="mt-2 space-y-1">
                 {stagedFiles.map((sf, i) => (
                   <div key={i} className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 rounded px-2 py-1">
-                    <span className="truncate flex-1">{sf.file.name}</span>
+                    <div className="truncate flex-1">
+                      <span>{sf.file.name}</span>
+                      {sf.comment && (
+                        <span className="text-xs text-gray-400 ml-1">— {sf.comment}</span>
+                      )}
+                    </div>
                     {sf.tag && (
                       <span className="text-xs bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded">{sf.tag}</span>
                     )}
@@ -1199,7 +1217,8 @@ export default function PipelinePage() {
     provisional: [], confirmed: [], lost: [],
   };
   for (const job of jobs) {
-    const status = job.pipeline_status || 'new_enquiry';
+    // Merge quoting into new_enquiry (now "Enquiries")
+    const status = job.pipeline_status === 'quoting' ? 'new_enquiry' : (job.pipeline_status || 'new_enquiry');
     if (jobsByStatus[status]) {
       jobsByStatus[status].push(job);
     }

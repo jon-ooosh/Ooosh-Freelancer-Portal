@@ -11,8 +11,8 @@ router.use(authorize('admin', 'manager', 'staff'));
 
 // Pipeline status labels for transition logging
 const PIPELINE_LABELS: Record<string, string> = {
-  new_enquiry: 'New Enquiry',
-  quoting: 'Quoting',
+  new_enquiry: 'Enquiries',
+  quoting: 'Enquiries',
   chasing: 'Chasing',
   paused: 'Paused Enquiry',
   provisional: 'Provisional',

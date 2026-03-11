@@ -227,7 +227,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
             job.MANAGER || null,
             job.MANAGER2 || null,
             job.CUSTOM_INDEX || null,
-            job.MONEY || null,
+            job.MONEY != null ? job.MONEY : null,
             jobNumber,
           ]
         );
@@ -275,7 +275,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
             job.MANAGER2 || null,
             job.CUSTOM_INDEX || null,
             userId,
-            job.MONEY || null,
+            job.MONEY != null ? job.MONEY : null,
             initialPipelineStatus,
           ]
         );

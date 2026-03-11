@@ -34,6 +34,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── interactions.ts
 │   │   │   ├── duplicates.ts  # Duplicate detection & merge
 │   │   │   ├── hirehop.ts  # HireHop sync endpoints
+│   │   │   ├── pipeline.ts     # Enquiry & sales pipeline (Kanban)
 │   │   │   ├── dashboard.ts   # Dashboard stats/metrics
 │   │   │   ├── search.ts      # Global search
 │   │   │   ├── users.ts       # User/team management
@@ -49,12 +50,16 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   ├── middleware/      # Auth, RBAC, validation
 │   │   ├── migrations/     # PostgreSQL migrations
 │   │   │   ├── 001_foundation.sql
-│   │   │   └── 002_jobs.sql
+│   │   │   ├── 002_jobs.sql
+│   │   │   ├── 003_job_status_tracking.sql
+│   │   │   ├── 004_pipeline.sql
+│   │   │   ├── 005_fix_interaction_types.sql
+│   │   │   └── 006_merge_quoting.sql
 │   │   └── seeds/          # Demo data seeder
 │   └── .env.example        # Required env vars
 ├── frontend/               # React SPA (Vite)
 │   └── src/
-│       ├── pages/          # Login, Dashboard, People, Organisations, Venues, Jobs, Team, Settings, Duplicates + detail pages
+│       ├── pages/          # Login, Dashboard, People, Organisations, Venues, Jobs, Pipeline (Kanban), Team, Settings, Duplicates + detail pages
 │       ├── components/     # Reusable UI components
 │       └── contexts/       # AuthContext
 ├── shared/                 # Shared TypeScript types
@@ -119,14 +124,20 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 
 ### Phase 2 — In Progress
 
-- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes
+- [x] **HireHop job sync (read-only pull)** — jobs table, sync service, API routes, job_value sync
 - [x] **Jobs UI** — jobs list page, job detail view, status badges, filtering by status
-- [ ] **Enquiry & Sales Pipeline with Kanban board** ← BUILDING NOW (see docs/PIPELINE-SPEC.md)
-  - [ ] Phase A: Data layer (migration, pipeline fields, chase interaction type, job_value sync)
-  - [ ] Phase B: Backend API (pipeline endpoints, status transitions, chase logic)
-  - [ ] Phase C: Kanban board UI (columns, cards, drag-and-drop, filters)
-  - [ ] Phase D: Supporting UI (new enquiry form, chase logging, pipeline dashboard widgets)
+- [x] **Enquiry & Sales Pipeline (Phases A–D)** — see docs/PIPELINE-SPEC.md
+  - [x] Phase A: Data layer (migrations 003-006, pipeline fields, chase interaction type)
+  - [x] Phase B: Backend API (pipeline endpoints, status transitions, chase logic, chase alerts)
+  - [x] Phase C: Kanban board UI (6 columns, cards, drag-and-drop, filters)
+  - [x] Phase D: Supporting UI (new enquiry form with file staging, chase logging with quick-select & alerts, HireHop links, inline file viewer)
   - [ ] Phase E: HireHop write-back (push status changes, create HH jobs from Ooosh)
+- [x] **File management** — authenticated upload/download, inline viewer (images + PDFs), file tags & comments
+- [x] **Enquiry/Quoting merge** — New Enquiry + Quoting merged into single "Enquiries" column
+- [ ] **Quoting tools integration** ← NEXT PRIORITY
+  - [ ] Delivery/collection calculator
+  - [ ] Staging calculator
+  - [ ] Backline matcher
 - [ ] Win/loss analysis dashboard (depends on pipeline — lost_reason basics included in pipeline)
 - [ ] Job close-out workflow
 - [ ] Command Centre dashboard (live data from jobs + contacts)

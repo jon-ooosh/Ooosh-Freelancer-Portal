@@ -137,13 +137,13 @@ export type ChaseMethod = 'phone' | 'email' | 'text' | 'whatsapp';
 
 // Pipeline status display config
 export const PIPELINE_STATUS_CONFIG: Record<PipelineStatus, { label: string; colour: string; order: number }> = {
-  new_enquiry:  { label: 'New Enquiry',     colour: '#3B82F6', order: 1 },  // Blue
-  quoting:      { label: 'Quoting',         colour: '#8B5CF6', order: 2 },  // Purple
-  chasing:      { label: 'Chasing',         colour: '#F59E0B', order: 3 },  // Amber
-  provisional:  { label: 'Provisional',     colour: '#EF4444', order: 4 },  // Red
-  paused:       { label: 'Paused Enquiry',  colour: '#6B7280', order: 5 },  // Grey
-  confirmed:    { label: 'Confirmed',       colour: '#10B981', order: 6 },  // Green
-  lost:         { label: 'Lost',            colour: '#374151', order: 7 },  // Dark grey
+  new_enquiry:  { label: 'Enquiries',       colour: '#3B82F6', order: 1 },  // Blue
+  quoting:      { label: 'Enquiries',       colour: '#3B82F6', order: 1 },  // Merged into Enquiries
+  chasing:      { label: 'Chasing',         colour: '#F59E0B', order: 2 },  // Amber
+  provisional:  { label: 'Provisional',     colour: '#EF4444', order: 3 },  // Red
+  paused:       { label: 'Paused Enquiry',  colour: '#6B7280', order: 4 },  // Grey
+  confirmed:    { label: 'Confirmed',       colour: '#10B981', order: 5 },  // Green
+  lost:         { label: 'Lost',            colour: '#374151', order: 6 },  // Dark grey
 };
 
 export const HOLD_REASON_LABELS: Record<HoldReason, string> = {
