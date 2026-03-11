@@ -33,6 +33,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '002_jobs.sql',
         '003_job_status_tracking.sql',
         '004_pipeline.sql',
+        '005_fix_interaction_types.sql',
       ];
 
       for (const migration of migrations) {

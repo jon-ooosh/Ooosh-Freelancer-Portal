@@ -244,6 +244,16 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
     // Auto-generate job name if not provided
     const finalJobName = job_name || `${client_name} — ${new Date(job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
 
+    // Resolve manager: use provided person_id, or look up the current user's person_id
+    let managerId = manager1_person_id || null;
+    if (!managerId) {
+      const userResult = await query(
+        `SELECT person_id FROM users WHERE id = $1`,
+        [req.user!.id]
+      );
+      managerId = userResult.rows[0]?.person_id || null;
+    }
+
     const result = await query(
       `INSERT INTO jobs (
         job_name, details, job_date, job_end,
@@ -268,15 +278,15 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       ) RETURNING *`,
       [
         finalJobName, details, job_date, job_end,
-        client_id, client_name,
-        venue_id, venue_name,
-        enquiry_source, job_value, likelihood, notes,
-        manager1_person_id || req.user!.id,
+        client_id || null, client_name,
+        venue_id || null, venue_name || null,
+        enquiry_source || null, job_value || null, likelihood || 'warm', notes || null,
+        managerId,
         req.user!.id,
       ]
     );
 
-    // Log creation as an interaction
+    // Log creation as an interaction on the job timeline
     await query(
       `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
        VALUES ('status_transition', $1, $2, $3, 'new_enquiry')`,
