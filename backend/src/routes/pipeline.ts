@@ -231,6 +231,10 @@ const createEnquirySchema = z.object({
   likelihood: z.enum(['hot', 'warm', 'cold']).optional().default('warm'),
   notes: z.string().optional().nullable(),
   manager1_person_id: z.string().uuid().optional().nullable(),
+  // Chase scheduling at creation
+  next_chase_date: z.string().optional().nullable(),
+  chase_interval_days: z.number().optional().nullable(),
+  chase_alert_user_id: z.string().uuid().optional().nullable(),
 });
 
 router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, res: Response) => {
@@ -239,6 +243,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       client_name, details, job_date, job_end, job_name,
       client_id, venue_id, venue_name, enquiry_source,
       job_value, likelihood, notes, manager1_person_id,
+      next_chase_date, chase_interval_days, chase_alert_user_id,
     } = req.body;
 
     // Auto-generate job name if not provided
@@ -253,6 +258,13 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       );
       managerId = userResult.rows[0]?.person_id || null;
     }
+
+    const chaseIntervalDays = chase_interval_days || 3;
+    const chaseDate = next_chase_date || null;
+    // If no chase date given, default to interval from today
+    const chaseDateSql = chaseDate
+      ? `$15::date`
+      : `CURRENT_DATE + ($15 || ' days')::interval`;
 
     const result = await query(
       `INSERT INTO jobs (
@@ -273,7 +285,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
         $13,
         0, 'Enquiry',
         'new_enquiry', NOW(),
-        3, CURRENT_DATE + INTERVAL '3 days',
+        $16, ${chaseDateSql},
         $14
       ) RETURNING *`,
       [
@@ -283,6 +295,8 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
         enquiry_source || null, job_value || null, likelihood || 'warm', notes || null,
         managerId,
         req.user!.id,
+        chaseDate || String(chaseIntervalDays),
+        chaseIntervalDays,
       ]
     );
 
@@ -294,6 +308,20 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
     );
 
     await logAudit(req.user!.id, 'jobs', result.rows[0].id, 'create', null, result.rows[0]);
+
+    // Create chase alert notification if requested
+    if (chase_alert_user_id) {
+      await query(
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
+         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4)`,
+        [
+          chase_alert_user_id,
+          `Chase reminder: ${finalJobName}`,
+          `Chase due for ${client_name} — ${finalJobName}`,
+          result.rows[0].id,
+        ]
+      );
+    }
 
     res.status(201).json(result.rows[0]);
   } catch (error) {

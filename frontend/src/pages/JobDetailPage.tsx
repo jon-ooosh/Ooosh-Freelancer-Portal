@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
@@ -27,23 +27,9 @@ const STATUS_COLOURS: Record<number, string> = {
 };
 
 const FILE_TAGS = [
-  'Stage Plot',
-  'Rider',
-  'Tour Dates',
-  'Quote',
-  'Invoice',
-  'Contract',
-  'Production Schedule',
-  'Site Map',
-  'Risk Assessment',
-  'Other',
+  'Stage Plot', 'Rider', 'Tour Dates', 'Quote', 'Invoice',
+  'Contract', 'Production Schedule', 'Site Map', 'Risk Assessment', 'Other',
 ] as const;
-
-function fileIcon(type: string): string {
-  if (type === 'image') return 'image';
-  if (type === 'document') return 'doc';
-  return 'file';
-}
 
 function fileTagColour(label: string): string {
   const map: Record<string, string> = {
@@ -58,6 +44,14 @@ function fileTagColour(label: string): string {
     'Risk Assessment': 'bg-orange-100 text-orange-700',
   };
   return map[label] || 'bg-gray-100 text-gray-600';
+}
+
+// Check if a file can be previewed inline
+function isPreviewable(name: string): 'image' | 'pdf' | null {
+  const lower = name.toLowerCase();
+  if (/\.(jpg|jpeg|png|gif|webp|svg)$/.test(lower)) return 'image';
+  if (/\.pdf$/.test(lower)) return 'pdf';
+  return null;
 }
 
 interface JobDetail {
@@ -173,6 +167,9 @@ export default function JobDetailPage() {
   const statusLabel = STATUS_MAP[job.status] || job.status_name || `Status ${job.status}`;
   const statusColour = STATUS_COLOURS[job.status] || 'bg-gray-100 text-gray-600';
   const fileCount = (job.files || []).length;
+  const hhJobUrl = job.hh_job_number
+    ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
+    : null;
 
   return (
     <div>
@@ -186,8 +183,18 @@ export default function JobDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-3">
-              {job.hh_job_number && (
-                <span className="text-sm font-mono text-gray-400">#{job.hh_job_number}</span>
+              {job.hh_job_number ? (
+                <a
+                  href={hhJobUrl!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                  title="Open in HireHop"
+                >
+                  #{job.hh_job_number}
+                </a>
+              ) : (
+                <span className="text-sm font-mono text-gray-400">NEW</span>
               )}
               <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${statusColour}`}>
                 {statusLabel}
@@ -224,6 +231,16 @@ export default function JobDetailPage() {
               )}
             </div>
           </div>
+          {hhJobUrl && (
+            <a
+              href={hhJobUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+            >
+              Open in HireHop &rarr;
+            </a>
+          )}
         </div>
 
         {/* Tags */}
@@ -420,7 +437,7 @@ export default function JobDetailPage() {
       {activeTab === 'details' && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <DetailField label="HireHop Job #" value={job.hh_job_number ? String(job.hh_job_number) : 'N/A'} />
+            <DetailField label="HireHop Job #" value={job.hh_job_number ? String(job.hh_job_number) : 'N/A (Ooosh-native)'} />
             <DetailField label="Job Name" value={job.job_name} />
             <DetailField label="Job Type" value={job.job_type} />
             <DetailField label="Status" value={statusLabel} />
@@ -464,6 +481,119 @@ export default function JobDetailPage() {
   );
 }
 
+// ── File Viewer Modal ─────────────────────────────────────────────────────
+
+function FileViewerModal({
+  file,
+  onClose,
+}: {
+  file: FileAttachment | null;
+  onClose: () => void;
+}) {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const loadFile = useCallback(async () => {
+    if (!file) return;
+    setLoading(true);
+    setError('');
+    try {
+      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
+      const url = URL.createObjectURL(blob);
+      setObjectUrl(url);
+    } catch {
+      setError('Failed to load file');
+    } finally {
+      setLoading(false);
+    }
+  }, [file]);
+
+  useEffect(() => {
+    loadFile();
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [file]);
+
+  if (!file) return null;
+
+  const previewType = isPreviewable(file.name);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-4xl mx-4 max-h-[90vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <div className="flex items-center gap-3 min-w-0">
+            <h3 className="text-sm font-semibold text-gray-900 truncate">{file.name}</h3>
+            {file.label && (
+              <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${fileTagColour(file.label)}`}>
+                {file.label}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {objectUrl && (
+              <a
+                href={objectUrl}
+                download={file.name}
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Download
+              </a>
+            )}
+            <button
+              onClick={onClose}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+
+        {/* Comment */}
+        {file.comment && (
+          <div className="px-4 py-2 bg-gray-50 border-b border-gray-200">
+            <p className="text-sm text-gray-600">{file.comment}</p>
+          </div>
+        )}
+
+        {/* Content */}
+        <div className="flex-1 overflow-auto p-4 flex items-center justify-center min-h-[300px]">
+          {loading && (
+            <div className="animate-spin h-8 w-8 border-4 border-ooosh-600 border-t-transparent rounded-full" />
+          )}
+          {error && <p className="text-sm text-red-600">{error}</p>}
+          {objectUrl && previewType === 'image' && (
+            <img src={objectUrl} alt={file.name} className="max-w-full max-h-[70vh] object-contain" />
+          )}
+          {objectUrl && previewType === 'pdf' && (
+            <iframe
+              src={objectUrl}
+              title={file.name}
+              className="w-full h-[70vh] border-0"
+            />
+          )}
+          {objectUrl && !previewType && (
+            <div className="text-center">
+              <p className="text-sm text-gray-500 mb-3">Preview not available for this file type.</p>
+              <a
+                href={objectUrl}
+                download={file.name}
+                className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700"
+              >
+                Download File
+              </a>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Files Section ─────────────────────────────────────────────────────────
 
 function JobFilesSection({
@@ -478,9 +608,11 @@ function JobFilesSection({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
   const [selectedTag, setSelectedTag] = useState('');
+  const [fileComment, setFileComment] = useState('');
   const [deleting, setDeleting] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [filterTag, setFilterTag] = useState('');
+  const [viewingFile, setViewingFile] = useState<FileAttachment | null>(null);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -493,12 +625,12 @@ function JobFilesSection({
       formData.append('file', file);
       formData.append('entity_type', 'jobs');
       formData.append('entity_id', jobId);
-      if (selectedTag) {
-        formData.append('label', selectedTag);
-      }
+      if (selectedTag) formData.append('label', selectedTag);
+      if (fileComment.trim()) formData.append('comment', fileComment.trim());
 
       await api.upload('/files/upload', formData);
       setSelectedTag('');
+      setFileComment('');
       onFilesChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed');
@@ -525,10 +657,7 @@ function JobFilesSection({
     }
   };
 
-  // Get unique tags from existing files
   const existingTags = [...new Set(files.map(f => f.label).filter(Boolean))] as string[];
-
-  // Filter files
   const filteredFiles = filterTag
     ? files.filter(f => f.label === filterTag)
     : files;
@@ -543,38 +672,50 @@ function JobFilesSection({
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
         )}
 
-        <div className="flex items-end gap-3 flex-wrap">
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Tag (optional)</label>
-            <select
-              value={selectedTag}
-              onChange={(e) => setSelectedTag(e.target.value)}
-              className="border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-            >
-              <option value="">No tag</option>
-              {FILE_TAGS.map(tag => (
-                <option key={tag} value={tag}>{tag}</option>
-              ))}
-            </select>
+        <div className="space-y-3">
+          <div className="flex items-end gap-3 flex-wrap">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">Tag</label>
+              <select
+                value={selectedTag}
+                onChange={(e) => setSelectedTag(e.target.value)}
+                className="border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              >
+                <option value="">No tag</option>
+                {FILE_TAGS.map(tag => (
+                  <option key={tag} value={tag}>{tag}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex-1 min-w-[200px]">
+              <label className="block text-xs font-medium text-gray-500 mb-1">Comment</label>
+              <input
+                type="text"
+                value={fileComment}
+                onChange={(e) => setFileComment(e.target.value)}
+                placeholder="Optional note about this file..."
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+            </div>
+            <div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                onChange={handleUpload}
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.jpg,.jpeg,.png,.gif,.webp,.svg,.zip,.rar"
+                className="hidden"
+                id="file-upload"
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
+              >
+                {uploading ? 'Uploading...' : 'Choose File'}
+              </button>
+            </div>
           </div>
-          <div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              onChange={handleUpload}
-              accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.jpg,.jpeg,.png,.gif,.webp,.svg,.zip,.rar"
-              className="hidden"
-              id="file-upload"
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-              className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
-            >
-              {uploading ? 'Uploading...' : 'Choose File'}
-            </button>
-          </div>
-          <p className="text-xs text-gray-400">PDF, images, docs, spreadsheets. Max 10MB.</p>
+          <p className="text-xs text-gray-400">PDF, images, docs, spreadsheets. Max 10MB. Images and PDFs can be viewed inline.</p>
         </div>
       </div>
 
@@ -585,7 +726,7 @@ function JobFilesSection({
             Files {files.length > 0 && `(${files.length})`}
           </h3>
           {existingTags.length > 0 && (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs text-gray-400">Filter:</span>
               <button
                 onClick={() => setFilterTag('')}
@@ -616,64 +757,77 @@ function JobFilesSection({
           </p>
         ) : (
           <div className="space-y-2">
-            {filteredFiles.map((file, idx) => (
-              <div
-                key={file.url || idx}
-                className="flex items-center justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold ${
-                    file.type === 'image' ? 'bg-purple-100 text-purple-600' :
-                    file.type === 'document' ? 'bg-blue-100 text-blue-600' :
-                    'bg-gray-100 text-gray-500'
-                  }`}>
-                    {fileIcon(file.type).toUpperCase().slice(0, 3)}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <a
-                        href={`/api/files/download?key=${encodeURIComponent(file.url)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate"
-                      >
-                        {file.name}
-                      </a>
-                      {file.label && (
-                        <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${fileTagColour(file.label)}`}>
-                          {file.label}
-                        </span>
-                      )}
+            {filteredFiles.map((file, idx) => {
+              const canPreview = isPreviewable(file.name);
+              return (
+                <div
+                  key={file.url || idx}
+                  className="flex items-center justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
+                >
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
+                      file.type === 'image' ? 'bg-purple-100 text-purple-600' :
+                      file.type === 'document' ? 'bg-blue-100 text-blue-600' :
+                      'bg-gray-100 text-gray-500'
+                    }`}>
+                      {file.type === 'image' ? 'IMG' : file.type === 'document' ? 'DOC' : 'FILE'}
                     </div>
-                    <p className="text-xs text-gray-400">
-                      {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
-                        day: 'numeric', month: 'short', year: 'numeric',
-                      })}
-                    </p>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setViewingFile(file)}
+                          className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate text-left"
+                        >
+                          {file.name}
+                          {canPreview && (
+                            <span className="text-xs text-gray-400 ml-1">(click to view)</span>
+                          )}
+                        </button>
+                        {file.label && (
+                          <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${fileTagColour(file.label)}`}>
+                            {file.label}
+                          </span>
+                        )}
+                      </div>
+                      {file.comment && (
+                        <p className="text-xs text-gray-500 mt-0.5 truncate">{file.comment}</p>
+                      )}
+                      <p className="text-xs text-gray-400">
+                        {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
+                          day: 'numeric', month: 'short', year: 'numeric',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+                    <button
+                      onClick={() => setViewingFile(file)}
+                      className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                    >
+                      View
+                    </button>
+                    <button
+                      onClick={() => handleDelete(file.url)}
+                      disabled={deleting === file.url}
+                      className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50"
+                    >
+                      {deleting === file.url ? '...' : 'Delete'}
+                    </button>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <a
-                    href={`/api/files/download?key=${encodeURIComponent(file.url)}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
-                  >
-                    Download
-                  </a>
-                  <button
-                    onClick={() => handleDelete(file.url)}
-                    disabled={deleting === file.url}
-                    className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50"
-                  >
-                    {deleting === file.url ? 'Deleting...' : 'Delete'}
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
+
+      {/* File viewer modal */}
+      {viewingFile && (
+        <FileViewerModal
+          file={viewingFile}
+          onClose={() => setViewingFile(null)}
+        />
+      )}
     </div>
   );
 }

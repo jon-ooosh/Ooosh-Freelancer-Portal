@@ -99,6 +99,44 @@ async function uploadRequest<T>(
   return response.json();
 }
 
+// Fetch a file as a blob with auth headers (for inline viewing)
+async function blobRequest(path: string): Promise<{ blob: Blob; contentType: string }> {
+  const { accessToken, refreshToken, setTokens, logout } = useAuthStore.getState();
+
+  const headers: Record<string, string> = {};
+  if (accessToken) {
+    headers['Authorization'] = `Bearer ${accessToken}`;
+  }
+
+  let response = await fetch(`${API_BASE}${path}`, { headers });
+
+  if (response.status === 401 && refreshToken) {
+    const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (refreshResponse.ok) {
+      const tokens = await refreshResponse.json();
+      setTokens(tokens.accessToken, tokens.refreshToken);
+      headers['Authorization'] = `Bearer ${tokens.accessToken}`;
+      response = await fetch(`${API_BASE}${path}`, { headers });
+    } else {
+      logout();
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const blob = await response.blob();
+  const contentType = response.headers.get('Content-Type') || 'application/octet-stream';
+  return { blob, contentType };
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body: unknown) =>
@@ -111,4 +149,5 @@ export const api = {
   deleteWithBody: <T>(path: string, body: unknown) =>
     request<T>(path, { method: 'DELETE', body: JSON.stringify(body) }),
   upload: <T>(path: string, formData: FormData) => uploadRequest<T>(path, formData),
+  blob: (path: string) => blobRequest(path),
 };

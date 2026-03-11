@@ -8,6 +8,7 @@
 export interface FileAttachment {
   name: string;
   label?: string;
+  comment?: string;
   url: string;
   type: 'document' | 'image' | 'other';
   uploaded_at: string;
@@ -139,8 +140,8 @@ export const PIPELINE_STATUS_CONFIG: Record<PipelineStatus, { label: string; col
   new_enquiry:  { label: 'New Enquiry',     colour: '#3B82F6', order: 1 },  // Blue
   quoting:      { label: 'Quoting',         colour: '#8B5CF6', order: 2 },  // Purple
   chasing:      { label: 'Chasing',         colour: '#F59E0B', order: 3 },  // Amber
-  paused:       { label: 'Paused Enquiry',  colour: '#6B7280', order: 4 },  // Grey
-  provisional:  { label: 'Provisional',     colour: '#EF4444', order: 5 },  // Red
+  provisional:  { label: 'Provisional',     colour: '#EF4444', order: 4 },  // Red
+  paused:       { label: 'Paused Enquiry',  colour: '#6B7280', order: 5 },  // Grey
   confirmed:    { label: 'Confirmed',       colour: '#10B981', order: 6 },  // Green
   lost:         { label: 'Lost',            colour: '#374151', order: 7 },  // Dark grey
 };

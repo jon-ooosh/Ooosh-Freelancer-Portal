@@ -63,7 +63,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
       return;
     }
 
-    const { entity_type, entity_id, label } = req.body;
+    const { entity_type, entity_id, label, comment } = req.body;
     if (!entity_type || !entity_id) {
       res.status(400).json({ error: 'entity_type and entity_id are required' });
       return;
@@ -91,6 +91,9 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
 
     if (label && label.trim()) {
       fileAttachment.label = label.trim();
+    }
+    if (comment && comment.trim()) {
+      fileAttachment.comment = comment.trim();
     }
 
     // Append to entity's files JSONB array

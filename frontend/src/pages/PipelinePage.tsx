@@ -31,7 +31,7 @@ type SortMode = 'chase_date' | 'job_date_nearest' | 'job_date_furthest' | 'value
 // ── Column order ───────────────────────────────────────────────────────────
 
 const COLUMN_ORDER: PipelineStatus[] = [
-  'new_enquiry', 'quoting', 'chasing', 'paused', 'provisional', 'confirmed', 'lost',
+  'new_enquiry', 'quoting', 'chasing', 'provisional', 'paused', 'confirmed', 'lost',
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -235,9 +235,20 @@ function PipelineCard({
     >
       {/* Row 1: Job number + value */}
       <div className="flex items-center justify-between mb-1">
-        <span className="text-xs font-mono text-gray-500">
-          {job.hh_job_number ? `J-${job.hh_job_number}` : 'NEW'}
-        </span>
+        {job.hh_job_number ? (
+          <a
+            href={`https://myhirehop.com/job.php?id=${job.hh_job_number}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-xs font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
+            title="Open in HireHop"
+          >
+            J-{job.hh_job_number}
+          </a>
+        ) : (
+          <span className="text-xs font-mono text-gray-400">NEW</span>
+        )}
         <span className="text-sm font-semibold text-gray-900">
           {formatCurrency(job.job_value)}
         </span>
@@ -467,12 +478,13 @@ function ChaseModal({
   const [content, setContent] = useState('');
   const [chaseResponse, setChaseResponse] = useState('');
   const [nextChaseDate, setNextChaseDate] = useState('');
+  const [chaseAlertUserId, setChaseAlertUserId] = useState('');
+  const [teamUsers, setTeamUsers] = useState<{ id: string; email: string; first_name: string; last_name: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (isOpen && job) {
-      // Default next chase date from job's chase interval
       const days = job.chase_interval_days || 3;
       const next = new Date();
       next.setDate(next.getDate() + days);
@@ -480,9 +492,18 @@ function ChaseModal({
       setContent('');
       setChaseResponse('');
       setChaseMethod('phone');
+      setChaseAlertUserId('');
       setError('');
     }
   }, [isOpen, job]);
+
+  useEffect(() => {
+    if (isOpen && teamUsers.length === 0) {
+      api.get<{ data: { id: string; email: string; first_name: string; last_name: string }[] }>('/users')
+        .then(res => setTeamUsers(res.data))
+        .catch(() => {});
+    }
+  }, [isOpen]);
 
   if (!isOpen || !job) return null;
 
@@ -501,6 +522,7 @@ function ChaseModal({
         chase_method: chaseMethod,
         chase_response: chaseResponse || undefined,
         next_chase_date: nextChaseDate || undefined,
+        chase_alert_user_id: chaseAlertUserId || undefined,
       });
       onChaseLogged();
       onClose();
@@ -568,13 +590,44 @@ function ChaseModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Next chase date</label>
-            <input
-              type="date"
-              value={nextChaseDate}
-              onChange={(e) => setNextChaseDate(e.target.value)}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-            />
+            <label className="block text-sm font-medium text-gray-700 mb-1">Next chase</label>
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              {[
+                { label: '2 hrs', fn: () => setNextChaseDate(addHoursToNow(2)) },
+                { label: '2 days', fn: () => setNextChaseDate(addDaysToDate(2)) },
+                { label: '5 days', fn: () => setNextChaseDate(addDaysToDate(5)) },
+                { label: '14 days', fn: () => setNextChaseDate(addDaysToDate(14)) },
+              ].map(({ label, fn }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={fn}
+                  className="px-2.5 py-1 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <input
+                type="date"
+                value={nextChaseDate}
+                onChange={(e) => setNextChaseDate(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+              <select
+                value={chaseAlertUserId}
+                onChange={(e) => setChaseAlertUserId(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              >
+                <option value="">No alert</option>
+                {teamUsers.map(u => (
+                  <option key={u.id} value={u.id}>
+                    Alert: {u.first_name} {u.last_name}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
 
@@ -605,11 +658,32 @@ const FILE_TAGS = [
   'Contract', 'Production Schedule', 'Site Map', 'Risk Assessment', 'Other',
 ] as const;
 
+// ── Chase date helper ─────────────────────────────────────────────────────
+
+function addDaysToDate(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString().split('T')[0];
+}
+
+function addHoursToNow(hours: number): string {
+  const d = new Date();
+  d.setHours(d.getHours() + hours);
+  return d.toISOString().split('T')[0]; // Chase dates are date-only in DB
+}
+
 // ── New Enquiry Modal ──────────────────────────────────────────────────────
 
 interface StagedFile {
   file: File;
   tag: string;
+}
+
+interface TeamUser {
+  id: string;
+  email: string;
+  first_name: string;
+  last_name: string;
 }
 
 function NewEnquiryModal({
@@ -640,6 +714,20 @@ function NewEnquiryModal({
   const [fileTag, setFileTag] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Chase scheduling
+  const [nextChaseDate, setNextChaseDate] = useState(() => addDaysToDate(3));
+  const [chaseAlertUserId, setChaseAlertUserId] = useState('');
+  const [teamUsers, setTeamUsers] = useState<TeamUser[]>([]);
+
+  // Load team users for alert dropdown
+  useEffect(() => {
+    if (isOpen && teamUsers.length === 0) {
+      api.get<{ data: TeamUser[] }>('/users')
+        .then(res => setTeamUsers(res.data))
+        .catch(() => {});
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
   const handleClientSelect = (result: SearchResult) => {
@@ -649,6 +737,19 @@ function NewEnquiryModal({
     } else {
       setClientId(null);
     }
+  };
+
+  // Date logic: setting start date auto-sets end date to same day, end date can't be before start
+  const handleStartDateChange = (val: string) => {
+    setJobDate(val);
+    if (!jobEnd || jobEnd < val) {
+      setJobEnd(val);
+    }
+  };
+
+  const handleEndDateChange = (val: string) => {
+    if (jobDate && val < jobDate) return; // Don't allow end before start
+    setJobEnd(val);
   };
 
   const handleFileStage = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -683,6 +784,8 @@ function NewEnquiryModal({
         likelihood,
         enquiry_source: enquirySource || undefined,
         notes: notes || undefined,
+        next_chase_date: nextChaseDate || undefined,
+        chase_alert_user_id: chaseAlertUserId || undefined,
       });
 
       // Upload staged files
@@ -706,6 +809,7 @@ function NewEnquiryModal({
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag('');
+      setNextChaseDate(addDaysToDate(3)); setChaseAlertUserId('');
       onCreated();
       onClose();
     } catch (err) {
@@ -756,7 +860,7 @@ function NewEnquiryModal({
               <input
                 type="date"
                 value={jobDate}
-                onChange={(e) => setJobDate(e.target.value)}
+                onChange={(e) => handleStartDateChange(e.target.value)}
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
             </div>
@@ -765,9 +869,52 @@ function NewEnquiryModal({
               <input
                 type="date"
                 value={jobEnd}
-                onChange={(e) => setJobEnd(e.target.value)}
+                min={jobDate || undefined}
+                onChange={(e) => handleEndDateChange(e.target.value)}
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
+            </div>
+          </div>
+
+          {/* Chase scheduling */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">First chase</label>
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              {[
+                { label: '2 hrs', fn: () => setNextChaseDate(addHoursToNow(2)) },
+                { label: '2 days', fn: () => setNextChaseDate(addDaysToDate(2)) },
+                { label: '5 days', fn: () => setNextChaseDate(addDaysToDate(5)) },
+                { label: '14 days', fn: () => setNextChaseDate(addDaysToDate(14)) },
+              ].map(({ label, fn }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={fn}
+                  className="px-2.5 py-1 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <input
+                type="date"
+                value={nextChaseDate}
+                onChange={(e) => setNextChaseDate(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+              <select
+                value={chaseAlertUserId}
+                onChange={(e) => setChaseAlertUserId(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              >
+                <option value="">No alert</option>
+                {teamUsers.map(u => (
+                  <option key={u.id} value={u.id}>
+                    Alert: {u.first_name} {u.last_name}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
 
@@ -1275,8 +1422,20 @@ export default function PipelinePage() {
                     >
                       <td className="px-4 py-3">
                         <div className="text-sm font-medium text-gray-900">{job.job_name || 'Untitled'}</div>
-                        <div className="text-xs text-gray-400 font-mono">
-                          {job.hh_job_number ? `J-${job.hh_job_number}` : 'NEW'}
+                        <div className="text-xs font-mono">
+                          {job.hh_job_number ? (
+                            <a
+                              href={`https://myhirehop.com/job.php?id=${job.hh_job_number}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                            >
+                              J-{job.hh_job_number}
+                            </a>
+                          ) : (
+                            <span className="text-gray-400">NEW</span>
+                          )}
                         </div>
                       </td>
                       <td className="px-4 py-3 text-sm text-gray-600">

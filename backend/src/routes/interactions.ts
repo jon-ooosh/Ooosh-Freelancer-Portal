@@ -24,6 +24,8 @@ const createInteractionSchema = z.object({
   chase_response: z.string().optional().nullable(),
   // Optional: override next chase date (otherwise auto-calculated)
   next_chase_date: z.string().optional().nullable(),
+  // Chase alert: notify a user when chase is due
+  chase_alert_user_id: z.string().uuid().optional().nullable(),
 });
 
 // GET /api/interactions — timeline for an entity
@@ -83,6 +85,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     const {
       type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
       mentioned_user_ids, chase_method, chase_response, next_chase_date,
+      chase_alert_user_id,
     } = req.body;
 
     // If linked to a job, snapshot current status for tracking
@@ -127,6 +130,23 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         WHERE id = $2`,
         [chaseDate, job_id]
       );
+
+      // Create chase alert notification if requested
+      if (chase_alert_user_id) {
+        const jobInfo = await query(`SELECT job_name, client_name FROM jobs WHERE id = $1`, [job_id]);
+        const jobName = jobInfo.rows[0]?.job_name || 'Unknown job';
+        const clientName = jobInfo.rows[0]?.client_name || '';
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
+           VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4)`,
+          [
+            chase_alert_user_id,
+            `Chase reminder: ${jobName}`,
+            `Chase due for ${clientName} — ${jobName}. ${content}`,
+            job_id,
+          ]
+        );
+      }
     }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
