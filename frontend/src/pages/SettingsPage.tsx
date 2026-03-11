@@ -468,6 +468,9 @@ function SettingsContent() {
         </div>
       </div>
 
+      {/* Calculator Settings — admin & manager */}
+      <CostingSettingsSection />
+
       {/* HireHop Sync section — admin only */}
       {currentUser?.role === 'admin' && <HireHopSection />}
 
@@ -677,6 +680,220 @@ function Stat({ label, value, color }: { label: string; value: number; color: st
     <div className="text-center">
       <div className={`text-xl font-bold ${color}`}>{value}</div>
       <div className="text-xs text-gray-500">{label}</div>
+    </div>
+  );
+}
+
+// ── Calculator / Costing Settings ─────────────────────────────────────────
+
+interface SettingRow {
+  key: string;
+  value: number;
+  label: string;
+  unit: string;
+}
+
+const UNIT_LABELS: Record<string, string> = {
+  per_hour: '/hr',
+  per_day: '/day',
+  per_litre: '/L',
+  minutes: 'mins',
+  percent: '%',
+  currency: '£',
+  hours: 'hrs',
+  ratio: 'x',
+};
+
+const SETTING_GROUPS: { title: string; keys: string[] }[] = [
+  {
+    title: 'Freelancer Rates',
+    keys: ['freelancer_hourly_day', 'freelancer_hourly_night', 'driver_day_rate'],
+  },
+  {
+    title: 'Client Rates',
+    keys: ['client_hourly_day', 'client_hourly_night', 'day_rate_client_markup'],
+  },
+  {
+    title: 'Fuel & Transport',
+    keys: ['fuel_price_per_litre', 'fuel_efficiency_mpg'],
+  },
+  {
+    title: 'Timing',
+    keys: ['handover_time_mins', 'unload_time_mins', 'min_hours_threshold'],
+  },
+  {
+    title: 'Costs & Markup',
+    keys: ['admin_cost_per_hour', 'expense_markup_percent', 'min_client_charge_floor'],
+  },
+];
+
+function CostingSettingsSection() {
+  const [settings, setSettings] = useState<Record<string, SettingRow>>({});
+  const [editValues, setEditValues] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    loadSettings();
+  }, []);
+
+  async function loadSettings() {
+    try {
+      const data = await api.get<{ data: Record<string, { value: number; label: string; unit: string }> }>('/quotes/settings');
+      const rows: Record<string, SettingRow> = {};
+      const vals: Record<string, string> = {};
+      for (const [key, info] of Object.entries(data.data)) {
+        rows[key] = { key, value: info.value, label: info.label, unit: info.unit };
+        vals[key] = String(info.value);
+      }
+      setSettings(rows);
+      setEditValues(vals);
+    } catch (err) {
+      console.error('Failed to load costing settings:', err);
+      setError('Could not load calculator settings.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleEdit(key: string, val: string) {
+    setEditValues((prev) => ({ ...prev, [key]: val }));
+  }
+
+  function hasChanges(): boolean {
+    return Object.keys(settings).some(
+      (key) => String(settings[key].value) !== editValues[key]
+    );
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      const changed: Record<string, number> = {};
+      for (const [key, row] of Object.entries(settings)) {
+        const newVal = parseFloat(editValues[key]);
+        if (!isNaN(newVal) && newVal !== row.value) {
+          changed[key] = newVal;
+        }
+      }
+      if (Object.keys(changed).length === 0) {
+        setEditing(false);
+        return;
+      }
+      await api.put('/quotes/settings', { settings: changed });
+      setSuccess('Settings updated.');
+      setEditing(false);
+      loadSettings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save settings');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleCancel() {
+    // Reset edit values
+    const vals: Record<string, string> = {};
+    for (const [key, row] of Object.entries(settings)) {
+      vals[key] = String(row.value);
+    }
+    setEditValues(vals);
+    setEditing(false);
+    setError('');
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="mb-8">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Calculator Settings</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Rates and defaults used by the transport/crew calculator.
+          </p>
+        </div>
+        {!editing ? (
+          <button
+            onClick={() => setEditing(true)}
+            className="px-4 py-2 text-sm border border-gray-300 rounded font-medium hover:bg-gray-50 transition-colors"
+          >
+            Edit Rates
+          </button>
+        ) : (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCancel}
+              className="px-4 py-2 text-sm border border-gray-300 rounded font-medium hover:bg-gray-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving || !hasChanges()}
+              className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : 'Save Changes'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {success && (
+        <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm mb-4">
+          {success}
+        </div>
+      )}
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm mb-4">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {SETTING_GROUPS.map((group) => (
+          <div key={group.title} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 className="text-sm font-semibold text-gray-700 mb-3">{group.title}</h3>
+            <div className="space-y-3">
+              {group.keys.map((key) => {
+                const row = settings[key];
+                if (!row) return null;
+                const unitLabel = UNIT_LABELS[row.unit] || row.unit;
+                return (
+                  <div key={key}>
+                    <label className="block text-xs text-gray-500 mb-1">{row.label}</label>
+                    <div className="flex items-center gap-2">
+                      {row.unit === 'currency' || row.unit === 'per_hour' || row.unit === 'per_day' || row.unit === 'per_litre' ? (
+                        <span className="text-sm text-gray-400">£</span>
+                      ) : null}
+                      {editing ? (
+                        <input
+                          type="number"
+                          value={editValues[key] || ''}
+                          onChange={(e) => handleEdit(key, e.target.value)}
+                          step="0.01"
+                          min="0"
+                          className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                        />
+                      ) : (
+                        <span className="text-sm font-medium text-gray-900">
+                          {row.value}
+                        </span>
+                      )}
+                      <span className="text-xs text-gray-400 whitespace-nowrap">{unitLabel}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

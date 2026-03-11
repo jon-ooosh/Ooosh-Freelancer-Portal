@@ -68,10 +68,30 @@ CREATE TABLE IF NOT EXISTS quotes (
   estimated_time_mins     INT,
   estimated_time_hrs      DECIMAL(6, 2),
 
+  -- OOH
+  early_start_mins  INT DEFAULT 0,
+  late_finish_mins  INT DEFAULT 0,
+  ooh_manual        BOOLEAN DEFAULT false,
+
+  -- Additional input context
+  what_is_it        VARCHAR(20),  -- 'vehicle', 'equipment', 'people'
+  add_collection    BOOLEAN DEFAULT false,
+  collection_date   DATE,
+  collection_time   VARCHAR(10),
+  client_name       VARCHAR(500),
+  includes_setup    BOOLEAN DEFAULT false,
+  setup_description TEXT,
+  work_type         VARCHAR(50),
+  work_description  TEXT,
+  job_finish_date   DATE,
+  is_multi_day      BOOLEAN DEFAULT false,
+
   -- Settings snapshot (rates at time of calculation)
   settings_snapshot       JSONB,
 
-  notes             TEXT,
+  -- Notes: internal (Ooosh only) and freelancer-facing
+  internal_notes    TEXT,       -- Margins, client charges, commercial notes (Ooosh eyes only)
+  freelancer_notes  TEXT,       -- Expense expectations, what's included, general £ info (visible to freelancer)
   created_by        UUID REFERENCES users(id),
   created_at        TIMESTAMPTZ DEFAULT NOW(),
   updated_at        TIMESTAMPTZ DEFAULT NOW(),

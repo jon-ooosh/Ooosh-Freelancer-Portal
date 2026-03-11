@@ -313,6 +313,84 @@ export interface PicklistItem {
   created_at: string;
 }
 
+// ============================================================================
+// Calculator & Quotes
+// ============================================================================
+
+export interface CostingSettings {
+  freelancer_hourly_day: number;
+  freelancer_hourly_night: number;
+  client_hourly_day: number;
+  client_hourly_night: number;
+  driver_day_rate: number;
+  admin_cost_per_hour: number;
+  fuel_price_per_litre: number;
+  handover_time_mins: number;
+  unload_time_mins: number;
+  expense_markup_percent: number;
+  min_hours_threshold: number;
+  min_client_charge_floor: number;
+  day_rate_client_markup: number;
+  fuel_efficiency_mpg: number;
+}
+
+export interface CostingSettingRow {
+  key: string;
+  value: number;
+  label: string;
+  unit: string;
+}
+
+export type QuoteJobType = 'delivery' | 'collection' | 'crewed';
+export type QuoteCalcMode = 'hourly' | 'dayrate';
+export type QuoteWhatIsIt = 'vehicle' | 'equipment' | 'people';
+
+export interface QuoteExpenseItem {
+  id: string;
+  category: string;   // fuel, parking, tolls, transport_out, transport_back, hotel, pd, other
+  label: string;
+  amount: number;
+  included: boolean;
+  description?: string;
+  pdDays?: number;
+}
+
+export interface SavedQuote {
+  id: string;
+  job_id: string | null;
+  job_type: QuoteJobType;
+  calculation_mode: QuoteCalcMode;
+  venue_name: string | null;
+  venue_id: string | null;
+  distance_miles: number | null;
+  drive_time_mins: number | null;
+  arrival_time: string | null;
+  job_date: string | null;
+  job_finish_date: string | null;
+  is_multi_day: boolean;
+  work_duration_hrs: number | null;
+  num_days: number | null;
+  what_is_it: QuoteWhatIsIt | null;
+  add_collection: boolean;
+  collection_date: string | null;
+  client_name: string | null;
+  work_type: string | null;
+  expenses: QuoteExpenseItem[];
+  // Calculated
+  client_charge_rounded: number;
+  freelancer_fee_rounded: number;
+  our_margin: number;
+  our_total_cost: number;
+  estimated_time_hrs: number | null;
+  // Notes
+  internal_notes: string | null;
+  freelancer_notes: string | null;
+  // Meta
+  created_by: string;
+  created_by_name: string | null;
+  created_at: string;
+}
+
 // API response wrappers
 export interface PaginatedResponse<T> {
   data: T[];

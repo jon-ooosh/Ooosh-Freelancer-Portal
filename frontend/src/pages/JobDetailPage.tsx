@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
+import TransportCalculator from '../components/TransportCalculator';
 import type { FileAttachment } from '@shared/index';
 
 const STATUS_MAP: Record<number, string> = {
@@ -117,6 +118,7 @@ export default function JobDetailPage() {
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'details'>('overview');
+  const [showCalculator, setShowCalculator] = useState(false);
 
   useEffect(() => {
     if (id) {
@@ -240,16 +242,24 @@ export default function JobDetailPage() {
               )}
             </div>
           </div>
-          {hhJobUrl && (
-            <a
-              href={hhJobUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowCalculator(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-ooosh-300 rounded-lg hover:bg-ooosh-50 text-ooosh-600 font-medium"
             >
-              Open in HireHop &rarr;
-            </a>
-          )}
+              Transport Calculator
+            </button>
+            {hhJobUrl && (
+              <a
+                href={hhJobUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+              >
+                Open in HireHop &rarr;
+              </a>
+            )}
+          </div>
         </div>
 
         {/* Tags */}
@@ -486,6 +496,21 @@ export default function JobDetailPage() {
           )}
         </div>
       )}
+
+      {/* Transport Calculator Modal */}
+      <TransportCalculator
+        isOpen={showCalculator}
+        onClose={() => setShowCalculator(false)}
+        onSaved={loadJob}
+        jobId={job.id}
+        jobName={job.job_name || undefined}
+        clientName={job.client_name || job.company_name || undefined}
+        venueName={job.venue_name || undefined}
+        venueId={job.venue_id || undefined}
+        jobDate={job.job_date || undefined}
+        jobEndDate={job.job_end || undefined}
+        hhJobNumber={job.hh_job_number || undefined}
+      />
     </div>
   );
 }

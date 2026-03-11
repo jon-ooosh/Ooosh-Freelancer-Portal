@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import TransportCalculator from '../components/TransportCalculator';
 import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
@@ -213,11 +214,13 @@ function PipelineCard({
   onDragStart,
   onClick,
   onChase,
+  onTransport,
 }: {
   job: Job;
   onDragStart: (e: React.DragEvent, job: Job) => void;
   onClick: (job: Job) => void;
   onChase: (job: Job) => void;
+  onTransport: (job: Job) => void;
 }) {
   const chase = chaseDueLabel(job.next_chase_date);
   const borderClass =
@@ -307,6 +310,13 @@ function PipelineCard({
             title="Log a chase"
           >
             Chase
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); onTransport(job); }}
+            className="text-xs text-gray-500 hover:text-ooosh-600 font-medium hover:underline"
+            title="Transport calculator"
+          >
+            Transport
           </button>
         </div>
         {job.manager1_name && (
@@ -1141,6 +1151,7 @@ export default function PipelinePage() {
     targetStatus: PipelineStatus;
   } | null>(null);
   const [chaseModal, setChaseModal] = useState<Job | null>(null);
+  const [transportJob, setTransportJob] = useState<Job | null>(null);
 
   // Drag state
   const dragJobRef = useRef<Job | null>(null);
@@ -1431,6 +1442,7 @@ export default function PipelinePage() {
                           onDragStart={handleDragStart}
                           onClick={handleCardClick}
                           onChase={(j) => setChaseModal(j)}
+                          onTransport={(j) => setTransportJob(j)}
                         />
                       ))
                     )}
@@ -1562,6 +1574,19 @@ export default function PipelinePage() {
         job={chaseModal}
         onClose={() => setChaseModal(null)}
         onChaseLogged={fetchPipeline}
+      />
+      <TransportCalculator
+        isOpen={!!transportJob}
+        onClose={() => setTransportJob(null)}
+        onSaved={fetchPipeline}
+        jobId={transportJob?.id}
+        jobName={transportJob?.job_name || undefined}
+        clientName={transportJob?.company_name || transportJob?.client_name || undefined}
+        venueName={transportJob?.venue_name || undefined}
+        venueId={transportJob?.venue_id || undefined}
+        jobDate={transportJob?.job_date || undefined}
+        jobEndDate={transportJob?.job_end || undefined}
+        hhJobNumber={transportJob?.hh_job_number || undefined}
       />
     </div>
   );
