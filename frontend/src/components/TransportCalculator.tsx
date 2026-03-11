@@ -21,6 +21,7 @@ interface CostingSettings {
   min_client_charge_floor: number;
   day_rate_client_markup: number;
   fuel_efficiency_mpg: number;
+  expense_variance_threshold: number;
 }
 
 interface VenueOption {
@@ -151,6 +152,14 @@ function normalizeTimeInput(value: string): string {
     }
   }
   return '';
+}
+
+/** Extract YYYY-MM-DD from ISO date string or date string */
+function toDateInput(dateStr?: string | null): string {
+  if (!dateStr) return '';
+  // Handle ISO format "2026-03-15T00:00:00.000Z" or plain "2026-03-15"
+  const match = dateStr.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : '';
 }
 
 function generateExpenseId(): string {
@@ -446,6 +455,9 @@ export default function TransportCalculator({
   const [venueDropdownOpen, setVenueDropdownOpen] = useState(false);
   const [step, setStep] = useState(1);
   const venueDropdownRef = useRef<HTMLDivElement>(null);
+  // Track original HireHop dates for change warnings
+  const [hhOriginalDate, setHhOriginalDate] = useState('');
+  const [hhOriginalEndDate, setHhOriginalEndDate] = useState('');
 
   // Load settings + venues on open
   useEffect(() => {
@@ -455,12 +467,19 @@ export default function TransportCalculator({
     setSuccess(null);
     setStep(1);
 
+    // Parse dates from HireHop props
+    const parsedDate = toDateInput(jobDate);
+    const parsedEndDate = toDateInput(jobEndDate);
+    setHhOriginalDate(parsedDate);
+    setHhOriginalEndDate(parsedEndDate);
+
     // Reset form with pre-filled values
     setFormData({
       ...INITIAL_FORM,
       expenses: createInitialExpenses(),
-      jobDate: jobDate || '',
-      jobFinishDate: jobEndDate || '',
+      jobDate: parsedDate,
+      jobFinishDate: parsedEndDate,
+      isMultiDay: !!(parsedDate && parsedEndDate && parsedDate !== parsedEndDate),
     });
     setVenueSearch(venueName || '');
 
@@ -514,6 +533,7 @@ export default function TransportCalculator({
         min_client_charge_floor: s.min_client_charge_floor ?? 0,
         day_rate_client_markup: s.day_rate_client_markup ?? 1.8,
         fuel_efficiency_mpg: s.fuel_efficiency_mpg ?? 5,
+        expense_variance_threshold: s.expense_variance_threshold ?? 20,
       });
     } catch {
       setError('Failed to load calculator settings');
@@ -654,7 +674,7 @@ export default function TransportCalculator({
   const isVehicle = formData.whatIsIt === 'vehicle';
   const needsTravelQuestion = isDC && isVehicle;
   const totalSteps = isCrewedJob ? 5 : 4;
-  const stepLabels = isCrewedJob ? ['Job', 'Transport', 'Work', 'Expenses', 'Review'] : ['Job', 'Transport', 'Expenses', 'Review'];
+  const stepLabels = isCrewedJob ? ['🎯 Job', '🚗 Transport', '🔧 Work', '💷 Expenses', '📋 Review'] : ['🎯 Job', '🚗 Transport', '💷 Expenses', '📋 Review'];
 
   const isStep1Valid = formData.jobType !== '' && formData.jobDate !== '' && (isCrewedJob || formData.whatIsIt !== '');
   const isStep2Valid = isCrewedJob ? true : (formData.destination !== '' && formData.distanceMiles >= 0);
@@ -668,7 +688,7 @@ export default function TransportCalculator({
         {/* Header */}
         <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between sm:rounded-t-xl">
           <div>
-            <h2 className="text-lg font-bold text-gray-900">Transport & Crew Calculator</h2>
+            <h2 className="text-lg font-bold text-gray-900">🧮 Transport & Crew Calculator</h2>
             {(jobName || hhJobNumber) && (
               <p className="text-sm text-gray-500">
                 {hhJobNumber ? `#${hhJobNumber} ` : ''}{jobName || ''}{clientName ? ` — ${clientName}` : ''}
@@ -716,14 +736,14 @@ export default function TransportCalculator({
               {/* ─── STEP 1: JOB DETAILS ─── */}
               {step === 1 && (
                 <div className="space-y-6">
-                  <h3 className="text-lg font-semibold text-gray-900">What are we doing?</h3>
+                  <h3 className="text-lg font-semibold text-gray-900">🎯 What are we doing?</h3>
 
                   {/* Job type */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     {([
-                      { value: 'delivery', label: 'Delivery', desc: 'Taking something out' },
-                      { value: 'collection', label: 'Collection', desc: 'Bringing something back' },
-                      { value: 'crewed', label: 'Crewed Job', desc: 'Freelancer works on site' },
+                      { value: 'delivery', label: 'Delivery', desc: 'Taking something out', emoji: '📦' },
+                      { value: 'collection', label: 'Collection', desc: 'Bringing something back', emoji: '📥' },
+                      { value: 'crewed', label: 'Crewed Job', desc: 'Freelancer works on site', emoji: '👷' },
                     ] as const).map((opt) => (
                       <button
                         key={opt.value}
@@ -738,6 +758,7 @@ export default function TransportCalculator({
                         }))}
                         className={`p-4 rounded-xl border-2 text-left transition-all ${formData.jobType === opt.value ? 'border-ooosh-500 bg-ooosh-50' : 'border-gray-200 hover:border-gray-300'}`}
                       >
+                        <div className="text-2xl mb-1">{opt.emoji}</div>
                         <h4 className="font-semibold text-gray-900">{opt.label}</h4>
                         <p className="text-xs text-gray-500">{opt.desc}</p>
                       </button>
@@ -747,18 +768,19 @@ export default function TransportCalculator({
                   {/* What is it? (D&C only) */}
                   {isDC && (
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-3">What is it?</label>
+                      <label className="block text-sm font-medium text-gray-700 mb-3">🤔 What is it?</label>
                       <div className="grid grid-cols-3 gap-3">
                         {([
-                          { value: 'vehicle', label: 'A Vehicle', hint: 'Driver returns separately' },
-                          { value: 'equipment', label: 'Equipment', hint: 'Driver returns with van' },
-                          { value: 'people', label: 'People', hint: 'Driver returns with van' },
+                          { value: 'vehicle', label: 'A Vehicle', hint: 'Driver returns separately', emoji: '🚐' },
+                          { value: 'equipment', label: 'Equipment', hint: 'Driver returns with van', emoji: '🎸' },
+                          { value: 'people', label: 'People', hint: 'Driver returns with van', emoji: '👥' },
                         ] as const).map((opt) => (
                           <button
                             key={opt.value}
                             onClick={() => updateField('whatIsIt', opt.value)}
                             className={`p-3 rounded-lg border-2 text-center transition-all ${formData.whatIsIt === opt.value ? 'border-ooosh-500 bg-ooosh-50' : 'border-gray-200 hover:border-gray-300'}`}
                           >
+                            <div className="text-xl mb-1">{opt.emoji}</div>
                             <p className="text-sm font-medium text-gray-900">{opt.label}</p>
                             <p className="text-xs text-gray-500">{opt.hint}</p>
                           </button>
@@ -802,13 +824,18 @@ export default function TransportCalculator({
 
                   {/* When */}
                   <div className="border-t pt-6">
-                    <h4 className="font-medium text-gray-900 mb-4">When?</h4>
+                    <h4 className="font-medium text-gray-900 mb-4">📅 When?</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">
                           {formData.jobType === 'collection' ? 'Collection Date' : isCrewedJob && formData.isMultiDay ? 'Start Date' : 'Job Date'}
                         </label>
                         <input type="date" value={formData.jobDate} onChange={(e) => updateField('jobDate', e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                        {hhOriginalDate && formData.jobDate && formData.jobDate !== hhOriginalDate && (
+                          <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                            <span>⚠️</span> Changed from HireHop date: {formatDateUK(hhOriginalDate)}
+                          </p>
+                        )}
                       </div>
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Arrive by (optional)</label>
@@ -828,6 +855,11 @@ export default function TransportCalculator({
                               <input type="date" value={formData.jobFinishDate} onChange={(e) => updateField('jobFinishDate', e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
                               {formData.jobDate && formData.jobFinishDate && (
                                 <p className="text-xs text-ooosh-600 mt-1">{calculateDaysBetween(formData.jobDate, formData.jobFinishDate)} days</p>
+                              )}
+                              {hhOriginalEndDate && formData.jobFinishDate && formData.jobFinishDate !== hhOriginalEndDate && (
+                                <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                                  <span>⚠️</span> Changed from HireHop: {formatDateUK(hhOriginalEndDate)}
+                                </p>
                               )}
                             </div>
                           )}
@@ -863,7 +895,7 @@ export default function TransportCalculator({
               {/* ─── STEP 2: TRANSPORT ─── */}
               {step === 2 && (
                 <div className="space-y-6">
-                  <h3 className="text-lg font-semibold text-gray-900">Transport Details</h3>
+                  <h3 className="text-lg font-semibold text-gray-900">🚗 Transport Details</h3>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="md:col-span-2" ref={venueDropdownRef}>
@@ -898,7 +930,7 @@ export default function TransportCalculator({
                           </div>
                         )}
                       </div>
-                      {formData.selectedVenueId && <p className="text-xs text-green-600 mt-1">Selected from venues database</p>}
+                      {formData.selectedVenueId && <p className="text-xs text-green-600 mt-1">✅ Selected from venues database</p>}
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">Distance (miles, one-way)</label>
@@ -942,7 +974,7 @@ export default function TransportCalculator({
               {/* ─── STEP 3: WORK (Crewed only) ─── */}
               {step === 3 && isCrewedJob && (
                 <div className="space-y-6">
-                  <h3 className="text-lg font-semibold text-gray-900">Work Details</h3>
+                  <h3 className="text-lg font-semibold text-gray-900">🔧 Work Details</h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">Work Type</label>
@@ -1014,7 +1046,7 @@ export default function TransportCalculator({
               {/* ─── EXPENSES STEP ─── */}
               {((step === 3 && !isCrewedJob) || (step === 4 && isCrewedJob)) && (
                 <div className="space-y-6">
-                  <h3 className="text-lg font-semibold text-gray-900">Expenses</h3>
+                  <h3 className="text-lg font-semibold text-gray-900">💷 Expenses</h3>
                   <p className="text-sm text-gray-500">Check to include in quote. Unchecked = client pays separately.</p>
 
                   {!isCrewedJob && (
@@ -1057,17 +1089,17 @@ export default function TransportCalculator({
               {/* ─── REVIEW STEP ─── */}
               {step === totalSteps && costs && (
                 <div className="space-y-6">
-                  <h3 className="text-lg font-semibold text-gray-900">Review &amp; Save</h3>
+                  <h3 className="text-lg font-semibold text-gray-900">📋 Review &amp; Save</h3>
 
                   {(costs.autoEarlyStartMinutes > 0 || costs.autoLateFinishMinutes > 0) && (
                     <div className="text-sm px-4 py-3 rounded-lg bg-amber-50 text-amber-700 border border-amber-200">
-                      Out of hours: {costs.autoEarlyStartMinutes > 0 && `${formatDurationHM(costs.autoEarlyStartMinutes)} early start`}{costs.autoEarlyStartMinutes > 0 && costs.autoLateFinishMinutes > 0 && ' + '}{costs.autoLateFinishMinutes > 0 && `${formatDurationHM(costs.autoLateFinishMinutes)} late finish`}
+                      🌙 Out of hours: {costs.autoEarlyStartMinutes > 0 && `${formatDurationHM(costs.autoEarlyStartMinutes)} early start`}{costs.autoEarlyStartMinutes > 0 && costs.autoLateFinishMinutes > 0 && ' + '}{costs.autoLateFinishMinutes > 0 && `${formatDurationHM(costs.autoLateFinishMinutes)} late finish`}
                     </div>
                   )}
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="bg-green-50 rounded-xl p-4">
-                      <p className="text-sm text-green-600 font-medium">Client Charge</p>
+                      <p className="text-sm text-green-600 font-medium">💰 Client Charge</p>
                       <p className="text-2xl font-bold text-green-700">&pound;{costs.clientChargeTotalRounded}</p>
                       <div className="mt-2 text-xs text-green-600 space-y-0.5">
                         <p>Labour: &pound;{costs.clientChargeLabour.toFixed(2)}</p>
@@ -1076,12 +1108,12 @@ export default function TransportCalculator({
                       </div>
                     </div>
                     <div className="bg-blue-50 rounded-xl p-4">
-                      <p className="text-sm text-blue-600 font-medium">Freelancer Fee</p>
+                      <p className="text-sm text-blue-600 font-medium">🧑‍🔧 Freelancer Fee</p>
                       <p className="text-2xl font-bold text-blue-700">&pound;{costs.freelancerFeeRounded}</p>
                       <p className="mt-2 text-xs text-blue-600">Est. time: {costs.estimatedTimeHours.toFixed(1)} hours</p>
                     </div>
                     <div className="bg-purple-50 rounded-xl p-4">
-                      <p className="text-sm text-purple-600 font-medium">Our Margin</p>
+                      <p className="text-sm text-purple-600 font-medium">📊 Our Margin</p>
                       <p className="text-2xl font-bold text-purple-700">&pound;{costs.ourMargin.toFixed(2)}</p>
                       <p className="mt-2 text-xs text-purple-600">Total cost: &pound;{costs.ourTotalCost.toFixed(2)}</p>
                     </div>
@@ -1112,11 +1144,11 @@ export default function TransportCalculator({
                   {/* Notes — two fields */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Internal Notes <span className="text-gray-400 font-normal">(Ooosh only)</span></label>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">🔒 Internal Notes <span className="text-gray-400 font-normal">(Ooosh only)</span></label>
                       <textarea value={formData.internalNotes} onChange={(e) => updateField('internalNotes', e.target.value)} placeholder="Margins, commercial notes..." rows={3} className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm" />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Freelancer Notes <span className="text-gray-400 font-normal">(visible to freelancer)</span></label>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">📝 Freelancer Notes <span className="text-gray-400 font-normal">(visible to freelancer)</span></label>
                       <textarea value={formData.freelancerNotes} onChange={(e) => updateField('freelancerNotes', e.target.value)} placeholder="Expense info, what's included..." rows={3} className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm" />
                     </div>
                   </div>
@@ -1278,7 +1310,7 @@ function OOHDisplay({ costs, formData, onToggleOverride, onChangeEarly, onChange
         <p className="text-sm text-gray-400 italic">Enter arrival time and drive time to auto-calculate.</p>
       ) : hasOOH ? (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
-          <p className="text-sm font-medium text-amber-800">Out of hours detected</p>
+          <p className="text-sm font-medium text-amber-800">🌙 Out of hours detected</p>
           {costs.autoEarlyStartMinutes > 0 && (
             <p className="text-sm text-amber-700">Departs {formatMinutesAsTime(costs.departureTimeMinutes)} — {formatDurationHM(costs.autoEarlyStartMinutes)} before 8am</p>
           )}
@@ -1288,7 +1320,7 @@ function OOHDisplay({ costs, formData, onToggleOverride, onChangeEarly, onChange
         </div>
       ) : (
         <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-          <p className="text-sm text-green-700">Within standard hours ({formatMinutesAsTime(costs.departureTimeMinutes)} — ~{formatMinutesAsTime(costs.finishTimeMinutes)})</p>
+          <p className="text-sm text-green-700">☀️ Within standard hours ({formatMinutesAsTime(costs.departureTimeMinutes)} — ~{formatMinutesAsTime(costs.finishTimeMinutes)})</p>
         </div>
       )}
     </div>

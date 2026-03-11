@@ -26,7 +26,8 @@ INSERT INTO calculator_settings (key, value, label, unit) VALUES
   ('min_hours_threshold',        5.00, 'Minimum hours threshold',       'hours'),
   ('min_client_charge_floor',    0.00, 'Minimum client charge floor',   'currency'),
   ('day_rate_client_markup',     1.80, 'Day rate client markup ratio',  'ratio'),
-  ('fuel_efficiency_mpg',        5.00, 'Fuel: miles per litre',         'per_litre')
+  ('fuel_efficiency_mpg',        5.00, 'Fuel: miles per litre',         'per_litre'),
+  ('expense_variance_threshold', 20.00, 'Expense variance threshold',   'percent')
 ON CONFLICT (key) DO NOTHING;
 
 -- Saved quotes

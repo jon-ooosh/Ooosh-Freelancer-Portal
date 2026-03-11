@@ -21,6 +21,7 @@ export interface CalculatorSettings {
   min_client_charge_floor: number;
   day_rate_client_markup: number;
   fuel_efficiency_mpg: number;  // Actually miles per litre in our system
+  expense_variance_threshold: number;  // % threshold for expense variance flagging
 }
 
 export interface ExpenseItem {

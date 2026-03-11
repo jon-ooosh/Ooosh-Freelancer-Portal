@@ -315,6 +315,7 @@ async function loadSettings(): Promise<CalculatorSettings> {
     min_client_charge_floor: map.min_client_charge_floor ?? 0,
     day_rate_client_markup: map.day_rate_client_markup ?? 1.8,
     fuel_efficiency_mpg: map.fuel_efficiency_mpg ?? 5,
+    expense_variance_threshold: map.expense_variance_threshold ?? 20,
   };
 }
 

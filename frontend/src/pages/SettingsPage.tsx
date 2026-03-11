@@ -723,7 +723,7 @@ const SETTING_GROUPS: { title: string; keys: string[] }[] = [
   },
   {
     title: 'Costs & Markup',
-    keys: ['admin_cost_per_hour', 'expense_markup_percent', 'min_client_charge_floor'],
+    keys: ['admin_cost_per_hour', 'expense_markup_percent', 'expense_variance_threshold', 'min_client_charge_floor'],
   },
 ];
 
