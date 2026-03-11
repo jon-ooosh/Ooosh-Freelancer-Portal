@@ -60,11 +60,11 @@ interface SyncLog {
   result: { jobsCreated: number; jobsUpdated: number; total: number } | null;
 }
 
-// Default: confirmed and active jobs (Booked through Requires Attention)
+// Default: confirmed and active jobs (Booked through Requires Attention, excluding Returned)
 const STATUS_FILTER_OPTIONS = [
-  { label: 'Confirmed & Active', value: '2,3,4,5,6,7,8' },
-  { label: 'All Active', value: '0,1,2,3,4,5,6,7,8' },
-  { label: 'All', value: '' },
+  { label: 'Confirmed & Active', value: '2,3,4,5,8' },
+  { label: 'Including Returned', value: '2,3,4,5,6,7,8' },
+  { label: 'All Statuses', value: '' },
   { label: 'Booked', value: '2' },
   { label: 'Prepped', value: '3' },
   { label: 'Dispatched', value: '4,5' },
@@ -122,7 +122,7 @@ const SECTION_COLOURS: Record<string, string> = {
 
 export default function JobsPage() {
   const [searchParams] = useSearchParams();
-  const initialStatus = searchParams.get('status') || '2,3,4,5,6,7,8';
+  const initialStatus = searchParams.get('status') || '2,3,4,5,8';
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState('');

@@ -138,6 +138,10 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
   - [ ] Delivery/collection calculator
   - [ ] Staging calculator
   - [ ] Backline matcher
+- [ ] **HireHop webhooks** — replace polling sync with real-time updates
+  - Key events: `job.status.updated`, `job.updated`, `job.created`, `contact.person.*`, `contact.company.*`
+  - Needs webhook endpoint + verification handler
+- [ ] **Chase auto-mover** — backend scheduler (cron) to auto-move jobs to "Chasing" column when `next_chase_date <= NOW()`
 - [ ] Win/loss analysis dashboard (depends on pipeline — lost_reason basics included in pipeline)
 - [ ] Job close-out workflow
 - [ ] Command Centre dashboard (live data from jobs + contacts)

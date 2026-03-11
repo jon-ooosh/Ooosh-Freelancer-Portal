@@ -92,6 +92,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
   // Chase-specific fields
   const [chaseMethod, setChaseMethod] = useState<string>('phone');
   const [nextChaseDate, setNextChaseDate] = useState('');
+  const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>(null);
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
 
   // Move interaction
@@ -255,6 +256,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       setContent('');
       setMentionedIds([]);
       setNextChaseDate('');
+      setSelectedChasePreset(null);
       setChaseAlertUserId('');
       onInteractionAdded();
     } catch (err) {
@@ -336,8 +338,10 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                   <button
                     key={opt.label}
                     type="button"
-                    onClick={() => setNextChaseDate(opt.fn())}
-                    className="px-2 py-1 rounded text-xs font-medium bg-white text-gray-500 hover:bg-orange-100 transition-colors"
+                    onClick={() => { setNextChaseDate(opt.fn()); setSelectedChasePreset(opt.label); }}
+                    className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                      selectedChasePreset === opt.label ? 'bg-orange-200 text-orange-800' : 'bg-white text-gray-500 hover:bg-orange-100'
+                    }`}
                   >
                     {opt.label}
                   </button>
@@ -345,7 +349,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                 <input
                   type="date"
                   value={nextChaseDate}
-                  onChange={(e) => setNextChaseDate(e.target.value)}
+                  onChange={(e) => { setNextChaseDate(e.target.value); setSelectedChasePreset(null); }}
                   className="text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none"
                 />
               </div>

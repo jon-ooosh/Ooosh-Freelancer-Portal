@@ -86,6 +86,10 @@ interface JobDetail {
   custom_index: string | null;
   depot_name: string | null;
   is_internal: boolean;
+  job_value: number | null;
+  pipeline_status: string | null;
+  likelihood: string | null;
+  enquiry_source: string | null;
   notes: string | null;
   tags: string[];
   files: FileAttachment[];
@@ -227,6 +231,11 @@ export default function JobDetailPage() {
                   ) : (
                     job.venue_name
                   )}
+                </span>
+              )}
+              {job.job_value != null && (
+                <span className="font-semibold text-gray-900">
+                  £{job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                 </span>
               )}
             </div>

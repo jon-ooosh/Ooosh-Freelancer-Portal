@@ -478,6 +478,7 @@ function ChaseModal({
   const [content, setContent] = useState('');
   const [chaseResponse, setChaseResponse] = useState('');
   const [nextChaseDate, setNextChaseDate] = useState('');
+  const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>(null);
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
   const [teamUsers, setTeamUsers] = useState<{ id: string; email: string; first_name: string; last_name: string }[]>([]);
   const [saving, setSaving] = useState(false);
@@ -485,13 +486,14 @@ function ChaseModal({
 
   useEffect(() => {
     if (isOpen && job) {
-      const days = job.chase_interval_days || 3;
+      const days = job.chase_interval_days || 5;
       const next = new Date();
       next.setDate(next.getDate() + days);
       setNextChaseDate(next.toISOString().split('T')[0]);
       setContent('');
       setChaseResponse('');
       setChaseMethod('phone');
+      setSelectedChasePreset(null);
       setChaseAlertUserId('');
       setError('');
     }
@@ -601,16 +603,20 @@ function ChaseModal({
             <label className="block text-sm font-medium text-gray-700 mb-1">Next chase</label>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               {[
-                { label: '2 hrs', fn: () => setNextChaseDate(addHoursToNow(2)) },
-                { label: '2 days', fn: () => setNextChaseDate(addDaysToDate(2)) },
-                { label: '5 days', fn: () => setNextChaseDate(addDaysToDate(5)) },
-                { label: '14 days', fn: () => setNextChaseDate(addDaysToDate(14)) },
+                { label: '2 hrs', fn: () => addHoursToNow(2) },
+                { label: '2 days', fn: () => addDaysToDate(2) },
+                { label: '5 days', fn: () => addDaysToDate(5) },
+                { label: '14 days', fn: () => addDaysToDate(14) },
               ].map(({ label, fn }) => (
                 <button
                   key={label}
                   type="button"
-                  onClick={fn}
-                  className="px-2.5 py-1 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+                  onClick={() => { setNextChaseDate(fn()); setSelectedChasePreset(label); }}
+                  className={`px-2.5 py-1 text-xs border rounded-lg transition-colors ${
+                    selectedChasePreset === label
+                      ? 'bg-ooosh-600 text-white border-ooosh-600'
+                      : 'border-gray-300 hover:bg-gray-50 text-gray-600'
+                  }`}
                 >
                   {label}
                 </button>
@@ -620,7 +626,7 @@ function ChaseModal({
               <input
                 type="date"
                 value={nextChaseDate}
-                onChange={(e) => setNextChaseDate(e.target.value)}
+                onChange={(e) => { setNextChaseDate(e.target.value); setSelectedChasePreset(null); }}
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
               <select
@@ -726,6 +732,7 @@ function NewEnquiryModal({
 
   // Chase scheduling
   const [nextChaseDate, setNextChaseDate] = useState(() => addDaysToDate(5));
+  const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>('5 days');
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
   const [teamUsers, setTeamUsers] = useState<TeamUser[]>([]);
 
@@ -829,7 +836,7 @@ function NewEnquiryModal({
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
-      setNextChaseDate(addDaysToDate(5)); setChaseAlertUserId('');
+      setNextChaseDate(addDaysToDate(5)); setSelectedChasePreset('5 days'); setChaseAlertUserId('');
       onCreated();
       onClose();
     } catch (err) {
@@ -901,16 +908,20 @@ function NewEnquiryModal({
             <label className="block text-sm font-medium text-gray-700 mb-1">First chase</label>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               {[
-                { label: '2 hrs', fn: () => setNextChaseDate(addHoursToNow(2)) },
-                { label: '2 days', fn: () => setNextChaseDate(addDaysToDate(2)) },
-                { label: '5 days', fn: () => setNextChaseDate(addDaysToDate(5)) },
-                { label: '14 days', fn: () => setNextChaseDate(addDaysToDate(14)) },
+                { label: '2 hrs', fn: () => addHoursToNow(2) },
+                { label: '2 days', fn: () => addDaysToDate(2) },
+                { label: '5 days', fn: () => addDaysToDate(5) },
+                { label: '14 days', fn: () => addDaysToDate(14) },
               ].map(({ label, fn }) => (
                 <button
                   key={label}
                   type="button"
-                  onClick={fn}
-                  className="px-2.5 py-1 text-xs border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+                  onClick={() => { setNextChaseDate(fn()); setSelectedChasePreset(label); }}
+                  className={`px-2.5 py-1 text-xs border rounded-lg transition-colors ${
+                    selectedChasePreset === label
+                      ? 'bg-ooosh-600 text-white border-ooosh-600'
+                      : 'border-gray-300 hover:bg-gray-50 text-gray-600'
+                  }`}
                 >
                   {label}
                 </button>
@@ -920,7 +931,7 @@ function NewEnquiryModal({
               <input
                 type="date"
                 value={nextChaseDate}
-                onChange={(e) => setNextChaseDate(e.target.value)}
+                onChange={(e) => { setNextChaseDate(e.target.value); setSelectedChasePreset(null); }}
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
               <select
