@@ -35,6 +35,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '004_pipeline.sql',
         '005_fix_interaction_types.sql',
         '006_merge_quoting.sql',
+        '007_calculator.sql',
       ];
 
       for (const migration of migrations) {

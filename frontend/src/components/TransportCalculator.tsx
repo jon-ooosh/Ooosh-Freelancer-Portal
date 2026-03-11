@@ -458,6 +458,9 @@ export default function TransportCalculator({
   // Track original HireHop dates for change warnings
   const [hhOriginalDate, setHhOriginalDate] = useState('');
   const [hhOriginalEndDate, setHhOriginalEndDate] = useState('');
+  // Track original venue transport values for writeback
+  const [venueOriginalMiles, setVenueOriginalMiles] = useState<number | null>(null);
+  const [venueOriginalDriveTime, setVenueOriginalDriveTime] = useState<number | null>(null);
 
   // Load settings + venues on open
   useEffect(() => {
@@ -559,6 +562,9 @@ export default function TransportCalculator({
     setVenueSearch(venue.name);
     setVenueDropdownOpen(false);
     const hasDistance = (venue.default_miles_from_base ?? 0) > 0;
+    // Store originals for writeback comparison
+    setVenueOriginalMiles(venue.default_miles_from_base ?? null);
+    setVenueOriginalDriveTime(venue.default_drive_time_mins ?? null);
     setFormData(prev => ({
       ...prev,
       destination: venue.name,
@@ -644,6 +650,23 @@ export default function TransportCalculator({
         internalNotes: formData.internalNotes || null,
         freelancerNotes: formData.freelancerNotes || null,
       });
+
+      // Write back venue distance/drive time if changed or newly filled
+      if (formData.selectedVenueId && formData.distanceMiles > 0) {
+        const milesChanged = venueOriginalMiles !== formData.distanceMiles;
+        const timeChanged = venueOriginalDriveTime !== formData.driveTimeMinutes;
+        if (milesChanged || timeChanged) {
+          try {
+            await api.put(`/venues/${formData.selectedVenueId}`, {
+              default_miles_from_base: formData.distanceMiles,
+              default_drive_time_mins: formData.driveTimeMinutes,
+            });
+          } catch {
+            // Non-critical — don't block the save
+            console.warn('Failed to update venue transport defaults');
+          }
+        }
+      }
 
       setSuccess('Quote saved successfully');
       onSaved?.();
@@ -930,7 +953,18 @@ export default function TransportCalculator({
                           </div>
                         )}
                       </div>
-                      {formData.selectedVenueId && <p className="text-xs text-green-600 mt-1">✅ Selected from venues database</p>}
+                      {formData.selectedVenueId && (
+                        <div className="mt-1">
+                          <p className="text-xs text-green-600">✅ Selected from venues database</p>
+                          {venueOriginalMiles === null && venueOriginalDriveTime === null && (
+                            <p className="text-xs text-amber-600 mt-0.5">📍 No saved distance/time — fill in below and it'll be saved to the venue</p>
+                          )}
+                          {(venueOriginalMiles !== null || venueOriginalDriveTime !== null) &&
+                           (formData.distanceMiles !== (venueOriginalMiles ?? 0) || formData.driveTimeMinutes !== (venueOriginalDriveTime ?? 0)) && (
+                            <p className="text-xs text-amber-600 mt-0.5">📍 Changed from saved values — will update venue on save</p>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">Distance (miles, one-way)</label>
