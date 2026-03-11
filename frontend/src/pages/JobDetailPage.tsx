@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
+import type { FileAttachment } from '@shared/index';
 
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
@@ -25,9 +26,43 @@ const STATUS_COLOURS: Record<number, string> = {
   11: 'bg-emerald-100 text-emerald-700',
 };
 
+const FILE_TAGS = [
+  'Stage Plot',
+  'Rider',
+  'Tour Dates',
+  'Quote',
+  'Invoice',
+  'Contract',
+  'Production Schedule',
+  'Site Map',
+  'Risk Assessment',
+  'Other',
+] as const;
+
+function fileIcon(type: string): string {
+  if (type === 'image') return 'image';
+  if (type === 'document') return 'doc';
+  return 'file';
+}
+
+function fileTagColour(label: string): string {
+  const map: Record<string, string> = {
+    'Stage Plot': 'bg-purple-100 text-purple-700',
+    'Rider': 'bg-blue-100 text-blue-700',
+    'Tour Dates': 'bg-amber-100 text-amber-700',
+    'Quote': 'bg-green-100 text-green-700',
+    'Invoice': 'bg-emerald-100 text-emerald-700',
+    'Contract': 'bg-red-100 text-red-700',
+    'Production Schedule': 'bg-indigo-100 text-indigo-700',
+    'Site Map': 'bg-teal-100 text-teal-700',
+    'Risk Assessment': 'bg-orange-100 text-orange-700',
+  };
+  return map[label] || 'bg-gray-100 text-gray-600';
+}
+
 interface JobDetail {
   id: string;
-  hh_job_number: number;
+  hh_job_number: number | null;
   job_name: string | null;
   job_type: string | null;
   status: number;
@@ -59,6 +94,7 @@ interface JobDetail {
   is_internal: boolean;
   notes: string | null;
   tags: string[];
+  files: FileAttachment[];
   created_at: string;
 }
 
@@ -82,7 +118,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'details'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'details'>('overview');
 
   useEffect(() => {
     if (id) {
@@ -136,6 +172,7 @@ export default function JobDetailPage() {
 
   const statusLabel = STATUS_MAP[job.status] || job.status_name || `Status ${job.status}`;
   const statusColour = STATUS_COLOURS[job.status] || 'bg-gray-100 text-gray-600';
+  const fileCount = (job.files || []).length;
 
   return (
     <div>
@@ -149,7 +186,9 @@ export default function JobDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center gap-3">
-              <span className="text-sm font-mono text-gray-400">#{job.hh_job_number}</span>
+              {job.hh_job_number && (
+                <span className="text-sm font-mono text-gray-400">#{job.hh_job_number}</span>
+              )}
               <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${statusColour}`}>
                 {statusLabel}
               </span>
@@ -202,7 +241,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['overview', 'timeline', 'details'] as const).map((tab) => (
+          {(['overview', 'timeline', 'files', 'details'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -212,7 +251,10 @@ export default function JobDetailPage() {
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              {tab === 'overview' ? 'Overview' : tab === 'timeline' ? 'Activity Timeline' : 'Full Details'}
+              {tab === 'overview' ? 'Overview' :
+               tab === 'timeline' ? 'Activity Timeline' :
+               tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
+               'Full Details'}
             </button>
           ))}
         </nav>
@@ -365,11 +407,20 @@ export default function JobDetailPage() {
         />
       )}
 
+      {/* Files Tab */}
+      {activeTab === 'files' && id && (
+        <JobFilesSection
+          jobId={id}
+          files={job.files || []}
+          onFilesChanged={loadJob}
+        />
+      )}
+
       {/* Full Details Tab */}
       {activeTab === 'details' && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <DetailField label="HireHop Job #" value={String(job.hh_job_number)} />
+            <DetailField label="HireHop Job #" value={job.hh_job_number ? String(job.hh_job_number) : 'N/A'} />
             <DetailField label="Job Name" value={job.job_name} />
             <DetailField label="Job Type" value={job.job_type} />
             <DetailField label="Status" value={statusLabel} />
@@ -412,6 +463,222 @@ export default function JobDetailPage() {
     </div>
   );
 }
+
+// ── Files Section ─────────────────────────────────────────────────────────
+
+function JobFilesSection({
+  jobId,
+  files,
+  onFilesChanged,
+}: {
+  jobId: string;
+  files: FileAttachment[];
+  onFilesChanged: () => void;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [selectedTag, setSelectedTag] = useState('');
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [error, setError] = useState('');
+  const [filterTag, setFilterTag] = useState('');
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setError('');
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('entity_type', 'jobs');
+      formData.append('entity_id', jobId);
+      if (selectedTag) {
+        formData.append('label', selectedTag);
+      }
+
+      await api.upload('/files/upload', formData);
+      setSelectedTag('');
+      onFilesChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleDelete = async (fileUrl: string) => {
+    if (!confirm('Delete this file?')) return;
+    setDeleting(fileUrl);
+    try {
+      await api.deleteWithBody('/files/delete', {
+        key: fileUrl,
+        entity_type: 'jobs',
+        entity_id: jobId,
+      });
+      onFilesChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Delete failed');
+    } finally {
+      setDeleting(null);
+    }
+  };
+
+  // Get unique tags from existing files
+  const existingTags = [...new Set(files.map(f => f.label).filter(Boolean))] as string[];
+
+  // Filter files
+  const filteredFiles = filterTag
+    ? files.filter(f => f.label === filterTag)
+    : files;
+
+  return (
+    <div className="space-y-6">
+      {/* Upload section */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h3 className="text-sm font-semibold text-gray-700 mb-4">Upload File</h3>
+
+        {error && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
+        )}
+
+        <div className="flex items-end gap-3 flex-wrap">
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">Tag (optional)</label>
+            <select
+              value={selectedTag}
+              onChange={(e) => setSelectedTag(e.target.value)}
+              className="border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            >
+              <option value="">No tag</option>
+              {FILE_TAGS.map(tag => (
+                <option key={tag} value={tag}>{tag}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              onChange={handleUpload}
+              accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.jpg,.jpeg,.png,.gif,.webp,.svg,.zip,.rar"
+              className="hidden"
+              id="file-upload"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              className="px-4 py-2 bg-ooosh-600 text-white text-sm font-medium rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
+            >
+              {uploading ? 'Uploading...' : 'Choose File'}
+            </button>
+          </div>
+          <p className="text-xs text-gray-400">PDF, images, docs, spreadsheets. Max 10MB.</p>
+        </div>
+      </div>
+
+      {/* File list */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-gray-700">
+            Files {files.length > 0 && `(${files.length})`}
+          </h3>
+          {existingTags.length > 0 && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-400">Filter:</span>
+              <button
+                onClick={() => setFilterTag('')}
+                className={`text-xs px-2 py-0.5 rounded ${
+                  !filterTag ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:bg-gray-100'
+                }`}
+              >
+                All
+              </button>
+              {existingTags.map(tag => (
+                <button
+                  key={tag}
+                  onClick={() => setFilterTag(tag === filterTag ? '' : tag)}
+                  className={`text-xs px-2 py-0.5 rounded ${
+                    filterTag === tag ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:bg-gray-100'
+                  }`}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {filteredFiles.length === 0 ? (
+          <p className="text-sm text-gray-400 py-8 text-center">
+            {files.length === 0 ? 'No files uploaded yet' : 'No files match this filter'}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {filteredFiles.map((file, idx) => (
+              <div
+                key={file.url || idx}
+                className="flex items-center justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold ${
+                    file.type === 'image' ? 'bg-purple-100 text-purple-600' :
+                    file.type === 'document' ? 'bg-blue-100 text-blue-600' :
+                    'bg-gray-100 text-gray-500'
+                  }`}>
+                    {fileIcon(file.type).toUpperCase().slice(0, 3)}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <a
+                        href={`/api/files/download?key=${encodeURIComponent(file.url)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm font-medium text-gray-900 hover:text-ooosh-600 truncate"
+                      >
+                        {file.name}
+                      </a>
+                      {file.label && (
+                        <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${fileTagColour(file.label)}`}>
+                          {file.label}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-400">
+                      {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
+                        day: 'numeric', month: 'short', year: 'numeric',
+                      })}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <a
+                    href={`/api/files/download?key=${encodeURIComponent(file.url)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                  >
+                    Download
+                  </a>
+                  <button
+                    onClick={() => handleDelete(file.url)}
+                    disabled={deleting === file.url}
+                    className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50"
+                  >
+                    {deleting === file.url ? 'Deleting...' : 'Delete'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Helper Components ─────────────────────────────────────────────────────
 
 function DateRow({ label, value }: { label: string; value: string }) {
   return (

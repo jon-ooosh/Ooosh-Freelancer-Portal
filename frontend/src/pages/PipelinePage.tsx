@@ -260,7 +260,7 @@ function PipelineCard({
         </div>
       )}
 
-      {/* Row 5: Likelihood + chase count */}
+      {/* Row 5: Likelihood + chase count + file count */}
       <div className="flex items-center gap-2 mb-1">
         {job.likelihood && (
           <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${likelihoodColour(job.likelihood)}`}>
@@ -270,6 +270,11 @@ function PipelineCard({
         {job.chase_count > 0 && (
           <span className="text-xs text-gray-400">
             Chased x{job.chase_count}
+          </span>
+        )}
+        {job.files && job.files.length > 0 && (
+          <span className="text-xs text-gray-400" title={`${job.files.length} file${job.files.length !== 1 ? 's' : ''} attached`}>
+            {job.files.length} file{job.files.length !== 1 ? 's' : ''}
           </span>
         )}
       </div>
@@ -593,7 +598,19 @@ function ChaseModal({
   );
 }
 
+// ── File tag constants ────────────────────────────────────────────────────
+
+const FILE_TAGS = [
+  'Stage Plot', 'Rider', 'Tour Dates', 'Quote', 'Invoice',
+  'Contract', 'Production Schedule', 'Site Map', 'Risk Assessment', 'Other',
+] as const;
+
 // ── New Enquiry Modal ──────────────────────────────────────────────────────
+
+interface StagedFile {
+  file: File;
+  tag: string;
+}
 
 function NewEnquiryModal({
   isOpen,
@@ -618,6 +635,11 @@ function NewEnquiryModal({
   const [error, setError] = useState('');
   const [showOptional, setShowOptional] = useState(false);
 
+  // File staging
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
+  const [fileTag, setFileTag] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   if (!isOpen) return null;
 
   const handleClientSelect = (result: SearchResult) => {
@@ -625,9 +647,20 @@ function NewEnquiryModal({
     if (result.type === 'organisation') {
       setClientId(result.id);
     } else {
-      // Person selected — use their name as client, no org link
       setClientId(null);
     }
+  };
+
+  const handleFileStage = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setStagedFiles(prev => [...prev, { file, tag: fileTag }]);
+    setFileTag('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const removeStagedFile = (index: number) => {
+    setStagedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
   const handleSave = async () => {
@@ -638,7 +671,8 @@ function NewEnquiryModal({
     setSaving(true);
     setError('');
     try {
-      await api.post('/pipeline/enquiry', {
+      // Create the enquiry
+      const created = await api.post<{ id: string }>('/pipeline/enquiry', {
         client_name: clientName,
         client_id: clientId || undefined,
         details,
@@ -650,10 +684,28 @@ function NewEnquiryModal({
         enquiry_source: enquirySource || undefined,
         notes: notes || undefined,
       });
+
+      // Upload staged files
+      if (stagedFiles.length > 0 && created.id) {
+        for (const staged of stagedFiles) {
+          const formData = new FormData();
+          formData.append('file', staged.file);
+          formData.append('entity_type', 'jobs');
+          formData.append('entity_id', created.id);
+          if (staged.tag) formData.append('label', staged.tag);
+          try {
+            await api.upload('/files/upload', formData);
+          } catch (uploadErr) {
+            console.error('File upload failed:', uploadErr);
+          }
+        }
+      }
+
       // Reset form
       setClientName(''); setClientId(null); setDetails(''); setJobDate(''); setJobEnd('');
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setEnquirySource(''); setNotes(''); setShowOptional(false);
+      setStagedFiles([]); setFileTag('');
       onCreated();
       onClose();
     } catch (err) {
@@ -717,6 +769,58 @@ function NewEnquiryModal({
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
             </div>
+          </div>
+
+          {/* Files */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Files</label>
+            <div className="flex items-center gap-2">
+              <select
+                value={fileTag}
+                onChange={(e) => setFileTag(e.target.value)}
+                className="border border-gray-300 rounded px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              >
+                <option value="">No tag</option>
+                {FILE_TAGS.map(tag => (
+                  <option key={tag} value={tag}>{tag}</option>
+                ))}
+              </select>
+              <input
+                ref={fileInputRef}
+                type="file"
+                onChange={handleFileStage}
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.rtf,.jpg,.jpeg,.png,.gif,.webp,.svg,.zip,.rar"
+                className="hidden"
+                id="enquiry-file"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                + Add file
+              </button>
+            </div>
+            {stagedFiles.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {stagedFiles.map((sf, i) => (
+                  <div key={i} className="flex items-center gap-2 text-sm text-gray-600 bg-gray-50 rounded px-2 py-1">
+                    <span className="truncate flex-1">{sf.file.name}</span>
+                    {sf.tag && (
+                      <span className="text-xs bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded">{sf.tag}</span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => removeStagedFile(i)}
+                      className="text-red-400 hover:text-red-600 text-xs font-medium"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-xs text-gray-400 mt-1">Stage plot, rider, tour dates, etc. Max 10MB each.</p>
           </div>
 
           {/* Optional toggle */}
@@ -810,7 +914,7 @@ function NewEnquiryModal({
             disabled={saving}
             className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
           >
-            {saving ? 'Creating...' : 'Create Enquiry'}
+            {saving ? (stagedFiles.length > 0 ? 'Creating & uploading...' : 'Creating...') : 'Create Enquiry'}
           </button>
         </div>
       </div>

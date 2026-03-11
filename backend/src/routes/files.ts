@@ -45,6 +45,7 @@ function getEntityFk(entityType: string): string | null {
     people: 'person_id',
     organisations: 'organisation_id',
     venues: 'venue_id',
+    jobs: 'job_id',
   };
   return map[entityType] || null;
 }
@@ -68,7 +69,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
       return;
     }
 
-    const validTypes = ['people', 'organisations', 'venues', 'interactions'];
+    const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs'];
     if (!validTypes.includes(entity_type)) {
       res.status(400).json({ error: 'Invalid entity_type' });
       return;
@@ -172,7 +173,7 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const validTypes = ['people', 'organisations', 'venues', 'interactions'];
+    const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs'];
     if (!validTypes.includes(entity_type)) {
       res.status(400).json({ error: 'Invalid entity_type' });
       return;
