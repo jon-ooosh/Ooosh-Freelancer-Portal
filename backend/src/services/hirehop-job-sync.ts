@@ -136,6 +136,14 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
 
   console.log(`[HH Job Sync] Processing ${jobs.length} active jobs`);
 
+  // Debug: log first job's raw data to diagnose MONEY field
+  if (jobs.length > 0) {
+    const sample = jobs[0];
+    console.log(`[HH Job Sync] Sample job fields:`, Object.keys(sample).join(', '));
+    console.log(`[HH Job Sync] Sample MONEY value:`, JSON.stringify(sample.MONEY), `type: ${typeof sample.MONEY}`);
+    console.log(`[HH Job Sync] Sample INVOICED value:`, JSON.stringify(sample.INVOICED), `type: ${typeof sample.INVOICED}`);
+  }
+
   // Pre-load all HireHop org mappings for client linking
   const orgMappings = await query(
     `SELECT external_id, entity_id FROM external_id_map

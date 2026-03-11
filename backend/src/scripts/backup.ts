@@ -33,15 +33,31 @@ async function runBackup() {
   }
 
   try {
-    // Run pg_dump and gzip
-    execSync(`pg_dump "${dbUrl}" | gzip > "${tmpPath}"`, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 300000, // 5 minute timeout
-    });
+    // Run pg_dump and gzip — capture stderr for error reporting
+    try {
+      execSync(`pg_dump "${dbUrl}" 2>/tmp/pgdump_err.log | gzip > "${tmpPath}"`, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 300000, // 5 minute timeout
+      });
+    } catch (dumpErr) {
+      // Read stderr for details
+      let errDetail = '';
+      try { errDetail = readFileSync('/tmp/pgdump_err.log', 'utf-8'); } catch { /* ignore */ }
+      console.error('pg_dump failed:', errDetail || dumpErr);
+      throw new Error(`pg_dump failed: ${errDetail || dumpErr}`);
+    }
 
     const fileBuffer = readFileSync(tmpPath);
     const sizeMB = (fileBuffer.length / (1024 * 1024)).toFixed(2);
     console.log(`Backup created: ${sizeMB} MB`);
+
+    // Check for suspiciously small backups (empty gzip is ~20 bytes)
+    if (fileBuffer.length < 100) {
+      let errDetail = '';
+      try { errDetail = readFileSync('/tmp/pgdump_err.log', 'utf-8'); } catch { /* ignore */ }
+      console.error(`Backup appears empty (${fileBuffer.length} bytes). pg_dump may have failed silently.`, errDetail);
+      throw new Error(`Backup empty (${fileBuffer.length} bytes). pg_dump error: ${errDetail || 'unknown'}`);
+    }
 
     // Upload to R2
     const key = `backups/${filename}`;

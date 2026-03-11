@@ -61,12 +61,19 @@ const TYPE_COLORS: Record<string, string> = {
   call: 'bg-green-100 text-green-700',
   email: 'bg-purple-100 text-purple-700',
   meeting: 'bg-amber-100 text-amber-700',
+  chase: 'bg-orange-100 text-orange-700',
   mention: 'bg-pink-100 text-pink-700',
 };
 
 const TYPE_ICONS: Record<string, string> = {
-  note: 'N', call: 'C', email: 'E', meeting: 'M', mention: '@',
+  note: 'N', call: 'C', email: 'E', meeting: 'M', chase: 'Ch', mention: '@',
 };
+
+function addDays(days: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString().split('T')[0];
+}
 
 function formatDateTime(dateStr: string) {
   return new Date(dateStr).toLocaleDateString('en-GB', {
@@ -81,6 +88,11 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
   const [content, setContent] = useState('');
   const [interactionType, setInteractionType] = useState<string>('note');
   const [submitting, setSubmitting] = useState(false);
+
+  // Chase-specific fields
+  const [chaseMethod, setChaseMethod] = useState<string>('phone');
+  const [nextChaseDate, setNextChaseDate] = useState('');
+  const [chaseAlertUserId, setChaseAlertUserId] = useState('');
 
   // Move interaction
   const [movingId, setMovingId] = useState<string | null>(null);
@@ -228,14 +240,22 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
 
     setSubmitting(true);
     try {
-      await api.post('/interactions', {
+      const payload: Record<string, unknown> = {
         type: interactionType,
         content: content.trim(),
         [entityType]: entityId,
         mentioned_user_ids: mentionedIds,
-      });
+      };
+      if (interactionType === 'chase') {
+        payload.chase_method = chaseMethod;
+        if (nextChaseDate) payload.next_chase_date = nextChaseDate;
+        if (chaseAlertUserId) payload.chase_alert_user_id = chaseAlertUserId;
+      }
+      await api.post('/interactions', payload);
       setContent('');
       setMentionedIds([]);
+      setNextChaseDate('');
+      setChaseAlertUserId('');
       onInteractionAdded();
     } catch (err) {
       console.error('Failed to add interaction:', err);
@@ -265,7 +285,10 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       {/* Add interaction form */}
       <form onSubmit={handleSubmit} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6">
         <div className="flex gap-2 mb-3 flex-wrap">
-          {(['note', 'call', 'email', 'meeting'] as const).map((t) => (
+          {(entityType === 'job_id'
+            ? ['note', 'call', 'email', 'meeting', 'chase'] as const
+            : ['note', 'call', 'email', 'meeting'] as const
+          ).map((t) => (
             <button
               key={t}
               type="button"
@@ -281,13 +304,77 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
           ))}
         </div>
 
+        {/* Chase-specific fields */}
+        {interactionType === 'chase' && (
+          <div className="mb-3 space-y-2 bg-orange-50 border border-orange-200 rounded-lg p-3">
+            <div className="flex items-center gap-3">
+              <label className="text-xs font-medium text-gray-600 w-16">Method</label>
+              <div className="flex gap-1.5">
+                {(['phone', 'email', 'text', 'whatsapp'] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setChaseMethod(m)}
+                    className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                      chaseMethod === m ? 'bg-orange-200 text-orange-800' : 'bg-white text-gray-500 hover:bg-orange-100'
+                    }`}
+                  >
+                    {m.charAt(0).toUpperCase() + m.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="text-xs font-medium text-gray-600 w-16">Next chase</label>
+              <div className="flex gap-1.5 flex-wrap items-center">
+                {[
+                  { label: '2 hrs', fn: () => { const d = new Date(); d.setHours(d.getHours() + 2); return d.toISOString().split('T')[0]; } },
+                  { label: '2 days', fn: () => addDays(2) },
+                  { label: '5 days', fn: () => addDays(5) },
+                  { label: '14 days', fn: () => addDays(14) },
+                ].map((opt) => (
+                  <button
+                    key={opt.label}
+                    type="button"
+                    onClick={() => setNextChaseDate(opt.fn())}
+                    className="px-2 py-1 rounded text-xs font-medium bg-white text-gray-500 hover:bg-orange-100 transition-colors"
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+                <input
+                  type="date"
+                  value={nextChaseDate}
+                  onChange={(e) => setNextChaseDate(e.target.value)}
+                  className="text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none"
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="text-xs font-medium text-gray-600 w-16">Alert</label>
+              <select
+                value={chaseAlertUserId}
+                onChange={(e) => setChaseAlertUserId(e.target.value)}
+                className="text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none"
+              >
+                <option value="">No alert</option>
+                {users.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+
         <div className="relative">
           <textarea
             ref={textareaRef}
             value={content}
             onChange={handleContentChange}
             onKeyDown={handleKeyDown}
-            placeholder={`Add a ${interactionType}... (type @ to mention someone)`}
+            placeholder={interactionType === 'chase' ? 'What happened on the chase?...' : `Add a ${interactionType}... (type @ to mention someone)`}
             rows={3}
             className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
           />

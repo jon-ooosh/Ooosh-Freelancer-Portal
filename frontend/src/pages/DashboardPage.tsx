@@ -271,7 +271,7 @@ export default function DashboardPage() {
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-gray-700">Enquiries & Provisionals</h3>
-                <Link to="/jobs?status=0,1" className="text-xs text-ooosh-600 hover:text-ooosh-700">View all &rarr;</Link>
+                <Link to="/pipeline" className="text-xs text-ooosh-600 hover:text-ooosh-700">View all &rarr;</Link>
               </div>
               {data.recent_enquiries.length === 0 ? (
                 <p className="text-sm text-gray-400">No open enquiries.</p>

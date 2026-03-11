@@ -505,6 +505,14 @@ function ChaseModal({
     }
   }, [isOpen]);
 
+  // Escape key to close
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [isOpen, onClose]);
+
   if (!isOpen || !job) return null;
 
   const handleSubmit = async () => {
@@ -717,7 +725,7 @@ function NewEnquiryModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Chase scheduling
-  const [nextChaseDate, setNextChaseDate] = useState(() => addDaysToDate(3));
+  const [nextChaseDate, setNextChaseDate] = useState(() => addDaysToDate(5));
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
   const [teamUsers, setTeamUsers] = useState<TeamUser[]>([]);
 
@@ -729,6 +737,14 @@ function NewEnquiryModal({
         .catch(() => {});
     }
   }, [isOpen]);
+
+  // Escape key to close
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
@@ -813,7 +829,7 @@ function NewEnquiryModal({
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
-      setNextChaseDate(addDaysToDate(3)); setChaseAlertUserId('');
+      setNextChaseDate(addDaysToDate(5)); setChaseAlertUserId('');
       onCreated();
       onClose();
     } catch (err) {
