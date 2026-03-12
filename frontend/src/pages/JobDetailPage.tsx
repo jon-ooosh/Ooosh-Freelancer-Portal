@@ -145,6 +145,9 @@ interface SavedQuote {
   our_margin: number | null;
   our_total_cost: number | null;
   estimated_time_hrs: number | null;
+  travel_method: string | null;
+  travel_time_mins: number | null;
+  travel_cost: number | null;
   // Status
   status: string;
   status_changed_at: string | null;
@@ -760,6 +763,9 @@ export default function JobDetailPage() {
                         {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
                         {q.add_collection && q.collection_date && (
                           <span>📥 Collection: {new Date(q.collection_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                        )}
+                        {q.travel_method === 'public_transport' && (
+                          <span>🚆 Public transport{q.travel_time_mins ? ` ${q.travel_time_mins}min` : ''}{q.travel_cost ? ` £${Number(q.travel_cost).toFixed(2)}` : ''}</span>
                         )}
                       </div>
 

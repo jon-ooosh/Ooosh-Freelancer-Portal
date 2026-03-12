@@ -112,6 +112,8 @@ const saveQuoteSchema = calculateSchema.extend({
   oohManual: z.boolean().optional().nullable(),
   earlyStartMins: z.number().optional().nullable(),
   lateFinishMins: z.number().optional().nullable(),
+  travelTimeMins: z.number().optional().nullable(),
+  travelCost: z.number().optional().nullable(),
   internalNotes: z.string().optional().nullable(),
   freelancerNotes: z.string().optional().nullable(),
 });
@@ -155,11 +157,13 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
         expected_fuel_cost, expenses_included, expenses_not_included,
         our_total_cost, our_margin,
         estimated_time_mins, estimated_time_hrs,
-        settings_snapshot, internal_notes, freelancer_notes, created_by
+        settings_snapshot, internal_notes, freelancer_notes,
+        travel_time_mins, travel_cost, created_by
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-        $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49
+        $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
+        $49, $50, $51
       ) RETURNING id`,
       [
         req.body.jobId || null,
@@ -210,6 +214,8 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
         JSON.stringify(settings),
         req.body.internalNotes || null,
         req.body.freelancerNotes || null,
+        req.body.travelTimeMins || null,
+        req.body.travelCost || null,
         req.user!.id,
       ]
     );

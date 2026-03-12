@@ -9,6 +9,9 @@ ALTER TABLE quotes ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPTZ;
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS status_changed_by UUID REFERENCES users(id);
 ALTER TABLE quotes ADD COLUMN IF NOT EXISTS cancelled_reason TEXT;
 
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS travel_time_mins INT;
+ALTER TABLE quotes ADD COLUMN IF NOT EXISTS travel_cost DECIMAL(12, 2);
+
 CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes (status) WHERE is_deleted = false;
 
 -- ── Quote crew assignments ──────────────────────────────────────────────

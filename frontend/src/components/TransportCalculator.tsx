@@ -676,6 +676,8 @@ export default function TransportCalculator({
         oohManual: formData.oohManualOverride,
         earlyStartMins: costs.autoEarlyStartMinutes,
         lateFinishMins: costs.autoLateFinishMinutes,
+        travelTimeMins: formData.travelTimeMins || null,
+        travelCost: formData.travelCost || null,
         internalNotes: formData.internalNotes || null,
         freelancerNotes: formData.freelancerNotes || null,
       });
@@ -968,6 +970,13 @@ export default function TransportCalculator({
               {step === 2 && (
                 <div className="space-y-6">
                   <h3 className="text-lg font-semibold text-gray-900">🚗 Transport Details</h3>
+
+                  {/* Vehicle delivery/collection reminder */}
+                  {isDC && isVehicle && (
+                    <div className="bg-orange-50 border border-orange-200 rounded-lg px-4 py-3 text-sm text-orange-800">
+                      🚐 Vehicle {formData.jobType === 'delivery' ? 'delivery' : 'collection'}: Driver will need to {formData.jobType === 'delivery' ? 'get home' : 'get there'}
+                    </div>
+                  )}
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="md:col-span-2" ref={venueDropdownRef}>
