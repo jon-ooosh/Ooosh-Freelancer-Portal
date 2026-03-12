@@ -36,6 +36,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '005_fix_interaction_types.sql',
         '006_merge_quoting.sql',
         '007_calculator.sql',
+        '008_quote_status_assignments.sql',
+        '009_fix_sync_log_permissions.sql',
       ];
 
       for (const migration of migrations) {
@@ -67,6 +69,9 @@ async function runMigrations(direction: 'up' | 'down') {
       await client.query('BEGIN');
       try {
         await client.query(`
+          DROP TABLE IF EXISTS quote_assignments CASCADE;
+          DROP TABLE IF EXISTS quotes CASCADE;
+          DROP TABLE IF EXISTS sync_log CASCADE;
           DROP TABLE IF EXISTS notifications CASCADE;
           DROP TABLE IF EXISTS audit_log CASCADE;
           DROP TABLE IF EXISTS jobs CASCADE;
