@@ -563,7 +563,6 @@ export default function TransportCalculator({
   function handleVenueSelect(venue: VenueOption) {
     setVenueSearch(venue.name);
     setVenueDropdownOpen(false);
-    const hasDistance = (venue.default_miles_from_base ?? 0) > 0;
     // Store originals for writeback comparison
     setVenueOriginalMiles(venue.default_miles_from_base ?? null);
     setVenueOriginalDriveTime(venue.default_drive_time_mins ?? null);
@@ -575,7 +574,7 @@ export default function TransportCalculator({
       distanceMiles: venue.default_miles_from_base ?? 0,
       driveTimeMinutes: venue.default_drive_time_mins ?? 0,
       expenses: prev.expenses.map(exp =>
-        exp.category === 'fuel' ? { ...exp, included: hasDistance } : exp
+        exp.category === 'fuel' ? { ...exp, included: true } : exp
       ),
     }));
   }
@@ -933,6 +932,11 @@ export default function TransportCalculator({
                               <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Collection Date</label>
                                 <input type="date" value={formData.collectionDate} onChange={(e) => updateField('collectionDate', e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                                {hhOriginalEndDate && formData.collectionDate && formData.collectionDate !== hhOriginalEndDate && (
+                                  <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                                    <span>⚠️</span> Changed from HireHop end date: {formatDateUK(hhOriginalEndDate)}
+                                  </p>
+                                )}
                               </div>
                               <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Collection arrive by</label>
