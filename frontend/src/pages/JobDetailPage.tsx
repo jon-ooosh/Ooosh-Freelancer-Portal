@@ -112,6 +112,7 @@ interface SavedQuote {
   job_type: string;
   calculation_mode: string;
   venue_name: string | null;
+  venue_id: string | null;
   distance_miles: number | null;
   drive_time_mins: number | null;
   arrival_time: string | null;
@@ -120,10 +121,16 @@ interface SavedQuote {
   collection_date: string | null;
   add_collection: boolean;
   what_is_it: string | null;
+  client_charge_labour: number | null;
+  client_charge_fuel: number | null;
+  client_charge_expenses: number | null;
   client_charge_total: number | null;
   client_charge_rounded: number | null;
   freelancer_fee: number | null;
   freelancer_fee_rounded: number | null;
+  expected_fuel_cost: number | null;
+  expenses_included: number | null;
+  expenses_not_included: number | null;
   our_margin: number | null;
   our_total_cost: number | null;
   estimated_time_hrs: number | null;
@@ -288,12 +295,6 @@ export default function JobDetailPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowCalculator(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-ooosh-300 rounded-lg hover:bg-ooosh-50 text-ooosh-600 font-medium"
-            >
-              Transport Calculator
-            </button>
             {hhJobUrl && (
               <a
                 href={hhJobUrl}
@@ -523,7 +524,19 @@ export default function JobDetailPage() {
             </div>
           ) : (
             <div className="space-y-3">
-              {quotes.map((q) => (
+              {quotes.map((q) => {
+                const clientCharge = Number(q.client_charge_rounded ?? q.client_charge_total ?? 0);
+                const freelancerFee = Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0);
+                const margin = Number(q.our_margin ?? 0);
+                const totalCost = Number(q.our_total_cost ?? 0);
+                const fuelCost = Number(q.expected_fuel_cost ?? 0);
+                const labourCharge = Number(q.client_charge_labour ?? 0);
+                const fuelCharge = Number(q.client_charge_fuel ?? 0);
+                const expenseCharge = Number(q.client_charge_expenses ?? 0);
+                const expensesAbsorbed = Number(q.expenses_included ?? 0);
+                const marginIsNegative = margin < 0;
+
+                return (
                 <div key={q.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
@@ -543,23 +556,26 @@ export default function JobDetailPage() {
                         </span>
                       </div>
 
+                      {/* Price summary row */}
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                         <div>
                           <span className="text-gray-500">Client Charge</span>
                           <p className="font-bold text-green-700">
-                            &pound;{q.client_charge_rounded ?? q.client_charge_total ?? 0}
-                            {q.add_collection && <span className="text-xs font-normal text-gray-400"> (&times;2 = &pound;{((q.client_charge_rounded ?? q.client_charge_total ?? 0) * 2)})</span>}
+                            &pound;{clientCharge.toFixed(2)}
+                            {q.add_collection && <span className="text-xs font-normal text-gray-400"> (&times;2 = &pound;{(clientCharge * 2).toFixed(2)})</span>}
                           </p>
                         </div>
                         <div>
                           <span className="text-gray-500">Freelancer Fee</span>
                           <p className="font-bold text-blue-700">
-                            &pound;{q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0}
+                            &pound;{freelancerFee.toFixed(2)}
                           </p>
                         </div>
                         <div>
                           <span className="text-gray-500">Our Margin</span>
-                          <p className="font-bold text-purple-700">&pound;{Number(q.our_margin ?? 0).toFixed(2)}</p>
+                          <p className={`font-bold ${marginIsNegative ? 'text-red-600' : 'text-purple-700'}`}>
+                            &pound;{margin.toFixed(2)}
+                          </p>
                         </div>
                         {q.estimated_time_hrs && (
                           <div>
@@ -569,8 +585,31 @@ export default function JobDetailPage() {
                         )}
                       </div>
 
+                      {/* Cost breakdown */}
+                      <div className="mt-2 grid grid-cols-2 gap-x-6 text-xs">
+                        <div className="space-y-0.5">
+                          <p className="text-gray-400 font-medium">Client charges:</p>
+                          {labourCharge > 0 && <p className="text-gray-500">Labour: &pound;{labourCharge.toFixed(2)}</p>}
+                          {fuelCharge > 0 && <p className="text-gray-500">Fuel: &pound;{fuelCharge.toFixed(2)}</p>}
+                          {expenseCharge > 0 && <p className="text-gray-500">Expenses: &pound;{expenseCharge.toFixed(2)}</p>}
+                        </div>
+                        <div className="space-y-0.5">
+                          <p className="text-gray-400 font-medium">Our costs:</p>
+                          <p className="text-gray-500">Freelancer: &pound;{freelancerFee.toFixed(2)}</p>
+                          {fuelCost > 0 && <p className="text-gray-500">Fuel: &pound;{fuelCost.toFixed(2)}</p>}
+                          {expensesAbsorbed > 0 && <p className="text-gray-500">Absorbed expenses: &pound;{expensesAbsorbed.toFixed(2)}</p>}
+                          <p className="text-gray-500 font-medium">Total cost: &pound;{totalCost.toFixed(2)}</p>
+                        </div>
+                      </div>
+
                       <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs text-gray-500">
-                        {q.venue_name && <span>📍 {q.venue_name}</span>}
+                        {q.venue_name && (
+                          q.venue_id ? (
+                            <Link to={`/venues/${q.venue_id}`} className="text-ooosh-600 hover:text-ooosh-700 hover:underline">📍 {q.venue_name}</Link>
+                          ) : (
+                            <span>📍 {q.venue_name}</span>
+                          )
+                        )}
                         {q.distance_miles && <span>{q.distance_miles}mi · {q.drive_time_mins}min</span>}
                         {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
                         {q.add_collection && q.collection_date && (
@@ -602,7 +641,8 @@ export default function JobDetailPage() {
                     </div>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

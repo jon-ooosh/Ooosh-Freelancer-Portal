@@ -12,12 +12,14 @@ export function validate(schema: ZodSchema, source: 'body' | 'params' | 'query' 
       next();
     } catch (error) {
       if (error instanceof ZodError) {
+        const details = error.errors.map((e) => ({
+          field: e.path.join('.'),
+          message: e.message,
+        }));
+        const summary = details.map(d => `${d.field}: ${d.message}`).join('; ');
         res.status(400).json({
-          error: 'Validation failed',
-          details: error.errors.map((e) => ({
-            field: e.path.join('.'),
-            message: e.message,
-          })),
+          error: `Validation failed: ${summary}`,
+          details,
         });
         return;
       }

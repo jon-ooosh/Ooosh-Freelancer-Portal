@@ -628,28 +628,39 @@ export default function TransportCalculator({
     setError(null);
 
     try {
+      // Normalize arrival time to HH:MM format
+      let arrivalTime = formData.arrivalTime || '09:00';
+      if (!/^\d{2}:\d{2}$/.test(arrivalTime)) {
+        arrivalTime = normalizeTimeInput(arrivalTime) || '09:00';
+      }
+
+      // Filter expenses: only send ones with amount > 0 or fuel
+      const expensesToSend = formData.expenses
+        .filter(e => e.category === 'fuel' || e.amount > 0 || (e.category === 'pd' && e.pdDays && e.amount > 0))
+        .map(e => ({
+          type: e.category,
+          description: e.label + (e.description ? `: ${e.description}` : ''),
+          amount: Number(e.category === 'fuel' ? costs.expectedFuelCost : (e.category === 'pd' && e.pdDays ? e.amount * e.pdDays : e.amount)) || 0,
+          includedInCharge: e.included,
+        }));
+
       await api.post('/quotes', {
         jobId: jobId || null,
         jobType: formData.jobType,
         calculationMode: formData.calculationMode === 'hourly' ? 'hourly' : 'dayrate',
-        distanceMiles: formData.distanceMiles,
-        driveTimeMins: formData.driveTimeMinutes,
-        arrivalTime: formData.arrivalTime || '09:00',
-        workDurationHrs: formData.workDurationHours,
-        numDays: formData.numberOfDays,
-        setupExtraHrs: formData.setupExtraTimeHours,
-        setupPremium: formData.setupFixedPremium,
+        distanceMiles: Number(formData.distanceMiles) || 0,
+        driveTimeMins: Number(formData.driveTimeMinutes) || 0,
+        arrivalTime,
+        workDurationHrs: Number(formData.workDurationHours) || 0,
+        numDays: Math.max(1, Number(formData.numberOfDays) || 1),
+        setupExtraHrs: Number(formData.setupExtraTimeHours) || 0,
+        setupPremium: Number(formData.setupFixedPremium) || 0,
         travelMethod: formData.travelMethod === 'public_transport' ? 'public_transport' : 'vehicle',
-        dayRateOverride: formData.dayRateOverride,
-        clientRateOverride: formData.clientDayRateOverride,
-        expenses: formData.expenses.map(e => ({
-          type: e.category,
-          description: e.label + (e.description ? `: ${e.description}` : ''),
-          amount: e.category === 'fuel' ? costs.expectedFuelCost : (e.category === 'pd' && e.pdDays ? e.amount * e.pdDays : e.amount),
-          includedInCharge: e.included,
-        })),
-        venueId: formData.selectedVenueId,
-        venueName: formData.destination,
+        dayRateOverride: formData.dayRateOverride != null ? Number(formData.dayRateOverride) : null,
+        clientRateOverride: formData.clientDayRateOverride != null ? Number(formData.clientDayRateOverride) : null,
+        expenses: expensesToSend,
+        venueId: formData.selectedVenueId || null,
+        venueName: formData.destination || null,
         jobDate: formData.jobDate || null,
         jobFinishDate: formData.jobFinishDate || null,
         isMultiDay: formData.isMultiDay,
@@ -688,8 +699,10 @@ export default function TransportCalculator({
 
       setSuccess('Quote saved successfully');
       onSaved?.();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save quote');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to save quote';
+      setError(msg);
+      console.error('Quote save failed:', msg, err);
     } finally {
       setSaving(false);
     }
