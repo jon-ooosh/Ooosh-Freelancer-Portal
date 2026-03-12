@@ -174,28 +174,77 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 - [x] **Quote status workflow** — draft → confirmed → completed/cancelled with audit trail (migration 008)
 - [x] **Navigation restructure** — "Address Book" submenu (People, Organisations, Venues) + "Jobs" submenu (Enquiries, Upcoming & Out)
 
-### Phase 2 — Active / Next Up
+### Phase 2 — Active / Next Up (WORK ORDER)
 
-- [ ] **Crew & Transport refinements** ← CURRENT WORK
+**The dependency chain determines the order. Do NOT skip ahead — each step depends on the previous.**
+
+#### Step 1: Vehicle Module Integration ← CURRENT PRIORITY
+Integrate the existing Vehicle Module (separate React app) into the OP as a route.
+
+- [ ] Add "Vehicles" nav group to Layout.tsx
+- [ ] Mount VM React components under `/vehicles/*` routes
+- [ ] Strip VM's own nav/auth shell, use OP session
+- [ ] Migrate VM's Netlify functions → OP backend API routes
+- [ ] Migrate Fleet Master + Driver Hire Forms off Monday.com → OP database
+- [ ] Vehicle fleet data (already have `vehicles` table — extend as needed)
+
+See **Vehicle Module Integration** section below for technical details.
+
+#### Step 2: Driver Hire Forms & Excess Calculation
+Driver hire forms calculate the insurance excess amount based on DVLA record points.
+
+- [ ] Driver hire form process in OP (captures DVLA data, calculates excess)
+- [ ] Excess amount flows into job record
+- [ ] Links to vehicle assignment on the job
+
+#### Step 3: Insurance Excess Tracking
+Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (can't move to "Out" without excess collected).
+
+- [ ] `job_excess` table or fields on jobs:
+  - `excess_amount_required` — calculated from hire form
+  - `excess_amount_taken` — what we've actually collected
+  - `excess_status` — `pending` | `taken` | `partial_claim` | `full_claim` | `reimbursed`
+  - `excess_taken_method` — `payment_portal` | `manual` | `bank_transfer`
+  - `excess_xero_contact` — Xero contact cemented at creation (won't change even if HH client name changes)
+  - `excess_client_name` — current client name (may differ from Xero contact)
+- [ ] Manual excess recording (not everything goes through payment portal)
+- [ ] Excess gate on job status: block "Upcoming → Out" if excess not collected
+- [ ] Client excess ledger — running balance per client across multiple hires (repeat clients leave excess with us)
+- [ ] Excess claim/reimbursement workflow
+- [ ] HireHop records excess as a deposit — sync this data
+
+#### Step 4: Status Transition Engine
+Bidirectional job status sync — depends on excess tracking for gate conditions.
+
+- [ ] `POST /api/webhooks/external/status-transition` endpoint for external systems
+- [ ] HireHop write-back via `status_save.php` (with `no_webhook=1`)
+- [ ] API key / service auth for external callers (`api_keys` table)
+- [ ] Status mismatch detection in existing sync (backup)
+- [ ] Pipeline ↔ HireHop status mapping (see Status Mapping section)
+- [ ] Gate conditions: check excess collected before allowing dispatch
+
+#### Step 5: Payment Portal Repointing
+Repoint payment portal from Monday.com → Ooosh status-transition API.
+
+- [ ] Payment portal calls Ooosh webhook instead of Monday.com
+- [ ] Excess payment events recorded in Ooosh (financial record, not pipeline change)
+- [ ] Payment confirmation → pipeline status change (deposit = confirmed)
+
+#### Remaining Phase 2 work (no strict ordering)
+
+- [ ] **Crew & Transport refinements**
   - [x] `is_freelancer` flag + freelancer filtering in crew assignment
   - [x] Tab badge count fix (show quote count on initial load)
   - [x] People page freelancer/approved filter
-  - [ ] Freelancer document management (DVLA check, licence front/back, passport)
-  - [ ] Freelancer joined date + annual review reminder trigger
+  - [x] Freelancer document management (DVLA check, licence front/back, passport)
+  - [x] Freelancer joined date + next review date fields
   - [ ] Quote editing (currently create-only, no edit mode)
   - [ ] Quote status transition validation (prevent invalid transitions)
   - [ ] RBAC on calculator settings (currently any auth user can change)
-- [ ] **Status transition engine** — bidirectional job status sync
-  - [ ] `POST /api/webhooks/external/status-transition` endpoint for external systems
-  - [ ] HireHop write-back via `status_save.php` (with `no_webhook=1`)
-  - [ ] API key / service auth for external callers
-  - [ ] Status mismatch detection in existing sync (backup)
-  - [ ] Pipeline ↔ HireHop status mapping (see Status Mapping section)
-- [ ] **Vehicle delivery reminders** — ties into transport module (reminder system for upcoming deliveries)
+- [ ] **Vehicle delivery reminders** — reminder system for upcoming deliveries (depends on vehicle module)
 - [ ] **HireHop webhooks** — replace polling sync with real-time updates (SSL now available)
   - Key events: `job.status.updated`, `job.updated`, `job.created`, `contact.person.*`, `contact.company.*`
   - Needs webhook endpoint + verification handler
-- [ ] Phase E: HireHop write-back (push status changes, create HH jobs from Ooosh)
 - [ ] **Tasks system** — general-purpose task management (not tied to specific jobs)
   - Freelancer application review workflow
   - Annual licence/detail review reminders
@@ -208,9 +257,9 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
-These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready:
+These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready (Step 5 above):
 
-- **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint.
+- **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint (after Steps 1-4).
 - **Staging Calculator** — stage/riser quoting tool (standalone, low priority)
 - **Backline Matcher** — match client requirements to inventory (standalone, low priority)
 - **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
@@ -295,6 +344,76 @@ Two-tier freelancer identification:
 ### Vehicles Table
 
 `vehicles` table stores vehicle fleet data (name, registration, fuel type, MPG). Used by the transport calculator to auto-populate fuel efficiency.
+
+## Vehicle Module Integration
+
+The Vehicle Module (VM) is an existing standalone React app that manages fleet vehicles, driver hire forms, and insurance excesses. It needs integrating into the OP as a route, not a separate app.
+
+### Integration Approach
+
+1. VM loses its own nav bar, auth screen, and layout wrapper
+2. VM exports its pages/routes as components the OP mounts
+3. OP's nav shell stays on screen at all times (add "Vehicles" to `navItems` in `Layout.tsx`)
+4. URL: `staff.oooshtours.co.uk/vehicles/...`
+5. VM's Netlify functions migrate to OP backend Express routes
+6. Auth: VM drops STAFF_PIN, uses OP JWT session. Freelancer token flow stays separate.
+
+### OP Tech Stack (for VM integration reference)
+
+| Aspect | Detail |
+|--------|--------|
+| Framework | React 18 + Vite + TypeScript (plain SPA, no Next.js/Remix) |
+| Hosting | Hetzner VPS, Nginx serves static build, reverse-proxies `/api/*` to Express port 3001 |
+| Auth | JWT Bearer tokens via `Authorization` header. Zustand store (`useAuthStore`). Session: `{ id, email, role }` |
+| Router | React Router v6. Routes defined in `App.tsx`. |
+| CSS | Tailwind CSS |
+| API base | `/api/*` — Express backend. HireHop proxy exists at `backend/src/config/hirehop.ts` |
+| Build/deploy | `deploy/deploy.sh` — git pull, npm build, systemctl restart. No Docker, no CI/CD. |
+| Nav | `frontend/src/components/Layout.tsx` — `navItems` array with optional `children` for dropdown submenus |
+
+### Nav Structure (Layout.tsx)
+
+```typescript
+const navItems: NavItem[] = [
+  {
+    path: '/address-book',
+    label: 'Address Book',
+    children: [
+      { path: '/people', label: 'People' },
+      { path: '/organisations', label: 'Organisations' },
+      { path: '/venues', label: 'Venues' },
+    ],
+  },
+  {
+    path: '/jobs-menu',
+    label: 'Jobs',
+    children: [
+      { path: '/pipeline', label: 'Enquiries' },
+      { path: '/jobs', label: 'Upcoming & Out' },
+    ],
+  },
+  // Add: { path: '/vehicles-menu', label: 'Vehicles', children: [...] }
+];
+```
+
+### HireHop Consolidation
+
+The OP already has HireHop integration (`backend/src/config/hirehop.ts`). The VM's HireHop cache in R2 (`hirehop-cache/jobs.json`) should be replaced by calling the OP's backend API instead. The OP backend becomes the single HireHop proxy.
+
+### Insurance Excess Lifecycle
+
+Self-drive hires require an insurance excess. The amount is calculated by the driver hire form process (based on DVLA licence points / insurance referral). The excess lifecycle:
+
+1. **Calculated** — hire form determines amount based on driver's DVLA record
+2. **Taken** — collected via payment portal (Stripe) OR manually (bank transfer, card in office)
+3. **Held** — excess sits with us for the duration of the hire (repeat clients may roll over across multiple hires)
+4. **Resolved** — either reimbursed to client OR partially/fully claimed against damage
+
+**Key complication:** HireHop records excess as a deposit. The HH→Xero link is cemented at job creation time, but the HH client name can change later. We need to track "which Xero contact holds this money" separately from "who is the current HH client".
+
+**Repeat client excess:** Some clients leave their excess with us across multiple hires. Need a running ledger per client showing total held, claimed, reimbursed.
+
+**Gate condition:** A job with a self-drive vehicle should not move from "Upcoming" to "Out Now" until the excess is collected. This is enforced in the status transition engine (Step 4).
 
 ## Scheduled Tasks (config/scheduler.ts)
 
@@ -395,7 +514,7 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 ## Architecture Notes
 
 - **Frontend talks to backend** via `/api/*` — Nginx proxies API requests to Express (port 3001)
-- **Auth flow:** Login → JWT access token (short-lived) + refresh token → stored in httpOnly cookies
+- **Auth flow:** Login → JWT access token (short-lived) + refresh token → stored in Zustand store (`useAuthStore`), sent as `Authorization: Bearer` header
 - **Database:** All IDs are UUIDs. `created_by` on most tables is VARCHAR (seed value), but `interactions.created_by` is a UUID FK to `users(id)`
 - **Migrations:** Sequential numbered SQL files, **hardcoded list in `run.ts`** — new migrations must be added to the array manually!
 - **Navigation:** Two-level nav with "Address Book" (People, Organisations, Venues) and "Jobs" (Enquiries/Pipeline, Upcoming & Out) submenus
