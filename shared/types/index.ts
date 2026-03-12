@@ -29,7 +29,10 @@ export interface Person {
   preferred_contact_method: string;
   home_address: string | null;
   date_of_birth: string | null;
-  // Freelancer-specific (null for non-freelancers)
+  // Freelancer-specific
+  is_freelancer: boolean;
+  freelancer_joined_date: string | null;
+  freelancer_next_review_date: string | null;
   skills: string[];
   is_insured_on_vehicles: boolean;
   is_approved: boolean;

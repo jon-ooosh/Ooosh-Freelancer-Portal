@@ -32,6 +32,9 @@ const createPersonSchema = z.object({
   home_address: z.string().optional().nullable(),
   date_of_birth: z.string().optional().nullable(),
   // Freelancer fields
+  is_freelancer: z.boolean().optional().default(false),
+  freelancer_joined_date: z.string().optional().nullable(),
+  freelancer_next_review_date: z.string().optional().nullable(),
   skills: z.array(z.string()).optional().default([]),
   is_insured_on_vehicles: z.boolean().optional().default(false),
   is_approved: z.boolean().optional().default(false),
@@ -55,7 +58,7 @@ const personOrgRoleSchema = z.object({
 // GET /api/people — list with search and pagination
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, page = '1', limit = '50', tag } = req.query;
+    const { search, page = '1', limit = '50', tag, is_freelancer, is_approved } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
@@ -92,6 +95,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       sql += ` AND $${paramIndex} = ANY(p.tags)`;
       params.push(tag);
       paramIndex++;
+    }
+
+    if (is_freelancer === 'true') {
+      sql += ` AND p.is_freelancer = true`;
+    }
+
+    if (is_approved === 'true') {
+      sql += ` AND p.is_approved = true`;
     }
 
     // Count total
@@ -203,6 +214,7 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
     const {
       first_name, last_name, email, phone, mobile, international_phone,
       notes, tags, files, preferred_contact_method, home_address, date_of_birth,
+      is_freelancer, freelancer_joined_date, freelancer_next_review_date,
       skills, is_insured_on_vehicles, is_approved, has_tshirt,
       emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
     } = req.body;
@@ -211,14 +223,16 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
       `INSERT INTO people (
         first_name, last_name, email, phone, mobile, international_phone,
         notes, tags, files, preferred_contact_method, home_address, date_of_birth,
+        is_freelancer, freelancer_joined_date, freelancer_next_review_date,
         skills, is_insured_on_vehicles, is_approved, has_tshirt,
         emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
         created_by
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
        RETURNING *`,
       [
         first_name, last_name, email?.toLowerCase(), phone, mobile, international_phone,
         notes, tags, JSON.stringify(files), preferred_contact_method, home_address, date_of_birth,
+        is_freelancer, freelancer_joined_date || null, freelancer_next_review_date || null,
         skills, is_insured_on_vehicles, is_approved, has_tshirt,
         emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
         req.user!.id,

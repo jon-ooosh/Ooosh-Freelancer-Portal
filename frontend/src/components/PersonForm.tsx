@@ -15,6 +15,7 @@ interface PersonFormData {
   notes: string;
   tags: string[];
   // Freelancer
+  is_freelancer: boolean;
   skills: string[];
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
@@ -72,6 +73,7 @@ const emptyForm: PersonFormData = {
   date_of_birth: '',
   notes: '',
   tags: [],
+  is_freelancer: false,
   skills: [],
   is_insured_on_vehicles: false,
   is_approved: false,
@@ -115,6 +117,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         date_of_birth: (data.date_of_birth as string) || '',
         notes: (data.notes as string) || '',
         tags: (data.tags as string[]) || [],
+        is_freelancer: (data.is_freelancer as boolean) || false,
         skills: (data.skills as string[]) || [],
         is_insured_on_vehicles: (data.is_insured_on_vehicles as boolean) || false,
         is_approved: (data.is_approved as boolean) || false,
@@ -123,8 +126,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         emergency_contact_phone: (data.emergency_contact_phone as string) || '',
         licence_details: (data.licence_details as string) || '',
       });
-      const skills = (data.skills as string[]) || [];
-      setShowFreelancer(skills.length > 0);
+      setShowFreelancer((data.is_freelancer as boolean) || false);
     } catch {
       setError('Failed to load person');
     } finally {
@@ -314,7 +316,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
           <input
             type="checkbox"
             checked={showFreelancer}
-            onChange={e => setShowFreelancer(e.target.checked)}
+            onChange={e => { setShowFreelancer(e.target.checked); set('is_freelancer', e.target.checked); }}
             className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
           />
           <span className="text-sm font-medium text-gray-700">This person is a freelancer</span>

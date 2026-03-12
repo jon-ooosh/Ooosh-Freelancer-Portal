@@ -194,12 +194,9 @@ export default function JobDetailPage() {
     if (id) {
       loadJob();
       loadInteractions();
+      loadQuotes();
     }
   }, [id]);
-
-  useEffect(() => {
-    if (activeTab === 'transport' && id && quotes.length === 0) loadQuotes();
-  }, [activeTab, id]);
 
   async function loadQuotes() {
     if (!id) return;
@@ -235,7 +232,7 @@ export default function JobDetailPage() {
 
   async function searchPeople(search: string) {
     try {
-      const data = await api.get<{ data: PersonOption[] }>(`/people?search=${encodeURIComponent(search)}&limit=10`);
+      const data = await api.get<{ data: PersonOption[] }>(`/people?search=${encodeURIComponent(search)}&limit=10&is_freelancer=true&is_approved=true`);
       setPeopleOptions(data.data);
     } catch {
       console.error('Failed to search people');

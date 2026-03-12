@@ -20,7 +20,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 | Scheduling | node-cron | Alongside Express |
 
 **Server:** Hetzner CAX11 (2 vCPU, 4GB RAM) at `49.13.158.66`
-**Domain:** Not yet configured (accessing via IP)
+**Domain:** `staff.oooshtours.co.uk` (SSL via Let's Encrypt)
 
 ## Repository Structure
 
@@ -65,6 +65,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── 007_calculator.sql         # quotes table, calculator_settings, vehicles
 │   │   │   ├── 008_quote_status_assignments.sql # Quote status workflow, quote_assignments (crew)
 │   │   │   ├── 009_fix_sync_log_permissions.sql # Grant permissions on sync_log for backups
+│   │   │   ├── 010_freelancer_fields.sql  # is_freelancer flag, joined date, review date, document tags
 │   │   │   └── run.ts                     # Migration runner (hardcoded file list — add new migrations here!)
 │   │   └── seeds/          # Demo data seeder
 │   └── .env.example        # Required env vars
@@ -148,8 +149,8 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 
 ### Phase 1 — Deferred / Ongoing
 
-- [ ] SSL certificate (Let's Encrypt via Certbot) — currently HTTP only
-- [ ] Domain name configuration
+- [x] SSL certificate (Let's Encrypt via Certbot) — live at `https://staff.oooshtours.co.uk/`
+- [x] Domain name configuration — `staff.oooshtours.co.uk`
 - [x] Database backup automation (pg_dump to R2) — **FIXED 12 Mar 2026**: sync_log permission issue resolved via migration 009. Backups now working (1.10 MB verified). Daily at 02:00 via scheduler.
 
 ### Phase 2 — In Progress
@@ -175,19 +176,50 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 
 ### Phase 2 — Active / Next Up
 
-- [ ] **Crew & Transport refinements** ← CURRENT DISCUSSION TOPIC (see section below)
-- [ ] **Staging calculator** — stage/riser quoting tool
-- [ ] **Backline matcher** — match client requirements to inventory
-- [ ] **Vehicle delivery reminders** — reminder system for upcoming deliveries
-- [ ] **HireHop webhooks** — replace polling sync with real-time updates
+- [ ] **Crew & Transport refinements** ← CURRENT WORK
+  - [x] `is_freelancer` flag + freelancer filtering in crew assignment
+  - [x] Tab badge count fix (show quote count on initial load)
+  - [x] People page freelancer/approved filter
+  - [ ] Freelancer document management (DVLA check, licence front/back, passport)
+  - [ ] Freelancer joined date + annual review reminder trigger
+  - [ ] Quote editing (currently create-only, no edit mode)
+  - [ ] Quote status transition validation (prevent invalid transitions)
+  - [ ] RBAC on calculator settings (currently any auth user can change)
+- [ ] **Status transition engine** — bidirectional job status sync
+  - [ ] `POST /api/webhooks/external/status-transition` endpoint for external systems
+  - [ ] HireHop write-back via `status_save.php` (with `no_webhook=1`)
+  - [ ] API key / service auth for external callers
+  - [ ] Status mismatch detection in existing sync (backup)
+  - [ ] Pipeline ↔ HireHop status mapping (see Status Mapping section)
+- [ ] **Vehicle delivery reminders** — ties into transport module (reminder system for upcoming deliveries)
+- [ ] **HireHop webhooks** — replace polling sync with real-time updates (SSL now available)
   - Key events: `job.status.updated`, `job.updated`, `job.created`, `contact.person.*`, `contact.company.*`
   - Needs webhook endpoint + verification handler
 - [ ] Phase E: HireHop write-back (push status changes, create HH jobs from Ooosh)
+- [ ] **Tasks system** — general-purpose task management (not tied to specific jobs)
+  - Freelancer application review workflow
+  - Annual licence/detail review reminders
+  - General admin tasks
+  - Linked optionally to person_id or job_id
 - [ ] Win/loss analysis dashboard (depends on pipeline — lost_reason basics included in pipeline)
 - [ ] Job close-out workflow
 - [ ] Command Centre dashboard (live data from jobs + contacts)
 - [ ] Xero financial summary integration
-- [ ] Cold lead finder (Ticketmaster API)
+
+### External Tools (already built, need repointing from Monday.com → Ooosh API)
+
+These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready:
+
+- **Payment Portal** — Stripe payment processing, currently updates Monday.com. HIGH PRIORITY to repoint.
+- **Staging Calculator** — stage/riser quoting tool (standalone, low priority)
+- **Backline Matcher** — match client requirements to inventory (standalone, low priority)
+- **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
+
+### Future Enhancements (captured, not scheduled)
+
+- Crew availability calendar (check if freelancer is already assigned to overlapping dates)
+- Skills-based crew matching (auto-suggest freelancers with matching skills for job type)
+- Freelancer application inbound form (public form → creates person with `is_freelancer=true`, `is_approved=false`, generates review task)
 
 ### Phase 3–5
 
@@ -240,6 +272,25 @@ Settings live in `calculator_settings` table. Key values include:
 - `expense_markup_percent` — markup on expenses
 - `min_hours_threshold`, `min_client_charge_floor` — minimum charge rules
 - `day_rate_client_markup` — markup for day rate pricing mode
+
+### Freelancer Workflow
+
+Two-tier freelancer identification:
+1. **`is_freelancer = true`** — person is a freelancer (may be new applicant, not yet vetted)
+2. **`is_approved = true`** — freelancer has been reviewed and cleared for assignment to jobs
+
+**Crew assignment only shows approved freelancers** (`is_freelancer = true AND is_approved = true`).
+
+**Freelancer document types** (tagged via existing file upload system):
+- DVLA Check
+- Licence Front
+- Licence Back
+- Passport
+
+**Freelancer fields on `people` table:**
+- `is_freelancer` BOOLEAN — explicit flag
+- `freelancer_joined_date` DATE — when added as freelancer
+- `freelancer_next_review_date` DATE — annual review trigger for licence/details
 
 ### Vehicles Table
 
@@ -303,6 +354,28 @@ HIREHOP_API_TOKEN=your_token_here   # API token from HireHop settings
 - **GET single job:** `https://{domain}/api/job_data.php?token={token}&job={id}`
 - **POST status update:** `https://{domain}/frames/status_save.php` (POST, form-encoded) — always include `no_webhook=1` to prevent loops
 - **Add note:** `https://{domain}/api/job_note.php?job={id}&note={text}&token={token}` (GET)
+
+## Pipeline ↔ HireHop Status Mapping
+
+| Ooosh Pipeline Status | HireHop Code | HH Name | Trigger Examples |
+|---|---|---|---|
+| `new_enquiry` | 0 | Enquiry | New enquiry created |
+| `quoting` | 0 | Enquiry | Quote being prepared (HH stays Enquiry) |
+| `chasing` | 0 | Enquiry | Following up (HH stays Enquiry) |
+| `paused` | 0 | Enquiry | Paused enquiry (HH stays Enquiry) |
+| `provisional` | 1 | Provisional | Awaiting deposit / held pending |
+| `confirmed` | 2 | Booked | Deposit/full payment received |
+| `lost` | 10 | Not Interested | Client declined |
+| _(cancelled)_ | 9 | Cancelled | Job cancelled after booking |
+
+**Status change API for external systems:**
+```
+POST /api/webhooks/external/status-transition
+Headers: X-API-Key: {service_api_key}
+Body: { hirehop_job_id, new_status, trigger, source, metadata }
+```
+
+**HireHop write-back:** Uses `POST status_save.php` with `no_webhook=1` to prevent loops.
 
 ## Database Tables Overview
 

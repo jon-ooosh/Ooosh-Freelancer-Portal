@@ -35,17 +35,21 @@ export default function PeoplePage() {
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
   const [showForm, setShowForm] = useState(false);
+  const [filterFreelancer, setFilterFreelancer] = useState(false);
+  const [filterApproved, setFilterApproved] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
     loadPeople();
-  }, [search]);
+  }, [search, filterFreelancer, filterApproved]);
 
   async function loadPeople(page = 1) {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: String(page), limit: '50' });
       if (search) params.set('search', search);
+      if (filterFreelancer) params.set('is_freelancer', 'true');
+      if (filterApproved) params.set('is_approved', 'true');
 
       const data = await api.get<PeopleResponse>(`/people?${params}`);
       setPeople(data.data);
@@ -82,8 +86,8 @@ export default function PeoplePage() {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="mt-6">
+      {/* Search & Filters */}
+      <div className="mt-6 flex flex-wrap items-center gap-4">
         <input
           type="text"
           placeholder="Search people by name or email..."
@@ -91,6 +95,24 @@ export default function PeoplePage() {
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-md rounded border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
         />
+        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
+          <input
+            type="checkbox"
+            checked={filterFreelancer}
+            onChange={(e) => setFilterFreelancer(e.target.checked)}
+            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+          />
+          Freelancers
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
+          <input
+            type="checkbox"
+            checked={filterApproved}
+            onChange={(e) => setFilterApproved(e.target.checked)}
+            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+          />
+          Approved only
+        </label>
       </div>
 
       {/* Table */}
