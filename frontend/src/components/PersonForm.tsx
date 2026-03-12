@@ -16,6 +16,8 @@ interface PersonFormData {
   tags: string[];
   // Freelancer
   is_freelancer: boolean;
+  freelancer_joined_date: string;
+  freelancer_next_review_date: string;
   skills: string[];
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
@@ -23,6 +25,7 @@ interface PersonFormData {
   emergency_contact_name: string;
   emergency_contact_phone: string;
   licence_details: string;
+  freelancer_references: string;
 }
 
 interface PersonFormProps {
@@ -74,6 +77,8 @@ const emptyForm: PersonFormData = {
   notes: '',
   tags: [],
   is_freelancer: false,
+  freelancer_joined_date: '',
+  freelancer_next_review_date: '',
   skills: [],
   is_insured_on_vehicles: false,
   is_approved: false,
@@ -81,6 +86,7 @@ const emptyForm: PersonFormData = {
   emergency_contact_name: '',
   emergency_contact_phone: '',
   licence_details: '',
+  freelancer_references: '',
 };
 
 export default function PersonForm({ personId, onSaved, onCancel }: PersonFormProps) {
@@ -118,6 +124,8 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         notes: (data.notes as string) || '',
         tags: (data.tags as string[]) || [],
         is_freelancer: (data.is_freelancer as boolean) || false,
+        freelancer_joined_date: (data.freelancer_joined_date as string)?.split('T')[0] || '',
+        freelancer_next_review_date: (data.freelancer_next_review_date as string)?.split('T')[0] || '',
         skills: (data.skills as string[]) || [],
         is_insured_on_vehicles: (data.is_insured_on_vehicles as boolean) || false,
         is_approved: (data.is_approved as boolean) || false,
@@ -125,6 +133,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         emergency_contact_name: (data.emergency_contact_name as string) || '',
         emergency_contact_phone: (data.emergency_contact_phone as string) || '',
         licence_details: (data.licence_details as string) || '',
+        freelancer_references: (data.freelancer_references as string) || '',
       });
       setShowFreelancer((data.is_freelancer as boolean) || false);
     } catch {
@@ -205,6 +214,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         emergency_contact_name: form.emergency_contact_name || null,
         emergency_contact_phone: form.emergency_contact_phone || null,
         licence_details: form.licence_details || null,
+        freelancer_joined_date: form.freelancer_joined_date || null,
+        freelancer_next_review_date: form.freelancer_next_review_date || null,
+        freelancer_references: form.freelancer_references || null,
       };
 
       if (isEdit) {
@@ -373,6 +385,12 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
             )}
           </div>
 
+          {/* Dates */}
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Joined Date" type="date" value={form.freelancer_joined_date} onChange={v => set('freelancer_joined_date', v)} />
+            <Field label="Next Review Date" type="date" value={form.freelancer_next_review_date} onChange={v => set('freelancer_next_review_date', v)} />
+          </div>
+
           <Field label="Licence Details" value={form.licence_details} onChange={v => set('licence_details', v)} />
 
           <div className="grid grid-cols-2 gap-4">
@@ -380,11 +398,31 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
             <Field label="Emergency Contact Phone" value={form.emergency_contact_phone} onChange={v => set('emergency_contact_phone', v)} />
           </div>
 
+          {/* References */}
+          <div>
+            <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">References</label>
+            <textarea
+              value={form.freelancer_references}
+              onChange={e => set('freelancer_references', e.target.value)}
+              rows={2}
+              placeholder="Reference details..."
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+            />
+          </div>
+
           <div className="flex flex-wrap gap-4">
             <Checkbox label="Insured on vehicles" checked={form.is_insured_on_vehicles} onChange={v => set('is_insured_on_vehicles', v)} />
             <Checkbox label="Approved freelancer" checked={form.is_approved} onChange={v => set('is_approved', v)} />
             <Checkbox label="Has T-shirt" checked={form.has_tshirt} onChange={v => set('has_tshirt', v)} />
           </div>
+
+          {isEdit && (
+            <div className="bg-blue-50 border border-blue-200 rounded p-3">
+              <p className="text-xs text-blue-700">
+                Upload freelancer documents (DVLA check, licence, passport) from the Details tab on the person page.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
