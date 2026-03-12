@@ -16,7 +16,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     const searchTerm = `%${(q as string).trim()}%`;
     const resultLimit = Math.min(parseInt(limit as string), 50);
-    const perType = Math.ceil(resultLimit / 3);
+    const perType = Math.ceil(resultLimit / 4);
 
     // Search people
     const peopleResults = await query(
@@ -51,11 +51,40 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       [searchTerm, perType]
     );
 
+    // Search jobs
+    const searchTermRaw = (q as string).trim();
+    const isNumeric = /^\d+$/.test(searchTermRaw);
+    const jobParams: unknown[] = [searchTerm];
+    let jobNumClause = '';
+    if (isNumeric) {
+      jobParams.push(parseInt(searchTermRaw, 10));
+      jobNumClause = `OR hh_job_number = $${jobParams.length}`;
+    }
+    jobParams.push(perType);
+    const jobResults = await query(
+      `SELECT id,
+              CASE WHEN hh_job_number IS NOT NULL
+                   THEN '#' || hh_job_number || ' - ' || COALESCE(job_name, '')
+                   ELSE COALESCE(job_name, 'Untitled Job')
+              END as name,
+              company_name as subtitle,
+              'job' as type
+       FROM jobs
+       WHERE is_deleted = false AND (
+         job_name ILIKE $1 OR company_name ILIKE $1 OR client_name ILIKE $1
+         ${jobNumClause}
+       )
+       ORDER BY created_at DESC
+       LIMIT $${jobParams.length}`,
+      jobParams
+    );
+
     res.json({
       results: [
         ...peopleResults.rows,
         ...orgResults.rows,
         ...venueResults.rows,
+        ...jobResults.rows,
       ],
     });
   } catch (error) {

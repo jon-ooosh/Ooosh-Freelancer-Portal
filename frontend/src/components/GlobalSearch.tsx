@@ -6,19 +6,21 @@ interface SearchResult {
   id: string;
   name: string;
   subtitle: string | null;
-  type: 'person' | 'organisation' | 'venue';
+  type: 'person' | 'organisation' | 'venue' | 'job';
 }
 
 const typeLabels: Record<string, string> = {
   person: 'Person',
   organisation: 'Org',
   venue: 'Venue',
+  job: 'Job',
 };
 
 const typeColors: Record<string, string> = {
   person: 'bg-blue-100 text-blue-700',
   organisation: 'bg-purple-100 text-purple-700',
   venue: 'bg-teal-100 text-teal-700',
+  job: 'bg-amber-100 text-amber-700',
 };
 
 export default function GlobalSearch() {
@@ -87,6 +89,7 @@ export default function GlobalSearch() {
       person: `/people/${result.id}`,
       organisation: `/organisations/${result.id}`,
       venue: `/venues/${result.id}`,
+      job: `/jobs/${result.id}`,
     };
     navigate(paths[result.type]);
     setQuery('');

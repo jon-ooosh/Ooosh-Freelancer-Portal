@@ -461,6 +461,7 @@ export default function TransportCalculator({
   // Track original venue transport values for writeback
   const [venueOriginalMiles, setVenueOriginalMiles] = useState<number | null>(null);
   const [venueOriginalDriveTime, setVenueOriginalDriveTime] = useState<number | null>(null);
+  const [creatingVenue, setCreatingVenue] = useState(false);
 
   // Load settings + venues on open
   useEffect(() => {
@@ -483,6 +484,7 @@ export default function TransportCalculator({
       jobDate: parsedDate,
       jobFinishDate: parsedEndDate,
       isMultiDay: !!(parsedDate && parsedEndDate && parsedDate !== parsedEndDate),
+      collectionDate: parsedEndDate, // Pre-fill collection date from HireHop end date
     });
     setVenueSearch(venueName || '');
 
@@ -603,6 +605,23 @@ export default function TransportCalculator({
   const removeExpense = useCallback((id: string) => {
     setFormData(prev => ({ ...prev, expenses: prev.expenses.filter(exp => exp.id !== id) }));
   }, []);
+
+  async function handleCreateVenue() {
+    if (!venueSearch.trim()) return;
+    setCreatingVenue(true);
+    try {
+      const newVenue = await api.post<{ id: string; name: string }>('/venues', {
+        name: venueSearch.trim(),
+      });
+      const created: VenueOption = { id: newVenue.id, name: newVenue.name ?? venueSearch.trim() };
+      setVenues(prev => [...prev, created]);
+      handleVenueSelect(created);
+    } catch {
+      setError('Failed to create venue');
+    } finally {
+      setCreatingVenue(false);
+    }
+  }
 
   async function handleSave() {
     if (!costs || !settings) return;
@@ -892,7 +911,12 @@ export default function TransportCalculator({
                         <>
                           <div className="md:col-span-2">
                             <label className="flex items-center space-x-2">
-                              <input type="checkbox" checked={formData.addCollection} onChange={(e) => updateField('addCollection', e.target.checked)} className="w-4 h-4 text-ooosh-600 rounded" />
+                              <input type="checkbox" checked={formData.addCollection} onChange={(e) => {
+                                updateField('addCollection', e.target.checked);
+                                if (e.target.checked && hhOriginalEndDate && !formData.collectionDate) {
+                                  updateField('collectionDate', hhOriginalEndDate);
+                                }
+                              }} className="w-4 h-4 text-ooosh-600 rounded" />
                               <span className="text-sm font-medium text-gray-700">Add collection from same location</span>
                             </label>
                           </div>
@@ -949,6 +973,16 @@ export default function TransportCalculator({
                             ))}
                             {filteredVenues.length === 0 && (
                               <div className="px-4 py-2 text-gray-500 text-sm">No matching venues</div>
+                            )}
+                            {venueSearch.trim().length > 0 && !venues.some(v => v.name.toLowerCase() === venueSearch.trim().toLowerCase()) && (
+                              <button
+                                type="button"
+                                onClick={handleCreateVenue}
+                                disabled={creatingVenue}
+                                className="w-full px-4 py-2 text-left hover:bg-ooosh-50 border-t border-gray-100 text-sm text-ooosh-600 font-medium"
+                              >
+                                {creatingVenue ? 'Creating...' : `➕ Create "${venueSearch.trim()}" as new venue`}
+                              </button>
                             )}
                           </div>
                         )}
@@ -1125,12 +1159,19 @@ export default function TransportCalculator({
                 <div className="space-y-6">
                   <h3 className="text-lg font-semibold text-gray-900">📋 Review &amp; Save</h3>
 
+                  {formData.addCollection && (
+                    <div className="text-sm px-4 py-3 rounded-lg bg-ooosh-50 text-ooosh-700 border border-ooosh-200 text-center">
+                      📦 Will save to D&amp;C board ({formData.addCollection ? '2 items' : '1 item'})
+                    </div>
+                  )}
+
                   {(costs.autoEarlyStartMinutes > 0 || costs.autoLateFinishMinutes > 0) && (
                     <div className="text-sm px-4 py-3 rounded-lg bg-amber-50 text-amber-700 border border-amber-200">
                       🌙 Out of hours: {costs.autoEarlyStartMinutes > 0 && `${formatDurationHM(costs.autoEarlyStartMinutes)} early start`}{costs.autoEarlyStartMinutes > 0 && costs.autoLateFinishMinutes > 0 && ' + '}{costs.autoLateFinishMinutes > 0 && `${formatDurationHM(costs.autoLateFinishMinutes)} late finish`}
                     </div>
                   )}
 
+                  {/* Cost summary cards */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="bg-green-50 rounded-xl p-4">
                       <p className="text-sm text-green-600 font-medium">💰 Client Charge</p>
@@ -1153,24 +1194,59 @@ export default function TransportCalculator({
                     </div>
                   </div>
 
+                  {/* Delivery + Collection breakdown (when addCollection is on) */}
                   {formData.addCollection && (
-                    <div className="bg-gray-100 rounded-lg p-3 text-sm text-center">
-                      <span className="font-medium">Combined (delivery + collection):</span> Client &pound;{costs.clientChargeTotalRounded * 2} / Freelancer &pound;{costs.freelancerFeeRounded * 2}
-                    </div>
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="bg-green-50/50 border border-green-200 rounded-xl p-4">
+                          <p className="text-sm font-medium text-green-700">📦 Delivery</p>
+                          <p className="text-xs text-gray-500 mt-0.5">{formatDateUK(formData.jobDate)}{formData.arrivalTime && ` @ ${formatTime12h(formData.arrivalTime)}`}</p>
+                          <div className="mt-2 text-sm">
+                            <p>Client: <span className="font-semibold">&pound;{costs.clientChargeTotalRounded}</span></p>
+                            <p>Freelancer: <span className="font-semibold">&pound;{costs.freelancerFeeRounded}</span></p>
+                          </div>
+                        </div>
+                        <div className="bg-amber-50/50 border border-amber-200 rounded-xl p-4">
+                          <p className="text-sm font-medium text-amber-700">📥 Collection</p>
+                          <p className="text-xs text-gray-500 mt-0.5">{formData.collectionDate ? formatDateUK(formData.collectionDate) : 'TBC'}{formData.collectionArrivalTime && ` @ ${formatTime12h(formData.collectionArrivalTime)}`}</p>
+                          <div className="mt-2 text-sm">
+                            <p>Client: <span className="font-semibold">&pound;{costs.clientChargeTotalRounded}</span></p>
+                            <p>Freelancer: <span className="font-semibold">&pound;{costs.freelancerFeeRounded}</span></p>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-gray-100 rounded-lg p-3 text-sm text-center">
+                        <span className="font-medium">Combined totals:</span>{' '}
+                        Client <span className="font-semibold">&pound;{costs.clientChargeTotalRounded * 2}</span>{' · '}
+                        Freelancer <span className="font-semibold">&pound;{costs.freelancerFeeRounded * 2}</span>{' · '}
+                        Margin <span className="font-semibold">&pound;{(costs.ourMargin * 2).toFixed(2)}</span>
+                      </div>
+                    </>
                   )}
 
-                  {/* Job summary */}
+                  {/* Job Summary */}
                   <div className="border rounded-lg divide-y">
-                    <div className="px-4 py-3 bg-gray-50"><h4 className="font-medium text-gray-900">Summary</h4></div>
+                    <div className="px-4 py-3 bg-gray-50"><h4 className="font-medium text-gray-900">Job Summary</h4></div>
                     <div className="px-4 py-3 grid grid-cols-2 gap-3 text-sm">
-                      <div><span className="text-gray-500">Type:</span> <span className="ml-1 capitalize">{formData.jobType}{isDC && formData.whatIsIt ? ` (${formData.whatIsIt})` : ''}</span></div>
-                      {formData.destination && <div><span className="text-gray-500">Venue:</span> <span className="ml-1">{formData.destination}</span></div>}
-                      <div><span className="text-gray-500">Date:</span> <span className="ml-1">{formatDateUK(formData.jobDate)}{formData.arrivalTime && ` @ ${formatTime12h(formData.arrivalTime)}`}</span></div>
+                      <div><span className="text-gray-500">Type:</span> <span className="ml-1 capitalize">{formData.jobType}{isDC && formData.whatIsIt ? ` (${formData.whatIsIt})` : ''}{formData.includesSetupWork ? ' + Setup' : ''}</span></div>
+                      {hhJobNumber && <div><span className="text-gray-500">HireHop #:</span> <span className="ml-1">{hhJobNumber}</span></div>}
+                      {clientName && <div><span className="text-gray-500">Client:</span> <span className="ml-1">{clientName}</span></div>}
+                      {formData.destination && <div><span className="text-gray-500">Destination:</span> <span className="ml-1">{formData.destination}</span></div>}
+                      <div><span className="text-gray-500">{formData.jobType === 'collection' ? 'Collection:' : 'Delivery:'}</span> <span className="ml-1 font-medium">{formatDateUK(formData.jobDate)}{formData.arrivalTime && ` @ ${formatTime12h(formData.arrivalTime)}`}</span></div>
+                      {formData.addCollection && formData.collectionDate && (
+                        <div><span className="text-gray-500">Collection:</span> <span className="ml-1 font-medium">{formatDateUK(formData.collectionDate)}{formData.collectionArrivalTime && ` @ ${formatTime12h(formData.collectionArrivalTime)}`}</span></div>
+                      )}
                       {formData.isMultiDay && formData.jobFinishDate && (
                         <div><span className="text-gray-500">Finish:</span> <span className="ml-1">{formatDateUK(formData.jobFinishDate)} ({formData.numberOfDays} days)</span></div>
                       )}
-                      {formData.addCollection && formData.collectionDate && (
-                        <div><span className="text-gray-500">Collection:</span> <span className="ml-1">{formatDateUK(formData.collectionDate)}</span></div>
+                      {formData.includesSetupWork && formData.setupWorkDescription && (
+                        <div className="col-span-2"><span className="text-gray-500">Setup:</span> <span className="ml-1">{formData.setupWorkDescription}</span></div>
+                      )}
+                      {isCrewedJob && formData.workType && (
+                        <div><span className="text-gray-500">Work:</span> <span className="ml-1">{WORK_TYPE_OPTIONS.find(o => o.value === formData.workType)?.label || formData.workType}{formData.workType === 'other' && formData.workTypeOther ? ` — ${formData.workTypeOther}` : ''}</span></div>
+                      )}
+                      {formData.distanceMiles > 0 && (
+                        <div><span className="text-gray-500">Distance:</span> <span className="ml-1">{formData.distanceMiles} mi · {formData.driveTimeMinutes} mins</span></div>
                       )}
                     </div>
                   </div>
