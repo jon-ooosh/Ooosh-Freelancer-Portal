@@ -64,4 +64,45 @@ export function startScheduler() {
     });
     console.log('Scheduler: HireHop job sync scheduled every 30 minutes');
   }
+
+  // ── Chase Auto-Mover ──────────────────────────────────────────────────
+  // Every 15 minutes, move jobs with overdue chase dates to 'chasing' status
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      // Find jobs where next_chase_date has arrived and status is an active pipeline stage
+      // (not already chasing, confirmed, or lost)
+      const result = await query(
+        `UPDATE jobs
+         SET pipeline_status = 'chasing',
+             pipeline_status_changed_at = NOW()
+         WHERE next_chase_date <= CURRENT_DATE
+           AND next_chase_date IS NOT NULL
+           AND pipeline_status IN ('new_enquiry', 'quoting', 'provisional', 'paused')
+         RETURNING id, job_name, hh_job_number, next_chase_date`
+      );
+
+      if (result.rows.length > 0) {
+        console.log(`Scheduler: Chase auto-mover moved ${result.rows.length} job(s) to chasing`);
+
+        // Log a status_transition interaction for each moved job
+        for (const job of result.rows) {
+          try {
+            await query(
+              `INSERT INTO interactions (type, content, job_id)
+               VALUES ('status_transition', $1, $2)`,
+              [
+                `Auto-moved to Chasing — chase date ${job.next_chase_date} reached`,
+                job.id,
+              ]
+            );
+          } catch {
+            // Non-critical — don't block other jobs
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Scheduler: Chase auto-mover failed:', err);
+    }
+  });
+  console.log('Scheduler: Chase auto-mover scheduled every 15 minutes');
 }

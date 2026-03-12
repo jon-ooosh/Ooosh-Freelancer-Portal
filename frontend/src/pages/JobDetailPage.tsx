@@ -524,7 +524,44 @@ export default function JobDetailPage() {
             </div>
           ) : (
             <div className="space-y-3">
-              {quotes.map((q) => {
+              {/* Summary panel */}
+              {quotes.length > 0 && (() => {
+                const totalClient = quotes.reduce((s, q) => s + Number(q.client_charge_rounded ?? q.client_charge_total ?? 0), 0);
+                const totalFreelancer = quotes.reduce((s, q) => s + Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0), 0);
+                const totalMargin = quotes.reduce((s, q) => s + Number(q.our_margin ?? 0), 0);
+                const totalTime = quotes.reduce((s, q) => s + Number(q.estimated_time_hrs ?? 0), 0);
+                return (
+                  <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mb-2">
+                    <div>
+                      <span className="text-gray-500">Total Client</span>
+                      <p className="font-bold text-green-700">&pound;{totalClient.toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Total Freelancer</span>
+                      <p className="font-bold text-blue-700">&pound;{totalFreelancer.toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Total Margin</span>
+                      <p className={`font-bold ${totalMargin < 0 ? 'text-red-600' : 'text-purple-700'}`}>&pound;{totalMargin.toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Total Time</span>
+                      <p className="font-medium text-gray-900">{totalTime.toFixed(1)}h</p>
+                    </div>
+                  </div>
+                );
+              })()}
+              {[...quotes]
+                .sort((a, b) => {
+                  // Sort by date first, then by arrival time
+                  const dateA = a.job_date || '';
+                  const dateB = b.job_date || '';
+                  if (dateA !== dateB) return dateA.localeCompare(dateB);
+                  const timeA = a.arrival_time || '';
+                  const timeB = b.arrival_time || '';
+                  return timeA.localeCompare(timeB);
+                })
+                .map((q) => {
                 const clientCharge = Number(q.client_charge_rounded ?? q.client_charge_total ?? 0);
                 const freelancerFee = Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0);
                 const margin = Number(q.our_margin ?? 0);
@@ -611,6 +648,7 @@ export default function JobDetailPage() {
                           )
                         )}
                         {q.distance_miles && <span>{q.distance_miles}mi · {q.drive_time_mins}min</span>}
+                        {q.arrival_time && <span>🕐 Arrive by {q.arrival_time}</span>}
                         {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
                         {q.add_collection && q.collection_date && (
                           <span>📥 Collection: {new Date(q.collection_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>

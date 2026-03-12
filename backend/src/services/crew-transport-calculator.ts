@@ -201,13 +201,16 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
   const totalHours = totalEngagedMins / 60;
 
   // ── Expenses ──
+  // Exclude fuel from expense sums — fuel is calculated separately from distance
+  const fuelExpense = expenses.find(e => e.type === 'fuel');
+  const fuelIncludedInCharge = fuelExpense?.includedInCharge ?? true;
   const expensesIncluded = expenses
-    .filter(e => e.includedInCharge)
+    .filter(e => e.includedInCharge && e.type !== 'fuel')
     .reduce((sum, e) => sum + e.amount, 0);
   const expensesNotIncluded = expenses
-    .filter(e => !e.includedInCharge)
+    .filter(e => !e.includedInCharge && e.type !== 'fuel')
     .reduce((sum, e) => sum + e.amount, 0);
-  const expenseMarkup = expensesNotIncluded * (settings.expense_markup_percent / 100);
+  const expenseMarkup = expensesIncluded * (settings.expense_markup_percent / 100);
 
   let freelancerFee: number;
   let clientChargeLabour: number;
@@ -253,29 +256,29 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
       }
     }
 
-    // Admin cost
+    // Admin cost — added to client labour charge and to our cost
     adminCost = totalHours * settings.admin_cost_per_hour;
+    clientChargeLabour += adminCost;
   }
 
   // ── Totals ──
-  const clientChargeFuel = fuelCost; // Pass fuel cost to client
-  const clientChargeExpenses = expensesNotIncluded + expenseMarkup;
+  // Fuel charge: include in client charge if fuel is marked as "included in charge"
+  const clientChargeFuel = fuelIncludedInCharge ? fuelCost : 0;
+  // Client expenses: charge for included expenses (in quote) with markup
+  const clientChargeExpenses = expensesIncluded + expenseMarkup;
   const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses;
-  const clientChargeTotalRounded = roundToFive(clientChargeTotal);
-
-  // Enforce floor
-  const finalClientCharge = Math.max(clientChargeTotalRounded, settings.min_client_charge_floor);
+  const clientChargeTotalRounded = Math.max(Math.round(clientChargeTotal), settings.min_client_charge_floor);
 
   const freelancerFeeRounded = roundToFive(freelancerFee);
   const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded + adminCost;
-  const ourMargin = finalClientCharge - ourTotalCost;
+  const ourMargin = clientChargeTotalRounded - ourTotalCost;
 
   return {
     clientChargeLabour: round2(clientChargeLabour),
     clientChargeFuel: round2(clientChargeFuel),
     clientChargeExpenses: round2(clientChargeExpenses),
     clientChargeTotal: round2(clientChargeTotal),
-    clientChargeTotalRounded: finalClientCharge,
+    clientChargeTotalRounded,
     freelancerFee: round2(freelancerFee),
     freelancerFeeRounded,
     expectedFuelCost: round2(fuelCost),
