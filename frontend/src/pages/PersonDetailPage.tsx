@@ -602,8 +602,15 @@ function FreelancerDocuments({ personId, files, onFilesChanged, onActivityCreate
     handleUploadClick(docLabel);
   }
 
-  function handleDownload(file: FileAttachment) {
-    window.open(`/api/files/download?key=${encodeURIComponent(file.url)}`, '_blank');
+  async function handleDownload(file: FileAttachment) {
+    try {
+      const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(file.url)}`);
+      const blobUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
+      window.open(blobUrl, '_blank');
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+    } catch {
+      setError('Download failed');
+    }
   }
 
   function formatDate(dateStr: string) {
