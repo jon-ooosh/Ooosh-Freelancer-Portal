@@ -107,6 +107,32 @@ interface Interaction {
   mentioned_user_ids: string[];
 }
 
+interface SavedQuote {
+  id: string;
+  job_type: string;
+  calculation_mode: string;
+  venue_name: string | null;
+  distance_miles: number | null;
+  drive_time_mins: number | null;
+  arrival_time: string | null;
+  job_date: string | null;
+  job_finish_date: string | null;
+  collection_date: string | null;
+  add_collection: boolean;
+  what_is_it: string | null;
+  client_charge_total: number | null;
+  client_charge_rounded: number | null;
+  freelancer_fee: number | null;
+  freelancer_fee_rounded: number | null;
+  our_margin: number | null;
+  our_total_cost: number | null;
+  estimated_time_hrs: number | null;
+  internal_notes: string | null;
+  freelancer_notes: string | null;
+  created_by_name: string | null;
+  created_at: string;
+}
+
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -117,8 +143,10 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'details'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'details'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
+  const [quotes, setQuotes] = useState<SavedQuote[]>([]);
+  const [quotesLoading, setQuotesLoading] = useState(false);
 
   useEffect(() => {
     if (id) {
@@ -126,6 +154,23 @@ export default function JobDetailPage() {
       loadInteractions();
     }
   }, [id]);
+
+  useEffect(() => {
+    if (activeTab === 'transport' && id && quotes.length === 0) loadQuotes();
+  }, [activeTab, id]);
+
+  async function loadQuotes() {
+    if (!id) return;
+    setQuotesLoading(true);
+    try {
+      const data = await api.get<{ data: SavedQuote[] }>(`/quotes?job_id=${id}`);
+      setQuotes(data.data);
+    } catch {
+      console.error('Failed to load quotes');
+    } finally {
+      setQuotesLoading(false);
+    }
+  }
 
   async function loadJob() {
     try {
@@ -277,7 +322,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['overview', 'timeline', 'files', 'details'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'files', 'details'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -289,6 +334,7 @@ export default function JobDetailPage() {
             >
               {tab === 'overview' ? 'Overview' :
                tab === 'timeline' ? 'Activity Timeline' :
+               tab === 'transport' ? `🚗 Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
                tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
                'Full Details'}
             </button>
@@ -452,6 +498,116 @@ export default function JobDetailPage() {
         />
       )}
 
+      {/* Crew & Transport Tab */}
+      {activeTab === 'transport' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-gray-900">🚗 Crew & Transport</h3>
+            <button
+              onClick={() => setShowCalculator(true)}
+              className="flex items-center gap-1.5 px-4 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
+            >
+              + New Calculation
+            </button>
+          </div>
+
+          {quotesLoading ? (
+            <div className="flex justify-center py-12">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
+            </div>
+          ) : quotes.length === 0 ? (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+              <p className="text-gray-400 text-4xl mb-3">🧮</p>
+              <p className="text-gray-600 font-medium">No calculations yet</p>
+              <p className="text-sm text-gray-400 mt-1">Use the calculator to cost deliveries, collections, and crewed jobs</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {quotes.map((q) => (
+                <div key={q.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-lg">
+                          {q.job_type === 'delivery' ? '📦' : q.job_type === 'collection' ? '📥' : '👷'}
+                        </span>
+                        <span className="font-semibold text-gray-900 capitalize">
+                          {q.job_type}
+                          {q.what_is_it ? ` (${q.what_is_it})` : ''}
+                          {q.add_collection ? ' + Collection' : ''}
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full ${
+                          q.calculation_mode === 'dayrate' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                        }`}>
+                          {q.calculation_mode === 'dayrate' ? 'Day Rate' : 'Hourly'}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                        <div>
+                          <span className="text-gray-500">Client Charge</span>
+                          <p className="font-bold text-green-700">
+                            &pound;{q.client_charge_rounded ?? q.client_charge_total ?? 0}
+                            {q.add_collection && <span className="text-xs font-normal text-gray-400"> (&times;2 = &pound;{((q.client_charge_rounded ?? q.client_charge_total ?? 0) * 2)})</span>}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-gray-500">Freelancer Fee</span>
+                          <p className="font-bold text-blue-700">
+                            &pound;{q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-gray-500">Our Margin</span>
+                          <p className="font-bold text-purple-700">&pound;{Number(q.our_margin ?? 0).toFixed(2)}</p>
+                        </div>
+                        {q.estimated_time_hrs && (
+                          <div>
+                            <span className="text-gray-500">Est. Time</span>
+                            <p className="font-medium text-gray-900">{Number(q.estimated_time_hrs).toFixed(1)}h</p>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs text-gray-500">
+                        {q.venue_name && <span>📍 {q.venue_name}</span>}
+                        {q.distance_miles && <span>{q.distance_miles}mi · {q.drive_time_mins}min</span>}
+                        {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
+                        {q.add_collection && q.collection_date && (
+                          <span>📥 Collection: {new Date(q.collection_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                        )}
+                      </div>
+
+                      {(q.internal_notes || q.freelancer_notes) && (
+                        <div className="mt-3 flex gap-4 text-xs">
+                          {q.internal_notes && (
+                            <div className="flex-1 bg-amber-50 border border-amber-200 rounded p-2">
+                              <span className="font-medium text-amber-700">🔒 Internal:</span>
+                              <span className="ml-1 text-amber-600">{q.internal_notes}</span>
+                            </div>
+                          )}
+                          {q.freelancer_notes && (
+                            <div className="flex-1 bg-blue-50 border border-blue-200 rounded p-2">
+                              <span className="font-medium text-blue-700">📝 Freelancer:</span>
+                              <span className="ml-1 text-blue-600">{q.freelancer_notes}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="text-right text-xs text-gray-400 ml-4 shrink-0">
+                      <p>{new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</p>
+                      {q.created_by_name && <p>{q.created_by_name}</p>}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Full Details Tab */}
       {activeTab === 'details' && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -501,7 +657,7 @@ export default function JobDetailPage() {
       <TransportCalculator
         isOpen={showCalculator}
         onClose={() => setShowCalculator(false)}
-        onSaved={loadJob}
+        onSaved={() => { loadJob(); loadQuotes(); }}
         jobId={job.id}
         jobName={job.job_name || undefined}
         clientName={job.client_name || job.company_name || undefined}
