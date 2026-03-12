@@ -484,7 +484,7 @@ export default function TransportCalculator({
       jobDate: parsedDate,
       jobFinishDate: parsedEndDate,
       isMultiDay: !!(parsedDate && parsedEndDate && parsedDate !== parsedEndDate),
-      collectionDate: parsedEndDate, // Pre-fill collection date from HireHop end date
+      collectionDate: parsedEndDate || parsedDate, // Pre-fill collection date from HireHop end date (or start)
     });
     setVenueSearch(venueName || '');
 
@@ -797,6 +797,10 @@ export default function TransportCalculator({
                           calculationMode: opt.value === 'crewed' ? 'dayrate' : 'hourly',
                           includesSetupWork: false,
                           oohManualOverride: false,
+                          // Collection uses end date as primary; delivery/crewed use start date
+                          jobDate: opt.value === 'collection'
+                            ? (hhOriginalEndDate || hhOriginalDate || prev.jobDate)
+                            : (hhOriginalDate || prev.jobDate),
                         }))}
                         className={`p-4 rounded-xl border-2 text-left transition-all ${formData.jobType === opt.value ? 'border-ooosh-500 bg-ooosh-50' : 'border-gray-200 hover:border-gray-300'}`}
                       >
@@ -873,11 +877,15 @@ export default function TransportCalculator({
                           {formData.jobType === 'collection' ? 'Collection Date' : isCrewedJob && formData.isMultiDay ? 'Start Date' : 'Job Date'}
                         </label>
                         <input type="date" value={formData.jobDate} onChange={(e) => updateField('jobDate', e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
-                        {hhOriginalDate && formData.jobDate && formData.jobDate !== hhOriginalDate && (
-                          <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
-                            <span>⚠️</span> Changed from HireHop date: {formatDateUK(hhOriginalDate)}
-                          </p>
-                        )}
+                        {(() => {
+                          // Collection jobs compare against end date; delivery/crewed against start date
+                          const hhRef = formData.jobType === 'collection' ? hhOriginalEndDate : hhOriginalDate;
+                          return hhRef && formData.jobDate && formData.jobDate !== hhRef ? (
+                            <p className="text-xs text-amber-600 mt-1 flex items-center gap-1">
+                              <span>⚠️</span> Changed from HireHop date: {formatDateUK(hhRef)}
+                            </p>
+                          ) : null;
+                        })()}
                       </div>
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Arrive by (optional)</label>
@@ -1236,7 +1244,7 @@ export default function TransportCalculator({
                       {formData.addCollection && formData.collectionDate && (
                         <div><span className="text-gray-500">Collection:</span> <span className="ml-1 font-medium">{formatDateUK(formData.collectionDate)}{formData.collectionArrivalTime && ` @ ${formatTime12h(formData.collectionArrivalTime)}`}</span></div>
                       )}
-                      {formData.isMultiDay && formData.jobFinishDate && (
+                      {isCrewedJob && formData.isMultiDay && formData.jobFinishDate && (
                         <div><span className="text-gray-500">Finish:</span> <span className="ml-1">{formatDateUK(formData.jobFinishDate)} ({formData.numberOfDays} days)</span></div>
                       )}
                       {formData.includesSetupWork && formData.setupWorkDescription && (
