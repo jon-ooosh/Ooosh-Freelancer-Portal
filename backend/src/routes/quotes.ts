@@ -244,7 +244,22 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     params.push(offset);
     const result = await query(
       `SELECT q.*,
-        CONCAT(p.first_name, ' ', p.last_name) as created_by_name
+        CONCAT(p.first_name, ' ', p.last_name) as created_by_name,
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+            'id', qa.id,
+            'person_id', qa.person_id,
+            'first_name', ap.first_name,
+            'last_name', ap.last_name,
+            'role', qa.role,
+            'status', qa.status,
+            'agreed_rate', qa.agreed_rate,
+            'rate_type', qa.rate_type
+          ) ORDER BY qa.created_at)
+          FROM quote_assignments qa
+          JOIN people ap ON ap.id = qa.person_id
+          WHERE qa.quote_id = q.id
+        ), '[]'::json) as assignments
        FROM quotes q
        LEFT JOIN users u ON u.id = q.created_by
        LEFT JOIN people p ON p.id = u.person_id
@@ -289,6 +304,125 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Get quote error:', error);
     res.status(500).json({ error: 'Failed to load quote' });
+  }
+});
+
+// ── PATCH /api/quotes/:id/status — update quote status ──────────────
+
+const statusSchema = z.object({
+  status: z.enum(['draft', 'confirmed', 'cancelled', 'completed']),
+  cancelledReason: z.string().optional().nullable(),
+});
+
+router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { status, cancelledReason } = req.body;
+    const result = await query(
+      `UPDATE quotes
+       SET status = $1, status_changed_at = NOW(), status_changed_by = $2,
+           cancelled_reason = $3, updated_at = NOW()
+       WHERE id = $4 AND is_deleted = false
+       RETURNING id, status`,
+      [status, req.user!.id, status === 'cancelled' ? (cancelledReason || null) : null, req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update quote status error:', error);
+    res.status(500).json({ error: 'Failed to update quote status' });
+  }
+});
+
+// ── DELETE /api/quotes/:id — soft-delete a quote ────────────────────
+
+router.delete('/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `UPDATE quotes SET is_deleted = true, updated_at = NOW() WHERE id = $1 AND is_deleted = false RETURNING id`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete quote error:', error);
+    res.status(500).json({ error: 'Failed to delete quote' });
+  }
+});
+
+// ── GET /api/quotes/:id/assignments — list crew for a quote ─────────
+
+router.get('/:id/assignments', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT qa.*,
+        p.first_name, p.last_name, p.email, p.mobile, p.skills,
+        p.is_insured_on_vehicles, p.is_approved
+       FROM quote_assignments qa
+       JOIN people p ON p.id = qa.person_id
+       WHERE qa.quote_id = $1
+       ORDER BY qa.created_at`,
+      [_req.params.id]
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('List quote assignments error:', error);
+    res.status(500).json({ error: 'Failed to load assignments' });
+  }
+});
+
+// ── POST /api/quotes/:id/assignments — assign a person to a quote ───
+
+const assignSchema = z.object({
+  personId: z.string().uuid(),
+  role: z.string().default('driver'),
+  agreedRate: z.number().optional().nullable(),
+  rateType: z.enum(['hourly', 'dayrate', 'fixed']).optional().nullable(),
+  rateNotes: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
+router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { personId, role, agreedRate, rateType, rateNotes, notes } = req.body;
+    const result = await query(
+      `INSERT INTO quote_assignments (quote_id, person_id, role, agreed_rate, rate_type, rate_notes, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (quote_id, person_id) DO UPDATE SET
+         role = EXCLUDED.role, agreed_rate = EXCLUDED.agreed_rate,
+         rate_type = EXCLUDED.rate_type, rate_notes = EXCLUDED.rate_notes,
+         notes = EXCLUDED.notes, updated_at = NOW()
+       RETURNING id`,
+      [req.params.id, personId, role, agreedRate || null, rateType || null, rateNotes || null, notes || null, req.user!.id]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Assign person to quote error:', error);
+    res.status(500).json({ error: 'Failed to assign person' });
+  }
+});
+
+// ── DELETE /api/quotes/:quoteId/assignments/:assignmentId ───────────
+
+router.delete('/:quoteId/assignments/:assignmentId', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `DELETE FROM quote_assignments WHERE id = $1 AND quote_id = $2 RETURNING id`,
+      [_req.params.assignmentId, _req.params.quoteId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Assignment not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Remove quote assignment error:', error);
+    res.status(500).json({ error: 'Failed to remove assignment' });
   }
 });
 

@@ -107,6 +107,17 @@ interface Interaction {
   mentioned_user_ids: string[];
 }
 
+interface QuoteAssignment {
+  id: string;
+  person_id: string;
+  first_name: string;
+  last_name: string;
+  role: string;
+  status: string;
+  agreed_rate: number | null;
+  rate_type: string | null;
+}
+
 interface SavedQuote {
   id: string;
   job_type: string;
@@ -134,10 +145,26 @@ interface SavedQuote {
   our_margin: number | null;
   our_total_cost: number | null;
   estimated_time_hrs: number | null;
+  // Status
+  status: string;
+  status_changed_at: string | null;
+  cancelled_reason: string | null;
+  // Assignments
+  assignments: QuoteAssignment[];
+  // Notes
   internal_notes: string | null;
   freelancer_notes: string | null;
   created_by_name: string | null;
   created_at: string;
+}
+
+interface PersonOption {
+  id: string;
+  first_name: string;
+  last_name: string;
+  skills: string[];
+  is_insured_on_vehicles: boolean;
+  is_approved: boolean;
 }
 
 export default function JobDetailPage() {
@@ -154,6 +181,11 @@ export default function JobDetailPage() {
   const [showCalculator, setShowCalculator] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
+  const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
+  const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
+  const [peopleSearch, setPeopleSearch] = useState('');
+  const [assignRole, setAssignRole] = useState('driver');
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
 
   useEffect(() => {
     if (id) {
@@ -176,6 +208,56 @@ export default function JobDetailPage() {
       console.error('Failed to load quotes');
     } finally {
       setQuotesLoading(false);
+    }
+  }
+
+  async function updateQuoteStatus(quoteId: string, status: string, cancelledReason?: string) {
+    try {
+      await api.patch(`/quotes/${quoteId}/status`, { status, cancelledReason });
+      await loadQuotes();
+    } catch {
+      console.error('Failed to update quote status');
+    }
+  }
+
+  async function deleteQuote(quoteId: string) {
+    try {
+      await api.delete(`/quotes/${quoteId}`);
+      setQuotes(prev => prev.filter(q => q.id !== quoteId));
+      setConfirmingDelete(null);
+    } catch {
+      console.error('Failed to delete quote');
+    }
+  }
+
+  async function searchPeople(search: string) {
+    try {
+      const data = await api.get<{ data: PersonOption[] }>(`/people?search=${encodeURIComponent(search)}&limit=10`);
+      setPeopleOptions(data.data);
+    } catch {
+      console.error('Failed to search people');
+    }
+  }
+
+  async function assignPerson(quoteId: string, personId: string, role: string) {
+    try {
+      await api.post(`/quotes/${quoteId}/assignments`, { personId, role });
+      await loadQuotes();
+      setAssignModalQuoteId(null);
+      setPeopleSearch('');
+      setPeopleOptions([]);
+      setAssignRole('driver');
+    } catch {
+      console.error('Failed to assign person');
+    }
+  }
+
+  async function removeAssignment(quoteId: string, assignmentId: string) {
+    try {
+      await api.delete(`/quotes/${quoteId}/assignments/${assignmentId}`);
+      await loadQuotes();
+    } catch {
+      console.error('Failed to remove assignment');
     }
   }
 
@@ -526,34 +608,45 @@ export default function JobDetailPage() {
             <div className="space-y-3">
               {/* Summary panel */}
               {quotes.length > 0 && (() => {
-                const totalClient = quotes.reduce((s, q) => s + Number(q.client_charge_rounded ?? q.client_charge_total ?? 0), 0);
-                const totalFreelancer = quotes.reduce((s, q) => s + Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0), 0);
-                const totalMargin = quotes.reduce((s, q) => s + Number(q.our_margin ?? 0), 0);
-                const totalTime = quotes.reduce((s, q) => s + Number(q.estimated_time_hrs ?? 0), 0);
+                const activeQuotes = quotes.filter(q => (q.status || 'draft') !== 'cancelled');
+                const confirmedQuotes = quotes.filter(q => q.status === 'confirmed' || q.status === 'completed');
+                const totalClient = activeQuotes.reduce((s, q) => s + Number(q.client_charge_rounded ?? q.client_charge_total ?? 0), 0);
+                const totalFreelancer = activeQuotes.reduce((s, q) => s + Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0), 0);
+                const totalMargin = activeQuotes.reduce((s, q) => s + Number(q.our_margin ?? 0), 0);
+                const totalTime = activeQuotes.reduce((s, q) => s + Number(q.estimated_time_hrs ?? 0), 0);
+                const totalCrew = activeQuotes.reduce((s, q) => s + (Array.isArray(q.assignments) ? q.assignments.length : 0), 0);
                 return (
-                  <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm mb-2">
-                    <div>
-                      <span className="text-gray-500">Total Client</span>
-                      <p className="font-bold text-green-700">&pound;{totalClient.toFixed(2)}</p>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Total Freelancer</span>
-                      <p className="font-bold text-blue-700">&pound;{totalFreelancer.toFixed(2)}</p>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Total Margin</span>
-                      <p className={`font-bold ${totalMargin < 0 ? 'text-red-600' : 'text-purple-700'}`}>&pound;{totalMargin.toFixed(2)}</p>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Total Time</span>
-                      <p className="font-medium text-gray-900">{totalTime.toFixed(1)}h</p>
+                  <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 text-sm mb-2">
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                      <div>
+                        <span className="text-gray-500">Total Client</span>
+                        <p className="font-bold text-green-700">&pound;{totalClient.toFixed(2)}</p>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Total Freelancer</span>
+                        <p className="font-bold text-blue-700">&pound;{totalFreelancer.toFixed(2)}</p>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Total Margin</span>
+                        <p className={`font-bold ${totalMargin < 0 ? 'text-red-600' : 'text-purple-700'}`}>&pound;{totalMargin.toFixed(2)}</p>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Total Time</span>
+                        <p className="font-medium text-gray-900">{totalTime.toFixed(1)}h</p>
+                      </div>
+                      <div>
+                        <span className="text-gray-500">Status</span>
+                        <p className="font-medium text-gray-900">
+                          {confirmedQuotes.length}/{activeQuotes.length} confirmed
+                          {totalCrew > 0 && <span className="text-gray-400"> · {totalCrew} crew</span>}
+                        </p>
+                      </div>
                     </div>
                   </div>
                 );
               })()}
               {[...quotes]
                 .sort((a, b) => {
-                  // Sort by date first, then by arrival time
                   const dateA = a.job_date || '';
                   const dateB = b.job_date || '';
                   if (dateA !== dateB) return dateA.localeCompare(dateB);
@@ -572,12 +665,24 @@ export default function JobDetailPage() {
                 const expenseCharge = Number(q.client_charge_expenses ?? 0);
                 const expensesAbsorbed = Number(q.expenses_included ?? 0);
                 const marginIsNegative = margin < 0;
+                const quoteStatus = q.status || 'draft';
+                const assignments: QuoteAssignment[] = Array.isArray(q.assignments) ? q.assignments : [];
+                const isCancelled = quoteStatus === 'cancelled';
+
+                const statusConfig: Record<string, { label: string; bg: string; text: string }> = {
+                  draft: { label: 'Draft', bg: 'bg-gray-100', text: 'text-gray-600' },
+                  confirmed: { label: 'Confirmed', bg: 'bg-green-100', text: 'text-green-700' },
+                  cancelled: { label: 'Cancelled', bg: 'bg-red-100', text: 'text-red-700' },
+                  completed: { label: 'Completed', bg: 'bg-emerald-100', text: 'text-emerald-700' },
+                };
+                const sc = statusConfig[quoteStatus] || statusConfig.draft;
 
                 return (
-                <div key={q.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+                <div key={q.id} className={`bg-white rounded-xl shadow-sm border ${isCancelled ? 'border-red-200 opacity-60' : 'border-gray-200'} p-5`}>
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
+                      {/* Header row with type, mode badge, status badge */}
+                      <div className="flex items-center gap-2 mb-2 flex-wrap">
                         <span className="text-lg">
                           {q.job_type === 'delivery' ? '📦' : q.job_type === 'collection' ? '📥' : '👷'}
                         </span>
@@ -590,6 +695,9 @@ export default function JobDetailPage() {
                           q.calculation_mode === 'dayrate' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
                         }`}>
                           {q.calculation_mode === 'dayrate' ? 'Day Rate' : 'Hourly'}
+                        </span>
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
+                          {sc.label}
                         </span>
                       </div>
 
@@ -655,6 +763,45 @@ export default function JobDetailPage() {
                         )}
                       </div>
 
+                      {/* Crew assignments */}
+                      <div className="mt-3 pt-3 border-t border-gray-100">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <span className="text-xs font-medium text-gray-500">Crew</span>
+                          {!isCancelled && (
+                            <button
+                              onClick={() => { setAssignModalQuoteId(q.id); setPeopleSearch(''); setPeopleOptions([]); }}
+                              className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                            >
+                              + Assign
+                            </button>
+                          )}
+                        </div>
+                        {assignments.length === 0 ? (
+                          <p className="text-xs text-gray-400 italic">No crew assigned</p>
+                        ) : (
+                          <div className="flex flex-wrap gap-2">
+                            {assignments.map((a) => (
+                              <div key={a.id} className="inline-flex items-center gap-1.5 bg-blue-50 border border-blue-200 rounded-full px-2.5 py-1 text-xs">
+                                <span className="font-medium text-blue-800">{a.first_name} {a.last_name}</span>
+                                <span className="text-blue-500 capitalize">({a.role})</span>
+                                {a.agreed_rate != null && (
+                                  <span className="text-blue-400">&pound;{Number(a.agreed_rate).toFixed(0)}</span>
+                                )}
+                                {!isCancelled && (
+                                  <button
+                                    onClick={() => removeAssignment(q.id, a.id)}
+                                    className="ml-0.5 text-blue-400 hover:text-red-500"
+                                    title="Remove"
+                                  >
+                                    &times;
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
                       {(q.internal_notes || q.freelancer_notes) && (
                         <div className="mt-3 flex gap-4 text-xs">
                           {q.internal_notes && (
@@ -671,11 +818,88 @@ export default function JobDetailPage() {
                           )}
                         </div>
                       )}
+
+                      {q.cancelled_reason && (
+                        <div className="mt-2 text-xs bg-red-50 border border-red-200 rounded p-2">
+                          <span className="font-medium text-red-700">Cancelled:</span>
+                          <span className="ml-1 text-red-600">{q.cancelled_reason}</span>
+                        </div>
+                      )}
                     </div>
 
-                    <div className="text-right text-xs text-gray-400 ml-4 shrink-0">
-                      <p>{new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</p>
-                      {q.created_by_name && <p>{q.created_by_name}</p>}
+                    {/* Right side: meta + actions */}
+                    <div className="text-right text-xs ml-4 shrink-0 flex flex-col items-end gap-2">
+                      <div className="text-gray-400">
+                        <p>{new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</p>
+                        {q.created_by_name && <p>{q.created_by_name}</p>}
+                      </div>
+
+                      {/* Status action buttons */}
+                      {!isCancelled && (
+                        <div className="flex flex-col gap-1">
+                          {quoteStatus === 'draft' && (
+                            <button
+                              onClick={() => updateQuoteStatus(q.id, 'confirmed')}
+                              className="px-2.5 py-1 bg-green-600 text-white rounded text-xs hover:bg-green-700 font-medium"
+                            >
+                              Confirm
+                            </button>
+                          )}
+                          {quoteStatus === 'confirmed' && (
+                            <button
+                              onClick={() => updateQuoteStatus(q.id, 'completed')}
+                              className="px-2.5 py-1 bg-emerald-600 text-white rounded text-xs hover:bg-emerald-700 font-medium"
+                            >
+                              Complete
+                            </button>
+                          )}
+                          {(quoteStatus === 'draft' || quoteStatus === 'confirmed') && (
+                            <button
+                              onClick={() => {
+                                const reason = window.prompt('Reason for cancelling (optional):');
+                                if (reason !== null) updateQuoteStatus(q.id, 'cancelled', reason || undefined);
+                              }}
+                              className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-red-50 hover:text-red-600 font-medium"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {quoteStatus === 'cancelled' && (
+                        <button
+                          onClick={() => updateQuoteStatus(q.id, 'draft')}
+                          className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200 font-medium"
+                        >
+                          Restore
+                        </button>
+                      )}
+
+                      {/* Delete button */}
+                      {confirmingDelete === q.id ? (
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => deleteQuote(q.id)}
+                            className="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700"
+                          >
+                            Delete
+                          </button>
+                          <button
+                            onClick={() => setConfirmingDelete(null)}
+                            className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200"
+                          >
+                            No
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmingDelete(q.id)}
+                          className="text-gray-300 hover:text-red-500 text-xs"
+                          title="Delete quote"
+                        >
+                          🗑
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -745,6 +969,99 @@ export default function JobDetailPage() {
         jobEndDate={job.job_end || undefined}
         hhJobNumber={job.hh_job_number || undefined}
       />
+
+      {/* Assign Crew Modal */}
+      {assignModalQuoteId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setAssignModalQuoteId(null)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Assign Crew Member</h3>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <select
+                  value={assignRole}
+                  onChange={e => setAssignRole(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                >
+                  <option value="driver">Driver</option>
+                  <option value="crew">Crew</option>
+                  <option value="loader">Loader</option>
+                  <option value="tech">Tech</option>
+                  <option value="manager">Manager</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Search People</label>
+                <input
+                  type="text"
+                  value={peopleSearch}
+                  onChange={e => {
+                    setPeopleSearch(e.target.value);
+                    if (e.target.value.length >= 2) searchPeople(e.target.value);
+                    else setPeopleOptions([]);
+                  }}
+                  placeholder="Type a name..."
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  autoFocus
+                />
+              </div>
+
+              {peopleOptions.length > 0 && (
+                <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                  {peopleOptions.map(p => {
+                    const currentQuote = quotes.find(q => q.id === assignModalQuoteId);
+                    const alreadyAssigned = currentQuote?.assignments?.some(a => a.person_id === p.id);
+                    return (
+                      <button
+                        key={p.id}
+                        disabled={alreadyAssigned}
+                        onClick={() => assignPerson(assignModalQuoteId!, p.id, assignRole)}
+                        className={`w-full text-left px-3 py-2.5 text-sm flex items-center justify-between ${
+                          alreadyAssigned ? 'opacity-40 cursor-not-allowed' : 'hover:bg-ooosh-50'
+                        }`}
+                      >
+                        <div>
+                          <span className="font-medium text-gray-900">{p.first_name} {p.last_name}</span>
+                          {p.skills?.length > 0 && (
+                            <span className="ml-2 text-xs text-gray-400">{p.skills.slice(0, 3).join(', ')}</span>
+                          )}
+                        </div>
+                        <div className="flex gap-1">
+                          {p.is_insured_on_vehicles && (
+                            <span className="text-xs bg-green-100 text-green-700 rounded px-1.5 py-0.5">Insured</span>
+                          )}
+                          {p.is_approved && (
+                            <span className="text-xs bg-blue-100 text-blue-700 rounded px-1.5 py-0.5">Approved</span>
+                          )}
+                          {alreadyAssigned && (
+                            <span className="text-xs bg-gray-100 text-gray-500 rounded px-1.5 py-0.5">Assigned</span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {peopleSearch.length >= 2 && peopleOptions.length === 0 && (
+                <p className="text-sm text-gray-400 text-center py-2">No people found</p>
+              )}
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => { setAssignModalQuoteId(null); setPeopleSearch(''); setPeopleOptions([]); }}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

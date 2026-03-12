@@ -355,6 +355,21 @@ export interface QuoteExpenseItem {
   pdDays?: number;
 }
 
+export type QuoteAssignmentStatus = 'assigned' | 'confirmed' | 'declined' | 'completed' | 'cancelled';
+
+export interface QuoteAssignment {
+  id: string;
+  person_id: string;
+  first_name: string;
+  last_name: string;
+  role: string;
+  status: QuoteAssignmentStatus;
+  agreed_rate: number | null;
+  rate_type: 'hourly' | 'dayrate' | 'fixed' | null;
+}
+
+export type QuoteStatusType = 'draft' | 'confirmed' | 'cancelled' | 'completed';
+
 export interface SavedQuote {
   id: string;
   job_id: string | null;
@@ -377,11 +392,25 @@ export interface SavedQuote {
   work_type: string | null;
   expenses: QuoteExpenseItem[];
   // Calculated
+  client_charge_labour: number | null;
+  client_charge_fuel: number | null;
+  client_charge_expenses: number | null;
+  client_charge_total: number | null;
   client_charge_rounded: number;
+  freelancer_fee: number | null;
   freelancer_fee_rounded: number;
+  expected_fuel_cost: number | null;
+  expenses_included: number | null;
+  expenses_not_included: number | null;
   our_margin: number;
   our_total_cost: number;
   estimated_time_hrs: number | null;
+  // Status
+  status: QuoteStatusType;
+  status_changed_at: string | null;
+  cancelled_reason: string | null;
+  // Crew assignments (populated via subquery)
+  assignments: QuoteAssignment[];
   // Notes
   internal_notes: string | null;
   freelancer_notes: string | null;
