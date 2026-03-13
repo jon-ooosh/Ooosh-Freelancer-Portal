@@ -40,6 +40,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '009_fix_sync_log_permissions.sql',
         '010_freelancer_fields.sql',
         '011_fleet_vehicles.sql',
+        '012_vehicle_service_log.sql',
+        '013_fleet_v5_fields.sql',
       ];
 
       for (const migration of migrations) {

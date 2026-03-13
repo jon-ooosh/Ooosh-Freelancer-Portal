@@ -718,6 +718,14 @@ function mapDbRowToVehicle(row: Record<string, unknown>) {
     fleetGroup: row.fleet_group as string,
     isActive: row.is_active as boolean,
     mondayItemId: row.monday_item_id as string | null,
+    // V5 / VE103B fields
+    vin: row.vin as string | null,
+    dateFirstReg: formatDate(row.date_first_reg),
+    v5Type: row.v5_type as string | null,
+    bodyType: row.body_type as string | null,
+    maxMassKg: row.max_mass_kg as number | null,
+    vehicleCategory: row.vehicle_category as string | null,
+    cylinderCapacityCc: row.cylinder_capacity_cc as number | null,
   };
 }
 
