@@ -429,6 +429,7 @@ function mapServiceLogRow(row: Record<string, unknown>) {
     aiExtracted: row.ai_extracted as boolean,
     files: row.files || [],
     createdBy: row.created_by as string | null,
+    createdByName: row.created_by_name as string | null,
     createdAt: row.created_at ? (row.created_at as Date).toISOString() : null,
     updatedAt: row.updated_at ? (row.updated_at as Date).toISOString() : null,
   };
@@ -443,17 +444,20 @@ router.get('/fleet/:vehicleId/service-log', async (req: AuthRequest, res: Respon
     const { vehicleId } = req.params;
     const { type, limit = '50', offset = '0' } = req.query;
 
-    let sql = 'SELECT * FROM vehicle_service_log WHERE vehicle_id = $1';
+    let sql = `SELECT sl.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+      FROM vehicle_service_log sl
+      LEFT JOIN users u ON u.id = sl.created_by
+      WHERE sl.vehicle_id = $1`;
     const params: unknown[] = [vehicleId];
     let idx = 2;
 
     if (type && typeof type === 'string') {
-      sql += ` AND service_type = $${idx}`;
+      sql += ` AND sl.service_type = $${idx}`;
       params.push(type);
       idx++;
     }
 
-    sql += ` ORDER BY service_date DESC NULLS LAST, created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`;
+    sql += ` ORDER BY sl.service_date DESC NULLS LAST, sl.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`;
     params.push(Number(limit), Number(offset));
 
     const result = await query(sql, params);
@@ -485,7 +489,10 @@ router.get('/fleet/:vehicleId/service-log/:logId', async (req: AuthRequest, res:
   try {
     const { vehicleId, logId } = req.params;
     const result = await query(
-      'SELECT * FROM vehicle_service_log WHERE id = $1 AND vehicle_id = $2',
+      `SELECT sl.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+       FROM vehicle_service_log sl
+       LEFT JOIN users u ON u.id = sl.created_by
+       WHERE sl.id = $1 AND sl.vehicle_id = $2`,
       [logId, vehicleId]
     );
     if (result.rows.length === 0) {

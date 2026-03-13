@@ -255,11 +255,11 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
                   >
                     {deletingId === record.id ? 'Deleting...' : 'Delete'}
                   </button>
-                  {record.createdAt && (
-                    <span className="ml-auto text-[10px] text-gray-300">
-                      Added {formatDisplayDate(record.createdAt.split('T')[0]!)}
-                    </span>
-                  )}
+                  <span className="ml-auto text-[10px] text-gray-300">
+                    {record.createdByName && `by ${record.createdByName}`}
+                    {record.createdByName && record.createdAt && ' · '}
+                    {record.createdAt && formatDisplayDate(record.createdAt.split('T')[0]!)}
+                  </span>
                 </div>
               </div>
             )}

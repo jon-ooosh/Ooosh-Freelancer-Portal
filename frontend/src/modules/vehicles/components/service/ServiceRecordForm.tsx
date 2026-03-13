@@ -148,7 +148,7 @@ export default function ServiceRecordForm({ currentMileage, editing, onSave, onC
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs font-medium text-gray-500">Cost ({'\u00A3'})</label>
+              <label className="mb-1 block text-xs font-medium text-gray-500">Cost ({'\u00A3'}) ex VAT</label>
               <input
                 type="number"
                 step="0.01"

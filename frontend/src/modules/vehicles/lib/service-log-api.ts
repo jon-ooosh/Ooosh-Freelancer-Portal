@@ -26,6 +26,7 @@ export interface ServiceLogRecord {
   aiExtracted: boolean
   files: Array<{ name: string; url: string; type: string; size?: number }>
   createdBy: string | null
+  createdByName: string | null
   createdAt: string | null
   updatedAt: string | null
 }

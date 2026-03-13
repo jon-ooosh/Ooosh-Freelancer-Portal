@@ -14,12 +14,12 @@ import { RecentActivityFeed } from '../components/dashboard/RecentActivityFeed'
 import { extractVanRequirements } from '../lib/hirehop-api'
 
 const quickActions = [
-  { to: vmPath('/book-out'), label: 'Book Out', description: 'Start a vehicle book-out', icon: '🚐' },
-  { to: vmPath('/check-in'), label: 'Check In', description: 'Return a vehicle', icon: '📋' },
-  { to: vmPath('/prep'), label: 'Prep', description: 'Prepare a vehicle', icon: '🔧' },
-  { to: vmPath('/issues/new'), label: 'Log Issue', description: 'Report a problem', icon: '⚠️' },
-  { to: vmPath('/allocations'), label: 'Allocations', description: 'Assign vans to jobs', icon: '📦' },
-  { to: vmPath('/fleet-map'), label: 'Fleet Map', description: 'Live GPS tracking', icon: '📍' },
+  { path: '/book-out', label: 'Book Out', description: 'Start a vehicle book-out', icon: '🚐' },
+  { path: '/check-in', label: 'Check In', description: 'Return a vehicle', icon: '📋' },
+  { path: '/prep', label: 'Prep', description: 'Prepare a vehicle', icon: '🔧' },
+  { path: '/issues/new', label: 'Log Issue', description: 'Report a problem', icon: '⚠️' },
+  { path: '/allocations', label: 'Allocations', description: 'Assign vans to jobs', icon: '📦' },
+  { path: '/fleet-map', label: 'Fleet Map', description: 'Live GPS tracking', icon: '📍' },
 ]
 
 export function HomePage() {
@@ -134,6 +134,7 @@ export function HomePage() {
         </h3>
         <div className="grid grid-cols-2 gap-3">
           {quickActions.map((action) => {
+            const resolved = vmPath(action.path)
             const className = "flex items-center gap-3 rounded-lg border border-gray-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md active:bg-gray-50"
             const content = (
               <>
@@ -148,12 +149,8 @@ export function HomePage() {
                 </div>
               </>
             )
-            return 'external' in action && action.external ? (
-              <a key={action.to} href={action.to} target="_blank" rel="noopener noreferrer" className={className}>
-                {content}
-              </a>
-            ) : (
-              <Link key={action.to} to={action.to} className={className}>
+            return (
+              <Link key={action.path} to={resolved} className={className}>
                 {content}
               </Link>
             )
