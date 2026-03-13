@@ -235,6 +235,17 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 - [x] Insurance details (due date, provider, policy number)
 - [x] Vehicle details (fuel type, MPG, CO2, tyre PSI)
 - [x] Finance details (provider, end date)
+- [x] Compliance alert thresholds editor (fleet-wide warning/urgent days for MOT, Tax, Insurance, TFL)
+- [x] Vehicle detail page uses configurable thresholds (fetched from compliance settings API)
+
+**Service History Enhancements** ✅ COMPLETE
+- [x] Sort dropdown (newest/oldest, highest/lowest cost, garage A-Z, type)
+- [x] Authenticated file download (JWT-based blob fetch, view images/PDFs in new tab)
+- [x] Date display on service record cards (fixed `formatDate` for pg Date objects)
+
+**Fleet Map Enhancements** ✅ COMPLETE
+- [x] "Open Traccar" link replaces redundant Dashboard button (links to https://tracking.oooshtours.co.uk/)
+- [x] Nav dropdown z-index fix (header `z-50` so dropdown renders above Leaflet map)
 
 **Phase B — AI Document Extraction** (deferred — nice-to-have, end of build)
 - [ ] POST /extract endpoint: upload invoice/service record → Claude extracts fields → returns JSON
@@ -322,6 +333,9 @@ These are existing standalone tools that currently push to Monday.com. They need
 - Crew availability calendar (check if freelancer is already assigned to overlapping dates)
 - Skills-based crew matching (auto-suggest freelancers with matching skills for job type)
 - Freelancer application inbound form (public form → creates person with `is_freelancer=true`, `is_approved=false`, generates review task)
+- **Mileage-based service threshold notifications** — add to daily compliance check, alert when vehicle within configurable miles of `next_service_due`
+- **Email notifications** — add SMTP/transactional email channel alongside in-app bell notifications (needs email service config)
+- **Per-user notification preferences** — allow users to opt in/out of specific notification categories (compliance, chase reminders, etc.)
 
 ### Phase 3–5
 
