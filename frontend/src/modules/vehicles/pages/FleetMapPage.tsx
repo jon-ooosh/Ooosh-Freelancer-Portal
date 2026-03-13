@@ -1,5 +1,4 @@
 import { useEffect, useRef, useMemo } from 'react'
-import { Link } from 'react-router-dom'
 import { vmPath } from '../config/route-paths'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -195,12 +194,14 @@ export function FleetMapPage() {
             </p>
           )}
         </div>
-        <Link
-          to={vmPath('/')}
-          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-600 active:bg-gray-50"
+        <a
+          href="https://tracking.oooshtours.co.uk/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-100"
         >
-          Dashboard
-        </Link>
+          Open Traccar
+        </a>
       </div>
 
       {/* Legend */}
