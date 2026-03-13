@@ -191,7 +191,7 @@ Integrate the existing Vehicle Module (separate React app) into the OP as a rout
 
 See **Vehicle Module Integration** section below for technical details.
 
-#### Step 1b: Vehicle Maintenance & Compliance ← CURRENT PRIORITY
+#### Step 1b: Vehicle Maintenance & Compliance ✅ PHASES A/C/D/E COMPLETE
 Full maintenance tracking, compliance monitoring, and cost reporting for the fleet.
 
 **Phase A — Service Log CRUD + Migration** ✅ COMPLETE
@@ -201,34 +201,40 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 - [x] Manual entry form with staged file uploads + comment field on files
 - [x] Mileage auto-logged to vehicle_mileage_log on service record creation
 
-**Phase C — Compliance Reminders + DVLA** ← IN PROGRESS
-- [ ] DVLA MOT History API integration (free, reg-based) — "Check DVLA" button
-- [ ] DVLA Vehicle Enquiry Service for tax status
-- [ ] Daily compliance scheduler (08:00): 1 month warning → 1 week urgent → daily overdue
-- [ ] Enhanced Key Dates section: colour coding (green/amber/red), "booked in" date fields
-- [ ] Compliance overview widget on vehicles homepage (fleet-wide due items)
-- [ ] Notifications targeted to vehicle manager role (configurable via vehicle_compliance_settings)
-- [ ] Compliance settings API (CRUD for vehicle_compliance_settings table)
+**Phase C — Compliance Reminders** ✅ COMPLETE
+- [x] Daily compliance scheduler (08:00) with configurable thresholds (warning/urgent days)
+- [x] Enhanced Key Dates section: colour coding (green/amber/red), days countdown, "booked in" date fields
+- [x] Insurance due date, provider, and policy number fields
+- [x] Compliance overview widget on vehicles homepage (fleet-wide overdue/due-soon alerts)
+- [x] Notifications targeted to configurable roles (deduped: 7-day for soon, 1-day for overdue)
+- [x] Compliance settings API (GET/PUT for vehicle_compliance_settings)
+- [x] On-demand compliance check endpoint (GET /api/vehicles/compliance/check)
+- [ ] DVLA MOT History API integration (deferred — needs API key registration)
+- [ ] DVLA Vehicle Enquiry Service for tax status (deferred)
 
-**Phase D — Mileage Tracking**
-- [x] Mileage logged on service record creation (single path)
-- [ ] Mileage API endpoints (history, stats, manual entry)
-- [ ] Hook into book-out/check-in/prep event flows → vehicle_mileage_log
-- [ ] Mileage history display on vehicle detail page
-- [ ] Amber warning on service mileage lower than current (retrospective invoices OK)
+**Phase D — Mileage Tracking** ✅ COMPLETE
+- [x] Mileage logged on service record creation
+- [x] Mileage API endpoints (GET history with stats, POST manual entry)
+- [x] Book-out/check-in/prep events dual-write to vehicle_mileage_log
+- [x] Current mileage display on vehicle detail (with last update date)
+- [x] "Miles until service" computed indicator with green/amber/red
+- [x] Amber warning on service mileage lower than current (in ServiceRecordForm)
 
-**Phase E — Fuel Monitoring + Cost Reporting**
-- [ ] Fuel log CRUD endpoints + stats (cost per mile, full-to-full method)
-- [ ] Configurable thresholds in settings, alerts when exceeded
-- [ ] Fleet-wide cost report page (service + fuel + insurance totals, per-vehicle breakdown)
-- [ ] Cost report restricted to admin/manager roles
-- [ ] Time period selector, CSV export
+**Phase E — Fuel Monitoring + Cost Reporting** ✅ COMPLETE
+- [x] Fuel log CRUD endpoints + stats (total cost, litres, fill count, cost per mile)
+- [x] "Fuel" tab on vehicle detail page with stats cards and add fuel form
+- [x] Fuel fills with mileage also write to vehicle_mileage_log
+- [x] Fleet-wide cost report page at `/vehicles/costs` (admin/manager only)
+- [x] Per-vehicle service + fuel cost breakdown with sortable table
+- [x] Time period selector with presets (YTD, 30d, 90d), CSV export
 
-**Per-Vehicle Settings Page** (after Phases C–E)
-- [ ] Admin-only settings route `/vehicles/:vehicleId/settings`
-- [ ] Move "Sell vehicle" button here (out of main detail view)
-- [ ] Per-vehicle compliance threshold overrides
-- [ ] Service interval mileage setting
+**Per-Vehicle Settings Page** ✅ COMPLETE
+- [x] Admin-only settings route `/vehicles/fleet/:id/settings`
+- [x] "Sell vehicle" / "Reactivate" moved to settings danger zone
+- [x] Service interval settings (next due mileage, last service)
+- [x] Insurance details (due date, provider, policy number)
+- [x] Vehicle details (fuel type, MPG, CO2, tyre PSI)
+- [x] Finance details (provider, end date)
 
 **Phase B — AI Document Extraction** (deferred — nice-to-have, end of build)
 - [ ] POST /extract endpoint: upload invoice/service record → Claude extracts fields → returns JSON
