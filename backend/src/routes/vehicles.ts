@@ -447,9 +447,10 @@ router.get('/fleet/:vehicleId/service-log', async (req: AuthRequest, res: Respon
     const { vehicleId } = req.params;
     const { type, limit = '50', offset = '0' } = req.query;
 
-    let sql = `SELECT sl.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+    let sql = `SELECT sl.*, CONCAT(p.first_name, ' ', p.last_name) AS created_by_name
       FROM vehicle_service_log sl
       LEFT JOIN users u ON u.id = sl.created_by
+      LEFT JOIN people p ON p.id = u.person_id
       WHERE sl.vehicle_id = $1`;
     const params: unknown[] = [vehicleId];
     let idx = 2;
@@ -492,9 +493,10 @@ router.get('/fleet/:vehicleId/service-log/:logId', async (req: AuthRequest, res:
   try {
     const { vehicleId, logId } = req.params;
     const result = await query(
-      `SELECT sl.*, CONCAT(u.first_name, ' ', u.last_name) AS created_by_name
+      `SELECT sl.*, CONCAT(p.first_name, ' ', p.last_name) AS created_by_name
        FROM vehicle_service_log sl
        LEFT JOIN users u ON u.id = sl.created_by
+       LEFT JOIN people p ON p.id = u.person_id
        WHERE sl.id = $1 AND sl.vehicle_id = $2`,
       [logId, vehicleId]
     );
