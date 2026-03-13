@@ -11,10 +11,13 @@
  *   4. /api/vehicles/:fn         — Netlify proxy catch-all (for remaining VM functions)
  */
 import { Router, Request, Response } from 'express';
+import multer from 'multer';
+import path from 'path';
+import { v4 as uuid } from 'uuid';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { query } from '../config/database';
 import { hireHopGet, hireHopPost, isHireHopConfigured } from '../config/hirehop';
-import { getFromR2, uploadToR2, listR2Objects, isR2Configured } from '../config/r2';
+import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured } from '../config/r2';
 
 const router = Router();
 router.use(authenticate);
@@ -666,6 +669,126 @@ router.delete('/fleet/:vehicleId/service-log/:logId', async (req: AuthRequest, r
   } catch (error) {
     console.error('[vehicles/service-log] Delete error:', error);
     res.status(500).json({ error: 'Failed to delete service record' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1c. SERVICE LOG FILES — /api/vehicles/fleet/:vehicleId/service-log/:logId/files
+// ═══════════════════════════════════════════════════════════════════════════
+
+const serviceLogUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+});
+
+/**
+ * POST /api/vehicles/fleet/:vehicleId/service-log/:logId/files
+ * Upload a file and append to the service record's files JSONB array.
+ */
+router.post(
+  '/fleet/:vehicleId/service-log/:logId/files',
+  serviceLogUpload.single('file'),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { vehicleId, logId } = req.params;
+      if (!req.file) {
+        res.status(400).json({ error: 'No file provided' });
+        return;
+      }
+
+      // Verify record exists
+      const existing = await query(
+        'SELECT id, files FROM vehicle_service_log WHERE id = $1 AND vehicle_id = $2',
+        [logId, vehicleId]
+      );
+      if (existing.rows.length === 0) {
+        res.status(404).json({ error: 'Service record not found' });
+        return;
+      }
+
+      const ext = path.extname(req.file.originalname).toLowerCase();
+      const fileId = uuid();
+      const key = `files/vehicle-service/${vehicleId}/${logId}/${fileId}${ext}`;
+
+      await uploadToR2(key, req.file.buffer, req.file.mimetype);
+
+      const imageExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg'];
+      const docExts = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.txt'];
+      const fileType = imageExts.includes(ext) ? 'image' : docExts.includes(ext) ? 'document' : 'other';
+
+      const fileMeta = {
+        name: req.file.originalname,
+        url: key,
+        type: fileType,
+        size: req.file.size,
+        uploaded_at: new Date().toISOString(),
+        uploaded_by: req.user!.email,
+      };
+
+      // Append to JSONB array
+      await query(
+        `UPDATE vehicle_service_log
+         SET files = COALESCE(files, '[]'::jsonb) || $1::jsonb, updated_at = NOW()
+         WHERE id = $2 AND vehicle_id = $3`,
+        [JSON.stringify([fileMeta]), logId, vehicleId]
+      );
+
+      res.status(201).json(fileMeta);
+    } catch (error) {
+      console.error('[vehicles/service-log] File upload error:', error);
+      if (error instanceof multer.MulterError) {
+        res.status(400).json({ error: `Upload error: ${error.message}` });
+        return;
+      }
+      res.status(500).json({ error: 'File upload failed' });
+    }
+  }
+);
+
+/**
+ * DELETE /api/vehicles/fleet/:vehicleId/service-log/:logId/files
+ * Remove a file from the service record and R2.
+ * Body: { key: "files/vehicle-service/..." }
+ */
+router.delete('/fleet/:vehicleId/service-log/:logId/files', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId, logId } = req.params;
+    const { key } = req.body;
+    if (!key) {
+      res.status(400).json({ error: 'key is required' });
+      return;
+    }
+
+    // Get current files
+    const existing = await query(
+      'SELECT files FROM vehicle_service_log WHERE id = $1 AND vehicle_id = $2',
+      [logId, vehicleId]
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Service record not found' });
+      return;
+    }
+
+    const files = (existing.rows[0].files || []) as Array<{ url: string }>;
+    const updated = files.filter(f => f.url !== key);
+
+    // Delete from R2
+    try {
+      await deleteFromR2(key);
+    } catch (e) {
+      console.warn('[vehicles/service-log] R2 delete failed (may not exist):', e);
+    }
+
+    // Update JSONB
+    await query(
+      'UPDATE vehicle_service_log SET files = $1::jsonb, updated_at = NOW() WHERE id = $2 AND vehicle_id = $3',
+      [JSON.stringify(updated), logId, vehicleId]
+    );
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('[vehicles/service-log] File delete error:', error);
+    res.status(500).json({ error: 'File delete failed' });
   }
 });
 

@@ -3,13 +3,15 @@
  * for a vehicle. Includes filtering, add/edit forms, and (future) AI extraction.
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchServiceLog,
   createServiceLogRecord,
   updateServiceLogRecord,
   deleteServiceLogRecord,
+  uploadServiceLogFile,
+  deleteServiceLogFile,
 } from '../../lib/service-log-api'
 import type { ServiceType, ServiceLogRecord, CreateServiceLogParams } from '../../lib/service-log-api'
 import ServiceRecordForm from './ServiceRecordForm'
@@ -47,6 +49,10 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
   const [editing, setEditing] = useState<ServiceLogRecord | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [uploadingFor, setUploadingFor] = useState<string | null>(null)
+  const [deletingFileKey, setDeletingFileKey] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const uploadTargetRef = useRef<string | null>(null)
 
   const queryKey = ['vehicle-service-log', vehicleId, filter]
   const { data, isLoading, error } = useQuery({
@@ -75,6 +81,32 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
       console.error('[ServiceHistoryTab] Delete error:', err)
     } finally {
       setDeletingId(null)
+    }
+  }, [vehicleId, queryClient])
+
+  const handleFileUpload = useCallback(async (logId: string, file: File) => {
+    setUploadingFor(logId)
+    try {
+      await uploadServiceLogFile(vehicleId, logId, file)
+      await queryClient.invalidateQueries({ queryKey: ['vehicle-service-log', vehicleId] })
+    } catch (err) {
+      console.error('[ServiceHistoryTab] File upload error:', err)
+      alert(err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setUploadingFor(null)
+    }
+  }, [vehicleId, queryClient])
+
+  const handleFileDelete = useCallback(async (logId: string, key: string, fileName: string) => {
+    if (!confirm(`Delete file "${fileName}"?`)) return
+    setDeletingFileKey(key)
+    try {
+      await deleteServiceLogFile(vehicleId, logId, key)
+      await queryClient.invalidateQueries({ queryKey: ['vehicle-service-log', vehicleId] })
+    } catch (err) {
+      console.error('[ServiceHistoryTab] File delete error:', err)
+    } finally {
+      setDeletingFileKey(null)
     }
   }, [vehicleId, queryClient])
 
@@ -215,24 +247,62 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
                     <p className="text-xs text-blue-700">{record.aiSummary}</p>
                   </div>
                 )}
-                {record.files && record.files.length > 0 && (
-                  <div>
-                    <span className="text-xs font-medium text-gray-400">Files</span>
-                    <div className="mt-1 flex flex-wrap gap-1">
+                {/* Files section */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-gray-400">
+                      Files {record.files?.length ? `(${record.files.length})` : ''}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={uploadingFor === record.id}
+                      onClick={() => {
+                        uploadTargetRef.current = record.id
+                        fileInputRef.current?.click()
+                      }}
+                      className="text-[11px] font-medium text-blue-600 hover:underline disabled:opacity-50"
+                    >
+                      {uploadingFor === record.id ? 'Uploading...' : '+ Attach file'}
+                    </button>
+                  </div>
+                  {record.files && record.files.length > 0 ? (
+                    <div className="space-y-1">
                       {record.files.map((f, i) => (
-                        <a
-                          key={i}
-                          href={f.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 rounded bg-gray-100 px-2 py-1 text-xs text-blue-600 hover:bg-gray-200"
-                        >
-                          {f.name}
-                        </a>
+                        <div key={i} className="flex items-center gap-2 rounded bg-gray-50 px-2 py-1.5">
+                          <span className="text-xs">
+                            {f.type === 'image' ? '\uD83D\uDDBC\uFE0F' : f.type === 'document' ? '\uD83D\uDCC4' : '\uD83D\uDCCE'}
+                          </span>
+                          <a
+                            href={`/api/files/download?key=${encodeURIComponent(f.url)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="min-w-0 flex-1 truncate text-xs text-blue-600 hover:underline"
+                          >
+                            {f.name}
+                          </a>
+                          {f.size != null && (
+                            <span className="shrink-0 text-[10px] text-gray-400">
+                              {f.size < 1024 ? `${f.size} B` : f.size < 1024 * 1024 ? `${(f.size / 1024).toFixed(0)} KB` : `${(f.size / (1024 * 1024)).toFixed(1)} MB`}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            disabled={deletingFileKey === f.url}
+                            onClick={() => handleFileDelete(record.id, f.url, f.name)}
+                            className="shrink-0 rounded p-0.5 text-gray-300 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
+                            title="Delete file"
+                          >
+                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
                       ))}
                     </div>
-                  </div>
-                )}
+                  ) : (
+                    <p className="text-xs text-gray-300">No files attached</p>
+                  )}
+                </div>
 
                 {/* Edit / Delete actions */}
                 <div className="flex items-center gap-2 pt-2 border-t border-gray-100">
@@ -266,6 +336,23 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
           </div>
         )
       })}
+
+      {/* Hidden file input for uploads */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.doc,.docx,.xls,.xlsx,.csv,.txt"
+        onChange={async (e) => {
+          const file = e.target.files?.[0]
+          const logId = uploadTargetRef.current
+          if (file && logId) {
+            await handleFileUpload(logId, file)
+          }
+          e.target.value = '' // reset so same file can be re-selected
+          uploadTargetRef.current = null
+        }}
+      />
 
       {/* Form modal */}
       {showForm && (

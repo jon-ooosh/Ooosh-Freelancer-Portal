@@ -8,6 +8,15 @@ import { apiFetch } from '../config/api-config'
 
 export type ServiceType = 'service' | 'repair' | 'mot' | 'insurance' | 'tax' | 'tyre' | 'other'
 
+export interface ServiceLogFile {
+  name: string
+  url: string
+  type: string
+  size?: number
+  uploaded_at?: string
+  uploaded_by?: string
+}
+
 export interface ServiceLogRecord {
   id: string
   vehicleId: string
@@ -24,7 +33,7 @@ export interface ServiceLogRecord {
   nextDueMileage: number | null
   aiSummary: string | null
   aiExtracted: boolean
-  files: Array<{ name: string; url: string; type: string; size?: number }>
+  files: ServiceLogFile[]
   createdBy: string | null
   createdByName: string | null
   createdAt: string | null
@@ -126,5 +135,48 @@ export async function deleteServiceLogRecord(
 
   if (!response.ok) {
     throw new Error(`Failed to delete record: ${response.status}`)
+  }
+}
+
+/**
+ * Upload a file to a service log record.
+ */
+export async function uploadServiceLogFile(
+  vehicleId: string,
+  logId: string,
+  file: File,
+): Promise<ServiceLogFile> {
+  const formData = new FormData()
+  formData.append('file', file)
+
+  const response = await apiFetch(`/fleet/${vehicleId}/service-log/${logId}/files`, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(err.error || `Upload failed: ${response.status}`)
+  }
+
+  return response.json() as Promise<ServiceLogFile>
+}
+
+/**
+ * Delete a file from a service log record.
+ */
+export async function deleteServiceLogFile(
+  vehicleId: string,
+  logId: string,
+  key: string,
+): Promise<void> {
+  const response = await apiFetch(`/fleet/${vehicleId}/service-log/${logId}/files`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to delete file: ${response.status}`)
   }
 }
