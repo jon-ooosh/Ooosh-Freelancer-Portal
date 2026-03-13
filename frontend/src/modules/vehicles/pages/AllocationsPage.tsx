@@ -559,7 +559,7 @@ function RequirementSlots({
             {/* Book Out link — only for soft allocations when vehicle is available */}
             {allocation.status === 'soft' && (
               <Link
-                to={`/book-out?vehicle=${allocation.vehicleId}&job=${job.id}`}
+                to={vmPath(`/book-out?vehicle=${allocation.vehicleId}&job=${job.id}`)}
                 className={`mt-2 block w-full rounded-lg py-2 text-center text-xs font-medium transition-colors ${
                   hireStatus === 'Available'
                     ? 'bg-ooosh-navy text-white active:bg-opacity-90'

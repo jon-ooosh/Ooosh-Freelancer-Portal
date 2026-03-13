@@ -6,6 +6,7 @@
  */
 
 import { Link } from 'react-router-dom'
+import { vmPath } from '../../config/route-paths'
 import { extractVanRequirements } from '../../lib/hirehop-api'
 import { formatVanType } from '../../lib/van-matching'
 import type { HireHopJob, VanAllocation, VanRequirement } from '../../types/hirehop'
@@ -33,7 +34,7 @@ export function HireHopJobCard({ job, allocations, dateMode }: HireHopJobCardPro
 
   return (
     <Link
-      to={`/allocations?job=${job.id}`}
+      to={vmPath(`/allocations?job=${job.id}`)}
       className="block rounded-lg border border-gray-200 bg-white p-3 active:bg-gray-50"
     >
       <div className="flex items-start justify-between gap-2">

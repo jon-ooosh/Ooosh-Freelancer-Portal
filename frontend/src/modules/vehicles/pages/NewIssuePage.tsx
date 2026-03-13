@@ -289,7 +289,7 @@ export function NewIssuePage() {
         await queryClient.invalidateQueries({ queryKey: ['vehicle-issues', selectedVehicle.reg] })
         await queryClient.invalidateQueries({ queryKey: ['all-issues'] })
 
-        navigate(`/issues/${encodeURIComponent(selectedVehicle.reg)}/${issueId}`)
+        navigate(vmPath(`/issues/${encodeURIComponent(selectedVehicle.reg)}/${issueId}`))
       } else {
         console.error('[NewIssuePage] Save failed:', result.error)
         setIsSaving(false)

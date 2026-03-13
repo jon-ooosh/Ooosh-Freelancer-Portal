@@ -147,7 +147,7 @@ export function FleetMapPage() {
           <strong style="font-size: 14px;">${device.name}</strong>
           ${vehicle ? `<br><span style="font-size: 11px; color: #666;">${vehicle.make} ${vehicle.model} · ${vehicle.simpleType || ''}</span>` : ''}
           <br><span style="font-size: 11px; color: #888;">${label} · ${timeSince(device.lastUpdate)}</span>
-          ${vehicle ? `<br><a href="/vehicles/${vehicle.id}" style="font-size: 11px; color: #2563eb;">View vehicle &rarr;</a>` : ''}
+          ${vehicle ? `<br><a href="${vmPath(`/vehicles/${vehicle.id}`)}" style="font-size: 11px; color: #2563eb;">View vehicle &rarr;</a>` : ''}
         </div>
       `
 
