@@ -3,9 +3,10 @@
  *
  * Two modes: "manual" entry and (future) "AI extract" from uploaded document.
  * Opens as a slide-up panel on mobile / modal on desktop.
+ * Supports staging files during creation — they are uploaded after the record is saved.
  */
 
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import type { ServiceType, CreateServiceLogParams, ServiceLogRecord } from '../../lib/service-log-api'
 
 const SERVICE_TYPES: { value: ServiceType; label: string }[] = [
@@ -20,11 +21,16 @@ const SERVICE_TYPES: { value: ServiceType; label: string }[] = [
 
 const STATUS_OPTIONS = ['Done', 'Pending', 'Booked', 'Cancelled']
 
+export interface StagedFile {
+  file: File
+  comment: string
+}
+
 interface Props {
   vehicleId: string
   currentMileage?: number | null
   editing?: ServiceLogRecord | null
-  onSave: (params: CreateServiceLogParams) => Promise<void>
+  onSave: (params: CreateServiceLogParams, stagedFiles?: StagedFile[]) => Promise<void>
   onClose: () => void
 }
 
@@ -40,14 +46,32 @@ export default function ServiceRecordForm({ currentMileage, editing, onSave, onC
   const [notes, setNotes] = useState(editing?.notes || '')
   const [nextDueDate, setNextDueDate] = useState(editing?.nextDueDate || '')
   const [nextDueMileage, setNextDueMileage] = useState(editing?.nextDueMileage?.toString() || '')
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Mileage sanity check — warn if lower than current (for service records, don't block)
   const mileageNum = mileage ? parseInt(mileage, 10) : null
   const mileageWarning = mileageNum && currentMileage && mileageNum < currentMileage
     ? `Current mileage is ${currentMileage.toLocaleString()}. This entry is ${(currentMileage - mileageNum).toLocaleString()} miles lower — is this a backdated record?`
     : null
+
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files
+    if (!files) return
+    const newStaged: StagedFile[] = Array.from(files).map(f => ({ file: f, comment: '' }))
+    setStagedFiles(prev => [...prev, ...newStaged])
+    e.target.value = '' // reset for re-selection
+  }
+
+  function removeStagedFile(index: number) {
+    setStagedFiles(prev => prev.filter((_, i) => i !== index))
+  }
+
+  function updateStagedComment(index: number, comment: string) {
+    setStagedFiles(prev => prev.map((sf, i) => i === index ? { ...sf, comment } : sf))
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -73,7 +97,7 @@ export default function ServiceRecordForm({ currentMileage, editing, onSave, onC
         next_due_date: nextDueDate || null,
         next_due_mileage: nextDueMileage ? parseInt(nextDueMileage, 10) : null,
         files: editing?.files || [],
-      })
+      }, stagedFiles.length > 0 ? stagedFiles : undefined)
       onClose()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save')
@@ -253,6 +277,71 @@ export default function ServiceRecordForm({ currentMileage, editing, onSave, onC
             />
           </div>
 
+          {/* File attachments */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-500">
+                Attachments {stagedFiles.length > 0 && `(${stagedFiles.length})`}
+              </label>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="text-[11px] font-medium text-blue-600 hover:underline"
+              >
+                + Add file
+              </button>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.doc,.docx,.xls,.xlsx,.csv,.txt"
+              onChange={handleFileSelect}
+            />
+            {stagedFiles.length > 0 && (
+              <div className="space-y-2">
+                {stagedFiles.map((sf, i) => (
+                  <div key={i} className="rounded-lg border border-gray-200 bg-gray-50 p-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs">
+                        {sf.file.type.startsWith('image/') ? '\uD83D\uDDBC\uFE0F' : '\uD83D\uDCC4'}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-700">
+                        {sf.file.name}
+                      </span>
+                      <span className="shrink-0 text-[10px] text-gray-400">
+                        {sf.file.size < 1024 * 1024
+                          ? `${(sf.file.size / 1024).toFixed(0)} KB`
+                          : `${(sf.file.size / (1024 * 1024)).toFixed(1)} MB`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeStagedFile(i)}
+                        className="shrink-0 rounded p-0.5 text-gray-300 hover:bg-red-50 hover:text-red-500"
+                        title="Remove file"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      value={sf.comment}
+                      onChange={e => updateStagedComment(i, e.target.value)}
+                      placeholder="Comment (optional) — e.g. MOT certificate, invoice"
+                      className="mt-1.5 w-full rounded border border-gray-200 bg-white px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+            {stagedFiles.length === 0 && !editing && (
+              <p className="text-xs text-gray-300">No files attached — you can also add files after saving</p>
+            )}
+          </div>
+
           {/* Actions */}
           <div className="flex gap-2 pt-2">
             <button
@@ -267,7 +356,9 @@ export default function ServiceRecordForm({ currentMileage, editing, onSave, onC
               disabled={saving}
               className="flex-1 rounded-lg bg-ooosh-navy py-2.5 text-sm font-medium text-white hover:bg-opacity-90 disabled:opacity-50"
             >
-              {saving ? 'Saving...' : editing ? 'Update' : 'Save Record'}
+              {saving
+                ? stagedFiles.length > 0 ? 'Saving & uploading...' : 'Saving...'
+                : editing ? 'Update' : stagedFiles.length > 0 ? `Save + Upload ${stagedFiles.length} file${stagedFiles.length > 1 ? 's' : ''}` : 'Save Record'}
             </button>
           </div>
         </form>

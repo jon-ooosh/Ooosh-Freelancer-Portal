@@ -13,6 +13,7 @@ export interface ServiceLogFile {
   url: string
   type: string
   size?: number
+  comment?: string
   uploaded_at?: string
   uploaded_by?: string
 }
@@ -145,9 +146,13 @@ export async function uploadServiceLogFile(
   vehicleId: string,
   logId: string,
   file: File,
+  comment?: string,
 ): Promise<ServiceLogFile> {
   const formData = new FormData()
   formData.append('file', file)
+  if (comment?.trim()) {
+    formData.append('comment', comment.trim())
+  }
 
   const response = await apiFetch(`/fleet/${vehicleId}/service-log/${logId}/files`, {
     method: 'POST',

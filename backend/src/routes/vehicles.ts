@@ -718,7 +718,9 @@ router.post(
       const docExts = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.txt'];
       const fileType = imageExts.includes(ext) ? 'image' : docExts.includes(ext) ? 'document' : 'other';
 
-      const fileMeta = {
+      const comment = req.body?.comment?.trim() || '';
+
+      const fileMeta: Record<string, unknown> = {
         name: req.file.originalname,
         url: key,
         type: fileType,
@@ -726,6 +728,9 @@ router.post(
         uploaded_at: new Date().toISOString(),
         uploaded_by: req.user!.email,
       };
+      if (comment) {
+        fileMeta.comment = comment;
+      }
 
       // Append to JSONB array
       await query(

@@ -15,6 +15,7 @@ import {
 } from '../../lib/service-log-api'
 import type { ServiceType, ServiceLogRecord, CreateServiceLogParams } from '../../lib/service-log-api'
 import ServiceRecordForm from './ServiceRecordForm'
+import type { StagedFile } from './ServiceRecordForm'
 
 const FILTER_OPTIONS: { value: ServiceType | 'all'; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -51,6 +52,9 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [uploadingFor, setUploadingFor] = useState<string | null>(null)
   const [deletingFileKey, setDeletingFileKey] = useState<string | null>(null)
+  // Comment input for attaching files to existing records
+  const [attachComment, setAttachComment] = useState('')
+  const [showAttachComment, setShowAttachComment] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const uploadTargetRef = useRef<string | null>(null)
 
@@ -63,11 +67,17 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
     }),
   })
 
-  const handleSave = useCallback(async (params: CreateServiceLogParams) => {
+  const handleSave = useCallback(async (params: CreateServiceLogParams, stagedFiles?: StagedFile[]) => {
     if (editing) {
       await updateServiceLogRecord(vehicleId, editing.id, params)
     } else {
-      await createServiceLogRecord(vehicleId, params)
+      const created = await createServiceLogRecord(vehicleId, params)
+      // Upload staged files sequentially after record creation
+      if (stagedFiles && stagedFiles.length > 0) {
+        for (const sf of stagedFiles) {
+          await uploadServiceLogFile(vehicleId, created.id, sf.file, sf.comment || undefined)
+        }
+      }
     }
     await queryClient.invalidateQueries({ queryKey: ['vehicle-service-log', vehicleId] })
   }, [vehicleId, editing, queryClient])
@@ -84,16 +94,18 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
     }
   }, [vehicleId, queryClient])
 
-  const handleFileUpload = useCallback(async (logId: string, file: File) => {
+  const handleFileUpload = useCallback(async (logId: string, file: File, comment?: string) => {
     setUploadingFor(logId)
     try {
-      await uploadServiceLogFile(vehicleId, logId, file)
+      await uploadServiceLogFile(vehicleId, logId, file, comment)
       await queryClient.invalidateQueries({ queryKey: ['vehicle-service-log', vehicleId] })
     } catch (err) {
       console.error('[ServiceHistoryTab] File upload error:', err)
       alert(err instanceof Error ? err.message : 'Upload failed')
     } finally {
       setUploadingFor(null)
+      setShowAttachComment(null)
+      setAttachComment('')
     }
   }, [vehicleId, queryClient])
 
@@ -208,6 +220,13 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
                 </span>
               )}
 
+              {/* File count indicator */}
+              {record.files?.length > 0 && (
+                <span className="shrink-0 text-[10px] text-gray-400" title={`${record.files.length} file${record.files.length > 1 ? 's' : ''}`}>
+                  {'\uD83D\uDCCE'}{record.files.length}
+                </span>
+              )}
+
               {/* Expand chevron */}
               <svg
                 className={`h-4 w-4 shrink-0 text-gray-300 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
@@ -257,50 +276,89 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
                       type="button"
                       disabled={uploadingFor === record.id}
                       onClick={() => {
-                        uploadTargetRef.current = record.id
-                        fileInputRef.current?.click()
+                        setShowAttachComment(record.id)
+                        setAttachComment('')
                       }}
                       className="text-[11px] font-medium text-blue-600 hover:underline disabled:opacity-50"
                     >
                       {uploadingFor === record.id ? 'Uploading...' : '+ Attach file'}
                     </button>
                   </div>
+                  {/* Inline attach comment input */}
+                  {showAttachComment === record.id && (
+                    <div className="mb-2 rounded-lg border border-blue-200 bg-blue-50/50 p-2 space-y-1.5">
+                      <input
+                        type="text"
+                        value={attachComment}
+                        onChange={e => setAttachComment(e.target.value)}
+                        placeholder="Comment (optional) — e.g. MOT certificate, invoice"
+                        className="w-full rounded border border-gray-200 bg-white px-2 py-1 text-xs focus:border-blue-400 focus:outline-none"
+                        autoFocus
+                      />
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            uploadTargetRef.current = record.id
+                            fileInputRef.current?.click()
+                          }}
+                          className="rounded bg-blue-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-blue-700"
+                        >
+                          Choose file
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setShowAttachComment(null); setAttachComment('') }}
+                          className="rounded px-2.5 py-1 text-[11px] font-medium text-gray-500 hover:bg-gray-100"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {record.files && record.files.length > 0 ? (
                     <div className="space-y-1">
                       {record.files.map((f, i) => (
-                        <div key={i} className="flex items-center gap-2 rounded bg-gray-50 px-2 py-1.5">
-                          <span className="text-xs">
-                            {f.type === 'image' ? '\uD83D\uDDBC\uFE0F' : f.type === 'document' ? '\uD83D\uDCC4' : '\uD83D\uDCCE'}
-                          </span>
-                          <a
-                            href={`/api/files/download?key=${encodeURIComponent(f.url)}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="min-w-0 flex-1 truncate text-xs text-blue-600 hover:underline"
-                          >
-                            {f.name}
-                          </a>
-                          {f.size != null && (
-                            <span className="shrink-0 text-[10px] text-gray-400">
-                              {f.size < 1024 ? `${f.size} B` : f.size < 1024 * 1024 ? `${(f.size / 1024).toFixed(0)} KB` : `${(f.size / (1024 * 1024)).toFixed(1)} MB`}
+                        <div key={i} className="rounded bg-gray-50 px-2 py-1.5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs">
+                              {f.type === 'image' ? '\uD83D\uDDBC\uFE0F' : f.type === 'document' ? '\uD83D\uDCC4' : '\uD83D\uDCCE'}
                             </span>
+                            <a
+                              href={`/api/files/download?key=${encodeURIComponent(f.url)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="min-w-0 flex-1 truncate text-xs text-blue-600 hover:underline"
+                            >
+                              {f.name}
+                            </a>
+                            {f.size != null && (
+                              <span className="shrink-0 text-[10px] text-gray-400">
+                                {f.size < 1024 ? `${f.size} B` : f.size < 1024 * 1024 ? `${(f.size / 1024).toFixed(0)} KB` : `${(f.size / (1024 * 1024)).toFixed(1)} MB`}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              disabled={deletingFileKey === f.url}
+                              onClick={() => handleFileDelete(record.id, f.url, f.name)}
+                              className="shrink-0 rounded p-0.5 text-gray-300 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
+                              title="Delete file"
+                            >
+                              <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </div>
+                          {f.comment && (
+                            <p className="mt-0.5 ml-5 text-[11px] text-gray-500 italic">{f.comment}</p>
                           )}
-                          <button
-                            type="button"
-                            disabled={deletingFileKey === f.url}
-                            onClick={() => handleFileDelete(record.id, f.url, f.name)}
-                            className="shrink-0 rounded p-0.5 text-gray-300 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
-                            title="Delete file"
-                          >
-                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                          </button>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="text-xs text-gray-300">No files attached</p>
+                    showAttachComment !== record.id && (
+                      <p className="text-xs text-gray-300">No files attached</p>
+                    )
                   )}
                 </div>
 
@@ -347,7 +405,7 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
           const file = e.target.files?.[0]
           const logId = uploadTargetRef.current
           if (file && logId) {
-            await handleFileUpload(logId, file)
+            await handleFileUpload(logId, file, attachComment || undefined)
           }
           e.target.value = '' // reset so same file can be re-selected
           uploadTargetRef.current = null
