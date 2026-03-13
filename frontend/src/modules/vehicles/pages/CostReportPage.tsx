@@ -8,7 +8,6 @@ import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { fetchFleetCosts } from '../lib/fuel-log-api'
-import type { FleetCostRow } from '../lib/fuel-log-api'
 
 export function CostReportPage() {
   const currentYear = new Date().getFullYear()
@@ -56,10 +55,6 @@ export function CostReportPage() {
     a.click()
     URL.revokeObjectURL(url)
   }
-
-  const SortIcon = ({ field }: { field: typeof sortBy }) => (
-    sortBy === field ? <span className="ml-0.5 text-[9px]">{sortDir === 'asc' ? '\u25B2' : '\u25BC'}</span> : null
-  )
 
   return (
     <div className="space-y-4">

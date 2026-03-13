@@ -1808,6 +1808,13 @@ function mapJobRowToHireHopJob(row: Record<string, unknown>) {
 /** Format a date value to YYYY-MM-DD string */
 function formatDate(val: unknown): string {
   if (!val) return '';
+  // Handle Date objects (returned by pg for DATE/TIMESTAMP columns)
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
   const s = String(val);
   const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
   return match ? match[1]! : '';

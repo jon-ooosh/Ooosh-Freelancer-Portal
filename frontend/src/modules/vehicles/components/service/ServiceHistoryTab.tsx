@@ -13,6 +13,7 @@ import {
   uploadServiceLogFile,
   deleteServiceLogFile,
 } from '../../lib/service-log-api'
+import { getAuthHeaders } from '../../config/api-config'
 import type { ServiceType, ServiceLogRecord, CreateServiceLogParams } from '../../lib/service-log-api'
 import ServiceRecordForm from './ServiceRecordForm'
 import type { StagedFile } from './ServiceRecordForm'
@@ -330,14 +331,38 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
                             <span className="text-xs">
                               {f.type === 'image' ? '\uD83D\uDDBC\uFE0F' : f.type === 'document' ? '\uD83D\uDCC4' : '\uD83D\uDCCE'}
                             </span>
-                            <a
-                              href={`/api/files/download?key=${encodeURIComponent(f.url)}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="min-w-0 flex-1 truncate text-xs text-blue-600 hover:underline"
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  const res = await fetch(`/api/files/download?key=${encodeURIComponent(f.url)}`, {
+                                    headers: getAuthHeaders(),
+                                  })
+                                  if (!res.ok) throw new Error(`Download failed: ${res.status}`)
+                                  const blob = await res.blob()
+                                  const contentType = res.headers.get('Content-Type') || ''
+                                  // Images and PDFs: open in new tab for viewing
+                                  if (contentType.startsWith('image/') || contentType === 'application/pdf') {
+                                    const url = URL.createObjectURL(blob)
+                                    window.open(url, '_blank')
+                                    setTimeout(() => URL.revokeObjectURL(url), 60000)
+                                  } else {
+                                    // Other files: trigger download
+                                    const url = URL.createObjectURL(blob)
+                                    const a = document.createElement('a')
+                                    a.href = url
+                                    a.download = f.name
+                                    a.click()
+                                    URL.revokeObjectURL(url)
+                                  }
+                                } catch (err) {
+                                  alert(err instanceof Error ? err.message : 'Failed to open file')
+                                }
+                              }}
+                              className="min-w-0 flex-1 truncate text-xs text-blue-600 hover:underline text-left"
                             >
                               {f.name}
-                            </a>
+                            </button>
                             {f.size != null && (
                               <span className="shrink-0 text-[10px] text-gray-400">
                                 {f.size < 1024 ? `${f.size} B` : f.size < 1024 * 1024 ? `${(f.size / 1024).toFixed(0)} KB` : `${(f.size / (1024 * 1024)).toFixed(1)} MB`}
