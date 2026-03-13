@@ -25,6 +25,7 @@ import { AllocationsPage } from './pages/AllocationsPage'
 import { PrepPage } from './pages/PrepPage'
 import { FleetMapPage } from './pages/FleetMapPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { CostReportPage } from './pages/CostReportPage'
 
 /**
  * All Vehicle Management routes.
@@ -69,6 +70,7 @@ export function VehicleRoutes() {
         <Route path="allocations" element={<AllocationsPage />} />
         <Route path="prep" element={<PrepPage />} />
         <Route path="fleet-map" element={<FleetMapPage />} />
+        <Route path="costs" element={<CostReportPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="" replace />} />
       </Routes>

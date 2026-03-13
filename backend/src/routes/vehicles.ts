@@ -1926,7 +1926,238 @@ router.post('/fleet/:vehicleId/mileage', async (req: AuthRequest, res: Response)
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 7. COMPLIANCE SETTINGS — /api/vehicles/compliance/*
+// 7. FUEL LOG — /api/vehicles/fleet/:vehicleId/fuel
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/vehicles/fleet/:vehicleId/fuel
+ * Fuel log with stats (cost per mile calculated from full-to-full fills).
+ */
+router.get('/fleet/:vehicleId/fuel', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId } = req.params;
+    const { limit = '50', offset = '0' } = req.query;
+
+    const result = await query(
+      `SELECT fl.*, CONCAT(p.first_name, ' ', p.last_name) AS created_by_name
+       FROM vehicle_fuel_log fl
+       LEFT JOIN users u ON u.id = fl.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE fl.vehicle_id = $1
+       ORDER BY fl.date DESC, fl.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [vehicleId, Number(limit), Number(offset)]
+    );
+
+    const countResult = await query(
+      'SELECT COUNT(*) FROM vehicle_fuel_log WHERE vehicle_id = $1', [vehicleId]
+    );
+
+    // Aggregate stats
+    const statsResult = await query(
+      `SELECT
+         SUM(cost) AS total_cost,
+         SUM(litres) AS total_litres,
+         COUNT(*) AS fill_count,
+         MIN(date) AS first_fill,
+         MAX(date) AS last_fill
+       FROM vehicle_fuel_log WHERE vehicle_id = $1`,
+      [vehicleId]
+    );
+    const s = statsResult.rows[0] || {};
+
+    // Cost per mile: use mileage range from fuel entries that have mileage_at_fill
+    let costPerMile: number | null = null;
+    const mileageRange = await query(
+      `SELECT MIN(mileage_at_fill) AS min_m, MAX(mileage_at_fill) AS max_m, SUM(cost) AS total_cost
+       FROM vehicle_fuel_log
+       WHERE vehicle_id = $1 AND mileage_at_fill IS NOT NULL`,
+      [vehicleId]
+    );
+    const mr = mileageRange.rows[0];
+    if (mr && mr.min_m != null && mr.max_m != null && Number(mr.max_m) > Number(mr.min_m)) {
+      costPerMile = Math.round((Number(mr.total_cost) / (Number(mr.max_m) - Number(mr.min_m))) * 100) / 100;
+    }
+
+    res.json({
+      data: result.rows.map(row => ({
+        id: row.id,
+        vehicleId: row.vehicle_id,
+        date: formatDate(row.date),
+        litres: row.litres ? Number(row.litres) : null,
+        cost: Number(row.cost),
+        mileageAtFill: row.mileage_at_fill as number | null,
+        fullTank: row.full_tank as boolean,
+        receiptFile: row.receipt_file,
+        notes: row.notes,
+        createdBy: row.created_by,
+        createdByName: row.created_by_name,
+        createdAt: row.created_at ? (row.created_at as Date).toISOString() : null,
+      })),
+      total: Number(countResult.rows[0]?.count || 0),
+      stats: {
+        totalCost: s.total_cost ? Number(s.total_cost) : 0,
+        totalLitres: s.total_litres ? Number(s.total_litres) : 0,
+        fillCount: Number(s.fill_count || 0),
+        costPerMile,
+      },
+    });
+  } catch (error) {
+    console.error('[vehicles/fuel] List error:', error);
+    res.status(500).json({ error: 'Failed to load fuel log' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:vehicleId/fuel
+ * Record a fuel fill.
+ */
+router.post('/fleet/:vehicleId/fuel', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId } = req.params;
+    const { date, litres, cost, mileage_at_fill, full_tank = false, notes } = req.body;
+    const userId = req.user?.id || null;
+
+    if (!cost || !date) {
+      res.status(400).json({ error: 'date and cost are required' });
+      return;
+    }
+
+    const result = await query(
+      `INSERT INTO vehicle_fuel_log (vehicle_id, date, litres, cost, mileage_at_fill, full_tank, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [vehicleId, date, litres || null, cost, mileage_at_fill || null, full_tank, notes || null, userId]
+    );
+
+    // If mileage provided, also log to mileage_log
+    if (mileage_at_fill && Number(mileage_at_fill) > 0) {
+      await query(
+        `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
+         VALUES ($1, $2, 'fuel', $3, $4)`,
+        [vehicleId, mileage_at_fill, result.rows[0].id, userId]
+      ).catch(() => {});
+      await query(
+        `UPDATE fleet_vehicles SET current_mileage = $1, last_mileage_update = NOW()
+         WHERE id = $2 AND (current_mileage IS NULL OR current_mileage < $1)`,
+        [mileage_at_fill, vehicleId]
+      ).catch(() => {});
+    }
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('[vehicles/fuel] Create error:', error);
+    res.status(500).json({ error: 'Failed to record fuel' });
+  }
+});
+
+/**
+ * DELETE /api/vehicles/fleet/:vehicleId/fuel/:fuelId
+ */
+router.delete('/fleet/:vehicleId/fuel/:fuelId', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId, fuelId } = req.params;
+    const result = await query(
+      'DELETE FROM vehicle_fuel_log WHERE id = $1 AND vehicle_id = $2 RETURNING id',
+      [fuelId, vehicleId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Fuel record not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error('[vehicles/fuel] Delete error:', error);
+    res.status(500).json({ error: 'Failed to delete fuel record' });
+  }
+});
+
+/**
+ * GET /api/vehicles/fleet-costs
+ * Fleet-wide cost report — aggregates service + fuel costs per vehicle.
+ * Query params: from, to (YYYY-MM-DD)
+ */
+router.get('/fleet-costs', async (req: AuthRequest, res: Response) => {
+  try {
+    const role = req.user?.role;
+    if (role !== 'admin' && role !== 'manager') {
+      res.status(403).json({ error: 'Admin or manager role required' });
+      return;
+    }
+
+    const { from, to } = req.query;
+    const fromDate = from ? String(from) : new Date(new Date().getFullYear(), 0, 1).toISOString().split('T')[0];
+    const toDate = to ? String(to) : new Date().toISOString().split('T')[0];
+
+    // Service costs by vehicle
+    const serviceCosts = await query(
+      `SELECT fv.id, fv.reg, fv.make, fv.model, fv.simple_type,
+              COALESCE(SUM(sl.cost), 0) AS service_total,
+              COUNT(sl.id) AS service_count
+       FROM fleet_vehicles fv
+       LEFT JOIN vehicle_service_log sl ON sl.vehicle_id = fv.id
+         AND sl.service_date BETWEEN $1 AND $2
+       WHERE fv.is_active = true AND fv.fleet_group != 'old_sold'
+       GROUP BY fv.id, fv.reg, fv.make, fv.model, fv.simple_type
+       ORDER BY fv.reg`,
+      [fromDate, toDate]
+    );
+
+    // Fuel costs by vehicle
+    const fuelCosts = await query(
+      `SELECT vehicle_id, COALESCE(SUM(cost), 0) AS fuel_total, COUNT(*) AS fuel_count
+       FROM vehicle_fuel_log
+       WHERE date BETWEEN $1 AND $2
+       GROUP BY vehicle_id`,
+      [fromDate, toDate]
+    );
+
+    const fuelMap = new Map<string, { fuel_total: number; fuel_count: number }>();
+    for (const row of fuelCosts.rows) {
+      fuelMap.set(row.vehicle_id as string, {
+        fuel_total: Number(row.fuel_total),
+        fuel_count: Number(row.fuel_count),
+      });
+    }
+
+    const report = serviceCosts.rows.map(row => {
+      const fuel = fuelMap.get(row.id as string) || { fuel_total: 0, fuel_count: 0 };
+      const serviceTotal = Number(row.service_total);
+      return {
+        vehicleId: row.id,
+        reg: row.reg,
+        make: row.make,
+        model: row.model,
+        simpleType: row.simple_type,
+        serviceCost: serviceTotal,
+        serviceCount: Number(row.service_count),
+        fuelCost: fuel.fuel_total,
+        fuelCount: fuel.fuel_count,
+        totalCost: serviceTotal + fuel.fuel_total,
+      };
+    });
+
+    // Grand totals
+    const grandService = report.reduce((sum, r) => sum + r.serviceCost, 0);
+    const grandFuel = report.reduce((sum, r) => sum + r.fuelCost, 0);
+
+    res.json({
+      data: report,
+      period: { from: fromDate, to: toDate },
+      totals: {
+        serviceCost: grandService,
+        fuelCost: grandFuel,
+        totalCost: grandService + grandFuel,
+        vehicleCount: report.length,
+      },
+    });
+  } catch (error) {
+    console.error('[vehicles/fleet-costs] Report error:', error);
+    res.status(500).json({ error: 'Failed to generate cost report' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. COMPLIANCE SETTINGS — /api/vehicles/compliance/*
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
