@@ -51,10 +51,36 @@ export interface Vehicle {
   // Tyre reference — front and rear may differ
   recommendedTyrePsiFront: number | null
   recommendedTyrePsiRear: number | null
+  // V5 / VE103B fields (migration 013)
+  vin: string | null              // E: VIN/Chassis number
+  dateFirstReg: string | null     // B: Date of first registration
+  v5Type: string | null           // D.2: Type designation
+  bodyType: string | null         // D.5: Body type (e.g. PANEL VAN)
+  maxMassKg: number | null        // F.1: Max permissible mass (kg)
+  vehicleCategory: string | null  // J: Vehicle category (e.g. M1, N1)
+  cylinderCapacityCc: number | null // P.1: Cylinder capacity (cc)
+  // Extended details (migration 015)
+  oilType: string | null          // e.g. "5W-30"
+  coolantType: string | null      // e.g. "Blue", "Pink"
+  tyreSize: string | null         // e.g. "235/65/R16"
+  lastRossettsServiceDate: string | null
+  lastRossettsServiceNotes: string | null
+  servicePlanStatus: string | null // '0 Remaining'..'6 Remaining', 'WORKINGONIT', 'NO PLAN'
+  files: VehicleFile[]
   // Fleet group classification
   isOldSold: boolean              // true = from Monday "Old and sold" group
   // Raw data for anything we haven't mapped yet
   _raw?: Record<string, unknown>
+}
+
+export interface VehicleFile {
+  name: string
+  label: string | null
+  comment: string | null
+  url: string
+  type: 'document' | 'image' | 'other'
+  uploaded_at: string
+  uploaded_by: string
 }
 
 export type VehicleSimpleType = 'Premium' | 'Basic' | 'Panel' | 'Vito' | string

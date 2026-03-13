@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
@@ -10,10 +10,11 @@ import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import FuelHistoryTab from '../components/fuel/FuelHistoryTab'
-import { updateVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
+import { updateVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
+import { getAuthHeaders } from '../config/api-config'
 import { getDateUrgency } from '../types/vehicle'
-import type { DateUrgency } from '../types/vehicle'
+import type { DateUrgency, VehicleFile } from '../types/vehicle'
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return '—'
@@ -380,7 +381,7 @@ export function VehicleDetailPage() {
           onSaveDate={v => saveField('warranty_expires', v)}
         />
         <ComplianceDateRow
-          label="Finance Ends" date={vehicle.financeEnds} warningDays={90}
+          label="Finance Ends" date={vehicle.financeEnds} warningDays={0}
           onSaveDate={v => saveField('finance_ends', v)}
         />
       </div>
@@ -424,6 +425,41 @@ export function VehicleDetailPage() {
             })()}
           </div>
         )}
+      </div>
+
+      {/* V5 / Registration Details */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">V5 / Registration</h3>
+        <EditableRow label="VIN / Chassis #" value={vehicle.vin} type="text" onSave={v => saveField('vin', v)} />
+        <EditableRow label="Date of First Reg" value={vehicle.dateFirstReg} type="date" onSave={v => saveField('date_first_reg', v)} />
+        <EditableRow label="D.2: Type" value={vehicle.v5Type} type="text" onSave={v => saveField('v5_type', v)} />
+        <EditableRow label="D.5: Body Type" value={vehicle.bodyType} type="text" onSave={v => saveField('body_type', v)} />
+        <EditableRow label="F.1: Max Mass (kg)" value={vehicle.maxMassKg} type="number" onSave={v => saveField('max_mass_kg', v)} />
+        <EditableRow label="J: Vehicle Category" value={vehicle.vehicleCategory} type="text" onSave={v => saveField('vehicle_category', v)} />
+        <EditableRow label="P.1: Cylinder Capacity (cc)" value={vehicle.cylinderCapacityCc} type="number" onSave={v => saveField('cylinder_capacity_cc', v)} />
+      </div>
+
+      {/* Vehicle Specs */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Vehicle Specs</h3>
+        <EditableRow label="Oil Type" value={vehicle.oilType} type="text" onSave={v => saveField('oil_type', v)} />
+        <EditableRow label="Coolant Type" value={vehicle.coolantType} type="text" onSave={v => saveField('coolant_type', v)} />
+        <EditableRow label="Tyre Size" value={vehicle.tyreSize} type="text" onSave={v => saveField('tyre_size', v)} />
+        <EditableRow label="Fuel Type" value={vehicle.fuelType} type="select"
+          options={['diesel', 'petrol', 'electric', 'hybrid']}
+          onSave={v => saveField('fuel_type', v)} />
+        <EditableRow label="MPG" value={vehicle.mpg} type="number" onSave={v => saveField('mpg', v)} />
+        <EditableRow label="CO2 (g/km)" value={vehicle.co2PerKm} type="number" onSave={v => saveField('co2_per_km', v)} />
+        <EditableRow label="Tyre PSI (Front)" value={vehicle.recommendedTyrePsiFront} type="number" onSave={v => saveField('recommended_tyre_psi_front', v)} />
+        <EditableRow label="Tyre PSI (Rear)" value={vehicle.recommendedTyrePsiRear} type="number" onSave={v => saveField('recommended_tyre_psi_rear', v)} />
+      </div>
+
+      {/* Rossetts & Service Plan */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Rossetts & Service Plan</h3>
+        <EditableRow label="Last Rossetts Service" value={vehicle.lastRossettsServiceDate} type="date" onSave={v => saveField('last_rossetts_service_date', v)} />
+        <EditableRow label="Rossetts Notes" value={vehicle.lastRossettsServiceNotes} type="text" onSave={v => saveField('last_rossetts_service_notes', v)} />
+        <ServicePlanRow value={vehicle.servicePlanStatus} onSave={v => saveField('service_plan_status', v)} />
       </div>
 
       {/* Other Info */}
@@ -486,6 +522,9 @@ export function VehicleDetailPage() {
         <EditableRow label="ULEZ Compliant" value={vehicle.ulezCompliant} type="toggle" onSave={v => saveField('ulez_compliant', v)} />
         <EditableRow label="Spare Key" value={vehicle.spareKey} type="toggle" onSave={v => saveField('spare_key', v)} />
       </div>
+
+      {/* Vehicle Files */}
+      <VehicleFilesSection vehicleId={vehicle.id} files={vehicle.files || []} />
 
       {/* Event History placeholder */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -621,6 +660,229 @@ function ComplianceDateRow({
             </button>
           ) : null}
         </>
+      )}
+    </div>
+  )
+}
+
+const SERVICE_PLAN_OPTIONS = [
+  { value: '6 Remaining', label: '6 Remaining', bg: 'bg-green-500' },
+  { value: '5 Remaining', label: '5 Remaining', bg: 'bg-green-400' },
+  { value: '4 Remaining', label: '4 Remaining', bg: 'bg-lime-400' },
+  { value: '3 Remaining', label: '3 Remaining', bg: 'bg-yellow-400' },
+  { value: '2 Remaining', label: '2 Remaining', bg: 'bg-orange-400' },
+  { value: '1 Remaining', label: '1 Remaining', bg: 'bg-orange-500' },
+  { value: '0 Remaining', label: '0 Remaining', bg: 'bg-red-500' },
+  { value: 'WORKINGONIT', label: 'WORKINGONIT', bg: 'bg-purple-500' },
+  { value: 'NO PLAN', label: 'NO PLAN', bg: 'bg-gray-400' },
+]
+
+/** Service plan status picker with colour-coded badges */
+function ServicePlanRow({ value, onSave }: { value: string | null; onSave: (v: string | null) => void }) {
+  const [editing, setEditing] = useState(false)
+
+  const current = SERVICE_PLAN_OPTIONS.find(o => o.value === value)
+  const displayBg = current?.bg || 'bg-gray-200'
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+      <span className="text-sm text-gray-500">Service Plan Status</span>
+      {editing ? (
+        <div className="flex flex-wrap gap-1.5 max-w-xs justify-end">
+          {SERVICE_PLAN_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => { onSave(opt.value); setEditing(false) }}
+              className={`${opt.bg} rounded-full px-2.5 py-0.5 text-[11px] font-bold text-white hover:opacity-80`}
+            >
+              {opt.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => { onSave(null); setEditing(false) }}
+            className="rounded-full border border-gray-300 px-2.5 py-0.5 text-[11px] text-gray-400 hover:bg-gray-100"
+          >
+            Clear
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="flex items-center gap-1 group"
+        >
+          {value ? (
+            <span className={`${displayBg} rounded-full px-2.5 py-0.5 text-[11px] font-bold text-white`}>
+              {value}
+            </span>
+          ) : (
+            <span className="text-sm text-gray-400">—</span>
+          )}
+          <span className="text-[10px] text-gray-300 group-hover:text-blue-400">Edit</span>
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** Vehicle files section — upload, view, delete files (V5, insurance cert, etc.) */
+function VehicleFilesSection({ vehicleId, files }: { vehicleId: string; files: VehicleFile[] }) {
+  const [uploading, setUploading] = useState(false)
+  const [comment, setComment] = useState('')
+  const [label, setLabel] = useState('')
+  const [showUploadForm, setShowUploadForm] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const queryClient = useQueryClient()
+  const authHeaders = getAuthHeaders()
+
+  const handleUpload = async (file: File) => {
+    setUploading(true)
+    try {
+      await uploadVehicleFile(vehicleId, file, label || undefined, comment || undefined)
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+      setComment('')
+      setLabel('')
+      setShowUploadForm(false)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const handleDelete = async (key: string, name: string) => {
+    if (!confirm(`Delete "${name}"?`)) return
+    try {
+      await deleteVehicleFile(vehicleId, key)
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Delete failed')
+    }
+  }
+
+  const handleOpenFile = async (f: VehicleFile) => {
+    try {
+      const res = await fetch(`/api/files/download?key=${encodeURIComponent(f.url)}`, {
+        headers: authHeaders,
+      })
+      if (!res.ok) throw new Error(`Download failed: ${res.status}`)
+      const blob = await res.blob()
+      const contentType = res.headers.get('Content-Type') || ''
+      if (contentType.startsWith('image/') || contentType === 'application/pdf') {
+        const url = URL.createObjectURL(blob)
+        window.open(url, '_blank')
+        setTimeout(() => URL.revokeObjectURL(url), 60000)
+      } else {
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = f.name
+        a.click()
+        URL.revokeObjectURL(url)
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to open file')
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+          Vehicle Files {files.length > 0 && <span className="normal-case text-gray-400">({files.length})</span>}
+        </h3>
+        <button
+          type="button"
+          onClick={() => setShowUploadForm(!showUploadForm)}
+          className="text-xs font-medium text-blue-600 hover:text-blue-800"
+        >
+          {showUploadForm ? 'Cancel' : '+ Upload'}
+        </button>
+      </div>
+
+      {/* Upload form */}
+      {showUploadForm && (
+        <div className="mb-3 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-3 space-y-2">
+          <input
+            type="text"
+            placeholder="Label (e.g. V5, Insurance Cert, Finance Agreement)"
+            value={label}
+            onChange={e => setLabel(e.target.value)}
+            className="w-full rounded border border-gray-200 px-2.5 py-1.5 text-sm focus:border-blue-300 focus:outline-none"
+          />
+          <input
+            type="text"
+            placeholder="Comment (optional)"
+            value={comment}
+            onChange={e => setComment(e.target.value)}
+            className="w-full rounded border border-gray-200 px-2.5 py-1.5 text-sm focus:border-blue-300 focus:outline-none"
+          />
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={e => {
+              const f = e.target.files?.[0]
+              if (f) handleUpload(f)
+              e.target.value = ''
+            }}
+          />
+          <button
+            type="button"
+            disabled={uploading}
+            onClick={() => fileInputRef.current?.click()}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {uploading ? 'Uploading...' : 'Choose File & Upload'}
+          </button>
+        </div>
+      )}
+
+      {/* File list */}
+      {files.length === 0 && !showUploadForm ? (
+        <p className="text-sm text-gray-400 text-center py-4">
+          No files uploaded. Use "+ Upload" to add V5, insurance certs, finance docs, etc.
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {files.map((f, i) => (
+            <div key={i} className="rounded bg-gray-50 px-3 py-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xs shrink-0">
+                  {f.type === 'image' ? '\uD83D\uDDBC\uFE0F' : f.type === 'document' ? '\uD83D\uDCC4' : '\uD83D\uDCCE'}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenFile(f)}
+                    className="truncate text-sm text-blue-600 hover:underline text-left block max-w-full"
+                  >
+                    {f.label ? <span className="font-medium">{f.label}: </span> : null}
+                    {f.name}
+                  </button>
+                  {f.comment && (
+                    <p className="text-[11px] text-gray-400 truncate">{f.comment}</p>
+                  )}
+                  <p className="text-[10px] text-gray-300">
+                    {f.uploaded_by} &middot; {new Date(f.uploaded_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleDelete(f.url, f.name)}
+                  className="shrink-0 rounded p-1 text-gray-300 hover:bg-red-50 hover:text-red-500"
+                  title="Delete file"
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   )

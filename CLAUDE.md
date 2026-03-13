@@ -245,7 +245,15 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 
 **Fleet Map Enhancements** ✅ COMPLETE
 - [x] "Open Traccar" link replaces redundant Dashboard button (links to https://tracking.oooshtours.co.uk/)
-- [x] Nav dropdown z-index fix (header `z-50` so dropdown renders above Leaflet map)
+- [ ] Nav dropdown z-index fix — `z-50` on header not sufficient, Leaflet map still overlays dropdown (known bug, low priority)
+
+**Vehicle Detail Enhancements** ✅ COMPLETE
+- [x] V5/Registration section on detail page (VIN, date first reg, type, body type, mass, category, cylinder capacity)
+- [x] Vehicle Specs section (oil type, coolant type, tyre size, fuel type, MPG, CO2, tyre PSI)
+- [x] Rossetts service tracking (last date + notes)
+- [x] Service Plan Status picker (colour-coded: 0-6 Remaining, WORKINGONIT, NO PLAN)
+- [x] Vehicle file uploads (V5 copy, insurance cert, wifi docs, finance docs, etc.) with labels + comments
+- [x] Migration 015: oil_type, coolant_type, tyre_size, rossetts fields, service_plan_status, files JSONB
 
 **Phase B — AI Document Extraction** (deferred — nice-to-have, end of build)
 - [ ] POST /extract endpoint: upload invoice/service record → Claude extracts fields → returns JSON

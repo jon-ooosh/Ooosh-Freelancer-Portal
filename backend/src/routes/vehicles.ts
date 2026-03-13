@@ -216,6 +216,21 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
       tax_booked_in_date: 'tax_booked_in_date', taxBookedInDate: 'tax_booked_in_date',
       // Mileage
       current_mileage: 'current_mileage', currentMileage: 'current_mileage',
+      // V5 fields
+      vin: 'vin',
+      date_first_reg: 'date_first_reg', dateFirstReg: 'date_first_reg',
+      v5_type: 'v5_type', v5Type: 'v5_type',
+      body_type: 'body_type', bodyType: 'body_type',
+      max_mass_kg: 'max_mass_kg', maxMassKg: 'max_mass_kg',
+      vehicle_category: 'vehicle_category', vehicleCategory: 'vehicle_category',
+      cylinder_capacity_cc: 'cylinder_capacity_cc', cylinderCapacityCc: 'cylinder_capacity_cc',
+      // Extended details (migration 015)
+      oil_type: 'oil_type', oilType: 'oil_type',
+      coolant_type: 'coolant_type', coolantType: 'coolant_type',
+      tyre_size: 'tyre_size', tyreSize: 'tyre_size',
+      last_rossetts_service_date: 'last_rossetts_service_date', lastRossettsServiceDate: 'last_rossetts_service_date',
+      last_rossetts_service_notes: 'last_rossetts_service_notes', lastRossettsServiceNotes: 'last_rossetts_service_notes',
+      service_plan_status: 'service_plan_status', servicePlanStatus: 'service_plan_status',
     };
 
     for (const [key, dbCol] of Object.entries(fieldMap)) {
@@ -795,6 +810,116 @@ router.delete('/fleet/:vehicleId/service-log/:logId/files', async (req: AuthRequ
     res.status(204).send();
   } catch (error) {
     console.error('[vehicles/service-log] File delete error:', error);
+    res.status(500).json({ error: 'File delete failed' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1d. VEHICLE FILES — /api/vehicles/fleet/:vehicleId/files
+// ═══════════════════════════════════════════════════════════════════════════
+
+const vehicleFileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+});
+
+/**
+ * POST /api/vehicles/fleet/:vehicleId/files
+ * Upload a file and append to the vehicle's files JSONB array.
+ * Body (multipart): file, label (optional), comment (optional)
+ */
+router.post(
+  '/fleet/:vehicleId/files',
+  vehicleFileUpload.single('file'),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { vehicleId } = req.params;
+      if (!req.file) {
+        res.status(400).json({ error: 'No file provided' });
+        return;
+      }
+
+      // Verify vehicle exists
+      const existing = await query('SELECT id, files FROM fleet_vehicles WHERE id = $1', [vehicleId]);
+      if (existing.rows.length === 0) {
+        res.status(404).json({ error: 'Vehicle not found' });
+        return;
+      }
+
+      const ext = path.extname(req.file.originalname).toLowerCase();
+      const fileType = ext.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i) ? 'image' : ext === '.pdf' ? 'document' : 'other';
+      const fileId = uuid();
+      const r2Key = `files/vehicle/${vehicleId}/${fileId}${ext}`;
+
+      await uploadToR2(r2Key, req.file.buffer, req.file.mimetype);
+
+      const fileMeta = {
+        name: req.file.originalname,
+        label: req.body.label || null,
+        comment: req.body.comment || null,
+        url: r2Key,
+        type: fileType,
+        uploaded_at: new Date().toISOString(),
+        uploaded_by: req.user?.email || 'system',
+      };
+
+      const currentFiles = (existing.rows[0].files || []) as unknown[];
+      currentFiles.push(fileMeta);
+
+      await query(
+        'UPDATE fleet_vehicles SET files = $1::jsonb WHERE id = $2',
+        [JSON.stringify(currentFiles), vehicleId]
+      );
+
+      res.status(201).json(fileMeta);
+    } catch (error) {
+      console.error('[vehicles/files] Upload error:', error);
+      if (error instanceof multer.MulterError) {
+        res.status(400).json({ error: `Upload error: ${error.message}` });
+        return;
+      }
+      res.status(500).json({ error: 'File upload failed' });
+    }
+  }
+);
+
+/**
+ * DELETE /api/vehicles/fleet/:vehicleId/files
+ * Remove a file from the vehicle and R2.
+ * Body: { key: "files/vehicle/..." }
+ */
+router.delete('/fleet/:vehicleId/files', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId } = req.params;
+    const { key } = req.body;
+    if (!key) {
+      res.status(400).json({ error: 'key is required' });
+      return;
+    }
+
+    const existing = await query('SELECT files FROM fleet_vehicles WHERE id = $1', [vehicleId]);
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+
+    const files = (existing.rows[0].files || []) as Array<{ url: string }>;
+    const updated = files.filter(f => f.url !== key);
+
+    try {
+      await deleteFromR2(key);
+    } catch (e) {
+      console.warn('[vehicles/files] R2 delete failed (may not exist):', e);
+    }
+
+    await query(
+      'UPDATE fleet_vehicles SET files = $1::jsonb WHERE id = $2',
+      [JSON.stringify(updated), vehicleId]
+    );
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('[vehicles/files] Delete error:', error);
     res.status(500).json({ error: 'File delete failed' });
   }
 });
@@ -2185,6 +2310,14 @@ function mapDbRowToVehicle(row: Record<string, unknown>) {
     maxMassKg: row.max_mass_kg as number | null,
     vehicleCategory: row.vehicle_category as string | null,
     cylinderCapacityCc: row.cylinder_capacity_cc as number | null,
+    // Extended details (migration 015)
+    oilType: row.oil_type as string | null,
+    coolantType: row.coolant_type as string | null,
+    tyreSize: row.tyre_size as string | null,
+    lastRossettsServiceDate: formatDate(row.last_rossetts_service_date),
+    lastRossettsServiceNotes: row.last_rossetts_service_notes as string | null,
+    servicePlanStatus: row.service_plan_status as string | null,
+    files: row.files || [],
   };
 }
 

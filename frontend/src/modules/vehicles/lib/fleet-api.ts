@@ -126,3 +126,54 @@ export async function updateComplianceSettings(updates: Partial<ComplianceSettin
   })
   if (!response.ok) throw new Error(`Failed to update compliance settings: ${response.status}`)
 }
+
+/**
+ * Upload a file to a vehicle's files JSONB array.
+ */
+export async function uploadVehicleFile(
+  vehicleId: string,
+  file: File,
+  label?: string,
+  comment?: string,
+): Promise<{ name: string; url: string; type: string }> {
+  const form = new FormData()
+  form.append('file', file)
+  if (label) form.append('label', label)
+  if (comment) form.append('comment', comment)
+
+  const response = await apiFetch(`/fleet/${vehicleId}/files`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(err.error || 'File upload failed')
+  }
+  return response.json() as Promise<{ name: string; url: string; type: string }>
+}
+
+/**
+ * Delete a file from a vehicle.
+ */
+export async function deleteVehicleFile(vehicleId: string, key: string): Promise<void> {
+  const response = await apiFetch(`/fleet/${vehicleId}/files`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key }),
+  })
+  if (!response.ok) throw new Error('File delete failed')
+}
+
+/**
+ * Get a download URL for a vehicle file (authenticated blob fetch via /api/files/download).
+ */
+export async function fetchVehicleFileBlob(key: string): Promise<string> {
+  // Use the generic files download endpoint (outside /api/vehicles prefix)
+  const token = (await import('../adapters/auth-adapter')).getOpAuthState()?.token
+  const response = await fetch(`/api/files/download?key=${encodeURIComponent(key)}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!response.ok) throw new Error('File download failed')
+  const blob = await response.blob()
+  return URL.createObjectURL(blob)
+}
