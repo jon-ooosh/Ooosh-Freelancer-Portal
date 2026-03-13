@@ -1361,6 +1361,34 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
       ).catch(err => console.warn('[vehicles/events] Failed to update hire status:', err));
     }
 
+    // Dual-write mileage to vehicle_mileage_log if present
+    if (event.mileage && Number(event.mileage) > 0) {
+      const mileageVal = Number(event.mileage);
+      const eventType = event.eventType || 'event';
+      try {
+        // Look up vehicle ID from reg
+        const vehicleResult = await query('SELECT id FROM fleet_vehicles WHERE reg = $1', [reg]);
+        if (vehicleResult.rows.length > 0) {
+          const vehicleId = vehicleResult.rows[0].id;
+          const userId = req.user?.id || null;
+
+          await query(
+            `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [vehicleId, mileageVal, eventType, event.id, userId]
+          );
+          // Update current mileage (only if higher)
+          await query(
+            `UPDATE fleet_vehicles SET current_mileage = $1, last_mileage_update = NOW()
+             WHERE id = $2 AND (current_mileage IS NULL OR current_mileage < $1)`,
+            [mileageVal, vehicleId]
+          );
+        }
+      } catch (err) {
+        console.warn('[vehicles/events] Failed to log mileage:', err);
+      }
+    }
+
     res.json({ success: true, id: event.id });
   } catch (error) {
     console.error('[vehicles/events] Failed to save event:', error);
@@ -1786,7 +1814,119 @@ function formatDate(val: unknown): string {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 6. COMPLIANCE SETTINGS — /api/vehicles/compliance/*
+// 6. MILEAGE — /api/vehicles/fleet/:vehicleId/mileage
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/vehicles/fleet/:vehicleId/mileage
+ * Mileage history for a vehicle, most recent first.
+ */
+router.get('/fleet/:vehicleId/mileage', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId } = req.params;
+    const { limit = '50', offset = '0' } = req.query;
+
+    const result = await query(
+      `SELECT ml.*, CONCAT(p.first_name, ' ', p.last_name) AS recorded_by_name
+       FROM vehicle_mileage_log ml
+       LEFT JOIN users u ON u.id = ml.recorded_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE ml.vehicle_id = $1
+       ORDER BY ml.recorded_at DESC
+       LIMIT $2 OFFSET $3`,
+      [vehicleId, Number(limit), Number(offset)]
+    );
+
+    const countResult = await query(
+      'SELECT COUNT(*) FROM vehicle_mileage_log WHERE vehicle_id = $1',
+      [vehicleId]
+    );
+
+    // Compute stats
+    const statsResult = await query(
+      `SELECT
+         MIN(mileage) AS min_mileage,
+         MAX(mileage) AS max_mileage,
+         COUNT(*) AS total_readings,
+         MIN(recorded_at) AS first_reading,
+         MAX(recorded_at) AS last_reading
+       FROM vehicle_mileage_log WHERE vehicle_id = $1`,
+      [vehicleId]
+    );
+    const stats = statsResult.rows[0] || {};
+
+    // Average daily mileage (from first to last reading)
+    let avgDailyMileage: number | null = null;
+    if (stats.first_reading && stats.last_reading && stats.min_mileage != null && stats.max_mileage != null) {
+      const daysDiff = (new Date(stats.last_reading as string).getTime() - new Date(stats.first_reading as string).getTime()) / (1000 * 60 * 60 * 24);
+      if (daysDiff > 0) {
+        avgDailyMileage = Math.round((Number(stats.max_mileage) - Number(stats.min_mileage)) / daysDiff);
+      }
+    }
+
+    res.json({
+      data: result.rows.map(row => ({
+        id: row.id,
+        vehicleId: row.vehicle_id,
+        mileage: Number(row.mileage),
+        source: row.source,
+        sourceRef: row.source_ref,
+        recordedAt: row.recorded_at ? (row.recorded_at as Date).toISOString() : null,
+        recordedBy: row.recorded_by,
+        recordedByName: row.recorded_by_name,
+      })),
+      total: Number(countResult.rows[0]?.count || 0),
+      stats: {
+        currentMileage: stats.max_mileage ? Number(stats.max_mileage) : null,
+        totalReadings: Number(stats.total_readings || 0),
+        avgDailyMileage,
+      },
+    });
+  } catch (error) {
+    console.error('[vehicles/mileage] List error:', error);
+    res.status(500).json({ error: 'Failed to load mileage history' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:vehicleId/mileage
+ * Manual mileage entry.
+ */
+router.post('/fleet/:vehicleId/mileage', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId } = req.params;
+    const { mileage, source = 'manual', source_ref } = req.body;
+    const userId = req.user?.id || null;
+
+    if (!mileage || Number(mileage) <= 0) {
+      res.status(400).json({ error: 'Valid mileage is required' });
+      return;
+    }
+
+    const mileageVal = Number(mileage);
+
+    const result = await query(
+      `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [vehicleId, mileageVal, source, source_ref || null, userId]
+    );
+
+    // Update current mileage (only if higher)
+    await query(
+      `UPDATE fleet_vehicles SET current_mileage = $1, last_mileage_update = NOW()
+       WHERE id = $2 AND (current_mileage IS NULL OR current_mileage < $1)`,
+      [mileageVal, vehicleId]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('[vehicles/mileage] Create error:', error);
+    res.status(500).json({ error: 'Failed to record mileage' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. COMPLIANCE SETTINGS — /api/vehicles/compliance/*
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**

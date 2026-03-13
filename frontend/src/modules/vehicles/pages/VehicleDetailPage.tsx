@@ -411,9 +411,36 @@ export function VehicleDetailPage() {
 
       {/* Mileage & Service */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Service & Mileage</h3>
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Mileage & Service</h3>
+        {vehicle.currentMileage != null && (
+          <div className="flex items-center justify-between py-2 border-b border-gray-100">
+            <span className="text-sm text-gray-500">Current Mileage</span>
+            <span className="text-sm font-bold text-gray-900">{vehicle.currentMileage.toLocaleString()} mi</span>
+          </div>
+        )}
+        {vehicle.currentMileage != null && vehicle.lastMileageUpdate && (
+          <div className="flex items-center justify-between py-1 border-b border-gray-100">
+            <span className="text-[11px] text-gray-400">Last updated</span>
+            <span className="text-[11px] text-gray-400">
+              {new Date(vehicle.lastMileageUpdate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+            </span>
+          </div>
+        )}
         <EditableRow label="Last Service Mileage" value={vehicle.lastServiceMileage} type="number" onSave={v => saveField('last_service_mileage', v)} />
         <EditableRow label="Next Service Due (miles)" value={vehicle.nextServiceDue} type="number" onSave={v => saveField('next_service_due', v)} />
+        {vehicle.currentMileage != null && vehicle.nextServiceDue != null && vehicle.nextServiceDue > 0 && (
+          <div className="flex items-center justify-between py-2">
+            <span className="text-[11px] text-gray-400">Miles until service</span>
+            {(() => {
+              const remaining = vehicle.nextServiceDue - vehicle.currentMileage
+              return (
+                <span className={`text-[11px] font-bold ${remaining <= 0 ? 'text-red-600' : remaining <= 1000 ? 'text-amber-600' : 'text-green-600'}`}>
+                  {remaining <= 0 ? `${Math.abs(remaining).toLocaleString()} mi overdue` : `${remaining.toLocaleString()} mi`}
+                </span>
+              )
+            })()}
+          </div>
+        )}
       </div>
 
       {/* Other Info */}
