@@ -1643,184 +1643,6 @@ router.post('/traccar', async (req: AuthRequest, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. NETLIFY PROXY CATCH-ALL (for remaining VM functions not yet migrated)
-// ═══════════════════════════════════════════════════════════════════════════
-
-const NETLIFY_BASE = process.env.VEHICLE_MODULE_URL || 'https://ooosh-vehicles.netlify.app';
-
-router.all('/:functionName', proxyToNetlify);
-router.all('/:functionName/*', proxyToNetlify);
-
-async function proxyToNetlify(req: Request, res: Response): Promise<void> {
-  const functionName = req.params.functionName as string;
-
-  // Don't proxy routes we handle natively
-  if (['fleet', 'jobs', 'hirehop'].includes(functionName)) {
-    res.status(404).json({ error: 'Not found' });
-    return;
-  }
-
-  const subPath = req.params[0] ? `/${req.params[0]}` : '';
-  const netlifyUrl = `${NETLIFY_BASE}/.netlify/functions/${functionName}${subPath}`;
-  const queryString = new URL(req.url, 'http://localhost').search;
-  const targetUrl = `${netlifyUrl}${queryString}`;
-
-  try {
-    const headers: Record<string, string> = {
-      'Content-Type': req.headers['content-type'] || 'application/json',
-    };
-
-    if (req.headers.authorization) {
-      headers['Authorization'] = req.headers.authorization as string;
-    }
-
-    const authReq = req as AuthRequest;
-    if (authReq.user) {
-      headers['X-OP-User-Id'] = authReq.user.id;
-      headers['X-OP-User-Email'] = authReq.user.email;
-      headers['X-OP-User-Role'] = authReq.user.role;
-    }
-
-    const fetchOptions: RequestInit = {
-      method: req.method,
-      headers,
-    };
-
-    if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
-      fetchOptions.body = JSON.stringify(req.body);
-    }
-
-    const response = await fetch(targetUrl, fetchOptions);
-    res.status(response.status);
-
-    const contentType = response.headers.get('content-type');
-    if (contentType) {
-      res.setHeader('Content-Type', contentType);
-    }
-
-    const body = await response.text();
-    res.send(body);
-  } catch (error) {
-    console.error(`[Vehicle Proxy] Error forwarding to ${targetUrl}:`, error);
-    res.status(502).json({
-      error: 'Vehicle Module proxy error',
-      detail: error instanceof Error ? error.message : 'Unknown error',
-    });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// MAPPERS
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Map a fleet_vehicles DB row to the VM's Vehicle interface shape */
-function mapDbRowToVehicle(row: Record<string, unknown>) {
-  return {
-    id: row.id as string,
-    reg: row.reg as string,
-    vehicleType: (row.vehicle_type as string) || '',
-    simpleType: (row.simple_type as string) || '',
-    make: (row.make as string) || '',
-    model: (row.model as string) || '',
-    colour: (row.colour as string) || '',
-    seats: row.seats as number | null,
-    damageStatus: (row.damage_status as string) || '',
-    serviceStatus: (row.service_status as string) || '',
-    hireStatus: (row.hire_status as string) || '',
-    motDue: formatDate(row.mot_due),
-    taxDue: formatDate(row.tax_due),
-    tflDue: formatDate(row.tfl_due),
-    lastServiceDate: formatDate(row.last_service_date),
-    warrantyExpires: formatDate(row.warranty_expires),
-    lastServiceMileage: row.last_service_mileage as number | null,
-    nextServiceDue: row.next_service_due as number | null,
-    ulezCompliant: row.ulez_compliant as boolean,
-    spareKey: row.spare_key as boolean,
-    wifiNetwork: row.wifi_network as string | null,
-    financeWith: row.finance_with as string | null,
-    financeEnds: formatDate(row.finance_ends),
-    co2PerKm: row.co2_per_km ? Number(row.co2_per_km) : null,
-    recommendedTyrePsiFront: row.recommended_tyre_psi_front ? Number(row.recommended_tyre_psi_front) : null,
-    recommendedTyrePsiRear: row.recommended_tyre_psi_rear ? Number(row.recommended_tyre_psi_rear) : null,
-    isOldSold: (row.fleet_group as string) === 'old_sold',
-    // Extra fields not in VM's original Vehicle but useful
-    fuelType: row.fuel_type as string | null,
-    mpg: row.mpg ? Number(row.mpg) : null,
-    fleetGroup: row.fleet_group as string,
-    isActive: row.is_active as boolean,
-    mondayItemId: row.monday_item_id as string | null,
-    // Insurance
-    insuranceDue: formatDate(row.insurance_due),
-    insuranceProvider: row.insurance_provider as string | null,
-    insurancePolicyNumber: row.insurance_policy_number as string | null,
-    // Booked-in dates
-    motBookedInDate: formatDate(row.mot_booked_in_date),
-    serviceBookedInDate: formatDate(row.service_booked_in_date),
-    insuranceBookedInDate: formatDate(row.insurance_booked_in_date),
-    taxBookedInDate: formatDate(row.tax_booked_in_date),
-    // Mileage
-    currentMileage: row.current_mileage as number | null,
-    lastMileageUpdate: row.last_mileage_update ? (row.last_mileage_update as Date).toISOString() : null,
-    // V5 / VE103B fields
-    vin: row.vin as string | null,
-    dateFirstReg: formatDate(row.date_first_reg),
-    v5Type: row.v5_type as string | null,
-    bodyType: row.body_type as string | null,
-    maxMassKg: row.max_mass_kg as number | null,
-    vehicleCategory: row.vehicle_category as string | null,
-    cylinderCapacityCc: row.cylinder_capacity_cc as number | null,
-  };
-}
-
-/**
- * Map an OP jobs row to the VM's HireHopJob interface shape.
- * Note: items[] will be empty — line item data is fetched separately
- * via the HireHop items_to_supply_list endpoint when needed.
- */
-function mapJobRowToHireHopJob(row: Record<string, unknown>) {
-  const HIREHOP_STATUS_LABELS: Record<number, string> = {
-    0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
-    4: 'Part Dispatched', 5: 'Dispatched', 6: 'Returned Incomplete',
-    7: 'Returned', 8: 'Requires Attention', 9: 'Cancelled',
-    10: 'Not Interested', 11: 'Completed',
-  };
-
-  const status = Number(row.status ?? 0);
-
-  return {
-    id: row.hh_job_number as number,
-    jobName: (row.job_name as string) || '',
-    company: (row.company_name as string) || (row.client_name as string) || '',
-    contactName: (row.client_name as string) || '',
-    contactEmail: '', // Not stored in OP jobs table — fetched from HireHop on demand if needed
-    status,
-    statusLabel: HIREHOP_STATUS_LABELS[status] || 'Unknown',
-    outDate: formatDate(row.out_date),
-    jobDate: formatDate(row.job_date),
-    jobEndDate: formatDate(row.job_end),
-    returnDate: formatDate(row.return_date),
-    items: [], // Line items not stored in OP — fetched from HireHop on demand
-    depot: row.depot_name ? null : null, // OP stores depot_name (string), not depot ID
-    notes: row.notes as string | null,
-  };
-}
-
-/** Format a date value to YYYY-MM-DD string */
-function formatDate(val: unknown): string {
-  if (!val) return '';
-  // Handle Date objects (returned by pg for DATE/TIMESTAMP columns)
-  if (val instanceof Date) {
-    const y = val.getFullYear();
-    const m = String(val.getMonth() + 1).padStart(2, '0');
-    const d = String(val.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }
-  const s = String(val);
-  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
-  return match ? match[1]! : '';
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // 6. MILEAGE — /api/vehicles/fleet/:vehicleId/mileage
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2235,5 +2057,183 @@ router.get('/compliance/check', async (_req: AuthRequest, res: Response) => {
     res.status(500).json({ error: 'Failed to run compliance check' });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NETLIFY PROXY CATCH-ALL (for remaining VM functions not yet migrated)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const NETLIFY_BASE = process.env.VEHICLE_MODULE_URL || 'https://ooosh-vehicles.netlify.app';
+
+router.all('/:functionName', proxyToNetlify);
+router.all('/:functionName/*', proxyToNetlify);
+
+async function proxyToNetlify(req: Request, res: Response): Promise<void> {
+  const functionName = req.params.functionName as string;
+
+  // Don't proxy routes we handle natively
+  if (['fleet', 'jobs', 'hirehop'].includes(functionName)) {
+    res.status(404).json({ error: 'Not found' });
+    return;
+  }
+
+  const subPath = req.params[0] ? `/${req.params[0]}` : '';
+  const netlifyUrl = `${NETLIFY_BASE}/.netlify/functions/${functionName}${subPath}`;
+  const queryString = new URL(req.url, 'http://localhost').search;
+  const targetUrl = `${netlifyUrl}${queryString}`;
+
+  try {
+    const headers: Record<string, string> = {
+      'Content-Type': req.headers['content-type'] || 'application/json',
+    };
+
+    if (req.headers.authorization) {
+      headers['Authorization'] = req.headers.authorization as string;
+    }
+
+    const authReq = req as AuthRequest;
+    if (authReq.user) {
+      headers['X-OP-User-Id'] = authReq.user.id;
+      headers['X-OP-User-Email'] = authReq.user.email;
+      headers['X-OP-User-Role'] = authReq.user.role;
+    }
+
+    const fetchOptions: RequestInit = {
+      method: req.method,
+      headers,
+    };
+
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
+      fetchOptions.body = JSON.stringify(req.body);
+    }
+
+    const response = await fetch(targetUrl, fetchOptions);
+    res.status(response.status);
+
+    const contentType = response.headers.get('content-type');
+    if (contentType) {
+      res.setHeader('Content-Type', contentType);
+    }
+
+    const body = await response.text();
+    res.send(body);
+  } catch (error) {
+    console.error(`[Vehicle Proxy] Error forwarding to ${targetUrl}:`, error);
+    res.status(502).json({
+      error: 'Vehicle Module proxy error',
+      detail: error instanceof Error ? error.message : 'Unknown error',
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MAPPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Map a fleet_vehicles DB row to the VM's Vehicle interface shape */
+function mapDbRowToVehicle(row: Record<string, unknown>) {
+  return {
+    id: row.id as string,
+    reg: row.reg as string,
+    vehicleType: (row.vehicle_type as string) || '',
+    simpleType: (row.simple_type as string) || '',
+    make: (row.make as string) || '',
+    model: (row.model as string) || '',
+    colour: (row.colour as string) || '',
+    seats: row.seats as number | null,
+    damageStatus: (row.damage_status as string) || '',
+    serviceStatus: (row.service_status as string) || '',
+    hireStatus: (row.hire_status as string) || '',
+    motDue: formatDate(row.mot_due),
+    taxDue: formatDate(row.tax_due),
+    tflDue: formatDate(row.tfl_due),
+    lastServiceDate: formatDate(row.last_service_date),
+    warrantyExpires: formatDate(row.warranty_expires),
+    lastServiceMileage: row.last_service_mileage as number | null,
+    nextServiceDue: row.next_service_due as number | null,
+    ulezCompliant: row.ulez_compliant as boolean,
+    spareKey: row.spare_key as boolean,
+    wifiNetwork: row.wifi_network as string | null,
+    financeWith: row.finance_with as string | null,
+    financeEnds: formatDate(row.finance_ends),
+    co2PerKm: row.co2_per_km ? Number(row.co2_per_km) : null,
+    recommendedTyrePsiFront: row.recommended_tyre_psi_front ? Number(row.recommended_tyre_psi_front) : null,
+    recommendedTyrePsiRear: row.recommended_tyre_psi_rear ? Number(row.recommended_tyre_psi_rear) : null,
+    isOldSold: (row.fleet_group as string) === 'old_sold',
+    // Extra fields not in VM's original Vehicle but useful
+    fuelType: row.fuel_type as string | null,
+    mpg: row.mpg ? Number(row.mpg) : null,
+    fleetGroup: row.fleet_group as string,
+    isActive: row.is_active as boolean,
+    mondayItemId: row.monday_item_id as string | null,
+    // Insurance
+    insuranceDue: formatDate(row.insurance_due),
+    insuranceProvider: row.insurance_provider as string | null,
+    insurancePolicyNumber: row.insurance_policy_number as string | null,
+    // Booked-in dates
+    motBookedInDate: formatDate(row.mot_booked_in_date),
+    serviceBookedInDate: formatDate(row.service_booked_in_date),
+    insuranceBookedInDate: formatDate(row.insurance_booked_in_date),
+    taxBookedInDate: formatDate(row.tax_booked_in_date),
+    // Mileage
+    currentMileage: row.current_mileage as number | null,
+    lastMileageUpdate: row.last_mileage_update ? (row.last_mileage_update as Date).toISOString() : null,
+    // V5 / VE103B fields
+    vin: row.vin as string | null,
+    dateFirstReg: formatDate(row.date_first_reg),
+    v5Type: row.v5_type as string | null,
+    bodyType: row.body_type as string | null,
+    maxMassKg: row.max_mass_kg as number | null,
+    vehicleCategory: row.vehicle_category as string | null,
+    cylinderCapacityCc: row.cylinder_capacity_cc as number | null,
+  };
+}
+
+/**
+ * Map an OP jobs row to the VM's HireHopJob interface shape.
+ * Note: items[] will be empty — line item data is fetched separately
+ * via the HireHop items_to_supply_list endpoint when needed.
+ */
+function mapJobRowToHireHopJob(row: Record<string, unknown>) {
+  const HIREHOP_STATUS_LABELS: Record<number, string> = {
+    0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
+    4: 'Part Dispatched', 5: 'Dispatched', 6: 'Returned Incomplete',
+    7: 'Returned', 8: 'Requires Attention', 9: 'Cancelled',
+    10: 'Not Interested', 11: 'Completed',
+  };
+
+  const status = Number(row.status ?? 0);
+
+  return {
+    id: row.hh_job_number as number,
+    jobName: (row.job_name as string) || '',
+    company: (row.company_name as string) || (row.client_name as string) || '',
+    contactName: (row.client_name as string) || '',
+    contactEmail: '', // Not stored in OP jobs table — fetched from HireHop on demand if needed
+    status,
+    statusLabel: HIREHOP_STATUS_LABELS[status] || 'Unknown',
+    outDate: formatDate(row.out_date),
+    jobDate: formatDate(row.job_date),
+    jobEndDate: formatDate(row.job_end),
+    returnDate: formatDate(row.return_date),
+    items: [], // Line items not stored in OP — fetched from HireHop on demand
+    depot: row.depot_name ? null : null, // OP stores depot_name (string), not depot ID
+    notes: row.notes as string | null,
+  };
+}
+
+/** Format a date value to YYYY-MM-DD string */
+function formatDate(val: unknown): string {
+  if (!val) return '';
+  // Handle Date objects (returned by pg for DATE/TIMESTAMP columns)
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  const s = String(val);
+  const match = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1]! : '';
+}
 
 export default router;
