@@ -11,6 +11,8 @@ import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { updateVehicle } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
+import { getDateUrgency } from '../types/vehicle'
+import type { DateUrgency } from '../types/vehicle'
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return '—'
@@ -359,15 +361,52 @@ export function VehicleDetailPage() {
           onSave={v => saveField('hire_status', v)} />
       </div>
 
-      {/* Key Dates */}
+      {/* Key Dates — compliance colour coded */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Key Dates</h3>
-        <EditableRow label="MOT Due" value={vehicle.motDue} type="date" onSave={v => saveField('mot_due', v)} />
-        <EditableRow label="Tax Due" value={vehicle.taxDue} type="date" onSave={v => saveField('tax_due', v)} />
-        <EditableRow label="TFL Due" value={vehicle.tflDue} type="date" onSave={v => saveField('tfl_due', v)} />
-        <EditableRow label="Warranty Expires" value={vehicle.warrantyExpires} type="date" onSave={v => saveField('warranty_expires', v)} />
-        <EditableRow label="Last Service" value={vehicle.lastServiceDate} type="date" onSave={v => saveField('last_service_date', v)} />
-        <EditableRow label="Finance Ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
+        <ComplianceDateRow
+          label="MOT Due" date={vehicle.motDue} warningDays={30}
+          bookedIn={vehicle.motBookedInDate}
+          onSaveDate={v => saveField('mot_due', v)}
+          onSaveBooked={v => saveField('mot_booked_in_date', v)}
+        />
+        <ComplianceDateRow
+          label="Tax Due" date={vehicle.taxDue} warningDays={30}
+          bookedIn={vehicle.taxBookedInDate}
+          onSaveDate={v => saveField('tax_due', v)}
+          onSaveBooked={v => saveField('tax_booked_in_date', v)}
+        />
+        <ComplianceDateRow
+          label="Insurance Due" date={vehicle.insuranceDue} warningDays={30}
+          bookedIn={vehicle.insuranceBookedInDate}
+          onSaveDate={v => saveField('insurance_due', v)}
+          onSaveBooked={v => saveField('insurance_booked_in_date', v)}
+        />
+        <ComplianceDateRow
+          label="TFL Due" date={vehicle.tflDue} warningDays={30}
+          onSaveDate={v => saveField('tfl_due', v)}
+        />
+        <ComplianceDateRow
+          label="Last Service" date={vehicle.lastServiceDate}
+          bookedIn={vehicle.serviceBookedInDate}
+          onSaveDate={v => saveField('last_service_date', v)}
+          onSaveBooked={v => saveField('service_booked_in_date', v)}
+        />
+        <ComplianceDateRow
+          label="Warranty Expires" date={vehicle.warrantyExpires} warningDays={60}
+          onSaveDate={v => saveField('warranty_expires', v)}
+        />
+        <ComplianceDateRow
+          label="Finance Ends" date={vehicle.financeEnds} warningDays={90}
+          onSaveDate={v => saveField('finance_ends', v)}
+        />
+      </div>
+
+      {/* Insurance Details */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Insurance</h3>
+        <EditableRow label="Provider" value={vehicle.insuranceProvider} type="text" onSave={v => saveField('insurance_provider', v)} />
+        <EditableRow label="Policy Number" value={vehicle.insurancePolicyNumber} type="text" onSave={v => saveField('insurance_policy_number', v)} />
       </div>
 
       {/* Mileage & Service */}
@@ -454,6 +493,125 @@ export function VehicleDetailPage() {
       />
 
       </>}
+    </div>
+  )
+}
+
+/** Compliance-aware date row — colour coded green/amber/red with optional booked-in date */
+function ComplianceDateRow({
+  label,
+  date,
+  warningDays = 30,
+  bookedIn,
+  onSaveDate,
+  onSaveBooked,
+}: {
+  label: string
+  date: string | null
+  warningDays?: number
+  bookedIn?: string | null
+  onSaveDate: (v: string | null) => void
+  onSaveBooked?: (v: string | null) => void
+}) {
+  const [editingDate, setEditingDate] = useState(false)
+  const [editingBooked, setEditingBooked] = useState(false)
+  const [dateValue, setDateValue] = useState('')
+  const [bookedValue, setBookedValue] = useState('')
+
+  const urgency = date ? getDateUrgency(date, warningDays) : 'unknown'
+
+  const urgencyStyles: Record<DateUrgency, { dot: string; text: string; bg: string; label: string }> = {
+    ok:      { dot: 'bg-green-500', text: 'text-green-700', bg: '', label: '' },
+    soon:    { dot: 'bg-amber-500', text: 'text-amber-700', bg: 'bg-amber-50', label: 'Due soon' },
+    overdue: { dot: 'bg-red-500',   text: 'text-red-700',   bg: 'bg-red-50',   label: 'Overdue' },
+    unknown: { dot: 'bg-gray-300',  text: 'text-gray-500',  bg: '', label: '' },
+  }
+  const style = urgencyStyles[urgency]
+
+  // Days remaining text
+  let daysText = ''
+  if (date && urgency !== 'unknown') {
+    const diffDays = Math.ceil((new Date(date).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24))
+    if (diffDays < 0) {
+      daysText = `${Math.abs(diffDays)}d overdue`
+    } else if (diffDays === 0) {
+      daysText = 'Today'
+    } else if (diffDays <= 90) {
+      daysText = `${diffDays}d`
+    }
+  }
+
+  const saveDate = () => { setEditingDate(false); onSaveDate(dateValue || null) }
+  const saveBooked = () => { setEditingBooked(false); onSaveBooked?.(bookedValue || null) }
+
+  return (
+    <div className={`flex items-center gap-2 py-2 px-1 rounded border-b border-gray-100 last:border-0 ${style.bg}`}>
+      {/* Urgency dot */}
+      <span className={`h-2 w-2 shrink-0 rounded-full ${style.dot}`} />
+
+      {/* Label */}
+      <span className="text-sm text-gray-500 min-w-0 flex-1">{label}</span>
+
+      {/* Days countdown */}
+      {daysText && (
+        <span className={`text-[10px] font-bold ${style.text}`}>{daysText}</span>
+      )}
+
+      {/* Date value */}
+      {editingDate ? (
+        <input
+          type="date"
+          value={dateValue}
+          onChange={e => setDateValue(e.target.value)}
+          onBlur={saveDate}
+          onKeyDown={e => e.key === 'Enter' && saveDate()}
+          autoFocus
+          className="w-36 rounded border border-gray-200 px-2 py-1 text-sm text-right focus:border-blue-300 focus:outline-none"
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => { setDateValue(date || ''); setEditingDate(true) }}
+          className={`text-sm font-medium hover:text-blue-600 group ${date ? style.text || 'text-gray-900' : 'text-gray-400'}`}
+        >
+          {date ? formatDate(date) : '—'}
+          <span className="ml-1 text-[10px] text-gray-300 group-hover:text-blue-400">Edit</span>
+        </button>
+      )}
+
+      {/* Booked-in indicator */}
+      {onSaveBooked && (
+        <>
+          {editingBooked ? (
+            <input
+              type="date"
+              value={bookedValue}
+              onChange={e => setBookedValue(e.target.value)}
+              onBlur={saveBooked}
+              onKeyDown={e => e.key === 'Enter' && saveBooked()}
+              autoFocus
+              className="w-32 rounded border border-gray-200 px-2 py-1 text-[11px] text-right focus:border-blue-300 focus:outline-none"
+            />
+          ) : bookedIn ? (
+            <button
+              type="button"
+              onClick={() => { setBookedValue(bookedIn || ''); setEditingBooked(true) }}
+              className="shrink-0 rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700 hover:bg-blue-200"
+              title={`Booked: ${formatDate(bookedIn)}`}
+            >
+              Booked {formatDate(bookedIn)}
+            </button>
+          ) : (urgency === 'soon' || urgency === 'overdue') ? (
+            <button
+              type="button"
+              onClick={() => { setBookedValue(''); setEditingBooked(true) }}
+              className="shrink-0 rounded-full border border-dashed border-gray-300 px-2 py-0.5 text-[10px] font-medium text-gray-400 hover:border-blue-400 hover:text-blue-500"
+            >
+              + Book in
+            </button>
+          ) : null}
+        </>
+      )}
     </div>
   )
 }

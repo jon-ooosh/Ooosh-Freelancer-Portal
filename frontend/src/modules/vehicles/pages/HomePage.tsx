@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { vmPath } from '../config/route-paths'
+import { getDateUrgency } from '../types/vehicle'
 import { useAllIssues } from '../hooks/useAllIssues'
 import { useRecentEvents } from '../hooks/useRecentEvents'
 import { useGoingOutJobs, useDueBackJobs } from '../hooks/useHireHopJobs'
@@ -80,6 +81,41 @@ export function HomePage() {
     [dueBackJobs],
   )
 
+  // Compliance alerts — vehicles with overdue or soon-due dates
+  const complianceAlerts = useMemo(() => {
+    const activeVehicles = enrichedVehicles.filter(v => !v.isOldSold)
+    const checks: { label: string; field: keyof typeof activeVehicles[0]; warningDays: number }[] = [
+      { label: 'MOT', field: 'motDue', warningDays: 30 },
+      { label: 'Tax', field: 'taxDue', warningDays: 30 },
+      { label: 'Insurance', field: 'insuranceDue', warningDays: 30 },
+      { label: 'TFL', field: 'tflDue', warningDays: 30 },
+    ]
+
+    const alerts: { vehicleId: string; reg: string; item: string; date: string; urgency: 'soon' | 'overdue' }[] = []
+
+    for (const v of activeVehicles) {
+      for (const check of checks) {
+        const dateVal = v[check.field] as string | null
+        if (!dateVal) continue
+        const urgency = getDateUrgency(dateVal, check.warningDays)
+        if (urgency === 'soon' || urgency === 'overdue') {
+          alerts.push({ vehicleId: v.id, reg: v.reg, item: check.label, date: dateVal, urgency })
+        }
+      }
+    }
+
+    // Sort: overdue first, then by date ascending
+    alerts.sort((a, b) => {
+      if (a.urgency !== b.urgency) return a.urgency === 'overdue' ? -1 : 1
+      return a.date.localeCompare(b.date)
+    })
+
+    return alerts
+  }, [enrichedVehicles])
+
+  const overdueCount = complianceAlerts.filter(a => a.urgency === 'overdue').length
+  const soonCount = complianceAlerts.filter(a => a.urgency === 'soon').length
+
   const allocationsList = allocations || []
 
   return (
@@ -126,6 +162,63 @@ export function HomePage() {
 
       {/* Low stock warning */}
       <LowStockBanner />
+
+      {/* Compliance alerts */}
+      {complianceAlerts.length > 0 && (
+        <section>
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-medium uppercase tracking-wide text-gray-500">
+              Compliance Alerts
+              {overdueCount > 0 && (
+                <span className="ml-1.5 rounded-full bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-700">
+                  {overdueCount} overdue
+                </span>
+              )}
+              {soonCount > 0 && (
+                <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
+                  {soonCount} due soon
+                </span>
+              )}
+            </h3>
+          </div>
+          <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
+            {complianceAlerts.slice(0, 8).map((alert, i) => {
+              const diffDays = Math.ceil((new Date(alert.date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+              const daysText = diffDays < 0
+                ? `${Math.abs(diffDays)}d overdue`
+                : diffDays === 0 ? 'Today' : `${diffDays}d`
+              return (
+                <Link
+                  key={`${alert.vehicleId}-${alert.item}-${i}`}
+                  to={vmPath(`/vehicles/${alert.vehicleId}`)}
+                  className={`flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50 ${
+                    alert.urgency === 'overdue' ? 'bg-red-50/50' : ''
+                  }`}
+                >
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${
+                    alert.urgency === 'overdue' ? 'bg-red-500' : 'bg-amber-500'
+                  }`} />
+                  <span className="font-mono text-sm font-bold text-ooosh-navy">{alert.reg}</span>
+                  <span className="text-sm text-gray-600">{alert.item}</span>
+                  <span className="ml-auto text-xs text-gray-400">
+                    {new Date(alert.date + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                  </span>
+                  <span className={`text-[10px] font-bold ${
+                    alert.urgency === 'overdue' ? 'text-red-600' : 'text-amber-600'
+                  }`}>
+                    {daysText}
+                  </span>
+                </Link>
+              )
+            })}
+            {complianceAlerts.length > 8 && (
+              <div className="px-3 py-2 text-center text-xs text-gray-400">
+                +{complianceAlerts.length - 8} more alerts
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* Quick actions */}
       <section>

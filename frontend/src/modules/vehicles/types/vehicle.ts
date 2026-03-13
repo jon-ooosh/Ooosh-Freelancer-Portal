@@ -24,12 +24,26 @@ export interface Vehicle {
   // Mileage & service
   lastServiceMileage: number | null
   nextServiceDue: number | null   // Mileage-based
+  // Insurance (migration 014)
+  insuranceDue: string | null     // YYYY-MM-DD
+  insuranceProvider: string | null
+  insurancePolicyNumber: string | null
+  // Booked-in dates (migration 014)
+  motBookedInDate: string | null
+  serviceBookedInDate: string | null
+  insuranceBookedInDate: string | null
+  taxBookedInDate: string | null
+  // Mileage tracking (migration 014)
+  currentMileage: number | null
+  lastMileageUpdate: string | null
   // Other info
   ulezCompliant: boolean
   spareKey: boolean
   wifiNetwork: string | null      // EE, Vodafone, THREE, N/A
   financeWith: string | null
   financeEnds: string | null      // YYYY-MM-DD
+  fuelType: string | null
+  mpg: number | null
   // Hire status (from Fleet Master board column color_mm0v8bak)
   hireStatus: string              // Available, On Hire, Prep Needed, Not Ready, or ''
   // CO2 emissions (g/km from Fleet Manager board)
