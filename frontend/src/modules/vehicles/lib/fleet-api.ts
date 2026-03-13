@@ -52,3 +52,39 @@ export async function fetchVehicle(idOrReg: string): Promise<Vehicle> {
 
   return response.json() as Promise<Vehicle>
 }
+
+/**
+ * Update a vehicle by ID. Returns the updated vehicle.
+ */
+export async function updateVehicle(id: string, fields: Record<string, unknown>): Promise<Vehicle> {
+  const response = await apiFetch(`/fleet/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(err.error || `Failed to update vehicle: ${response.status}`)
+  }
+
+  return response.json() as Promise<Vehicle>
+}
+
+/**
+ * Create a new vehicle. Returns the created vehicle.
+ */
+export async function createVehicle(fields: Record<string, unknown>): Promise<Vehicle> {
+  const response = await apiFetch('/fleet', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  })
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(err.error || `Failed to create vehicle: ${response.status}`)
+  }
+
+  return response.json() as Promise<Vehicle>
+}

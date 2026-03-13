@@ -1,9 +1,12 @@
 import { Link, useSearchParams } from 'react-router-dom'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useFilteredVehicles } from '../hooks/useVehicles'
 import { useAllocations } from '../hooks/useAllocations'
 import { getGearbox } from '../lib/van-matching'
 import { getDateUrgency } from '../types/vehicle'
+import { vmPath } from '../config/route-paths'
+import { createVehicle } from '../lib/fleet-api'
+import { getOpAuthState } from '../adapters/auth-adapter'
 import type { Vehicle } from '../types/vehicle'
 
 /** Colour classes for simple vehicle types */
@@ -69,7 +72,7 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
 
   return (
     <Link
-      to={`/vehicles/${vehicle.id}`}
+      to={vmPath(`/vehicles/${vehicle.id}`)}
       className="block rounded-lg border border-gray-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md active:bg-gray-50"
     >
       {/* Top row: reg + type badges */}
@@ -140,6 +143,9 @@ export function VehiclesPage() {
     () => new Set((allocations || []).map(a => a.vehicleId)),
     [allocations],
   )
+  const [showAddForm, setShowAddForm] = useState(false)
+  const opAuth = getOpAuthState()
+  const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
 
   // When ?status=on-hire, sort on-hire vehicles to the top
   const sortedVehicles = useMemo(() => {
@@ -163,14 +169,35 @@ export function VehiclesPage() {
             </span>
           )}
         </h2>
-        <button
-          onClick={() => refetch()}
-          disabled={isLoading}
-          className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50"
-        >
-          {isLoading ? 'Loading...' : 'Refresh'}
-        </button>
+        <div className="flex gap-2">
+          {isAdmin && (
+            <button
+              onClick={() => setShowAddForm(true)}
+              className="rounded-lg bg-ooosh-navy px-3 py-1.5 text-sm font-medium text-white hover:bg-ooosh-navy/90 active:bg-ooosh-navy/80"
+            >
+              + Add Vehicle
+            </button>
+          )}
+          <button
+            onClick={() => refetch()}
+            disabled={isLoading}
+            className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50"
+          >
+            {isLoading ? 'Loading...' : 'Refresh'}
+          </button>
+        </div>
       </div>
+
+      {/* Add Vehicle form */}
+      {showAddForm && (
+        <AddVehicleForm
+          onClose={() => setShowAddForm(false)}
+          onCreated={() => {
+            setShowAddForm(false)
+            refetch()
+          }}
+        />
+      )}
 
       {/* Search */}
       <input
@@ -279,6 +306,105 @@ export function VehiclesPage() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/** Inline form for adding a new vehicle */
+function AddVehicleForm({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [reg, setReg] = useState('')
+  const [make, setMake] = useState('')
+  const [model, setModel] = useState('')
+  const [simpleType, setSimpleType] = useState('Premium')
+  const [colour, setColour] = useState('')
+  const [seats, setSeats] = useState('')
+  const [fuelType, setFuelType] = useState('diesel')
+  const [isSaving, setIsSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!reg.trim()) { setError('Registration is required'); return }
+
+    setIsSaving(true)
+    setError(null)
+    try {
+      await createVehicle({
+        reg: reg.trim().toUpperCase(),
+        make: make.trim(),
+        model: model.trim(),
+        simple_type: simpleType,
+        colour: colour.trim(),
+        seats: seats ? parseInt(seats) : null,
+        fuel_type: fuelType,
+        fleet_group: 'active',
+        is_active: true,
+      })
+      onCreated()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create vehicle')
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-ooosh-navy">Add New Vehicle</h3>
+        <button type="button" onClick={onClose} className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+      </div>
+      <form onSubmit={handleSubmit} className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Registration *</label>
+            <input type="text" value={reg} onChange={e => setReg(e.target.value)} placeholder="e.g. AB12 CDE"
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
+            <select value={simpleType} onChange={e => setSimpleType(e.target.value)}
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none">
+              {VEHICLE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Make</label>
+            <input type="text" value={make} onChange={e => setMake(e.target.value)} placeholder="e.g. Mercedes"
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Model</label>
+            <input type="text" value={model} onChange={e => setModel(e.target.value)} placeholder="e.g. Sprinter"
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Colour</label>
+            <input type="text" value={colour} onChange={e => setColour(e.target.value)} placeholder="e.g. White"
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Seats</label>
+            <input type="number" value={seats} onChange={e => setSeats(e.target.value)} placeholder="e.g. 16"
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Fuel Type</label>
+            <select value={fuelType} onChange={e => setFuelType(e.target.value)}
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none">
+              <option value="diesel">Diesel</option>
+              <option value="petrol">Petrol</option>
+              <option value="electric">Electric</option>
+              <option value="hybrid">Hybrid</option>
+            </select>
+          </div>
+        </div>
+        {error && <p className="text-xs text-red-600">{error}</p>}
+        <button type="submit" disabled={isSaving}
+          className="rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-medium text-white hover:bg-ooosh-navy/90 disabled:opacity-50">
+          {isSaving ? 'Creating...' : 'Create Vehicle'}
+        </button>
+      </form>
     </div>
   )
 }

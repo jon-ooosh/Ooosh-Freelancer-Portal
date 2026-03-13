@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
 import { useVehicleIssues } from '../hooks/useVehicleIssues'
@@ -9,6 +10,8 @@ import { getDateUrgency } from '../types/vehicle'
 import type { DateUrgency } from '../types/vehicle'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
+import { updateVehicle } from '../lib/fleet-api'
+import { getOpAuthState } from '../adapters/auth-adapter'
 
 const urgencyColours: Record<DateUrgency, string> = {
   ok: 'text-green-700 bg-green-50',
@@ -78,6 +81,32 @@ export function VehicleDetailPage() {
   const [activeTab, setActiveTab] = useState<'details' | 'location' | 'preps'>('details')
   const [editingTracker, setEditingTracker] = useState(false)
   const [trackerInput, setTrackerInput] = useState('')
+  const [isSelling, setIsSelling] = useState(false)
+  const queryClient = useQueryClient()
+  const opAuth = getOpAuthState()
+  const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+
+  const handleToggleSold = async () => {
+    if (!vehicle) return
+    const newGroup = vehicle.isOldSold ? 'active' : 'old_sold'
+    const confirmMsg = vehicle.isOldSold
+      ? `Reactivate ${vehicle.reg} and return it to the active fleet?`
+      : `Mark ${vehicle.reg} as Old & Sold? It will be moved out of the active fleet.`
+    if (!window.confirm(confirmMsg)) return
+
+    setIsSelling(true)
+    try {
+      await updateVehicle(vehicle.id, {
+        fleet_group: newGroup,
+        is_active: newGroup === 'active',
+      })
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update vehicle')
+    } finally {
+      setIsSelling(false)
+    }
+  }
 
   const openIssues = useMemo(
     () => (vehicleIssues || []).filter(i => i.status !== 'Resolved'),
@@ -190,15 +219,33 @@ export function VehicleDetailPage() {
             <Badge className="bg-gray-100 text-gray-600">Spare key</Badge>
           )}
         </div>
+
+        {/* Admin actions */}
+        {isAdmin && (
+          <div className="mt-3 flex gap-2 border-t border-gray-100 pt-3">
+            <button
+              type="button"
+              onClick={handleToggleSold}
+              disabled={isSelling}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                vehicle.isOldSold
+                  ? 'border border-green-200 text-green-700 hover:bg-green-50'
+                  : 'border border-orange-200 text-orange-700 hover:bg-orange-50'
+              } disabled:opacity-50`}
+            >
+              {isSelling ? 'Updating...' : vehicle.isOldSold ? 'Reactivate Vehicle' : 'Mark as Sold'}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Quick actions — hidden for old/sold vehicles */}
       {!vehicle.isOldSold && (
         <div className="grid grid-cols-3 gap-2">
           {[
-            { label: 'Book Out', to: `/book-out?vehicle=${vehicle.id}` },
-            { label: 'Check In', to: `/check-in?vehicle=${vehicle.id}` },
-            { label: 'Log Issue', to: `/issues/new?vehicle=${vehicle.id}` },
+            { label: 'Book Out', to: vmPath(`/book-out?vehicle=${vehicle.id}`) },
+            { label: 'Check In', to: vmPath(`/check-in?vehicle=${vehicle.id}`) },
+            { label: 'Log Issue', to: vmPath(`/issues/new?vehicle=${vehicle.id}`) },
           ].map(action => (
             <Link
               key={action.label}
@@ -360,7 +407,7 @@ function VehicleIssuesSection({
         <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">
           Issues {totalIssues > 0 && <span className="normal-case text-gray-400">({totalIssues})</span>}
         </h3>
-        <Link to={`/issues/new?vehicle=${vehicleId}`} className="text-xs font-medium text-blue-600">
+        <Link to={vmPath(`/issues/new?vehicle=${vehicleId}`)} className="text-xs font-medium text-blue-600">
           Log issue →
         </Link>
       </div>

@@ -14,6 +14,7 @@ import { Router, Request, Response } from 'express';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { query } from '../config/database';
 import { hireHopGet, hireHopPost, isHireHopConfigured } from '../config/hirehop';
+import { getFromR2, uploadToR2, listR2Objects, isR2Configured } from '../config/r2';
 
 const router = Router();
 router.use(authenticate);
@@ -612,7 +613,390 @@ router.post('/hirehop', async (req: AuthRequest, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 4. NETLIFY PROXY CATCH-ALL (for remaining VM functions not yet migrated)
+// 4. R2-BACKED DATA ENDPOINTS
+//    Settings, issues, allocations, stock, and vehicle events.
+//    All stored in the OP's R2 bucket under vm-specific prefixes.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Helper: read a JSON file from R2, return parsed object or null */
+async function readR2Json<T>(key: string): Promise<T | null> {
+  try {
+    const resp = await getFromR2(key);
+    if (!resp.Body) return null;
+    const text = await resp.Body.transformToString('utf-8');
+    return JSON.parse(text) as T;
+  } catch (err: unknown) {
+    const code = (err as { name?: string })?.name;
+    if (code === 'NoSuchKey') return null;
+    throw err;
+  }
+}
+
+/** Helper: write a JSON object to R2 */
+async function writeR2Json(key: string, data: unknown): Promise<void> {
+  const body = Buffer.from(JSON.stringify(data));
+  await uploadToR2(key, body, 'application/json');
+}
+
+// ── Checklist Settings ──
+
+/**
+ * GET /api/vehicles/get-checklist-settings
+ * Fetch checklist settings from R2. Falls back to empty defaults.
+ */
+router.get('/get-checklist-settings', async (_req: AuthRequest, res: Response) => {
+  try {
+    const data = await readR2Json<Record<string, unknown>>('settings/checklists.json');
+    if (data) {
+      res.json(data);
+    } else {
+      // Return empty structure — the frontend has DEFAULT_CHECKLIST_SETTINGS as fallback
+      res.json({ briefingItems: {}, prepItems: {} });
+    }
+  } catch (error) {
+    console.error('[vehicles/settings] Failed to read checklist settings:', error);
+    res.status(500).json({ error: 'Failed to load settings' });
+  }
+});
+
+/**
+ * POST /api/vehicles/save-checklist-settings
+ * Save checklist settings to R2.
+ */
+router.post('/save-checklist-settings', async (req: AuthRequest, res: Response) => {
+  try {
+    const data = req.body;
+    data.updatedAt = new Date().toISOString();
+    await writeR2Json('settings/checklists.json', data);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[vehicles/settings] Failed to save checklist settings:', error);
+    res.status(500).json({ error: 'Failed to save settings' });
+  }
+});
+
+// ── Issues (R2-backed) ──
+
+/**
+ * GET /api/vehicles/get-all-issues
+ * Fetch the fleet-wide issue index from R2.
+ */
+router.get('/get-all-issues', async (_req: AuthRequest, res: Response) => {
+  try {
+    const data = await readR2Json<{ issues: unknown[] }>('issues/_index.json');
+    res.json({ issues: data?.issues || [] });
+  } catch (error) {
+    console.error('[vehicles/issues] Failed to read issues index:', error);
+    res.status(500).json({ error: 'Failed to load issues' });
+  }
+});
+
+/**
+ * GET /api/vehicles/get-vehicle-issues?vehicleReg=XX00XXX
+ * Fetch all issues for a specific vehicle from R2.
+ */
+router.get('/get-vehicle-issues', async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicleReg = (req.query.vehicleReg as string || '').toUpperCase();
+    if (!vehicleReg) {
+      res.status(400).json({ error: 'vehicleReg is required' });
+      return;
+    }
+
+    const prefix = `issues/${vehicleReg}/`;
+    const objects = await listR2Objects(prefix);
+    const issues: unknown[] = [];
+
+    for (const obj of objects) {
+      if (!obj.Key || obj.Key.endsWith('/_index.json')) continue;
+      const issue = await readR2Json(obj.Key);
+      if (issue) issues.push(issue);
+    }
+
+    // Sort by reportedAt descending
+    issues.sort((a: any, b: any) => (b.reportedAt || '').localeCompare(a.reportedAt || ''));
+    res.json({ issues });
+  } catch (error) {
+    console.error('[vehicles/issues] Failed to read vehicle issues:', error);
+    res.status(500).json({ error: 'Failed to load vehicle issues' });
+  }
+});
+
+/**
+ * GET /api/vehicles/get-issue?vehicleReg=XX00XXX&issueId=xxx
+ * Fetch a single issue by vehicle reg + issue ID.
+ */
+router.get('/get-issue', async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicleReg = (req.query.vehicleReg as string || '').toUpperCase();
+    const issueId = req.query.issueId as string;
+    if (!vehicleReg || !issueId) {
+      res.status(400).json({ error: 'vehicleReg and issueId are required' });
+      return;
+    }
+
+    const issue = await readR2Json(`issues/${vehicleReg}/${issueId}.json`);
+    if (!issue) {
+      res.status(404).json({ error: 'Issue not found' });
+      return;
+    }
+    res.json({ issue });
+  } catch (error) {
+    console.error('[vehicles/issues] Failed to read issue:', error);
+    res.status(500).json({ error: 'Failed to load issue' });
+  }
+});
+
+/**
+ * POST /api/vehicles/save-issue
+ * Save (create or update) an issue to R2.
+ * Writes the full issue JSON and upserts the fleet-wide index.
+ */
+router.post('/save-issue', async (req: AuthRequest, res: Response) => {
+  try {
+    const { issue } = req.body;
+    if (!issue?.id || !issue?.vehicleReg) {
+      res.status(400).json({ error: 'issue with id and vehicleReg is required' });
+      return;
+    }
+
+    const reg = (issue.vehicleReg as string).toUpperCase();
+
+    // Write full issue JSON
+    await writeR2Json(`issues/${reg}/${issue.id}.json`, issue);
+
+    // Update fleet-wide index
+    const indexData = await readR2Json<{ issues: any[] }>('issues/_index.json') || { issues: [] };
+    const indexEntry = {
+      id: issue.id,
+      vehicleReg: reg,
+      vehicleId: issue.vehicleId || '',
+      category: issue.category,
+      component: issue.component,
+      severity: issue.severity,
+      summary: issue.summary,
+      status: issue.status,
+      reportedAt: issue.reportedAt,
+      resolvedAt: issue.resolvedAt || null,
+      lastActivityAt: issue.activity?.length
+        ? issue.activity[issue.activity.length - 1].timestamp
+        : issue.reportedAt,
+    };
+
+    const idx = indexData.issues.findIndex((e: any) => e.id === issue.id);
+    if (idx >= 0) {
+      indexData.issues[idx] = indexEntry;
+    } else {
+      indexData.issues.push(indexEntry);
+    }
+
+    await writeR2Json('issues/_index.json', indexData);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[vehicles/issues] Failed to save issue:', error);
+    res.status(500).json({ error: 'Failed to save issue' });
+  }
+});
+
+// ── Allocations ──
+
+/**
+ * GET /api/vehicles/get-allocations
+ * Fetch all active allocations from R2.
+ */
+router.get('/get-allocations', async (_req: AuthRequest, res: Response) => {
+  try {
+    const data = await readR2Json<{ allocations: unknown[] }>('allocations/_index.json');
+    res.json({ allocations: data?.allocations || [] });
+  } catch (error) {
+    console.error('[vehicles/allocations] Failed to read allocations:', error);
+    res.status(500).json({ error: 'Failed to load allocations' });
+  }
+});
+
+/**
+ * POST /api/vehicles/save-allocations
+ * Save the full allocations array to R2 (replaces existing).
+ */
+router.post('/save-allocations', async (req: AuthRequest, res: Response) => {
+  try {
+    const { allocations } = req.body;
+    await writeR2Json('allocations/_index.json', { allocations: allocations || [], updatedAt: new Date().toISOString() });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[vehicles/allocations] Failed to save allocations:', error);
+    res.status(500).json({ error: 'Failed to save allocations' });
+  }
+});
+
+// ── Stock ──
+
+/**
+ * GET /api/vehicles/get-stock
+ * Fetch all stock items and recent transactions from R2.
+ */
+router.get('/get-stock', async (_req: AuthRequest, res: Response) => {
+  try {
+    const data = await readR2Json<{ items: unknown[]; transactions: unknown[] }>('stock/data.json');
+    res.json({ items: data?.items || [], transactions: data?.transactions || [] });
+  } catch (error) {
+    console.error('[vehicles/stock] Failed to read stock:', error);
+    res.status(500).json({ error: 'Failed to load stock' });
+  }
+});
+
+/**
+ * POST /api/vehicles/save-stock
+ * Save the full stock state (items + transactions).
+ */
+router.post('/save-stock', async (req: AuthRequest, res: Response) => {
+  try {
+    const { items, transactions } = req.body;
+    await writeR2Json('stock/data.json', { items: items || [], transactions: transactions || [], updatedAt: new Date().toISOString() });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[vehicles/stock] Failed to save stock:', error);
+    res.status(500).json({ error: 'Failed to save stock' });
+  }
+});
+
+/**
+ * POST /api/vehicles/record-stock-transaction
+ * Record one or more stock transactions.
+ * Reads current stock, applies transaction(s), writes back.
+ */
+router.post('/record-stock-transaction', async (req: AuthRequest, res: Response) => {
+  try {
+    const { transaction, transactions: batchTransactions } = req.body;
+    const txns = batchTransactions || (transaction ? [transaction] : []);
+
+    if (txns.length === 0) {
+      res.status(400).json({ error: 'transaction(s) required' });
+      return;
+    }
+
+    // Read current stock
+    const data = await readR2Json<{ items: any[]; transactions: any[] }>('stock/data.json') || { items: [], transactions: [] };
+
+    // Apply each transaction
+    for (const txn of txns) {
+      data.transactions.push(txn);
+
+      // Update item quantity
+      const item = data.items.find((i: any) => i.id === txn.itemId);
+      if (item) {
+        if (txn.type === 'consumed' || txn.type === 'adjustment_down') {
+          item.currentStock = Math.max(0, (item.currentStock || 0) - (txn.quantity || 0));
+        } else if (txn.type === 'received' || txn.type === 'adjustment_up') {
+          item.currentStock = (item.currentStock || 0) + (txn.quantity || 0);
+        }
+        item.updatedAt = new Date().toISOString();
+      }
+    }
+
+    data.transactions = data.transactions || [];
+    await writeR2Json('stock/data.json', { ...data, updatedAt: new Date().toISOString() });
+    res.json({ success: true, processed: txns.length });
+  } catch (error) {
+    console.error('[vehicles/stock] Failed to record transaction:', error);
+    res.status(500).json({ error: 'Failed to record stock transaction' });
+  }
+});
+
+// ── Vehicle Events ──
+
+/**
+ * POST /api/vehicles/save-event
+ * Save a vehicle event to R2.
+ * Writes event JSON + updates per-vehicle index.
+ */
+router.post('/save-event', async (req: AuthRequest, res: Response) => {
+  try {
+    const { event } = req.body;
+    if (!event?.id || !event?.vehicleReg) {
+      res.status(400).json({ error: 'event with id and vehicleReg is required' });
+      return;
+    }
+
+    const reg = (event.vehicleReg as string).toUpperCase();
+
+    // Write full event JSON
+    await writeR2Json(`vehicle-events/${reg}/${event.id}.json`, event);
+
+    // Update per-vehicle index
+    const indexKey = `vehicle-events/${reg}/_index.json`;
+    const indexData = await readR2Json<{ events: any[] }>(indexKey) || { events: [] };
+
+    const indexEntry = {
+      id: event.id,
+      vehicleReg: reg,
+      eventType: event.eventType,
+      eventDate: event.eventDate,
+      mileage: event.mileage ?? null,
+      fuelLevel: event.fuelLevel ?? null,
+      hireHopJob: event.hireHopJob ?? null,
+      hireStatus: event.hireStatus ?? null,
+      createdAt: event.createdAt || new Date().toISOString(),
+    };
+
+    const idx = indexData.events.findIndex((e: any) => e.id === event.id);
+    if (idx >= 0) {
+      indexData.events[idx] = indexEntry;
+    } else {
+      indexData.events.push(indexEntry);
+    }
+
+    await writeR2Json(indexKey, indexData);
+
+    // If hire status change included, update fleet_vehicles table
+    if (event.hireStatus) {
+      await query(
+        'UPDATE fleet_vehicles SET hire_status = $1 WHERE reg = $2',
+        [event.hireStatus, reg]
+      ).catch(err => console.warn('[vehicles/events] Failed to update hire status:', err));
+    }
+
+    res.json({ success: true, id: event.id });
+  } catch (error) {
+    console.error('[vehicles/events] Failed to save event:', error);
+    res.status(500).json({ error: 'Failed to save event' });
+  }
+});
+
+/**
+ * GET /api/vehicles/get-recent-events?limit=10
+ * Fetch recent events across all vehicles.
+ * Scans per-vehicle indexes and returns the most recent N events.
+ */
+router.get('/get-recent-events', async (req: AuthRequest, res: Response) => {
+  try {
+    const limit = parseInt(req.query.limit as string) || 10;
+
+    // List all vehicle event index files
+    const objects = await listR2Objects('vehicle-events/');
+    const indexKeys = (objects || [])
+      .filter(obj => obj.Key?.endsWith('/_index.json'))
+      .map(obj => obj.Key!);
+
+    const allEvents: any[] = [];
+    for (const key of indexKeys) {
+      const indexData = await readR2Json<{ events: any[] }>(key);
+      if (indexData?.events) {
+        allEvents.push(...indexData.events);
+      }
+    }
+
+    // Sort by createdAt descending, take limit
+    allEvents.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    res.json({ events: allEvents.slice(0, limit) });
+  } catch (error) {
+    console.error('[vehicles/events] Failed to read recent events:', error);
+    res.status(500).json({ error: 'Failed to load recent events' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. NETLIFY PROXY CATCH-ALL (for remaining VM functions not yet migrated)
 // ═══════════════════════════════════════════════════════════════════════════
 
 const NETLIFY_BASE = process.env.VEHICLE_MODULE_URL || 'https://ooosh-vehicles.netlify.app';
