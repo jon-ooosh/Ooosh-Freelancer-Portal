@@ -6,10 +6,11 @@
 
 import { useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
-import { updateVehicle } from '../lib/fleet-api'
+import { updateVehicle, fetchComplianceSettings, updateComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
+import type { ComplianceSettings } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
 
 function EditableField({
@@ -66,6 +67,81 @@ function EditableField({
   )
 }
 
+function ComplianceThresholdRow({
+  label,
+  warningKey,
+  urgentKey,
+  settings,
+  onSave,
+}: {
+  label: string
+  warningKey: keyof ComplianceSettings
+  urgentKey: keyof ComplianceSettings
+  settings: ComplianceSettings
+  onSave: (key: keyof ComplianceSettings, val: number) => void
+}) {
+  const [editingField, setEditingField] = useState<'warning' | 'urgent' | null>(null)
+  const [editVal, setEditVal] = useState('')
+
+  const save = (key: keyof ComplianceSettings) => {
+    setEditingField(null)
+    const num = parseInt(editVal, 10)
+    if (!isNaN(num) && num >= 0) onSave(key, num)
+  }
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+      <span className="text-sm text-gray-600">{label}</span>
+      <div className="flex items-center gap-3">
+        {/* Warning (amber) */}
+        <div className="flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />
+          {editingField === 'warning' ? (
+            <input
+              type="number" min="0" value={editVal}
+              onChange={e => setEditVal(e.target.value)}
+              onBlur={() => save(warningKey)}
+              onKeyDown={e => e.key === 'Enter' && save(warningKey)}
+              autoFocus
+              className="w-14 rounded border border-gray-200 px-1.5 py-0.5 text-xs text-right focus:border-blue-300 focus:outline-none"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => { setEditVal(String(settings[warningKey])); setEditingField('warning') }}
+              className="text-xs font-medium text-gray-700 hover:text-blue-600"
+            >
+              {settings[warningKey]}d
+            </button>
+          )}
+        </div>
+        {/* Urgent (red) */}
+        <div className="flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-full bg-red-500" />
+          {editingField === 'urgent' ? (
+            <input
+              type="number" min="0" value={editVal}
+              onChange={e => setEditVal(e.target.value)}
+              onBlur={() => save(urgentKey)}
+              onKeyDown={e => e.key === 'Enter' && save(urgentKey)}
+              autoFocus
+              className="w-14 rounded border border-gray-200 px-1.5 py-0.5 text-xs text-right focus:border-blue-300 focus:outline-none"
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => { setEditVal(String(settings[urgentKey])); setEditingField('urgent') }}
+              className="text-xs font-medium text-gray-700 hover:text-blue-600"
+            >
+              {settings[urgentKey]}d
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function VehicleSettingsPage() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -74,6 +150,21 @@ export function VehicleSettingsPage() {
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
   const [actionLoading, setActionLoading] = useState(false)
+
+  const { data: complianceSettings } = useQuery({
+    queryKey: ['compliance-settings'],
+    queryFn: fetchComplianceSettings,
+  })
+  const compliance = complianceSettings || DEFAULT_COMPLIANCE
+
+  const saveThreshold = async (key: keyof ComplianceSettings, value: number) => {
+    try {
+      await updateComplianceSettings({ [key]: value })
+      queryClient.invalidateQueries({ queryKey: ['compliance-settings'] })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save threshold')
+    }
+  }
 
   if (!isAdmin) {
     return (
@@ -172,6 +263,19 @@ export function VehicleSettingsPage() {
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Finance</h3>
         <EditableField label="Finance with" value={vehicle.financeWith} type="text" onSave={v => saveField('finance_with', v)} />
         <EditableField label="Finance ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
+      </div>
+
+      {/* Compliance Alert Thresholds (fleet-wide) */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <h3 className="mb-1 text-sm font-semibold uppercase tracking-wide text-gray-500">Compliance Alert Thresholds</h3>
+        <p className="mb-3 text-xs text-gray-400">
+          Fleet-wide settings. <span className="inline-flex items-center gap-0.5"><span className="inline-block h-2 w-2 rounded-full bg-amber-400" /> Amber</span> = warning,{' '}
+          <span className="inline-flex items-center gap-0.5"><span className="inline-block h-2 w-2 rounded-full bg-red-500" /> Red</span> = urgent. Click to edit.
+        </p>
+        <ComplianceThresholdRow label="MOT" warningKey="mot_warning_days" urgentKey="mot_urgent_days" settings={compliance} onSave={saveThreshold} />
+        <ComplianceThresholdRow label="Tax" warningKey="tax_warning_days" urgentKey="tax_urgent_days" settings={compliance} onSave={saveThreshold} />
+        <ComplianceThresholdRow label="Insurance" warningKey="insurance_warning_days" urgentKey="insurance_urgent_days" settings={compliance} onSave={saveThreshold} />
+        <ComplianceThresholdRow label="TFL" warningKey="tfl_warning_days" urgentKey="tfl_urgent_days" settings={compliance} onSave={saveThreshold} />
       </div>
 
       {/* Danger zone */}

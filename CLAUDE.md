@@ -209,7 +209,7 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 - [x] Notifications targeted to configurable roles (deduped: 7-day for soon, 1-day for overdue)
 - [x] Compliance settings API (GET/PUT for vehicle_compliance_settings)
 - [x] On-demand compliance check endpoint (GET /api/vehicles/compliance/check)
-- [ ] DVLA MOT History API integration (deferred — needs API key registration)
+- [ ] DVSA MOT History API integration (API key applied for 13 Mar 2026, ~5 day turnaround)
 - [ ] DVLA Vehicle Enquiry Service for tax status (deferred)
 
 **Phase D — Mileage Tracking** ✅ COMPLETE

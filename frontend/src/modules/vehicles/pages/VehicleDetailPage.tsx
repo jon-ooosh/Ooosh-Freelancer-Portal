@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
 import { useVehicleIssues } from '../hooks/useVehicleIssues'
@@ -10,7 +10,7 @@ import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import FuelHistoryTab from '../components/fuel/FuelHistoryTab'
-import { updateVehicle } from '../lib/fleet-api'
+import { updateVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import { getDateUrgency } from '../types/vehicle'
 import type { DateUrgency } from '../types/vehicle'
@@ -122,6 +122,12 @@ export function VehicleDetailPage() {
   const { data: vehicleIssues } = useVehicleIssues(vehicle?.reg)
   const { trackerNumber } = useVehicleTracker(vehicle?.reg)
   const { assign: assignTracker, isSaving: isAssigningTracker } = useUpdateTrackerAssignment()
+  const { data: complianceSettings } = useQuery({
+    queryKey: ['compliance-settings'],
+    queryFn: fetchComplianceSettings,
+    staleTime: 5 * 60 * 1000,
+  })
+  const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [activeTab, setActiveTab] = useState<'details' | 'service' | 'fuel' | 'location' | 'preps'>('details')
   const [editingTracker, setEditingTracker] = useState(false)
   const [trackerInput, setTrackerInput] = useState('')
@@ -342,25 +348,25 @@ export function VehicleDetailPage() {
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Key Dates</h3>
         <ComplianceDateRow
-          label="MOT Due" date={vehicle.motDue} warningDays={30}
+          label="MOT Due" date={vehicle.motDue} warningDays={cs.mot_warning_days}
           bookedIn={vehicle.motBookedInDate}
           onSaveDate={v => saveField('mot_due', v)}
           onSaveBooked={v => saveField('mot_booked_in_date', v)}
         />
         <ComplianceDateRow
-          label="Tax Due" date={vehicle.taxDue} warningDays={30}
+          label="Tax Due" date={vehicle.taxDue} warningDays={cs.tax_warning_days}
           bookedIn={vehicle.taxBookedInDate}
           onSaveDate={v => saveField('tax_due', v)}
           onSaveBooked={v => saveField('tax_booked_in_date', v)}
         />
         <ComplianceDateRow
-          label="Insurance Due" date={vehicle.insuranceDue} warningDays={30}
+          label="Insurance Due" date={vehicle.insuranceDue} warningDays={cs.insurance_warning_days}
           bookedIn={vehicle.insuranceBookedInDate}
           onSaveDate={v => saveField('insurance_due', v)}
           onSaveBooked={v => saveField('insurance_booked_in_date', v)}
         />
         <ComplianceDateRow
-          label="TFL Due" date={vehicle.tflDue} warningDays={30}
+          label="TFL Due" date={vehicle.tflDue} warningDays={cs.tfl_warning_days}
           onSaveDate={v => saveField('tfl_due', v)}
         />
         <ComplianceDateRow

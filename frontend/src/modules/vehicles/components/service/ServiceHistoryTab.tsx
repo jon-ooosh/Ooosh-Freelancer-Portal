@@ -3,7 +3,7 @@
  * for a vehicle. Includes filtering, add/edit forms, and (future) AI extraction.
  */
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useMemo } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fetchServiceLog,
@@ -39,6 +39,17 @@ const TYPE_BADGE_COLORS: Record<string, string> = {
   other: 'bg-gray-100 text-gray-600',
 }
 
+type SortField = 'date_desc' | 'date_asc' | 'cost_desc' | 'cost_asc' | 'garage' | 'type'
+
+const SORT_OPTIONS: { value: SortField; label: string }[] = [
+  { value: 'date_desc', label: 'Newest first' },
+  { value: 'date_asc', label: 'Oldest first' },
+  { value: 'cost_desc', label: 'Highest cost' },
+  { value: 'cost_asc', label: 'Lowest cost' },
+  { value: 'garage', label: 'Garage A-Z' },
+  { value: 'type', label: 'Type' },
+]
+
 interface Props {
   vehicleId: string
   currentMileage?: number | null
@@ -47,6 +58,7 @@ interface Props {
 export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) {
   const queryClient = useQueryClient()
   const [filter, setFilter] = useState<ServiceType | 'all'>('all')
+  const [sortBy, setSortBy] = useState<SortField>('date_desc')
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<ServiceLogRecord | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
@@ -123,8 +135,33 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
     }
   }, [vehicleId, queryClient])
 
-  const records = data?.data || []
+  const rawRecords = data?.data || []
   const total = data?.total || 0
+
+  const records = useMemo(() => {
+    const sorted = [...rawRecords]
+    switch (sortBy) {
+      case 'date_desc':
+        sorted.sort((a, b) => (b.serviceDate || '').localeCompare(a.serviceDate || ''))
+        break
+      case 'date_asc':
+        sorted.sort((a, b) => (a.serviceDate || '').localeCompare(b.serviceDate || ''))
+        break
+      case 'cost_desc':
+        sorted.sort((a, b) => (b.cost ?? -1) - (a.cost ?? -1))
+        break
+      case 'cost_asc':
+        sorted.sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity))
+        break
+      case 'garage':
+        sorted.sort((a, b) => (a.garage || 'zzz').localeCompare(b.garage || 'zzz'))
+        break
+      case 'type':
+        sorted.sort((a, b) => a.serviceType.localeCompare(b.serviceType))
+        break
+    }
+    return sorted
+  }, [rawRecords, sortBy])
 
   return (
     <div className="space-y-3">
@@ -142,22 +179,33 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
         </button>
       </div>
 
-      {/* Filter pills */}
-      <div className="flex flex-wrap gap-1.5">
-        {FILTER_OPTIONS.map(f => (
-          <button
-            key={f.value}
-            type="button"
-            onClick={() => setFilter(f.value)}
-            className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
-              filter === f.value
-                ? 'bg-ooosh-navy text-white'
-                : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
+      {/* Filter pills + sort */}
+      <div className="flex items-center gap-3">
+        <div className="flex flex-wrap gap-1.5 flex-1">
+          {FILTER_OPTIONS.map(f => (
+            <button
+              key={f.value}
+              type="button"
+              onClick={() => setFilter(f.value)}
+              className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
+                filter === f.value
+                  ? 'bg-ooosh-navy text-white'
+                  : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+        <select
+          value={sortBy}
+          onChange={e => setSortBy(e.target.value as SortField)}
+          className="shrink-0 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 focus:border-blue-400 focus:outline-none"
+        >
+          {SORT_OPTIONS.map(s => (
+            <option key={s.value} value={s.value}>{s.label}</option>
+          ))}
+        </select>
       </div>
 
       {/* Loading */}
