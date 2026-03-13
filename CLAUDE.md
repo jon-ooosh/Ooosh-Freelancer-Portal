@@ -178,15 +178,62 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
 
 **The dependency chain determines the order. Do NOT skip ahead — each step depends on the previous.**
 
-#### Step 1: Vehicle Module Integration ← CURRENT PRIORITY
+#### Step 1: Vehicle Module Integration ← MOSTLY COMPLETE
 Integrate the existing Vehicle Module (separate React app) into the OP as a route.
 
-- [ ] Add "Vehicles" nav group to Layout.tsx
-- [ ] Mount VM React components under `/vehicles/*` routes
-- [ ] Strip VM's own nav/auth shell, use OP session
-- [ ] Migrate VM's Netlify functions → OP backend API routes
-- [ ] Migrate Fleet Master + Driver Hire Forms off Monday.com → OP database
-- [ ] Vehicle fleet data (already have `vehicles` table — extend as needed)
+- [x] Add "Vehicles" nav group to Layout.tsx
+- [x] Mount VM React components under `/vehicles/*` routes
+- [x] Strip VM's own nav/auth shell, use OP session
+- [x] Migrate VM's Netlify functions → OP backend API routes
+- [x] Migrate Fleet Master off Monday.com → OP database (fleet_vehicles table + Monday xlsx import)
+- [x] Vehicle fleet data (fleet_vehicles table with full schema)
+- [ ] Driver Hire Forms migration (see Step 2)
+
+See **Vehicle Module Integration** section below for technical details.
+
+#### Step 1b: Vehicle Maintenance & Compliance ← CURRENT PRIORITY
+Full maintenance tracking, compliance monitoring, and cost reporting for the fleet.
+
+**Phase A — Service Log CRUD + Migration** ✅ COMPLETE
+- [x] Migration 014 (fleet_vehicles extensions, vehicle_service_log extensions, vehicle_mileage_log, vehicle_fuel_log, vehicle_compliance_settings)
+- [x] Service log CRUD API (list, create, update, delete) + file upload/download
+- [x] "Service History" tab on VehicleDetailPage with filter pills + expandable records
+- [x] Manual entry form with staged file uploads + comment field on files
+- [x] Mileage auto-logged to vehicle_mileage_log on service record creation
+
+**Phase C — Compliance Reminders + DVLA** ← IN PROGRESS
+- [ ] DVLA MOT History API integration (free, reg-based) — "Check DVLA" button
+- [ ] DVLA Vehicle Enquiry Service for tax status
+- [ ] Daily compliance scheduler (08:00): 1 month warning → 1 week urgent → daily overdue
+- [ ] Enhanced Key Dates section: colour coding (green/amber/red), "booked in" date fields
+- [ ] Compliance overview widget on vehicles homepage (fleet-wide due items)
+- [ ] Notifications targeted to vehicle manager role (configurable via vehicle_compliance_settings)
+- [ ] Compliance settings API (CRUD for vehicle_compliance_settings table)
+
+**Phase D — Mileage Tracking**
+- [x] Mileage logged on service record creation (single path)
+- [ ] Mileage API endpoints (history, stats, manual entry)
+- [ ] Hook into book-out/check-in/prep event flows → vehicle_mileage_log
+- [ ] Mileage history display on vehicle detail page
+- [ ] Amber warning on service mileage lower than current (retrospective invoices OK)
+
+**Phase E — Fuel Monitoring + Cost Reporting**
+- [ ] Fuel log CRUD endpoints + stats (cost per mile, full-to-full method)
+- [ ] Configurable thresholds in settings, alerts when exceeded
+- [ ] Fleet-wide cost report page (service + fuel + insurance totals, per-vehicle breakdown)
+- [ ] Cost report restricted to admin/manager roles
+- [ ] Time period selector, CSV export
+
+**Per-Vehicle Settings Page** (after Phases C–E)
+- [ ] Admin-only settings route `/vehicles/:vehicleId/settings`
+- [ ] Move "Sell vehicle" button here (out of main detail view)
+- [ ] Per-vehicle compliance threshold overrides
+- [ ] Service interval mileage setting
+
+**Phase B — AI Document Extraction** (deferred — nice-to-have, end of build)
+- [ ] POST /extract endpoint: upload invoice/service record → Claude extracts fields → returns JSON
+- [ ] "Upload & Extract" mode in service record form — preview extracted data, user confirms
+- [ ] Future: receipt uploader integration (general receipts with "is this for a van?" routing)
 
 See **Vehicle Module Integration** section below for technical details.
 
