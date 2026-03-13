@@ -6,37 +6,16 @@ import { useVehicle } from '../hooks/useVehicles'
 import { useVehicleIssues } from '../hooks/useVehicleIssues'
 import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrackerAssignments'
 import { IssueCard } from '../components/issues/IssueCard'
-import { getDateUrgency } from '../types/vehicle'
-import type { DateUrgency } from '../types/vehicle'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import { updateVehicle } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
-
-const urgencyColours: Record<DateUrgency, string> = {
-  ok: 'text-green-700 bg-green-50',
-  soon: 'text-amber-700 bg-amber-50',
-  overdue: 'text-red-700 bg-red-50',
-  unknown: 'text-gray-400 bg-gray-50',
-}
-
-const urgencyLabels: Record<DateUrgency, string> = {
-  ok: 'OK',
-  soon: 'Due soon',
-  overdue: 'Overdue',
-  unknown: 'Not set',
-}
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return '—'
   return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB', {
     day: 'numeric', month: 'short', year: 'numeric',
   })
-}
-
-function formatMileage(m: number | null): string {
-  if (m == null) return '—'
-  return m.toLocaleString('en-GB')
 }
 
 /** Status badge used throughout the detail page */
@@ -48,26 +27,87 @@ function Badge({ children, className = '' }: { children: React.ReactNode; classN
   )
 }
 
-/** A row in the info grid */
-function InfoRow({ label, value, className = '' }: { label: string; value: React.ReactNode; className?: string }) {
-  return (
-    <div className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
-      <span className="text-sm text-gray-500">{label}</span>
-      <span className={`text-sm font-medium text-gray-900 ${className}`}>{value || '—'}</span>
-    </div>
-  )
-}
+/** Editable row — click to edit inline, save on blur or Enter */
+function EditableRow({
+  label,
+  value,
+  type = 'text',
+  options,
+  onSave,
+}: {
+  label: string
+  value: string | number | boolean | null
+  type?: 'text' | 'date' | 'number' | 'select' | 'toggle'
+  options?: string[]
+  onSave: (newValue: string | number | boolean | null) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [editValue, setEditValue] = useState('')
 
-/** A date row with urgency colouring */
-function DateRow({ label, date, warningDays = 30 }: { label: string; date: string | null; warningDays?: number }) {
-  const urgency = getDateUrgency(date, warningDays)
+  const displayValue = type === 'toggle'
+    ? (value ? 'Yes' : 'No')
+    : type === 'date'
+      ? formatDate(value as string | null)
+      : value != null ? String(value) : '—'
+
+  const startEdit = () => {
+    if (type === 'toggle') {
+      onSave(!value)
+      return
+    }
+    setEditValue(value != null ? String(value) : '')
+    setEditing(true)
+  }
+
+  const save = () => {
+    setEditing(false)
+    if (type === 'number') {
+      onSave(editValue ? Number(editValue) : null)
+    } else if (type === 'date') {
+      onSave(editValue || null)
+    } else {
+      onSave(editValue || null)
+    }
+  }
+
   return (
     <div className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
       <span className="text-sm text-gray-500">{label}</span>
-      <div className="flex items-center gap-2">
-        <span className="text-sm font-medium text-gray-900">{formatDate(date)}</span>
-        <Badge className={urgencyColours[urgency]}>{urgencyLabels[urgency]}</Badge>
-      </div>
+      {editing ? (
+        <div className="flex items-center gap-1">
+          {type === 'select' && options ? (
+            <select
+              value={editValue}
+              onChange={e => setEditValue(e.target.value)}
+              onBlur={save}
+              autoFocus
+              className="rounded border border-gray-200 px-2 py-1 text-sm focus:border-blue-300 focus:outline-none"
+            >
+              <option value="">—</option>
+              {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+            </select>
+          ) : (
+            <input
+              type={type === 'date' ? 'date' : type === 'number' ? 'number' : 'text'}
+              value={editValue}
+              onChange={e => setEditValue(e.target.value)}
+              onBlur={save}
+              onKeyDown={e => e.key === 'Enter' && save()}
+              autoFocus
+              className="w-36 rounded border border-gray-200 px-2 py-1 text-sm text-right focus:border-blue-300 focus:outline-none"
+            />
+          )}
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={startEdit}
+          className="flex items-center gap-1 text-sm font-medium text-gray-900 hover:text-blue-600 group"
+        >
+          {displayValue}
+          <span className="text-[10px] text-gray-300 group-hover:text-blue-400">Edit</span>
+        </button>
+      )}
     </div>
   )
 }
@@ -85,6 +125,16 @@ export function VehicleDetailPage() {
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+
+  const saveField = async (field: string, value: string | number | boolean | null) => {
+    if (!vehicle) return
+    try {
+      await updateVehicle(vehicle.id, { [field]: value })
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save')
+    }
+  }
 
   const handleToggleSold = async () => {
     if (!vehicle) return
@@ -289,22 +339,36 @@ export function VehicleDetailPage() {
       {/* Details tab */}
       {activeTab === 'details' && <>
 
+      {/* Status */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Status</h3>
+        <EditableRow label="Damage Status" value={vehicle.damageStatus} type="select"
+          options={['ALL GOOD', 'BOOK REPAIR!', 'QUOTE NEEDED', 'REPAIR BOOKED']}
+          onSave={v => saveField('damage_status', v)} />
+        <EditableRow label="Service Status" value={vehicle.serviceStatus} type="select"
+          options={['OK', 'SERVICE BOOKED', 'SERVICE DUE!', 'SERVICE DUE SOON', 'CHECK']}
+          onSave={v => saveField('service_status', v)} />
+        <EditableRow label="Hire Status" value={vehicle.hireStatus} type="select"
+          options={['Available', 'On Hire', 'Prep Needed', 'Not Ready']}
+          onSave={v => saveField('hire_status', v)} />
+      </div>
+
       {/* Key Dates */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Key Dates</h3>
-        <DateRow label="MOT Due" date={vehicle.motDue} />
-        <DateRow label="Tax Due" date={vehicle.taxDue} />
-        {vehicle.tflDue && <DateRow label="TFL Due" date={vehicle.tflDue} />}
-        <DateRow label="Warranty Expires" date={vehicle.warrantyExpires} />
-        <InfoRow label="Last Service" value={formatDate(vehicle.lastServiceDate)} />
-        {vehicle.financeEnds && <DateRow label="Finance Ends" date={vehicle.financeEnds} />}
+        <EditableRow label="MOT Due" value={vehicle.motDue} type="date" onSave={v => saveField('mot_due', v)} />
+        <EditableRow label="Tax Due" value={vehicle.taxDue} type="date" onSave={v => saveField('tax_due', v)} />
+        <EditableRow label="TFL Due" value={vehicle.tflDue} type="date" onSave={v => saveField('tfl_due', v)} />
+        <EditableRow label="Warranty Expires" value={vehicle.warrantyExpires} type="date" onSave={v => saveField('warranty_expires', v)} />
+        <EditableRow label="Last Service" value={vehicle.lastServiceDate} type="date" onSave={v => saveField('last_service_date', v)} />
+        <EditableRow label="Finance Ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
       </div>
 
       {/* Mileage & Service */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Service & Mileage</h3>
-        <InfoRow label="Last Service Mileage" value={formatMileage(vehicle.lastServiceMileage)} />
-        <InfoRow label="Next Service Due" value={vehicle.nextServiceDue ? `${formatMileage(vehicle.nextServiceDue)} miles` : '—'} />
+        <EditableRow label="Last Service Mileage" value={vehicle.lastServiceMileage} type="number" onSave={v => saveField('last_service_mileage', v)} />
+        <EditableRow label="Next Service Due (miles)" value={vehicle.nextServiceDue} type="number" onSave={v => saveField('next_service_due', v)} />
       </div>
 
       {/* Other Info */}
@@ -332,7 +396,7 @@ export function VehicleDetailPage() {
                     setEditingTracker(false)
                   }
                 }}
-                className="rounded bg-ooosh-navy px-2 py-1 text-xs font-medium text-white hover:bg-ooosh-navy/90"
+                className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700"
               >
                 {isAssigningTracker ? '...' : 'Save'}
               </button>
@@ -362,10 +426,10 @@ export function VehicleDetailPage() {
             </div>
           )}
         </div>
-        <InfoRow label="Wifi Network" value={vehicle.wifiNetwork} />
-        <InfoRow label="Finance With" value={vehicle.financeWith} />
-        <InfoRow label="ULEZ Compliant" value={vehicle.ulezCompliant ? 'Yes' : 'No'} />
-        <InfoRow label="Spare Key" value={vehicle.spareKey ? 'Yes' : 'No'} />
+        <EditableRow label="Wifi Network" value={vehicle.wifiNetwork} type="text" onSave={v => saveField('wifi_network', v)} />
+        <EditableRow label="Finance With" value={vehicle.financeWith} type="text" onSave={v => saveField('finance_with', v)} />
+        <EditableRow label="ULEZ Compliant" value={vehicle.ulezCompliant} type="toggle" onSave={v => saveField('ulez_compliant', v)} />
+        <EditableRow label="Spare Key" value={vehicle.spareKey} type="toggle" onSave={v => saveField('spare_key', v)} />
       </div>
 
       {/* Event History placeholder */}

@@ -1153,6 +1153,62 @@ router.get('/photo/*', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Traccar GPS Proxy ──
+
+const TRACCAR_URL = process.env.TRACCAR_URL || 'https://tracking.oooshtours.co.uk';
+const TRACCAR_EMAIL = process.env.TRACCAR_EMAIL || '';
+const TRACCAR_PASSWORD = process.env.TRACCAR_PASSWORD || '';
+
+/**
+ * POST /api/vehicles/traccar
+ * Proxy requests to Traccar GPS tracking server.
+ * Body: { endpoint: string, params?: Record<string, string> }
+ */
+router.post('/traccar', async (req: AuthRequest, res: Response) => {
+  try {
+    if (!TRACCAR_EMAIL || !TRACCAR_PASSWORD) {
+      res.status(503).json({ error: 'Traccar not configured. Set TRACCAR_URL, TRACCAR_EMAIL, TRACCAR_PASSWORD in .env' });
+      return;
+    }
+
+    const { endpoint, params } = req.body;
+    if (!endpoint) {
+      res.status(400).json({ error: 'endpoint is required' });
+      return;
+    }
+
+    // Build URL with query params
+    const url = new URL(`/api${endpoint}`, TRACCAR_URL);
+    if (params) {
+      for (const [key, value] of Object.entries(params as Record<string, string>)) {
+        url.searchParams.set(key, value);
+      }
+    }
+
+    const authHeader = 'Basic ' + Buffer.from(`${TRACCAR_EMAIL}:${TRACCAR_PASSWORD}`).toString('base64');
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        'Authorization': authHeader,
+        'Accept': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      console.error(`[vehicles/traccar] Traccar API error: ${response.status}`, body);
+      res.status(response.status).json({ error: `Traccar API error: ${response.status}` });
+      return;
+    }
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    console.error('[vehicles/traccar] Proxy error:', error);
+    res.status(500).json({ error: 'Traccar request failed' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 5. NETLIFY PROXY CATCH-ALL (for remaining VM functions not yet migrated)
 // ═══════════════════════════════════════════════════════════════════════════

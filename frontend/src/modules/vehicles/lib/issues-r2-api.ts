@@ -4,7 +4,7 @@
  */
 
 import type { VehicleIssue, IssueIndexEntry } from '../types/issue'
-import { apiFetch, apiUrl } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
 /**
  * Save (create or update) an issue to R2.
@@ -36,9 +36,7 @@ export async function saveIssue(issue: VehicleIssue): Promise<{ success: boolean
  */
 export async function getVehicleIssues(vehicleReg: string): Promise<VehicleIssue[]> {
   try {
-    const resp = await fetch(
-      `${apiUrl('/get-vehicle-issues')}?vehicleReg=${encodeURIComponent(vehicleReg)}`,
-    )
+    const resp = await apiFetch(`/get-vehicle-issues?vehicleReg=${encodeURIComponent(vehicleReg)}`)
     if (!resp.ok) return []
 
     const data = await resp.json() as { issues: VehicleIssue[] }
@@ -72,9 +70,7 @@ export async function getAllIssues(): Promise<IssueIndexEntry[]> {
  */
 export async function getIssue(vehicleReg: string, issueId: string): Promise<VehicleIssue | null> {
   try {
-    const resp = await fetch(
-      `${apiUrl('/get-issue')}?vehicleReg=${encodeURIComponent(vehicleReg)}&issueId=${encodeURIComponent(issueId)}`,
-    )
+    const resp = await apiFetch(`/get-issue?vehicleReg=${encodeURIComponent(vehicleReg)}&issueId=${encodeURIComponent(issueId)}`)
     if (!resp.ok) return null
 
     const data = await resp.json() as { issue: VehicleIssue }

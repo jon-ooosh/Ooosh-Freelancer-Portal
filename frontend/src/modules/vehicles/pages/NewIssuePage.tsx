@@ -9,6 +9,7 @@ import { useState, useMemo, useEffect } from 'react'
 import { useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { vmPath } from '../config/route-paths'
 import { useQueryClient } from '@tanstack/react-query'
+import { getOpAuthState } from '../adapters/auth-adapter'
 import { useVehicles } from '../hooks/useVehicles'
 import { useTraccarDevice, useTraccarPosition } from '../hooks/useTraccar'
 import { getAllocations } from '../lib/allocations-api'
@@ -161,7 +162,8 @@ export function NewIssuePage() {
   const [component, setComponent] = useState<IssueComponent | null>(null)
   const [severity, setSeverity] = useState<IssueSeverity | null>(null)
   const [summary, setSummary] = useState('')
-  const [reportedBy, setReportedBy] = useState('')
+  const opAuth = getOpAuthState()
+  const [reportedBy, setReportedBy] = useState(opAuth?.userName || '')
   const [reportedDuring, setReportedDuring] = useState<IssueContext | null>(null)
   const [mileage, setMileage] = useState('')
   const [hireHopJob, setHireHopJob] = useState('')
