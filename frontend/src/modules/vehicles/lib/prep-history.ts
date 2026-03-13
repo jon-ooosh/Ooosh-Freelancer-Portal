@@ -3,7 +3,7 @@
  * Fetches previous prep session data from R2 for pre-filling values.
  */
 
-import { apiUrl } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
 export interface PrepHistoryItem {
   name: string
@@ -39,8 +39,8 @@ export async function fetchLastPrepSession(
   vehicleReg: string,
 ): Promise<PrepHistorySession | null> {
   try {
-    const resp = await fetch(
-      `${apiUrl('/get-prep-history')}?vehicleReg=${encodeURIComponent(vehicleReg)}&limit=1`,
+    const resp = await apiFetch(
+      `/get-prep-history?vehicleReg=${encodeURIComponent(vehicleReg)}&limit=1`,
     )
     if (!resp.ok) return null
 

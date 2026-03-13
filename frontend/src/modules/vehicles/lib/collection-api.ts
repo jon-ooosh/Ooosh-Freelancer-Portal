@@ -6,7 +6,7 @@
  */
 
 import type { CollectionData } from '../types/vehicle-event'
-import { apiFetch, apiUrl } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
 /** Save collection data to R2 */
 export async function saveCollection(
@@ -39,8 +39,8 @@ export async function getCollection(
   jobId: string,
 ): Promise<CollectionData | null> {
   try {
-    const resp = await fetch(
-      `${apiUrl('/get-collection')}?vehicleReg=${encodeURIComponent(vehicleReg)}&jobId=${encodeURIComponent(jobId)}`,
+    const resp = await apiFetch(
+      `/get-collection?vehicleReg=${encodeURIComponent(vehicleReg)}&jobId=${encodeURIComponent(jobId)}`,
     )
     if (!resp.ok) return null
 
