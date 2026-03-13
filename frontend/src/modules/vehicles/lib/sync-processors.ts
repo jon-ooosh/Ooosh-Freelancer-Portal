@@ -27,7 +27,7 @@ export async function processBookOutSubmission(
   signatureBlob: Blob | null,
 ): Promise<boolean> {
   const vehicleReg = formData.vehicleReg as string
-  const vehicleId = formData.vehicleId as string | null
+
   const driverName = formData.driverName as string
   const hireHopJob = formData.hireHopJob as string
   const clientEmail = formData.clientEmail as string
@@ -70,8 +70,8 @@ export async function processBookOutSubmission(
   }
 
   // Step 2: Update fleet status
-  if (vehicleId) {
-    await updateFleetHireStatus(vehicleId, 'On Hire')
+  if (vehicleReg) {
+    await updateFleetHireStatus(vehicleReg, 'On Hire')
   }
 
   // Step 3: Upload photos
@@ -166,7 +166,7 @@ export async function processCollectionSubmission(
   signatureBlob: Blob | null,
 ): Promise<boolean> {
   const vehicleReg = formData.vehicleReg as string
-  const vehicleId = formData.vehicleId as string | null
+
   const driverName = formData.driverName as string
   const hireHopJob = formData.hireHopJob as string
   const clientEmail = formData.clientEmail as string
@@ -205,8 +205,8 @@ export async function processCollectionSubmission(
   if (!eventResult.success) criticalSuccess = false
 
   // Step 2: Fleet status
-  if (vehicleId) {
-    await updateFleetHireStatus(vehicleId, 'Collected')
+  if (vehicleReg) {
+    await updateFleetHireStatus(vehicleReg, 'Collected')
   }
 
   // Step 3: Photos
@@ -312,7 +312,7 @@ export async function processCheckInSubmission(
   signatureBlob: Blob | null,
 ): Promise<boolean> {
   const vehicleReg = formData.vehicleReg as string
-  const vehicleId = formData.vehicleId as string | null
+
   const mileage = formData.mileage as string
   const fuelLevel = formData.fuelLevel as string | null
   const mileageNum = parseInt(mileage, 10)
@@ -344,8 +344,8 @@ export async function processCheckInSubmission(
   if (!eventResult.success) criticalSuccess = false
 
   // Step 2: Fleet status
-  if (vehicleId) {
-    await updateFleetHireStatus(vehicleId, 'Prep Needed')
+  if (vehicleReg) {
+    await updateFleetHireStatus(vehicleReg, 'Prep Needed')
   }
 
   // Step 3: Photos

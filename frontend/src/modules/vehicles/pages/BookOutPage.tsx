@@ -405,8 +405,8 @@ export function BookOutPage() {
     }
 
     // ── Step 1b: Update Fleet Master status to "On Hire" ──
-    if (form.vehicleId) {
-      const fleetResult = await updateFleetHireStatus(form.vehicleId, 'On Hire')
+    if (form.vehicleReg) {
+      const fleetResult = await updateFleetHireStatus(form.vehicleReg, 'On Hire')
       if (fleetResult.success) {
         results.push({ label: 'Fleet status', success: true, detail: 'Set to On Hire' })
       } else {

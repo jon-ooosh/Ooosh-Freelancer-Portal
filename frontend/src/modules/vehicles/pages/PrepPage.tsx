@@ -548,7 +548,7 @@ export function PrepPage() {
         ? 'Available'
         : 'Not Ready'
 
-    const fleetResult = await updateFleetHireStatus(selectedVehicle.id, newStatus)
+    const fleetResult = await updateFleetHireStatus(selectedVehicle.reg, newStatus)
     if (fleetResult.success) {
       results.push({ label: 'Fleet status', success: true, detail: `Set to ${newStatus}` })
     } else {

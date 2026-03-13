@@ -418,8 +418,8 @@ export function CheckInPage() {
     }
 
     // ── Step 1b: Update Fleet Master status to "Prep Needed" ──
-    if (form.vehicleId) {
-      const fleetResult = await updateFleetHireStatus(form.vehicleId, 'Prep Needed')
+    if (form.vehicleReg) {
+      const fleetResult = await updateFleetHireStatus(form.vehicleReg, 'Prep Needed')
       if (fleetResult.success) {
         results.push({ label: 'Fleet status', success: true, detail: 'Set to Prep Needed' })
       } else {

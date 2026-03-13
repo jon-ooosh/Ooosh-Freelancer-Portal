@@ -307,8 +307,8 @@ export function CollectionPage() {
     }
 
     // ── Step 1b: Update Fleet Master status to "Collected" ──
-    if (form.vehicleId) {
-      const fleetResult = await updateFleetHireStatus(form.vehicleId, 'Collected')
+    if (form.vehicleReg) {
+      const fleetResult = await updateFleetHireStatus(form.vehicleReg, 'Collected')
       if (fleetResult.success) {
         results.push({ label: 'Fleet status', success: true, detail: 'Set to Collected' })
       } else {

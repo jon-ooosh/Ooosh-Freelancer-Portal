@@ -1,53 +1,42 @@
 /**
- * Fleet Status API — updates hire status on the Fleet Master board.
+ * Fleet Status API — updates hire status via the OP backend.
+ *
+ * Previously: Updated Monday.com board column via GraphQL.
+ * Now: PATCH /api/vehicles/fleet/by-reg/:reg/hire-status
  *
  * Called from book-out (set "On Hire") and check-in (set "Prep Needed").
- * Uses change_multiple_column_values with the proven escapeJson pattern.
  */
 
-import { mondayQuery, BOARD_IDS } from './monday'
-
-// Fleet Master board column for hire status
-const FLEET_HIRE_STATUS_COLUMN = 'color_mm0v8bak'
+import { apiFetch } from '../config/api-config'
 
 type HireStatus = 'Available' | 'On Hire' | 'Collected' | 'Prep Needed' | 'Not Ready'
 
-/** Escape a JSON string for embedding inside a GraphQL string literal */
-function escapeJson(str: string): string {
-  return str.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-}
-
 /**
- * Update the hire status on the Fleet Master board for a vehicle.
+ * Update the hire status for a vehicle by its registration plate.
  *
- * @param vehicleItemId - The Monday.com item ID of the vehicle (from fleet board)
+ * @param vehicleReg - The vehicle registration (used as identifier)
  * @param status - The new hire status label
  */
 export async function updateFleetHireStatus(
-  vehicleItemId: string,
+  vehicleReg: string,
   status: HireStatus,
 ): Promise<{ success: boolean; error?: string }> {
-  const columnValues: Record<string, unknown> = {
-    [FLEET_HIRE_STATUS_COLUMN]: { label: status },
-  }
-
-  const escapedValues = escapeJson(JSON.stringify(columnValues))
-
-  const mutation = `
-    mutation {
-      change_multiple_column_values (
-        item_id: ${vehicleItemId},
-        board_id: ${BOARD_IDS.fleet},
-        column_values: "${escapedValues}"
-      ) {
-        id
-      }
-    }
-  `
-
   try {
-    console.log('[fleet-status] Updating hire status for item', vehicleItemId, 'to', status)
-    await mondayQuery(mutation)
+    console.log('[fleet-status] Updating hire status for', vehicleReg, 'to', status)
+
+    const response = await apiFetch(`/fleet/by-reg/${encodeURIComponent(vehicleReg)}/hire-status`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    })
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({})) as { error?: string }
+      const errMsg = err.error || `Status update failed: ${response.status}`
+      console.error('[fleet-status] Update failed:', errMsg)
+      return { success: false, error: errMsg }
+    }
+
     console.log('[fleet-status] Status updated successfully')
     return { success: true }
   } catch (err) {

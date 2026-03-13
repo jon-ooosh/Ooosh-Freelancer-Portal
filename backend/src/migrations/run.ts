@@ -39,6 +39,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '008_quote_status_assignments.sql',
         '009_fix_sync_log_permissions.sql',
         '010_freelancer_fields.sql',
+        '011_fleet_vehicles.sql',
       ];
 
       for (const migration of migrations) {
