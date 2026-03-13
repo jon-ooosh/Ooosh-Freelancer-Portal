@@ -199,18 +199,24 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
               onClick={() => setExpandedId(isExpanded ? null : record.id)}
               className="flex w-full items-center gap-3 px-4 py-3 text-left"
             >
+              {/* Date */}
+              {record.serviceDate && (
+                <span className="shrink-0 text-xs font-medium text-gray-400 tabular-nums">
+                  {formatShortDate(record.serviceDate)}
+                </span>
+              )}
+
               {/* Type badge */}
               <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${TYPE_BADGE_COLORS[record.serviceType] || TYPE_BADGE_COLORS.other}`}>
                 {record.serviceType}
               </span>
 
-              {/* Name + date */}
+              {/* Name + garage */}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-gray-900">{record.name}</p>
-                <div className="flex items-center gap-2 text-xs text-gray-400">
-                  {record.serviceDate && <span>{formatDisplayDate(record.serviceDate)}</span>}
-                  {record.garage && <span>· {record.garage}</span>}
-                </div>
+                {record.garage && (
+                  <p className="truncate text-xs text-gray-400">{record.garage}</p>
+                )}
               </div>
 
               {/* Cost */}
@@ -433,6 +439,15 @@ function DetailRow({ label, value }: { label: string; value: string }) {
       <span className="text-sm text-gray-700">{value}</span>
     </div>
   )
+}
+
+function formatShortDate(dateStr: string): string {
+  try {
+    const d = new Date(dateStr + 'T00:00:00')
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+  } catch {
+    return dateStr
+  }
 }
 
 function formatDisplayDate(dateStr: string): string {
