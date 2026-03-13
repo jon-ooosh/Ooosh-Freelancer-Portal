@@ -1785,4 +1785,77 @@ function formatDate(val: unknown): string {
   return match ? match[1]! : '';
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. COMPLIANCE SETTINGS — /api/vehicles/compliance/*
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/vehicles/compliance/settings
+ * Return all compliance settings.
+ */
+router.get('/compliance/settings', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query('SELECT key, value, updated_at FROM vehicle_compliance_settings ORDER BY key');
+    const settings: Record<string, unknown> = {};
+    for (const row of result.rows) {
+      try {
+        settings[row.key as string] = JSON.parse(row.value as string);
+      } catch {
+        settings[row.key as string] = row.value;
+      }
+    }
+    res.json(settings);
+  } catch (error) {
+    console.error('[vehicles/compliance] Settings fetch error:', error);
+    res.status(500).json({ error: 'Failed to load compliance settings' });
+  }
+});
+
+/**
+ * PUT /api/vehicles/compliance/settings
+ * Update compliance settings (admin/manager only).
+ * Body: { key: value, key: value, ... }
+ */
+router.put('/compliance/settings', async (req: AuthRequest, res: Response) => {
+  try {
+    const role = req.user?.role;
+    if (role !== 'admin' && role !== 'manager') {
+      res.status(403).json({ error: 'Admin or manager role required' });
+      return;
+    }
+
+    const updates = req.body as Record<string, unknown>;
+    const userId = req.user!.id;
+
+    for (const [key, value] of Object.entries(updates)) {
+      await query(
+        `INSERT INTO vehicle_compliance_settings (key, value, updated_at, updated_by)
+         VALUES ($1, $2::jsonb, NOW(), $3)
+         ON CONFLICT (key) DO UPDATE SET value = $2::jsonb, updated_at = NOW(), updated_by = $3`,
+        [key, JSON.stringify(value), userId]
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('[vehicles/compliance] Settings update error:', error);
+    res.status(500).json({ error: 'Failed to update compliance settings' });
+  }
+});
+
+/**
+ * GET /api/vehicles/compliance/check
+ * Run compliance check on demand (returns alerts without creating notifications).
+ */
+router.get('/compliance/check', async (_req: AuthRequest, res: Response) => {
+  try {
+    const { runComplianceCheck } = await import('../services/compliance-checker');
+    const result = await runComplianceCheck(false);
+    res.json(result);
+  } catch (error) {
+    console.error('[vehicles/compliance] Check error:', error);
+    res.status(500).json({ error: 'Failed to run compliance check' });
+  }
+});
+
 export default router;

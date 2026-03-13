@@ -3,6 +3,7 @@ import { isR2Configured } from './r2';
 import { runBackup } from '../scripts/backup';
 import { isHireHopConfigured } from './hirehop';
 import { syncJobsFromHireHop } from '../services/hirehop-job-sync';
+import { runComplianceCheck } from '../services/compliance-checker';
 import { query } from './database';
 
 /**
@@ -105,4 +106,17 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Chase auto-mover scheduled every 15 minutes');
+
+  // ── Vehicle Compliance Check ────────────────────────────────────────
+  // Daily at 08:00 — check MOT, Tax, Insurance, TFL due dates
+  cron.schedule('0 8 * * *', async () => {
+    console.log('Scheduler: Starting vehicle compliance check...');
+    try {
+      const result = await runComplianceCheck(true);
+      console.log(`Scheduler: Compliance check complete — ${result.alerts.length} alerts, ${result.notificationsCreated} notifications created`);
+    } catch (err) {
+      console.error('Scheduler: Vehicle compliance check failed:', err);
+    }
+  });
+  console.log('Scheduler: Vehicle compliance check scheduled daily at 08:00');
 }
