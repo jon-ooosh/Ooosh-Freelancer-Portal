@@ -7,7 +7,7 @@
 
 import { useState, useRef } from 'react'
 import type { IssueDocument } from '../../types/issue'
-import { apiUrl } from '../../config/api-config'
+import { apiFetch } from '../../config/api-config'
 const R2_PUBLIC_URL = import.meta.env.VITE_R2_PUBLIC_URL || ''
 
 interface IssueDocumentsProps {
@@ -46,7 +46,7 @@ export function IssueDocuments({
       formData.append('file', file, safeFilename)
       formData.append('key', key)
 
-      const response = await fetch(apiUrl('/upload-photo'), {
+      const response = await apiFetch('/upload-photo', {
         method: 'POST',
         body: formData,
       })

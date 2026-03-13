@@ -10,7 +10,7 @@
  * - Check-in to prevent double check-ins
  */
 
-import { apiUrl } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
 export interface BookOutEventData {
   id: string
@@ -45,7 +45,7 @@ async function fetchVehicleEvents(
   const params = new URLSearchParams({ vehicleReg })
   if (eventType) params.set('eventType', eventType)
 
-  const response = await fetch(`${apiUrl('/get-events')}?${params}`)
+  const response = await apiFetch(`/get-events?${params}`)
   if (!response.ok) {
     throw new Error(`Failed to fetch events: HTTP ${response.status}`)
   }
@@ -62,7 +62,7 @@ async function fetchEventDetail(
   eventId: string,
 ): Promise<Record<string, unknown> | null> {
   const params = new URLSearchParams({ vehicleReg, eventId })
-  const response = await fetch(`${apiUrl('/get-events')}?${params}`)
+  const response = await apiFetch(`/get-events?${params}`)
   if (!response.ok) return null
 
   const data = await response.json() as { event?: Record<string, unknown> }

@@ -2,7 +2,7 @@
  * Photo Retrieval — fetches book-out photo URLs from R2 for check-in comparison.
  */
 
-import { apiUrl } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
 export interface BookOutPhoto {
   angle: string
@@ -22,7 +22,7 @@ export async function fetchBookOutPhotos(
   const prefix = `events/${eventId}/${safeReg}/`
 
   try {
-    const response = await fetch(`${apiUrl('/list-photos')}?prefix=${encodeURIComponent(prefix)}`)
+    const response = await apiFetch(`/list-photos?prefix=${encodeURIComponent(prefix)}`)
 
     if (!response.ok) {
       console.warn('[photo-retrieval] List photos failed:', response.status)

@@ -6,7 +6,7 @@
  */
 
 import type { CapturedPhoto, DamageItem } from '../types/vehicle-event'
-import { apiUrl } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
 interface UploadResult {
   url: string
@@ -35,7 +35,7 @@ export async function uploadPhoto(
   formData.append('file', photo.blob, `${photo.angle}.jpg`)
   formData.append('key', key)
 
-  const response = await fetch(apiUrl('/upload-photo'), {
+  const response = await apiFetch('/upload-photo', {
     method: 'POST',
     body: formData,
   })
@@ -117,7 +117,7 @@ export async function uploadDamagePhotos(
     formData.append('key', key)
 
     try {
-      const response = await fetch(apiUrl('/upload-photo'), {
+      const response = await apiFetch('/upload-photo', {
         method: 'POST',
         body: formData,
       })
@@ -159,7 +159,7 @@ export async function uploadIssuePhotos(
     formData.append('key', key)
 
     try {
-      const response = await fetch(apiUrl('/upload-photo'), {
+      const response = await apiFetch('/upload-photo', {
         method: 'POST',
         body: formData,
       })

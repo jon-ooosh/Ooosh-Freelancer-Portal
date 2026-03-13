@@ -995,6 +995,164 @@ router.get('/get-recent-events', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Tracker Assignments ──
+
+/**
+ * GET /api/vehicles/get-tracker-assignments
+ * Fetch tracker-to-vehicle assignment map from R2.
+ */
+router.get('/get-tracker-assignments', async (_req: AuthRequest, res: Response) => {
+  try {
+    const data = await readR2Json<{ assignments: Record<string, string> }>('trackers/assignments.json');
+    res.json({ assignments: data?.assignments || {} });
+  } catch (error) {
+    console.error('[vehicles/trackers] Failed to read assignments:', error);
+    res.status(500).json({ error: 'Failed to load tracker assignments' });
+  }
+});
+
+/**
+ * POST /api/vehicles/save-tracker-assignments
+ * Save the full tracker assignments map to R2 (replaces existing).
+ */
+router.post('/save-tracker-assignments', async (req: AuthRequest, res: Response) => {
+  try {
+    const { assignments } = req.body;
+    await writeR2Json('trackers/assignments.json', {
+      assignments: assignments || {},
+      updatedAt: new Date().toISOString(),
+    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[vehicles/trackers] Failed to save assignments:', error);
+    res.status(500).json({ error: 'Failed to save tracker assignments' });
+  }
+});
+
+// ── Per-Vehicle Events Query ──
+
+/**
+ * GET /api/vehicles/get-events?vehicleReg=XX00XXX&eventType=Book+Out&eventId=xxx
+ * Fetch events for a specific vehicle from R2 index.
+ * If eventId is provided, returns the full event detail.
+ */
+router.get('/get-events', async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicleReg = (req.query.vehicleReg as string || '').toUpperCase();
+    const eventType = req.query.eventType as string | undefined;
+    const eventId = req.query.eventId as string | undefined;
+
+    if (!vehicleReg) {
+      res.status(400).json({ error: 'vehicleReg is required' });
+      return;
+    }
+
+    // If eventId provided, return full event detail
+    if (eventId) {
+      const event = await readR2Json(`vehicle-events/${vehicleReg}/${eventId}.json`);
+      res.json({ event: event || null });
+      return;
+    }
+
+    // Otherwise return index, optionally filtered by event type
+    const indexKey = `vehicle-events/${vehicleReg}/_index.json`;
+    const indexData = await readR2Json<{ events: any[] }>(indexKey);
+    let events = indexData?.events || [];
+
+    if (eventType) {
+      events = events.filter((e: any) => e.eventType === eventType);
+    }
+
+    // Sort by createdAt/eventDate descending
+    events.sort((a: any, b: any) => (b.createdAt || b.eventDate || '').localeCompare(a.createdAt || a.eventDate || ''));
+
+    res.json({ events });
+  } catch (error) {
+    console.error('[vehicles/events] Failed to query events:', error);
+    res.status(500).json({ error: 'Failed to load events' });
+  }
+});
+
+// ── Photo Upload & List ──
+
+/**
+ * POST /api/vehicles/upload-photo
+ * Upload a photo to R2. Expects multipart form with 'file' and 'key' fields.
+ */
+router.post('/upload-photo', async (req: AuthRequest, res: Response) => {
+  try {
+    // This endpoint needs multipart parsing — for now proxy to Netlify
+    // TODO: implement native R2 upload with multer
+    // Falling through to Netlify proxy will handle this
+    res.status(501).json({ error: 'Photo upload not yet migrated — use Netlify proxy' });
+  } catch (error) {
+    console.error('[vehicles/photos] Upload error:', error);
+    res.status(500).json({ error: 'Upload failed' });
+  }
+});
+
+/**
+ * GET /api/vehicles/list-photos?prefix=events/xxx/REG/
+ * List photos in R2 under a given prefix.
+ */
+router.get('/list-photos', async (req: AuthRequest, res: Response) => {
+  try {
+    const prefix = req.query.prefix as string;
+    if (!prefix) {
+      res.status(400).json({ error: 'prefix is required' });
+      return;
+    }
+
+    const objects = await listR2Objects(prefix);
+    const photos = (objects || [])
+      .filter(obj => obj.Key && /\.(jpg|jpeg|png|webp)$/i.test(obj.Key))
+      .map(obj => {
+        const key = obj.Key!;
+        const angle = key.split('/').pop()?.replace(/\.[^.]+$/, '') || '';
+        return { angle, key, url: `/api/vehicles/photo/${encodeURIComponent(key)}` };
+      });
+
+    res.json({ photos });
+  } catch (error) {
+    console.error('[vehicles/photos] List error:', error);
+    res.status(500).json({ error: 'Failed to list photos' });
+  }
+});
+
+/**
+ * GET /api/vehicles/photo/:key
+ * Serve a photo from R2 (streaming proxy).
+ */
+router.get('/photo/*', async (req: AuthRequest, res: Response) => {
+  try {
+    const key = (req.params as Record<string, string>)[0];
+    if (!key) {
+      res.status(400).json({ error: 'key is required' });
+      return;
+    }
+
+    const obj = await getFromR2(key);
+    if (!obj.Body) {
+      res.status(404).json({ error: 'Photo not found' });
+      return;
+    }
+
+    const contentType = obj.ContentType || 'image/jpeg';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+
+    const bodyBytes = await obj.Body.transformToByteArray();
+    res.send(Buffer.from(bodyBytes));
+  } catch (error: unknown) {
+    if ((error as { name?: string })?.name === 'NoSuchKey') {
+      res.status(404).json({ error: 'Photo not found' });
+      return;
+    }
+    console.error('[vehicles/photos] Serve error:', error);
+    res.status(500).json({ error: 'Failed to serve photo' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 5. NETLIFY PROXY CATCH-ALL (for remaining VM functions not yet migrated)
 // ═══════════════════════════════════════════════════════════════════════════

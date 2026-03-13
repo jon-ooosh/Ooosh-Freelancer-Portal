@@ -3,7 +3,7 @@
  */
 
 import { useQuery } from '@tanstack/react-query'
-import { apiUrl } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
 export interface RecentEventEntry {
   id: string
@@ -19,7 +19,7 @@ export interface RecentEventEntry {
 
 async function getRecentEvents(limit = 10): Promise<RecentEventEntry[]> {
   try {
-    const resp = await fetch(`${apiUrl('/get-recent-events')}?limit=${limit}`)
+    const resp = await apiFetch(`/get-recent-events?limit=${limit}`)
     if (!resp.ok) return []
     const data = await resp.json() as { events: RecentEventEntry[] }
     return data.events || []
