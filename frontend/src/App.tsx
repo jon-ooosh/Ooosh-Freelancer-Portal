@@ -14,6 +14,17 @@ import PipelinePage from './pages/PipelinePage';
 import SettingsPage from './pages/SettingsPage';
 import DuplicatesPage from './pages/DuplicatesPage';
 import Layout from './components/Layout';
+import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
+
+// Initialize Vehicle Module with OP auth and API config
+initVehicleModule({
+  apiBaseUrl: '/api/vehicles',
+  getAuthHeaders: (): Record<string, string> => {
+    const token = useAuthStore.getState().accessToken;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  },
+  authStoreGetter: () => useAuthStore.getState(),
+});
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
@@ -42,6 +53,7 @@ export default function App() {
                 <Route path="/jobs/:id" element={<JobDetailPage />} />
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
+                <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>

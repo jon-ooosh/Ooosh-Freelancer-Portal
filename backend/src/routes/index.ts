@@ -15,6 +15,7 @@ import duplicatesRouter from './duplicates';
 import hirehopRouter from './hirehop';
 import pipelineRouter from './pipeline';
 import quotesRouter from './quotes';
+import vehiclesRouter from './vehicles';
 
 const router = Router();
 
@@ -34,5 +35,6 @@ router.use('/duplicates', duplicatesRouter);
 router.use('/hirehop', hirehopRouter);
 router.use('/pipeline', pipelineRouter);
 router.use('/quotes', quotesRouter);
+router.use('/vehicles', vehiclesRouter);
 
 export default router;
