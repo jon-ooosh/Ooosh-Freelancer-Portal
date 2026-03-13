@@ -26,6 +26,7 @@ import { PrepPage } from './pages/PrepPage'
 import { FleetMapPage } from './pages/FleetMapPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { CostReportPage } from './pages/CostReportPage'
+import { VehicleSettingsPage } from './pages/VehicleSettingsPage'
 
 /**
  * All Vehicle Management routes.
@@ -61,6 +62,7 @@ export function VehicleRoutes() {
         <Route index element={<HomePage />} />
         <Route path="fleet" element={<VehiclesPage />} />
         <Route path="fleet/:id" element={<VehicleDetailPage />} />
+        <Route path="fleet/:id/settings" element={<VehicleSettingsPage />} />
         <Route path="book-out" element={<BookOutPage />} />
         <Route path="check-in" element={<CheckInPage />} />
         <Route path="collection" element={<CollectionPage />} />

@@ -125,7 +125,6 @@ export function VehicleDetailPage() {
   const [activeTab, setActiveTab] = useState<'details' | 'service' | 'fuel' | 'location' | 'preps'>('details')
   const [editingTracker, setEditingTracker] = useState(false)
   const [trackerInput, setTrackerInput] = useState('')
-  const [isSelling, setIsSelling] = useState(false)
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
@@ -137,28 +136,6 @@ export function VehicleDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['vehicles'] })
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to save')
-    }
-  }
-
-  const handleToggleSold = async () => {
-    if (!vehicle) return
-    const newGroup = vehicle.isOldSold ? 'active' : 'old_sold'
-    const confirmMsg = vehicle.isOldSold
-      ? `Reactivate ${vehicle.reg} and return it to the active fleet?`
-      : `Mark ${vehicle.reg} as Old & Sold? It will be moved out of the active fleet.`
-    if (!window.confirm(confirmMsg)) return
-
-    setIsSelling(true)
-    try {
-      await updateVehicle(vehicle.id, {
-        fleet_group: newGroup,
-        is_active: newGroup === 'active',
-      })
-      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to update vehicle')
-    } finally {
-      setIsSelling(false)
     }
   }
 
@@ -277,18 +254,12 @@ export function VehicleDetailPage() {
         {/* Admin actions */}
         {isAdmin && (
           <div className="mt-3 flex gap-2 border-t border-gray-100 pt-3">
-            <button
-              type="button"
-              onClick={handleToggleSold}
-              disabled={isSelling}
-              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-                vehicle.isOldSold
-                  ? 'border border-green-200 text-green-700 hover:bg-green-50'
-                  : 'border border-orange-200 text-orange-700 hover:bg-orange-50'
-              } disabled:opacity-50`}
+            <Link
+              to={vmPath(`/vehicles/${vehicle.id}/settings`)}
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50"
             >
-              {isSelling ? 'Updating...' : vehicle.isOldSold ? 'Reactivate Vehicle' : 'Mark as Sold'}
-            </button>
+              Vehicle Settings
+            </Link>
           </div>
         )}
       </div>
