@@ -42,6 +42,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '011_fleet_vehicles.sql',
         '012_vehicle_service_log.sql',
         '013_fleet_v5_fields.sql',
+        '014_vehicle_maintenance_compliance.sql',
       ];
 
       for (const migration of migrations) {

@@ -202,6 +202,17 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
       mpg: 'mpg', fleet_group: 'fleet_group', fleetGroup: 'fleet_group',
       is_active: 'is_active', isActive: 'is_active',
       notes: 'notes',
+      // Insurance
+      insurance_due: 'insurance_due', insuranceDue: 'insurance_due',
+      insurance_provider: 'insurance_provider', insuranceProvider: 'insurance_provider',
+      insurance_policy_number: 'insurance_policy_number', insurancePolicyNumber: 'insurance_policy_number',
+      // Booked-in dates
+      mot_booked_in_date: 'mot_booked_in_date', motBookedInDate: 'mot_booked_in_date',
+      service_booked_in_date: 'service_booked_in_date', serviceBookedInDate: 'service_booked_in_date',
+      insurance_booked_in_date: 'insurance_booked_in_date', insuranceBookedInDate: 'insurance_booked_in_date',
+      tax_booked_in_date: 'tax_booked_in_date', taxBookedInDate: 'tax_booked_in_date',
+      // Mileage
+      current_mileage: 'current_mileage', currentMileage: 'current_mileage',
     };
 
     for (const [key, dbCol] of Object.entries(fieldMap)) {
@@ -391,6 +402,263 @@ router.post('/fleet/bulk', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[vehicles/fleet] Bulk import error:', error);
     res.status(500).json({ error: 'Bulk import failed' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1b. SERVICE LOG — /api/vehicles/fleet/:vehicleId/service-log/*
+//     CRUD for vehicle service, repair, MOT, insurance, and tax records.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function mapServiceLogRow(row: Record<string, unknown>) {
+  return {
+    id: row.id as string,
+    vehicleId: row.vehicle_id as string,
+    name: row.name as string,
+    serviceType: row.service_type as string,
+    serviceDate: formatDate(row.service_date),
+    mileage: row.mileage as number | null,
+    cost: row.cost ? Number(row.cost) : null,
+    status: row.status as string | null,
+    garage: row.garage as string | null,
+    hirehopJob: row.hirehop_job as string | null,
+    notes: row.notes as string | null,
+    nextDueDate: formatDate(row.next_due_date),
+    nextDueMileage: row.next_due_mileage as number | null,
+    aiSummary: row.ai_summary as string | null,
+    aiExtracted: row.ai_extracted as boolean,
+    files: row.files || [],
+    createdBy: row.created_by as string | null,
+    createdAt: row.created_at ? (row.created_at as Date).toISOString() : null,
+    updatedAt: row.updated_at ? (row.updated_at as Date).toISOString() : null,
+  };
+}
+
+/**
+ * GET /api/vehicles/fleet/:vehicleId/service-log
+ * List all service records for a vehicle. Optional ?type= filter.
+ */
+router.get('/fleet/:vehicleId/service-log', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId } = req.params;
+    const { type, limit = '50', offset = '0' } = req.query;
+
+    let sql = 'SELECT * FROM vehicle_service_log WHERE vehicle_id = $1';
+    const params: unknown[] = [vehicleId];
+    let idx = 2;
+
+    if (type && typeof type === 'string') {
+      sql += ` AND service_type = $${idx}`;
+      params.push(type);
+      idx++;
+    }
+
+    sql += ` ORDER BY service_date DESC NULLS LAST, created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`;
+    params.push(Number(limit), Number(offset));
+
+    const result = await query(sql, params);
+
+    // Get total count
+    let countSql = 'SELECT COUNT(*) FROM vehicle_service_log WHERE vehicle_id = $1';
+    const countParams: unknown[] = [vehicleId];
+    if (type && typeof type === 'string') {
+      countSql += ' AND service_type = $2';
+      countParams.push(type);
+    }
+    const countResult = await query(countSql, countParams);
+
+    res.json({
+      data: result.rows.map(mapServiceLogRow),
+      total: Number(countResult.rows[0].count),
+    });
+  } catch (error) {
+    console.error('[vehicles/service-log] List error:', error);
+    res.status(500).json({ error: 'Failed to fetch service records' });
+  }
+});
+
+/**
+ * GET /api/vehicles/fleet/:vehicleId/service-log/:logId
+ * Get a single service record.
+ */
+router.get('/fleet/:vehicleId/service-log/:logId', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId, logId } = req.params;
+    const result = await query(
+      'SELECT * FROM vehicle_service_log WHERE id = $1 AND vehicle_id = $2',
+      [logId, vehicleId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Service record not found' });
+      return;
+    }
+    res.json(mapServiceLogRow(result.rows[0]));
+  } catch (error) {
+    console.error('[vehicles/service-log] Get error:', error);
+    res.status(500).json({ error: 'Failed to fetch service record' });
+  }
+});
+
+/**
+ * POST /api/vehicles/fleet/:vehicleId/service-log
+ * Create a new service record. Also updates vehicle mileage and due dates.
+ */
+router.post('/fleet/:vehicleId/service-log', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId } = req.params;
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.id || null;
+    const {
+      name, service_type = 'service', service_date, mileage, cost,
+      status, garage, hirehop_job, notes, next_due_date, next_due_mileage,
+      ai_summary, ai_extracted = false, files = [],
+    } = req.body;
+
+    if (!name) {
+      res.status(400).json({ error: 'name is required' });
+      return;
+    }
+
+    // Insert service record
+    const result = await query(
+      `INSERT INTO vehicle_service_log (
+        vehicle_id, name, service_type, service_date, mileage, cost,
+        status, garage, hirehop_job, notes, next_due_date, next_due_mileage,
+        ai_summary, ai_extracted, files, created_by
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      RETURNING *`,
+      [
+        vehicleId, name, service_type, service_date || null, mileage || null, cost || null,
+        status || null, garage || null, hirehop_job || null, notes || null,
+        next_due_date || null, next_due_mileage || null,
+        ai_summary || null, ai_extracted, JSON.stringify(files), userId,
+      ]
+    );
+
+    const record = result.rows[0];
+
+    // If mileage provided, record it in mileage log and update vehicle
+    if (mileage) {
+      await query(
+        `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
+         VALUES ($1, $2, 'service', $3, $4)`,
+        [vehicleId, mileage, record.id, userId]
+      );
+      await query(
+        `UPDATE fleet_vehicles SET current_mileage = $1, last_mileage_update = NOW()
+         WHERE id = $2 AND (current_mileage IS NULL OR current_mileage < $1)`,
+        [mileage, vehicleId]
+      );
+    }
+
+    // If next_due_date, update relevant date on fleet_vehicles
+    if (next_due_date) {
+      const dateFieldMap: Record<string, string> = {
+        mot: 'mot_due',
+        service: 'next_service_due', // For service, we use last_service_date + next_due_date
+        insurance: 'insurance_due',
+        tax: 'tax_due',
+      };
+      // For MOT/insurance/tax, update the due date directly
+      if (service_type === 'mot') {
+        await query('UPDATE fleet_vehicles SET mot_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
+      } else if (service_type === 'insurance') {
+        await query('UPDATE fleet_vehicles SET insurance_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
+      } else if (service_type === 'tax') {
+        await query('UPDATE fleet_vehicles SET tax_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
+      }
+    }
+
+    // Update last_service_date if this is a service record
+    if ((service_type === 'service' || service_type === 'repair') && service_date) {
+      await query(
+        `UPDATE fleet_vehicles SET last_service_date = $1, last_service_mileage = COALESCE($2, last_service_mileage)
+         WHERE id = $3`,
+        [service_date, mileage, vehicleId]
+      );
+    }
+
+    res.status(201).json(mapServiceLogRow(record));
+  } catch (error) {
+    console.error('[vehicles/service-log] Create error:', error);
+    res.status(500).json({ error: 'Failed to create service record' });
+  }
+});
+
+/**
+ * PUT /api/vehicles/fleet/:vehicleId/service-log/:logId
+ * Update a service record.
+ */
+router.put('/fleet/:vehicleId/service-log/:logId', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId, logId } = req.params;
+    const v = req.body;
+
+    const fieldMap: Record<string, string> = {
+      name: 'name', service_type: 'service_type', service_date: 'service_date',
+      mileage: 'mileage', cost: 'cost', status: 'status',
+      garage: 'garage', hirehop_job: 'hirehop_job', notes: 'notes',
+      next_due_date: 'next_due_date', next_due_mileage: 'next_due_mileage',
+      ai_summary: 'ai_summary', files: 'files',
+    };
+
+    const fields: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+
+    for (const [key, dbCol] of Object.entries(fieldMap)) {
+      if (v[key] !== undefined) {
+        fields.push(`${dbCol} = $${idx}`);
+        values.push(key === 'files' ? JSON.stringify(v[key]) : v[key]);
+        idx++;
+      }
+    }
+
+    if (fields.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+
+    values.push(logId, vehicleId);
+    const result = await query(
+      `UPDATE vehicle_service_log SET ${fields.join(', ')}, updated_at = NOW()
+       WHERE id = $${idx} AND vehicle_id = $${idx + 1} RETURNING *`,
+      values
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Service record not found' });
+      return;
+    }
+
+    res.json(mapServiceLogRow(result.rows[0]));
+  } catch (error) {
+    console.error('[vehicles/service-log] Update error:', error);
+    res.status(500).json({ error: 'Failed to update service record' });
+  }
+});
+
+/**
+ * DELETE /api/vehicles/fleet/:vehicleId/service-log/:logId
+ * Delete a service record.
+ */
+router.delete('/fleet/:vehicleId/service-log/:logId', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleId, logId } = req.params;
+    const result = await query(
+      'DELETE FROM vehicle_service_log WHERE id = $1 AND vehicle_id = $2 RETURNING id',
+      [logId, vehicleId]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Service record not found' });
+      return;
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[vehicles/service-log] Delete error:', error);
+    res.status(500).json({ error: 'Failed to delete service record' });
   }
 });
 
@@ -1316,6 +1584,18 @@ function mapDbRowToVehicle(row: Record<string, unknown>) {
     fleetGroup: row.fleet_group as string,
     isActive: row.is_active as boolean,
     mondayItemId: row.monday_item_id as string | null,
+    // Insurance
+    insuranceDue: formatDate(row.insurance_due),
+    insuranceProvider: row.insurance_provider as string | null,
+    insurancePolicyNumber: row.insurance_policy_number as string | null,
+    // Booked-in dates
+    motBookedInDate: formatDate(row.mot_booked_in_date),
+    serviceBookedInDate: formatDate(row.service_booked_in_date),
+    insuranceBookedInDate: formatDate(row.insurance_booked_in_date),
+    taxBookedInDate: formatDate(row.tax_booked_in_date),
+    // Mileage
+    currentMileage: row.current_mileage as number | null,
+    lastMileageUpdate: row.last_mileage_update ? (row.last_mileage_update as Date).toISOString() : null,
     // V5 / VE103B fields
     vin: row.vin as string | null,
     dateFirstReg: formatDate(row.date_first_reg),

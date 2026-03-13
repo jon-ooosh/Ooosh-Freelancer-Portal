@@ -8,6 +8,7 @@ import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrack
 import { IssueCard } from '../components/issues/IssueCard'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
+import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { updateVehicle } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
 
@@ -118,7 +119,7 @@ export function VehicleDetailPage() {
   const { data: vehicleIssues } = useVehicleIssues(vehicle?.reg)
   const { trackerNumber } = useVehicleTracker(vehicle?.reg)
   const { assign: assignTracker, isSaving: isAssigningTracker } = useUpdateTrackerAssignment()
-  const [activeTab, setActiveTab] = useState<'details' | 'location' | 'preps'>('details')
+  const [activeTab, setActiveTab] = useState<'details' | 'service' | 'location' | 'preps'>('details')
   const [editingTracker, setEditingTracker] = useState(false)
   const [trackerInput, setTrackerInput] = useState('')
   const [isSelling, setIsSelling] = useState(false)
@@ -310,7 +311,7 @@ export function VehicleDetailPage() {
 
       {/* Tab bar */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
-        {(['details', 'preps', 'location'] as const).map(tab => (
+        {(['details', 'service', 'preps', 'location'] as const).map(tab => (
           <button
             key={tab}
             type="button"
@@ -321,7 +322,7 @@ export function VehicleDetailPage() {
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'details' ? 'Details' : tab === 'preps' ? 'Prep History' : 'Location'}
+            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'preps' ? 'Prep History' : 'Location'}
           </button>
         ))}
       </div>
@@ -329,6 +330,11 @@ export function VehicleDetailPage() {
       {/* Location tab */}
       {activeTab === 'location' && (
         <VehicleLocationTab reg={vehicle.reg} />
+      )}
+
+      {/* Service History tab */}
+      {activeTab === 'service' && (
+        <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} />
       )}
 
       {/* Prep History tab */}
