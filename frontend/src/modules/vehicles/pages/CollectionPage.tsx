@@ -71,7 +71,7 @@ export function CollectionPage() {
   const [opResults, setOpResults] = useState<OpResult[]>([])
   const [bookOutMileage, setBookOutMileage] = useState<number | null>(null)
   const [bookOutFuelLevel, setBookOutFuelLevel] = useState<string | null>(null)
-  const signatureRef = useRef<SignatureCaptureHandle>(null)
+  const signatureRef = useRef<SignatureCaptureHandle>(null!)
   const [queuedOffline, setQueuedOffline] = useState(false)
 
   // Form autosave
@@ -1025,7 +1025,7 @@ function StepConfirm({
 }: {
   form: CollectionFormState
   onUpdate: <K extends keyof CollectionFormState>(key: K, value: CollectionFormState[K]) => void
-  signatureRef: React.RefObject<SignatureCaptureHandle | null>
+  signatureRef: React.RefObject<SignatureCaptureHandle>
   bookOutFuelLevel: string | null
 }) {
   const fuelChanged = bookOutFuelLevel && form.fuelLevel && bookOutFuelLevel !== form.fuelLevel

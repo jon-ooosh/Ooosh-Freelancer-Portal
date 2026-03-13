@@ -87,7 +87,7 @@ export function CheckInPage() {
   const [opResults, setOpResults] = useState<OpResult[]>([])
   const [bookOutLoading, setBookOutLoading] = useState(false)
   const [checkInStatus, setCheckInStatus] = useState<CheckInStatus | null>(null)
-  const signatureRef = useRef<SignatureCaptureHandle>(null)
+  const signatureRef = useRef<SignatureCaptureHandle>(null!)
   const [collectionData, setCollectionData] = useState<CollectionData | null>(null)
   const [queuedOffline, setQueuedOffline] = useState(false)
 
@@ -1746,7 +1746,7 @@ function StepConfirm({
   onDriverPresentChange,
 }: {
   form: CheckInFormState
-  signatureRef: React.RefObject<SignatureCaptureHandle | null>
+  signatureRef: React.RefObject<SignatureCaptureHandle>
   driverPresent: boolean
   onDriverPresentChange: (value: boolean) => void
 }) {

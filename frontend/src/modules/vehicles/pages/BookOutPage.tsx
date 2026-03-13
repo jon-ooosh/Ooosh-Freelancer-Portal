@@ -86,7 +86,7 @@ export function BookOutPage() {
   const [submitSuccess, setSubmitSuccess] = useState(false)
   const [uploadProgress, setUploadProgress] = useState<string | null>(null)
   const [opResults, setOpResults] = useState<OpResult[]>([])
-  const signatureRef = useRef<SignatureCaptureHandle>(null)
+  const signatureRef = useRef<SignatureCaptureHandle>(null!)
   const isOnline = useOnlineStatus()
   const [lastKnownMileage, setLastKnownMileage] = useState<number | null>(null)
   const [queuedOffline, setQueuedOffline] = useState(false)
@@ -1976,7 +1976,7 @@ function StepConfirm({
   onSubmit: () => void
   isSubmitting: boolean
   error: string | null
-  signatureRef: React.RefObject<SignatureCaptureHandle | null>
+  signatureRef: React.RefObject<SignatureCaptureHandle>
 }) {
   return (
     <div className="space-y-4">
