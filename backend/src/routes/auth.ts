@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { validate } from '../middleware/validate';
@@ -8,7 +9,28 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this';
+// Rate limiting: 10 login attempts per 15 minutes per IP
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many login attempts — try again in 15 minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Rate limiting: 20 token refresh attempts per 15 minutes per IP
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: 'Too many refresh attempts — try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+if (!process.env.JWT_SECRET) {
+  throw new Error('FATAL: JWT_SECRET environment variable is required');
+}
+const JWT_SECRET: string = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '15m';
 const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
 
@@ -42,7 +64,7 @@ function generateTokens(user: { id: string; email: string; role: string }) {
 }
 
 // POST /api/auth/login
-router.post('/login', validate(loginSchema), async (req: Request, res: Response) => {
+router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
 
@@ -130,7 +152,7 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
 });
 
 // POST /api/auth/refresh
-router.post('/refresh', async (req: Request, res: Response) => {
+router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
   try {
     const { refreshToken } = req.body;
 
@@ -164,6 +186,17 @@ router.post('/refresh', async (req: Request, res: Response) => {
     res.json(tokens);
   } catch {
     res.status(401).json({ error: 'Invalid or expired refresh token' });
+  }
+});
+
+// POST /api/auth/logout
+router.post('/logout', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    await query('UPDATE users SET refresh_token = NULL WHERE id = $1', [req.user!.id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 

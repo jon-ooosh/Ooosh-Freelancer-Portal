@@ -349,6 +349,153 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 See docs/SPEC.md for full phased plan.
 
+## Shared Utilities (built before parallel workstreams)
+
+These are reusable services that ALL modules must use. Do NOT make direct HireHop API calls or send emails from individual modules — use the broker/service.
+
+### HireHop Request Broker
+
+**File:** `backend/src/services/hirehop-broker.ts` _(to be built)_
+
+Central gateway for ALL HireHop API communication. Prevents rate limit issues when multiple users/modules hit HireHop simultaneously.
+
+**Architecture:**
+```
+Module A ──┐
+Module B ──┤──→ [HH Request Broker] ──→ HireHop API
+Module C ──┘     ├─ Request queue (priority-based)
+                 ├─ Response cache (Redis, configurable TTL)
+                 ├─ Rate limiter (token bucket, ≤50 req/min)
+                 └─ Deduplication (same request within TTL = cache hit)
+```
+
+**Key features:**
+- **Priority queue:** User-initiated requests (high) vs background sync (low)
+- **Redis cache:** Per-endpoint configurable TTL:
+  - Static data (contacts, stock list): 30 min TTL
+  - Job data: 5 min TTL
+  - Status updates (POST/PUT): no cache, write-through
+- **Deduplication:** Same GET request within TTL returns cached response
+- **Token bucket rate limiter:** Max 50 req/min (leaving 10 req/min headroom from HH's 60 limit)
+- **Metrics:** Cache hit rate, queue depth, rate limit headroom logged
+
+**Usage pattern (all modules):**
+```typescript
+import { hhBroker } from '../services/hirehop-broker';
+
+// GET with caching
+const job = await hhBroker.get('/api/job_data.php', { job: 1234 }, { priority: 'high', cacheTTL: 300 });
+
+// POST (bypasses cache, still rate-limited)
+await hhBroker.post('/frames/status_save.php', { job: 1234, status: 2 }, { priority: 'high' });
+
+// Batch (sequential with rate limiting)
+const results = await hhBroker.batch([
+  { endpoint: '/api/job_data.php', params: { job: 1234 } },
+  { endpoint: '/api/job_data.php', params: { job: 1235 } },
+], { delayMs: 350 });
+```
+
+**Migration plan:** Existing `hirehop-sync.ts` and `hirehop-job-sync.ts` should be refactored to use the broker instead of calling `hireHopGet()` directly.
+
+### Email Service
+
+**File:** `backend/src/services/email-service.ts` _(to be built)_
+
+Centralised email sending with branded templates, test mode routing, and audit logging.
+
+**Sending method:** Google Workspace SMTP via app password (existing infrastructure).
+
+**Architecture:**
+```typescript
+import { emailService } from '../services/email-service';
+
+// Send a branded client email
+await emailService.send('booking_confirmation', {
+  to: 'client@example.com',
+  variables: { clientName: 'John', jobNumber: 'J-1234', amount: '£500' },
+});
+
+// Send an internal notification email
+await emailService.send('compliance_reminder', {
+  to: 'jon@oooshtours.co.uk',
+  variables: { vehicleReg: 'RX22SXL', dueType: 'MOT', daysRemaining: 7 },
+});
+```
+
+**Key features:**
+- **Template registry:** Each email type registered with subject template + HTML body template
+- **Two template categories:**
+  - Client-facing: Polished, Ooosh-branded (logo, colours, professional footer)
+  - Internal/operational: Simpler but consistent styling
+- **Test mode:** Global `EMAIL_MODE` setting (`test` | `live`)
+  - In test mode: ALL emails redirect to `EMAIL_TEST_REDIRECT` address
+  - Test emails include banner: "TEST MODE — would have been sent to: client@example.com"
+  - One-click admin toggle in Settings page to switch to live
+- **Audit trail:** Every email logged to `email_log` table (recipient, template, sent_at, status)
+- **No unsubscribe:** These are transactional/operational emails, not marketing
+
+**Environment variables:**
+```
+EMAIL_MODE=test                           # 'test' or 'live'
+EMAIL_TEST_REDIRECT=jon@oooshtours.co.uk  # Where test emails go
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=notifications@oooshtours.co.uk
+SMTP_PASS=xxxx-xxxx-xxxx-xxxx            # Google Workspace app password
+SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
+```
+
+**Template structure:**
+- Base layout: `backend/src/services/email-templates/base.ts` — Ooosh branding wrapper
+- Per-template: `backend/src/services/email-templates/{template-id}.ts` — subject + body
+- Variables injected via `{{variableName}}` substitution
+
+## Security
+
+### Current Security Posture (as of 15 Mar 2026)
+
+**Authentication & Authorization:**
+- [x] JWT access tokens (15 min) + refresh tokens (7 days)
+- [x] Bcrypt password hashing (12 salt rounds)
+- [x] RBAC middleware (`authorize()`) on sensitive routes
+- [x] JWT_SECRET required via env var (no default fallback) — app won't start without it
+- [x] Startup validation: JWT_SECRET must be set and ≥32 characters, DATABASE_URL required
+- [x] Rate limiting on login (10 attempts per 15 min per IP) and token refresh (20 per 15 min)
+- [x] Logout endpoint (`POST /api/auth/logout`) — nulls refresh token
+- [x] Socket.io JWT authentication middleware — connections require valid token
+
+**Data Security:**
+- [x] All SQL queries parameterised (no injection risk)
+- [x] File uploads: authenticated, type-whitelisted, 10MB limit, UUID-named R2 keys
+- [x] R2 `operations` bucket: private only (no public access)
+- [x] R2 `ooosh-vehicle-photos` bucket: public access (client-facing vehicle photos only, no PII)
+- [x] File downloads via authenticated `/api/files/download` endpoint with path traversal prevention
+- [x] Zod input validation on all POST/PUT endpoints
+- [x] Helmet middleware for Express security headers
+
+**Infrastructure:**
+- [x] SSL/TLS via Let's Encrypt (HTTPS enforced)
+- [x] Nginx security headers: X-Content-Type-Options, X-Frame-Options, HSTS, Referrer-Policy, Permissions-Policy
+- [x] Nginx reverse proxy (Express not directly exposed)
+- [x] CORS restricted to configured FRONTEND_URL
+
+**Known gaps (to address):**
+- [ ] Field-level encryption for sensitive PII (DVLA data, passport numbers) — need application-level AES-256 encryption with key in env var. Data encrypted at rest, decrypted on read by authorised users only.
+- [ ] RBAC on PUT endpoints for people/organisations (currently any authenticated user can edit)
+- [ ] Data retention/expiry policy for PII (GDPR compliance)
+- [ ] Secrets rotation documentation
+
+**Encryption approach for PII:**
+When implemented, sensitive fields will use AES-256-GCM encryption:
+```
+ENCRYPTION_KEY=<64-char-hex-key>  # In .env, generated via: openssl rand -hex 32
+```
+- Encrypted fields stored as `encrypted_<fieldname>` in DB (TEXT column with IV prepended)
+- Decryption only happens in API response layer, never in SQL queries
+- Key stored only in `.env` on server (not in repo, not in R2)
+- Yes — we hold the key, so we can always read data back. If the key is lost, encrypted data is unrecoverable.
+
 ## Crew & Transport System
 
 This is the quoting/costing system for delivery, collection, and crewed jobs. It lives in the **"Crew & Transport" tab** on the Job Detail page.

@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import jwt from 'jsonwebtoken';
 import { createServer } from 'http';
 import { Server as SocketServer } from 'socket.io';
 import dotenv from 'dotenv';
@@ -10,6 +11,19 @@ import { connectRedis } from './config/redis';
 import { startScheduler } from './config/scheduler';
 
 dotenv.config();
+
+// ── Startup validation ──────────────────────────────────────────────────────
+const REQUIRED_ENV = ['JWT_SECRET', 'DATABASE_URL'];
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`FATAL: Missing required environment variable: ${key}`);
+    process.exit(1);
+  }
+}
+if (process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) {
+  console.error('FATAL: JWT_SECRET must be at least 32 characters');
+  process.exit(1);
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -50,14 +64,29 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Socket.io connection handling
-io.on('connection', (socket) => {
-  console.log(`Socket connected: ${socket.id}`);
+// Socket.io authentication middleware — verify JWT before allowing connection
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token as string | undefined;
+  if (!token) {
+    return next(new Error('Authentication required'));
+  }
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as { id: string; email: string; role: string };
+    (socket as unknown as Record<string, unknown>).userId = decoded.id;
+    (socket as unknown as Record<string, unknown>).userEmail = decoded.email;
+    next();
+  } catch {
+    next(new Error('Invalid or expired token'));
+  }
+});
 
-  // Join user-specific room for notifications
-  socket.on('auth', (userId: string) => {
-    socket.join(`user:${userId}`);
-  });
+// Socket.io connection handling — only authenticated users reach here
+io.on('connection', (socket) => {
+  const userId = (socket as unknown as Record<string, unknown>).userId as string;
+  console.log(`Socket connected: ${socket.id} (user: ${userId})`);
+
+  // Auto-join user's notification room (no longer trusts client-supplied userId)
+  socket.join(`user:${userId}`);
 
   socket.on('join-entity', (entityId: string) => {
     socket.join(`entity:${entityId}`);
