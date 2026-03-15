@@ -713,8 +713,12 @@ function NewEnquiryModal({
   const [clientName, setClientName] = useState('');
   const [clientId, setClientId] = useState<string | null>(null);
   const [details, setDetails] = useState('');
+  const [outDate, setOutDate] = useState('');
   const [jobDate, setJobDate] = useState('');
   const [jobEnd, setJobEnd] = useState('');
+  const [returnDate, setReturnDate] = useState('');
+  const [outLinked, setOutLinked] = useState(true);   // Outgoing locked to Job Start
+  const [returnLinked, setReturnLinked] = useState(true); // Returning locked to Job Finish
   const [jobName, setJobName] = useState('');
   const [jobValue, setJobValue] = useState('');
   const [likelihood, setLikelihood] = useState<Likelihood>('warm');
@@ -735,6 +739,37 @@ function NewEnquiryModal({
   const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>('5 days');
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
   const [teamUsers, setTeamUsers] = useState<TeamUser[]>([]);
+
+  // Client trading history
+  const [clientHistory, setClientHistory] = useState<{
+    jobs: Array<{
+      id: string; hh_job_number: number | null; job_name: string | null;
+      status: number; pipeline_status: string | null; job_date: string | null;
+      job_end: string | null; job_value: number | null; likelihood: string | null;
+    }>;
+    stats: {
+      total_jobs: string; confirmed_jobs: string; lost_jobs: string;
+      total_confirmed_value: string; total_value: string;
+      first_job_date: string | null; last_job_date: string | null;
+    };
+  } | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const fetchClientHistory = useCallback(async (orgId: string | null, name: string) => {
+    if (!name || name.length < 2) { setClientHistory(null); return; }
+    setHistoryLoading(true);
+    try {
+      const params = orgId
+        ? `client_id=${encodeURIComponent(orgId)}`
+        : `client_name=${encodeURIComponent(name)}`;
+      const data = await api.get<typeof clientHistory>(`/pipeline/client-history?${params}`);
+      setClientHistory(data);
+    } catch {
+      setClientHistory(null);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
 
   // Load team users for alert dropdown
   useEffect(() => {
@@ -759,22 +794,62 @@ function NewEnquiryModal({
     setClientName(result.name);
     if (result.type === 'organisation') {
       setClientId(result.id);
+      fetchClientHistory(result.id, result.name);
     } else {
       setClientId(null);
+      fetchClientHistory(null, result.name);
     }
   };
 
-  // Date logic: setting start date auto-sets end date to same day, end date can't be before start
-  const handleStartDateChange = (val: string) => {
+  // HireHop-style date linking: Outgoing=Job Start, Returning=Job Finish by default
+  const handleOutDateChange = (val: string) => {
+    setOutDate(val);
+    if (outLinked) {
+      setJobDate(val);
+    }
+  };
+
+  const handleJobDateChange = (val: string) => {
     setJobDate(val);
+    if (outLinked) {
+      setOutDate(val);
+    }
+    // Auto-set job end if empty or before start
     if (!jobEnd || jobEnd < val) {
+      setJobEnd(val);
+      if (returnLinked) setReturnDate(val);
+    }
+  };
+
+  const handleJobEndChange = (val: string) => {
+    if (jobDate && val < jobDate) return;
+    setJobEnd(val);
+    if (returnLinked) {
+      setReturnDate(val);
+    }
+  };
+
+  const handleReturnDateChange = (val: string) => {
+    setReturnDate(val);
+    if (returnLinked) {
       setJobEnd(val);
     }
   };
 
-  const handleEndDateChange = (val: string) => {
-    if (jobDate && val < jobDate) return; // Don't allow end before start
-    setJobEnd(val);
+  const toggleOutLink = () => {
+    if (!outLinked) {
+      // Re-linking: sync outgoing to job start
+      setOutDate(jobDate);
+    }
+    setOutLinked(!outLinked);
+  };
+
+  const toggleReturnLink = () => {
+    if (!returnLinked) {
+      // Re-linking: sync returning to job finish
+      setReturnDate(jobEnd);
+    }
+    setReturnLinked(!returnLinked);
   };
 
   const handleFileStage = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -791,8 +866,8 @@ function NewEnquiryModal({
   };
 
   const handleSave = async () => {
-    if (!clientName || !details || !jobDate || !jobEnd) {
-      setError('Client, description, and dates are required');
+    if (!clientName || !details) {
+      setError('Client and description are required');
       return;
     }
     setSaving(true);
@@ -803,8 +878,10 @@ function NewEnquiryModal({
         client_name: clientName,
         client_id: clientId || undefined,
         details,
-        job_date: jobDate,
-        job_end: jobEnd,
+        out_date: outDate || undefined,
+        job_date: jobDate || undefined,
+        job_end: jobEnd || undefined,
+        return_date: returnDate || undefined,
         job_name: jobName || undefined,
         job_value: jobValue ? parseFloat(jobValue) : undefined,
         likelihood,
@@ -832,8 +909,11 @@ function NewEnquiryModal({
       }
 
       // Reset form
-      setClientName(''); setClientId(null); setDetails(''); setJobDate(''); setJobEnd('');
+      setClientName(''); setClientId(null); setDetails('');
+      setOutDate(''); setJobDate(''); setJobEnd(''); setReturnDate('');
+      setOutLinked(true); setReturnLinked(true);
       setJobName(''); setJobValue(''); setLikelihood('warm');
+      setClientHistory(null);
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
       setNextChaseDate(addDaysToDate(5)); setSelectedChasePreset('5 days'); setChaseAlertUserId('');
@@ -846,10 +926,14 @@ function NewEnquiryModal({
     }
   };
 
+  const hasHistory = clientHistory && parseInt(clientHistory.stats.total_jobs) > 0;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-xl p-6 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+      <div className={`relative bg-white rounded-xl shadow-xl w-full mx-4 max-h-[90vh] flex transition-all duration-300 ${hasHistory ? 'max-w-4xl' : 'max-w-lg'}`}>
+        {/* Left side: form */}
+        <div className="flex-1 min-w-0 p-6 overflow-y-auto">
         <h3 className="text-lg font-semibold mb-4">New Enquiry</h3>
 
         {error && (
@@ -881,26 +965,73 @@ function NewEnquiryModal({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Start date *</label>
-              <input
-                type="date"
-                value={jobDate}
-                onChange={(e) => handleStartDateChange(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              />
+          {/* Dates — HireHop-style 4-date system with linking */}
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-700">Dates</label>
+            <div className="border border-gray-200 rounded-lg overflow-hidden">
+              {/* Row 1: Outgoing */}
+              <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200">
+                <span className="text-xs text-gray-500 w-20 shrink-0">Outgoing</span>
+                <input
+                  type="date"
+                  value={outDate}
+                  onChange={(e) => handleOutDateChange(e.target.value)}
+                  disabled={outLinked}
+                  className={`flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 ${outLinked ? 'bg-gray-100 text-gray-400' : ''}`}
+                />
+                <button
+                  type="button"
+                  onClick={toggleOutLink}
+                  className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${outLinked ? 'text-ooosh-600 bg-ooosh-50' : 'text-gray-400 hover:text-gray-600'}`}
+                  title={outLinked ? 'Linked to Job Start — click to unlink' : 'Click to link to Job Start'}
+                >
+                  {outLinked ? '🔗' : '🔓'}
+                </button>
+              </div>
+              {/* Row 2: Job Start */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-200">
+                <span className="text-xs text-gray-500 w-20 shrink-0">Job start</span>
+                <input
+                  type="date"
+                  value={jobDate}
+                  onChange={(e) => handleJobDateChange(e.target.value)}
+                  className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                />
+                <div className="w-[52px]" />
+              </div>
+              {/* Row 3: Job Finish */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-200">
+                <span className="text-xs text-gray-500 w-20 shrink-0">Job finish</span>
+                <input
+                  type="date"
+                  value={jobEnd}
+                  min={jobDate || undefined}
+                  onChange={(e) => handleJobEndChange(e.target.value)}
+                  className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                />
+                <div className="w-[52px]" />
+              </div>
+              {/* Row 4: Returning */}
+              <div className="flex items-center gap-2 px-3 py-2 bg-gray-50">
+                <span className="text-xs text-gray-500 w-20 shrink-0">Returning</span>
+                <input
+                  type="date"
+                  value={returnDate}
+                  onChange={(e) => handleReturnDateChange(e.target.value)}
+                  disabled={returnLinked}
+                  className={`flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 ${returnLinked ? 'bg-gray-100 text-gray-400' : ''}`}
+                />
+                <button
+                  type="button"
+                  onClick={toggleReturnLink}
+                  className={`text-xs px-2 py-1 rounded flex items-center gap-1 ${returnLinked ? 'text-ooosh-600 bg-ooosh-50' : 'text-gray-400 hover:text-gray-600'}`}
+                  title={returnLinked ? 'Linked to Job Finish — click to unlink' : 'Click to link to Job Finish'}
+                >
+                  {returnLinked ? '🔗' : '🔓'}
+                </button>
+              </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">End date *</label>
-              <input
-                type="date"
-                value={jobEnd}
-                min={jobDate || undefined}
-                onChange={(e) => handleEndDateChange(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              />
-            </div>
+            <p className="text-xs text-gray-400">Leave blank if dates not yet known</p>
           </div>
 
           {/* Chase scheduling */}
@@ -1109,6 +1240,80 @@ function NewEnquiryModal({
             {saving ? (stagedFiles.length > 0 ? 'Creating & uploading...' : 'Creating...') : 'Create Enquiry'}
           </button>
         </div>
+        </div>
+
+        {/* Right side: client trading history */}
+        {hasHistory && (
+          <div className="hidden lg:block w-80 border-l border-gray-200 bg-gray-50 p-4 overflow-y-auto rounded-r-xl">
+            <h4 className="text-sm font-semibold text-gray-700 mb-3">Client History</h4>
+
+            {/* Stats summary */}
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <div className="bg-white rounded-lg p-2 text-center border border-gray-200">
+                <div className="text-lg font-bold text-gray-900">{clientHistory!.stats.total_jobs}</div>
+                <div className="text-xs text-gray-500">Total Jobs</div>
+              </div>
+              <div className="bg-white rounded-lg p-2 text-center border border-gray-200">
+                <div className="text-lg font-bold text-green-600">{clientHistory!.stats.confirmed_jobs}</div>
+                <div className="text-xs text-gray-500">Confirmed</div>
+              </div>
+              <div className="bg-white rounded-lg p-2 text-center border border-gray-200">
+                <div className="text-lg font-bold text-gray-900">
+                  {formatCurrency(parseFloat(clientHistory!.stats.total_confirmed_value))}
+                </div>
+                <div className="text-xs text-gray-500">Confirmed Value</div>
+              </div>
+              <div className="bg-white rounded-lg p-2 text-center border border-gray-200">
+                <div className="text-lg font-bold text-red-500">{clientHistory!.stats.lost_jobs}</div>
+                <div className="text-xs text-gray-500">Lost</div>
+              </div>
+            </div>
+
+            {/* Recent jobs list */}
+            <h5 className="text-xs font-semibold text-gray-500 uppercase mb-2">Recent Jobs</h5>
+            <div className="space-y-2">
+              {clientHistory!.jobs.map((j) => {
+                const pStatus = j.pipeline_status;
+                const statusBadge = pStatus
+                  ? PIPELINE_STATUS_CONFIG[pStatus as PipelineStatus]
+                  : null;
+                return (
+                  <div key={j.id} className="bg-white rounded-lg p-2.5 border border-gray-200 text-xs">
+                    <div className="flex items-center justify-between mb-1">
+                      {j.hh_job_number ? (
+                        <span className="font-mono text-ooosh-600">J-{j.hh_job_number}</span>
+                      ) : (
+                        <span className="text-gray-400">NEW</span>
+                      )}
+                      {statusBadge && (
+                        <span
+                          className="px-1.5 py-0.5 rounded-full text-[10px] font-medium"
+                          style={{ backgroundColor: statusBadge.colour + '20', color: statusBadge.colour }}
+                        >
+                          {statusBadge.label}
+                        </span>
+                      )}
+                    </div>
+                    <div className="font-medium text-gray-900 truncate">{j.job_name || 'Untitled'}</div>
+                    {j.job_date && (
+                      <div className="text-gray-400 mt-0.5">
+                        {formatDateRange(j.job_date, j.job_end)}
+                      </div>
+                    )}
+                    {j.job_value != null && (
+                      <div className="text-gray-600 font-medium mt-0.5">{formatCurrency(j.job_value)}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {historyLoading && (
+          <div className="hidden lg:flex w-80 border-l border-gray-200 bg-gray-50 items-center justify-center rounded-r-xl">
+            <div className="animate-spin h-6 w-6 border-2 border-ooosh-500 border-t-transparent rounded-full" />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -3,7 +3,8 @@ import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
-import type { FileAttachment } from '@shared/index';
+import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
+import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
 
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
@@ -190,6 +191,69 @@ export default function JobDetailPage() {
   const [assignRole, setAssignRole] = useState('driver');
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
 
+  // Status transition state
+  const [showStatusDropdown, setShowStatusDropdown] = useState(false);
+  const [showTransitionModal, setShowTransitionModal] = useState(false);
+  const [transitionTarget, setTransitionTarget] = useState<PipelineStatus | null>(null);
+  const [transitionSaving, setTransitionSaving] = useState(false);
+  const statusDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close status dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (statusDropdownRef.current && !statusDropdownRef.current.contains(e.target as Node)) {
+        setShowStatusDropdown(false);
+      }
+    }
+    if (showStatusDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showStatusDropdown]);
+
+  async function handleStatusTransition(targetStatus: PipelineStatus, extraData?: Record<string, string>) {
+    if (!job) return;
+    setTransitionSaving(true);
+    try {
+      await api.patch(`/pipeline/${job.id}/status`, {
+        pipeline_status: targetStatus,
+        ...extraData,
+      });
+      await loadJob();
+      await loadInteractions();
+      setShowTransitionModal(false);
+      setTransitionTarget(null);
+    } catch (err) {
+      console.error('Status transition failed:', err);
+    } finally {
+      setTransitionSaving(false);
+    }
+  }
+
+  function initiateStatusChange(targetStatus: PipelineStatus) {
+    setShowStatusDropdown(false);
+    const needsPrompt = ['paused', 'confirmed', 'lost'].includes(targetStatus);
+    if (needsPrompt) {
+      setTransitionTarget(targetStatus);
+      setShowTransitionModal(true);
+    } else {
+      handleStatusTransition(targetStatus);
+    }
+  }
+
+  // Client trading history for sidebar
+  const [clientHistoryData, setClientHistoryData] = useState<{
+    jobs: Array<{
+      id: string; hh_job_number: number | null; job_name: string | null;
+      status: number; pipeline_status: string | null; job_date: string | null;
+      job_end: string | null; job_value: number | null;
+    }>;
+    stats: {
+      total_jobs: string; confirmed_jobs: string; lost_jobs: string;
+      total_confirmed_value: string; total_value: string;
+    };
+  } | null>(null);
+
   useEffect(() => {
     if (id) {
       loadJob();
@@ -197,6 +261,18 @@ export default function JobDetailPage() {
       loadQuotes();
     }
   }, [id]);
+
+  // Load client history when job loads
+  useEffect(() => {
+    if (job && (job.client_id || job.client_name)) {
+      const params = job.client_id
+        ? `client_id=${encodeURIComponent(job.client_id)}&exclude_job_id=${job.id}`
+        : `client_name=${encodeURIComponent(job.client_name!)}&exclude_job_id=${job.id}`;
+      api.get<typeof clientHistoryData>(`/pipeline/client-history?${params}`)
+        .then(data => setClientHistoryData(data))
+        .catch(() => setClientHistoryData(null));
+    }
+  }, [job?.id, job?.client_id, job?.client_name]);
 
   async function loadQuotes() {
     if (!id) return;
@@ -304,15 +380,29 @@ export default function JobDetailPage() {
     return <div className="text-center py-12 text-gray-500">Job not found.</div>;
   }
 
-  const statusLabel = STATUS_MAP[job.status] || job.status_name || `Status ${job.status}`;
-  const statusColour = STATUS_COLOURS[job.status] || 'bg-gray-100 text-gray-600';
+  // Pipeline status takes precedence for display if available
+  const pipelineConfig = job.pipeline_status
+    ? PIPELINE_STATUS_CONFIG[job.pipeline_status as PipelineStatus]
+    : null;
+  const statusLabel = pipelineConfig?.label || STATUS_MAP[job.status] || job.status_name || `Status ${job.status}`;
+  const statusColour = pipelineConfig
+    ? '' // Using inline style for pipeline status
+    : (STATUS_COLOURS[job.status] || 'bg-gray-100 text-gray-600');
+  const hasPipelineStatus = !!job.pipeline_status;
+
+  // Available pipeline statuses for the dropdown (excluding current)
+  const PIPELINE_TRANSITIONS: PipelineStatus[] = ['new_enquiry', 'chasing', 'provisional', 'paused', 'confirmed', 'lost'];
+  const availableStatuses = PIPELINE_TRANSITIONS.filter(s => s !== job.pipeline_status);
   const fileCount = (job.files || []).length;
   const hhJobUrl = job.hh_job_number
     ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
     : null;
 
+  const showClientHistory = clientHistoryData && parseInt(clientHistoryData.stats.total_jobs) > 0;
+
   return (
-    <div>
+    <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
+      <div className={showClientHistory ? 'flex-1 min-w-0' : ''}>
       {/* Back link */}
       <Link to={backTo} className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
         &larr; {backLabel}
@@ -336,9 +426,48 @@ export default function JobDetailPage() {
               ) : (
                 <span className="text-sm font-mono text-gray-400">NEW</span>
               )}
-              <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${statusColour}`}>
-                {statusLabel}
-              </span>
+              {hasPipelineStatus ? (
+                <div ref={statusDropdownRef} className="relative">
+                  <button
+                    onClick={() => setShowStatusDropdown(!showStatusDropdown)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer hover:opacity-80 transition-opacity"
+                    style={{
+                      backgroundColor: pipelineConfig!.colour + '20',
+                      color: pipelineConfig!.colour,
+                    }}
+                    title="Click to change status"
+                  >
+                    {statusLabel}
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {showStatusDropdown && (
+                    <div className="absolute left-0 top-full mt-1 z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px]">
+                      {availableStatuses.map((s) => {
+                        const cfg = PIPELINE_STATUS_CONFIG[s];
+                        return (
+                          <button
+                            key={s}
+                            onClick={() => initiateStatusChange(s)}
+                            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 flex items-center gap-2"
+                          >
+                            <span
+                              className="w-2 h-2 rounded-full"
+                              style={{ backgroundColor: cfg.colour }}
+                            />
+                            {cfg.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${statusColour}`}>
+                  {statusLabel}
+                </span>
+              )}
               {job.is_internal && (
                 <span className="inline-flex px-2 py-0.5 rounded-full text-xs bg-gray-200 text-gray-600">Internal</span>
               )}
@@ -1416,6 +1545,91 @@ function JobFilesSection({
           onClose={() => setViewingFile(null)}
         />
       )}
+
+      {/* Status transition modal */}
+      {showTransitionModal && transitionTarget && (
+        <StatusTransitionModal
+          targetStatus={transitionTarget}
+          saving={transitionSaving}
+          onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
+          onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
+        />
+      )}
+      </div>
+
+      {/* Client trading history sidebar (desktop only) */}
+      {showClientHistory && (
+        <div className="hidden lg:block w-72 shrink-0">
+          <div className="sticky top-4 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 className="text-sm font-semibold text-gray-700 mb-3">
+              Client History — {job.client_name || job.company_name}
+            </h3>
+
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <div className="bg-gray-50 rounded-lg p-2 text-center">
+                <div className="text-lg font-bold text-gray-900">{clientHistoryData!.stats.total_jobs}</div>
+                <div className="text-[10px] text-gray-500">Total Jobs</div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2 text-center">
+                <div className="text-lg font-bold text-green-600">{clientHistoryData!.stats.confirmed_jobs}</div>
+                <div className="text-[10px] text-gray-500">Confirmed</div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2 text-center">
+                <div className="text-lg font-bold text-gray-900">
+                  {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(parseFloat(clientHistoryData!.stats.total_confirmed_value))}
+                </div>
+                <div className="text-[10px] text-gray-500">Confirmed Value</div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2 text-center">
+                <div className="text-lg font-bold text-red-500">{clientHistoryData!.stats.lost_jobs}</div>
+                <div className="text-[10px] text-gray-500">Lost</div>
+              </div>
+            </div>
+
+            <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">Other Jobs</h4>
+            <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+              {clientHistoryData!.jobs.map((j) => {
+                const pStatus = j.pipeline_status;
+                const pConfig = pStatus ? PIPELINE_STATUS_CONFIG[pStatus as PipelineStatus] : null;
+                return (
+                  <Link
+                    key={j.id}
+                    to={`/jobs/${j.id}`}
+                    className="block bg-gray-50 rounded-lg p-2.5 text-xs hover:bg-gray-100 transition-colors"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      {j.hh_job_number ? (
+                        <span className="font-mono text-ooosh-600">J-{j.hh_job_number}</span>
+                      ) : (
+                        <span className="text-gray-400">NEW</span>
+                      )}
+                      {pConfig && (
+                        <span
+                          className="px-1.5 py-0.5 rounded-full text-[10px] font-medium"
+                          style={{ backgroundColor: pConfig.colour + '20', color: pConfig.colour }}
+                        >
+                          {pConfig.label}
+                        </span>
+                      )}
+                    </div>
+                    <div className="font-medium text-gray-900 truncate">{j.job_name || 'Untitled'}</div>
+                    {j.job_date && (
+                      <div className="text-gray-400 mt-0.5">
+                        {new Date(j.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                      </div>
+                    )}
+                    {j.job_value != null && (
+                      <div className="text-gray-600 font-medium mt-0.5">
+                        {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(j.job_value)}
+                      </div>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1436,6 +1650,142 @@ function DetailField({ label, value }: { label: string; value: string | null | u
     <div>
       <dt className="text-xs font-medium text-gray-500 uppercase tracking-wider">{label}</dt>
       <dd className="mt-1 text-sm text-gray-900">{value || '—'}</dd>
+    </div>
+  );
+}
+
+function StatusTransitionModal({
+  targetStatus,
+  saving,
+  onConfirm,
+  onCancel,
+}: {
+  targetStatus: PipelineStatus;
+  saving: boolean;
+  onConfirm: (data: Record<string, string>) => void;
+  onCancel: () => void;
+}) {
+  const [holdReason, setHoldReason] = useState<HoldReason>('client_undecided');
+  const [holdDetail, setHoldDetail] = useState('');
+  const [confirmedMethod, setConfirmedMethod] = useState<ConfirmedMethod>('deposit');
+  const [lostReason, setLostReason] = useState('Price');
+  const [lostDetail, setLostDetail] = useState('');
+  const [note, setNote] = useState('');
+
+  const handleSubmit = () => {
+    const data: Record<string, string> = {};
+    if (targetStatus === 'paused') {
+      data.hold_reason = holdReason;
+      if (holdDetail) data.hold_reason_detail = holdDetail;
+    } else if (targetStatus === 'confirmed') {
+      data.confirmed_method = confirmedMethod;
+    } else if (targetStatus === 'lost') {
+      data.lost_reason = lostReason;
+      if (lostDetail) data.lost_detail = lostDetail;
+    }
+    if (note) data.transition_note = note;
+    onConfirm(data);
+  };
+
+  const config = PIPELINE_STATUS_CONFIG[targetStatus];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/30" onClick={onCancel} />
+      <div className="relative bg-white rounded-xl shadow-xl p-6 w-full max-w-md mx-4">
+        <h3 className="text-lg font-semibold mb-4">
+          Move to <span style={{ color: config.colour }}>{config.label}</span>
+        </h3>
+
+        {targetStatus === 'paused' && (
+          <div className="space-y-3 mb-4">
+            <label className="block text-sm font-medium text-gray-700">Reason for pausing</label>
+            <select
+              value={holdReason}
+              onChange={(e) => setHoldReason(e.target.value as HoldReason)}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            >
+              {Object.entries(HOLD_REASON_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+            {holdReason === 'other' && (
+              <input
+                type="text"
+                placeholder="Details..."
+                value={holdDetail}
+                onChange={(e) => setHoldDetail(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+              />
+            )}
+          </div>
+        )}
+
+        {targetStatus === 'confirmed' && (
+          <div className="space-y-3 mb-4">
+            <label className="block text-sm font-medium text-gray-700">How was this confirmed?</label>
+            <select
+              value={confirmedMethod}
+              onChange={(e) => setConfirmedMethod(e.target.value as ConfirmedMethod)}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            >
+              <option value="deposit">Deposit received</option>
+              <option value="full_payment">Full payment received</option>
+              <option value="po">Purchase order received</option>
+              <option value="manual">Manual confirmation</option>
+            </select>
+          </div>
+        )}
+
+        {targetStatus === 'lost' && (
+          <div className="space-y-3 mb-4">
+            <label className="block text-sm font-medium text-gray-700">Why was this lost?</label>
+            <select
+              value={lostReason}
+              onChange={(e) => setLostReason(e.target.value)}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            >
+              {LOST_REASON_OPTIONS.map((reason) => (
+                <option key={reason} value={reason}>{reason}</option>
+              ))}
+            </select>
+            <textarea
+              placeholder="Any details..."
+              value={lostDetail}
+              onChange={(e) => setLostDetail(e.target.value)}
+              rows={2}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+          </div>
+        )}
+
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-gray-700 mb-1">Note (optional)</label>
+          <input
+            type="text"
+            placeholder="Why are you changing the status?"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+          />
+        </div>
+
+        <div className="flex gap-3 justify-end">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Confirm'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

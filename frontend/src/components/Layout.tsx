@@ -24,8 +24,9 @@ const navItems: NavItem[] = [
     path: '/jobs-menu',
     label: 'Jobs',
     children: [
+      { path: '/pipeline?newEnquiry=1', label: 'New Enquiry' },
       { path: '/pipeline', label: 'Enquiries' },
-      { path: '/jobs', label: 'Upcoming & Out' },
+      { path: '/jobs', label: 'Upcoming & Out Now' },
     ],
   },
   {
@@ -104,11 +105,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
   function isItemActive(item: NavItem): boolean {
     if (item.children) {
-      return item.children.some(
-        (child) => location.pathname === child.path || location.pathname.startsWith(child.path + '/')
-      );
+      return item.children.some((child) => {
+        const childPath = child.path.split('?')[0]; // Strip query params for matching
+        return location.pathname === childPath || location.pathname.startsWith(childPath + '/');
+      });
     }
-    return location.pathname === item.path || (item.path !== '/' && location.pathname.startsWith(item.path));
+    const itemPath = item.path.split('?')[0];
+    return location.pathname === itemPath || (itemPath !== '/' && location.pathname.startsWith(itemPath));
   }
 
   return (
