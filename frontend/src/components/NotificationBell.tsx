@@ -36,10 +36,9 @@ export default function NotificationBell() {
     const socket = io(window.location.origin, {
       path: '/socket.io',
       transports: ['websocket', 'polling'],
-    });
-
-    socket.on('connect', () => {
-      socket.emit('auth', user.id);
+      auth: {
+        token: useAuthStore.getState().accessToken,
+      },
     });
 
     socket.on('notification', (notif: Notification) => {
