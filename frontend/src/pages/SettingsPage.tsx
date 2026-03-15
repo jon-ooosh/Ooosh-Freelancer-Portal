@@ -471,6 +471,9 @@ function SettingsContent() {
       {/* Calculator Settings — admin & manager */}
       <CostingSettingsSection />
 
+      {/* Email Service section — admin only */}
+      {currentUser?.role === 'admin' && <EmailSection />}
+
       {/* HireHop Sync section — admin only */}
       {currentUser?.role === 'admin' && <HireHopSection />}
 
@@ -498,6 +501,142 @@ interface SyncPreview {
   newPeople: number;
   newOrganisations: number;
   sample: Array<{ name: string; company: string; email: string }>;
+}
+
+function EmailSection() {
+  const [status, setStatus] = useState<{ configured: boolean; mode: string; templates: string[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [toggling, setToggling] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    loadStatus();
+  }, []);
+
+  async function loadStatus() {
+    try {
+      const data = await api.get<{ configured: boolean; mode: string; templates: string[] }>('/email/status');
+      setStatus(data);
+    } catch {
+      setStatus(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function toggleMode() {
+    if (!status) return;
+    const newMode = status.mode === 'test' ? 'live' : 'test';
+    const confirmMsg = newMode === 'live'
+      ? 'Switch to LIVE mode? Emails will be sent to real recipients.'
+      : 'Switch to TEST mode? All emails will be redirected to the test address.';
+    if (!confirm(confirmMsg)) return;
+
+    setToggling(true);
+    setError('');
+    setMessage('');
+    try {
+      await api.put('/email/mode', { mode: newMode });
+      setStatus({ ...status, mode: newMode });
+      setMessage(`Email mode changed to ${newMode.toUpperCase()}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to change mode');
+    } finally {
+      setToggling(false);
+    }
+  }
+
+  async function sendTestEmail() {
+    setTesting(true);
+    setError('');
+    setMessage('');
+    try {
+      await api.post('/email/test', {});
+      setMessage('Test email sent successfully. Check your inbox.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send test email');
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="mb-8">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Email Service</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Transactional email via Google Workspace SMTP.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {status?.configured && (
+            <>
+              <button
+                onClick={sendTestEmail}
+                disabled={testing}
+                className="px-4 py-2 text-sm border border-gray-300 rounded font-medium hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                {testing ? 'Sending...' : 'Send Test'}
+              </button>
+              <button
+                onClick={toggleMode}
+                disabled={toggling}
+                className={`px-4 py-2 text-sm rounded font-medium transition-colors disabled:opacity-50 ${
+                  status.mode === 'live'
+                    ? 'bg-green-600 text-white hover:bg-green-700'
+                    : 'bg-amber-500 text-white hover:bg-amber-600'
+                }`}
+              >
+                {toggling ? 'Switching...' : status.mode === 'live' ? 'LIVE' : 'TEST MODE'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {message && (
+        <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm mb-4">
+          {message}
+        </div>
+      )}
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm mb-4">
+          {error}
+        </div>
+      )}
+
+      {!status?.configured ? (
+        <div className="bg-amber-50 border border-amber-200 text-amber-700 px-4 py-3 rounded-lg text-sm">
+          SMTP not configured. Add <code className="bg-amber-100 px-1 rounded">SMTP_USER</code> and <code className="bg-amber-100 px-1 rounded">SMTP_PASS</code> to the server .env file.
+        </div>
+      ) : (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Status</p>
+              <p className="text-sm font-medium text-green-600">Connected</p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Mode</p>
+              <p className={`text-sm font-medium ${status.mode === 'live' ? 'text-green-600' : 'text-amber-600'}`}>
+                {status.mode === 'live' ? 'Live — sending to real recipients' : 'Test — all emails redirected'}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Templates</p>
+              <p className="text-sm font-medium text-gray-900">{status.templates.length} registered</p>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function HireHopSection() {

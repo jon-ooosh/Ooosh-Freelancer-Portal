@@ -8,7 +8,7 @@
  * - Respects HireHop rate limits (max 60/min, 3/sec → 5s delay per page as recommended)
  */
 import { query, getClient } from '../config/database';
-import { hireHopGet } from '../config/hirehop';
+import { hhBroker } from './hirehop-broker';
 
 // HireHop status code → human-readable name
 const HH_JOB_STATUS_MAP: Record<number, string> = {
@@ -77,12 +77,12 @@ export async function fetchActiveHireHopJobs(): Promise<HHJobRow[]> {
   const statusFilter = HH_ACTIVE_STATUSES.join(',');
 
   while (true) {
-    const result = await hireHopGet<HHSearchResponse>('/php_functions/search_list.php', {
+    const result = await hhBroker.get<HHSearchResponse>('/php_functions/search_list.php', {
       jobs: 1,
       status: statusFilter,
       page,
       rows,
-    });
+    }, { priority: 'low', cacheTTL: 300 });
 
     if (!result.success || !result.data) {
       throw new Error(`Failed to fetch HireHop jobs page ${page}: ${result.error}`);
@@ -103,8 +103,8 @@ export async function fetchActiveHireHopJobs(): Promise<HHJobRow[]> {
     if (page >= data.total) break;
     page++;
 
-    // Rate limit: 5 second delay between pages as recommended by HH docs
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    // Broker handles rate limiting, keep delay between pages for HH recommendation
+    await new Promise(resolve => setTimeout(resolve, 2000));
   }
 
   return allJobs;

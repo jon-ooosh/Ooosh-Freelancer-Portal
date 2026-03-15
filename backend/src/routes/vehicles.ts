@@ -16,7 +16,8 @@ import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { query } from '../config/database';
-import { hireHopGet, hireHopPost, isHireHopConfigured } from '../config/hirehop';
+import { isHireHopConfigured } from '../config/hirehop';
+import { hhBroker } from '../services/hirehop-broker';
 import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured } from '../config/r2';
 
 const router = Router();
@@ -1124,9 +1125,9 @@ router.post('/hirehop', async (req: AuthRequest, res: Response) => {
 
     let result;
     if (method === 'POST') {
-      result = await hireHopPost(endpoint, params || {}, true);
+      result = await hhBroker.post(endpoint, params || {}, { priority: 'high' });
     } else {
-      result = await hireHopGet(endpoint, params || {});
+      result = await hhBroker.get(endpoint, params || {}, { priority: 'high' });
     }
 
     if (!result.success) {

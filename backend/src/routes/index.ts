@@ -16,6 +16,7 @@ import hirehopRouter from './hirehop';
 import pipelineRouter from './pipeline';
 import quotesRouter from './quotes';
 import vehiclesRouter from './vehicles';
+import emailRouter from './email';
 
 const router = Router();
 
@@ -36,5 +37,6 @@ router.use('/hirehop', hirehopRouter);
 router.use('/pipeline', pipelineRouter);
 router.use('/quotes', quotesRouter);
 router.use('/vehicles', vehiclesRouter);
+router.use('/email', emailRouter);
 
 export default router;
