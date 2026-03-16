@@ -29,10 +29,17 @@ const app = express();
 const httpServer = createServer(app);
 const PORT = process.env.PORT || 3001;
 
+// CORS origins — OP frontend + hire form Netlify app
+const CORS_ORIGINS = [
+  process.env.FRONTEND_URL || 'http://localhost:5173',
+  'https://ooosh-driver-verification.netlify.app',
+  ...(process.env.EXTRA_CORS_ORIGINS ? process.env.EXTRA_CORS_ORIGINS.split(',') : []),
+];
+
 // Socket.io setup
 const io = new SocketServer(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+    origin: CORS_ORIGINS,
     methods: ['GET', 'POST'],
   },
 });
@@ -40,7 +47,7 @@ const io = new SocketServer(httpServer, {
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  origin: CORS_ORIGINS,
   credentials: true,
 }));
 app.use(morgan('short'));
