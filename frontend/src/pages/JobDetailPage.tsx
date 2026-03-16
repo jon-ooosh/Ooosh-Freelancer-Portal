@@ -181,7 +181,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'details'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'prep' | 'details'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -534,7 +534,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['overview', 'timeline', 'transport', 'files', 'details'] as const).map((tab) => (
+          {(['overview', 'prep', 'timeline', 'transport', 'files', 'details'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -545,8 +545,9 @@ export default function JobDetailPage() {
               }`}
             >
               {tab === 'overview' ? 'Overview' :
+               tab === 'prep' ? 'Prep Checklist' :
                tab === 'timeline' ? 'Activity Timeline' :
-               tab === 'transport' ? `🚗 Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
+               tab === 'transport' ? `Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
                tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
                'Full Details'}
             </button>
@@ -689,6 +690,11 @@ export default function JobDetailPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* Prep Checklist Tab (Prototype) */}
+      {activeTab === 'prep' && (
+        <JobPrepChecklist jobId={id || ''} jobNumber={job.hh_job_number} />
       )}
 
       {/* Timeline Tab */}
@@ -1416,6 +1422,349 @@ function FileViewerModal({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Prep Checklist (Prototype) ───────────────────────────────────────────
+
+// Requirement types that can be added to a job
+const REQUIREMENT_TYPES = [
+  { type: 'transport', label: 'Transport / Delivery', icon: '🚛', hasSteps: false },
+  { type: 'crew', label: 'Crew', icon: '👥', hasSteps: false },
+  { type: 'vehicle', label: 'Vehicle (Self-Drive)', icon: '🚐', hasSteps: false },
+  { type: 'hire_forms', label: 'Driver Hire Forms', icon: '📋', hasSteps: false },
+  { type: 'excess', label: 'Insurance Excess', icon: '💰', hasSteps: false },
+  { type: 'backline', label: 'Backline', icon: '🎸', hasSteps: false },
+  { type: 'merch', label: 'Merch Receiving', icon: '📦', hasSteps: true,
+    steps: ['Request sent', 'Some received', 'All received', 'Notified client', 'Given to client'] },
+  { type: 'carnet', label: 'Carnet', icon: '📄', hasSteps: true,
+    steps: ['Applied', 'Received', 'Items listed', 'Stamped out'] },
+  { type: 'rehearsal', label: 'Rehearsal Space', icon: '🎵', hasSteps: true,
+    steps: ['Sourcing', 'Booked', 'Confirmed with client'] },
+  { type: 'accommodation', label: 'Accommodation', icon: '🏨', hasSteps: true,
+    steps: ['Sourcing', 'Booked', 'Confirmed'] },
+  { type: 'permits', label: 'Special Permits', icon: '📑', hasSteps: false },
+  { type: 'stage_plot', label: 'Stage Plot / Tech Spec', icon: '📐', hasSteps: true,
+    steps: ['Requested', 'Received', 'Reviewed'] },
+] as const;
+
+// Job type templates
+const JOB_TEMPLATES = [
+  { name: 'Self-Drive Van Hire', types: ['vehicle', 'hire_forms', 'excess'] },
+  { name: 'Crewed Delivery', types: ['transport', 'crew', 'vehicle'] },
+  { name: 'Festival w/ Backline', types: ['transport', 'crew', 'backline', 'stage_plot', 'merch'] },
+  { name: 'Tour Support', types: ['transport', 'crew', 'backline', 'accommodation'] },
+] as const;
+
+interface PrepRequirement {
+  id: string;
+  type: string;
+  label: string;
+  icon: string;
+  status: 'not_started' | 'in_progress' | 'done' | 'blocked';
+  currentStep?: string;
+  steps?: string[];
+  notes?: string;
+  assignedTo?: string;
+}
+
+const PREP_STATUS_CONFIG: Record<string, { label: string; colour: string; bg: string }> = {
+  not_started: { label: 'Not Started', colour: 'text-gray-500', bg: 'bg-gray-100' },
+  in_progress: { label: 'In Progress', colour: 'text-amber-700', bg: 'bg-amber-100' },
+  done: { label: 'Done', colour: 'text-green-700', bg: 'bg-green-100' },
+  blocked: { label: 'Blocked', colour: 'text-red-700', bg: 'bg-red-100' },
+};
+
+function JobPrepChecklist({ jobId, jobNumber }: { jobId: string; jobNumber: number | null }) {
+  const [requirements, setRequirements] = useState<PrepRequirement[]>([]);
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const [showTemplateMenu, setShowTemplateMenu] = useState(false);
+
+  // Seed with some dummy data based on job number for demo
+  useEffect(() => {
+    if (!jobNumber) return;
+    const num = jobNumber;
+    const initial: PrepRequirement[] = [];
+
+    // Simulate: some jobs have pre-existing requirements
+    if (num % 3 !== 0) {
+      initial.push({
+        id: `${jobId}-transport`, type: 'transport', label: 'Transport / Delivery', icon: '🚛',
+        status: num % 5 === 0 ? 'done' : 'in_progress',
+        notes: num % 5 === 0 ? '2 quotes confirmed' : '1 draft quote',
+      });
+    }
+    if (num % 2 === 0) {
+      initial.push({
+        id: `${jobId}-crew`, type: 'crew', label: 'Crew', icon: '👥',
+        status: num % 7 === 0 ? 'done' : 'not_started',
+        notes: num % 7 === 0 ? '3/3 confirmed' : undefined,
+        assignedTo: 'Jon',
+      });
+    }
+    if (num % 4 === 1) {
+      initial.push(
+        { id: `${jobId}-vehicle`, type: 'vehicle', label: 'Vehicle (Self-Drive)', icon: '🚐',
+          status: 'in_progress', notes: 'RX22 SXL allocated' },
+        { id: `${jobId}-hire`, type: 'hire_forms', label: 'Driver Hire Forms', icon: '📋',
+          status: 'not_started' },
+        { id: `${jobId}-excess`, type: 'excess', label: 'Insurance Excess', icon: '💰',
+          status: num % 5 === 0 ? 'blocked' : 'not_started',
+          notes: num % 5 === 0 ? 'Awaiting client payment' : undefined },
+      );
+    }
+    if (num % 5 === 2) {
+      initial.push({
+        id: `${jobId}-backline`, type: 'backline', label: 'Backline', icon: '🎸',
+        status: 'in_progress', assignedTo: 'Tom',
+      });
+    }
+    if (num % 7 === 3) {
+      initial.push({
+        id: `${jobId}-merch`, type: 'merch', label: 'Merch Receiving', icon: '📦',
+        status: 'in_progress',
+        steps: ['Request sent', 'Some received', 'All received', 'Notified client', 'Given to client'],
+        currentStep: 'Some received',
+      });
+    }
+    setRequirements(initial);
+  }, [jobId, jobNumber]);
+
+  function addRequirement(typeKey: string) {
+    const typeDef = REQUIREMENT_TYPES.find(t => t.type === typeKey);
+    if (!typeDef) return;
+    if (requirements.some(r => r.type === typeKey)) return; // already added
+
+    setRequirements(prev => [...prev, {
+      id: `${jobId}-${typeKey}-${Date.now()}`,
+      type: typeDef.type,
+      label: typeDef.label,
+      icon: typeDef.icon,
+      status: 'not_started',
+      steps: typeDef.hasSteps ? [...typeDef.steps] : undefined,
+    }]);
+    setShowAddMenu(false);
+  }
+
+  function applyTemplate(templateIdx: number) {
+    const template = JOB_TEMPLATES[templateIdx];
+    if (!template) return;
+    for (const typeKey of template.types) {
+      if (!requirements.some(r => r.type === typeKey)) {
+        addRequirement(typeKey);
+      }
+    }
+    setShowTemplateMenu(false);
+  }
+
+  function updateStatus(reqId: string, newStatus: PrepRequirement['status']) {
+    setRequirements(prev => prev.map(r =>
+      r.id === reqId ? { ...r, status: newStatus } : r
+    ));
+  }
+
+  function advanceStep(reqId: string) {
+    setRequirements(prev => prev.map(r => {
+      if (r.id !== reqId || !r.steps || !r.currentStep) return r;
+      const idx = r.steps.indexOf(r.currentStep);
+      if (idx < r.steps.length - 1) {
+        const nextStep = r.steps[idx + 1];
+        return {
+          ...r,
+          currentStep: nextStep,
+          status: idx + 1 === r.steps.length - 1 ? 'done' : 'in_progress',
+        };
+      }
+      return r;
+    }));
+  }
+
+  function removeRequirement(reqId: string) {
+    setRequirements(prev => prev.filter(r => r.id !== reqId));
+  }
+
+  const doneCount = requirements.filter(r => r.status === 'done').length;
+  const blockedCount = requirements.filter(r => r.status === 'blocked').length;
+  const totalCount = requirements.length;
+  const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
+
+  // Items not yet added
+  const availableTypes = REQUIREMENT_TYPES.filter(t => !requirements.some(r => r.type === t.type));
+
+  return (
+    <div className="space-y-6">
+      {/* Prototype banner */}
+      <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-800">
+        <strong>Prototype</strong> — This is a UI demo of the Job Requirements system. Changes are local only and won't persist.
+        Hover over items to see actions. Click status badges to cycle through states.
+      </div>
+
+      {/* Header with progress */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <h3 className="text-lg font-semibold text-gray-900">Prep Checklist</h3>
+          {totalCount > 0 && (
+            <div className="flex items-center gap-2">
+              <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full transition-all ${blockedCount > 0 ? 'bg-red-500' : progressPct === 100 ? 'bg-green-500' : 'bg-amber-400'}`}
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+              <span className="text-sm text-gray-500">
+                {doneCount}/{totalCount}
+                {blockedCount > 0 && <span className="text-red-600 ml-1">({blockedCount} blocked)</span>}
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* Template button */}
+          <div className="relative">
+            <button
+              onClick={() => { setShowTemplateMenu(!showTemplateMenu); setShowAddMenu(false); }}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700"
+            >
+              Apply Template
+            </button>
+            {showTemplateMenu && (
+              <div className="absolute right-0 mt-1 w-56 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1">
+                {JOB_TEMPLATES.map((tmpl, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => applyTemplate(idx)}
+                    className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50"
+                  >
+                    <span className="font-medium">{tmpl.name}</span>
+                    <span className="text-gray-400 ml-2 text-xs">({tmpl.types.length} items)</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Add requirement button */}
+          <div className="relative">
+            <button
+              onClick={() => { setShowAddMenu(!showAddMenu); setShowTemplateMenu(false); }}
+              className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700"
+            >
+              + Add Requirement
+            </button>
+            {showAddMenu && availableTypes.length > 0 && (
+              <div className="absolute right-0 mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1 max-h-72 overflow-y-auto">
+                {availableTypes.map((t) => (
+                  <button
+                    key={t.type}
+                    onClick={() => addRequirement(t.type)}
+                    className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+                  >
+                    <span>{t.icon}</span>
+                    <span>{t.label}</span>
+                    {t.hasSteps && <span className="text-xs text-gray-400 ml-auto">{t.steps.length} steps</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Requirements list */}
+      {requirements.length === 0 ? (
+        <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
+          <p className="text-gray-500 text-sm">No requirements added yet.</p>
+          <p className="text-gray-400 text-xs mt-1">Click "Apply Template" or "Add Requirement" to get started.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {requirements.map((req) => {
+            const statusConfig = PREP_STATUS_CONFIG[req.status];
+            return (
+              <div
+                key={req.id}
+                className={`group bg-white rounded-xl border ${req.status === 'blocked' ? 'border-red-200' : req.status === 'done' ? 'border-green-200' : 'border-gray-200'} p-4 transition-all hover:shadow-sm`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className="text-lg">{req.icon}</span>
+                    <div>
+                      <span className={`font-medium ${req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                        {req.label}
+                      </span>
+                      {req.notes && (
+                        <span className="text-xs text-gray-400 ml-2">{req.notes}</span>
+                      )}
+                      {req.assignedTo && (
+                        <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded ml-2">{req.assignedTo}</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {/* Step progress for multi-step requirements */}
+                    {req.steps && req.currentStep && (
+                      <div className="flex items-center gap-1 mr-2">
+                        <span className="text-xs text-gray-500">{req.currentStep}</span>
+                        <button
+                          onClick={() => advanceStep(req.id)}
+                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium ml-1"
+                          title="Advance to next step"
+                        >
+                          Next &rarr;
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Status badge — clickable to cycle */}
+                    <button
+                      onClick={() => {
+                        const order: PrepRequirement['status'][] = ['not_started', 'in_progress', 'done', 'blocked'];
+                        const idx = order.indexOf(req.status);
+                        updateStatus(req.id, order[(idx + 1) % order.length]);
+                      }}
+                      className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${statusConfig.bg} ${statusConfig.colour} cursor-pointer hover:opacity-80 transition-opacity`}
+                      title="Click to change status"
+                    >
+                      {statusConfig.label}
+                    </button>
+
+                    {/* Remove button (visible on hover) */}
+                    <button
+                      onClick={() => removeRequirement(req.id)}
+                      className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all ml-1"
+                      title="Remove requirement"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Multi-step progress bar */}
+                {req.steps && (
+                  <div className="mt-3 flex gap-1">
+                    {req.steps.map((step, i) => {
+                      const currentIdx = req.currentStep ? req.steps!.indexOf(req.currentStep) : -1;
+                      const isComplete = i <= currentIdx;
+                      return (
+                        <div
+                          key={step}
+                          className={`flex-1 h-1.5 rounded-full ${isComplete ? 'bg-green-400' : 'bg-gray-200'} transition-colors`}
+                          title={step}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
