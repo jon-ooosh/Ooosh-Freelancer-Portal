@@ -181,7 +181,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'prep' | 'details'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'prep' | 'details'>('prep');
   const [showCalculator, setShowCalculator] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -692,9 +692,9 @@ export default function JobDetailPage() {
         </div>
       )}
 
-      {/* Prep Checklist Tab (Prototype) */}
+      {/* Prep Checklist Tab */}
       {activeTab === 'prep' && (
-        <JobPrepChecklist jobId={id || ''} jobNumber={job.hh_job_number} />
+        <JobPrepChecklist jobId={id || ''} />
       )}
 
       {/* Timeline Tab */}
@@ -1426,162 +1426,142 @@ function FileViewerModal({
   );
 }
 
-// ── Prep Checklist (Prototype) ───────────────────────────────────────────
+// ── Prep Checklist (API-backed) ──────────────────────────────────────────
 
-// Requirement types that can be added to a job
-const REQUIREMENT_TYPES = [
-  { type: 'transport', label: 'Transport / Delivery', icon: '🚛', hasSteps: false },
-  { type: 'crew', label: 'Crew', icon: '👥', hasSteps: false },
-  { type: 'vehicle', label: 'Vehicle (Self-Drive)', icon: '🚐', hasSteps: false },
-  { type: 'hire_forms', label: 'Driver Hire Forms', icon: '📋', hasSteps: false },
-  { type: 'excess', label: 'Insurance Excess', icon: '💰', hasSteps: false },
-  { type: 'backline', label: 'Backline', icon: '🎸', hasSteps: false },
-  { type: 'merch', label: 'Merch Receiving', icon: '📦', hasSteps: true,
-    steps: ['Request sent', 'Some received', 'All received', 'Notified client', 'Given to client'] },
-  { type: 'carnet', label: 'Carnet', icon: '📄', hasSteps: true,
-    steps: ['Applied', 'Received', 'Items listed', 'Stamped out'] },
-  { type: 'rehearsal', label: 'Rehearsal Space', icon: '🎵', hasSteps: true,
-    steps: ['Sourcing', 'Booked', 'Confirmed with client'] },
-  { type: 'accommodation', label: 'Accommodation', icon: '🏨', hasSteps: true,
-    steps: ['Sourcing', 'Booked', 'Confirmed'] },
-  { type: 'permits', label: 'Special Permits', icon: '📑', hasSteps: false },
-  { type: 'stage_plot', label: 'Stage Plot / Tech Spec', icon: '📐', hasSteps: true,
-    steps: ['Requested', 'Received', 'Reviewed'] },
-] as const;
-
-// Job type templates
-const JOB_TEMPLATES = [
-  { name: 'Self-Drive Van Hire', types: ['vehicle', 'hire_forms', 'excess'] },
-  { name: 'Crewed Delivery', types: ['transport', 'crew', 'vehicle'] },
-  { name: 'Festival w/ Backline', types: ['transport', 'crew', 'backline', 'stage_plot', 'merch'] },
-  { name: 'Tour Support', types: ['transport', 'crew', 'backline', 'accommodation'] },
-] as const;
-
-interface PrepRequirement {
-  id: string;
+interface RequirementTypeDef {
   type: string;
   label: string;
   icon: string;
-  status: 'not_started' | 'in_progress' | 'done' | 'blocked';
-  currentStep?: string;
-  steps?: string[];
-  notes?: string;
-  assignedTo?: string;
+  steps: string[] | null;
+  sort_order: number;
 }
 
-const PREP_STATUS_CONFIG: Record<string, { label: string; colour: string; bg: string }> = {
-  not_started: { label: 'Not Started', colour: 'text-gray-500', bg: 'bg-gray-100' },
-  in_progress: { label: 'In Progress', colour: 'text-amber-700', bg: 'bg-amber-100' },
-  done: { label: 'Done', colour: 'text-green-700', bg: 'bg-green-100' },
-  blocked: { label: 'Blocked', colour: 'text-red-700', bg: 'bg-red-100' },
+interface RequirementTemplate {
+  id: string;
+  name: string;
+  description: string | null;
+  requirement_types: string[];
+}
+
+interface JobRequirement {
+  id: string;
+  job_id: string;
+  requirement_type: string;
+  status: 'not_started' | 'in_progress' | 'done' | 'blocked';
+  current_step: string | null;
+  custom_label: string | null;
+  notes: string | null;
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  due_date: string | null;
+  is_auto: boolean;
+  source: string;
+  type_label: string;
+  type_icon: string;
+  type_steps: string[] | null;
+  sort_order: number;
+}
+
+const PREP_STATUS_CONFIG: Record<string, { label: string; colour: string; bg: string; border: string }> = {
+  not_started: { label: 'Not Started', colour: 'text-gray-600', bg: 'bg-gray-100', border: 'border-gray-200' },
+  in_progress: { label: 'In Progress', colour: 'text-amber-700', bg: 'bg-amber-100', border: 'border-amber-200' },
+  done:        { label: 'Done',        colour: 'text-green-700', bg: 'bg-green-100', border: 'border-green-200' },
+  blocked:     { label: 'Blocked',     colour: 'text-red-700',   bg: 'bg-red-100',   border: 'border-red-200' },
 };
 
-function JobPrepChecklist({ jobId, jobNumber }: { jobId: string; jobNumber: number | null }) {
-  const [requirements, setRequirements] = useState<PrepRequirement[]>([]);
+const PREP_STATUS_ORDER: JobRequirement['status'][] = ['not_started', 'in_progress', 'done', 'blocked'];
+
+function JobPrepChecklist({ jobId }: { jobId: string }) {
+  const [requirements, setRequirements] = useState<JobRequirement[]>([]);
+  const [types, setTypes] = useState<RequirementTypeDef[]>([]);
+  const [templates, setTemplates] = useState<RequirementTemplate[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [showTemplateMenu, setShowTemplateMenu] = useState(false);
+  const [showStatusMenu, setShowStatusMenu] = useState<string | null>(null);
 
-  // Seed with some dummy data based on job number for demo
   useEffect(() => {
-    if (!jobNumber) return;
-    const num = jobNumber;
-    const initial: PrepRequirement[] = [];
+    loadAll();
+  }, [jobId]);
 
-    // Simulate: some jobs have pre-existing requirements
-    if (num % 3 !== 0) {
-      initial.push({
-        id: `${jobId}-transport`, type: 'transport', label: 'Transport / Delivery', icon: '🚛',
-        status: num % 5 === 0 ? 'done' : 'in_progress',
-        notes: num % 5 === 0 ? '2 quotes confirmed' : '1 draft quote',
-      });
+  async function loadAll() {
+    setLoading(true);
+    try {
+      const [reqRes, typesRes, tmplRes] = await Promise.all([
+        api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}`),
+        api.get<{ data: RequirementTypeDef[] }>('/requirements/types'),
+        api.get<{ data: RequirementTemplate[] }>('/requirements/templates'),
+      ]);
+      setRequirements(reqRes.data);
+      setTypes(typesRes.data);
+      setTemplates(tmplRes.data);
+    } catch (err) {
+      console.error('Failed to load requirements:', err);
+    } finally {
+      setLoading(false);
     }
-    if (num % 2 === 0) {
-      initial.push({
-        id: `${jobId}-crew`, type: 'crew', label: 'Crew', icon: '👥',
-        status: num % 7 === 0 ? 'done' : 'not_started',
-        notes: num % 7 === 0 ? '3/3 confirmed' : undefined,
-        assignedTo: 'Jon',
-      });
-    }
-    if (num % 4 === 1) {
-      initial.push(
-        { id: `${jobId}-vehicle`, type: 'vehicle', label: 'Vehicle (Self-Drive)', icon: '🚐',
-          status: 'in_progress', notes: 'RX22 SXL allocated' },
-        { id: `${jobId}-hire`, type: 'hire_forms', label: 'Driver Hire Forms', icon: '📋',
-          status: 'not_started' },
-        { id: `${jobId}-excess`, type: 'excess', label: 'Insurance Excess', icon: '💰',
-          status: num % 5 === 0 ? 'blocked' : 'not_started',
-          notes: num % 5 === 0 ? 'Awaiting client payment' : undefined },
-      );
-    }
-    if (num % 5 === 2) {
-      initial.push({
-        id: `${jobId}-backline`, type: 'backline', label: 'Backline', icon: '🎸',
-        status: 'in_progress', assignedTo: 'Tom',
-      });
-    }
-    if (num % 7 === 3) {
-      initial.push({
-        id: `${jobId}-merch`, type: 'merch', label: 'Merch Receiving', icon: '📦',
-        status: 'in_progress',
-        steps: ['Request sent', 'Some received', 'All received', 'Notified client', 'Given to client'],
-        currentStep: 'Some received',
-      });
-    }
-    setRequirements(initial);
-  }, [jobId, jobNumber]);
-
-  function addRequirement(typeKey: string) {
-    const typeDef = REQUIREMENT_TYPES.find(t => t.type === typeKey);
-    if (!typeDef) return;
-    if (requirements.some(r => r.type === typeKey)) return; // already added
-
-    setRequirements(prev => [...prev, {
-      id: `${jobId}-${typeKey}-${Date.now()}`,
-      type: typeDef.type,
-      label: typeDef.label,
-      icon: typeDef.icon,
-      status: 'not_started',
-      steps: typeDef.hasSteps ? [...typeDef.steps] : undefined,
-    }]);
-    setShowAddMenu(false);
   }
 
-  function applyTemplate(templateIdx: number) {
-    const template = JOB_TEMPLATES[templateIdx];
-    if (!template) return;
-    for (const typeKey of template.types) {
-      if (!requirements.some(r => r.type === typeKey)) {
-        addRequirement(typeKey);
-      }
+  async function addRequirement(typeKey: string) {
+    try {
+      await api.post(`/requirements/job/${jobId}`, { requirement_type: typeKey });
+      await loadAll();
+      setShowAddMenu(false);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to add';
+      console.error('Failed to add requirement:', msg);
     }
-    setShowTemplateMenu(false);
   }
 
-  function updateStatus(reqId: string, newStatus: PrepRequirement['status']) {
-    setRequirements(prev => prev.map(r =>
-      r.id === reqId ? { ...r, status: newStatus } : r
-    ));
+  async function applyTemplate(templateId: string) {
+    try {
+      await api.post(`/requirements/job/${jobId}/template/${templateId}`, {});
+      await loadAll();
+      setShowTemplateMenu(false);
+    } catch (err) {
+      console.error('Failed to apply template:', err);
+    }
   }
 
-  function advanceStep(reqId: string) {
-    setRequirements(prev => prev.map(r => {
-      if (r.id !== reqId || !r.steps || !r.currentStep) return r;
-      const idx = r.steps.indexOf(r.currentStep);
-      if (idx < r.steps.length - 1) {
-        const nextStep = r.steps[idx + 1];
-        return {
-          ...r,
-          currentStep: nextStep,
-          status: idx + 1 === r.steps.length - 1 ? 'done' : 'in_progress',
-        };
-      }
-      return r;
-    }));
+  async function updateRequirement(reqId: string, updates: Record<string, unknown>) {
+    try {
+      await api.patch(`/requirements/${reqId}`, updates);
+      // Optimistic update
+      setRequirements(prev => prev.map(r =>
+        r.id === reqId ? { ...r, ...updates, updated_at: new Date().toISOString() } as JobRequirement : r
+      ));
+    } catch (err) {
+      console.error('Failed to update requirement:', err);
+      await loadAll(); // Revert on error
+    }
   }
 
-  function removeRequirement(reqId: string) {
-    setRequirements(prev => prev.filter(r => r.id !== reqId));
+  async function changeStatus(reqId: string, newStatus: JobRequirement['status']) {
+    await updateRequirement(reqId, { status: newStatus });
+    setShowStatusMenu(null);
+  }
+
+  async function advanceStep(reqId: string) {
+    const req = requirements.find(r => r.id === reqId);
+    if (!req?.type_steps || !req.current_step) return;
+    const idx = req.type_steps.indexOf(req.current_step);
+    if (idx < req.type_steps.length - 1) {
+      const nextStep = req.type_steps[idx + 1];
+      const isLast = idx + 1 === req.type_steps.length - 1;
+      await updateRequirement(reqId, {
+        current_step: nextStep,
+        status: isLast ? 'done' : 'in_progress',
+      });
+    }
+  }
+
+  async function removeRequirement(reqId: string) {
+    try {
+      await api.delete(`/requirements/${reqId}`);
+      setRequirements(prev => prev.filter(r => r.id !== reqId));
+    } catch (err) {
+      console.error('Failed to remove requirement:', err);
+    }
   }
 
   const doneCount = requirements.filter(r => r.status === 'done').length;
@@ -1589,17 +1569,14 @@ function JobPrepChecklist({ jobId, jobNumber }: { jobId: string; jobNumber: numb
   const totalCount = requirements.length;
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
 
-  // Items not yet added
-  const availableTypes = REQUIREMENT_TYPES.filter(t => !requirements.some(r => r.type === t.type));
+  const availableTypes = types.filter(t => t.type === 'custom' || !requirements.some(r => r.requirement_type === t.type));
+
+  if (loading) {
+    return <div className="text-center text-sm text-gray-500 py-8">Loading prep checklist...</div>;
+  }
 
   return (
     <div className="space-y-6">
-      {/* Prototype banner */}
-      <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-800">
-        <strong>Prototype</strong> — This is a UI demo of the Job Requirements system. Changes are local only and won't persist.
-        Hover over items to see actions. Click status badges to cycle through states.
-      </div>
-
       {/* Header with progress */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
@@ -1630,15 +1607,17 @@ function JobPrepChecklist({ jobId, jobNumber }: { jobId: string; jobNumber: numb
               Apply Template
             </button>
             {showTemplateMenu && (
-              <div className="absolute right-0 mt-1 w-56 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1">
-                {JOB_TEMPLATES.map((tmpl, idx) => (
+              <div className="absolute right-0 mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1">
+                {templates.map((tmpl) => (
                   <button
-                    key={idx}
-                    onClick={() => applyTemplate(idx)}
+                    key={tmpl.id}
+                    onClick={() => applyTemplate(tmpl.id)}
                     className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50"
                   >
                     <span className="font-medium">{tmpl.name}</span>
-                    <span className="text-gray-400 ml-2 text-xs">({tmpl.types.length} items)</span>
+                    {tmpl.description && (
+                      <span className="text-gray-400 ml-2 text-xs">{tmpl.description}</span>
+                    )}
                   </button>
                 ))}
               </div>
@@ -1663,7 +1642,7 @@ function JobPrepChecklist({ jobId, jobNumber }: { jobId: string; jobNumber: numb
                   >
                     <span>{t.icon}</span>
                     <span>{t.label}</span>
-                    {t.hasSteps && <span className="text-xs text-gray-400 ml-auto">{t.steps.length} steps</span>}
+                    {t.steps && <span className="text-xs text-gray-400 ml-auto">{t.steps.length} steps</span>}
                   </button>
                 ))}
               </div>
@@ -1681,55 +1660,78 @@ function JobPrepChecklist({ jobId, jobNumber }: { jobId: string; jobNumber: numb
       ) : (
         <div className="space-y-2">
           {requirements.map((req) => {
-            const statusConfig = PREP_STATUS_CONFIG[req.status];
+            const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
+            const label = req.custom_label || req.type_label;
             return (
               <div
                 key={req.id}
-                className={`group bg-white rounded-xl border ${req.status === 'blocked' ? 'border-red-200' : req.status === 'done' ? 'border-green-200' : 'border-gray-200'} p-4 transition-all hover:shadow-sm`}
+                className={`group bg-white rounded-xl border ${statusConfig.border} p-4 transition-all hover:shadow-sm`}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <span className="text-lg">{req.icon}</span>
+                    <span className="text-lg">{req.type_icon}</span>
                     <div>
                       <span className={`font-medium ${req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
-                        {req.label}
+                        {label}
                       </span>
                       {req.notes && (
                         <span className="text-xs text-gray-400 ml-2">{req.notes}</span>
                       )}
-                      {req.assignedTo && (
-                        <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded ml-2">{req.assignedTo}</span>
+                      {req.assigned_to_name && (
+                        <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded ml-2">{req.assigned_to_name}</span>
+                      )}
+                      {req.due_date && (
+                        <span className="text-xs text-gray-400 ml-2">Due: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>
                       )}
                     </div>
                   </div>
 
                   <div className="flex items-center gap-2">
                     {/* Step progress for multi-step requirements */}
-                    {req.steps && req.currentStep && (
+                    {req.type_steps && req.current_step && (
                       <div className="flex items-center gap-1 mr-2">
-                        <span className="text-xs text-gray-500">{req.currentStep}</span>
-                        <button
-                          onClick={() => advanceStep(req.id)}
-                          className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium ml-1"
-                          title="Advance to next step"
-                        >
-                          Next &rarr;
-                        </button>
+                        <span className="text-xs text-gray-500">{req.current_step}</span>
+                        {req.type_steps.indexOf(req.current_step) < req.type_steps.length - 1 && (
+                          <button
+                            onClick={() => advanceStep(req.id)}
+                            className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium ml-1"
+                            title="Advance to next step"
+                          >
+                            Next &rarr;
+                          </button>
+                        )}
                       </div>
                     )}
 
-                    {/* Status badge — clickable to cycle */}
-                    <button
-                      onClick={() => {
-                        const order: PrepRequirement['status'][] = ['not_started', 'in_progress', 'done', 'blocked'];
-                        const idx = order.indexOf(req.status);
-                        updateStatus(req.id, order[(idx + 1) % order.length]);
-                      }}
-                      className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${statusConfig.bg} ${statusConfig.colour} cursor-pointer hover:opacity-80 transition-opacity`}
-                      title="Click to change status"
-                    >
-                      {statusConfig.label}
-                    </button>
+                    {/* Status dropdown — non-linear, any to any */}
+                    <div className="relative">
+                      <button
+                        onClick={() => setShowStatusMenu(showStatusMenu === req.id ? null : req.id)}
+                        className={`inline-flex px-3 py-1 rounded text-xs font-medium ${statusConfig.bg} ${statusConfig.colour} cursor-pointer hover:opacity-80 transition-opacity`}
+                      >
+                        {statusConfig.label}
+                        <svg className="w-3 h-3 ml-1 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+                      {showStatusMenu === req.id && (
+                        <div className="absolute right-0 mt-1 w-36 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1">
+                          {PREP_STATUS_ORDER.map((s) => {
+                            const sc = PREP_STATUS_CONFIG[s];
+                            return (
+                              <button
+                                key={s}
+                                onClick={() => changeStatus(req.id, s)}
+                                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 ${req.status === s ? 'font-bold' : ''}`}
+                              >
+                                <span className={`w-2 h-2 rounded-full ${sc.bg.replace('100', '500')}`} />
+                                {sc.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
 
                     {/* Remove button (visible on hover) */}
                     <button
@@ -1745,10 +1747,10 @@ function JobPrepChecklist({ jobId, jobNumber }: { jobId: string; jobNumber: numb
                 </div>
 
                 {/* Multi-step progress bar */}
-                {req.steps && (
+                {req.type_steps && (
                   <div className="mt-3 flex gap-1">
-                    {req.steps.map((step, i) => {
-                      const currentIdx = req.currentStep ? req.steps!.indexOf(req.currentStep) : -1;
+                    {req.type_steps.map((step: string, i: number) => {
+                      const currentIdx = req.current_step ? req.type_steps!.indexOf(req.current_step) : -1;
                       const isComplete = i <= currentIdx;
                       return (
                         <div

@@ -161,119 +161,28 @@ const SECTION_COLOURS: Record<string, string> = {
   'No date set': 'border-l-gray-300',
 };
 
-// --- Dummy requirements data for prototype ---
-// This simulates what the job_requirements system would look like.
-// In production, this would come from the API.
-interface JobRequirement {
-  type: string;
-  label: string;
-  status: 'not_started' | 'in_progress' | 'done' | 'blocked';
-  detail?: string;
+// --- Requirements progress (from API) ---
+
+interface ReqProgress {
+  total: number;
+  done: number;
+  blocked: number;
 }
 
-// Generate deterministic dummy requirements based on job number for demo purposes
-function getDummyRequirements(job: Job): JobRequirement[] {
-  const num = job.hh_job_number || 0;
-  const reqs: JobRequirement[] = [];
-
-  // Most confirmed jobs need transport
-  if (num % 3 !== 0) {
-    reqs.push({
-      type: 'transport',
-      label: 'Transport',
-      status: num % 5 === 0 ? 'done' : num % 4 === 0 ? 'in_progress' : 'not_started',
-      detail: num % 5 === 0 ? '2 quotes confirmed' : num % 4 === 0 ? '1 quote draft' : undefined,
-    });
-  }
-
-  // Some need crew
-  if (num % 2 === 0) {
-    reqs.push({
-      type: 'crew',
-      label: 'Crew',
-      status: num % 7 === 0 ? 'done' : num % 3 === 0 ? 'in_progress' : 'not_started',
-      detail: num % 7 === 0 ? '3/3 confirmed' : num % 3 === 0 ? '1/2 confirmed' : undefined,
-    });
-  }
-
-  // Self-drive jobs need vehicle + hire forms + excess
-  if (num % 4 === 1) {
-    reqs.push(
-      {
-        type: 'vehicle',
-        label: 'Vehicle',
-        status: num % 6 === 0 ? 'done' : 'in_progress',
-        detail: num % 6 === 0 ? 'RX22 SXL' : 'Allocated',
-      },
-      {
-        type: 'hire_forms',
-        label: 'Hire Forms',
-        status: num % 8 === 0 ? 'done' : 'not_started',
-      },
-      {
-        type: 'excess',
-        label: 'Excess',
-        status: num % 8 === 0 ? 'done' : num % 5 === 0 ? 'blocked' : 'not_started',
-        detail: num % 8 === 0 ? 'Collected' : num % 5 === 0 ? 'Awaiting payment' : undefined,
-      }
-    );
-  }
-
-  // Some need backline
-  if (num % 5 === 2) {
-    reqs.push({
-      type: 'backline',
-      label: 'Backline',
-      status: num % 3 === 0 ? 'done' : 'in_progress',
-    });
-  }
-
-  // Some have merch
-  if (num % 7 === 3) {
-    reqs.push({
-      type: 'merch',
-      label: 'Merch Receiving',
-      status: num % 4 === 0 ? 'done' : num % 2 === 0 ? 'in_progress' : 'not_started',
-      detail: num % 4 === 0 ? 'All received' : num % 2 === 0 ? '2/4 boxes' : undefined,
-    });
-  }
-
-  // Occasional carnet
-  if (num % 11 === 0) {
-    reqs.push({
-      type: 'carnet',
-      label: 'Carnet',
-      status: 'in_progress',
-    });
-  }
-
-  return reqs;
-}
-
-const REQ_STATUS_COLOURS: Record<string, string> = {
-  not_started: 'bg-gray-200',
-  in_progress: 'bg-amber-400',
-  done: 'bg-green-500',
-  blocked: 'bg-red-500',
-};
-
-function RequirementsProgress({ reqs }: { reqs: JobRequirement[] }) {
-  if (reqs.length === 0) return null;
-  const done = reqs.filter(r => r.status === 'done').length;
-  const blocked = reqs.filter(r => r.status === 'blocked').length;
+function RequirementsProgress({ progress }: { progress: ReqProgress | undefined }) {
+  if (!progress || progress.total === 0) return null;
+  const { total, done, blocked } = progress;
+  const pct = Math.round((done / total) * 100);
   return (
     <div className="flex items-center gap-1.5">
-      <div className="flex gap-0.5">
-        {reqs.map((r, i) => (
-          <div
-            key={i}
-            className={`w-2 h-2 rounded-full ${REQ_STATUS_COLOURS[r.status]}`}
-            title={`${r.label}: ${r.status.replace('_', ' ')}${r.detail ? ` — ${r.detail}` : ''}`}
-          />
-        ))}
+      <div className="w-16 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full ${blocked > 0 ? 'bg-red-500' : pct === 100 ? 'bg-green-500' : 'bg-amber-400'}`}
+          style={{ width: `${pct}%` }}
+        />
       </div>
-      <span className={`text-xs ${blocked > 0 ? 'text-red-600 font-medium' : done === reqs.length ? 'text-green-600' : 'text-gray-400'}`}>
-        {blocked > 0 ? `${blocked} blocked` : `${done}/${reqs.length}`}
+      <span className={`text-xs ${blocked > 0 ? 'text-red-600 font-medium' : done === total ? 'text-green-600' : 'text-gray-400'}`}>
+        {blocked > 0 ? `${blocked} blocked` : `${done}/${total}`}
       </span>
     </div>
   );
@@ -291,6 +200,7 @@ export default function JobsPage() {
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState<SyncLog | null>(null);
+  const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -300,6 +210,15 @@ export default function JobsPage() {
   useEffect(() => {
     loadLastSync();
   }, []);
+
+  // Load requirements progress when jobs change
+  useEffect(() => {
+    if (jobs.length === 0) return;
+    const jobIds = jobs.map(j => j.id);
+    api.post<{ data: Record<string, ReqProgress> }>('/requirements/bulk', { job_ids: jobIds })
+      .then(res => setReqProgress(res.data))
+      .catch(() => { /* requirements table may not exist yet */ });
+  }, [jobs]);
 
   async function loadJobs(page = 1) {
     setLoading(true);
@@ -463,7 +382,7 @@ export default function JobsPage() {
   }
 
   function renderJobRow(job: Job, showRequirements = false, happeningBadge?: { text: string; colour: string }) {
-    const reqs = showRequirements ? getDummyRequirements(job) : [];
+    const progress = showRequirements ? reqProgress[job.id] : undefined;
     return (
       <tr
         key={job.id}
@@ -489,9 +408,9 @@ export default function JobsPage() {
           <div className="text-sm font-medium text-gray-900 truncate max-w-[200px]">
             {job.job_name || '\u2014'}
           </div>
-          {showRequirements && reqs.length > 0 && (
+          {showRequirements && progress && (
             <div className="mt-0.5">
-              <RequirementsProgress reqs={reqs} />
+              <RequirementsProgress progress={progress} />
             </div>
           )}
         </td>
