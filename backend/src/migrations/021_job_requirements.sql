@@ -97,7 +97,12 @@ CREATE INDEX IF NOT EXISTS idx_job_requirements_type ON job_requirements(require
 CREATE INDEX IF NOT EXISTS idx_job_requirements_assigned ON job_requirements(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_job_requirements_due_date ON job_requirements(due_date);
 
--- Grant permissions for backup user
-GRANT SELECT ON requirement_type_definitions TO ooosh_backup;
-GRANT SELECT ON requirement_templates TO ooosh_backup;
-GRANT SELECT ON job_requirements TO ooosh_backup;
+-- Grant permissions for backup user (skip if role doesn't exist)
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ooosh_backup') THEN
+    GRANT SELECT ON requirement_type_definitions TO ooosh_backup;
+    GRANT SELECT ON requirement_templates TO ooosh_backup;
+    GRANT SELECT ON job_requirements TO ooosh_backup;
+  END IF;
+END $$;
