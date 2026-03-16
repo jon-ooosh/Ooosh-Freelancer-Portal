@@ -87,7 +87,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // Search
     if (search) {
-      conditions.push(`(j.job_name ILIKE $${paramIndex} OR j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex})`);
+      conditions.push(`(j.job_name ILIKE $${paramIndex} OR j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex} OR CAST(j.hh_job_number AS TEXT) ILIKE $${paramIndex})`);
       params.push(`%${search}%`);
       paramIndex++;
     }
