@@ -11,7 +11,7 @@
  * Uses external_id_map to track which HireHop IDs map to which Ooosh UUIDs.
  */
 import { query, getClient } from '../config/database';
-import { hireHopGet } from '../config/hirehop';
+import { hhBroker } from './hirehop-broker';
 
 // ── HireHop response types ─────────────────────────────────────────────
 
@@ -91,10 +91,10 @@ export async function fetchAllHireHopContacts(): Promise<HHContactRow[]> {
   const rows = 200; // Max allowed
 
   while (true) {
-    const result = await hireHopGet<HHListResponse>('/modules/contacts/list.php', {
+    const result = await hhBroker.get<HHListResponse>('/modules/contacts/list.php', {
       page,
       rows,
-    });
+    }, { priority: 'low', cacheTTL: 1800 });
 
     if (!result.success || !result.data) {
       throw new Error(`Failed to fetch HireHop contacts page ${page}: ${result.error}`);
@@ -108,8 +108,8 @@ export async function fetchAllHireHopContacts(): Promise<HHContactRow[]> {
     if (page >= data.total) break;
     page++;
 
-    // Rate limit: wait between pages
-    await new Promise(resolve => setTimeout(resolve, 350));
+    // Broker handles rate limiting, but keep a small delay for paging
+    await new Promise(resolve => setTimeout(resolve, 100));
   }
 
   return allContacts;

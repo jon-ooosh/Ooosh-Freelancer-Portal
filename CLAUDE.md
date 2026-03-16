@@ -43,6 +43,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── files.ts       # File uploads (R2)
 │   │   │   ├── notifications.ts
 │   │   │   ├── backups.ts     # Database backup management
+│   │   │   ├── email.ts       # Email service admin endpoints
 │   │   │   └── health.ts
 │   │   ├── config/
 │   │   │   ├── hirehop.ts     # HireHop API configuration
@@ -53,7 +54,10 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   ├── services/
 │   │   │   ├── hirehop-sync.ts             # HireHop contact sync (read-only)
 │   │   │   ├── hirehop-job-sync.ts         # HireHop job sync (read-only)
-│   │   │   └── crew-transport-calculator.ts # Delivery/collection/crewed cost engine
+│   │   │   ├── crew-transport-calculator.ts # Delivery/collection/crewed cost engine
+│   │   │   ├── hirehop-broker.ts          # Centralised HireHop API gateway (rate limit, cache, queue)
+│   │   │   ├── email-service.ts           # Email sending with SMTP, templates, test mode, audit
+│   │   │   └── email-templates/           # HTML email templates (base layout + per-template)
 │   │   ├── middleware/      # Auth, RBAC, validation (zod)
 │   │   ├── migrations/     # PostgreSQL migrations (hardcoded list in run.ts)
 │   │   │   ├── 001_foundation.sql         # Core tables: people, orgs, venues, interactions, users
@@ -66,6 +70,8 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── 008_quote_status_assignments.sql # Quote status workflow, quote_assignments (crew)
 │   │   │   ├── 009_fix_sync_log_permissions.sql # Grant permissions on sync_log for backups
 │   │   │   ├── 010_freelancer_fields.sql  # is_freelancer flag, joined date, review date, document tags
+│   │   │   ├── ...                        # 011-015: fleet vehicles, service log, V5, maintenance, details
+│   │   │   ├── 016_email_log.sql          # Email audit trail table
 │   │   │   └── run.ts                     # Migration runner (hardcoded file list — add new migrations here!)
 │   │   └── seeds/          # Demo data seeder
 │   └── .env.example        # Required env vars
@@ -349,13 +355,13 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 See docs/SPEC.md for full phased plan.
 
-## Shared Utilities (built before parallel workstreams)
+## Shared Utilities (BUILT)
 
 These are reusable services that ALL modules must use. Do NOT make direct HireHop API calls or send emails from individual modules — use the broker/service.
 
-### HireHop Request Broker
+### HireHop Request Broker ✅ COMPLETE
 
-**File:** `backend/src/services/hirehop-broker.ts` _(to be built)_
+**File:** `backend/src/services/hirehop-broker.ts`
 
 Central gateway for ALL HireHop API communication. Prevents rate limit issues when multiple users/modules hit HireHop simultaneously.
 
@@ -396,11 +402,14 @@ const results = await hhBroker.batch([
 ], { delayMs: 350 });
 ```
 
-**Migration plan:** Existing `hirehop-sync.ts` and `hirehop-job-sync.ts` should be refactored to use the broker instead of calling `hireHopGet()` directly.
+**Migration plan:** ~~Existing `hirehop-sync.ts` and `hirehop-job-sync.ts` should be refactored to use the broker instead of calling `hireHopGet()` directly.~~ DONE — both sync services and vehicles route now use broker. `config/hirehop.ts` exports (`hireHopGet`/`hireHopPost`) kept for backward compatibility, internally delegate to broker.
 
-### Email Service
+### Email Service ✅ COMPLETE
 
-**File:** `backend/src/services/email-service.ts` _(to be built)_
+**File:** `backend/src/services/email-service.ts`
+**Templates:** `backend/src/services/email-templates/`
+**Routes:** `backend/src/routes/email.ts`
+**Migration:** `016_email_log.sql` (audit trail)
 
 Centralised email sending with branded templates, test mode routing, and audit logging.
 
@@ -732,6 +741,9 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 `calculator_settings` — admin-editable pricing parameters
 `vehicles` — fleet vehicles with fuel data
 `quote_assignments` — crew/freelancer assignments per quote (role, rate, status)
+
+### Email (migration 016)
+`email_log` — audit trail for all outbound emails (template, recipient, status, mode)
 
 ## Architecture Notes
 

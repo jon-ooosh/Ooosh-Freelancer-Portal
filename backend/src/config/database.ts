@@ -41,4 +41,8 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
+export function getPool() {
+  return pool;
+}
+
 export default pool;

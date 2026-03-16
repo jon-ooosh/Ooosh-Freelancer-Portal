@@ -423,6 +423,164 @@ export interface SavedQuote {
   created_at: string;
 }
 
+// ============================================================================
+// Driver Hire & Excess types
+// These mirror the database schema from migration 017
+// ============================================================================
+
+export interface LicenceEndorsement {
+  code: string;
+  points: number;
+  date: string | null;
+  expiry: string | null;
+}
+
+export interface Driver {
+  id: string;
+  person_id: string | null;
+  full_name: string;
+  email: string | null;
+  phone: string | null;
+  date_of_birth: string | null;
+  address_line1: string | null;
+  address_line2: string | null;
+  city: string | null;
+  postcode: string | null;
+  licence_number: string | null;
+  licence_type: string | null;
+  licence_valid_from: string | null;
+  licence_valid_to: string | null;
+  licence_issue_country: string;
+  licence_points: number;
+  licence_endorsements: LicenceEndorsement[];
+  licence_restrictions: string | null;
+  dvla_check_code: string | null;
+  dvla_check_date: string | null;
+  requires_referral: boolean;
+  referral_status: string | null;
+  referral_date: string | null;
+  referral_notes: string | null;
+  source: string;
+  monday_item_id: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+}
+
+export type HireAssignmentType = 'self_drive' | 'driven' | 'delivery' | 'collection';
+export type HireAssignmentStatus = 'soft' | 'confirmed' | 'booked_out' | 'active' | 'returned' | 'cancelled';
+
+export interface VehicleHireAssignment {
+  id: string;
+  vehicle_id: string;
+  job_id: string | null;
+  hirehop_job_id: number | null;
+  hirehop_job_name: string | null;
+  driver_id: string | null;
+  assignment_type: HireAssignmentType;
+  van_requirement_index: number;
+  required_type: string | null;
+  required_gearbox: string | null;
+  status: HireAssignmentStatus;
+  status_changed_at: string;
+  hire_start: string | null;
+  hire_end: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  return_overnight: boolean | null;
+  booked_out_at: string | null;
+  booked_out_by: string | null;
+  mileage_out: number | null;
+  fuel_level_out: string | null;
+  checked_in_at: string | null;
+  checked_in_by: string | null;
+  mileage_in: number | null;
+  fuel_level_in: string | null;
+  has_damage: boolean;
+  freelancer_person_id: string | null;
+  notes: string | null;
+  ve103b_ref: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  allocated_by_name: string | null;
+  // Joined fields (populated via subquery/join)
+  vehicle_reg?: string;
+  driver_name?: string;
+  freelancer_name?: string;
+}
+
+export type ExcessStatus = 'not_required' | 'pending' | 'taken' | 'partial' | 'waived' | 'claimed' | 'reimbursed' | 'rolled_over';
+
+export interface JobExcess {
+  id: string;
+  assignment_id: string;
+  job_id: string | null;
+  hirehop_job_id: number | null;
+  excess_amount_required: number | null;
+  excess_amount_taken: number;
+  excess_calculation_basis: string | null;
+  excess_status: ExcessStatus;
+  payment_method: string | null;
+  payment_reference: string | null;
+  payment_date: string | null;
+  xero_contact_id: string | null;
+  xero_contact_name: string | null;
+  client_name: string | null;
+  claim_amount: number | null;
+  claim_date: string | null;
+  claim_notes: string | null;
+  reimbursement_amount: number | null;
+  reimbursement_date: string | null;
+  reimbursement_method: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+}
+
+export interface ExcessRule {
+  id: string;
+  rule_type: string;
+  condition_min: number | null;
+  condition_max: number | null;
+  condition_code: string | null;
+  excess_amount: number | null;
+  requires_referral: boolean;
+  description: string | null;
+  is_active: boolean;
+  sort_order: number;
+  updated_at: string;
+  updated_by: string | null;
+}
+
+export interface ClientExcessLedgerEntry {
+  xero_contact_id: string;
+  xero_contact_name: string;
+  client_name: string;
+  total_hires: number;
+  total_taken: number;
+  total_claimed: number;
+  total_reimbursed: number;
+  balance_held: number;
+  pending_count: number;
+  held_count: number;
+  rolled_over_count: number;
+}
+
+export interface DispatchCheck {
+  canDispatch: boolean;
+  blockers: DispatchBlocker[];
+}
+
+export interface DispatchBlocker {
+  type: 'excess_pending' | 'referral_pending';
+  assignmentId: string;
+  driverName: string | null;
+  vehicleReg: string | null;
+  amountRequired: number | null;
+}
+
 // API response wrappers
 export interface PaginatedResponse<T> {
   data: T[];

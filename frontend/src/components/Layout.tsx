@@ -42,6 +42,7 @@ const navItems: NavItem[] = [
       { path: '/vehicles/issues', label: 'Issues' },
       { path: '/vehicles/fleet-map', label: 'Fleet Map' },
       { path: '/vehicles/settings', label: 'Settings' },
+      { path: '/drivers', label: 'Drivers' },
     ],
   },
 ];
