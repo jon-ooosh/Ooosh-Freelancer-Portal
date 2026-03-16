@@ -83,7 +83,7 @@ router.post('/hirehop', async (req: Request, res: Response) => {
 
   // Now process asynchronously
   try {
-    const { event, data, changes, export_key } = req.body || {};
+    const { event, data, changes, export_key, job: topLevelJobId } = req.body || {};
 
     // Verify authenticity
     if (!verifyHireHopWebhook(export_key)) {
@@ -97,15 +97,15 @@ router.post('/hirehop', async (req: Request, res: Response) => {
       return;
     }
 
-    console.log(`[Webhook] HireHop event: ${event}`);
+    console.log(`[Webhook] HireHop event: ${event}, job: ${topLevelJobId || 'none'}`);
 
     let result: { success: boolean; message: string; changes?: Record<string, unknown> };
 
-    // Route to appropriate handler
+    // Route to appropriate handler — pass top-level job ID from webhook payload
     if (event.startsWith('job.status')) {
-      result = await handleJobStatusChange(data, changes);
+      result = await handleJobStatusChange(data, changes, topLevelJobId);
     } else if (event.startsWith('job.')) {
-      result = await handleJobUpdate(event, data, changes);
+      result = await handleJobUpdate(event, data, changes, topLevelJobId);
     } else if (event.startsWith('contact.')) {
       result = await handleContactChange(event, data, changes);
     } else {
@@ -131,13 +131,15 @@ router.post('/hirehop', async (req: Request, res: Response) => {
 async function handleJobStatusChange(
   data: Record<string, unknown> | undefined,
   changes: Record<string, unknown> | undefined,
+  topLevelJobId?: number | string,
 ): Promise<{ success: boolean; message: string; changes?: Record<string, unknown> }> {
-  if (!data) {
+  if (!data && !topLevelJobId) {
     return { success: false, message: 'No data in webhook payload' };
   }
 
-  // Extract job number — HireHop may send it as ID, NUMBER, or job
-  const jobNumber = data.NUMBER || data.job || data.ID;
+  // Extract job number — HireHop sends it as top-level "job" field,
+  // or sometimes inside data as ID/NUMBER
+  const jobNumber = topLevelJobId || data?.NUMBER || data?.job || data?.ID;
   if (!jobNumber) {
     return { success: false, message: 'No job number in webhook data' };
   }
@@ -153,7 +155,7 @@ async function handleJobStatusChange(
       newHHStatus = statusChange;
     }
   }
-  if (newHHStatus === null && data.STATUS !== undefined) {
+  if (newHHStatus === null && data?.STATUS !== undefined) {
     newHHStatus = Math.floor(Number(data.STATUS));
   }
 
@@ -234,12 +236,13 @@ async function handleJobUpdate(
   event: string,
   data: Record<string, unknown> | undefined,
   _changes: Record<string, unknown> | undefined,
+  topLevelJobId?: number | string,
 ): Promise<{ success: boolean; message: string }> {
-  if (!data) {
+  if (!data && !topLevelJobId) {
     return { success: false, message: 'No data in webhook payload' };
   }
 
-  const jobNumber = data.NUMBER || data.job || data.ID;
+  const jobNumber = topLevelJobId || data?.NUMBER || data?.job || data?.ID;
   if (!jobNumber) {
     return { success: true, message: 'No job number — logged only' };
   }
@@ -275,7 +278,7 @@ async function handleJobUpdate(
   };
 
   for (const [hhField, dbField] of Object.entries(fieldMap)) {
-    if (data[hhField] !== undefined) {
+    if (data && data[hhField] !== undefined) {
       updates.push(`${dbField} = $${pIdx}`);
       params.push(data[hhField] || null);
       pIdx++;
