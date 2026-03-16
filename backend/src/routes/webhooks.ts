@@ -37,10 +37,32 @@ const PIPELINE_LABELS: Record<string, string> = {
   lost: 'Lost',
 };
 
+// ── HireHop Webhook Receiver — GET for URL verification ──────────────────
+
+router.get('/hirehop', (_req: Request, res: Response) => {
+  res.status(200).json({
+    status: 'ok',
+    service: 'Ooosh Operations Platform',
+    endpoint: 'HireHop Webhook Receiver',
+    accepts: 'POST',
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ── HireHop Webhook Receiver ─────────────────────────────────────────────
 
 router.post('/hirehop', async (req: Request, res: Response) => {
   const startTime = Date.now();
+
+  // ── Raw request diagnostics (always log) ──────────────────────────────
+  console.log('[Webhook] ══════════════════════════════════════════════════');
+  console.log('[Webhook] Incoming POST /api/webhooks/hirehop');
+  console.log('[Webhook] Content-Type:', req.headers['content-type']);
+  console.log('[Webhook] User-Agent:', req.headers['user-agent']);
+  console.log('[Webhook] IP:', req.ip || req.socket.remoteAddress);
+  console.log('[Webhook] Body type:', typeof req.body, '| Keys:', req.body ? Object.keys(req.body) : 'null');
+  console.log('[Webhook] Raw body:', JSON.stringify(req.body).substring(0, 500));
+  console.log('[Webhook] ══════════════════════════════════════════════════');
 
   // Log the raw webhook immediately
   let logId: string | null = null;
