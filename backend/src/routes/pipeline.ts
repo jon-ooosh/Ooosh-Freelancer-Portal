@@ -4,6 +4,7 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 
 const router = Router();
 router.use(authenticate);
@@ -86,7 +87,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     // Search
     if (search) {
-      conditions.push(`(j.job_name ILIKE $${paramIndex} OR j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex})`);
+      conditions.push(`(j.job_name ILIKE $${paramIndex} OR j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex} OR CAST(j.hh_job_number AS TEXT) ILIKE $${paramIndex})`);
       params.push(`%${search}%`);
       paramIndex++;
     }
@@ -219,8 +220,11 @@ const createEnquirySchema = z.object({
   // Required
   client_name: z.string().min(1),
   details: z.string().min(1),              // "What they want"
-  job_date: z.string(),                    // Start date
-  job_end: z.string(),                     // End date
+  // Dates (all optional — enquiry may not have dates yet)
+  out_date: z.string().optional().nullable(),      // Outgoing / equipment leaves
+  job_date: z.string().optional().nullable(),      // Job start
+  job_end: z.string().optional().nullable(),       // Job finish
+  return_date: z.string().optional().nullable(),   // Returning / equipment back
   // Optional
   job_name: z.string().optional().nullable(),
   client_id: z.string().uuid().optional().nullable(),
@@ -240,14 +244,17 @@ const createEnquirySchema = z.object({
 router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
-      client_name, details, job_date, job_end, job_name,
+      client_name, details, out_date, job_date, job_end, return_date, job_name,
       client_id, venue_id, venue_name, enquiry_source,
       job_value, likelihood, notes, manager1_person_id,
       next_chase_date, chase_interval_days, chase_alert_user_id,
     } = req.body;
 
     // Auto-generate job name if not provided
-    const finalJobName = job_name || `${client_name} — ${new Date(job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+    const dateStr = job_date
+      ? new Date(job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+      : new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+    const finalJobName = job_name || `${client_name} — ${dateStr}`;
 
     // Resolve manager: use provided person_id, or look up the current user's person_id
     let managerId = manager1_person_id || null;
@@ -263,12 +270,12 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
     const chaseDate = next_chase_date || null;
     // If no chase date given, default to interval from today
     const chaseDateSql = chaseDate
-      ? `$15::date`
-      : `CURRENT_DATE + ($15 || ' days')::interval`;
+      ? `$17::date`
+      : `CURRENT_DATE + ($17 || ' days')::interval`;
 
     const result = await query(
       `INSERT INTO jobs (
-        job_name, details, job_date, job_end,
+        job_name, details, out_date, job_date, job_end, return_date,
         client_id, client_name, company_name,
         venue_id, venue_name,
         enquiry_source, job_value, likelihood, notes,
@@ -278,18 +285,18 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
         chase_interval_days, next_chase_date,
         created_by
       ) VALUES (
-        $1, $2, $3, $4,
-        $5, $6, $6,
-        $7, $8,
-        $9, $10, $11, $12,
-        $13,
+        $1, $2, $3, $4, $5, $6,
+        $7, $8, $8,
+        $9, $10,
+        $11, $12, $13, $14,
+        $15,
         0, 'Enquiry',
         'new_enquiry', NOW(),
-        $16, ${chaseDateSql},
-        $14
+        $18, ${chaseDateSql},
+        $16
       ) RETURNING *`,
       [
-        finalJobName, details, job_date, job_end,
+        finalJobName, details, out_date || null, job_date || null, job_end || null, return_date || null,
         client_id || null, client_name,
         venue_id || null, venue_name || null,
         enquiry_source || null, job_value || null, likelihood || 'warm', notes || null,
@@ -430,6 +437,13 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
 
+    // Write back to HireHop (async, non-blocking — don't fail the response if HH is down)
+    writeBackStatusToHireHop(jobId, pipeline_status, req.user!.email || req.user!.id)
+      .then(wb => {
+        if (!wb.success) console.warn(`[Pipeline] HH write-back note: ${wb.message}`);
+      })
+      .catch(err => console.error('[Pipeline] HH write-back error:', err));
+
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Update pipeline status error:', error);
@@ -498,6 +512,87 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Update pipeline fields error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Client trading history ────────────────────────────────────────────────
+// Returns recent jobs for a client (by org ID or client name) for context
+
+router.get('/client-history', async (req: AuthRequest, res: Response) => {
+  try {
+    const { client_id, client_name, exclude_job_id } = req.query;
+
+    if (!client_id && !client_name) {
+      res.status(400).json({ error: 'client_id or client_name required' });
+      return;
+    }
+
+    const params: unknown[] = [];
+    let paramIndex = 1;
+    const conditions: string[] = ['j.is_deleted = false'];
+
+    if (client_id) {
+      conditions.push(`j.client_id = $${paramIndex}`);
+      params.push(client_id);
+      paramIndex++;
+    } else {
+      conditions.push(`(j.client_name ILIKE $${paramIndex} OR j.company_name ILIKE $${paramIndex})`);
+      params.push(client_name);
+      paramIndex++;
+    }
+
+    if (exclude_job_id) {
+      conditions.push(`j.id != $${paramIndex}`);
+      params.push(exclude_job_id);
+      paramIndex++;
+    }
+
+    const where = conditions.join(' AND ');
+
+    const result = await query(
+      `SELECT
+        j.id, j.hh_job_number, j.job_name, j.status, j.status_name,
+        j.pipeline_status, j.job_date, j.job_end, j.job_value,
+        j.client_name, j.company_name, j.likelihood,
+        j.created_at
+      FROM jobs j
+      WHERE ${where}
+      ORDER BY j.job_date DESC NULLS LAST, j.created_at DESC
+      LIMIT 20`,
+      params
+    );
+
+    // Summary stats (use only the client filter, not exclude_job_id)
+    const statsConditions: string[] = ['j.is_deleted = false'];
+    const statsParams: unknown[] = [];
+    if (client_id) {
+      statsConditions.push(`j.client_id = $1`);
+      statsParams.push(client_id);
+    } else {
+      statsConditions.push(`(j.client_name ILIKE $1 OR j.company_name ILIKE $1)`);
+      statsParams.push(client_name);
+    }
+    const statsResult = await query(
+      `SELECT
+        COUNT(*) as total_jobs,
+        COUNT(*) FILTER (WHERE pipeline_status = 'confirmed' OR status = 2) as confirmed_jobs,
+        COUNT(*) FILTER (WHERE pipeline_status = 'lost' OR status IN (9, 10)) as lost_jobs,
+        COALESCE(SUM(job_value) FILTER (WHERE pipeline_status = 'confirmed' OR status = 2), 0) as total_confirmed_value,
+        COALESCE(SUM(job_value), 0) as total_value,
+        MIN(job_date) as first_job_date,
+        MAX(job_date) as last_job_date
+      FROM jobs j
+      WHERE ${statsConditions.join(' AND ')}`,
+      statsParams
+    );
+
+    res.json({
+      jobs: result.rows,
+      stats: statsResult.rows[0],
+    });
+  } catch (error) {
+    console.error('Client history error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
