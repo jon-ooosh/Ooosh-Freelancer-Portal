@@ -17,6 +17,10 @@ import pipelineRouter from './pipeline';
 import quotesRouter from './quotes';
 import vehiclesRouter from './vehicles';
 import emailRouter from './email';
+import driversRouter from './drivers';
+import assignmentsRouter from './assignments';
+import excessRouter from './excess';
+import hireFormsRouter from './hire-forms';
 
 const router = Router();
 
@@ -38,5 +42,9 @@ router.use('/pipeline', pipelineRouter);
 router.use('/quotes', quotesRouter);
 router.use('/vehicles', vehiclesRouter);
 router.use('/email', emailRouter);
+router.use('/drivers', driversRouter);
+router.use('/assignments', assignmentsRouter);
+router.use('/excess', excessRouter);
+router.use('/hire-forms', hireFormsRouter);
 
 export default router;
