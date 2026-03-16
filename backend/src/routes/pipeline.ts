@@ -4,6 +4,7 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 
 const router = Router();
 router.use(authenticate);
@@ -435,6 +436,13 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     );
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
+
+    // Write back to HireHop (async, non-blocking — don't fail the response if HH is down)
+    writeBackStatusToHireHop(jobId, pipeline_status, req.user!.email || req.user!.id)
+      .then(wb => {
+        if (!wb.success) console.warn(`[Pipeline] HH write-back note: ${wb.message}`);
+      })
+      .catch(err => console.error('[Pipeline] HH write-back error:', err));
 
     res.json(result.rows[0]);
   } catch (error) {

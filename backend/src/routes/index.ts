@@ -21,6 +21,7 @@ import driversRouter from './drivers';
 import assignmentsRouter from './assignments';
 import excessRouter from './excess';
 import hireFormsRouter from './hire-forms';
+import webhooksRouter from './webhooks';
 
 const router = Router();
 
@@ -46,5 +47,6 @@ router.use('/drivers', driversRouter);
 router.use('/assignments', assignmentsRouter);
 router.use('/excess', excessRouter);
 router.use('/hire-forms', hireFormsRouter);
+router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
 
 export default router;
