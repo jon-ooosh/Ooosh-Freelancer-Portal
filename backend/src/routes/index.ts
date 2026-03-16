@@ -53,4 +53,17 @@ router.use('/requirements', requirementsRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
 router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
 
+// Alias: /api/jobs/:jobNumber → /api/driver-verification/validate-job/:jobNumber
+// Needed because Netlify validate-job.js calls opFetch('/jobs/{jobId}')
+router.get('/jobs/:jobNumber(\\d+)', (req, res, next) => {
+  // Only handle if API key is present (don't interfere with future authenticated /jobs routes)
+  if (req.headers['x-api-key']) {
+    const jobNumber = (req.params as Record<string, string>).jobNumber;
+    req.url = `/validate-job/${jobNumber}`;
+    driverVerificationRouter(req, res, next);
+  } else {
+    next();
+  }
+});
+
 export default router;

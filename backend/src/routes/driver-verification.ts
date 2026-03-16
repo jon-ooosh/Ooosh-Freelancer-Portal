@@ -346,6 +346,128 @@ router.get('/check-hire-form', authenticateHireForm, async (req: HireFormRequest
 });
 
 // ============================================================================
+// GET /api/driver-verification/validate-job/:jobNumber — Validate job for hire form
+// Also mounted at GET /api/jobs/:jobNumber (for Netlify validate-job.js compatibility)
+// ============================================================================
+
+/**
+ * Map HireHop status codes and pipeline statuses to a human-readable status string.
+ * Returns the status and whether the job is valid for driver verification.
+ */
+function mapJobStatus(job: Record<string, unknown>): { status: string; validForHire: boolean } {
+  const pipelineStatus = job.pipeline_status as string | null;
+  const hhStatus = job.status as number;
+
+  // Pipeline status takes precedence if set
+  if (pipelineStatus) {
+    switch (pipelineStatus) {
+      case 'new_enquiry':
+      case 'quoting':
+      case 'chasing':
+      case 'paused':
+        return { status: 'enquiry', validForHire: false };
+      case 'lost':
+        return { status: 'cancelled', validForHire: false };
+      case 'provisional':
+        return { status: 'provisional', validForHire: true };
+      case 'confirmed':
+        // Check HH code for more granularity
+        if (hhStatus === 9) return { status: 'cancelled', validForHire: false };
+        if (hhStatus === 11) return { status: 'completed', validForHire: false };
+        return { status: 'confirmed', validForHire: true };
+      default:
+        break;
+    }
+  }
+
+  // Fall back to HH status codes
+  switch (hhStatus) {
+    case 0: return { status: 'enquiry', validForHire: false };
+    case 1: return { status: 'provisional', validForHire: true };
+    case 2: return { status: 'confirmed', validForHire: true };
+    case 3: return { status: 'prepped', validForHire: true };
+    case 4: return { status: 'part_dispatched', validForHire: true };
+    case 5: return { status: 'dispatched', validForHire: true };
+    case 6: return { status: 'returned_incomplete', validForHire: true };
+    case 7: return { status: 'returned', validForHire: true };
+    case 8: return { status: 'requires_attention', validForHire: true };
+    case 9: return { status: 'cancelled', validForHire: false };
+    case 10: return { status: 'not_interested', validForHire: false };
+    case 11: return { status: 'completed', validForHire: false };
+    default: return { status: 'unknown', validForHire: false };
+  }
+}
+
+/**
+ * Middleware: authenticate via API key only (no session JWT needed for job lookup).
+ * This is a lighter auth than authenticateHireForm — only server-to-server.
+ */
+function authenticateApiKey(req: Request, res: Response, next: NextFunction): void {
+  const apiKey = req.headers['x-api-key'] as string;
+  if (apiKey && process.env.HIRE_FORM_API_KEY) {
+    try {
+      const expected = Buffer.from(process.env.HIRE_FORM_API_KEY);
+      const provided = Buffer.from(apiKey);
+      if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
+        next();
+        return;
+      }
+    } catch {
+      // Fall through
+    }
+  }
+  res.status(401).json({ error: 'API key required' });
+}
+
+router.get('/validate-job/:jobNumber', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const jobNumber = req.params.jobNumber as string;
+    const jobNum = parseInt(jobNumber, 10);
+
+    if (isNaN(jobNum)) {
+      res.status(400).json({ error: 'Invalid job number' });
+      return;
+    }
+
+    const result = await query(
+      `SELECT hh_job_number, job_name, client_name, job_date, job_end, status, pipeline_status
+       FROM jobs
+       WHERE hh_job_number = $1 AND is_deleted = false
+       LIMIT 1`,
+      [jobNum]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ found: false });
+      return;
+    }
+
+    const job = result.rows[0];
+    const { status, validForHire } = mapJobStatus(job);
+
+    const formatDate = (d: unknown): string | null => {
+      if (!d) return null;
+      const date = new Date(d as string);
+      if (isNaN(date.getTime())) return null;
+      return date.toISOString().split('T')[0];
+    };
+
+    res.json({
+      found: true,
+      jobNumber: String(job.hh_job_number),
+      jobName: job.job_name || job.client_name || 'Unknown Job',
+      startDate: formatDate(job.job_date),
+      endDate: formatDate(job.job_end),
+      status,
+      validForHire,
+    });
+  } catch (error) {
+    console.error('[driver-verification] Validate job error:', error);
+    res.status(500).json({ error: 'Failed to validate job' });
+  }
+});
+
+// ============================================================================
 // Document analysis & routing engine (ported from get-next-step.js)
 // ============================================================================
 
