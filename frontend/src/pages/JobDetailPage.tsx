@@ -1194,6 +1194,91 @@ export default function JobDetailPage() {
           </div>
         </div>
       )}
+
+      {/* Status transition modal */}
+      {showTransitionModal && transitionTarget && (
+        <StatusTransitionModal
+          targetStatus={transitionTarget}
+          saving={transitionSaving}
+          onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
+          onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
+        />
+      )}
+      </div>
+
+      {/* Client trading history sidebar (desktop only) */}
+      {showClientHistory && (
+        <div className="hidden lg:block w-72 shrink-0">
+          <div className="sticky top-4 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+            <h3 className="text-sm font-semibold text-gray-700 mb-3">
+              Client History — {job.client_name || job.company_name}
+            </h3>
+
+            <div className="grid grid-cols-2 gap-2 mb-4">
+              <div className="bg-gray-50 rounded-lg p-2 text-center">
+                <div className="text-lg font-bold text-gray-900">{clientHistoryData!.stats.total_jobs}</div>
+                <div className="text-[10px] text-gray-500">Total Jobs</div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2 text-center">
+                <div className="text-lg font-bold text-green-600">{clientHistoryData!.stats.confirmed_jobs}</div>
+                <div className="text-[10px] text-gray-500">Confirmed</div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2 text-center">
+                <div className="text-lg font-bold text-gray-900">
+                  {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(parseFloat(clientHistoryData!.stats.total_confirmed_value))}
+                </div>
+                <div className="text-[10px] text-gray-500">Confirmed Value</div>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2 text-center">
+                <div className="text-lg font-bold text-red-500">{clientHistoryData!.stats.lost_jobs}</div>
+                <div className="text-[10px] text-gray-500">Lost</div>
+              </div>
+            </div>
+
+            <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">Other Jobs</h4>
+            <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+              {clientHistoryData!.jobs.map((j) => {
+                const pStatus = j.pipeline_status;
+                const pConfig = pStatus ? PIPELINE_STATUS_CONFIG[pStatus as PipelineStatus] : null;
+                return (
+                  <Link
+                    key={j.id}
+                    to={`/jobs/${j.id}`}
+                    className="block bg-gray-50 rounded-lg p-2.5 text-xs hover:bg-gray-100 transition-colors"
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      {j.hh_job_number ? (
+                        <span className="font-mono text-ooosh-600">J-{j.hh_job_number}</span>
+                      ) : (
+                        <span className="text-gray-400">NEW</span>
+                      )}
+                      {pConfig && (
+                        <span
+                          className="px-1.5 py-0.5 rounded-full text-[10px] font-medium"
+                          style={{ backgroundColor: pConfig.colour + '20', color: pConfig.colour }}
+                        >
+                          {pConfig.label}
+                        </span>
+                      )}
+                    </div>
+                    <div className="font-medium text-gray-900 truncate">{j.job_name || 'Untitled'}</div>
+                    {j.job_date && (
+                      <div className="text-gray-400 mt-0.5">
+                        {new Date(j.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                      </div>
+                    )}
+                    {j.job_value != null && (
+                      <div className="text-gray-600 font-medium mt-0.5">
+                        {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(j.job_value)}
+                      </div>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1546,90 +1631,6 @@ function JobFilesSection({
         />
       )}
 
-      {/* Status transition modal */}
-      {showTransitionModal && transitionTarget && (
-        <StatusTransitionModal
-          targetStatus={transitionTarget}
-          saving={transitionSaving}
-          onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
-          onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
-        />
-      )}
-      </div>
-
-      {/* Client trading history sidebar (desktop only) */}
-      {showClientHistory && (
-        <div className="hidden lg:block w-72 shrink-0">
-          <div className="sticky top-4 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-            <h3 className="text-sm font-semibold text-gray-700 mb-3">
-              Client History — {job.client_name || job.company_name}
-            </h3>
-
-            <div className="grid grid-cols-2 gap-2 mb-4">
-              <div className="bg-gray-50 rounded-lg p-2 text-center">
-                <div className="text-lg font-bold text-gray-900">{clientHistoryData!.stats.total_jobs}</div>
-                <div className="text-[10px] text-gray-500">Total Jobs</div>
-              </div>
-              <div className="bg-gray-50 rounded-lg p-2 text-center">
-                <div className="text-lg font-bold text-green-600">{clientHistoryData!.stats.confirmed_jobs}</div>
-                <div className="text-[10px] text-gray-500">Confirmed</div>
-              </div>
-              <div className="bg-gray-50 rounded-lg p-2 text-center">
-                <div className="text-lg font-bold text-gray-900">
-                  {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(parseFloat(clientHistoryData!.stats.total_confirmed_value))}
-                </div>
-                <div className="text-[10px] text-gray-500">Confirmed Value</div>
-              </div>
-              <div className="bg-gray-50 rounded-lg p-2 text-center">
-                <div className="text-lg font-bold text-red-500">{clientHistoryData!.stats.lost_jobs}</div>
-                <div className="text-[10px] text-gray-500">Lost</div>
-              </div>
-            </div>
-
-            <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">Other Jobs</h4>
-            <div className="space-y-2 max-h-[60vh] overflow-y-auto">
-              {clientHistoryData!.jobs.map((j) => {
-                const pStatus = j.pipeline_status;
-                const pConfig = pStatus ? PIPELINE_STATUS_CONFIG[pStatus as PipelineStatus] : null;
-                return (
-                  <Link
-                    key={j.id}
-                    to={`/jobs/${j.id}`}
-                    className="block bg-gray-50 rounded-lg p-2.5 text-xs hover:bg-gray-100 transition-colors"
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      {j.hh_job_number ? (
-                        <span className="font-mono text-ooosh-600">J-{j.hh_job_number}</span>
-                      ) : (
-                        <span className="text-gray-400">NEW</span>
-                      )}
-                      {pConfig && (
-                        <span
-                          className="px-1.5 py-0.5 rounded-full text-[10px] font-medium"
-                          style={{ backgroundColor: pConfig.colour + '20', color: pConfig.colour }}
-                        >
-                          {pConfig.label}
-                        </span>
-                      )}
-                    </div>
-                    <div className="font-medium text-gray-900 truncate">{j.job_name || 'Untitled'}</div>
-                    {j.job_date && (
-                      <div className="text-gray-400 mt-0.5">
-                        {new Date(j.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                      </div>
-                    )}
-                    {j.job_value != null && (
-                      <div className="text-gray-600 font-medium mt-0.5">
-                        {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(j.job_value)}
-                      </div>
-                    )}
-                  </Link>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
