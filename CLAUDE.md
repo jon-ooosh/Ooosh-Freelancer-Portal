@@ -289,13 +289,19 @@ See `docs/DRIVER-HIRE-EXCESS-SPEC.md` for full spec.
 - [x] "Drivers" in Vehicles nav submenu
 - [x] Routes wired in App.tsx
 
-**Phase C — Hire Form Flow** ← CURRENT
-- [ ] Repoint `driver-hire-api.ts` from Monday.com → OP backend (`/api/hire-forms`, `/api/drivers/lookup`)
-- [ ] Repoint `useDriverHireForms.ts` hook to use new API functions
-- [ ] Build `HireFormWizard` component (driver lookup → details → excess calc → hire details → review & save)
-- [ ] Wire "Hire Form" button into Allocations page (self-drive assignments)
-- [ ] Wire "Hire Form" button into Job Detail → Crew & Transport tab
-- [ ] Repeat driver pre-fill with stale DVLA check warning (> 6 months)
+**Phase C — Hire Form Repointing (Monday.com → OP backend)** ← CURRENT
+Existing hire form app is NOT being rebuilt — just repointing its data layer from Monday.com to OP.
+
+*Read path (OP vehicle module pages):*
+- [ ] Repoint `driver-hire-api.ts` — Monday.com GraphQL → OP backend (`GET /api/hire-forms/by-job/:id`)
+- [ ] Repoint `useDriverHireForms.ts` — follows automatically (imports from driver-hire-api)
+- [ ] Ensure OP backend returns data in `DriverHireForm` shape consumers expect
+- [ ] No changes to BookOutPage, AllocationsPage, CheckInPage, CollectionPage
+
+*Write path (standalone hire form app):*
+- [ ] Repoint hire form Netlify function calls → OP backend (`POST /api/hire-forms`, `GET /api/drivers/lookup`)
+- [ ] Ensure `POST /api/hire-forms` accepts data shape hire form sends
+- [ ] Driver lookup for repeat driver pre-fill (`GET /api/drivers/lookup`)
 
 **Phase D — Allocations Migration** (next)
 - [ ] Switch AllocationsPage to read from `vehicle_hire_assignments`

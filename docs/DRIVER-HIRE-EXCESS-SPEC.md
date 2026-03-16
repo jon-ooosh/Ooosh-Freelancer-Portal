@@ -717,16 +717,26 @@ Both systems run simultaneously during transition:
 3. ✅ "Drivers" added to Vehicles nav submenu
 4. ✅ Routes wired in App.tsx
 
-**Phase C: Hire Form Flow (repoint existing + new wizard component)** ← CURRENT
-The Vehicle Module has existing hire form API functions (`driver-hire-api.ts`) and a React Query hook (`useDriverHireForms.ts`) that currently talk to **Monday.com board 841453886**. Phase C repoints these to the OP backend and adds the hire form entry wizard.
+**Phase C: Hire Form Repointing (swap Monday.com → OP backend)** ← CURRENT
+The existing driver hire form is a standalone app that works and is NOT being rebuilt. Phase C repoints its data layer from Monday.com to the OP backend, and repoints the OP vehicle module pages that read hire form data.
 
-1. Repoint `driver-hire-api.ts` — replace Monday.com calls with OP backend calls (`/api/hire-forms`, `/api/drivers/lookup`)
-2. Repoint `useDriverHireForms.ts` hook — use new API functions
-3. Build `HireFormWizard` component — multi-step form (driver lookup → details → excess calc → hire details → review & save), submits to `POST /api/hire-forms`
-4. Wire "Hire Form" button into Allocations page (for self-drive assignments)
-5. Wire "Hire Form" button into Job Detail → Crew & Transport tab
-6. Show excess calculation result inline (points breakdown, referral alert if triggered)
-7. Repeat driver pre-fill from `GET /api/drivers/lookup` (with stale DVLA check warning if > 6 months)
+**Two repointing targets:**
+
+*Target 1 — OP vehicle module pages (read path):*
+The OP's BookOutPage, AllocationsPage, CheckInPage, and CollectionPage currently read hire form data from Monday.com via `driver-hire-api.ts` → Monday.com GraphQL. Repoint to read from OP backend instead.
+
+1. Repoint `driver-hire-api.ts` — replace Monday.com GraphQL calls with OP backend calls (`GET /api/hire-forms/by-job/:hirehopJobId`, `PUT /api/assignments/:id`)
+2. Repoint `useDriverHireForms.ts` hook — follows automatically (just imports from driver-hire-api)
+3. Ensure OP backend returns data in the `DriverHireForm` shape that consumers expect (or add adapter)
+4. No changes to BookOutPage, AllocationsPage, CheckInPage, CollectionPage — they consume the hook, not the API directly
+
+*Target 2 — Standalone hire form app (write path):*
+The standalone hire form app currently writes to Monday.com via Netlify functions. Repoint its API calls to write to the OP backend instead (`POST /api/hire-forms`, `GET /api/drivers/lookup`).
+
+5. Repoint hire form's Netlify function calls → OP backend API endpoints
+6. Ensure `POST /api/hire-forms` accepts the data shape the hire form sends
+7. Ensure driver lookup (`GET /api/drivers/lookup`) returns data for repeat driver pre-fill
+8. Existing excess calculation logic stays in the hire form — OP backend also calculates and stores the result
 
 **Phase D: Allocations Migration (swap data source)**
 1. Switch AllocationsPage to read from `vehicle_hire_assignments`
