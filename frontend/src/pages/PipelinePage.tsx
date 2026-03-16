@@ -802,10 +802,18 @@ function NewEnquiryModal({
   };
 
   // HireHop-style date linking: Outgoing=Job Start, Returning=Job Finish by default
+  // Constraint: Outgoing ≤ Job Start ≤ Job Finish ≤ Returning
   const handleOutDateChange = (val: string) => {
+    // Outgoing must be ≤ Job Start (if set)
+    if (jobDate && val > jobDate) return;
     setOutDate(val);
     if (outLinked) {
       setJobDate(val);
+      // Cascade: if new job start > job end, push job end forward
+      if (jobEnd && val > jobEnd) {
+        setJobEnd(val);
+        if (returnLinked) setReturnDate(val);
+      }
     }
   };
 
@@ -813,6 +821,9 @@ function NewEnquiryModal({
     setJobDate(val);
     if (outLinked) {
       setOutDate(val);
+    } else {
+      // If unlinked outgoing is after new job start, pull it back
+      if (outDate && outDate > val) setOutDate(val);
     }
     // Auto-set job end if empty or before start
     if (!jobEnd || jobEnd < val) {
@@ -826,10 +837,15 @@ function NewEnquiryModal({
     setJobEnd(val);
     if (returnLinked) {
       setReturnDate(val);
+    } else {
+      // If unlinked returning is before new job end, push it forward
+      if (returnDate && returnDate < val) setReturnDate(val);
     }
   };
 
   const handleReturnDateChange = (val: string) => {
+    // Returning must be ≥ Job Finish (if set)
+    if (jobEnd && val < jobEnd) return;
     setReturnDate(val);
     if (returnLinked) {
       setJobEnd(val);
@@ -975,6 +991,7 @@ function NewEnquiryModal({
                 <input
                   type="date"
                   value={outDate}
+                  max={jobDate || undefined}
                   onChange={(e) => handleOutDateChange(e.target.value)}
                   disabled={outLinked}
                   className={`flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 ${outLinked ? 'bg-gray-100 text-gray-400' : ''}`}
@@ -994,6 +1011,7 @@ function NewEnquiryModal({
                 <input
                   type="date"
                   value={jobDate}
+                  max={jobEnd || undefined}
                   onChange={(e) => handleJobDateChange(e.target.value)}
                   className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 />
@@ -1017,6 +1035,7 @@ function NewEnquiryModal({
                 <input
                   type="date"
                   value={returnDate}
+                  min={jobEnd || undefined}
                   onChange={(e) => handleReturnDateChange(e.target.value)}
                   disabled={returnLinked}
                   className={`flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 ${returnLinked ? 'bg-gray-100 text-gray-400' : ''}`}
@@ -1274,14 +1293,37 @@ function NewEnquiryModal({
             <div className="space-y-2">
               {clientHistory!.jobs.map((j) => {
                 const pStatus = j.pipeline_status;
-                const statusBadge = pStatus
+                const pConfig = pStatus
                   ? PIPELINE_STATUS_CONFIG[pStatus as PipelineStatus]
                   : null;
+                // Fallback to HireHop status for completed/cancelled/dispatched etc.
+                const hhStatusBadge = !pConfig && j.status != null ? (() => {
+                  const HH_STATUS_MAP: Record<number, { label: string; colour: string }> = {
+                    3: { label: 'Prepped', colour: '#8B5CF6' },
+                    4: { label: 'Part Dispatched', colour: '#F97316' },
+                    5: { label: 'On Hire', colour: '#0EA5E9' },
+                    6: { label: 'Returned (Incomplete)', colour: '#F59E0B' },
+                    7: { label: 'Returned', colour: '#6366F1' },
+                    8: { label: 'Needs Attention', colour: '#EF4444' },
+                    9: { label: 'Cancelled', colour: '#9CA3AF' },
+                    10: { label: 'Not Interested', colour: '#6B7280' },
+                    11: { label: 'Completed', colour: '#059669' },
+                  };
+                  return HH_STATUS_MAP[j.status] || null;
+                })() : null;
+                const statusBadge = pConfig || hhStatusBadge;
                 return (
                   <div key={j.id} className="bg-white rounded-lg p-2.5 border border-gray-200 text-xs">
                     <div className="flex items-center justify-between mb-1">
                       {j.hh_job_number ? (
-                        <span className="font-mono text-ooosh-600">J-{j.hh_job_number}</span>
+                        <a
+                          href={`https://myhirehop.com/job.php?id=${j.hh_job_number}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                        >
+                          J-{j.hh_job_number}
+                        </a>
                       ) : (
                         <span className="text-gray-400">NEW</span>
                       )}

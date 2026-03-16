@@ -430,7 +430,7 @@ export default function JobDetailPage() {
                 <div ref={statusDropdownRef} className="relative">
                   <button
                     onClick={() => setShowStatusDropdown(!showStatusDropdown)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer hover:opacity-80 transition-opacity"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-sm font-semibold cursor-pointer hover:opacity-80 transition-opacity"
                     style={{
                       backgroundColor: pipelineConfig!.colour + '20',
                       color: pipelineConfig!.colour,
@@ -464,7 +464,7 @@ export default function JobDetailPage() {
                   )}
                 </div>
               ) : (
-                <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${statusColour}`}>
+                <span className={`inline-flex px-3.5 py-1.5 rounded-md text-sm font-semibold ${statusColour}`}>
                   {statusLabel}
                 </span>
               )}
@@ -1240,6 +1240,22 @@ export default function JobDetailPage() {
               {clientHistoryData!.jobs.map((j) => {
                 const pStatus = j.pipeline_status;
                 const pConfig = pStatus ? PIPELINE_STATUS_CONFIG[pStatus as PipelineStatus] : null;
+                // Fallback to HireHop status for completed/cancelled/dispatched etc.
+                const hhStatusBadge = !pConfig && j.status != null ? (() => {
+                  const HH_STATUS_MAP: Record<number, { label: string; colour: string }> = {
+                    3: { label: 'Prepped', colour: '#8B5CF6' },
+                    4: { label: 'Part Dispatched', colour: '#F97316' },
+                    5: { label: 'On Hire', colour: '#0EA5E9' },
+                    6: { label: 'Returned (Incomplete)', colour: '#F59E0B' },
+                    7: { label: 'Returned', colour: '#6366F1' },
+                    8: { label: 'Needs Attention', colour: '#EF4444' },
+                    9: { label: 'Cancelled', colour: '#9CA3AF' },
+                    10: { label: 'Not Interested', colour: '#6B7280' },
+                    11: { label: 'Completed', colour: '#059669' },
+                  };
+                  return HH_STATUS_MAP[j.status] || null;
+                })() : null;
+                const badge = pConfig || hhStatusBadge;
                 return (
                   <Link
                     key={j.id}
@@ -1248,16 +1264,24 @@ export default function JobDetailPage() {
                   >
                     <div className="flex items-center justify-between mb-1">
                       {j.hh_job_number ? (
-                        <span className="font-mono text-ooosh-600">J-{j.hh_job_number}</span>
+                        <a
+                          href={`https://myhirehop.com/job.php?id=${j.hh_job_number}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          J-{j.hh_job_number}
+                        </a>
                       ) : (
                         <span className="text-gray-400">NEW</span>
                       )}
-                      {pConfig && (
+                      {badge && (
                         <span
                           className="px-1.5 py-0.5 rounded-full text-[10px] font-medium"
-                          style={{ backgroundColor: pConfig.colour + '20', color: pConfig.colour }}
+                          style={{ backgroundColor: badge.colour + '20', color: badge.colour }}
                         >
-                          {pConfig.label}
+                          {badge.label}
                         </span>
                       )}
                     </div>
