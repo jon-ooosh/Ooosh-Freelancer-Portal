@@ -108,6 +108,8 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 └── docs/
     ├── SPEC.md             # Full system specification (v1.1)
     ├── PIPELINE-SPEC.md    # Pipeline/Kanban specification
+    ├── DRIVER-HIRE-EXCESS-SPEC.md  # Driver hire forms & excess calculation spec
+    ├── HIRE-FORM-REPOINTING-SPEC.md # Monday.com → OP repointing spec (Phase C)
     └── MAINTENANCE.md      # Health register & maintenance plan
 ```
 
@@ -291,17 +293,33 @@ See `docs/DRIVER-HIRE-EXCESS-SPEC.md` for full spec.
 
 **Phase C — Hire Form Repointing (Monday.com → OP backend)** ← CURRENT
 Existing hire form app is NOT being rebuilt — just repointing its data layer from Monday.com to OP.
+**Full spec:** `docs/HIRE-FORM-REPOINTING-SPEC.md` — covers Monday.com board mapping, document validity backbone, routing engine, gap analysis, and migration plan.
 
-*Read path (OP vehicle module pages):*
+*Phase C1: Database + Backend (prerequisite for all repointing):*
+- [ ] Migration `020_driver_hire_form_fields.sql` — add document expiry dates, POA providers, insurance questionnaire booleans, identity gaps to `drivers` table
+- [ ] Update `drivers.ts` route to accept all new fields in POST/PUT
+- [ ] Build `GET /api/drivers/status` endpoint (returns driver state + document validity, replaces `driver-status.js`)
+- [ ] Build `POST /api/drivers/next-step` endpoint (routing engine, replaces `get-next-step.js`)
+- [ ] Update shared types (`Driver` interface) with new fields
+- [ ] Hire form authentication: `/api/hire-forms/auth/verify` endpoint for driver session tokens
+
+*Phase C2: Read path (OP vehicle module pages):*
 - [ ] Repoint `driver-hire-api.ts` — Monday.com GraphQL → OP backend (`GET /api/hire-forms/by-job/:id`)
 - [ ] Repoint `useDriverHireForms.ts` — follows automatically (imports from driver-hire-api)
 - [ ] Ensure OP backend returns data in `DriverHireForm` shape consumers expect
 - [ ] No changes to BookOutPage, AllocationsPage, CheckInPage, CollectionPage
 
-*Write path (standalone hire form app):*
-- [ ] Repoint hire form Netlify function calls → OP backend (`POST /api/hire-forms`, `GET /api/drivers/lookup`)
-- [ ] Ensure `POST /api/hire-forms` accepts data shape hire form sends
-- [ ] Driver lookup for repeat driver pre-fill (`GET /api/drivers/lookup`)
+*Phase C3: Write path (standalone hire form app — 7 Netlify functions to repoint):*
+- [ ] Repoint `monday-integration.js` — all 7 actions → OP backend REST endpoints
+- [ ] Repoint `driver-status.js` → `GET /api/drivers/status`
+- [ ] Repoint `get-next-step.js` → `POST /api/drivers/next-step`
+- [ ] Repoint `validate-job.js` → OP backend `/api/jobs`
+- [ ] Repoint `generate-hire-form.js` — read from OP instead of Monday Board B
+- [ ] `send-verification-code`, `verify-code`, `create-idenfy-session`, `document-processor` — NO CHANGE
+
+*Phase C4: Dual-write transition (optional):*
+- [ ] Write to OP first, Monday.com as backup, monitor for 1-2 weeks
+- [ ] Remove Monday.com writes once confident
 
 **Phase D — Allocations Migration** (next)
 - [ ] Switch AllocationsPage to read from `vehicle_hire_assignments`
