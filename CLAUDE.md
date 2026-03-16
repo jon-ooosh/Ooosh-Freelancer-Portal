@@ -171,7 +171,8 @@ cd deploy && bash deploy.sh        # Pull, build, restart on server
   - [x] Phase B: Backend API (pipeline endpoints, status transitions, chase logic, chase alerts)
   - [x] Phase C: Kanban board UI (6 columns, cards, drag-and-drop, filters)
   - [x] Phase D: Supporting UI (new enquiry form with file staging, chase logging with quick-select & alerts, HireHop links, inline file viewer)
-  - [ ] Phase E: HireHop write-back (push status changes, create HH jobs from Ooosh)
+  - [x] Phase E: HireHop write-back (push status changes to HH via webhooks + write-back service)
+  - [ ] Phase E.2: Create HH jobs from Ooosh (deferred)
 - [x] **File management** — authenticated upload/download, inline viewer (images + PDFs), file tags & comments
 - [x] **Enquiry/Quoting merge** — New Enquiry + Quoting merged into single "Enquiries" column
 - [x] **Chase auto-mover** — runs every 15 minutes via `config/scheduler.ts`, moves jobs with `next_chase_date <= NOW()` to "chasing" pipeline status, logs status_transition interactions
@@ -291,14 +292,17 @@ Financial lifecycle tracking for insurance excesses — NOT a pipeline status, b
 - [ ] Excess claim/reimbursement workflow
 - [ ] HireHop records excess as a deposit — sync this data
 
-#### Step 4: Status Transition Engine
+#### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.
 
-- [ ] `POST /api/webhooks/external/status-transition` endpoint for external systems
-- [ ] HireHop write-back via `status_save.php` (with `no_webhook=1`)
-- [ ] API key / service auth for external callers (`api_keys` table)
+- [x] `POST /api/webhooks/external/status-transition` endpoint for external systems
+- [x] HireHop write-back via `status_save.php` (with `no_webhook=1`) — `hirehop-writeback.ts` service
+- [x] API key / service auth for external callers (`api_keys` table)
+- [x] HireHop → Ooosh: inbound webhook receiver (`POST /api/webhooks/hirehop`) with export_key verification
+- [x] Ooosh → HireHop: write-back on pipeline status changes (with loop prevention)
+- [x] Pipeline ↔ HireHop status mapping (see Status Mapping section)
+- [x] Webhook logging (`webhook_log` table, migration 018)
 - [ ] Status mismatch detection in existing sync (backup)
-- [ ] Pipeline ↔ HireHop status mapping (see Status Mapping section)
 - [ ] Gate conditions: check excess collected before allowing dispatch
 
 #### Step 5: Payment Portal Repointing
@@ -320,9 +324,13 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
   - [ ] Quote status transition validation (prevent invalid transitions)
   - [ ] RBAC on calculator settings (currently any auth user can change)
 - [ ] **Vehicle delivery reminders** — reminder system for upcoming deliveries (depends on vehicle module)
-- [ ] **HireHop webhooks** — replace polling sync with real-time updates (SSL now available)
-  - Key events: `job.status.updated`, `job.updated`, `job.created`, `contact.person.*`, `contact.company.*`
-  - Needs webhook endpoint + verification handler
+- [x] **HireHop webhooks** — bidirectional real-time sync via webhooks (live 16 Mar 2026)
+  - [x] Inbound webhook receiver: `POST /api/webhooks/hirehop` with export_key verification
+  - [x] Handles: `job.status.updated`, `job.updated`, `job.created`, `contact.*` events
+  - [x] Webhook logging to `webhook_log` table (migration 018)
+  - [x] Write-back service: pushes pipeline changes to HireHop with `no_webhook=1` loop prevention
+  - [x] External status transition API with API key auth (`api_keys` table)
+  - Polling sync still runs as fallback (every 30 min) for catch-up
 - [ ] **Tasks system** — general-purpose task management (not tied to specific jobs)
   - Freelancer application review workflow
   - Annual licence/detail review reminders
@@ -661,15 +669,22 @@ Self-drive hires require an insurance excess. The amount is calculated by the dr
 ```
 HIREHOP_DOMAIN=myhirehop.com        # Domain only, no https:// or trailing slash
 HIREHOP_API_TOKEN=your_token_here   # API token from HireHop settings
+HIREHOP_EXPORT_KEY=your_export_key  # Export key for webhook verification (from HireHop settings)
 ```
 
 ### Current Sync
 
 - **Contacts (Phase 1):** Read-only pull from HireHop into `people` table, matched by email
 - **Jobs (Phase 2):** Read-only pull of active jobs (statuses 0-8) into `jobs` table, every 30 min
+- **Webhooks (Phase 2):** Real-time bidirectional sync via HireHop webhooks (live 16 Mar 2026)
+  - Inbound: `POST /api/webhooks/hirehop` — receives `job.status.updated`, `job.updated`, `job.created`, `contact.*`
+  - Outbound: `hirehop-writeback.ts` — pushes pipeline status changes back to HireHop
+  - Polling sync still runs as fallback every 30 min
 - Config: `backend/src/config/hirehop.ts`
 - Contact sync: `backend/src/services/hirehop-sync.ts`
 - Job sync: `backend/src/services/hirehop-job-sync.ts`
+- Write-back: `backend/src/services/hirehop-writeback.ts`
+- Webhooks: `backend/src/routes/webhooks.ts`
 - Routes: `backend/src/routes/hirehop.ts`
 
 ### HireHop Job Status Codes
