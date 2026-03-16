@@ -375,6 +375,91 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
 - [ ] Excess payment events recorded in Ooosh (financial record, not pipeline change)
 - [ ] Payment confirmation → pipeline status change (deposit = confirmed)
 
+#### Step 6: Operations Modules (Hire Readiness) ← PLANNING COMPLETE
+
+**Architecture:** Each confirmed job gets a **Prep Checklist** (the new default tab on Job Detail, replacing the old Overview). Each checklist item is a *requirement* — things that need doing before a job can go out. Requirements link into deeper per-job tabs, global overview pages, or expand inline for simple items.
+
+**Key design decisions:**
+- Prep Checklist = the job-level dashboard. Always the first tab you see.
+- Status system is **non-linear** (any status → any status), styled like pipeline badges (rectangular, coloured).
+- Each requirement type has its **own status flow** (not a global linear flow). E.g. Merch: "Request sent → Some received → All received → Notified client → Given to client".
+- **Templates** for common job types (one click adds multiple requirements).
+- **Dashboard** (`/dashboard`) is the global overview — aggregates all outstanding items across all jobs.
+- **Freelancer portal integration** — crew assignments, delivery jobs, studio sitter assignments all need to be readable/writable from the freelancer portal (currently reads from Monday.com, needs repointing to OP).
+
+##### Stream 1: Core Requirements System (FOUNDATION — do first)
+- [ ] `job_requirements` table + migration
+- [ ] Requirements API: CRUD, non-linear status changes, templates
+- [ ] Wire Prep Checklist to real data (replace dummy prototype)
+- [ ] Replace Overview tab with Prep Checklist as default job tab
+- [ ] Non-linear status badges (styled like pipeline status dropdowns)
+- [ ] Progress indicators on Jobs list page (real data)
+- [ ] Deposit/payment progress bar on Prep Checklist (visual: deposit taken vs full fee)
+- [ ] "Compare" function: what we've said we need vs what HH tells us (flag discrepancies)
+
+##### Stream 2: Global Operations Dashboard
+Aggregate views on the Dashboard page — click through to individual jobs from each widget.
+- [ ] Transport overview widget: all jobs with transport needs, who's driving, when, where
+- [ ] Crew overview widget: who's assigned where this week, availability gaps
+- [ ] Backline overview widget: jobs with backline, prep status
+- [ ] Incoming deliveries widget: what's arriving today across all jobs
+- [ ] Carnet overview widget: outstanding carnets, return tracking
+- [ ] Lost property widget: uncollected items with age
+- [ ] Studio/rehearsal schedule widget: upcoming rehearsals, studio sitter assignments
+- [ ] Payment summary widget: deposits pending, balances outstanding
+- [ ] Hook into freelancer portal (repoint from Monday.com read/write to OP API)
+
+##### Stream 3: Backline + Sub-hires Module
+- [ ] `job_backline` table (job_id, status, notes, item_count, checked_out_count)
+- [ ] `job_subhires` table (what, supplier, status, cost, po_ref, due_date, received)
+- [ ] Backline status flags: not started / in progress / prepped / checked out / returned / issues
+- [ ] Backline issues tracking (missing items, damage — similar pattern to vehicle issues)
+- [ ] Sub-hire tracking: need → sourcing → ordered → received → returned
+- [ ] Per-job sections + global backline board view
+- [ ] Optional HH integration: pull item counts from `job_data.php` to auto-populate (if API supports checked-out counts)
+
+##### Stream 4: Incoming Deliveries + Lost Property
+- [ ] `incoming_deliveries` table (job_id, description, expected_date, box_count, received_count, status, sender_name)
+- [ ] Support for "mystery boxes" — record arrival with unknown association, link to job/client later
+- [ ] Status flow: expected → some received → all received → notified client → given to client
+- [ ] `lost_property` table (job_id, description, found_date, found_location, photo, client_notified, collected, dispose_after)
+- [ ] Auto-reminder: chase client to collect, flag for disposal after X weeks
+- [ ] Global pages for both: `/operations/deliveries`, `/operations/lost-property`
+
+##### Stream 5: Rehearsals Module
+- [ ] `rehearsals` table (job_id, venue, date_start, date_end, studio_sitter_id, setup_specs, sound_files, status)
+- [ ] Studio sitter assignment (links to people table, freelancer portal integration)
+- [ ] Room prep method (similar to vehicle prep checklist)
+- [ ] Handover tracking: evening studio sitters → daytime staff
+- [ ] Issues tracking (similar to vehicle issues)
+- [ ] Band setup specs + sound file uploads
+- [ ] Studio schedule global view (`/operations/rehearsals`) — calendar/timeline format
+- [ ] Freelancer portal integration: push rehearsal assignments to studio sitters
+
+##### Stream 6: Payment Tracking (pre-Xero)
+Per-job financial tracking, summarised on Dashboard rather than its own global page.
+- [ ] `job_payments` table (job_id, type: deposit/balance/refund, amount, method, status, date, reference)
+- [ ] Per-job payment summary on Prep Checklist (progress bar: deposit → balance → paid in full)
+- [ ] Client payment terms on `organisations` table (upfront / credit / credit up to £X)
+- [ ] Address Book UI for managing client payment terms
+- [ ] Payment status feeds into gate conditions (deposit required before dispatch)
+- [ ] Dashboard payment summary widget (deposits pending, balances outstanding across all jobs)
+
+##### Stream 7: Transport & Crew Operations
+Global operational view for what's currently happening / about to happen with transport and crew.
+- [ ] Transport operations page (`/operations/transport`): date/time/venue/who/status per delivery
+- [ ] Crew operations page (`/operations/crew`): who's assigned where, confirmation status
+- [ ] "On the road" status tracking: dispatched, arrived, issues, completed
+- [ ] Issues on road reporting (breakdowns, delays, problems)
+- [ ] Freelancer portal: repoint from Monday.com to OP (crew can see their assignments, confirm, report issues)
+
+##### Carnets (inline on Prep Checklist, with global overview)
+- [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed
+- [ ] Global carnet overview page (`/operations/carnets`) — outstanding carnets, post-hire returns pending
+- [ ] Reminder automation: chase for return after hire ends
+
+**Parallelisation notes:** Streams 2-7 can all run simultaneously — they touch different tables, routes, and pages. Stream 1 is the foundation and should complete first (or at least the migration + API), as Streams 2-7 plug requirements into it. Streams 3-5 are fully independent of each other. Stream 6 has a dependency on the organisations table (payment terms) but is otherwise standalone.
+
 #### Remaining Phase 2 work (no strict ordering)
 
 - [ ] **Crew & Transport refinements**
@@ -394,6 +479,11 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
   - [x] Write-back service: pushes pipeline changes to HireHop with `no_webhook=1` loop prevention
   - [x] External status transition API with API key auth (`api_keys` table)
   - Polling sync still runs as fallback (every 30 min) for catch-up
+- [x] **Jobs page improvements** (live 16 Mar 2026)
+  - [x] "Happening Today" section split into Going Out / Out Now / Returning sub-sections
+  - [x] Return window logic (midday day before through return_date)
+  - [x] Time-based filter dropdown (Out Now / Next 2 Weeks / Over 2 Weeks)
+  - [x] Prep Checklist prototype tab on Job Detail (dummy data, interactive demo)
 - [ ] **Tasks system** — general-purpose task management (not tied to specific jobs)
   - Freelancer application review workflow
   - Annual licence/detail review reminders
@@ -401,7 +491,6 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
   - Linked optionally to person_id or job_id
 - [ ] Win/loss analysis dashboard (depends on pipeline — lost_reason basics included in pipeline)
 - [ ] Job close-out workflow
-- [ ] Command Centre dashboard (live data from jobs + contacts)
 - [ ] Xero financial summary integration
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
@@ -421,6 +510,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Mileage-based service threshold notifications** — add to daily compliance check, alert when vehicle within configurable miles of `next_service_due`
 - **Email notifications** — add SMTP/transactional email channel alongside in-app bell notifications (needs email service config)
 - **Per-user notification preferences** — allow users to opt in/out of specific notification categories (compliance, chase reminders, etc.)
+- **Freelancer portal repointing** — switch freelancer-facing app from Monday.com read/write to OP API for crew assignments, delivery jobs, studio sitter assignments, hire form status
 
 ### Phase 3–5
 
