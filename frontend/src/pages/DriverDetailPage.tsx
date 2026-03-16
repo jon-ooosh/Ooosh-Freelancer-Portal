@@ -1,6 +1,16 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
+import FileUpload from '../components/FileUpload';
+
+interface FileAttachment {
+  name: string;
+  label?: string;
+  url: string;
+  type: 'document' | 'image' | 'other';
+  uploaded_at: string;
+  uploaded_by: string;
+}
 
 interface LicenceEndorsement {
   code: string;
@@ -34,6 +44,7 @@ interface DriverDetail {
   referral_status: string | null;
   referral_date: string | null;
   referral_notes: string | null;
+  files: FileAttachment[];
   source: string;
   is_active: boolean;
   created_at: string;
@@ -124,7 +135,7 @@ export default function DriverDetailPage() {
   const [hireHistory, setHireHistory] = useState<HireHistoryItem[]>([]);
   const [excessHistory, setExcessHistory] = useState<ExcessHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'files' | 'hires' | 'excess'>('details');
   const [editing, setEditing] = useState(false);
   const [editData, setEditData] = useState<Record<string, any>>({});
   const [saving, setSaving] = useState(false);
@@ -286,17 +297,22 @@ export default function DriverDetailPage() {
       {/* Tabs */}
       <div className="mt-6 border-b border-gray-200">
         <nav className="flex gap-6">
-          {(['details', 'hires', 'excess'] as const).map((tab) => (
+          {([
+            { key: 'details', label: 'Details' },
+            { key: 'files', label: `Files${driver.files?.length ? ` (${driver.files.length})` : ''}` },
+            { key: 'hires', label: 'Hire History' },
+            { key: 'excess', label: 'Excess History' },
+          ] as const).map(({ key, label }) => (
             <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
+              key={key}
+              onClick={() => setActiveTab(key)}
               className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab
+                activeTab === key
                   ? 'border-ooosh-600 text-ooosh-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              {tab === 'details' ? 'Details' : tab === 'hires' ? 'Hire History' : 'Excess History'}
+              {label}
             </button>
           ))}
         </nav>
@@ -315,6 +331,23 @@ export default function DriverDetailPage() {
             onSave={handleSave}
             onCancel={() => setEditing(false)}
           />
+        )}
+        {activeTab === 'files' && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <h3 className="text-sm font-semibold text-gray-700 mb-4">Driver Documents</h3>
+              <p className="text-xs text-gray-400 mb-4">
+                Upload licence images, DVLA check codes, proof of address, insurance documents, etc.
+              </p>
+              <FileUpload
+                entityType="drivers"
+                entityId={driver.id}
+                files={driver.files || []}
+                onFilesChanged={(files) => setDriver({ ...driver, files })}
+                labelSuggestions={['Licence Front', 'Licence Back', 'DVLA Check Code', 'Proof of Address', 'Passport', 'Insurance Doc', 'Photo', 'Other']}
+              />
+            </div>
+          </div>
         )}
         {activeTab === 'hires' && <HireHistoryTab history={hireHistory} />}
         {activeTab === 'excess' && <ExcessHistoryTab history={excessHistory} />}
