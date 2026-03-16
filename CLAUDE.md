@@ -268,35 +268,62 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 
 See **Vehicle Module Integration** section below for technical details.
 
-#### Step 2: Driver Hire Forms & Excess Calculation
+#### Step 2: Driver Hire Forms & Excess Calculation ← PHASE C IN PROGRESS
 Driver hire forms calculate the insurance excess amount based on DVLA record points.
+See `docs/DRIVER-HIRE-EXCESS-SPEC.md` for full spec.
 
-- [ ] Driver hire form process in OP (captures DVLA data, calculates excess)
-- [ ] Excess amount flows into job record
-- [ ] Links to vehicle assignment on the job
+**Phase A — Database + API** ✅ COMPLETE
+- [x] Migration 017: `drivers`, `vehicle_hire_assignments`, `job_excess`, `excess_rules`, `client_excess_ledger` view
+- [x] Migration 018: `webhook_log`, `api_keys` tables
+- [x] Migration 019: `files` JSONB on `drivers` table
+- [x] Backend routes: `drivers.ts`, `assignments.ts`, `excess.ts`, `hire-forms.ts`
+- [x] Transactional hire form submission (`POST /api/hire-forms`)
+- [x] Excess calculation engine (points tiers + referral trigger detection)
+- [x] Dispatch gate check endpoint (`GET /api/assignments/dispatch-check/:jobId`)
+- [x] Compatibility layer for existing allocations page
+- [x] All shared TypeScript types
+
+**Phase B — Drivers Page** ✅ COMPLETE
+- [x] DriversPage.tsx — list, search, filters, add driver slide panel
+- [x] DriverDetailPage.tsx — tabs: Details (editable), Files, Hire History, Excess History
+- [x] "Drivers" in Vehicles nav submenu
+- [x] Routes wired in App.tsx
+
+**Phase C — Hire Form Flow** ← CURRENT
+- [ ] Repoint `driver-hire-api.ts` from Monday.com → OP backend (`/api/hire-forms`, `/api/drivers/lookup`)
+- [ ] Repoint `useDriverHireForms.ts` hook to use new API functions
+- [ ] Build `HireFormWizard` component (driver lookup → details → excess calc → hire details → review & save)
+- [ ] Wire "Hire Form" button into Allocations page (self-drive assignments)
+- [ ] Wire "Hire Form" button into Job Detail → Crew & Transport tab
+- [ ] Repeat driver pre-fill with stale DVLA check warning (> 6 months)
+
+**Phase D — Allocations Migration** (next)
+- [ ] Switch AllocationsPage to read from `vehicle_hire_assignments`
+- [ ] Keep compatibility API for existing book-out/check-in flows
+- [ ] Remove R2 allocation writes (R2 becomes read-only fallback)
 
 #### Step 3: Insurance Excess Tracking
 Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (can't move to "Out" without excess collected).
 
-- [ ] `job_excess` table or fields on jobs:
-  - `excess_amount_required` — calculated from hire form
-  - `excess_amount_taken` — what we've actually collected
-  - `excess_status` — `pending` | `taken` | `partial_claim` | `full_claim` | `reimbursed`
-  - `excess_taken_method` — `payment_portal` | `manual` | `bank_transfer`
-  - `excess_xero_contact` — Xero contact cemented at creation (won't change even if HH client name changes)
-  - `excess_client_name` — current client name (may differ from Xero contact)
-- [ ] Manual excess recording (not everything goes through payment portal)
-- [ ] Excess gate on job status: block "Upcoming → Out" if excess not collected
-- [ ] Client excess ledger — running balance per client across multiple hires (repeat clients leave excess with us)
-- [ ] Excess claim/reimbursement workflow
-- [ ] HireHop records excess as a deposit — sync this data
+**Database layer** ✅ COMPLETE (built in Step 2 Phase A)
+- [x] `job_excess` table with full financial lifecycle fields
+- [x] `excess_rules` table (configurable points tiers + referral triggers)
+- [x] `client_excess_ledger` view (running balance per Xero contact)
+- [x] Excess CRUD + payment/claim/reimburse/waive endpoints (`excess.ts`)
+
+**Phase E — Excess Gate + Ledger UI** (after Phase D)
+- [ ] Excess gate UI — warning banners on Job Detail when excess pending
+- [ ] Wire gate into status transition engine (block dispatch)
+- [ ] Excess ledger page (`/excess`) — client balances, history, actions
+- [ ] Payment recording UI (record payment, claim, reimburse)
+- [ ] HireHop excess-as-deposit sync
 
 #### Step 4: Status Transition Engine
 Bidirectional job status sync — depends on excess tracking for gate conditions.
 
 - [ ] `POST /api/webhooks/external/status-transition` endpoint for external systems
 - [ ] HireHop write-back via `status_save.php` (with `no_webhook=1`)
-- [ ] API key / service auth for external callers (`api_keys` table)
+- [x] API key / service auth for external callers (`api_keys` table — built in migration 018)
 - [ ] Status mismatch detection in existing sync (backup)
 - [ ] Pipeline ↔ HireHop status mapping (see Status Mapping section)
 - [ ] Gate conditions: check excess collected before allowing dispatch

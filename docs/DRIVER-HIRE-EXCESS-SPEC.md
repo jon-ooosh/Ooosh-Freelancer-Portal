@@ -700,22 +700,33 @@ Both systems run simultaneously during transition:
 
 ### 10.3 Migration Phases
 
-**Phase A: Database + API (build first, no UI changes)**
-1. Create migration SQL (tables, indexes, view)
-2. Build backend CRUD endpoints
-3. Build compatibility layer (`get-allocations` / `save-allocations` adapters)
-4. Import existing driver data from Monday.com export
+**Phase A: Database + API (build first, no UI changes)** ✅ COMPLETE (March 2026)
+1. ✅ Migration 017: `drivers`, `vehicle_hire_assignments`, `job_excess`, `excess_rules`, `client_excess_ledger` view
+2. ✅ Migration 018: `webhook_log`, `api_keys` (for external service auth)
+3. ✅ Migration 019: `files` JSONB column on `drivers` table
+4. ✅ Backend routes: `drivers.ts`, `assignments.ts`, `excess.ts`, `hire-forms.ts`
+5. ✅ Transactional hire form submission endpoint (`POST /api/hire-forms`)
+6. ✅ Excess calculation engine (points tiers + referral trigger detection)
+7. ✅ Dispatch gate check endpoint (`GET /api/assignments/dispatch-check/:jobId`)
+8. ✅ Compatibility layer (`GET/POST /api/assignments/compat/allocations`)
+9. ✅ All shared TypeScript types (Driver, VehicleHireAssignment, JobExcess, ExcessRule, etc.)
 
-**Phase B: Drivers Page (new page, no existing pages affected)**
-1. Build Drivers list page
-2. Build Driver detail page
-3. Add "Drivers" to nav
+**Phase B: Drivers Page (new page, no existing pages affected)** ✅ COMPLETE (March 2026)
+1. ✅ DriversPage.tsx — list, search, filters, add driver slide panel
+2. ✅ DriverDetailPage.tsx — tabs: Details (editable), Files, Hire History, Excess History
+3. ✅ "Drivers" added to Vehicles nav submenu
+4. ✅ Routes wired in App.tsx
 
-**Phase C: Hire Form Flow (new component, launched from existing pages)**
-1. Build hire form multi-step component
-2. Wire into Allocations page ("Hire Form" button)
-3. Wire into Job Detail page
-4. Excess calculation engine
+**Phase C: Hire Form Flow (repoint existing + new wizard component)** ← CURRENT
+The Vehicle Module has existing hire form API functions (`driver-hire-api.ts`) and a React Query hook (`useDriverHireForms.ts`) that currently talk to **Monday.com board 841453886**. Phase C repoints these to the OP backend and adds the hire form entry wizard.
+
+1. Repoint `driver-hire-api.ts` — replace Monday.com calls with OP backend calls (`/api/hire-forms`, `/api/drivers/lookup`)
+2. Repoint `useDriverHireForms.ts` hook — use new API functions
+3. Build `HireFormWizard` component — multi-step form (driver lookup → details → excess calc → hire details → review & save), submits to `POST /api/hire-forms`
+4. Wire "Hire Form" button into Allocations page (for self-drive assignments)
+5. Wire "Hire Form" button into Job Detail → Crew & Transport tab
+6. Show excess calculation result inline (points breakdown, referral alert if triggered)
+7. Repeat driver pre-fill from `GET /api/drivers/lookup` (with stale DVLA check warning if > 6 months)
 
 **Phase D: Allocations Migration (swap data source)**
 1. Switch AllocationsPage to read from `vehicle_hire_assignments`
@@ -723,10 +734,10 @@ Both systems run simultaneously during transition:
 3. Remove R2 allocation writes (R2 becomes read-only fallback)
 
 **Phase E: Excess Gate + Ledger**
-1. Build dispatch gate check
+1. Build dispatch gate check UI (warning banners on Job Detail)
 2. Wire into status transition engine
-3. Build excess ledger page
-4. Payment recording endpoints
+3. Build excess ledger page (`/excess`)
+4. Payment recording UI (record payment, claim, reimburse actions)
 
 ---
 
