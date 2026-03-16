@@ -44,6 +44,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── notifications.ts
 │   │   │   ├── backups.ts     # Database backup management
 │   │   │   ├── email.ts       # Email service admin endpoints
+│   │   │   ├── driver-verification.ts  # Public-facing hire form endpoints (own JWT auth)
 │   │   │   └── health.ts
 │   │   ├── config/
 │   │   │   ├── hirehop.ts     # HireHop API configuration
@@ -291,17 +292,22 @@ See `docs/DRIVER-HIRE-EXCESS-SPEC.md` for full spec.
 - [x] "Drivers" in Vehicles nav submenu
 - [x] Routes wired in App.tsx
 
-**Phase C — Hire Form Repointing (Monday.com → OP backend)** ← CURRENT
+**Phase C — Hire Form Repointing (Monday.com → OP backend)**
 Existing hire form app is NOT being rebuilt — just repointing its data layer from Monday.com to OP.
 **Full spec:** `docs/HIRE-FORM-REPOINTING-SPEC.md` — covers Monday.com board mapping, document validity backbone, routing engine, gap analysis, and migration plan.
 
-*Phase C1: Database + Backend (prerequisite for all repointing):*
-- [ ] Migration `020_driver_hire_form_fields.sql` — add document expiry dates, POA providers, insurance questionnaire booleans, identity gaps to `drivers` table
-- [ ] Update `drivers.ts` route to accept all new fields in POST/PUT
-- [ ] Build `GET /api/drivers/status` endpoint (returns driver state + document validity, replaces `driver-status.js`)
-- [ ] Build `POST /api/drivers/next-step` endpoint (routing engine, replaces `get-next-step.js`)
-- [ ] Update shared types (`Driver` interface) with new fields
-- [ ] Hire form authentication: `/api/hire-forms/auth/verify` endpoint for driver session tokens
+*Phase C1: Database + Backend* ✅ COMPLETE
+- [x] Migration `020_driver_hire_form_fields.sql` — document expiry dates, POA providers, insurance questionnaire booleans, identity gaps on `drivers` table
+- [x] `driver-verification.ts` route — public-facing endpoints with own JWT auth (not OP user JWT):
+  - `POST /api/driver-verification/auth/verify` — issue session JWT after OTP verification
+  - `GET /api/driver-verification/status` — driver status + document validity (replaces `driver-status.js`)
+  - `POST /api/driver-verification/next-step` — routing engine (replaces `get-next-step.js`)
+  - `POST /api/driver-verification/update` — partial driver field updates (upsert, whitelisted fields)
+  - `GET /api/driver-verification/check-hire-form` — check if hire form exists for job
+- [x] Auth: API key (`X-API-Key`), Bearer JWT (hire_form_session type), shared verification secret
+- [x] Document analysis engine + routing engine ported from `get-next-step.js`
+- [x] Mounted in routes/index.ts at `/driver-verification`
+- [x] Env vars needed: `HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`
 
 *Phase C2: Read path (OP vehicle module pages):*
 - [ ] Repoint `driver-hire-api.ts` — Monday.com GraphQL → OP backend (`GET /api/hire-forms/by-job/:id`)
@@ -309,17 +315,23 @@ Existing hire form app is NOT being rebuilt — just repointing its data layer f
 - [ ] Ensure OP backend returns data in `DriverHireForm` shape consumers expect
 - [ ] No changes to BookOutPage, AllocationsPage, CheckInPage, CollectionPage
 
-*Phase C3: Write path (standalone hire form app — 7 Netlify functions to repoint):*
-- [ ] Repoint `monday-integration.js` — all 7 actions → OP backend REST endpoints
-- [ ] Repoint `driver-status.js` → `GET /api/drivers/status`
-- [ ] Repoint `get-next-step.js` → `POST /api/drivers/next-step`
-- [ ] Repoint `validate-job.js` → OP backend `/api/jobs`
-- [ ] Repoint `generate-hire-form.js` — read from OP instead of Monday Board B
-- [ ] `send-verification-code`, `verify-code`, `create-idenfy-session`, `document-processor` — NO CHANGE
+*Phase C3: Write path (standalone hire form app)* ✅ COMPLETE
+All Netlify functions repointed with `DATA_BACKEND` feature flag (default: `monday`, switch to `op` when ready):
+- [x] `functions/op-backend.js` — shared helper with `opFetch()`, `opUpload()`, `isOpMode()`, retry logic
+- [x] `monday-integration.js` (v4.1) — all 7 actions → OP `/driver-verification/*` endpoints
+- [x] `driver-status.js` (v3.2) → `GET /api/driver-verification/status?email=` (returns "new driver" on 404)
+- [x] `get-next-step.js` (v2.7) → `POST /api/driver-verification/next-step` (falls back to local routing + Monday.com on failure)
+- [x] `validate-job.js` (v2.0) → `GET /api/jobs/:jobId` (falls back to Monday.com Q&H Board)
+- [x] `generate-hire-form.js` (v5.6) → `GET /api/hire-forms/:id` + `POST /api/files` (logo still from Monday.com templates board)
+- [x] `send-verification-code`, `verify-code`, `create-idenfy-session`, `document-processor` — NO CHANGE
+- [x] Netlify env vars: `DATA_BACKEND` (monday|op), `OP_BACKEND_URL`, `OP_API_KEY`
 
-*Phase C4: Dual-write transition (optional):*
-- [ ] Write to OP first, Monday.com as backup, monitor for 1-2 weeks
-- [ ] Remove Monday.com writes once confident
+*Phase C4: Go-live cutover:*
+- [ ] Set env vars on OP server (`HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`)
+- [ ] Run migration 020 on production (`npm run db:migrate`)
+- [ ] Test end-to-end with `DATA_BACKEND=op` on Netlify deploy preview
+- [ ] Flip `DATA_BACKEND=op` on Netlify production
+- [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
 
 **Phase D — Allocations Migration** (next)
 - [ ] Switch AllocationsPage to read from `vehicle_hire_assignments`
