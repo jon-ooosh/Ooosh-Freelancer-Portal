@@ -13,6 +13,8 @@ import JobDetailPage from './pages/JobDetailPage';
 import PipelinePage from './pages/PipelinePage';
 import SettingsPage from './pages/SettingsPage';
 import DuplicatesPage from './pages/DuplicatesPage';
+import DriversPage from './pages/DriversPage';
+import DriverDetailPage from './pages/DriverDetailPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 
@@ -52,6 +54,8 @@ export default function App() {
                 <Route path="/jobs" element={<JobsPage />} />
                 <Route path="/jobs/:id" element={<JobDetailPage />} />
                 <Route path="/pipeline" element={<PipelinePage />} />
+                <Route path="/drivers" element={<DriversPage />} />
+                <Route path="/drivers/:id" element={<DriverDetailPage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
