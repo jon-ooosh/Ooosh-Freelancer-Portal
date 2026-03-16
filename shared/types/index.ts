@@ -435,37 +435,128 @@ export interface LicenceEndorsement {
   expiry: string | null;
 }
 
+export type InsuranceStatus = 'Approved' | 'Referral' | 'Failed';
+
 export interface Driver {
   id: string;
   person_id: string | null;
   full_name: string;
   email: string | null;
   phone: string | null;
+  phone_country: string | null;
   date_of_birth: string | null;
+  nationality: string | null;
   address_line1: string | null;
   address_line2: string | null;
   city: string | null;
   postcode: string | null;
+  address_full: string | null;
+  licence_address: string | null;
   licence_number: string | null;
   licence_type: string | null;
   licence_valid_from: string | null;
   licence_valid_to: string | null;
   licence_issue_country: string;
+  licence_issued_by: string | null;
   licence_points: number;
   licence_endorsements: LicenceEndorsement[];
   licence_restrictions: string | null;
+  licence_next_check_due: string | null;
+  date_passed_test: string | null;
+  // Document expiry dates (the validity backbone)
+  poa1_valid_until: string | null;
+  poa2_valid_until: string | null;
+  dvla_valid_until: string | null;
+  passport_valid_until: string | null;
+  // Document providers (POA diversity check)
+  poa1_provider: string | null;
+  poa2_provider: string | null;
+  // DVLA
   dvla_check_code: string | null;
   dvla_check_date: string | null;
+  // Insurance questionnaire
+  has_disability: boolean;
+  has_convictions: boolean;
+  has_prosecution: boolean;
+  has_accidents: boolean;
+  has_insurance_issues: boolean;
+  has_driving_ban: boolean;
+  additional_details: string | null;
+  insurance_status: InsuranceStatus | null;
+  overall_status: string | null;
+  // Referral
   requires_referral: boolean;
   referral_status: string | null;
   referral_date: string | null;
   referral_notes: string | null;
+  // iDenfy
+  idenfy_check_date: string | null;
+  idenfy_scan_ref: string | null;
+  // Signature
+  signature_date: string | null;
+  // Metadata
   source: string;
   monday_item_id: string | null;
+  files: FileAttachment[] | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
   created_by: string | null;
+}
+
+// Driver document validity analysis (computed, not stored)
+export interface DriverDocumentStatus {
+  licence: { valid: boolean; expiryDate: string | null };
+  poa1: { valid: boolean; expiryDate: string | null; provider: string | null };
+  poa2: { valid: boolean; expiryDate: string | null; provider: string | null };
+  dvla: { valid: boolean; expiryDate: string | null };
+  passport: { valid: boolean; expiryDate: string | null };
+  isUkDriver: boolean;
+  allValid: boolean;
+}
+
+// Response shape for GET /api/drivers/status (matches hire form app expectations)
+export interface DriverStatusResponse {
+  status: string;
+  email: string;
+  name: string | null;
+  phoneNumber: string | null;
+  phoneCountry: string | null;
+  dateOfBirth: string | null;
+  licenseNumber: string | null;
+  licenseEnding: string | null;
+  licenseIssuedBy: string | null;
+  homeAddress: string | null;
+  licenseAddress: string | null;
+  nationality: string | null;
+  documents: {
+    license: { valid: boolean; expiryDate?: string; status: string };
+    poa1: { valid: boolean; expiryDate?: string; status: string; provider: string | null };
+    poa2: { valid: boolean; expiryDate?: string; status: string; provider: string | null };
+    dvlaCheck: { valid: boolean; expiryDate?: string; status: string };
+    passportCheck: { valid: boolean; expiryDate?: string; status: string };
+  };
+  insuranceData: {
+    datePassedTest: string;
+    hasDisability: boolean;
+    hasConvictions: boolean;
+    hasProsecution: boolean;
+    hasAccidents: boolean;
+    hasInsuranceIssues: boolean;
+    hasDrivingBan: boolean;
+    additionalDetails: string;
+  } | null;
+  boardAId: string | null;
+  licenseNextCheckDue: string | null;
+  poa1ValidUntil: string | null;
+  poa2ValidUntil: string | null;
+  dvlaValidUntil: string | null;
+  passportValidUntil: string | null;
+  poa1Provider: string | null;
+  poa2Provider: string | null;
+  dvlaPoints: number;
+  dvlaEndorsements: string | null;
+  dvlaCalculatedExcess: string | null;
 }
 
 export type HireAssignmentType = 'self_drive' | 'driven' | 'delivery' | 'collection';

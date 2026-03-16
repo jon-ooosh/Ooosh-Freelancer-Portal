@@ -47,6 +47,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '016_email_log.sql',
         '017_driver_hire_excess.sql',
         '018_webhook_log.sql',
+        '019_driver_files.sql',
+        '020_driver_hire_form_fields.sql',
       ];
 
       for (const migration of migrations) {

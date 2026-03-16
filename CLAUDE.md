@@ -44,6 +44,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── notifications.ts
 │   │   │   ├── backups.ts     # Database backup management
 │   │   │   ├── email.ts       # Email service admin endpoints
+│   │   │   ├── driver-verification.ts  # Public-facing hire form endpoints (own JWT auth)
 │   │   │   └── health.ts
 │   │   ├── config/
 │   │   │   ├── hirehop.ts     # HireHop API configuration
@@ -108,6 +109,8 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 └── docs/
     ├── SPEC.md             # Full system specification (v1.1)
     ├── PIPELINE-SPEC.md    # Pipeline/Kanban specification
+    ├── DRIVER-HIRE-EXCESS-SPEC.md  # Driver hire forms & excess calculation spec
+    ├── HIRE-FORM-REPOINTING-SPEC.md # Monday.com → OP repointing spec (Phase C)
     └── MAINTENANCE.md      # Health register & maintenance plan
 ```
 
@@ -269,28 +272,88 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 
 See **Vehicle Module Integration** section below for technical details.
 
-#### Step 2: Driver Hire Forms & Excess Calculation
+#### Step 2: Driver Hire Forms & Excess Calculation ← PHASE C IN PROGRESS
 Driver hire forms calculate the insurance excess amount based on DVLA record points.
+See `docs/DRIVER-HIRE-EXCESS-SPEC.md` for full spec.
 
-- [ ] Driver hire form process in OP (captures DVLA data, calculates excess)
-- [ ] Excess amount flows into job record
-- [ ] Links to vehicle assignment on the job
+**Phase A — Database + API** ✅ COMPLETE
+- [x] Migration 017: `drivers`, `vehicle_hire_assignments`, `job_excess`, `excess_rules`, `client_excess_ledger` view
+- [x] Migration 018: `webhook_log`, `api_keys` tables
+- [x] Migration 019: `files` JSONB on `drivers` table
+- [x] Backend routes: `drivers.ts`, `assignments.ts`, `excess.ts`, `hire-forms.ts`
+- [x] Transactional hire form submission (`POST /api/hire-forms`)
+- [x] Excess calculation engine (points tiers + referral trigger detection)
+- [x] Dispatch gate check endpoint (`GET /api/assignments/dispatch-check/:jobId`)
+- [x] Compatibility layer for existing allocations page
+- [x] All shared TypeScript types
+
+**Phase B — Drivers Page** ✅ COMPLETE
+- [x] DriversPage.tsx — list, search, filters, add driver slide panel
+- [x] DriverDetailPage.tsx — tabs: Details (editable), Files, Hire History, Excess History
+- [x] "Drivers" in Vehicles nav submenu
+- [x] Routes wired in App.tsx
+
+**Phase C — Hire Form Repointing (Monday.com → OP backend)**
+Existing hire form app is NOT being rebuilt — just repointing its data layer from Monday.com to OP.
+**Full spec:** `docs/HIRE-FORM-REPOINTING-SPEC.md` — covers Monday.com board mapping, document validity backbone, routing engine, gap analysis, and migration plan.
+
+*Phase C1: Database + Backend* ✅ COMPLETE
+- [x] Migration `020_driver_hire_form_fields.sql` — document expiry dates, POA providers, insurance questionnaire booleans, identity gaps on `drivers` table
+- [x] `driver-verification.ts` route — public-facing endpoints with own JWT auth (not OP user JWT):
+  - `POST /api/driver-verification/auth/verify` — issue session JWT after OTP verification
+  - `GET /api/driver-verification/status` — driver status + document validity (replaces `driver-status.js`)
+  - `POST /api/driver-verification/next-step` — routing engine (replaces `get-next-step.js`)
+  - `POST /api/driver-verification/update` — partial driver field updates (upsert, whitelisted fields)
+  - `GET /api/driver-verification/check-hire-form` — check if hire form exists for job
+- [x] Auth: API key (`X-API-Key`), Bearer JWT (hire_form_session type), shared verification secret
+- [x] Document analysis engine + routing engine ported from `get-next-step.js`
+- [x] Mounted in routes/index.ts at `/driver-verification`
+- [x] Env vars needed: `HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`
+
+*Phase C2: Read path (OP vehicle module pages):*
+- [ ] Repoint `driver-hire-api.ts` — Monday.com GraphQL → OP backend (`GET /api/hire-forms/by-job/:id`)
+- [ ] Repoint `useDriverHireForms.ts` — follows automatically (imports from driver-hire-api)
+- [ ] Ensure OP backend returns data in `DriverHireForm` shape consumers expect
+- [ ] No changes to BookOutPage, AllocationsPage, CheckInPage, CollectionPage
+
+*Phase C3: Write path (standalone hire form app)* ✅ COMPLETE
+All Netlify functions repointed with `DATA_BACKEND` feature flag (default: `monday`, switch to `op` when ready):
+- [x] `functions/op-backend.js` — shared helper with `opFetch()`, `opUpload()`, `isOpMode()`, retry logic
+- [x] `monday-integration.js` (v4.1) — all 7 actions → OP `/driver-verification/*` endpoints
+- [x] `driver-status.js` (v3.2) → `GET /api/driver-verification/status?email=` (returns "new driver" on 404)
+- [x] `get-next-step.js` (v2.7) → `POST /api/driver-verification/next-step` (falls back to local routing + Monday.com on failure)
+- [x] `validate-job.js` (v2.0) → `GET /api/jobs/:jobId` (falls back to Monday.com Q&H Board)
+- [x] `generate-hire-form.js` (v5.6) → `GET /api/hire-forms/:id` + `POST /api/files` (logo still from Monday.com templates board)
+- [x] `send-verification-code`, `verify-code`, `create-idenfy-session`, `document-processor` — NO CHANGE
+- [x] Netlify env vars: `DATA_BACKEND` (monday|op), `OP_BACKEND_URL`, `OP_API_KEY`
+
+*Phase C4: Go-live cutover:*
+- [ ] Set env vars on OP server (`HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`)
+- [ ] Run migration 020 on production (`npm run db:migrate`)
+- [ ] Test end-to-end with `DATA_BACKEND=op` on Netlify deploy preview
+- [ ] Flip `DATA_BACKEND=op` on Netlify production
+- [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
+
+**Phase D — Allocations Migration** (next)
+- [ ] Switch AllocationsPage to read from `vehicle_hire_assignments`
+- [ ] Keep compatibility API for existing book-out/check-in flows
+- [ ] Remove R2 allocation writes (R2 becomes read-only fallback)
 
 #### Step 3: Insurance Excess Tracking
 Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (can't move to "Out" without excess collected).
 
-- [ ] `job_excess` table or fields on jobs:
-  - `excess_amount_required` — calculated from hire form
-  - `excess_amount_taken` — what we've actually collected
-  - `excess_status` — `pending` | `taken` | `partial_claim` | `full_claim` | `reimbursed`
-  - `excess_taken_method` — `payment_portal` | `manual` | `bank_transfer`
-  - `excess_xero_contact` — Xero contact cemented at creation (won't change even if HH client name changes)
-  - `excess_client_name` — current client name (may differ from Xero contact)
-- [ ] Manual excess recording (not everything goes through payment portal)
-- [ ] Excess gate on job status: block "Upcoming → Out" if excess not collected
-- [ ] Client excess ledger — running balance per client across multiple hires (repeat clients leave excess with us)
-- [ ] Excess claim/reimbursement workflow
-- [ ] HireHop records excess as a deposit — sync this data
+**Database layer** ✅ COMPLETE (built in Step 2 Phase A)
+- [x] `job_excess` table with full financial lifecycle fields
+- [x] `excess_rules` table (configurable points tiers + referral triggers)
+- [x] `client_excess_ledger` view (running balance per Xero contact)
+- [x] Excess CRUD + payment/claim/reimburse/waive endpoints (`excess.ts`)
+
+**Phase E — Excess Gate + Ledger UI** (after Phase D)
+- [ ] Excess gate UI — warning banners on Job Detail when excess pending
+- [ ] Wire gate into status transition engine (block dispatch)
+- [ ] Excess ledger page (`/excess`) — client balances, history, actions
+- [ ] Payment recording UI (record payment, claim, reimburse)
+- [ ] HireHop excess-as-deposit sync
 
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.

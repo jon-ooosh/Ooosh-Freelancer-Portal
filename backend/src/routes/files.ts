@@ -69,7 +69,7 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
       return;
     }
 
-    const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs'];
+    const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs', 'drivers'];
     if (!validTypes.includes(entity_type)) {
       res.status(400).json({ error: 'Invalid entity_type' });
       return;
@@ -176,7 +176,7 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs'];
+    const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs', 'drivers'];
     if (!validTypes.includes(entity_type)) {
       res.status(400).json({ error: 'Invalid entity_type' });
       return;

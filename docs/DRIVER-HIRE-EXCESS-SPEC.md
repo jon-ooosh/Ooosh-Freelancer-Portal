@@ -700,22 +700,43 @@ Both systems run simultaneously during transition:
 
 ### 10.3 Migration Phases
 
-**Phase A: Database + API (build first, no UI changes)**
-1. Create migration SQL (tables, indexes, view)
-2. Build backend CRUD endpoints
-3. Build compatibility layer (`get-allocations` / `save-allocations` adapters)
-4. Import existing driver data from Monday.com export
+**Phase A: Database + API (build first, no UI changes)** ✅ COMPLETE (March 2026)
+1. ✅ Migration 017: `drivers`, `vehicle_hire_assignments`, `job_excess`, `excess_rules`, `client_excess_ledger` view
+2. ✅ Migration 018: `webhook_log`, `api_keys` (for external service auth)
+3. ✅ Migration 019: `files` JSONB column on `drivers` table
+4. ✅ Backend routes: `drivers.ts`, `assignments.ts`, `excess.ts`, `hire-forms.ts`
+5. ✅ Transactional hire form submission endpoint (`POST /api/hire-forms`)
+6. ✅ Excess calculation engine (points tiers + referral trigger detection)
+7. ✅ Dispatch gate check endpoint (`GET /api/assignments/dispatch-check/:jobId`)
+8. ✅ Compatibility layer (`GET/POST /api/assignments/compat/allocations`)
+9. ✅ All shared TypeScript types (Driver, VehicleHireAssignment, JobExcess, ExcessRule, etc.)
 
-**Phase B: Drivers Page (new page, no existing pages affected)**
-1. Build Drivers list page
-2. Build Driver detail page
-3. Add "Drivers" to nav
+**Phase B: Drivers Page (new page, no existing pages affected)** ✅ COMPLETE (March 2026)
+1. ✅ DriversPage.tsx — list, search, filters, add driver slide panel
+2. ✅ DriverDetailPage.tsx — tabs: Details (editable), Files, Hire History, Excess History
+3. ✅ "Drivers" added to Vehicles nav submenu
+4. ✅ Routes wired in App.tsx
 
-**Phase C: Hire Form Flow (new component, launched from existing pages)**
-1. Build hire form multi-step component
-2. Wire into Allocations page ("Hire Form" button)
-3. Wire into Job Detail page
-4. Excess calculation engine
+**Phase C: Hire Form Repointing (swap Monday.com → OP backend)** ← CURRENT
+The existing driver hire form is a standalone app that works and is NOT being rebuilt. Phase C repoints its data layer from Monday.com to the OP backend, and repoints the OP vehicle module pages that read hire form data.
+
+**Two repointing targets:**
+
+*Target 1 — OP vehicle module pages (read path):*
+The OP's BookOutPage, AllocationsPage, CheckInPage, and CollectionPage currently read hire form data from Monday.com via `driver-hire-api.ts` → Monday.com GraphQL. Repoint to read from OP backend instead.
+
+1. Repoint `driver-hire-api.ts` — replace Monday.com GraphQL calls with OP backend calls (`GET /api/hire-forms/by-job/:hirehopJobId`, `PUT /api/assignments/:id`)
+2. Repoint `useDriverHireForms.ts` hook — follows automatically (just imports from driver-hire-api)
+3. Ensure OP backend returns data in the `DriverHireForm` shape that consumers expect (or add adapter)
+4. No changes to BookOutPage, AllocationsPage, CheckInPage, CollectionPage — they consume the hook, not the API directly
+
+*Target 2 — Standalone hire form app (write path):*
+The standalone hire form app currently writes to Monday.com via Netlify functions. Repoint its API calls to write to the OP backend instead (`POST /api/hire-forms`, `GET /api/drivers/lookup`).
+
+5. Repoint hire form's Netlify function calls → OP backend API endpoints
+6. Ensure `POST /api/hire-forms` accepts the data shape the hire form sends
+7. Ensure driver lookup (`GET /api/drivers/lookup`) returns data for repeat driver pre-fill
+8. Existing excess calculation logic stays in the hire form — OP backend also calculates and stores the result
 
 **Phase D: Allocations Migration (swap data source)**
 1. Switch AllocationsPage to read from `vehicle_hire_assignments`
@@ -723,10 +744,10 @@ Both systems run simultaneously during transition:
 3. Remove R2 allocation writes (R2 becomes read-only fallback)
 
 **Phase E: Excess Gate + Ledger**
-1. Build dispatch gate check
+1. Build dispatch gate check UI (warning banners on Job Detail)
 2. Wire into status transition engine
-3. Build excess ledger page
-4. Payment recording endpoints
+3. Build excess ledger page (`/excess`)
+4. Payment recording UI (record payment, claim, reimburse actions)
 
 ---
 

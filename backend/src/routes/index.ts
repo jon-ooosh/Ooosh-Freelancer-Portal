@@ -22,6 +22,7 @@ import assignmentsRouter from './assignments';
 import excessRouter from './excess';
 import hireFormsRouter from './hire-forms';
 import webhooksRouter from './webhooks';
+import driverVerificationRouter from './driver-verification';
 
 const router = Router();
 
@@ -48,5 +49,6 @@ router.use('/assignments', assignmentsRouter);
 router.use('/excess', excessRouter);
 router.use('/hire-forms', hireFormsRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
+router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
 
 export default router;

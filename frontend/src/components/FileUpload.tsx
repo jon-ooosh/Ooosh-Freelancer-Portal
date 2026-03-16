@@ -11,12 +11,13 @@ interface FileAttachment {
 }
 
 interface FileUploadProps {
-  entityType: 'people' | 'organisations' | 'venues' | 'interactions';
+  entityType: 'people' | 'organisations' | 'venues' | 'interactions' | 'drivers';
   entityId: string;
   files: FileAttachment[];
   onFilesChanged: (files: FileAttachment[]) => void;
   onActivityCreated?: () => void;
   readOnly?: boolean;
+  labelSuggestions?: string[];
 }
 
 const FILE_ICONS: Record<string, string> = {
@@ -30,7 +31,7 @@ const LABEL_SUGGESTIONS = [
   'Contract', 'Risk assessment', 'Photo', 'Invoice', 'Other',
 ];
 
-export default function FileUpload({ entityType, entityId, files, onFilesChanged, onActivityCreated, readOnly }: FileUploadProps) {
+export default function FileUpload({ entityType, entityId, files, onFilesChanged, onActivityCreated, readOnly, labelSuggestions }: FileUploadProps) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -182,7 +183,7 @@ export default function FileUpload({ entityType, entityId, files, onFilesChanged
               className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded focus:border-ooosh-400 focus:ring-1 focus:ring-ooosh-400 outline-none"
             />
             <div className="flex flex-wrap gap-1 mt-1.5">
-              {LABEL_SUGGESTIONS.map((suggestion) => (
+              {(labelSuggestions || LABEL_SUGGESTIONS).map((suggestion) => (
                 <button
                   key={suggestion}
                   type="button"
