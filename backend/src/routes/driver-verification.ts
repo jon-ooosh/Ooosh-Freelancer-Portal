@@ -223,6 +223,50 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
   try {
     const { email, updates } = updateSchema.parse(req.body);
 
+    // camelCase → snake_case mapping for hire form app compatibility
+    const camelToSnake: Record<string, string> = {
+      fullName: 'full_name',
+      phoneNumber: 'phone',
+      phoneCountry: 'phone_country',
+      dateOfBirth: 'date_of_birth',
+      addressFull: 'address_full',
+      homeAddress: 'address_full',
+      licenceAddress: 'licence_address',
+      licenseAddress: 'licence_address',
+      licenceNumber: 'licence_number',
+      licenseNumber: 'licence_number',
+      licenceIssuedBy: 'licence_issued_by',
+      licenseIssuedBy: 'licence_issued_by',
+      licenceIssueCountry: 'licence_issue_country',
+      licenceValidFrom: 'licence_valid_from',
+      licenceValidTo: 'licence_valid_to',
+      datePassedTest: 'date_passed_test',
+      licenceNextCheckDue: 'licence_next_check_due',
+      licenseNextCheckDue: 'licence_next_check_due',
+      poa1ValidUntil: 'poa1_valid_until',
+      poa2ValidUntil: 'poa2_valid_until',
+      dvlaValidUntil: 'dvla_valid_until',
+      passportValidUntil: 'passport_valid_until',
+      poa1Provider: 'poa1_provider',
+      poa2Provider: 'poa2_provider',
+      dvlaCheckCode: 'dvla_check_code',
+      dvlaCheckDate: 'dvla_check_date',
+      hasDisability: 'has_disability',
+      hasConvictions: 'has_convictions',
+      hasProsecution: 'has_prosecution',
+      hasAccidents: 'has_accidents',
+      hasInsuranceIssues: 'has_insurance_issues',
+      hasDrivingBan: 'has_driving_ban',
+      additionalDetails: 'additional_details',
+      insuranceStatus: 'insurance_status',
+      overallStatus: 'overall_status',
+      idenfyCheckDate: 'idenfy_check_date',
+      idenfyScanRef: 'idenfy_scan_ref',
+      signatureDate: 'signature_date',
+      licencePoints: 'licence_points',
+      licenceEndorsements: 'licence_endorsements',
+    };
+
     // Whitelist of fields the hire form app can update
     const allowedFields = new Set([
       'full_name', 'phone', 'phone_country', 'date_of_birth', 'nationality',
@@ -237,16 +281,18 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'has_insurance_issues', 'has_driving_ban', 'additional_details',
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
-      'licence_points',
+      'licence_points', 'licence_endorsements',
     ]);
 
     const setClauses: string[] = [];
     const params: unknown[] = [];
 
     for (const [key, value] of Object.entries(updates)) {
-      if (!allowedFields.has(key)) continue;
+      // Normalise: accept both camelCase and snake_case
+      const dbField = camelToSnake[key] || key;
+      if (!allowedFields.has(dbField)) continue;
       params.push(value ?? null);
-      setClauses.push(`${key} = $${params.length}`);
+      setClauses.push(`${dbField} = $${params.length}`);
     }
 
     if (setClauses.length === 0) {
