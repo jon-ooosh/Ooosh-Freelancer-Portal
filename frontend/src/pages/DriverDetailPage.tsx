@@ -177,6 +177,7 @@ function computeOooshValidity(driver: DriverDetail): {
   licenceCapped: boolean;
   dvla: string | null;
   passport: string | null;
+  isUkDriver: boolean;
 } {
   function addDays(dateStr: string | null, days: number): string | null {
     if (!dateStr) return null;
@@ -193,6 +194,9 @@ function computeOooshValidity(driver: DriverDetail): {
     if (!b) return a;
     return new Date(a) < new Date(b) ? a : b;
   }
+
+  // UK driver: licence issued by DVLA OR licence_issue_country = GB
+  const isUkDriver = driver.licence_issued_by === 'DVLA' || driver.licence_issue_country === 'GB';
 
   // Licence: 90d from iDenfy check, capped at actual licence expiry
   const licenceWindow = addDays(driver.idenfy_check_date, 90);
@@ -211,13 +215,13 @@ function computeOooshValidity(driver: DriverDetail): {
   // DVLA: 30d from check date
   const dvla = addDays(driver.dvla_check_date, 30);
 
-  // Passport: use passport_valid_until if set, otherwise 30d from iDenfy for non-UK
-  let passport: string | null = driver.passport_valid_until || null;
-  if (!passport && driver.licence_issue_country !== 'GB') {
-    passport = addDays(driver.idenfy_check_date, 30);
+  // Passport: only for non-UK drivers. Use stored value or compute 30d from iDenfy
+  let passport: string | null = null;
+  if (!isUkDriver) {
+    passport = driver.passport_valid_until || addDays(driver.idenfy_check_date, 30);
   }
 
-  return { licence, licenceCapped, dvla, passport };
+  return { licence, licenceCapped, dvla, passport, isUkDriver };
 }
 
 // Normalise address for comparison — strip whitespace, punctuation, lowercase
@@ -831,8 +835,7 @@ function DetailsTab({
                   </div>
                   {validityField('POA 1', 'poa1_valid_until', 'poa1_provider')}
                   {validityField('POA 2', 'poa2_valid_until', 'poa2_provider')}
-                  {validityField('Passport', 'passport_valid_until')}
-                  {field('DVLA Check Code', 'dvla_check_code', { mono: true })}
+                  {!computed.isUkDriver && validityField('Passport', 'passport_valid_until')}
                 </>
               );
             }
@@ -859,19 +862,16 @@ function DetailsTab({
                   <dt className="text-xs text-gray-400 mb-1">POA 2{driver.poa2_provider ? ` (${driver.poa2_provider})` : ''} (90d from doc)</dt>
                   <dd><ValidityPill date={driver.poa2_valid_until} /></dd>
                 </div>
-                <div>
-                  <dt className="text-xs text-gray-400 mb-1">Passport (30d from check)</dt>
-                  <dd><ValidityPill date={computed.passport} /></dd>
-                </div>
+                {!computed.isUkDriver && (
+                  <div>
+                    <dt className="text-xs text-gray-400 mb-1">Passport (30d from check)</dt>
+                    <dd><ValidityPill date={computed.passport} /></dd>
+                  </div>
+                )}
                 <div>
                   <dt className="text-xs text-gray-400 mb-1">iDenfy Check</dt>
                   <dd className="text-sm text-gray-900">{formatDate(driver.idenfy_check_date)}</dd>
                 </div>
-                <div>
-                  <dt className="text-xs text-gray-400 mb-1">DVLA Check Date</dt>
-                  <dd className="text-sm text-gray-900">{formatDate(driver.dvla_check_date)}</dd>
-                </div>
-                {field('DVLA Check Code', 'dvla_check_code', { mono: true })}
               </>
             );
           })()}
