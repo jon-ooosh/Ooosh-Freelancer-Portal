@@ -675,7 +675,7 @@ async function fireReferralNotification(
       .filter(Boolean);
     const jobsText = jobRefs.length > 0 ? jobRefs.join(', ') : 'No active assignments';
 
-    // Create bell notifications for all admin/manager users
+    // 1. Create bell notifications for all admin/manager users
     const adminUsers = await query(
       `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
     );
@@ -690,7 +690,29 @@ async function fireReferralNotification(
       );
     }
 
-    console.log(`[driver-verification] Referral notifications sent to ${adminUsers.rows.length} admin/manager users`);
+    console.log(`[driver-verification] Bell notifications sent to ${adminUsers.rows.length} admin/manager users`);
+
+    // 2. Send email alert to info@oooshtours.co.uk (matches existing hire form behaviour)
+    try {
+      const { emailService } = await import('../services/email-service');
+      const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+
+      await emailService.send('referral_alert', {
+        to: 'info@oooshtours.co.uk',
+        variables: {
+          driverName,
+          driverEmail,
+          referralReasons: reasonsText,
+          linkedJobs: jobsText,
+          driverUrl: `${frontendUrl}/vehicles/drivers/${driverId}`,
+        },
+      });
+
+      console.log(`[driver-verification] Referral email sent to info@oooshtours.co.uk`);
+    } catch (emailErr) {
+      // Email failure shouldn't block the update — bell notification already sent
+      console.error('[driver-verification] Failed to send referral email (bell notification still sent):', emailErr);
+    }
   } catch (error) {
     // Don't fail the update if notification fails
     console.error('[driver-verification] Failed to send referral notification:', error);
