@@ -215,10 +215,11 @@ function computeOooshValidity(driver: DriverDetail): {
   // DVLA: 30d from check date
   const dvla = addDays(driver.dvla_check_date, 30);
 
-  // Passport: only for non-UK drivers. Use stored value or compute 30d from iDenfy
-  let passport: string | null = null;
-  if (!isUkDriver) {
-    passport = driver.passport_valid_until || addDays(driver.idenfy_check_date, 30);
+  // Passport: always show stored value if set (UK drivers need it for address mismatch).
+  // For non-UK drivers, auto-compute 30d from iDenfy if no stored value.
+  let passport: string | null = driver.passport_valid_until || null;
+  if (!passport && !isUkDriver) {
+    passport = addDays(driver.idenfy_check_date, 30);
   }
 
   return { licence, licenceCapped, dvla, passport, isUkDriver };
@@ -835,7 +836,7 @@ function DetailsTab({
                   </div>
                   {validityField('POA 1', 'poa1_valid_until', 'poa1_provider')}
                   {validityField('POA 2', 'poa2_valid_until', 'poa2_provider')}
-                  {!computed.isUkDriver && validityField('Passport', 'passport_valid_until')}
+                  {validityField('Passport', 'passport_valid_until')}
                 </>
               );
             }
@@ -862,12 +863,10 @@ function DetailsTab({
                   <dt className="text-xs text-gray-400 mb-1">POA 2{driver.poa2_provider ? ` (${driver.poa2_provider})` : ''} (90d from doc)</dt>
                   <dd><ValidityPill date={driver.poa2_valid_until} /></dd>
                 </div>
-                {!computed.isUkDriver && (
-                  <div>
-                    <dt className="text-xs text-gray-400 mb-1">Passport (30d from check)</dt>
-                    <dd><ValidityPill date={computed.passport} /></dd>
-                  </div>
-                )}
+                <div>
+                  <dt className="text-xs text-gray-400 mb-1">Passport{!computed.isUkDriver ? ' (30d from check)' : ''}</dt>
+                  <dd><ValidityPill date={computed.passport} /></dd>
+                </div>
                 <div>
                   <dt className="text-xs text-gray-400 mb-1">iDenfy Check</dt>
                   <dd className="text-sm text-gray-900">{formatDate(driver.idenfy_check_date)}</dd>
