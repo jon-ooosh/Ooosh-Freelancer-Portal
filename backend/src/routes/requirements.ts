@@ -22,10 +22,11 @@ router.get('/job/:jobId', async (req: AuthRequest, res: Response) => {
               rtd.label AS type_label,
               rtd.icon AS type_icon,
               rtd.steps AS type_steps,
-              u.first_name || ' ' || u.last_name AS assigned_to_name
+              p.first_name || ' ' || p.last_name AS assigned_to_name
        FROM job_requirements jr
        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
        LEFT JOIN users u ON u.id = jr.assigned_to
+       LEFT JOIN people p ON p.id = u.person_id
        WHERE jr.job_id = $1
        ORDER BY jr.sort_order, rtd.sort_order, jr.created_at`,
       [jobId]
