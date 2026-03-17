@@ -88,9 +88,10 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │       │   ├── PipelinePage.tsx                    # Kanban board
 │       │   ├── TeamPage.tsx
 │       │   ├── SettingsPage.tsx
+│       │   ├── ProfilePage.tsx                  # User profile: avatar upload, password change, name edit
 │       │   └── DuplicatesPage.tsx
 │       ├── components/
-│       │   ├── Layout.tsx              # Nav with "Address Book" and "Jobs" submenus
+│       │   ├── Layout.tsx              # Nav with "Address Book"/"Jobs" submenus + user avatar dropdown
 │       │   ├── TransportCalculator.tsx  # Full calculator modal (delivery/collection/crewed)
 │       │   ├── FileUpload.tsx
 │       │   ├── ActivityTimeline.tsx
@@ -546,6 +547,13 @@ Global operational view for what's currently happening / about to happen with tr
   - [x] Return window logic (midday day before through return_date)
   - [x] Time-based filter dropdown (Out Now / Next 2 Weeks / Over 2 Weeks)
   - [x] Prep Checklist prototype tab on Job Detail (dummy data, interactive demo)
+- [x] **User profiles & nav redesign** (17 Mar 2026)
+  - [x] Migration 023: avatar_url, force_password_change, password_changed_at on users
+  - [x] Profile page (`/profile`): edit name, upload avatar photo, change password
+  - [x] Nav bar redesign: user avatar + name as dropdown with My Profile / Settings / Sign out
+  - [x] Settings link removed from main nav, now in user dropdown (admin/manager only)
+  - [x] Admin force-password-reset from Settings page (sets temp password + force_password_change flag)
+  - [x] Avatar stored in R2 under `avatars/{userId}/`, displayed in nav bar and user lists
 - [ ] **Tasks system** — general-purpose task management (not tied to specific jobs)
   - Freelancer application review workflow
   - Annual licence/detail review reminders
@@ -697,6 +705,8 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 - [x] Startup validation: JWT_SECRET must be set and ≥32 characters, DATABASE_URL required
 - [x] Rate limiting on login (10 attempts per 15 min per IP) and token refresh (20 per 15 min)
 - [x] Logout endpoint (`POST /api/auth/logout`) — nulls refresh token
+- [x] Password change (self-service `POST /auth/change-password`, admin force-reset `POST /users/:id/force-password`)
+- [x] User profile page with avatar upload, name editing
 - [x] Socket.io JWT authentication middleware — connections require valid token
 
 **Data Security:**
@@ -976,6 +986,11 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 
 ### Email (migration 016)
 `email_log` — audit trail for all outbound emails (template, recipient, status, mode)
+
+### User Profiles (migration 023)
+`users.avatar_url` — R2 key for profile photo
+`users.force_password_change` — admin-set flag, prompts user on next login
+`users.password_changed_at` — tracks when password was last changed
 
 ## Architecture Notes
 
