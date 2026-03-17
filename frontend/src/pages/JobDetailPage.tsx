@@ -544,7 +544,7 @@ export default function JobDetailPage() {
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              {tab === 'overview' ? 'Overview' :
+              {tab === 'overview' ? 'Job Requirements' :
                tab === 'timeline' ? 'Activity Timeline' :
                tab === 'transport' ? `Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
                tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
@@ -1339,7 +1339,6 @@ function JobPrepChecklist({ jobId }: { jobId: string }) {
   const [templates, setTemplates] = useState<RequirementTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
-  const [showTemplateMenu, setShowTemplateMenu] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1379,7 +1378,7 @@ function JobPrepChecklist({ jobId }: { jobId: string }) {
     try {
       await api.post(`/requirements/job/${jobId}/template/${templateId}`, {});
       await loadAll();
-      setShowTemplateMenu(false);
+      setShowAddMenu(false);
     } catch (err) {
       console.error('Failed to apply template:', err);
     }
@@ -1442,7 +1441,7 @@ function JobPrepChecklist({ jobId }: { jobId: string }) {
       {/* Header with progress */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <h3 className="text-lg font-semibold text-gray-900">Overview</h3>
+          <h3 className="text-lg font-semibold text-gray-900">Job Requirements</h3>
           {totalCount > 0 && (
             <div className="flex items-center gap-2">
               <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden">
@@ -1459,57 +1458,56 @@ function JobPrepChecklist({ jobId }: { jobId: string }) {
           )}
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* Template button */}
-          <div className="relative">
-            <button
-              onClick={() => { setShowTemplateMenu(!showTemplateMenu); setShowAddMenu(false); }}
-              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700"
-            >
-              Apply Template
-            </button>
-            {showTemplateMenu && (
-              <div className="absolute right-0 mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1">
-                {templates.map((tmpl) => (
-                  <button
-                    key={tmpl.id}
-                    onClick={() => applyTemplate(tmpl.id)}
-                    className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50"
-                  >
-                    <span className="font-medium">{tmpl.name}</span>
-                    {tmpl.description && (
-                      <span className="text-gray-400 ml-2 text-xs">{tmpl.description}</span>
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Add requirement button */}
-          <div className="relative">
-            <button
-              onClick={() => { setShowAddMenu(!showAddMenu); setShowTemplateMenu(false); }}
-              className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700"
-            >
-              + Add Requirement
-            </button>
-            {showAddMenu && availableTypes.length > 0 && (
-              <div className="absolute right-0 mt-1 w-64 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1 max-h-72 overflow-y-auto">
-                {availableTypes.map((t) => (
-                  <button
-                    key={t.type}
-                    onClick={() => addRequirement(t.type)}
-                    className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
-                  >
-                    <span>{t.icon}</span>
-                    <span>{t.label}</span>
-                    {t.steps && <span className="text-xs text-gray-400 ml-auto">{t.steps.length} steps</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+        <div className="relative">
+          <button
+            onClick={() => setShowAddMenu(!showAddMenu)}
+            className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700"
+          >
+            + Add Job Requirement
+          </button>
+          {showAddMenu && (
+            <div className="absolute right-0 mt-1 w-72 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1 max-h-96 overflow-y-auto">
+              {/* Templates section */}
+              {templates.length > 0 && (
+                <>
+                  <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Quick Add (Templates)</div>
+                  {templates.map((tmpl) => (
+                    <button
+                      key={`tmpl-${tmpl.id}`}
+                      onClick={() => applyTemplate(tmpl.id)}
+                      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <span className="text-base">📋</span>
+                      <div>
+                        <span className="font-medium">{tmpl.name}</span>
+                        <span className="text-xs text-gray-400 ml-2">{tmpl.requirement_types.length} items</span>
+                      </div>
+                    </button>
+                  ))}
+                  {availableTypes.length > 0 && (
+                    <div className="border-t border-gray-100 my-1" />
+                  )}
+                </>
+              )}
+              {/* Individual requirement types */}
+              {availableTypes.length > 0 && (
+                <>
+                  <div className="px-4 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Individual</div>
+                  {availableTypes.map((t) => (
+                    <button
+                      key={t.type}
+                      onClick={() => addRequirement(t.type)}
+                      className="w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <span>{t.icon}</span>
+                      <span>{t.label}</span>
+                      {t.steps && <span className="text-xs text-gray-400 ml-auto">{t.steps.length} steps</span>}
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -1517,7 +1515,7 @@ function JobPrepChecklist({ jobId }: { jobId: string }) {
       {requirements.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
           <p className="text-gray-500 text-sm">No requirements added yet.</p>
-          <p className="text-gray-400 text-xs mt-1">Click "Apply Template" or "Add Requirement" to get started.</p>
+          <p className="text-gray-400 text-xs mt-1">Click "+ Add Job Requirement" to get started.</p>
         </div>
       ) : (
         <div className="space-y-2">
