@@ -49,6 +49,33 @@ interface DashboardData {
   upcoming_jobs: JobSummary[];
   overdue_returns: JobSummary[];
   recent_enquiries: JobSummary[];
+  pending_referrals: Array<{
+    id: string;
+    full_name: string;
+    email: string;
+    referral_status: string;
+    referral_date: string | null;
+    licence_points: number | null;
+    updated_at: string;
+    hirehop_job_id: number | null;
+    hirehop_job_name: string | null;
+    job_name: string | null;
+    job_uuid: string | null;
+  }>;
+  pending_excess: Array<{
+    excess_id: string;
+    excess_status: string;
+    excess_amount_required: number | null;
+    assignment_id: string;
+    hirehop_job_id: number | null;
+    hirehop_job_name: string | null;
+    hire_start: string | null;
+    driver_name: string | null;
+    driver_email: string | null;
+    vehicle_reg: string | null;
+    job_name: string | null;
+    job_uuid: string | null;
+  }>;
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -294,6 +321,75 @@ export default function DashboardPage() {
                 </div>
               )}
             </div>
+
+            {/* Pending Referrals */}
+            {data.pending_referrals.length > 0 && (
+              <div className="bg-white rounded-xl shadow-sm border border-orange-200 p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-gray-700">Pending Referrals</h3>
+                  <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full font-medium">
+                    {data.pending_referrals.length}
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {data.pending_referrals.map((r) => (
+                    <Link key={r.id} to={`/vehicles/drivers/${r.id}`} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1.5 rounded transition-colors">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-gray-900 truncate">
+                          {r.full_name}
+                          {r.licence_points != null && r.licence_points > 0 && (
+                            <span className={`ml-2 text-xs px-1.5 py-0.5 rounded-full ${
+                              r.licence_points >= 10 ? 'bg-red-100 text-red-700' :
+                              r.licence_points >= 7 ? 'bg-orange-100 text-orange-700' :
+                              'bg-amber-100 text-amber-700'
+                            }`}>
+                              {r.licence_points} pts
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {r.hirehop_job_name || r.job_name || 'No job linked'}
+                        </div>
+                      </div>
+                      <span className="text-xs text-orange-600 font-medium flex-shrink-0 ml-2">
+                        {r.referral_status || 'Pending'}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pending Excess */}
+            {data.pending_excess.length > 0 && (
+              <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-gray-700">Excess Awaiting Collection</h3>
+                  <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">
+                    {data.pending_excess.length}
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {data.pending_excess.map((e) => (
+                    <Link key={e.excess_id} to={e.job_uuid ? `/jobs/${e.job_uuid}` : '#'} className="flex items-center justify-between hover:bg-gray-50 -mx-2 px-2 py-1.5 rounded transition-colors">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-gray-900 truncate">
+                          {e.driver_name || e.driver_email || 'Unknown driver'}
+                          <span className="text-gray-400 font-normal ml-1.5">— {e.vehicle_reg || '?'}</span>
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {e.hirehop_job_name || e.job_name || `J-${e.hirehop_job_id}`}
+                          {e.hire_start && ` · ${new Date(e.hire_start).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`}
+                        </div>
+                      </div>
+                      <span className="text-xs text-amber-600 font-medium flex-shrink-0 ml-2">
+                        {e.excess_amount_required ? `£${Number(e.excess_amount_required).toFixed(0)}` : 'TBD'}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Still-placeholder panels */}
             <PlaceholderPanel

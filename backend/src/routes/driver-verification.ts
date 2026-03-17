@@ -272,6 +272,11 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       signatureDate: 'signature_date',
       licencePoints: 'licence_points',
       licenceEndorsements: 'licence_endorsements',
+      requiresReferral: 'requires_referral',
+      referralStatus: 'referral_status',
+      referralReasons: 'referral_reasons',
+      referralDate: 'referral_date',
+      referralNotes: 'referral_notes',
     };
 
     // Whitelist of fields the hire form app can update
@@ -289,6 +294,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
       'licence_points', 'licence_endorsements',
+      'requires_referral', 'referral_status', 'referral_reasons', 'referral_date', 'referral_notes',
     ]);
 
     const setClauses: string[] = [];
@@ -319,12 +325,33 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       [email]
     );
 
+    // Check if requires_referral is being set to true (for notification trigger)
+    const referralBeingSet = updates.requiresReferral === true || updates.requires_referral === true;
+
+    // If referral is being set, check if it's a *change* (was previously false/null)
+    let wasAlreadyReferred = false;
+    if (referralBeingSet && existing.rows.length > 0) {
+      const currentDriver = await query(
+        `SELECT requires_referral FROM drivers WHERE id = $1`,
+        [existing.rows[0].id]
+      );
+      wasAlreadyReferred = currentDriver.rows[0]?.requires_referral === true;
+    }
+
     if (existing.rows.length > 0) {
       const result = await query(
         `UPDATE drivers SET ${setClauses.join(', ')} WHERE email = $${params.length} AND is_active = true RETURNING id`,
         params
       );
-      res.json({ success: true, driverId: result.rows[0]?.id });
+
+      const driverId = result.rows[0]?.id;
+
+      // Fire referral notification if requires_referral just changed to true
+      if (referralBeingSet && !wasAlreadyReferred && driverId) {
+        await fireReferralNotification(email, driverId, updates);
+      }
+
+      res.json({ success: true, driverId });
     } else {
       // Create new driver with email + whatever fields were provided
       const fullName = (updates.full_name as string) || email;
@@ -340,6 +367,11 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
         `UPDATE drivers SET ${setClauses.join(', ')} WHERE id = $${params.length + 1}`,
         [...params.slice(0, -1), newId] // replace email param with id
       );
+
+      // Fire referral notification for new driver created with referral flag
+      if (referralBeingSet) {
+        await fireReferralNotification(email, newId, updates);
+      }
 
       res.json({ success: true, driverId: newId, created: true });
     }
@@ -610,6 +642,60 @@ router.post('/upload', authenticateHireForm, hireFormUpload.single('file'), asyn
     res.status(500).json({ error: message });
   }
 });
+
+// ============================================================================
+// Referral notification helper
+// ============================================================================
+
+async function fireReferralNotification(
+  driverEmail: string,
+  driverId: string,
+  updates: Record<string, unknown>
+): Promise<void> {
+  try {
+    const driverName = (updates.fullName as string) || (updates.full_name as string) || driverEmail;
+    const reasons = (updates.referralReasons as string[]) || (updates.referral_reasons as string[]) || [];
+    const reasonsText = reasons.length > 0 ? reasons.join(', ') : 'Not specified';
+
+    console.log(`[driver-verification] REFERRAL TRIGGERED for ${driverName} (${driverEmail}) — reasons: ${reasonsText}`);
+
+    // Find which jobs this driver is currently assigned to
+    const assignmentResult = await query(
+      `SELECT vha.hirehop_job_id, vha.hirehop_job_name, j.job_name
+       FROM vehicle_hire_assignments vha
+       LEFT JOIN jobs j ON j.id = vha.job_id
+       WHERE vha.driver_id = $1
+         AND vha.status IN ('soft', 'confirmed')
+         AND vha.assignment_type = 'self_drive'`,
+      [driverId]
+    );
+
+    const jobRefs = assignmentResult.rows
+      .map((r: any) => r.hirehop_job_name || r.job_name || `J-${r.hirehop_job_id}`)
+      .filter(Boolean);
+    const jobsText = jobRefs.length > 0 ? jobRefs.join(', ') : 'No active assignments';
+
+    // Create bell notifications for all admin/manager users
+    const adminUsers = await query(
+      `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
+    );
+
+    const notificationContent = `Manual referral needed: ${driverName} — ${reasonsText}${jobRefs.length > 0 ? ` (Jobs: ${jobsText})` : ''}`;
+
+    for (const user of adminUsers.rows) {
+      await query(
+        `INSERT INTO notifications (user_id, type, content, link)
+         VALUES ($1, 'referral', $2, $3)`,
+        [user.id, notificationContent, `/vehicles/drivers/${driverId}`]
+      );
+    }
+
+    console.log(`[driver-verification] Referral notifications sent to ${adminUsers.rows.length} admin/manager users`);
+  } catch (error) {
+    // Don't fail the update if notification fails
+    console.error('[driver-verification] Failed to send referral notification:', error);
+  }
+}
 
 // ============================================================================
 // Document analysis & routing engine (ported from get-next-step.js)

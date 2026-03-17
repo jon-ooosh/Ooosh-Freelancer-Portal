@@ -171,6 +171,47 @@ interface PersonOption {
   is_approved: boolean;
 }
 
+interface VehicleAssignment {
+  id: string;
+  vehicle_id: string;
+  vehicle_reg: string;
+  vehicle_type: string | null;
+  driver_id: string | null;
+  driver_name: string | null;
+  driver_email: string | null;
+  driver_points: number | null;
+  freelancer_name: string | null;
+  freelancer_person_id: string | null;
+  assignment_type: string;
+  status: string;
+  hire_start: string | null;
+  hire_end: string | null;
+  mileage_out: number | null;
+  mileage_in: number | null;
+  booked_out_at: string | null;
+  checked_in_at: string | null;
+  has_damage: boolean;
+  excess?: {
+    id: string;
+    excess_status: string;
+    excess_amount_required: number | null;
+    excess_amount_taken: number | null;
+  } | null;
+}
+
+interface DispatchCheckResult {
+  canDispatch: boolean;
+  totalAssignments: number;
+  readyAssignments: number;
+  blockers: Array<{
+    type: string;
+    assignmentId: string;
+    driverName: string | null;
+    vehicleReg: string | null;
+    amountRequired: number | null;
+  }>;
+}
+
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -181,7 +222,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'details'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'details'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -190,6 +231,11 @@ export default function JobDetailPage() {
   const [peopleSearch, setPeopleSearch] = useState('');
   const [assignRole, setAssignRole] = useState('driver');
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+
+  // Drivers & Vehicles state
+  const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
+  const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
+  const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
 
   // Status transition state
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
@@ -259,6 +305,7 @@ export default function JobDetailPage() {
       loadJob();
       loadInteractions();
       loadQuotes();
+      loadVehicleAssignments();
     }
   }, [id]);
 
@@ -354,6 +401,33 @@ export default function JobDetailPage() {
       setInteractions(data.data);
     } catch (err) {
       console.error('Failed to load interactions:', err);
+    }
+  }
+
+  async function loadVehicleAssignments() {
+    if (!id) return;
+    setVehicleAssignmentsLoading(true);
+    try {
+      const raw = await api.get<{ data: any[] }>(`/assignments?job_id=${id}`);
+      // Reshape flat excess columns into nested object
+      const shaped: VehicleAssignment[] = raw.data.map((r: any) => ({
+        ...r,
+        excess: r.excess_id ? {
+          id: r.excess_id,
+          excess_status: r.excess_status,
+          excess_amount_required: r.excess_amount_required,
+          excess_amount_taken: r.excess_amount_taken,
+        } : null,
+      }));
+      setVehicleAssignments(shaped);
+
+      // Also load dispatch check
+      const check = await api.get<DispatchCheckResult>(`/assignments/dispatch-check/${id}`);
+      setDispatchCheck(check);
+    } catch {
+      console.error('Failed to load vehicle assignments');
+    } finally {
+      setVehicleAssignmentsLoading(false);
     }
   }
 
@@ -534,7 +608,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['overview', 'timeline', 'transport', 'files', 'details'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'drivers', 'files', 'details'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -547,6 +621,7 @@ export default function JobDetailPage() {
               {tab === 'overview' ? 'Overview' :
                tab === 'timeline' ? 'Activity Timeline' :
                tab === 'transport' ? `Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
+               tab === 'drivers' ? `Drivers & Vehicles${vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}` :
                tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
                'Full Details'}
             </button>
@@ -567,6 +642,177 @@ export default function JobDetailPage() {
           interactions={interactions}
           onInteractionAdded={loadInteractions}
         />
+      )}
+
+      {/* Drivers & Vehicles Tab */}
+      {activeTab === 'drivers' && (
+        <div className="space-y-4">
+          <h3 className="text-lg font-semibold text-gray-900">Drivers & Vehicles</h3>
+
+          {/* Referral/excess warnings */}
+          {dispatchCheck && dispatchCheck.blockers.length > 0 && (
+            <div className="space-y-2">
+              {dispatchCheck.blockers.map((b, i) => (
+                <div key={i} className={`flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium ${
+                  b.type === 'referral_pending'
+                    ? 'bg-orange-50 border border-orange-200 text-orange-800'
+                    : 'bg-amber-50 border border-amber-200 text-amber-800'
+                }`}>
+                  <span>{b.type === 'referral_pending' ? '!' : '$'}</span>
+                  <span>
+                    {b.type === 'referral_pending'
+                      ? `Referral pending for ${b.driverName || 'Unknown driver'} (${b.vehicleReg || '?'}) — cannot book out until approved`
+                      : `Excess pending for ${b.driverName || 'Unknown driver'} (${b.vehicleReg || '?'})${b.amountRequired ? ` — £${b.amountRequired.toFixed(2)} required` : ''}`
+                    }
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {vehicleAssignmentsLoading ? (
+            <div className="flex justify-center py-12">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
+            </div>
+          ) : vehicleAssignments.length === 0 ? (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+              <p className="text-gray-400 text-4xl mb-3">🚐</p>
+              <p className="text-gray-600 font-medium">No vehicle assignments yet</p>
+              <p className="text-sm text-gray-400 mt-1">Vehicle assignments from the Allocations page will appear here</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {vehicleAssignments.map((a) => {
+                const assignmentBlockers = dispatchCheck?.blockers.filter(b => b.assignmentId === a.id) || [];
+                const hasReferralBlocker = assignmentBlockers.some(b => b.type === 'referral_pending');
+                const hasExcessBlocker = assignmentBlockers.some(b => b.type === 'excess_pending');
+
+                const statusConfig: Record<string, { label: string; bg: string; text: string }> = {
+                  soft: { label: 'Soft Allocation', bg: 'bg-gray-100', text: 'text-gray-600' },
+                  confirmed: { label: 'Confirmed', bg: 'bg-blue-100', text: 'text-blue-700' },
+                  booked_out: { label: 'Booked Out', bg: 'bg-indigo-100', text: 'text-indigo-700' },
+                  active: { label: 'On Hire', bg: 'bg-green-100', text: 'text-green-700' },
+                  returned: { label: 'Returned', bg: 'bg-teal-100', text: 'text-teal-700' },
+                  cancelled: { label: 'Cancelled', bg: 'bg-red-100', text: 'text-red-700' },
+                };
+                const sc = statusConfig[a.status] || statusConfig.soft;
+
+                const typeLabels: Record<string, string> = {
+                  self_drive: 'Self-Drive',
+                  driven: 'Driven',
+                  delivery: 'Delivery',
+                  collection: 'Collection',
+                };
+
+                return (
+                  <div key={a.id} className={`bg-white rounded-xl shadow-sm border ${
+                    hasReferralBlocker ? 'border-orange-300' : hasExcessBlocker ? 'border-amber-300' : 'border-gray-200'
+                  } p-5`}>
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-lg">🚐</span>
+                        <span className="font-semibold text-gray-900">{a.vehicle_reg}</span>
+                        {a.vehicle_type && <span className="text-sm text-gray-500">({a.vehicle_type})</span>}
+                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
+                          {sc.label}
+                        </span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
+                          {typeLabels[a.assignment_type] || a.assignment_type}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Driver info */}
+                    {a.assignment_type === 'self_drive' && (
+                      <div className={`rounded-lg p-3 mb-3 ${
+                        hasReferralBlocker ? 'bg-orange-50' : 'bg-gray-50'
+                      }`}>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="text-xs font-medium text-gray-500 uppercase">Driver</span>
+                            {a.driver_name ? (
+                              <p className="text-sm font-medium text-gray-900">
+                                {a.driver_name}
+                                {a.driver_email && <span className="text-gray-400 font-normal ml-2">{a.driver_email}</span>}
+                              </p>
+                            ) : (
+                              <p className="text-sm text-gray-400 italic">No driver assigned</p>
+                            )}
+                          </div>
+                          <div className="flex gap-2">
+                            {hasReferralBlocker && (
+                              <span className="text-xs px-2 py-1 rounded-full bg-orange-100 text-orange-700 font-medium">
+                                Referral Pending
+                              </span>
+                            )}
+                            {a.driver_points != null && a.driver_points > 0 && (
+                              <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                                a.driver_points >= 10 ? 'bg-red-100 text-red-700' :
+                                a.driver_points >= 7 ? 'bg-orange-100 text-orange-700' :
+                                a.driver_points >= 4 ? 'bg-amber-100 text-amber-700' :
+                                'bg-gray-100 text-gray-600'
+                              }`}>
+                                {a.driver_points} pts
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Excess status */}
+                        {a.excess && (
+                          <div className="mt-2 pt-2 border-t border-gray-200">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-gray-500">Insurance Excess</span>
+                              <div className="flex items-center gap-2">
+                                {a.excess.excess_amount_required && (
+                                  <span className="font-medium text-gray-700">
+                                    £{Number(a.excess.excess_amount_required).toFixed(2)}
+                                  </span>
+                                )}
+                                <span className={`px-2 py-0.5 rounded-full font-medium ${
+                                  a.excess.excess_status === 'taken' ? 'bg-green-100 text-green-700' :
+                                  a.excess.excess_status === 'waived' ? 'bg-blue-100 text-blue-700' :
+                                  a.excess.excess_status === 'pending' ? 'bg-amber-100 text-amber-700' :
+                                  'bg-gray-100 text-gray-600'
+                                }`}>
+                                  {a.excess.excess_status === 'taken' ? 'Collected' :
+                                   a.excess.excess_status === 'waived' ? 'Waived' :
+                                   a.excess.excess_status === 'pending' ? 'Pending' :
+                                   a.excess.excess_status}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Driven assignment - show freelancer driver */}
+                    {a.assignment_type === 'driven' && a.freelancer_name && (
+                      <div className="bg-gray-50 rounded-lg p-3 mb-3">
+                        <span className="text-xs font-medium text-gray-500 uppercase">Staff Driver</span>
+                        <p className="text-sm font-medium text-gray-900">{a.freelancer_name}</p>
+                      </div>
+                    )}
+
+                    {/* Hire dates and mileage */}
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+                      {a.hire_start && (
+                        <span>Start: {new Date(a.hire_start).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                      )}
+                      {a.hire_end && (
+                        <span>End: {new Date(a.hire_end).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                      )}
+                      {a.mileage_out != null && <span>Out: {a.mileage_out.toLocaleString()} mi</span>}
+                      {a.mileage_in != null && <span>In: {a.mileage_in.toLocaleString()} mi</span>}
+                      {a.has_damage && <span className="text-red-600 font-medium">Damage reported</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Files Tab */}
