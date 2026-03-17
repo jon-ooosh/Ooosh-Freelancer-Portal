@@ -393,7 +393,7 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
 - [x] Wire Prep Checklist to real data (replace dummy prototype)
 - [x] Replace Overview tab with Prep Checklist as default job tab (now called "Job Requirements")
 - [x] Non-linear status badges (styled like pipeline status dropdowns)
-- [ ] Progress indicators on Jobs list page (real data)
+- [x] Progress indicators on Jobs list page + Pipeline kanban cards (real data via bulk endpoint)
 - [ ] Deposit/payment progress bar on Prep Checklist (visual: deposit taken vs full fee)
 - [ ] "Compare" function: what we've said we need vs what HH tells us (flag discrepancies)
 
