@@ -375,7 +375,7 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
 - [ ] Excess payment events recorded in Ooosh (financial record, not pipeline change)
 - [ ] Payment confirmation → pipeline status change (deposit = confirmed)
 
-#### Step 6: Operations Modules (Hire Readiness) ← PLANNING COMPLETE
+#### Step 6: Operations Modules (Hire Readiness) ← STREAM 1 FOUNDATION MOSTLY COMPLETE
 
 **Architecture:** Each confirmed job gets a **Prep Checklist** (the new default tab on Job Detail, replacing the old Overview). Each checklist item is a *requirement* — things that need doing before a job can go out. Requirements link into deeper per-job tabs, global overview pages, or expand inline for simple items.
 
@@ -388,11 +388,11 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
 - **Freelancer portal integration** — crew assignments, delivery jobs, studio sitter assignments all need to be readable/writable from the freelancer portal (currently reads from Monday.com, needs repointing to OP).
 
 ##### Stream 1: Core Requirements System (FOUNDATION — do first)
-- [ ] `job_requirements` table + migration
-- [ ] Requirements API: CRUD, non-linear status changes, templates
-- [ ] Wire Prep Checklist to real data (replace dummy prototype)
-- [ ] Replace Overview tab with Prep Checklist as default job tab
-- [ ] Non-linear status badges (styled like pipeline status dropdowns)
+- [x] `job_requirements` table + migration (migration 021)
+- [x] Requirements API: CRUD, non-linear status changes, templates
+- [x] Wire Prep Checklist to real data (replace dummy prototype)
+- [x] Replace Overview tab with Prep Checklist as default job tab (now called "Job Requirements")
+- [x] Non-linear status badges (styled like pipeline status dropdowns)
 - [ ] Progress indicators on Jobs list page (real data)
 - [ ] Deposit/payment progress bar on Prep Checklist (visual: deposit taken vs full fee)
 - [ ] "Compare" function: what we've said we need vs what HH tells us (flag discrepancies)
