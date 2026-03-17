@@ -6,6 +6,8 @@ interface User {
   role: string;
   first_name: string;
   last_name: string;
+  avatar_url?: string | null;
+  force_password_change?: boolean;
 }
 
 interface AuthState {
@@ -16,6 +18,7 @@ interface AuthState {
   login: (user: User, accessToken: string, refreshToken: string) => void;
   logout: () => void;
   setTokens: (accessToken: string, refreshToken: string) => void;
+  updateUser: (updates: Partial<User>) => void;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -42,5 +45,14 @@ export const useAuthStore = create<AuthState>((set) => ({
     localStorage.setItem('ooosh_access_token', accessToken);
     localStorage.setItem('ooosh_refresh_token', refreshToken);
     set({ accessToken, refreshToken });
+  },
+
+  updateUser: (updates) => {
+    set((state) => {
+      if (!state.user) return state;
+      const updated = { ...state.user, ...updates };
+      localStorage.setItem('ooosh_user', JSON.stringify(updated));
+      return { user: updated };
+    });
   },
 }));

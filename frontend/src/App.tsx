@@ -12,6 +12,7 @@ import JobsPage from './pages/JobsPage';
 import JobDetailPage from './pages/JobDetailPage';
 import PipelinePage from './pages/PipelinePage';
 import SettingsPage from './pages/SettingsPage';
+import ProfilePage from './pages/ProfilePage';
 import DuplicatesPage from './pages/DuplicatesPage';
 import DriversPage from './pages/DriversPage';
 import DriverDetailPage from './pages/DriverDetailPage';
@@ -58,6 +59,7 @@ export default function App() {
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
+                <Route path="/profile" element={<ProfilePage />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>

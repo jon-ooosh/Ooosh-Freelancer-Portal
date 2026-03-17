@@ -2,10 +2,14 @@ import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
+import multer from 'multer';
+import path from 'path';
+import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { validate } from '../middleware/validate';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import { uploadToR2, deleteFromR2, isR2Configured } from '../config/r2';
 
 const router = Router();
 
@@ -47,6 +51,31 @@ const registerSchema = z.object({
   role: z.enum(['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer']).default('staff'),
 });
 
+const changePasswordSchema = z.object({
+  current_password: z.string().min(1),
+  new_password: z.string().min(8),
+});
+
+const updateProfileSchema = z.object({
+  first_name: z.string().min(1).optional(),
+  last_name: z.string().min(1).optional(),
+});
+
+// Avatar upload config — images only, 5MB limit
+const avatarUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowed.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type ${ext} not allowed. Use JPG, PNG, GIF, or WebP.`));
+    }
+  },
+});
+
 function generateTokens(user: { id: string; email: string; role: string }) {
   const accessToken = jwt.sign(
     { id: user.id, email: user.email, role: user.role },
@@ -69,7 +98,9 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
     const { email, password } = req.body;
 
     const result = await query(
-      'SELECT u.*, p.first_name, p.last_name FROM users u JOIN people p ON u.person_id = p.id WHERE u.email = $1 AND u.is_active = true',
+      `SELECT u.*, p.first_name, p.last_name
+       FROM users u JOIN people p ON u.person_id = p.id
+       WHERE u.email = $1 AND u.is_active = true`,
       [email.toLowerCase()]
     );
 
@@ -101,6 +132,8 @@ router.post('/login', loginLimiter, validate(loginSchema), async (req: Request, 
         role: user.role,
         first_name: user.first_name,
         last_name: user.last_name,
+        avatar_url: user.avatar_url || null,
+        force_password_change: user.force_password_change || false,
       },
       ...tokens,
     });
@@ -169,7 +202,9 @@ router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
     }
 
     const result = await query(
-      'SELECT u.*, p.first_name, p.last_name FROM users u JOIN people p ON u.person_id = p.id WHERE u.id = $1 AND u.refresh_token = $2 AND u.is_active = true',
+      `SELECT u.*, p.first_name, p.last_name
+       FROM users u JOIN people p ON u.person_id = p.id
+       WHERE u.id = $1 AND u.refresh_token = $2 AND u.is_active = true`,
       [decoded.id, refreshToken]
     );
 
@@ -204,7 +239,10 @@ router.post('/logout', authenticate, async (req: AuthRequest, res: Response) => 
 router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
-      'SELECT u.id, u.email, u.role, p.first_name, p.last_name FROM users u JOIN people p ON u.person_id = p.id WHERE u.id = $1',
+      `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
+              p.first_name, p.last_name
+       FROM users u JOIN people p ON u.person_id = p.id
+       WHERE u.id = $1`,
       [req.user!.id]
     );
 
@@ -216,6 +254,151 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Get user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/auth/profile — update own profile (name only, not email/role)
+router.put('/profile', authenticate, validate(updateProfileSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { first_name, last_name } = req.body;
+    const userId = req.user!.id;
+
+    const updates: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+
+    if (first_name) {
+      updates.push(`first_name = $${idx}`);
+      params.push(first_name);
+      idx++;
+    }
+    if (last_name) {
+      updates.push(`last_name = $${idx}`);
+      params.push(last_name);
+      idx++;
+    }
+
+    if (updates.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+
+    params.push(userId);
+    await query(
+      `UPDATE people SET ${updates.join(', ')}, updated_at = NOW()
+       WHERE id = (SELECT person_id FROM users WHERE id = $${idx})`,
+      params
+    );
+
+    // Return updated user
+    const result = await query(
+      `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
+              p.first_name, p.last_name
+       FROM users u JOIN people p ON u.person_id = p.id
+       WHERE u.id = $1`,
+      [userId]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Profile update error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/change-password — change own password
+router.post('/change-password', authenticate, validate(changePasswordSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { current_password, new_password } = req.body;
+    const userId = req.user!.id;
+
+    // Verify current password
+    const result = await query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    const valid = await bcrypt.compare(current_password, result.rows[0].password_hash);
+    if (!valid) {
+      res.status(401).json({ error: 'Current password is incorrect' });
+      return;
+    }
+
+    const newHash = await bcrypt.hash(new_password, 12);
+    await query(
+      'UPDATE users SET password_hash = $1, force_password_change = false, password_changed_at = NOW() WHERE id = $2',
+      [newHash, userId]
+    );
+
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/auth/avatar — upload profile photo
+router.post('/avatar', authenticate, avatarUpload.single('avatar'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isR2Configured()) {
+      res.status(503).json({ error: 'File storage not configured' });
+      return;
+    }
+
+    if (!req.file) {
+      res.status(400).json({ error: 'No image provided' });
+      return;
+    }
+
+    const userId = req.user!.id;
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const key = `avatars/${userId}/${uuid()}${ext}`;
+
+    // Delete old avatar if exists
+    const existing = await query('SELECT avatar_url FROM users WHERE id = $1', [userId]);
+    if (existing.rows[0]?.avatar_url) {
+      try {
+        await deleteFromR2(existing.rows[0].avatar_url);
+      } catch {
+        // Old avatar may already be deleted, continue
+      }
+    }
+
+    await uploadToR2(key, req.file.buffer, req.file.mimetype);
+    await query('UPDATE users SET avatar_url = $1 WHERE id = $2', [key, userId]);
+
+    res.json({ avatar_url: key });
+  } catch (error) {
+    console.error('Avatar upload error:', error);
+    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+      res.status(413).json({ error: 'Image too large (max 5MB)' });
+      return;
+    }
+    const message = error instanceof Error ? error.message : 'Upload failed';
+    res.status(500).json({ error: message });
+  }
+});
+
+// DELETE /api/auth/avatar — remove profile photo
+router.delete('/avatar', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const existing = await query('SELECT avatar_url FROM users WHERE id = $1', [userId]);
+
+    if (existing.rows[0]?.avatar_url) {
+      try {
+        await deleteFromR2(existing.rows[0].avatar_url);
+      } catch {
+        // Continue even if R2 delete fails
+      }
+    }
+
+    await query('UPDATE users SET avatar_url = NULL WHERE id = $1', [userId]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Avatar delete error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

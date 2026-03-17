@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
@@ -13,7 +14,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const includeInactive = req.query.include_inactive === 'true';
     const whereClause = includeInactive ? '' : 'WHERE u.is_active = true';
     const result = await query(
-      `SELECT u.id, u.email, u.role, u.is_active, u.last_login,
+      `SELECT u.id, u.email, u.role, u.is_active, u.last_login, u.avatar_url,
         p.first_name, p.last_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
@@ -104,7 +105,7 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateUserSchema), as
 
     // Return updated user
     const result = await query(
-      `SELECT u.id, u.email, u.role, u.is_active,
+      `SELECT u.id, u.email, u.role, u.is_active, u.avatar_url,
         p.first_name, p.last_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
@@ -115,6 +116,35 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateUserSchema), as
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Update user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+const forcePasswordSchema = z.object({
+  new_password: z.string().min(8),
+});
+
+// POST /api/users/:id/force-password — admin sets a new password for a user
+router.post('/:id/force-password', authorize('admin'), validate(forcePasswordSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { new_password } = req.body;
+
+    const userCheck = await query('SELECT id FROM users WHERE id = $1', [id]);
+    if (userCheck.rows.length === 0) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    const newHash = await bcrypt.hash(new_password, 12);
+    await query(
+      `UPDATE users SET password_hash = $1, force_password_change = true, password_changed_at = NOW() WHERE id = $2`,
+      [newHash, id]
+    );
+
+    res.json({ success: true, message: 'Password reset. User will be prompted to change it on next login.' });
+  } catch (error) {
+    console.error('Force password error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
