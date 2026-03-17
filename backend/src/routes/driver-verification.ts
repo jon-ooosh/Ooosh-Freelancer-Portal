@@ -56,12 +56,12 @@ function authenticateHireForm(req: HireFormRequest, res: Response, next: NextFun
       const provided = Buffer.from(apiKey);
       if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
         // API key auth — extract email from query or body
+        // Note: for multipart uploads, req.body may not be parsed yet (multer runs after this middleware),
+        // so we allow API key auth to proceed without email — the endpoint can extract it later.
         const email = (req.query.email as string) || req.body?.email;
-        if (email) {
-          req.hireFormUser = { email, type: 'hire_form_session' };
-          next();
-          return;
-        }
+        req.hireFormUser = { email: email || 'api_key_service', type: 'hire_form_session' };
+        next();
+        return;
       }
     } catch {
       // Fall through to other auth methods
