@@ -44,7 +44,7 @@ const registerSchema = z.object({
   password: z.string().min(8),
   first_name: z.string().min(1),
   last_name: z.string().min(1),
-  role: z.enum(['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager']).default('staff'),
+  role: z.enum(['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer']).default('staff'),
 });
 
 function generateTokens(user: { id: string; email: string; role: string }) {

@@ -131,6 +131,68 @@ cd frontend && npm run build       # Production build
 cd deploy && bash deploy.sh        # Pull, build, restart on server
 ```
 
+## Deployment Playbook
+
+When the user asks to "deploy" or "merge and deploy", follow these steps. The production server is at `49.13.158.66` and the user SSHs in as root.
+
+### Multi-branch merge & deploy
+
+When work has been done on multiple Claude branches and needs merging to a deployment branch:
+
+1. **Identify branches to merge.** The user will tell you which branches contain new work.
+2. **Pick or create a target branch** (usually the branch the server is currently on — check with `git branch` on server).
+3. **Provide the user with these commands to run on the server** (Claude cannot SSH):
+
+```bash
+# On the production server (ssh root@49.13.158.66)
+cd /var/www/ooosh-portal
+
+# Step 1: Fetch the branches
+git fetch origin <branch-1>
+git fetch origin <branch-2>
+
+# Step 2: Checkout the target branch
+git checkout <target-branch>
+git pull origin <target-branch>
+
+# Step 3: Merge each source branch
+git merge origin/<branch-1>
+git merge origin/<branch-2>
+# (resolve conflicts if any, then git add + git commit)
+
+# Step 4: Run migrations (if any new ones)
+cd backend && npm run db:migrate
+
+# Step 5: Build
+cd /var/www/ooosh-portal/backend && npm run build
+cd /var/www/ooosh-portal/frontend && npm run build
+
+# Step 6: Restart the service
+sudo systemctl restart ooosh-portal
+
+# Step 7: Verify
+sudo systemctl status ooosh-portal
+# Check logs for errors:
+journalctl -u ooosh-portal -n 50 --no-pager
+```
+
+### Quick deploy (same branch, just pull latest)
+
+```bash
+cd /var/www/ooosh-portal
+git pull origin <current-branch>
+cd backend && npm run build
+cd ../frontend && npm run build
+sudo systemctl restart ooosh-portal
+sudo systemctl status ooosh-portal
+```
+
+### Post-deploy checks
+- Service should show `active (running)` within a few seconds
+- Check `journalctl -u ooosh-portal -n 50` for any startup errors (DB connection, migration issues, missing env vars)
+- Test the site at `https://staff.oooshtours.co.uk/`
+- If migrations fail, check the error and fix — the migration runner skips already-applied migrations, so re-running is safe
+
 ## Login Credentials (Demo Seed)
 
 - **Admin:** admin@oooshtours.co.uk / admin12345
@@ -628,7 +690,9 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 **Authentication & Authorization:**
 - [x] JWT access tokens (15 min) + refresh tokens (7 days)
 - [x] Bcrypt password hashing (12 salt rounds)
-- [x] RBAC middleware (`authorize()`) on sensitive routes
+- [x] RBAC middleware (`authorize()`) on sensitive routes — 6 roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, `freelancer`
+- [x] Account locking — `is_active = false` nulls refresh token via DB trigger, locks user out within 15 min (access token expiry)
+- [x] Optimistic locking — `version` column on people, organisations, venues, jobs tables. PUT requests can send `version` to detect concurrent edits (409 Conflict if stale). Backwards compatible — omitting `version` skips the check.
 - [x] JWT_SECRET required via env var (no default fallback) — app won't start without it
 - [x] Startup validation: JWT_SECRET must be set and ≥32 characters, DATABASE_URL required
 - [x] Rate limiting on login (10 attempts per 15 min per IP) and token refresh (20 per 15 min)

@@ -160,7 +160,8 @@ router.put('/:id', validate(updateOrgSchema), async (req: AuthRequest, res: Resp
       return;
     }
 
-    const fields = Object.entries(req.body).filter(([, v]) => v !== undefined);
+    const clientVersion = req.body.version;
+    const fields = Object.entries(req.body).filter(([k, v]) => v !== undefined && k !== 'version');
     if (fields.length === 0) {
       res.json(current.rows[0]);
       return;
@@ -168,13 +169,25 @@ router.put('/:id', validate(updateOrgSchema), async (req: AuthRequest, res: Resp
 
     const setClauses = fields.map(([key], i) => `${key} = $${i + 1}`);
     setClauses.push(`updated_at = NOW()`);
+    setClauses.push(`version = version + 1`);
     const values = fields.map(([, v]) => v);
     values.push(req.params.id);
 
+    let whereClause = `id = $${values.length} AND is_deleted = false`;
+    if (clientVersion !== undefined) {
+      values.push(clientVersion);
+      whereClause += ` AND version = $${values.length}`;
+    }
+
     const result = await query(
-      `UPDATE organisations SET ${setClauses.join(', ')} WHERE id = $${values.length} AND is_deleted = false RETURNING *`,
+      `UPDATE organisations SET ${setClauses.join(', ')} WHERE ${whereClause} RETURNING *`,
       values
     );
+
+    if (result.rows.length === 0 && clientVersion !== undefined) {
+      res.status(409).json({ error: 'This record was modified by someone else. Please reload and try again.' });
+      return;
+    }
 
     await logAudit(req.user!.id, 'organisations', req.params.id as string, 'update', current.rows[0], result.rows[0]);
 

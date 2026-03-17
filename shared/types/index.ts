@@ -275,7 +275,7 @@ export interface User {
   id: string;
   person_id: string;
   email: string;
-  role: 'admin' | 'manager' | 'staff' | 'general_assistant' | 'weekend_manager';
+  role: 'admin' | 'manager' | 'staff' | 'general_assistant' | 'weekend_manager' | 'freelancer';
   is_active: boolean;
   last_login: string | null;
   preferences: UserPreferences;

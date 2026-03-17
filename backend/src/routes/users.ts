@@ -7,16 +7,18 @@ import { validate } from '../middleware/validate';
 const router = Router();
 router.use(authenticate);
 
-// GET /api/users — list users (for @mention lookups)
+// GET /api/users — list users (for @mention lookups, team management)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
+    const includeInactive = req.query.include_inactive === 'true';
+    const whereClause = includeInactive ? '' : 'WHERE u.is_active = true';
     const result = await query(
-      `SELECT u.id, u.email, u.role, u.is_active,
+      `SELECT u.id, u.email, u.role, u.is_active, u.last_login,
         p.first_name, p.last_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
-       WHERE u.is_active = true
-       ORDER BY p.first_name, p.last_name`
+       ${whereClause}
+       ORDER BY u.is_active DESC, p.first_name, p.last_name`
     );
 
     res.json({ data: result.rows });
@@ -30,7 +32,7 @@ const updateUserSchema = z.object({
   first_name: z.string().min(1).optional(),
   last_name: z.string().min(1).optional(),
   email: z.string().email().optional(),
-  role: z.enum(['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager']).optional(),
+  role: z.enum(['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer']).optional(),
   is_active: z.boolean().optional(),
 });
 

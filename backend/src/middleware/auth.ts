@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 export interface AuthUser {
   id: string;
   email: string;
-  role: 'admin' | 'manager' | 'staff' | 'general_assistant' | 'weekend_manager';
+  role: 'admin' | 'manager' | 'staff' | 'general_assistant' | 'weekend_manager' | 'freelancer';
 }
 
 export interface AuthRequest extends Request {
