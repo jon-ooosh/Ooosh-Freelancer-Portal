@@ -16,7 +16,11 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import multer from 'multer';
+import path from 'path';
+import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
+import { uploadToR2, isR2Configured } from '../config/r2';
 
 const router = Router();
 
@@ -223,6 +227,53 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
   try {
     const { email, updates } = updateSchema.parse(req.body);
 
+    console.log(`[driver-verification] UPDATE for ${email} — incoming fields:`, Object.keys(updates));
+    console.log(`[driver-verification] UPDATE values:`, JSON.stringify(updates, null, 2));
+
+    // camelCase → snake_case mapping for hire form app compatibility
+    const camelToSnake: Record<string, string> = {
+      fullName: 'full_name',
+      phoneNumber: 'phone',
+      phoneCountry: 'phone_country',
+      dateOfBirth: 'date_of_birth',
+      addressFull: 'address_full',
+      homeAddress: 'address_full',
+      licenceAddress: 'licence_address',
+      licenseAddress: 'licence_address',
+      licenceNumber: 'licence_number',
+      licenseNumber: 'licence_number',
+      licenceIssuedBy: 'licence_issued_by',
+      licenseIssuedBy: 'licence_issued_by',
+      licenceIssueCountry: 'licence_issue_country',
+      licenceValidFrom: 'licence_valid_from',
+      licenceValidTo: 'licence_valid_to',
+      datePassedTest: 'date_passed_test',
+      licenceNextCheckDue: 'licence_next_check_due',
+      licenseNextCheckDue: 'licence_next_check_due',
+      poa1ValidUntil: 'poa1_valid_until',
+      poa2ValidUntil: 'poa2_valid_until',
+      dvlaValidUntil: 'dvla_valid_until',
+      passportValidUntil: 'passport_valid_until',
+      poa1Provider: 'poa1_provider',
+      poa2Provider: 'poa2_provider',
+      dvlaCheckCode: 'dvla_check_code',
+      dvlaCheckDate: 'dvla_check_date',
+      hasDisability: 'has_disability',
+      hasConvictions: 'has_convictions',
+      hasProsecution: 'has_prosecution',
+      hasAccidents: 'has_accidents',
+      hasInsuranceIssues: 'has_insurance_issues',
+      hasDrivingBan: 'has_driving_ban',
+      additionalDetails: 'additional_details',
+      insuranceStatus: 'insurance_status',
+      overallStatus: 'overall_status',
+      idenfyCheckDate: 'idenfy_check_date',
+      idenfyScanRef: 'idenfy_scan_ref',
+      signatureDate: 'signature_date',
+      licencePoints: 'licence_points',
+      licenceEndorsements: 'licence_endorsements',
+    };
+
     // Whitelist of fields the hire form app can update
     const allowedFields = new Set([
       'full_name', 'phone', 'phone_country', 'date_of_birth', 'nationality',
@@ -237,22 +288,27 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'has_insurance_issues', 'has_driving_ban', 'additional_details',
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
-      'licence_points',
+      'licence_points', 'licence_endorsements',
     ]);
 
     const setClauses: string[] = [];
     const params: unknown[] = [];
 
     for (const [key, value] of Object.entries(updates)) {
-      if (!allowedFields.has(key)) continue;
+      // Normalise: accept both camelCase and snake_case
+      const dbField = camelToSnake[key] || key;
+      if (!allowedFields.has(dbField)) continue;
       params.push(value ?? null);
-      setClauses.push(`${key} = $${params.length}`);
+      setClauses.push(`${dbField} = $${params.length}`);
     }
 
     if (setClauses.length === 0) {
+      console.log(`[driver-verification] UPDATE for ${email} — NO valid fields after mapping! Incoming keys were:`, Object.keys(updates));
       res.status(400).json({ error: 'No valid fields to update' });
       return;
     }
+
+    console.log(`[driver-verification] UPDATE for ${email} — writing fields:`, setClauses.map(c => c.split(' = ')[0]));
 
     setClauses.push('updated_at = NOW()');
     params.push(email);
@@ -464,6 +520,94 @@ router.get('/validate-job/:jobNumber', authenticateApiKey, async (req: Request, 
   } catch (error) {
     console.error('[driver-verification] Validate job error:', error);
     res.status(500).json({ error: 'Failed to validate job' });
+  }
+});
+
+// ============================================================================
+// POST /api/driver-verification/upload — File upload for hire form app
+// ============================================================================
+
+const hireFormUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.webp', '.doc', '.docx'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowed.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type ${ext} not allowed`));
+    }
+  },
+});
+
+router.post('/upload', authenticateHireForm, hireFormUpload.single('file'), async (req: HireFormRequest, res: Response) => {
+  try {
+    if (!isR2Configured()) {
+      res.status(503).json({ error: 'File storage not configured' });
+      return;
+    }
+
+    if (!req.file) {
+      res.status(400).json({ error: 'No file provided' });
+      return;
+    }
+
+    const { entity_id, label, comment, tag } = req.body;
+    const email = req.body.email || req.hireFormUser?.email;
+
+    // Look up driver by email or entity_id
+    let driverId = entity_id;
+    if (!driverId && email) {
+      const result = await query(
+        `SELECT id FROM drivers WHERE email = $1 AND is_active = true LIMIT 1`,
+        [email]
+      );
+      if (result.rows.length > 0) {
+        driverId = result.rows[0].id;
+      }
+    }
+
+    if (!driverId) {
+      res.status(400).json({ error: 'Driver not found — provide entity_id or email' });
+      return;
+    }
+
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const fileId = uuid();
+    const key = `files/drivers/${driverId}/${fileId}${ext}`;
+
+    await uploadToR2(key, req.file.buffer, req.file.mimetype);
+
+    const fileType = ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext) ? 'image' : 'document';
+    const fileAttachment: Record<string, unknown> = {
+      name: req.file.originalname,
+      url: key,
+      type: fileType,
+      uploaded_at: new Date().toISOString(),
+      uploaded_by: email || 'hire_form',
+    };
+    if (label?.trim()) fileAttachment.label = label.trim();
+    if (comment?.trim()) fileAttachment.comment = comment.trim();
+    if (tag?.trim()) fileAttachment.tag = tag.trim();
+
+    // Append to driver's files JSONB array
+    await query(
+      `UPDATE drivers SET files = COALESCE(files, '[]'::jsonb) || $1::jsonb, updated_at = NOW() WHERE id = $2`,
+      [JSON.stringify([fileAttachment]), driverId]
+    );
+
+    console.log(`[driver-verification] File uploaded for driver ${driverId}: ${req.file.originalname} (tag: ${tag || 'none'})`);
+
+    res.status(201).json({ success: true, file: fileAttachment, driverId });
+  } catch (error) {
+    console.error('[driver-verification] File upload error:', error);
+    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+      res.status(413).json({ error: 'File too large (max 10MB)' });
+      return;
+    }
+    const message = error instanceof Error ? error.message : 'Upload failed';
+    res.status(500).json({ error: message });
   }
 });
 
