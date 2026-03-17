@@ -341,7 +341,8 @@ router.get('/:id/audit-log', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const result = await query(
-      `SELECT al.*, u.email AS user_email,
+      `SELECT al.id, al.user_id, al.action, al.previous_values, al.new_values, al.created_at,
+        u.email AS user_email,
         COALESCE(u.first_name || ' ' || u.last_name, u.email) AS user_name
       FROM audit_log al
       LEFT JOIN users u ON u.id::text = al.user_id
@@ -352,8 +353,12 @@ router.get('/:id/audit-log', async (req: AuthRequest, res: Response) => {
     );
     res.json({ data: result.rows });
   } catch (error) {
-    console.error('[drivers] Audit log error:', error);
-    res.status(500).json({ error: 'Failed to load audit log' });
+    // Log the actual error for server-side debugging
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[drivers] Audit log error:', errMsg);
+    // Return empty data instead of 500 — audit log is non-critical
+    // Common cause: permissions issue on audit_log table (like sync_log before migration 009)
+    res.json({ data: [], _error: 'Audit log temporarily unavailable' });
   }
 });
 

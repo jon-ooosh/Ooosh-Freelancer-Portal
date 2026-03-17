@@ -50,6 +50,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '019_driver_files.sql',
         '020_driver_hire_form_fields.sql',
         '021_job_requirements.sql',
+        '022_fix_audit_log_permissions.sql',
       ];
 
       for (const migration of migrations) {

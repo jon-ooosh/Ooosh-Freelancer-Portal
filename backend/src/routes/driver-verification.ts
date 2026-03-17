@@ -649,14 +649,33 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
 
   analysis.isUkDriver = driver.licence_issued_by === 'DVLA';
 
-  // Licence: valid if licence_next_check_due is in the future
-  if (driver.licence_next_check_due) {
+  // Helper: add days to a date string
+  function addDays(dateStr: string, days: number): Date {
+    const d = new Date(dateStr);
+    d.setDate(d.getDate() + days);
+    return d;
+  }
+
+  // Licence: 90 days from iDenfy check, capped at actual licence expiry
+  // Falls back to licence_next_check_due if idenfy_check_date is not set
+  if (driver.idenfy_check_date) {
+    const windowEnd = addDays(driver.idenfy_check_date as string, 90);
+    // Cap at actual licence expiry if that's sooner
+    let effectiveEnd = windowEnd;
+    if (driver.licence_valid_to) {
+      const licenceExpiry = new Date(driver.licence_valid_to as string);
+      if (licenceExpiry < windowEnd) effectiveEnd = licenceExpiry;
+    }
+    analysis.licence.valid = effectiveEnd > today;
+    analysis.licence.expiryDate = effectiveEnd.toISOString().split('T')[0];
+  } else if (driver.licence_next_check_due) {
+    // Legacy fallback
     const checkDate = new Date(driver.licence_next_check_due as string);
     analysis.licence.valid = checkDate > today;
     analysis.licence.expiryDate = (driver.licence_next_check_due as string);
   }
 
-  // POA1
+  // POA1: 90 days from doc date (stored as poa1_valid_until by hire form)
   if (driver.poa1_valid_until) {
     const poa1Date = new Date(driver.poa1_valid_until as string);
     analysis.poa1.valid = poa1Date > today;
@@ -664,7 +683,7 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
   }
   analysis.poa1.provider = (driver.poa1_provider as string) || null;
 
-  // POA2
+  // POA2: 90 days from doc date
   if (driver.poa2_valid_until) {
     const poa2Date = new Date(driver.poa2_valid_until as string);
     analysis.poa2.valid = poa2Date > today;
@@ -672,18 +691,27 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
   }
   analysis.poa2.provider = (driver.poa2_provider as string) || null;
 
-  // DVLA
-  if (driver.dvla_valid_until) {
+  // DVLA: 30 days from check date
+  if (driver.dvla_check_date) {
+    const dvlaEnd = addDays(driver.dvla_check_date as string, 30);
+    analysis.dvla.valid = dvlaEnd > today;
+    analysis.dvla.expiryDate = dvlaEnd.toISOString().split('T')[0];
+  } else if (driver.dvla_valid_until) {
+    // Fallback to stored value
     const dvlaDate = new Date(driver.dvla_valid_until as string);
     analysis.dvla.valid = dvlaDate > today;
     analysis.dvla.expiryDate = (driver.dvla_valid_until as string);
   }
 
-  // Passport
+  // Passport: 30 days from iDenfy check (non-UK), or stored value
   if (driver.passport_valid_until) {
     const passDate = new Date(driver.passport_valid_until as string);
     analysis.passport.valid = passDate > today;
     analysis.passport.expiryDate = (driver.passport_valid_until as string);
+  } else if (!analysis.isUkDriver && driver.idenfy_check_date) {
+    const passEnd = addDays(driver.idenfy_check_date as string, 30);
+    analysis.passport.valid = passEnd > today;
+    analysis.passport.expiryDate = passEnd.toISOString().split('T')[0];
   }
 
   // All valid check

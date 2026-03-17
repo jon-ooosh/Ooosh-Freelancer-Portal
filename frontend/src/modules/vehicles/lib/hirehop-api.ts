@@ -218,7 +218,7 @@ async function _processNextItem(): Promise<void> {
  * - Deduplicates in-flight requests for the same job
  * - Retries once on error 327 with 1.5s backoff
  */
-function fetchJobItemsQueued(jobId: number): Promise<HireHopJobItem[]> {
+export function fetchJobItemsQueued(jobId: number): Promise<HireHopJobItem[]> {
   // Return from cache if available
   const cached = _getCachedItems(jobId)
   if (cached) return Promise.resolve(cached)
