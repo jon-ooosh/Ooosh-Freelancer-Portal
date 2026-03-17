@@ -208,16 +208,24 @@ function ClientPicker({
 
 // ── Pipeline Card ──────────────────────────────────────────────────────────
 
+interface ReqProgress {
+  total: number;
+  done: number;
+  blocked: number;
+}
+
 function PipelineCard({
   job,
   onDragStart,
   onClick,
   onChase,
+  progress,
 }: {
   job: Job;
   onDragStart: (e: React.DragEvent, job: Job) => void;
   onClick: (job: Job) => void;
   onChase: (job: Job) => void;
+  progress?: ReqProgress;
 }) {
   const chase = chaseDueLabel(job.next_chase_date);
   const borderClass =
@@ -289,6 +297,24 @@ function PipelineCard({
           </span>
         )}
       </div>
+
+      {/* Requirements progress */}
+      {progress && progress.total > 0 && (() => {
+        const pct = Math.round((progress.done / progress.total) * 100);
+        return (
+          <div className="flex items-center gap-1.5 mb-1">
+            <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full ${progress.blocked > 0 ? 'bg-red-500' : pct === 100 ? 'bg-green-500' : 'bg-amber-400'}`}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className={`text-xs ${progress.blocked > 0 ? 'text-red-600' : progress.done === progress.total ? 'text-green-600' : 'text-gray-400'}`}>
+              {progress.blocked > 0 ? `${progress.blocked} blocked` : `${progress.done}/${progress.total}`}
+            </span>
+          </div>
+        );
+      })()}
 
       {/* Row 6: Chase due + chase button + manager */}
       <div className="flex items-center justify-between">
@@ -1369,6 +1395,7 @@ export default function PipelinePage() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [stats, setStats] = useState<PipelineStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
   const [view, setView] = useState<'kanban' | 'list'>('kanban');
 
   // Sort
@@ -1431,6 +1458,15 @@ export default function PipelinePage() {
   useEffect(() => {
     fetchPipeline();
   }, [fetchPipeline]);
+
+  // Load requirements progress when jobs change
+  useEffect(() => {
+    if (jobs.length === 0) return;
+    const jobIds = jobs.map(j => j.id);
+    api.post<{ data: Record<string, ReqProgress> }>('/requirements/bulk', { job_ids: jobIds })
+      .then(res => setReqProgress(res.data))
+      .catch(() => { /* requirements table may not exist yet */ });
+  }, [jobs]);
 
   // ── Drag and drop ──────────────────────────────────────────────────────
 
@@ -1678,6 +1714,7 @@ export default function PipelinePage() {
                           onDragStart={handleDragStart}
                           onClick={handleCardClick}
                           onChase={(j) => setChaseModal(j)}
+                          progress={reqProgress[job.id]}
                         />
                       ))
                     )}
