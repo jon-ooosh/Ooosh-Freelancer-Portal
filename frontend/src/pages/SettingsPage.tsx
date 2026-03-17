@@ -19,7 +19,7 @@ interface BackupEntry {
   created_at: string;
 }
 
-const ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'] as const;
+const ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer'] as const;
 
 const ROLE_LABELS: Record<string, string> = {
   admin: 'Admin',
@@ -27,6 +27,7 @@ const ROLE_LABELS: Record<string, string> = {
   staff: 'Staff',
   general_assistant: 'General Assistant',
   weekend_manager: 'Weekend Manager',
+  freelancer: 'Freelancer',
 };
 
 const roleBadgeColors: Record<string, string> = {
@@ -35,6 +36,7 @@ const roleBadgeColors: Record<string, string> = {
   staff: 'bg-green-100 text-green-700',
   general_assistant: 'bg-amber-100 text-amber-700',
   weekend_manager: 'bg-purple-100 text-purple-700',
+  freelancer: 'bg-teal-100 text-teal-700',
 };
 
 function getPasswordStrength(pw: string): { score: number; label: string; color: string; checks: string[] } {
