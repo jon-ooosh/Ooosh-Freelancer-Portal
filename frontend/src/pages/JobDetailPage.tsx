@@ -181,7 +181,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'prep' | 'details'>('prep');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'details'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -534,7 +534,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['overview', 'prep', 'timeline', 'transport', 'files', 'details'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'files', 'details'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -545,7 +545,6 @@ export default function JobDetailPage() {
               }`}
             >
               {tab === 'overview' ? 'Overview' :
-               tab === 'prep' ? 'Prep Checklist' :
                tab === 'timeline' ? 'Activity Timeline' :
                tab === 'transport' ? `Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
                tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
@@ -555,145 +554,8 @@ export default function JobDetailPage() {
         </nav>
       </div>
 
-      {/* Overview Tab */}
+      {/* Overview Tab (Prep Checklist) */}
       {activeTab === 'overview' && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Dates Card */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h3 className="text-sm font-semibold text-gray-700 mb-4">Dates</h3>
-            <div className="space-y-3">
-              <DateRow label="Out Date" value={formatDate(job.out_date)} />
-              <DateRow label="Job Start" value={formatDate(job.job_date)} />
-              <DateRow label="Job End" value={formatDate(job.job_end)} />
-              <DateRow label="Return Date" value={formatDate(job.return_date)} />
-              {(job.duration_days || job.duration_hrs) && (
-                <div className="pt-2 border-t">
-                  <span className="text-xs text-gray-500">Duration: </span>
-                  <span className="text-sm text-gray-900">
-                    {job.duration_days ? `${job.duration_days} day${job.duration_days !== 1 ? 's' : ''}` : ''}
-                    {job.duration_days && job.duration_hrs ? ', ' : ''}
-                    {job.duration_hrs ? `${job.duration_hrs} hr${job.duration_hrs !== 1 ? 's' : ''}` : ''}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* People Card */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h3 className="text-sm font-semibold text-gray-700 mb-4">People</h3>
-            <div className="space-y-3">
-              <div>
-                <span className="text-xs text-gray-500 block">Client</span>
-                {job.client_id ? (
-                  <Link to={`/organisations/${job.client_id}`} className="text-sm text-ooosh-600 hover:text-ooosh-700 font-medium">
-                    {job.client_name || job.company_name || '—'}
-                  </Link>
-                ) : (
-                  <span className="text-sm text-gray-900">{job.client_name || job.company_name || '—'}</span>
-                )}
-                {job.client_ref && (
-                  <span className="text-xs text-gray-400 ml-2">Ref: {job.client_ref}</span>
-                )}
-              </div>
-              <div>
-                <span className="text-xs text-gray-500 block">Manager 1</span>
-                {job.manager1_person_id ? (
-                  <Link to={`/people/${job.manager1_person_id}`} className="text-sm text-ooosh-600 hover:text-ooosh-700 font-medium">
-                    {job.manager1_name || '—'}
-                  </Link>
-                ) : (
-                  <span className="text-sm text-gray-900">{job.manager1_name || '—'}</span>
-                )}
-              </div>
-              <div>
-                <span className="text-xs text-gray-500 block">Manager 2</span>
-                {job.manager2_person_id ? (
-                  <Link to={`/people/${job.manager2_person_id}`} className="text-sm text-ooosh-600 hover:text-ooosh-700 font-medium">
-                    {job.manager2_name || '—'}
-                  </Link>
-                ) : (
-                  <span className="text-sm text-gray-900">{job.manager2_name || '—'}</span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* Venue Card */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h3 className="text-sm font-semibold text-gray-700 mb-4">Venue</h3>
-            <div className="space-y-2">
-              <div>
-                <span className="text-xs text-gray-500 block">Name</span>
-                {job.venue_id ? (
-                  <Link to={`/venues/${job.venue_id}`} className="text-sm text-ooosh-600 hover:text-ooosh-700 font-medium">
-                    {job.venue_name || '—'}
-                  </Link>
-                ) : (
-                  <span className="text-sm text-gray-900">{job.venue_name || '—'}</span>
-                )}
-              </div>
-              {job.address && (
-                <div>
-                  <span className="text-xs text-gray-500 block">Address</span>
-                  <span className="text-sm text-gray-900">{job.address}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Project Card */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h3 className="text-sm font-semibold text-gray-700 mb-4">Project & Meta</h3>
-            <div className="space-y-2">
-              {job.project_name && (
-                <div>
-                  <span className="text-xs text-gray-500 block">Project</span>
-                  <span className="text-sm text-gray-900">{job.project_name}</span>
-                </div>
-              )}
-              {job.job_type && (
-                <div>
-                  <span className="text-xs text-gray-500 block">Type</span>
-                  <span className="text-sm text-gray-900">{job.job_type}</span>
-                </div>
-              )}
-              {job.depot_name && (
-                <div>
-                  <span className="text-xs text-gray-500 block">Depot</span>
-                  <span className="text-sm text-gray-900">{job.depot_name}</span>
-                </div>
-              )}
-              {job.custom_index && (
-                <div>
-                  <span className="text-xs text-gray-500 block">Custom Index</span>
-                  <span className="text-sm text-gray-900">{job.custom_index}</span>
-                </div>
-              )}
-              <div>
-                <span className="text-xs text-gray-500 block">Created</span>
-                <span className="text-sm text-gray-900">{formatDateTime(job.created_date)}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Notes */}
-          {(job.notes || job.details) && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 md:col-span-2">
-              <h3 className="text-sm font-semibold text-gray-700 mb-3">Notes</h3>
-              {job.details && (
-                <p className="text-sm text-gray-600 whitespace-pre-wrap mb-3">{job.details}</p>
-              )}
-              {job.notes && (
-                <p className="text-sm text-gray-600 whitespace-pre-wrap">{job.notes}</p>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Prep Checklist Tab */}
-      {activeTab === 'prep' && (
         <JobPrepChecklist jobId={id || ''} />
       )}
 
@@ -1426,7 +1288,7 @@ function FileViewerModal({
   );
 }
 
-// ── Prep Checklist (API-backed) ──────────────────────────────────────────
+// ── Overview / Prep Checklist (API-backed) ───────────────────────────────
 
 interface RequirementTypeDef {
   type: string;
@@ -1580,7 +1442,7 @@ function JobPrepChecklist({ jobId }: { jobId: string }) {
       {/* Header with progress */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <h3 className="text-lg font-semibold text-gray-900">Prep Checklist</h3>
+          <h3 className="text-lg font-semibold text-gray-900">Overview</h3>
           {totalCount > 0 && (
             <div className="flex items-center gap-2">
               <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden">
@@ -2011,15 +1873,6 @@ function JobFilesSection({
 }
 
 // ── Helper Components ─────────────────────────────────────────────────────
-
-function DateRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-xs text-gray-500">{label}</span>
-      <span className="text-sm text-gray-900">{value}</span>
-    </div>
-  );
-}
 
 function DetailField({ label, value }: { label: string; value: string | null | undefined }) {
   return (
