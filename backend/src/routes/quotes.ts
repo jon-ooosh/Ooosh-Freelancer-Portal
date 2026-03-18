@@ -615,7 +615,7 @@ const localQuoteSchema = z.object({
   arrivalTime: z.string().optional().nullable(),
   venueId: z.string().uuid().optional().nullable(),
   venueName: z.string().optional().nullable(),
-  fee: z.number().min(0),
+  fee: z.number().min(0).optional().nullable(),
   clientCharge: z.number().min(0).optional().nullable(),
   notes: z.string().optional().nullable(),
   whatIsIt: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
@@ -624,6 +624,8 @@ const localQuoteSchema = z.object({
 router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, whatIsIt } = req.body;
+    const feeVal = fee || 0;
+    const chargeVal = clientCharge || feeVal;
 
     const result = await query(
       `INSERT INTO quotes (
@@ -639,7 +641,7 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
       [
         jobId, jobType, venueId || null, venueName || null,
         jobDate || null, arrivalTime || null,
-        fee, clientCharge || fee,
+        feeVal, chargeVal,
         whatIsIt || null, notes || null,
         req.user!.id,
       ]
