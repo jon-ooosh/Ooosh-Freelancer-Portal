@@ -1469,7 +1469,7 @@ export default function JobDetailsPage() {
 
                   {!job.completedAtDate && (
                     <Link
-                      href={`/job/${job.id}/complete`}
+                      href={`/job/${job.id}/start`}
                       className="w-full bg-purple-500 text-white px-6 py-4 rounded-xl font-semibold hover:bg-purple-600 transition-colors flex items-center justify-center gap-2 text-lg"
                     >
                       <span>▶️</span> Start {isDelivery ? 'Delivery' : 'Collection'}

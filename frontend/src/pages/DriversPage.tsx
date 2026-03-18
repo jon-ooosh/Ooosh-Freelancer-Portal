@@ -11,9 +11,14 @@ interface DriverListItem {
   postcode: string | null;
   licence_number: string | null;
   licence_points: number;
+  licence_valid_to: string | null;
   requires_referral: boolean;
   referral_status: string | null;
   dvla_check_date: string | null;
+  dvla_valid_until: string | null;
+  poa1_valid_until: string | null;
+  poa2_valid_until: string | null;
+  signature_date: string | null;
   is_active: boolean;
   source: string;
   created_at: string;
@@ -79,6 +84,55 @@ function formatDate(d: string | null): string {
   } catch {
     return d;
   }
+}
+
+function isDateExpired(d: string | null): boolean {
+  if (!d) return false;
+  try {
+    return new Date(d) < new Date();
+  } catch {
+    return false;
+  }
+}
+
+function deriveDriverStatus(driver: DriverListItem): { label: string; colour: string } {
+  // Referral takes priority
+  if (driver.requires_referral) {
+    if (driver.referral_status === 'approved') {
+      return { label: 'Referral Approved', colour: 'bg-blue-100 text-blue-700' };
+    }
+    if (driver.referral_status === 'declined') {
+      return { label: 'Referral Declined', colour: 'bg-red-100 text-red-700' };
+    }
+    return { label: 'Referral Required', colour: 'bg-red-100 text-red-700' };
+  }
+
+  // Check for expired documents
+  const expiredDocs: string[] = [];
+  if (isDateExpired(driver.licence_valid_to)) expiredDocs.push('Licence');
+  if (isDateExpired(driver.dvla_valid_until)) expiredDocs.push('DVLA');
+  if (isDateExpired(driver.poa1_valid_until)) expiredDocs.push('POA');
+
+  if (expiredDocs.length > 0) {
+    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
+  }
+
+  // In progress — has started form but not signed
+  if (!driver.signature_date && driver.email) {
+    // Check if they have any meaningful data beyond just name/email
+    const hasLicence = !!driver.licence_number;
+    const hasDvla = !!driver.dvla_check_date;
+    if (!hasLicence && !hasDvla) {
+      return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+    }
+  }
+
+  // If signed but missing key validity dates, still in progress
+  if (driver.signature_date && !driver.dvla_valid_until && !driver.licence_valid_to) {
+    return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+  }
+
+  return { label: 'Clear', colour: 'bg-green-100 text-green-700' };
 }
 
 export default function DriversPage() {
@@ -219,43 +273,40 @@ export default function DriversPage() {
                 </td>
               </tr>
             ) : (
-              drivers.map((driver) => (
-                <tr
-                  key={driver.id}
-                  onClick={() => navigate(`/drivers/${driver.id}`)}
-                  className="hover:bg-gray-50 cursor-pointer transition-colors"
-                >
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-medium text-gray-900">{driver.full_name}</div>
-                    {driver.postcode && (
-                      <div className="text-xs text-gray-400">{driver.postcode}</div>
-                    )}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {driver.email || '—'}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
-                    {driver.licence_number || '—'}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {pointsBadge(driver.licence_points)}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {formatDate(driver.dvla_check_date)}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {driver.requires_referral ? (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-red-100 text-red-700">
-                        {driver.referral_status === 'approved' ? 'Referral Approved' : 'Referral Required'}
+              drivers.map((driver) => {
+                const status = deriveDriverStatus(driver);
+                return (
+                  <tr
+                    key={driver.id}
+                    onClick={() => navigate(`/drivers/${driver.id}`)}
+                    className="hover:bg-gray-50 cursor-pointer transition-colors"
+                  >
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm font-medium text-gray-900">{driver.full_name}</div>
+                      {driver.postcode && (
+                        <div className="text-xs text-gray-400">{driver.postcode}</div>
+                      )}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {driver.email || '—'}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
+                      {driver.licence_number || '—'}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {pointsBadge(driver.licence_points)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      {formatDate(driver.dvla_check_date)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${status.colour}`}>
+                        {status.label}
                       </span>
-                    ) : (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-green-100 text-green-700">
-                        Clear
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>

@@ -16,6 +16,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../config/api-config'
 import type { HireHopJob } from '../types/hirehop'
 import { useState, useCallback } from 'react'
+import { fetchJobItemsQueued } from '../lib/hirehop-api'
 
 /** Fetch jobs from the OP backend */
 async function fetchJobsFromOP(endpoint: string): Promise<HireHopJob[]> {
@@ -24,6 +25,30 @@ async function fetchJobsFromOP(endpoint: string): Promise<HireHopJob[]> {
     throw new Error(`Failed to fetch jobs: ${response.status}`)
   }
   return response.json() as Promise<HireHopJob[]>
+}
+
+/**
+ * Fetch jobs from OP backend, then enrich with HireHop line items.
+ * Items are needed by the Allocations page to extract van requirements.
+ */
+async function fetchAndEnrichJobs(endpoint: string): Promise<HireHopJob[]> {
+  const jobs = await fetchJobsFromOP(endpoint)
+  if (jobs.length === 0) return jobs
+
+  // Enrich each job with items from HireHop via the throttled queue
+  const enriched = await Promise.all(
+    jobs.map(async (job) => {
+      if (job.id <= 0) return job
+      try {
+        const items = await fetchJobItemsQueued(job.id)
+        return { ...job, items }
+      } catch (err) {
+        console.warn(`[useHireHopJobs] Failed to fetch items for job ${job.id}:`, err)
+        return { ...job, itemsFetchFailed: true }
+      }
+    })
+  )
+  return enriched
 }
 
 /**
@@ -57,7 +82,7 @@ export function useDueBackJobs() {
 export function useUpcomingJobs(daysAhead: number = 7) {
   return useQuery<HireHopJob[]>({
     queryKey: ['hirehop-upcoming', daysAhead],
-    queryFn: () => fetchJobsFromOP(`/jobs/upcoming?days=${daysAhead}`),
+    queryFn: () => fetchAndEnrichJobs(`/jobs/upcoming?days=${daysAhead}`),
     staleTime: 2 * 60 * 1000,
     gcTime: 15 * 60 * 1000,
   })
@@ -70,7 +95,7 @@ export function useUpcomingJobs(daysAhead: number = 7) {
 export function useUpcomingDueBackJobs(daysAhead: number = 7) {
   return useQuery<HireHopJob[]>({
     queryKey: ['hirehop-upcoming-due-back', daysAhead],
-    queryFn: () => fetchJobsFromOP(`/jobs/upcoming-due-back?days=${daysAhead}`),
+    queryFn: () => fetchAndEnrichJobs(`/jobs/upcoming-due-back?days=${daysAhead}`),
     staleTime: 2 * 60 * 1000,
     gcTime: 15 * 60 * 1000,
   })

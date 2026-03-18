@@ -69,11 +69,18 @@ const BASE_SELECT = `
     d.full_name AS driver_name,
     d.email AS driver_email,
     d.licence_points AS driver_points,
-    p.first_name || ' ' || p.last_name AS freelancer_name
+    d.requires_referral AS driver_requires_referral,
+    d.referral_status AS driver_referral_status,
+    p.first_name || ' ' || p.last_name AS freelancer_name,
+    je.id AS excess_id,
+    je.excess_status,
+    je.excess_amount_required,
+    je.excess_amount_taken
   FROM vehicle_hire_assignments vha
   JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
   LEFT JOIN drivers d ON d.id = vha.driver_id
   LEFT JOIN people p ON p.id = vha.freelancer_person_id
+  LEFT JOIN job_excess je ON je.assignment_id = vha.id
 `;
 
 // ── GET /api/assignments — List assignments ──
@@ -316,6 +323,40 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
     const { id } = req.params;
     const { mileage_out, fuel_level_out } = req.body;
 
+    // Per-driver gate: check if this driver's referral and excess are cleared
+    const gateCheck = await query(
+      `SELECT vha.assignment_type, vha.driver_id,
+        d.requires_referral, d.referral_status,
+        je.excess_status
+      FROM vehicle_hire_assignments vha
+      LEFT JOIN drivers d ON d.id = vha.driver_id
+      LEFT JOIN job_excess je ON je.assignment_id = vha.id
+      WHERE vha.id = $1`,
+      [id]
+    );
+
+    if (gateCheck.rows.length > 0) {
+      const row = gateCheck.rows[0];
+      const gateBlockers: string[] = [];
+
+      if (row.assignment_type === 'self_drive') {
+        if (row.requires_referral && row.referral_status !== 'approved') {
+          gateBlockers.push('Driver referral pending — must be approved before book-out');
+        }
+        if (row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required'].includes(row.excess_status)) {
+          gateBlockers.push('Insurance excess not resolved — must be taken or waived before book-out');
+        }
+      }
+
+      if (gateBlockers.length > 0) {
+        res.status(409).json({
+          error: 'Book-out blocked',
+          blockers: gateBlockers,
+        });
+        return;
+      }
+    }
+
     const result = await query(
       `UPDATE vehicle_hire_assignments
        SET status = 'booked_out',
@@ -451,15 +492,19 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 // DISPATCH GATE CHECK
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── GET /api/assignments/dispatch-check/:jobId — Can this job be dispatched? ──
+// ── GET /api/assignments/dispatch-check/:jobId — Per-assignment readiness for a job ──
+// Returns blockers per assignment. The job itself can still go out — the gate
+// is per-driver: a specific driver can't be booked out until their referral
+// is approved and excess is resolved.
 
 router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
 
-    // Find all self_drive assignments for this job with pending excess
+    // Find all self_drive assignments for this job with excess + referral status
     const result = await query(
       `SELECT vha.id AS assignment_id,
+        vha.status AS assignment_status,
         d.full_name AS driver_name,
         fv.reg AS vehicle_reg,
         je.excess_amount_required,
@@ -509,7 +554,10 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
     }
 
     res.json({
-      canDispatch: blockers.length === 0,
+      // Job can still dispatch — blockers are per-driver, not per-job
+      canDispatch: true,
+      totalAssignments: result.rows.length,
+      readyAssignments: result.rows.length - new Set(blockers.map(b => b.assignmentId)).size,
       blockers,
     });
   } catch (error) {

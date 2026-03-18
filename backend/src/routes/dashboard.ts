@@ -9,20 +9,7 @@ router.use(authenticate);
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     // Run all queries in parallel for speed
-    const [
-      countsResult,
-      recentActivityResult,
-      activityByTypeResult,
-      recentPeopleResult,
-      recentOrgsResult,
-      thisWeekActivityResult,
-      teamActivityResult,
-      notificationsResult,
-      jobStatusBreakdownResult,
-      upcomingJobsResult,
-      overdueReturnsResult,
-      recentEnquiriesResult,
-    ] = await Promise.all([
+    const results = await Promise.all([
       // Entity counts (including jobs)
       query(`
         SELECT
@@ -157,7 +144,52 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         ORDER BY created_date DESC
         LIMIT 8
       `),
+
+      // Pending referrals — drivers needing manual insurer referral
+      query(`
+        SELECT d.id, d.full_name, d.email, d.referral_status, d.referral_date,
+               d.licence_points, d.updated_at,
+               vha.hirehop_job_id, vha.hirehop_job_name,
+               j.job_name, j.id AS job_uuid
+        FROM drivers d
+        LEFT JOIN vehicle_hire_assignments vha
+          ON vha.driver_id = d.id
+          AND vha.status IN ('soft', 'confirmed')
+          AND vha.assignment_type = 'self_drive'
+        LEFT JOIN jobs j ON j.id = vha.job_id
+        WHERE d.requires_referral = true
+          AND d.referral_status IN ('pending', 'submitted')
+          AND d.is_active = true
+        ORDER BY d.updated_at DESC
+        LIMIT 10
+      `),
+
+      // Pending excess — assignments with unresolved excess
+      query(`
+        SELECT je.id AS excess_id, je.excess_status, je.excess_amount_required,
+               vha.id AS assignment_id, vha.hirehop_job_id, vha.hirehop_job_name, vha.hire_start,
+               d.full_name AS driver_name, d.email AS driver_email,
+               fv.reg AS vehicle_reg,
+               j.job_name, j.id AS job_uuid
+        FROM job_excess je
+        JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+        LEFT JOIN drivers d ON d.id = vha.driver_id
+        LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+        LEFT JOIN jobs j ON j.id = vha.job_id
+        WHERE je.excess_status = 'pending'
+          AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
+        ORDER BY vha.hire_start ASC NULLS LAST
+        LIMIT 10
+      `),
     ]);
+
+    const [
+      countsResult, recentActivityResult, activityByTypeResult,
+      recentPeopleResult, recentOrgsResult, thisWeekActivityResult,
+      teamActivityResult, notificationsResult, jobStatusBreakdownResult,
+      upcomingJobsResult, overdueReturnsResult, recentEnquiriesResult,
+      pendingReferralsResult, pendingExcessResult,
+    ] = results;
 
     res.json({
       counts: countsResult.rows[0],
@@ -172,6 +204,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       upcoming_jobs: upcomingJobsResult.rows,
       overdue_returns: overdueReturnsResult.rows,
       recent_enquiries: recentEnquiriesResult.rows,
+      pending_referrals: pendingReferralsResult.rows,
+      pending_excess: pendingExcessResult.rows,
     });
   } catch (error) {
     console.error('Dashboard error:', error);

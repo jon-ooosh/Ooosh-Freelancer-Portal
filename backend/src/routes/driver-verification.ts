@@ -56,12 +56,12 @@ function authenticateHireForm(req: HireFormRequest, res: Response, next: NextFun
       const provided = Buffer.from(apiKey);
       if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
         // API key auth — extract email from query or body
+        // Note: for multipart uploads, req.body may not be parsed yet (multer runs after this middleware),
+        // so we allow API key auth to proceed without email — the endpoint can extract it later.
         const email = (req.query.email as string) || req.body?.email;
-        if (email) {
-          req.hireFormUser = { email, type: 'hire_form_session' };
-          next();
-          return;
-        }
+        req.hireFormUser = { email: email || 'api_key_service', type: 'hire_form_session' };
+        next();
+        return;
       }
     } catch {
       // Fall through to other auth methods
@@ -272,6 +272,11 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       signatureDate: 'signature_date',
       licencePoints: 'licence_points',
       licenceEndorsements: 'licence_endorsements',
+      requiresReferral: 'requires_referral',
+      referralStatus: 'referral_status',
+      referralReasons: 'referral_reasons',
+      referralDate: 'referral_date',
+      referralNotes: 'referral_notes',
     };
 
     // Whitelist of fields the hire form app can update
@@ -289,6 +294,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
       'licence_points', 'licence_endorsements',
+      'requires_referral', 'referral_status', 'referral_reasons', 'referral_date', 'referral_notes',
     ]);
 
     const setClauses: string[] = [];
@@ -319,12 +325,33 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       [email]
     );
 
+    // Check if requires_referral is being set to true (for notification trigger)
+    const referralBeingSet = updates.requiresReferral === true || updates.requires_referral === true;
+
+    // If referral is being set, check if it's a *change* (was previously false/null)
+    let wasAlreadyReferred = false;
+    if (referralBeingSet && existing.rows.length > 0) {
+      const currentDriver = await query(
+        `SELECT requires_referral FROM drivers WHERE id = $1`,
+        [existing.rows[0].id]
+      );
+      wasAlreadyReferred = currentDriver.rows[0]?.requires_referral === true;
+    }
+
     if (existing.rows.length > 0) {
       const result = await query(
         `UPDATE drivers SET ${setClauses.join(', ')} WHERE email = $${params.length} AND is_active = true RETURNING id`,
         params
       );
-      res.json({ success: true, driverId: result.rows[0]?.id });
+
+      const driverId = result.rows[0]?.id;
+
+      // Fire referral notification if requires_referral just changed to true
+      if (referralBeingSet && !wasAlreadyReferred && driverId) {
+        await fireReferralNotification(email, driverId, updates);
+      }
+
+      res.json({ success: true, driverId });
     } else {
       // Create new driver with email + whatever fields were provided
       const fullName = (updates.full_name as string) || email;
@@ -340,6 +367,11 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
         `UPDATE drivers SET ${setClauses.join(', ')} WHERE id = $${params.length + 1}`,
         [...params.slice(0, -1), newId] // replace email param with id
       );
+
+      // Fire referral notification for new driver created with referral flag
+      if (referralBeingSet) {
+        await fireReferralNotification(email, newId, updates);
+      }
 
       res.json({ success: true, driverId: newId, created: true });
     }
@@ -612,6 +644,82 @@ router.post('/upload', authenticateHireForm, hireFormUpload.single('file'), asyn
 });
 
 // ============================================================================
+// Referral notification helper
+// ============================================================================
+
+async function fireReferralNotification(
+  driverEmail: string,
+  driverId: string,
+  updates: Record<string, unknown>
+): Promise<void> {
+  try {
+    const driverName = (updates.fullName as string) || (updates.full_name as string) || driverEmail;
+    const reasons = (updates.referralReasons as string[]) || (updates.referral_reasons as string[]) || [];
+    const reasonsText = reasons.length > 0 ? reasons.join(', ') : 'Not specified';
+
+    console.log(`[driver-verification] REFERRAL TRIGGERED for ${driverName} (${driverEmail}) — reasons: ${reasonsText}`);
+
+    // Find which jobs this driver is currently assigned to
+    const assignmentResult = await query(
+      `SELECT vha.hirehop_job_id, vha.hirehop_job_name, j.job_name
+       FROM vehicle_hire_assignments vha
+       LEFT JOIN jobs j ON j.id = vha.job_id
+       WHERE vha.driver_id = $1
+         AND vha.status IN ('soft', 'confirmed')
+         AND vha.assignment_type = 'self_drive'`,
+      [driverId]
+    );
+
+    const jobRefs = assignmentResult.rows
+      .map((r: any) => r.hirehop_job_name || r.job_name || `J-${r.hirehop_job_id}`)
+      .filter(Boolean);
+    const jobsText = jobRefs.length > 0 ? jobRefs.join(', ') : 'No active assignments';
+
+    // 1. Create bell notifications for all admin/manager users
+    const adminUsers = await query(
+      `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
+    );
+
+    const notificationContent = `Manual referral needed: ${driverName} — ${reasonsText}${jobRefs.length > 0 ? ` (Jobs: ${jobsText})` : ''}`;
+
+    for (const user of adminUsers.rows) {
+      await query(
+        `INSERT INTO notifications (user_id, type, content, link)
+         VALUES ($1, 'referral', $2, $3)`,
+        [user.id, notificationContent, `/vehicles/drivers/${driverId}`]
+      );
+    }
+
+    console.log(`[driver-verification] Bell notifications sent to ${adminUsers.rows.length} admin/manager users`);
+
+    // 2. Send email alert to info@oooshtours.co.uk (matches existing hire form behaviour)
+    try {
+      const { emailService } = await import('../services/email-service');
+      const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+
+      await emailService.send('referral_alert', {
+        to: 'info@oooshtours.co.uk',
+        variables: {
+          driverName,
+          driverEmail,
+          referralReasons: reasonsText,
+          linkedJobs: jobsText,
+          driverUrl: `${frontendUrl}/vehicles/drivers/${driverId}`,
+        },
+      });
+
+      console.log(`[driver-verification] Referral email sent to info@oooshtours.co.uk`);
+    } catch (emailErr) {
+      // Email failure shouldn't block the update — bell notification already sent
+      console.error('[driver-verification] Failed to send referral email (bell notification still sent):', emailErr);
+    }
+  } catch (error) {
+    // Don't fail the update if notification fails
+    console.error('[driver-verification] Failed to send referral notification:', error);
+  }
+}
+
+// ============================================================================
 // Document analysis & routing engine (ported from get-next-step.js)
 // ============================================================================
 
@@ -649,14 +757,33 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
 
   analysis.isUkDriver = driver.licence_issued_by === 'DVLA';
 
-  // Licence: valid if licence_next_check_due is in the future
-  if (driver.licence_next_check_due) {
+  // Helper: add days to a date string
+  function addDays(dateStr: string, days: number): Date {
+    const d = new Date(dateStr);
+    d.setDate(d.getDate() + days);
+    return d;
+  }
+
+  // Licence: 90 days from iDenfy check, capped at actual licence expiry
+  // Falls back to licence_next_check_due if idenfy_check_date is not set
+  if (driver.idenfy_check_date) {
+    const windowEnd = addDays(driver.idenfy_check_date as string, 90);
+    // Cap at actual licence expiry if that's sooner
+    let effectiveEnd = windowEnd;
+    if (driver.licence_valid_to) {
+      const licenceExpiry = new Date(driver.licence_valid_to as string);
+      if (licenceExpiry < windowEnd) effectiveEnd = licenceExpiry;
+    }
+    analysis.licence.valid = effectiveEnd > today;
+    analysis.licence.expiryDate = effectiveEnd.toISOString().split('T')[0];
+  } else if (driver.licence_next_check_due) {
+    // Legacy fallback
     const checkDate = new Date(driver.licence_next_check_due as string);
     analysis.licence.valid = checkDate > today;
     analysis.licence.expiryDate = (driver.licence_next_check_due as string);
   }
 
-  // POA1
+  // POA1: 90 days from doc date (stored as poa1_valid_until by hire form)
   if (driver.poa1_valid_until) {
     const poa1Date = new Date(driver.poa1_valid_until as string);
     analysis.poa1.valid = poa1Date > today;
@@ -664,7 +791,7 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
   }
   analysis.poa1.provider = (driver.poa1_provider as string) || null;
 
-  // POA2
+  // POA2: 90 days from doc date
   if (driver.poa2_valid_until) {
     const poa2Date = new Date(driver.poa2_valid_until as string);
     analysis.poa2.valid = poa2Date > today;
@@ -672,18 +799,27 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
   }
   analysis.poa2.provider = (driver.poa2_provider as string) || null;
 
-  // DVLA
-  if (driver.dvla_valid_until) {
+  // DVLA: 30 days from check date
+  if (driver.dvla_check_date) {
+    const dvlaEnd = addDays(driver.dvla_check_date as string, 30);
+    analysis.dvla.valid = dvlaEnd > today;
+    analysis.dvla.expiryDate = dvlaEnd.toISOString().split('T')[0];
+  } else if (driver.dvla_valid_until) {
+    // Fallback to stored value
     const dvlaDate = new Date(driver.dvla_valid_until as string);
     analysis.dvla.valid = dvlaDate > today;
     analysis.dvla.expiryDate = (driver.dvla_valid_until as string);
   }
 
-  // Passport
+  // Passport: 30 days from iDenfy check (non-UK), or stored value
   if (driver.passport_valid_until) {
     const passDate = new Date(driver.passport_valid_until as string);
     analysis.passport.valid = passDate > today;
     analysis.passport.expiryDate = (driver.passport_valid_until as string);
+  } else if (!analysis.isUkDriver && driver.idenfy_check_date) {
+    const passEnd = addDays(driver.idenfy_check_date as string, 30);
+    analysis.passport.valid = passEnd > today;
+    analysis.passport.expiryDate = passEnd.toISOString().split('T')[0];
   }
 
   // All valid check

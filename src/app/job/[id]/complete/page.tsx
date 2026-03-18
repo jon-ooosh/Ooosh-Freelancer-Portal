@@ -25,7 +25,7 @@
  */
 
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useParams, useRouter } from 'next/navigation'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 
 // =============================================================================
@@ -928,14 +928,170 @@ function OfflineBanner() {
 }
 
 // =============================================================================
+// VAN-ONLY CONFIRMATION COMPONENT
+// =============================================================================
+
+function VanOnlyConfirmation({
+  job, jobId, isDelivery, typeLabel, isOnline, onComplete
+}: {
+  job: Job
+  jobId: string
+  isDelivery: boolean
+  typeLabel: string
+  isOnline: boolean
+  onComplete: () => void
+}) {
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleConfirm = async () => {
+    if (!isOnline) return
+    setSubmitting(true)
+    setError(null)
+
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          notes: 'Van book-out completed (van only)',
+          customerPresent: false,
+          vanOnly: true,
+        }),
+      })
+
+      const contentType = response.headers.get('content-type') || ''
+      if (!contentType.includes('application/json')) {
+        if (response.status >= 500 || !response.ok) {
+          throw new Error(
+            'The server took too long to respond. Your completion may have been saved - please check the job status.'
+          )
+        }
+      }
+
+      let data
+      try {
+        data = await response.json()
+      } catch {
+        throw new Error(
+          'The server took too long to respond. Your completion may have been saved - please check the job status.'
+        )
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to complete job')
+      }
+
+      onComplete()
+    } catch (err) {
+      console.error('Error completing van-only job:', err)
+      setError(err instanceof Error ? err.message : 'Failed to complete job')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 pb-8">
+      {!isOnline && <OfflineBanner />}
+
+      <header className="bg-white shadow-sm sticky top-0 z-10">
+        <div className="max-w-lg mx-auto px-4 py-3 flex items-center">
+          <Link
+            href={`/job/${jobId}`}
+            className="flex items-center text-gray-600 hover:text-gray-900 transition-colors"
+          >
+            <svg className="w-5 h-5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            Back
+          </Link>
+          <h1 className="flex-1 text-center font-semibold text-gray-900">
+            Complete {typeLabel}
+          </h1>
+          <div className="w-16"></div>
+        </div>
+      </header>
+
+      <main className="max-w-lg mx-auto p-4 pt-8">
+        <div className="text-center mb-8">
+          <div className="text-5xl mb-4">🚐</div>
+          <h2 className="text-xl font-bold text-gray-900 mb-2">
+            Van Book-Out Complete
+          </h2>
+          <p className="text-gray-500">
+            {formatJobTitle(job.name, job.venueName)}
+          </p>
+          {job.date && (
+            <p className="text-sm text-gray-400 mt-1">{formatDate(job.date)}</p>
+          )}
+        </div>
+
+        <div className="bg-white rounded-xl shadow-sm p-6 text-center mb-6">
+          <p className="text-gray-700 mb-2">
+            You&apos;ve completed the vehicle book-out for this {isDelivery ? 'delivery' : 'collection'}.
+          </p>
+          <p className="text-sm text-gray-500">
+            Tap below to mark this job as done.
+          </p>
+        </div>
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
+            <p className="text-red-700 text-sm">{error}</p>
+            {error.includes('may have been saved') && (
+              <Link
+                href={`/job/${jobId}`}
+                className="inline-block mt-2 text-sm text-purple-600 hover:text-purple-700 font-medium"
+              >
+                Check job status
+              </Link>
+            )}
+          </div>
+        )}
+
+        <button
+          onClick={handleConfirm}
+          disabled={submitting || !isOnline}
+          className={`w-full py-4 rounded-xl font-semibold text-lg flex items-center justify-center gap-2 transition-colors ${
+            !submitting && isOnline
+              ? 'bg-green-500 text-white hover:bg-green-600'
+              : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+          }`}
+        >
+          {submitting ? (
+            <>
+              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+              Completing...
+            </>
+          ) : !isOnline ? (
+            <>
+              <span>📡</span>
+              Offline - Cannot Submit
+            </>
+          ) : (
+            <>
+              <span>✓</span>
+              All Done
+            </>
+          )}
+        </button>
+      </main>
+    </div>
+  )
+}
+
+// =============================================================================
 // MAIN PAGE COMPONENT
 // =============================================================================
 
 export default function CompletePage() {
   const params = useParams()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const jobId = params.id as string
   const isOnline = useOnlineStatus()
+  const vanOnly = searchParams.get('vanOnly') === 'true'
 
   // Job data
   const [job, setJob] = useState<Job | null>(null)
@@ -1110,6 +1266,20 @@ export default function CompletePage() {
   const isDelivery = job.type === 'delivery'
   const typeLabel = isDelivery ? 'Delivery' : 'Collection'
   const typeIcon = isDelivery ? '📦' : '📥'
+
+  // Van-only confirmation: simple "All done?" screen after vehicle book-out
+  if (vanOnly) {
+    return (
+      <VanOnlyConfirmation
+        job={job}
+        jobId={jobId}
+        isDelivery={isDelivery}
+        typeLabel={typeLabel}
+        isOnline={isOnline}
+        onComplete={() => router.push(`/job/${jobId}?completed=true`)}
+      />
+    )
+  }
 
   // Only show client email section for equipment jobs (not vehicles, for now)
   const showClientEmailSection = job.whatIsIt === 'equipment' || !job.whatIsIt

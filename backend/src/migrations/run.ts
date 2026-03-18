@@ -51,6 +51,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '020_driver_hire_form_fields.sql',
         '021_job_requirements.sql',
         '022_roles_and_optimistic_locking.sql',
+        '022_fix_audit_log_permissions.sql',
         '023_user_profiles.sql',
       ];
 

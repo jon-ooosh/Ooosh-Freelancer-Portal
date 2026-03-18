@@ -335,12 +335,47 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
   }
 });
 
-// ── PUT /api/drivers/:id — Update driver ──
+// ── GET /api/drivers/:id/audit-log — Edit history for a driver ──
 
-router.put('/:id', validate(updateDriverSchema), async (req: AuthRequest, res: Response) => {
+router.get('/:id/audit-log', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const result = await query(
+      `SELECT al.id, al.user_id, al.action, al.previous_values, al.new_values, al.created_at,
+        u.email AS user_email,
+        COALESCE(u.first_name || ' ' || u.last_name, u.email) AS user_name
+      FROM audit_log al
+      LEFT JOIN users u ON u.id::text = al.user_id
+      WHERE al.entity_type = 'driver' AND al.entity_id = $1
+      ORDER BY al.created_at DESC
+      LIMIT 100`,
+      [id]
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    // Log the actual error for server-side debugging
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[drivers] Audit log error:', errMsg);
+    // Return empty data instead of 500 — audit log is non-critical
+    // Common cause: permissions issue on audit_log table (like sync_log before migration 009)
+    res.json({ data: [], _error: 'Audit log temporarily unavailable' });
+  }
+});
+
+// ── PUT /api/drivers/:id — Update driver (admin/manager only) ──
+
+router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const updates = req.body;
+
+    // Fetch previous values for audit log
+    const previous = await query('SELECT * FROM drivers WHERE id = $1', [id]);
+    if (previous.rows.length === 0) {
+      res.status(404).json({ error: 'Driver not found' });
+      return;
+    }
+    const previousValues = previous.rows[0];
 
     // Build dynamic UPDATE
     const setClauses: string[] = [];
@@ -351,8 +386,17 @@ router.put('/:id', validate(updateDriverSchema), async (req: AuthRequest, res: R
       fields.licence_endorsements = JSON.stringify(fields.licence_endorsements);
     }
 
+    // Track what actually changed for audit
+    const changedFields: Record<string, { old: unknown; new: unknown }> = {};
+
     for (const [key, value] of Object.entries(fields)) {
-      params.push(value ?? null);
+      const prev = previousValues[key];
+      const newVal = value ?? null;
+      // Compare stringified to handle date/number coercion
+      if (String(prev ?? '') !== String(newVal ?? '')) {
+        changedFields[key] = { old: prev, new: newVal };
+      }
+      params.push(newVal);
       setClauses.push(`${key} = $${params.length}`);
     }
 
@@ -372,6 +416,21 @@ router.put('/:id', validate(updateDriverSchema), async (req: AuthRequest, res: R
     if (result.rows.length === 0) {
       res.status(404).json({ error: 'Driver not found' });
       return;
+    }
+
+    // Write audit log if anything actually changed
+    if (Object.keys(changedFields).length > 0) {
+      const oldVals: Record<string, unknown> = {};
+      const newVals: Record<string, unknown> = {};
+      for (const [key, { old: o, new: n }] of Object.entries(changedFields)) {
+        oldVals[key] = o;
+        newVals[key] = n;
+      }
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+         VALUES ($1, 'driver', $2, 'update', $3, $4)`,
+        [req.user!.id, id, JSON.stringify(oldVals), JSON.stringify(newVals)]
+      );
     }
 
     res.json({ data: result.rows[0] });

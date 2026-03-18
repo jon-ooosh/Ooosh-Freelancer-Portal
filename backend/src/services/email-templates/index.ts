@@ -168,6 +168,32 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+  referral_alert: {
+    variant: 'internal',
+    subject: 'Insurer Referral Required — {{driverName}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Insurer Referral Required</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        A driver requires manual referral to insurers before their hire can proceed.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#fff7ed;border-radius:8px;border:1px solid #fed7aa;">
+            <p style="margin:0 0 8px;font-size:13px;color:#9a3412;font-weight:600;">Driver</p>
+            <p style="margin:0 0 4px;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
+            <p style="margin:0 0 12px;font-size:13px;color:#64748b;">{{driverEmail}}</p>
+            <p style="margin:0 0 4px;font-size:13px;color:#9a3412;font-weight:600;">Referral Reasons</p>
+            <p style="margin:0 0 12px;font-size:14px;color:#1e293b;">{{referralReasons}}</p>
+            <p style="margin:0 0 4px;font-size:13px;color:#9a3412;font-weight:600;">Linked Jobs</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;">{{linkedJobs}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{driverUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View driver in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
 };
 
 export default templates;
