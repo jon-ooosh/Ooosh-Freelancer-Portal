@@ -510,11 +510,20 @@ Per-job financial tracking, summarised on Dashboard rather than its own global p
 
 ##### Stream 7: Transport & Crew Operations
 Global operational view for what's currently happening / about to happen with transport and crew.
-- [ ] Transport operations page (`/operations/transport`): date/time/venue/who/status per delivery
-- [ ] Crew operations page (`/operations/crew`): who's assigned where, confirmation status
+**Full spec:** `docs/TRANSPORT-CREW-OPS-SPEC.md` — covers Monday.com board replacement, freelancer portal repointing, completion flow, and implementation plan.
+- [ ] Transport operations page (`/operations/transport`): replaces Monday.com D&C board
+- [ ] Crew operations page (`/operations/crew`): replaces Monday.com Crewed Jobs board
+- [ ] Operational status on quotes (`ops_status`: todo → arranging → arranged → dispatched → arrived → completed)
+- [ ] Completion tracking (signature, photos, notes, customer present toggle)
+- [ ] Arranging details (key points, client introductions, tolls/accommodation/flight booking status)
+- [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging)
+- [ ] Reminder system (unassigned deliveries approaching, overdue completions)
+- [ ] Change notifications to freelancers (date/time/venue changes → email alert)
 - [ ] "On the road" status tracking: dispatched, arrived, issues, completed
 - [ ] Issues on road reporting (breakdowns, delays, problems)
-- [ ] Freelancer portal: repoint from Monday.com to OP (crew can see their assignments, confirm, report issues)
+- [ ] Freelancer portal repointing: Monday.com → OP backend API (auth, jobs, completion, equipment, files)
+- [ ] PDF delivery note generation (migrate from Netlify function to OP backend)
+- [ ] Client delivery note emails via OP email service
 
 ##### Carnets (inline on Prep Checklist, with global overview)
 - [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed
