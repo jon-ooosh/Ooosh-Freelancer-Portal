@@ -31,6 +31,7 @@ interface DraftData {
 
 export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const suppressSaveRef = useRef(false)
   const [draftLoaded, setDraftLoaded] = useState<DraftData | null>(null)
   const [draftChecked, setDraftChecked] = useState(false)
 
@@ -79,7 +80,7 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
       signatureBlob: Blob | null
       vehicleReg: string
     }) => {
-      if (disabled) return
+      if (disabled || suppressSaveRef.current) return
 
       if (timerRef.current) clearTimeout(timerRef.current)
       timerRef.current = setTimeout(() => {
@@ -116,8 +117,9 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
     setDraftLoaded(null)
   }, [flowType])
 
-  // Dismiss draft without restoring
+  // Dismiss draft without restoring — suppresses autosave so draft isn't re-created
   const dismissDraft = useCallback(() => {
+    suppressSaveRef.current = true
     clear()
   }, [clear])
 

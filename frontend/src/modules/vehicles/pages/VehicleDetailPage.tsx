@@ -432,11 +432,15 @@ export function VehicleDetailPage() {
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">V5 / Registration</h3>
         <EditableRow label="VIN / Chassis #" value={vehicle.vin} type="text" onSave={v => saveField('vin', v)} />
         <EditableRow label="Date of First Reg" value={vehicle.dateFirstReg} type="date" onSave={v => saveField('date_first_reg', v)} />
+        <EditableRow label="D.1: Make" value={vehicle.make} type="text" onSave={v => saveField('make', v)} />
         <EditableRow label="D.2: Type" value={vehicle.v5Type} type="text" onSave={v => saveField('v5_type', v)} />
+        <EditableRow label="D.3: Model" value={vehicle.model} type="text" onSave={v => saveField('model', v)} />
         <EditableRow label="D.5: Body Type" value={vehicle.bodyType} type="text" onSave={v => saveField('body_type', v)} />
         <EditableRow label="F.1: Max Mass (kg)" value={vehicle.maxMassKg} type="number" onSave={v => saveField('max_mass_kg', v)} />
         <EditableRow label="J: Vehicle Category" value={vehicle.vehicleCategory} type="text" onSave={v => saveField('vehicle_category', v)} />
         <EditableRow label="P.1: Cylinder Capacity (cc)" value={vehicle.cylinderCapacityCc} type="number" onSave={v => saveField('cylinder_capacity_cc', v)} />
+        <EditableRow label="R: Colour" value={vehicle.colour} type="text" onSave={v => saveField('colour', v)} />
+        <EditableRow label="S.1: No. of Seats (inc. driver)" value={vehicle.seats} type="number" onSave={v => saveField('seats', v)} />
       </div>
 
       {/* Vehicle Specs */}

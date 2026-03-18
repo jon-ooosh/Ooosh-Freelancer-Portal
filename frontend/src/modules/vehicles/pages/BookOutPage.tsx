@@ -1276,6 +1276,8 @@ function StepDriverHire({
   isFreelancer: boolean
 }) {
   const [showJobPicker, setShowJobPicker] = useState(false)
+  const [localJobNum, setLocalJobNum] = useState(form.hireHopJob)
+  const jobNumTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const { data: goingOutJobs } = useGoingOutJobs()
   const { data: allocations } = useAllocations()
 
@@ -1516,11 +1518,24 @@ function StepDriverHire({
             type="text"
             inputMode="numeric"
             pattern="[0-9]*"
-            value={form.hireHopJob}
+            value={localJobNum}
             onChange={e => {
               const cleaned = e.target.value.replace(/\D/g, '')
-              onUpdate('hireHopJob', cleaned)
-              hireFormsAppliedRef.current = null
+              setLocalJobNum(cleaned)
+              // Debounce the parent update to prevent re-render on each keystroke
+              if (jobNumTimerRef.current) clearTimeout(jobNumTimerRef.current)
+              jobNumTimerRef.current = setTimeout(() => {
+                onUpdate('hireHopJob', cleaned)
+                hireFormsAppliedRef.current = null
+              }, 600)
+            }}
+            onBlur={() => {
+              // Sync immediately on blur
+              if (jobNumTimerRef.current) clearTimeout(jobNumTimerRef.current)
+              if (localJobNum !== form.hireHopJob) {
+                onUpdate('hireHopJob', localJobNum)
+                hireFormsAppliedRef.current = null
+              }
             }}
             placeholder="Or enter job # manually"
             className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
