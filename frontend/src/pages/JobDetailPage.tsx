@@ -313,6 +313,119 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt }: {
   );
 }
 
+// ── Quick Assign Driver + Vehicle to Job (for testing) ──────────────────
+function QuickAssignButton({ jobId, onCreated }: { jobId: string; onCreated: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [drivers, setDrivers] = useState<any[]>([]);
+  const [vehicles, setVehicles] = useState<any[]>([]);
+  const [driverId, setDriverId] = useState('');
+  const [vehicleId, setVehicleId] = useState('');
+  const [hireStart, setHireStart] = useState(new Date().toISOString().substring(0, 10));
+  const [hireEnd, setHireEnd] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function loadOptions() {
+    try {
+      const res = await api.get<{ drivers: any[]; vehicles: any[] }>('/hire-forms/options/lists');
+      setDrivers(res.drivers || []);
+      setVehicles(res.vehicles || []);
+    } catch {
+      setError('Failed to load options');
+    }
+  }
+
+  async function handleSubmit() {
+    if (!driverId || !vehicleId) { setError('Select both driver and vehicle'); return; }
+    setSaving(true);
+    setError('');
+    try {
+      await api.post('/hire-forms/quick-assign', {
+        driver_id: driverId,
+        vehicle_id: vehicleId,
+        job_id: jobId,
+        hire_start: hireStart || undefined,
+        hire_end: hireEnd || undefined,
+      });
+      setOpen(false);
+      setDriverId('');
+      setVehicleId('');
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        onClick={() => { setOpen(true); loadOptions(); }}
+        className="flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
+      >
+        + Assign Driver & Vehicle
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setOpen(false)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Assign Driver & Vehicle</h3>
+
+            {error && <div className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded mb-3">{error}</div>}
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Driver</label>
+                <select value={driverId} onChange={e => setDriverId(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="">Select driver...</option>
+                  {drivers.map(d => (
+                    <option key={d.id} value={d.id}>{d.full_name} ({d.email || 'no email'}) — {d.licence_points || 0} pts</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Vehicle</label>
+                <select value={vehicleId} onChange={e => setVehicleId(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                  <option value="">Select vehicle...</option>
+                  {vehicles.map(v => (
+                    <option key={v.id} value={v.id}>{v.reg} — {v.vehicle_type || v.simple_type || 'Unknown'} ({v.hire_status})</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Hire Start</label>
+                  <input type="date" value={hireStart} onChange={e => setHireStart(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Hire End</label>
+                  <input type="date" value={hireEnd} onChange={e => setHireEnd(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-5">
+              <button onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={handleSubmit} disabled={saving}
+                className="px-4 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium disabled:opacity-50">
+                {saving ? 'Creating...' : 'Create Assignment'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -759,7 +872,10 @@ export default function JobDetailPage() {
       {/* Drivers & Vehicles Tab */}
       {activeTab === 'drivers' && (
         <div className="space-y-4">
-          <h3 className="text-lg font-semibold text-gray-900">Drivers & Vehicles</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-gray-900">Drivers & Vehicles</h3>
+            {id && <QuickAssignButton jobId={id} onCreated={loadVehicleAssignments} />}
+          </div>
 
           {/* Referral/excess warnings */}
           {dispatchCheck && dispatchCheck.blockers.length > 0 && (

@@ -323,6 +323,90 @@ router.get('/by-driver/:driverId', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── POST /api/hire-forms/quick-assign — Quick-create assignment for testing ──
+
+const quickAssignSchema = z.object({
+  driver_id: z.string().uuid(),
+  vehicle_id: z.string().uuid(),
+  job_id: z.string().uuid(),
+  hire_start: z.string().optional(),
+  hire_end: z.string().optional(),
+  client_email: z.string().email().optional(),
+});
+
+router.post('/quick-assign', validate(quickAssignSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const f = req.body;
+
+    // Look up the HireHop job number from the jobs table
+    const jobResult = await query(`SELECT hh_job_number, job_name FROM jobs WHERE id = $1`, [f.job_id]);
+    const hhJobId = jobResult.rows[0]?.hh_job_number || null;
+    const hhJobName = jobResult.rows[0]?.job_name || null;
+
+    // Create assignment
+    const result = await query(
+      `INSERT INTO vehicle_hire_assignments (
+        vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
+        driver_id, assignment_type,
+        status, status_changed_at,
+        hire_start, hire_end, client_email,
+        created_by
+      ) VALUES ($1, $2, $3, $4, $5, 'self_drive', 'confirmed', NOW(), $6, $7, $8, $9)
+      RETURNING *`,
+      [
+        f.vehicle_id, f.job_id, hhJobId, hhJobName,
+        f.driver_id,
+        f.hire_start || null, f.hire_end || null, f.client_email || null,
+        req.user!.id,
+      ]
+    );
+
+    // Also create an excess record
+    const assignment = result.rows[0];
+    const driverResult = await query(`SELECT licence_points FROM drivers WHERE id = $1`, [f.driver_id]);
+    const points = driverResult.rows[0]?.licence_points || 0;
+
+    const tierResult = await query(
+      `SELECT * FROM excess_rules WHERE is_active = true AND rule_type = 'points_tier'
+       AND condition_min <= $1 AND condition_max >= $1 ORDER BY sort_order LIMIT 1`,
+      [points]
+    );
+    const excessAmount = tierResult.rows[0]?.excess_amount ? parseFloat(tierResult.rows[0].excess_amount) : null;
+
+    await query(
+      `INSERT INTO job_excess (assignment_id, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, created_by)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
+      [assignment.id, f.job_id, hhJobId, excessAmount, `${points} points`, req.user!.id]
+    );
+
+    console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id} on job ${f.job_id})`);
+    res.status(201).json({ data: assignment });
+  } catch (error) {
+    console.error('[hire-forms] Quick assign error:', error);
+    res.status(500).json({ error: 'Failed to create assignment' });
+  }
+});
+
+// ── GET /api/hire-forms/options — Get available drivers and vehicles for assignment ──
+
+router.get('/options/lists', async (_req: AuthRequest, res: Response) => {
+  try {
+    const drivers = await query(
+      `SELECT id, full_name, email, licence_points, overall_status FROM drivers WHERE is_active = true ORDER BY full_name`
+    );
+    const vehicles = await query(
+      `SELECT id, reg, vehicle_type, simple_type, hire_status FROM fleet_vehicles WHERE status = 'active' ORDER BY reg`
+    );
+    res.json({
+      drivers: drivers.rows,
+      vehicles: vehicles.rows,
+    });
+  } catch (error) {
+    console.error('[hire-forms] Options error:', error);
+    res.status(500).json({ error: 'Failed to load options' });
+  }
+});
+
 // ── GET /api/hire-forms/:id — Get single hire form with full details ──
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {
