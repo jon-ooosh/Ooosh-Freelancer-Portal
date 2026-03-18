@@ -40,7 +40,7 @@ export function wrapInBaseLayout(
           <tr>
             <td style="background-color:${OOOSH_ORANGE};padding:24px 32px;border-radius:12px 12px 0 0;text-align:center;">
               <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;letter-spacing:-0.5px;">
-                OOOSH TOURS
+                Ooosh Tours Ltd
               </h1>
             </td>
           </tr>
