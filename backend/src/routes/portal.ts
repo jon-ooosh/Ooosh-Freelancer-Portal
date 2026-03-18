@@ -136,6 +136,12 @@ router.post('/auth/login', async (req: Request, res: Response) => {
       path: '/',
     });
 
+    // Update last login timestamp (fire and forget)
+    query(
+      'UPDATE people SET portal_last_login = NOW() WHERE id = $1',
+      [freelancer.id]
+    ).catch(err => console.error('Failed to update portal_last_login:', err));
+
     res.json({
       success: true,
       user: {
