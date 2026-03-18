@@ -609,7 +609,10 @@ function CalendarView({
 
 function formatDate(dateStr: string): string {
   try {
-    const d = new Date(dateStr + 'T00:00:00');
+    // Handle both DATE ("2026-03-20") and TIMESTAMPTZ ("2026-03-20T00:00:00.000Z") strings
+    const raw = dateStr.includes('T') ? dateStr : dateStr + 'T12:00:00';
+    const d = new Date(raw);
+    if (isNaN(d.getTime())) return dateStr;
     return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
   } catch {
     return dateStr;
