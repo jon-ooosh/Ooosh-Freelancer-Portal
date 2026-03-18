@@ -70,6 +70,6 @@ CREATE INDEX IF NOT EXISTS idx_quotes_job_type ON quotes(job_type);
 -- CALCULATOR SETTINGS — Local delivery default fee
 -- ============================================================
 
-INSERT INTO calculator_settings (key, value, label, category)
-VALUES ('local_delivery_fee', '50', 'Local delivery/collection fee', 'transport')
+INSERT INTO calculator_settings (key, value, label, unit)
+VALUES ('local_delivery_fee', 50, 'Local delivery/collection fee', 'currency')
 ON CONFLICT (key) DO NOTHING;
