@@ -14,6 +14,14 @@ import { generateHireFormPdf, fetchLogo, type HireFormData } from '../services/h
 import { uploadToR2, getFromR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 
+/** Format a date string/Date to "18 Mar 2026" */
+function fmtDate(d?: string | Date | null): string {
+  if (!d) return 'TBC';
+  const dt = typeof d === 'string' ? new Date(d) : d;
+  if (isNaN(dt.getTime())) return 'TBC';
+  return dt.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 const router = Router();
 router.use(authenticate);
 
@@ -672,8 +680,8 @@ router.post('/:id/generate-pdf', async (req: AuthRequest, res: Response) => {
           driverName: formData.driverName,
           vehicleReg: formData.vehicleReg || 'TBC',
           vehicleModel: formData.vehicleModel || 'TBC',
-          hireStart: formData.hireStartDate || 'TBC',
-          hireEnd: formData.hireEndDate || 'TBC',
+          hireStart: fmtDate(formData.hireStartDate),
+          hireEnd: fmtDate(formData.hireEndDate),
         },
         attachments: [{
           filename,
@@ -754,8 +762,8 @@ router.post('/:id/send-email', async (req: AuthRequest, res: Response) => {
         driverName: row.driver_name || 'Driver',
         vehicleReg: row.vehicle_reg || 'TBC',
         vehicleModel: row.vehicle_model || 'TBC',
-        hireStart: row.hire_start ? String(row.hire_start) : 'TBC',
-        hireEnd: row.hire_end ? String(row.hire_end) : 'TBC',
+        hireStart: fmtDate(row.hire_start),
+        hireEnd: fmtDate(row.hire_end),
       },
       attachments: [{
         filename,
