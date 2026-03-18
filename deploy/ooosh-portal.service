@@ -1,0 +1,40 @@
+# Ooosh Operations Portal - systemd service
+# Usage: Copy to /etc/systemd/system/ooosh-portal.service
+#        Then: systemctl daemon-reload
+#              systemctl enable ooosh-portal
+#              systemctl start ooosh-portal
+
+[Unit]
+Description=Ooosh Operations Portal API
+After=network.target postgresql.service redis-server.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=ooosh
+Group=ooosh
+WorkingDirectory=/var/www/ooosh-portal/backend
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Environment
+Environment=NODE_ENV=production
+EnvironmentFile=/var/www/ooosh-portal/backend/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/www/ooosh-portal/backend
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ooosh-portal
+
+[Install]
+WantedBy=multi-user.target
