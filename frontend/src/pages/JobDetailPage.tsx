@@ -464,6 +464,18 @@ export default function JobDetailPage() {
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
 
+  // Escape key to close modals
+  useEffect(() => {
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        if (assignModalQuoteId) { setAssignModalQuoteId(null); setPeopleSearch(''); setPeopleOptions([]); }
+        else if (showLocalForm) setShowLocalForm(false);
+      }
+    }
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [assignModalQuoteId, showLocalForm]);
+
   // Status transition state
   const [showStatusDropdown, setShowStatusDropdown] = useState(false);
   const [showTransitionModal, setShowTransitionModal] = useState(false);

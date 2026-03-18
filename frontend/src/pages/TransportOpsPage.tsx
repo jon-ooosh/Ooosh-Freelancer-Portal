@@ -121,6 +121,19 @@ export default function TransportOpsPage() {
     loadOps();
   }, [filter]);
 
+  // Escape key to close assign modal
+  useEffect(() => {
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === 'Escape' && assignModalQuoteId) {
+        setAssignModalQuoteId(null);
+        setPeopleSearch('');
+        setPeopleOptions([]);
+      }
+    }
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [assignModalQuoteId]);
+
   async function loadOps() {
     try {
       setLoading(true);
