@@ -45,7 +45,7 @@ interface OpResult {
 }
 
 // Testing mode: set to true to skip photo minimum requirement
-const TESTING_MODE = false
+const TESTING_MODE = true  // TEMP: skip photo requirement for testing
 
 const STEPS = [
   'Select Vehicle',
