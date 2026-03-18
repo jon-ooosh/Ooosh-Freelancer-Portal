@@ -29,8 +29,8 @@ interface OpsQuote {
   venue_id: string | null;
   distance_miles: number | null;
   arrival_time: string | null;
-  job_date: string | null;
-  job_finish_date: string | null;
+  job_date: string | Date | null;
+  job_finish_date: string | Date | null;
   is_multi_day: boolean;
   status: string;
   ops_status: string;
@@ -93,6 +93,15 @@ const JOB_TYPE_COLOURS: Record<string, string> = {
   crewed: 'bg-purple-100 text-purple-700',
 };
 
+interface PersonOption {
+  id: string;
+  first_name: string;
+  last_name: string;
+  skills: string[];
+  is_insured_on_vehicles: boolean;
+  is_approved: boolean;
+}
+
 // ── Main Page ────────────────────────────────────────────────────────
 
 export default function TransportOpsPage() {
@@ -103,6 +112,10 @@ export default function TransportOpsPage() {
   const [viewMode, setViewMode] = useState<'table' | 'calendar'>('table');
   const [showCompleted, setShowCompleted] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
+  const [assignRole, setAssignRole] = useState('driver');
+  const [peopleSearch, setPeopleSearch] = useState('');
+  const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
 
   useEffect(() => {
     loadOps();
@@ -132,6 +145,46 @@ export default function TransportOpsPage() {
     }
   }
 
+  async function searchPeople(search: string) {
+    try {
+      const data = await api.get<{ data: PersonOption[] }>(
+        `/people?search=${encodeURIComponent(search)}&limit=10&is_freelancer=true&is_approved=true`
+      );
+      setPeopleOptions(data.data);
+    } catch {
+      console.error('Failed to search people');
+    }
+  }
+
+  async function assignPerson(quoteId: string, personId: string, role: string) {
+    try {
+      await api.post(`/quotes/${quoteId}/assignments`, { personId, role });
+      await loadOps();
+      setAssignModalQuoteId(null);
+      setPeopleSearch('');
+      setPeopleOptions([]);
+      setAssignRole('driver');
+    } catch {
+      console.error('Failed to assign person');
+    }
+  }
+
+  async function removeAssignment(quoteId: string, assignmentId: string) {
+    try {
+      await api.delete(`/quotes/${quoteId}/assignments/${assignmentId}`);
+      await loadOps();
+    } catch {
+      console.error('Failed to remove assignment');
+    }
+  }
+
+  function openAssignModal(quoteId: string) {
+    setAssignModalQuoteId(quoteId);
+    setPeopleSearch('');
+    setPeopleOptions([]);
+    setAssignRole('driver');
+  }
+
   // Group quotes by ops_status for table view
   const grouped = useMemo(() => {
     const groups: Record<string, OpsQuote[]> = {};
@@ -151,9 +204,14 @@ export default function TransportOpsPage() {
     const byDate: Record<string, OpsQuote[]> = {};
     for (const q of quotes) {
       if (q.ops_status === 'completed' || q.ops_status === 'cancelled') continue;
-      const date = q.job_date || 'unscheduled';
-      if (!byDate[date]) byDate[date] = [];
-      byDate[date].push(q);
+      let dateKey = 'unscheduled';
+      if (q.job_date instanceof Date) {
+        dateKey = q.job_date.toISOString().split('T')[0];
+      } else if (typeof q.job_date === 'string') {
+        dateKey = q.job_date.includes('T') ? q.job_date.split('T')[0] : q.job_date;
+      }
+      if (!byDate[dateKey]) byDate[dateKey] = [];
+      byDate[dateKey].push(q);
     }
     return byDate;
   }, [quotes]);
@@ -256,6 +314,8 @@ export default function TransportOpsPage() {
                         expanded={expandedId === q.id}
                         onToggle={() => setExpandedId(expandedId === q.id ? null : q.id)}
                         onStatusChange={updateOpsStatus}
+                        onAssign={openAssignModal}
+                        onRemoveAssignment={removeAssignment}
                       />
                     ))}
                   </div>
@@ -270,6 +330,99 @@ export default function TransportOpsPage() {
       {viewMode === 'calendar' && (
         <CalendarView data={calendarData} />
       )}
+
+      {/* Assign Crew Modal */}
+      {assignModalQuoteId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setAssignModalQuoteId(null)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Assign Crew Member</h3>
+
+            <div className="space-y-4">
+              {/* Role */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <select
+                  value={assignRole}
+                  onChange={e => setAssignRole(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                >
+                  <option value="driver">Driver</option>
+                  <option value="crew">Crew</option>
+                  <option value="loader">Loader</option>
+                  <option value="tech">Tech</option>
+                  <option value="manager">Manager</option>
+                </select>
+              </div>
+
+              {/* Search */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Search People</label>
+                <input
+                  type="text"
+                  value={peopleSearch}
+                  onChange={e => {
+                    setPeopleSearch(e.target.value);
+                    if (e.target.value.length >= 2) searchPeople(e.target.value);
+                    else setPeopleOptions([]);
+                  }}
+                  placeholder="Type a name..."
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  autoFocus
+                />
+              </div>
+
+              {/* Results */}
+              {peopleOptions.length > 0 && (
+                <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                  {peopleOptions.map(p => {
+                    const currentQuote = quotes.find(q => q.id === assignModalQuoteId);
+                    const alreadyAssigned = currentQuote?.assignments?.some(a => a.person_id === p.id);
+                    return (
+                      <button
+                        key={p.id}
+                        disabled={alreadyAssigned}
+                        onClick={() => assignPerson(assignModalQuoteId!, p.id, assignRole)}
+                        className={`w-full text-left px-3 py-2.5 text-sm flex items-center justify-between ${
+                          alreadyAssigned ? 'opacity-40 cursor-not-allowed' : 'hover:bg-ooosh-50'
+                        }`}
+                      >
+                        <div>
+                          <span className="font-medium text-gray-900">{p.first_name} {p.last_name}</span>
+                          {p.skills?.length > 0 && (
+                            <span className="ml-2 text-xs text-gray-400">{p.skills.slice(0, 3).join(', ')}</span>
+                          )}
+                        </div>
+                        <div className="flex gap-1">
+                          {p.is_insured_on_vehicles && (
+                            <span className="text-xs bg-green-100 text-green-700 rounded px-1.5 py-0.5">Insured</span>
+                          )}
+                          {alreadyAssigned && (
+                            <span className="text-xs bg-gray-100 text-gray-500 rounded px-1.5 py-0.5">Assigned</span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {peopleSearch.length >= 2 && peopleOptions.length === 0 && (
+                <p className="text-sm text-gray-400 text-center py-2">No people found</p>
+              )}
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => setAssignModalQuoteId(null)}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -281,11 +434,15 @@ function QuoteRow({
   expanded,
   onToggle,
   onStatusChange,
+  onAssign,
+  onRemoveAssignment,
 }: {
   quote: OpsQuote;
   expanded: boolean;
   onToggle: () => void;
   onStatusChange: (id: string, status: string) => void;
+  onAssign: (quoteId: string) => void;
+  onRemoveAssignment: (quoteId: string, assignmentId: string) => void;
 }) {
   const assignments = Array.isArray(q.assignments) ? q.assignments : [];
   const crewNames = assignments
@@ -347,11 +504,23 @@ function QuoteRow({
         </div>
 
         {/* Crew */}
-        <div className="w-40 flex-shrink-0 hidden lg:block">
+        <div className="w-40 flex-shrink-0 hidden lg:block" onClick={(e) => e.stopPropagation()}>
           {crewNames.length > 0 ? (
-            <div className="text-sm text-gray-700 truncate">{crewNames.join(', ')}</div>
+            <div className="text-sm text-gray-700 truncate">
+              {crewNames.join(', ')}
+              <button
+                onClick={() => onAssign(q.id)}
+                className="ml-1 text-xs text-ooosh-600 hover:text-ooosh-700"
+                title="Assign more crew"
+              >+</button>
+            </div>
           ) : (
-            <span className="text-xs text-red-500 font-medium">Unassigned</span>
+            <button
+              onClick={() => onAssign(q.id)}
+              className="text-xs text-red-500 hover:text-red-700 font-medium"
+            >
+              + Assign crew
+            </button>
           )}
         </div>
 
@@ -449,24 +618,39 @@ function QuoteRow({
 
             {/* Column 3: Crew & Financials */}
             <div className="space-y-2">
-              <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Crew & Costs</h4>
+              <div className="flex items-center gap-2">
+                <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Crew & Costs</h4>
+                <button
+                  onClick={() => onAssign(q.id)}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                >
+                  + Assign
+                </button>
+              </div>
               {assignments.length === 0 ? (
-                <div className="text-red-500 text-xs">No crew assigned</div>
+                <div className="text-red-500 text-xs italic">No crew assigned</div>
               ) : (
-                assignments.map((a) => (
-                  <div key={a.id} className="flex items-center justify-between text-xs">
-                    <span className="text-gray-700">
-                      {a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name} ${a.last_name}`}
-                      <span className="text-gray-400 ml-1">({a.role})</span>
-                    </span>
-                    <span className="text-gray-500">
-                      {a.agreed_rate ? `£${a.agreed_rate}` : '—'}
-                      {a.invoice_received && (
-                        <span className="ml-1 text-green-600" title={`Invoice: £${a.invoice_amount}`}>INV</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {assignments.map((a) => (
+                    <div key={a.id} className="inline-flex items-center gap-1.5 bg-blue-50 border border-blue-200 rounded-full px-2.5 py-1 text-xs">
+                      <span className="font-medium text-blue-800">
+                        {a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name} ${a.last_name}`}
+                      </span>
+                      <span className="text-blue-500 capitalize">({a.role})</span>
+                      {a.agreed_rate != null && (
+                        <span className="text-blue-400">&pound;{Number(a.agreed_rate).toFixed(0)}</span>
                       )}
-                    </span>
-                  </div>
-                ))
+                      {a.invoice_received && (
+                        <span className="text-green-600" title={`Invoice: £${a.invoice_amount}`}>INV</span>
+                      )}
+                      <button
+                        onClick={() => onRemoveAssignment(q.id, a.id)}
+                        className="ml-0.5 text-blue-400 hover:text-red-500"
+                        title="Remove"
+                      >&times;</button>
+                    </div>
+                  ))}
+                </div>
               )}
               <div className="border-t border-gray-200 pt-1 mt-1">
                 <div className="flex justify-between text-xs">
@@ -607,14 +791,21 @@ function CalendarView({
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function formatDate(dateStr: string): string {
+function formatDate(dateInput: string | Date): string {
   try {
-    // Handle both DATE ("2026-03-20") and TIMESTAMPTZ ("2026-03-20T00:00:00.000Z") strings
-    const raw = dateStr.includes('T') ? dateStr : dateStr + 'T12:00:00';
-    const d = new Date(raw);
-    if (isNaN(d.getTime())) return dateStr;
+    // node-pg returns DATE columns as JS Date objects, TIMESTAMPTZ as ISO strings
+    let d: Date;
+    if (dateInput instanceof Date) {
+      d = dateInput;
+    } else if (typeof dateInput === 'string') {
+      const raw = dateInput.includes('T') ? dateInput : dateInput + 'T12:00:00';
+      d = new Date(raw);
+    } else {
+      return String(dateInput);
+    }
+    if (isNaN(d.getTime())) return String(dateInput);
     return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
   } catch {
-    return dateStr;
+    return String(dateInput);
   }
 }
