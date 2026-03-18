@@ -24,6 +24,15 @@ import templates from './email-templates/index';
 
 export type EmailMode = 'test' | 'live';
 
+export interface EmailAttachment {
+  /** Filename to display */
+  filename: string;
+  /** File content as Buffer */
+  content: Buffer;
+  /** MIME type */
+  contentType: string;
+}
+
 export interface SendEmailOptions {
   /** Recipient email address */
   to: string;
@@ -33,6 +42,8 @@ export interface SendEmailOptions {
   cc?: string[];
   /** Optional override subject (bypasses template subject) */
   subjectOverride?: string;
+  /** Optional file attachments */
+  attachments?: EmailAttachment[];
 }
 
 export interface SendEmailResult {
@@ -142,12 +153,19 @@ class EmailService {
     // Send
     try {
       const transporter = this.getTransporter();
+      const mailAttachments = options.attachments?.map(a => ({
+        filename: a.filename,
+        content: a.content,
+        contentType: a.contentType,
+      }));
+
       const result = await transporter.sendMail({
         from: config.smtp.from,
         to: actualRecipient,
         cc: isTestMode ? undefined : options.cc,
         subject: isTestMode ? `[TEST] ${subject}` : subject,
         html,
+        attachments: mailAttachments,
       });
 
       // Log to audit trail
