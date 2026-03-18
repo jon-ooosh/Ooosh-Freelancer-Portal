@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 
@@ -95,6 +96,14 @@ const JOB_TYPE_COLOURS: Record<string, string> = {
   collection: 'bg-orange-100 text-orange-700',
   crewed: 'bg-purple-100 text-purple-700',
 };
+
+const RUN_PILL_STYLES = [
+  { border: 'border-l-violet-500', pill: 'bg-violet-100 text-violet-700' },
+  { border: 'border-l-emerald-500', pill: 'bg-emerald-100 text-emerald-700' },
+  { border: 'border-l-sky-500', pill: 'bg-sky-100 text-sky-700' },
+  { border: 'border-l-rose-500', pill: 'bg-rose-100 text-rose-700' },
+  { border: 'border-l-amber-500', pill: 'bg-amber-100 text-amber-700' },
+];
 
 interface PersonOption {
   id: string;
@@ -540,8 +549,8 @@ function QuoteRow({
     .map((a) => a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim())
     .filter(Boolean);
 
-  // Compute run letter for display
-  const runLetter = useMemo(() => {
+  // Compute run letter and colour index for display
+  const runInfo = useMemo(() => {
     if (!q.run_group || !q.job_id) return null;
     const RUN_LETTERS = ['A', 'B', 'C', 'D', 'E'];
     const uniqueGroups: string[] = [];
@@ -551,27 +560,13 @@ function QuoteRow({
       }
     }
     const idx = uniqueGroups.indexOf(q.run_group);
-    return RUN_LETTERS[idx] || String(idx + 1);
-  }, [q.run_group, q.job_id, allQuotes]);
-
-  // Run group colour bands
-  const RUN_COLOURS = ['border-l-violet-500', 'border-l-emerald-500', 'border-l-sky-500', 'border-l-rose-500', 'border-l-amber-500'];
-  const runColourClass = useMemo(() => {
-    if (!q.run_group || !q.job_id) return '';
-    const uniqueGroups: string[] = [];
-    for (const other of allQuotes) {
-      if (other.job_id === q.job_id && other.run_group && !uniqueGroups.includes(other.run_group)) {
-        uniqueGroups.push(other.run_group);
-      }
-    }
-    const idx = uniqueGroups.indexOf(q.run_group);
-    return RUN_COLOURS[idx % RUN_COLOURS.length] || '';
+    return { letter: RUN_LETTERS[idx] || String(idx + 1), colourIdx: idx % RUN_PILL_STYLES.length };
   }, [q.run_group, q.job_id, allQuotes]);
 
   return (
     <div>
       <div
-        className={`px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${runColourClass ? `border-l-4 ${runColourClass}` : ''}`}
+        className={`px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${runInfo ? `border-l-4 ${RUN_PILL_STYLES[runInfo.colourIdx].border}` : ''}`}
         onClick={onToggle}
       >
         {/* Expand chevron */}
@@ -606,9 +601,9 @@ function QuoteRow({
             {q.is_local && (
               <span className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 font-medium flex-shrink-0">Local</span>
             )}
-            {q.run_group && runLetter && (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-medium flex-shrink-0">
-                Run {runLetter}
+            {q.run_group && runInfo && (
+              <span className={`text-xs px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${RUN_PILL_STYLES[runInfo.colourIdx].pill}`}>
+                Run {runInfo.letter}
               </span>
             )}
             {q.hh_job_number && (
@@ -678,22 +673,44 @@ function QuoteRow({
 
 function StatusDropdown({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+
+  const openMenu = useCallback(() => {
+    if (btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      const menuHeight = OPS_STATUSES.length * 30 + 8; // approx height
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const top = spaceBelow < menuHeight ? rect.top - menuHeight : rect.bottom + 4;
+      setMenuPos({ top, left: rect.right - 160 }); // 160 = w-40
+    }
+    setOpen(true);
+  }, []);
 
   useEffect(() => {
+    if (!open) return;
     function handleClickOutside(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      if (btnRef.current?.contains(e.target as Node)) return;
+      if (menuRef.current?.contains(e.target as Node)) return;
+      setOpen(false);
     }
-    if (open) document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    function handleScroll() { setOpen(false); }
+    document.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
   }, [open]);
 
   const config = OPS_STATUS_CONFIG[value] || OPS_STATUS_CONFIG.todo;
 
   return (
-    <div ref={ref} className="relative">
+    <div>
       <button
-        onClick={() => setOpen(!open)}
+        ref={btnRef}
+        onClick={() => open ? setOpen(false) : openMenu()}
         className={`text-xs font-medium rounded px-2.5 py-1.5 w-full text-left flex items-center justify-between ${config.bgColour} ${config.colour}`}
       >
         <span>{config.label}</span>
@@ -701,8 +718,12 @@ function StatusDropdown({ value, onChange }: { value: string; onChange: (v: stri
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      {open && (
-        <div className="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-gray-200 z-20 py-1 overflow-hidden">
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 9999 }}
+          className="w-40 bg-white rounded-lg shadow-lg border border-gray-200 py-1"
+        >
           {OPS_STATUSES.map((s) => {
             const sc = OPS_STATUS_CONFIG[s];
             return (
@@ -718,7 +739,8 @@ function StatusDropdown({ value, onChange }: { value: string; onChange: (v: stri
               </button>
             );
           })}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -896,18 +918,6 @@ function ExpandedDetail({
                   + New run
                 </button>
               </div>
-              {q.run_group && (
-                <div className="mt-1.5 flex items-center gap-2">
-                  <span className="text-xs text-gray-500">Stop order:</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={q.run_order || 1}
-                    onChange={(e) => onUpdateRunGroup(q.id, q.run_group, parseInt(e.target.value) || 1)}
-                    className="w-14 border border-gray-300 rounded px-2 py-0.5 text-xs text-center"
-                  />
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -1458,99 +1468,327 @@ function CalendarView({
 }: {
   data: Record<string, OpsQuote[]>;
 }) {
-  const [currentMonth, setCurrentMonth] = useState(() => {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1);
-  });
-
-  const daysInMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate();
-  const firstDayOfWeek = currentMonth.getDay(); // 0=Sun
-  // Adjust to Monday-start: 0=Mon, 6=Sun
-  const startOffset = firstDayOfWeek === 0 ? 6 : firstDayOfWeek - 1;
-
-  const days: (number | null)[] = [];
-  for (let i = 0; i < startOffset; i++) days.push(null);
-  for (let d = 1; d <= daysInMonth; d++) days.push(d);
-
-  const monthStr = currentMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-
-  function dateKey(day: number): string {
-    const y = currentMonth.getFullYear();
-    const m = String(currentMonth.getMonth() + 1).padStart(2, '0');
-    return `${y}-${m}-${String(day).padStart(2, '0')}`;
-  }
+  type CalViewMode = 'month' | 'week' | 'day';
+  const [calView, setCalView] = useState<CalViewMode>('month');
+  const [currentDate, setCurrentDate] = useState(() => new Date());
+  const [selectedQuote, setSelectedQuote] = useState<OpsQuote | null>(null);
 
   const todayKey = new Date().toISOString().split('T')[0];
 
-  return (
-    <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-      {/* Month nav */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
-        <button
-          onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))}
-          className="p-1 hover:bg-gray-100 rounded"
-        >
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-        </button>
-        <h2 className="font-semibold text-gray-900">{monthStr}</h2>
-        <button
-          onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))}
-          className="p-1 hover:bg-gray-100 rounded"
-        >
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </button>
-      </div>
+  function makeDateKey(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
 
-      {/* Day headers */}
-      <div className="grid grid-cols-7 border-b border-gray-200">
-        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
-          <div key={d} className="px-2 py-1.5 text-xs font-semibold text-gray-500 text-center">{d}</div>
-        ))}
-      </div>
+  // Navigation
+  function navigate(dir: -1 | 1) {
+    setCurrentDate(prev => {
+      const d = new Date(prev);
+      if (calView === 'month') d.setMonth(d.getMonth() + dir);
+      else if (calView === 'week') d.setDate(d.getDate() + dir * 7);
+      else d.setDate(d.getDate() + dir);
+      return d;
+    });
+  }
 
-      {/* Calendar grid */}
-      <div className="grid grid-cols-7">
-        {days.map((day, idx) => {
-          if (day === null) {
-            return <div key={`empty-${idx}`} className="min-h-[80px] border-b border-r border-gray-100 bg-gray-50" />;
-          }
+  function goToday() { setCurrentDate(new Date()); }
 
-          const key = dateKey(day);
-          const items = data[key] || [];
-          const isToday = key === todayKey;
+  // Compute visible days
+  const visibleDays: Date[] = useMemo(() => {
+    const result: Date[] = [];
+    if (calView === 'month') {
+      const first = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+      const dow = first.getDay();
+      const startOffset = dow === 0 ? 6 : dow - 1;
+      const startDate = new Date(first);
+      startDate.setDate(startDate.getDate() - startOffset);
+      const daysInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
+      const totalCells = Math.ceil((startOffset + daysInMonth) / 7) * 7;
+      for (let i = 0; i < totalCells; i++) {
+        const d = new Date(startDate);
+        d.setDate(d.getDate() + i);
+        result.push(d);
+      }
+    } else if (calView === 'week') {
+      const dow = currentDate.getDay();
+      const mondayOffset = dow === 0 ? -6 : 1 - dow;
+      const monday = new Date(currentDate);
+      monday.setDate(monday.getDate() + mondayOffset);
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(monday);
+        d.setDate(d.getDate() + i);
+        result.push(d);
+      }
+    } else {
+      result.push(new Date(currentDate));
+    }
+    return result;
+  }, [currentDate, calView]);
 
-          return (
-            <div
-              key={key}
-              className={`min-h-[80px] border-b border-r border-gray-100 p-1 ${isToday ? 'bg-ooosh-50' : ''}`}
-            >
-              <div className={`text-xs font-medium mb-0.5 ${isToday ? 'text-ooosh-700 font-bold' : 'text-gray-500'}`}>
-                {day}
-              </div>
-              <div className="space-y-0.5">
-                {items.slice(0, 4).map((q) => (
-                  <div
-                    key={q.id}
-                    className={`text-[10px] leading-tight px-1 py-0.5 rounded truncate cursor-default ${
-                      JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'
-                    }`}
-                    title={`${JOB_TYPE_LABELS[q.job_type]} ${q.linked_venue_name || q.venue_name || ''} ${q.arrival_time || ''}`}
-                  >
-                    {JOB_TYPE_LABELS[q.job_type]} {q.linked_venue_name || q.venue_name || '?'}
+  // Heading
+  const heading = useMemo(() => {
+    if (calView === 'month') return currentDate.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+    if (calView === 'week') {
+      const first = visibleDays[0];
+      const last = visibleDays[visibleDays.length - 1];
+      return `${first.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${last.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+    }
+    return currentDate.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  }, [currentDate, calView, visibleDays]);
+
+  // Quote detail panel
+  function QuotePanel({ q, onClose }: { q: OpsQuote; onClose: () => void }) {
+    const assignments = Array.isArray(q.assignments) ? q.assignments : [];
+    const statusCfg = OPS_STATUS_CONFIG[q.ops_status || 'todo'] || OPS_STATUS_CONFIG.todo;
+    return (
+      <div className="fixed inset-0 z-50 flex justify-end">
+        <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+        <div className="relative w-full max-w-md bg-white shadow-xl overflow-y-auto">
+          <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+            <h3 className="font-semibold text-gray-900">{JOB_TYPE_LABELS[q.job_type]} – {q.linked_venue_name || q.venue_name || 'TBC'}</h3>
+            <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded">
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
+          <div className="p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className={`text-xs font-medium rounded px-2 py-1 ${statusCfg.bgColour} ${statusCfg.colour}`}>{statusCfg.label}</span>
+              {q.calculation_mode === 'fixed' && <span className="text-xs bg-amber-100 text-amber-700 rounded px-2 py-0.5">Local</span>}
+            </div>
+            {q.hh_job_number && (
+              <Link to={`/jobs/${q.job_id}`} className="text-sm text-ooosh-600 hover:underline block">Job #{q.hh_job_number}</Link>
+            )}
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <div><span className="text-gray-500">Date:</span> {q.job_date ? formatDate(q.job_date) : '—'}</div>
+              <div><span className="text-gray-500">Time:</span> {q.arrival_time || '—'}</div>
+              <div><span className="text-gray-500">Client charge:</span> £{q.client_charge_rounded ?? '—'}</div>
+              <div><span className="text-gray-500">Freelancer fee:</span> £{q.freelancer_fee_rounded ?? '—'}</div>
+            </div>
+            {assignments.length > 0 && (
+              <div>
+                <h4 className="text-xs font-semibold text-gray-500 uppercase mb-1">Crew</h4>
+                {assignments.map(a => (
+                  <div key={a.id} className="text-sm text-gray-700">
+                    {a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim()} — {a.role}
                   </div>
                 ))}
-                {items.length > 4 && (
-                  <div className="text-[10px] text-gray-400">+{items.length - 4} more</div>
-                )}
               </div>
-            </div>
-          );
-        })}
+            )}
+            {q.internal_notes && (
+              <div>
+                <h4 className="text-xs font-semibold text-gray-500 uppercase mb-1">Notes</h4>
+                <p className="text-sm text-gray-700 whitespace-pre-wrap">{q.internal_notes}</p>
+              </div>
+            )}
+            {q.key_points && (
+              <div>
+                <h4 className="text-xs font-semibold text-gray-500 uppercase mb-1">Key Points</h4>
+                <p className="text-sm text-gray-700 whitespace-pre-wrap">{q.key_points}</p>
+              </div>
+            )}
+            {q.completion_notes && (
+              <div>
+                <h4 className="text-xs font-semibold text-gray-500 uppercase mb-1">Completion</h4>
+                <p className="text-sm text-gray-700 whitespace-pre-wrap">{q.completion_notes}</p>
+                {q.completed_at && <p className="text-xs text-gray-400 mt-1">{new Date(q.completed_at).toLocaleString('en-GB')}</p>}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
+    );
+  }
+
+  // Render a single item pill (shared between month/week/day)
+  function ItemPill({ q }: { q: OpsQuote }) {
+    return (
+      <div
+        key={q.id}
+        onClick={(e) => { e.stopPropagation(); setSelectedQuote(q); }}
+        className={`text-[10px] leading-tight px-1 py-0.5 rounded truncate cursor-pointer hover:opacity-80 transition-opacity ${
+          JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'
+        }`}
+        title={`${JOB_TYPE_LABELS[q.job_type]} ${q.linked_venue_name || q.venue_name || ''} ${q.arrival_time || ''}`}
+      >
+        {q.arrival_time && <span className="font-semibold">{q.arrival_time} </span>}
+        {JOB_TYPE_LABELS[q.job_type]} {q.linked_venue_name || q.venue_name || '?'}
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+      {/* Header: nav + view mode */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+        <div className="flex items-center gap-2">
+          <button onClick={() => navigate(-1)} className="p-1 hover:bg-gray-100 rounded">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+          </button>
+          <button onClick={() => navigate(1)} className="p-1 hover:bg-gray-100 rounded">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+          </button>
+          <button onClick={goToday} className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Today</button>
+          <h2 className="font-semibold text-gray-900 ml-2">{heading}</h2>
+        </div>
+        <div className="flex rounded-lg border border-gray-300 overflow-hidden text-xs">
+          {(['month', 'week', 'day'] as CalViewMode[]).map(v => (
+            <button
+              key={v}
+              onClick={() => setCalView(v)}
+              className={`px-3 py-1.5 capitalize ${calView === v ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Month view */}
+      {calView === 'month' && (
+        <>
+          <div className="grid grid-cols-7 border-b border-gray-200">
+            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
+              <div key={d} className="px-2 py-1.5 text-xs font-semibold text-gray-500 text-center">{d}</div>
+            ))}
+          </div>
+          <div className="grid grid-cols-7">
+            {visibleDays.map((day) => {
+              const key = makeDateKey(day);
+              const items = data[key] || [];
+              const isToday = key === todayKey;
+              const isCurrentMonth = day.getMonth() === currentDate.getMonth();
+              return (
+                <div
+                  key={key}
+                  className={`min-h-[80px] border-b border-r border-gray-100 p-1 ${isToday ? 'bg-ooosh-50' : ''} ${!isCurrentMonth ? 'bg-gray-50' : ''}`}
+                >
+                  <div className={`text-xs font-medium mb-0.5 ${isToday ? 'text-ooosh-700 font-bold' : isCurrentMonth ? 'text-gray-500' : 'text-gray-300'}`}>
+                    {day.getDate()}
+                  </div>
+                  <div className="space-y-0.5">
+                    {items.slice(0, 4).map((q) => <ItemPill key={q.id} q={q} />)}
+                    {items.length > 4 && (
+                      <button
+                        onClick={() => { setCalView('day'); setCurrentDate(new Date(day)); }}
+                        className="text-[10px] text-ooosh-600 hover:underline"
+                      >
+                        +{items.length - 4} more
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Week view */}
+      {calView === 'week' && (
+        <>
+          <div className="grid grid-cols-7 border-b border-gray-200">
+            {visibleDays.map(day => {
+              const key = makeDateKey(day);
+              const isToday = key === todayKey;
+              return (
+                <div
+                  key={key}
+                  className={`px-2 py-2 text-center border-r border-gray-100 cursor-pointer hover:bg-gray-50 ${isToday ? 'bg-ooosh-50' : ''}`}
+                  onClick={() => { setCalView('day'); setCurrentDate(new Date(day)); }}
+                >
+                  <div className="text-xs text-gray-500">{day.toLocaleDateString('en-GB', { weekday: 'short' })}</div>
+                  <div className={`text-lg font-semibold ${isToday ? 'text-ooosh-700' : 'text-gray-900'}`}>{day.getDate()}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="grid grid-cols-7">
+            {visibleDays.map(day => {
+              const key = makeDateKey(day);
+              const items = data[key] || [];
+              const isToday = key === todayKey;
+              return (
+                <div key={key} className={`min-h-[200px] border-r border-gray-100 p-1.5 space-y-1 ${isToday ? 'bg-ooosh-50/30' : ''}`}>
+                  {items.map(q => {
+                    const sc = OPS_STATUS_CONFIG[q.ops_status || 'todo'] || OPS_STATUS_CONFIG.todo;
+                    const assignments = Array.isArray(q.assignments) ? q.assignments : [];
+                    return (
+                      <div
+                        key={q.id}
+                        onClick={() => setSelectedQuote(q)}
+                        className={`p-1.5 rounded border cursor-pointer hover:shadow-sm transition-shadow ${JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-50 border-gray-200'}`}
+                      >
+                        <div className="text-[10px] font-semibold">{q.arrival_time || '—'}</div>
+                        <div className="text-[10px] leading-tight truncate">{q.linked_venue_name || q.venue_name || 'TBC'}</div>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <span className={`text-[9px] rounded px-1 py-0.5 ${sc.bgColour} ${sc.colour}`}>{sc.label}</span>
+                        </div>
+                        {assignments.length > 0 && (
+                          <div className="text-[9px] text-gray-500 mt-0.5 truncate">
+                            {assignments.map(a => a.is_ooosh_crew ? 'Ooosh' : a.first_name || '').join(', ')}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {items.length === 0 && <div className="text-xs text-gray-300 text-center mt-4">—</div>}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Day view */}
+      {calView === 'day' && (
+        <div className="p-4">
+          {(() => {
+            const key = makeDateKey(currentDate);
+            const items = (data[key] || []).sort((a, b) => (a.arrival_time || '').localeCompare(b.arrival_time || ''));
+            if (items.length === 0) return <p className="text-gray-400 text-sm text-center py-8">No transport scheduled for this day.</p>;
+            return (
+              <div className="space-y-2">
+                {items.map(q => {
+                  const sc = OPS_STATUS_CONFIG[q.ops_status || 'todo'] || OPS_STATUS_CONFIG.todo;
+                  const assignments = Array.isArray(q.assignments) ? q.assignments : [];
+                  return (
+                    <div
+                      key={q.id}
+                      onClick={() => setSelectedQuote(q)}
+                      className="flex items-start gap-4 p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
+                    >
+                      <div className="w-16 text-right">
+                        <div className="text-sm font-semibold text-gray-900">{q.arrival_time || '—'}</div>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-medium rounded px-2 py-0.5 ${JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'}`}>
+                            {JOB_TYPE_LABELS[q.job_type]}
+                          </span>
+                          <span className={`text-xs rounded px-2 py-0.5 ${sc.bgColour} ${sc.colour}`}>{sc.label}</span>
+                          {q.calculation_mode === 'fixed' && <span className="text-xs bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">Local</span>}
+                        </div>
+                        <div className="text-sm font-medium text-gray-900 mt-1">{q.linked_venue_name || q.venue_name || 'TBC'}</div>
+                        {q.hh_job_number && <Link to={`/jobs/${q.job_id}`} className="text-xs text-ooosh-600 hover:underline">Job #{q.hh_job_number}</Link>}
+                        {assignments.length > 0 && (
+                          <div className="text-xs text-gray-500 mt-1">
+                            {assignments.map(a => a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim()).join(', ')}
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-right text-xs text-gray-500">
+                        {q.client_charge_rounded != null && <div>£{q.client_charge_rounded}</div>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Quote detail slide panel */}
+      {selectedQuote && <QuotePanel q={selectedQuote} onClose={() => setSelectedQuote(null)} />}
     </div>
   );
 }
