@@ -105,6 +105,12 @@ const RUN_PILL_STYLES = [
   { border: 'border-l-amber-500', pill: 'bg-amber-100 text-amber-700' },
 ];
 
+function normaliseDateKey(d: string | Date | null): string {
+  if (!d) return '';
+  if (d instanceof Date) return d.toISOString().split('T')[0];
+  return typeof d === 'string' ? (d.includes('T') ? d.split('T')[0] : d) : '';
+}
+
 interface PersonOption {
   id: string;
   first_name: string;
@@ -265,22 +271,18 @@ export default function TransportOpsPage() {
     return groups;
   }, [quotes]);
 
-  // Calendar data: group by date
+  // Calendar data: group by date (respects completed/cancelled toggles)
   const calendarData = useMemo(() => {
     const byDate: Record<string, OpsQuote[]> = {};
     for (const q of quotes) {
-      if (q.ops_status === 'completed' || q.ops_status === 'cancelled') continue;
-      let dateKey = 'unscheduled';
-      if (q.job_date instanceof Date) {
-        dateKey = q.job_date.toISOString().split('T')[0];
-      } else if (typeof q.job_date === 'string') {
-        dateKey = q.job_date.includes('T') ? q.job_date.split('T')[0] : q.job_date;
-      }
+      if (q.ops_status === 'completed' && !showCompleted) continue;
+      if (q.ops_status === 'cancelled' && !showCancelled) continue;
+      const dateKey = normaliseDateKey(q.job_date) || 'unscheduled';
       if (!byDate[dateKey]) byDate[dateKey] = [];
       byDate[dateKey].push(q);
     }
     return byDate;
-  }, [quotes]);
+  }, [quotes, showCompleted, showCancelled]);
 
   if (loading) {
     return (
@@ -411,7 +413,16 @@ export default function TransportOpsPage() {
 
       {/* Calendar view */}
       {viewMode === 'calendar' && (
-        <CalendarView data={calendarData} />
+        <CalendarView
+          data={calendarData}
+          allQuotes={quotes}
+          onStatusChange={updateOpsStatus}
+          onAssign={openAssignModal}
+          onRemoveAssignment={removeAssignment}
+          onUpdateDetails={updateOpsDetails}
+          onEdit={openEditModal}
+          onUpdateRunGroup={updateRunGroup}
+        />
       )}
 
       {/* Assign Crew Modal */}
@@ -549,19 +560,20 @@ function QuoteRow({
     .map((a) => a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim())
     .filter(Boolean);
 
-  // Compute run letter and colour index for display
+  // Compute run letter and colour index for display (runs match by date, not job)
+  const qDate = normaliseDateKey(q.job_date);
   const runInfo = useMemo(() => {
-    if (!q.run_group || !q.job_id) return null;
+    if (!q.run_group) return null;
     const RUN_LETTERS = ['A', 'B', 'C', 'D', 'E'];
     const uniqueGroups: string[] = [];
     for (const other of allQuotes) {
-      if (other.job_id === q.job_id && other.run_group && !uniqueGroups.includes(other.run_group)) {
+      if (normaliseDateKey(other.job_date) === qDate && other.run_group && !uniqueGroups.includes(other.run_group)) {
         uniqueGroups.push(other.run_group);
       }
     }
     const idx = uniqueGroups.indexOf(q.run_group);
     return { letter: RUN_LETTERS[idx] || String(idx + 1), colourIdx: idx % RUN_PILL_STYLES.length };
-  }, [q.run_group, q.job_id, allQuotes]);
+  }, [q.run_group, qDate, allQuotes]);
 
   return (
     <div>
@@ -800,31 +812,31 @@ function ExpandedDetail({
     onUpdateDetails(q.id, { client_introduction: newStatus });
   }
 
-  // Run grouping — find existing run groups on this job
+  // Run grouping — find existing run groups on the same date (runs can span jobs)
+  const qDate = normaliseDateKey(q.job_date);
   const jobRunGroups = useMemo(() => {
-    if (!q.job_id) return [];
-    const groups = new Map<string, { letter: string; count: number }>();
+    const groups = new Map<string, { letter: string; count: number; colourIdx: number }>();
     const RUN_LETTERS = ['A', 'B', 'C', 'D', 'E'];
     let letterIdx = 0;
     for (const other of allQuotes) {
-      if (other.job_id === q.job_id && other.run_group && !groups.has(other.run_group)) {
-        groups.set(other.run_group, { letter: RUN_LETTERS[letterIdx] || String(letterIdx + 1), count: 0 });
+      if (normaliseDateKey(other.job_date) === qDate && other.run_group && !groups.has(other.run_group)) {
+        groups.set(other.run_group, { letter: RUN_LETTERS[letterIdx] || String(letterIdx + 1), count: 0, colourIdx: letterIdx % RUN_PILL_STYLES.length });
         letterIdx++;
       }
     }
-    // Count items per group
     for (const other of allQuotes) {
-      if (other.job_id === q.job_id && other.run_group && groups.has(other.run_group)) {
+      if (normaliseDateKey(other.job_date) === qDate && other.run_group && groups.has(other.run_group)) {
         groups.get(other.run_group)!.count++;
       }
     }
     return Array.from(groups.entries()).map(([id, info]) => ({ id, ...info }));
-  }, [q.job_id, allQuotes]);
+  }, [qDate, allQuotes]);
 
-  const currentRunLetter = useMemo(() => {
+  const currentRunInfo = useMemo(() => {
     if (!q.run_group) return null;
     const group = jobRunGroups.find((g) => g.id === q.run_group);
-    return group?.letter || '?';
+    if (!group) return null;
+    return { letter: group.letter, colourIdx: group.colourIdx };
   }, [q.run_group, jobRunGroups]);
 
   async function setRunGroup(groupId: string | null) {
@@ -883,9 +895,9 @@ function ExpandedDetail({
             <div className="border-t border-gray-200 pt-2 mt-2">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-xs font-medium text-gray-700">Run group</span>
-                {currentRunLetter && (
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">
-                    Run {currentRunLetter}
+                {currentRunInfo && (
+                  <span className={`text-xs px-1.5 py-0.5 rounded font-bold ${RUN_PILL_STYLES[currentRunInfo.colourIdx].pill}`}>
+                    Run {currentRunInfo.letter}
                   </span>
                 )}
               </div>
@@ -898,19 +910,23 @@ function ExpandedDetail({
                 >
                   None
                 </button>
-                {jobRunGroups.map((g) => (
-                  <button
-                    key={g.id}
-                    onClick={() => setRunGroup(g.id)}
-                    className={`text-xs px-2 py-0.5 rounded border ${
-                      q.run_group === g.id
-                        ? 'bg-violet-100 border-violet-300 text-violet-700 font-medium'
-                        : 'bg-white border-gray-200 hover:bg-violet-50'
-                    }`}
-                  >
-                    Run {g.letter} ({g.count})
-                  </button>
-                ))}
+                {jobRunGroups.map((g) => {
+                  const style = RUN_PILL_STYLES[g.colourIdx];
+                  const isSelected = q.run_group === g.id;
+                  return (
+                    <button
+                      key={g.id}
+                      onClick={() => setRunGroup(g.id)}
+                      className={`text-xs px-2 py-0.5 rounded border font-medium ${
+                        isSelected
+                          ? `${style.pill} border-current`
+                          : `bg-white border-gray-200 hover:${style.pill}`
+                      }`}
+                    >
+                      Run {g.letter} ({g.count})
+                    </button>
+                  );
+                })}
                 <button
                   onClick={createNewRunGroup}
                   className="text-xs px-2 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
@@ -1465,8 +1481,22 @@ function EditQuoteModal({
 
 function CalendarView({
   data,
+  allQuotes,
+  onStatusChange,
+  onAssign,
+  onRemoveAssignment,
+  onUpdateDetails,
+  onEdit,
+  onUpdateRunGroup,
 }: {
   data: Record<string, OpsQuote[]>;
+  allQuotes: OpsQuote[];
+  onStatusChange: (id: string, status: string) => void;
+  onAssign: (quoteId: string) => void;
+  onRemoveAssignment: (quoteId: string, assignmentId: string) => void;
+  onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
+  onEdit: (quote: OpsQuote) => void;
+  onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
 }) {
   type CalViewMode = 'month' | 'week' | 'day';
   const [calView, setCalView] = useState<CalViewMode>('month');
@@ -1536,63 +1566,46 @@ function CalendarView({
   }, [currentDate, calView, visibleDays]);
 
   // Quote detail panel
-  function QuotePanel({ q, onClose }: { q: OpsQuote; onClose: () => void }) {
+  // Slide panel with full editable ExpandedDetail (same as table view)
+  function QuoteSlidePanel({ q, onClose }: { q: OpsQuote; onClose: () => void }) {
     const assignments = Array.isArray(q.assignments) ? q.assignments : [];
-    const statusCfg = OPS_STATUS_CONFIG[q.ops_status || 'todo'] || OPS_STATUS_CONFIG.todo;
     return (
       <div className="fixed inset-0 z-50 flex justify-end">
         <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-        <div className="relative w-full max-w-md bg-white shadow-xl overflow-y-auto">
-          <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="font-semibold text-gray-900">{JOB_TYPE_LABELS[q.job_type]} – {q.linked_venue_name || q.venue_name || 'TBC'}</h3>
-            <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
-            </button>
-          </div>
-          <div className="p-4 space-y-3">
+        <div className="relative w-full max-w-2xl bg-white shadow-xl overflow-y-auto">
+          {/* Header with status, type, venue */}
+          <div className="p-4 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white z-10">
+            <div className="flex items-center gap-3">
+              <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'}`}>
+                {JOB_TYPE_LABELS[q.job_type] || q.job_type}
+              </span>
+              <span className="font-semibold text-gray-900">{q.linked_venue_name || q.venue_name || 'TBC'}</span>
+              {q.job_date && <span className="text-sm text-gray-500">{formatDate(q.job_date)}</span>}
+              {q.arrival_time && <span className="text-sm text-gray-500">{q.arrival_time}</span>}
+            </div>
             <div className="flex items-center gap-2">
-              <span className={`text-xs font-medium rounded px-2 py-1 ${statusCfg.bgColour} ${statusCfg.colour}`}>{statusCfg.label}</span>
-              {q.calculation_mode === 'fixed' && <span className="text-xs bg-amber-100 text-amber-700 rounded px-2 py-0.5">Local</span>}
+              <div className="w-28">
+                <StatusDropdown
+                  value={q.ops_status || 'todo'}
+                  onChange={(v) => onStatusChange(q.id, v)}
+                />
+              </div>
+              <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
             </div>
-            {q.hh_job_number && (
-              <Link to={`/jobs/${q.job_id}`} className="text-sm text-ooosh-600 hover:underline block">Job #{q.hh_job_number}</Link>
-            )}
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              <div><span className="text-gray-500">Date:</span> {q.job_date ? formatDate(q.job_date) : '—'}</div>
-              <div><span className="text-gray-500">Time:</span> {q.arrival_time || '—'}</div>
-              <div><span className="text-gray-500">Client charge:</span> £{q.client_charge_rounded ?? '—'}</div>
-              <div><span className="text-gray-500">Freelancer fee:</span> £{q.freelancer_fee_rounded ?? '—'}</div>
-            </div>
-            {assignments.length > 0 && (
-              <div>
-                <h4 className="text-xs font-semibold text-gray-500 uppercase mb-1">Crew</h4>
-                {assignments.map(a => (
-                  <div key={a.id} className="text-sm text-gray-700">
-                    {a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim()} — {a.role}
-                  </div>
-                ))}
-              </div>
-            )}
-            {q.internal_notes && (
-              <div>
-                <h4 className="text-xs font-semibold text-gray-500 uppercase mb-1">Notes</h4>
-                <p className="text-sm text-gray-700 whitespace-pre-wrap">{q.internal_notes}</p>
-              </div>
-            )}
-            {q.key_points && (
-              <div>
-                <h4 className="text-xs font-semibold text-gray-500 uppercase mb-1">Key Points</h4>
-                <p className="text-sm text-gray-700 whitespace-pre-wrap">{q.key_points}</p>
-              </div>
-            )}
-            {q.completion_notes && (
-              <div>
-                <h4 className="text-xs font-semibold text-gray-500 uppercase mb-1">Completion</h4>
-                <p className="text-sm text-gray-700 whitespace-pre-wrap">{q.completion_notes}</p>
-                {q.completed_at && <p className="text-xs text-gray-400 mt-1">{new Date(q.completed_at).toLocaleString('en-GB')}</p>}
-              </div>
-            )}
           </div>
+          {/* Full editable detail */}
+          <ExpandedDetail
+            q={q}
+            assignments={assignments}
+            onAssign={onAssign}
+            onRemoveAssignment={onRemoveAssignment}
+            onUpdateDetails={onUpdateDetails}
+            onEdit={onEdit}
+            onUpdateRunGroup={onUpdateRunGroup}
+            allQuotes={allQuotes}
+          />
         </div>
       </div>
     );
@@ -1788,7 +1801,7 @@ function CalendarView({
       )}
 
       {/* Quote detail slide panel */}
-      {selectedQuote && <QuotePanel q={selectedQuote} onClose={() => setSelectedQuote(null)} />}
+      {selectedQuote && <QuoteSlidePanel q={selectedQuote} onClose={() => setSelectedQuote(null)} />}
     </div>
   );
 }
