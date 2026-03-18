@@ -395,7 +395,7 @@ router.get('/options/lists', async (_req: AuthRequest, res: Response) => {
       `SELECT id, full_name, email, licence_points FROM drivers WHERE is_active = true ORDER BY full_name`
     );
     const vehicles = await query(
-      `SELECT id, reg, vehicle_type, simple_type, hire_status FROM fleet_vehicles WHERE status = 'active' ORDER BY reg`
+      `SELECT id, reg, vehicle_type, simple_type, hire_status FROM fleet_vehicles WHERE hire_status != 'Sold' ORDER BY reg`
     );
     res.json({
       drivers: drivers.rows,
