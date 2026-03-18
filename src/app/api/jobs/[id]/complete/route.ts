@@ -43,6 +43,7 @@ interface CompleteJobRequest {
   customerPresent: boolean
   clientEmails?: string[]   // Array of client email addresses to send delivery note/confirmation
   sendClientEmail?: boolean // Whether to send client email
+  vanOnly?: boolean         // True for van-only book-out (no signature/photos required)
 }
 
 // =============================================================================
@@ -84,21 +85,24 @@ export async function POST(
       )
     }
 
-    const { notes, signature, photos, customerPresent, clientEmails, sendClientEmail } = body
+    const { notes, signature, photos, customerPresent, clientEmails, sendClientEmail, vanOnly } = body
 
-    // Validate required fields based on customerPresent
-    if (customerPresent && !signature) {
-      return NextResponse.json(
-        { success: false, error: 'Signature is required when customer is present' },
-        { status: 400 }
-      )
-    }
+    // Van-only completions skip signature/photo validation
+    if (!vanOnly) {
+      // Validate required fields based on customerPresent
+      if (customerPresent && !signature) {
+        return NextResponse.json(
+          { success: false, error: 'Signature is required when customer is present' },
+          { status: 400 }
+        )
+      }
 
-    if (!customerPresent && (!photos || photos.length === 0)) {
-      return NextResponse.json(
-        { success: false, error: 'At least one photo is required when customer is not present' },
-        { status: 400 }
-      )
+      if (!customerPresent && (!photos || photos.length === 0)) {
+        return NextResponse.json(
+          { success: false, error: 'At least one photo is required when customer is not present' },
+          { status: 400 }
+        )
+      }
     }
 
     // Validate photo count (max 5)

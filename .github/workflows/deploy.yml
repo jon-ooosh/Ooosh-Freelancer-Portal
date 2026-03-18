@@ -1,0 +1,24 @@
+name: Deploy to Hetzner
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to Hetzner server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script: |
+            cd /var/www/ooosh-portal
+            git pull origin main
+            cd backend && npm run build && npm run db:migrate
+            cd ../frontend && npm run build
+            sudo systemctl restart ooosh-portal
