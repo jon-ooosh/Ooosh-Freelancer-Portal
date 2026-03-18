@@ -372,6 +372,7 @@ export default function TransportOpsPage() {
                         onUpdateDetails={updateOpsDetails}
                         onEdit={openEditModal}
                         onUpdateRunGroup={updateRunGroup}
+                        allQuotes={quotes}
                       />
                     ))}
                   </div>
@@ -504,6 +505,7 @@ function QuoteRow({
   onUpdateDetails,
   onEdit,
   onUpdateRunGroup,
+  allQuotes,
 }: {
   quote: OpsQuote;
   expanded: boolean;
@@ -514,6 +516,7 @@ function QuoteRow({
   onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
   onEdit: (quote: OpsQuote) => void;
   onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
+  allQuotes: OpsQuote[];
 }) {
   const assignments = Array.isArray(q.assignments) ? q.assignments : [];
   const crewNames = assignments
@@ -626,6 +629,7 @@ function QuoteRow({
           onUpdateDetails={onUpdateDetails}
           onEdit={onEdit}
           onUpdateRunGroup={onUpdateRunGroup}
+          allQuotes={allQuotes}
         />
       )}
     </div>
@@ -636,10 +640,12 @@ function QuoteRow({
 
 const ARRANGEMENT_STATUSES = ['not_needed', 'todo', 'booked', 'paid'] as const;
 
-function nextArrangementStatus(current: string): string {
-  const idx = ARRANGEMENT_STATUSES.indexOf(current as typeof ARRANGEMENT_STATUSES[number]);
-  if (idx === -1) return 'todo';
-  return ARRANGEMENT_STATUSES[(idx + 1) % ARRANGEMENT_STATUSES.length];
+const CLIENT_INTRO_STATUSES = ['not_needed', 'todo', 'working_on_it', 'done'] as const;
+
+function nextStatus(current: string, list: readonly string[]): string {
+  const idx = list.indexOf(current);
+  if (idx === -1) return list[1] || list[0]; // default to second item (usually 'todo')
+  return list[(idx + 1) % list.length];
 }
 
 function ExpandedDetail({
@@ -650,6 +656,7 @@ function ExpandedDetail({
   onUpdateDetails,
   onEdit,
   onUpdateRunGroup,
+  allQuotes,
 }: {
   q: OpsQuote;
   assignments: Assignment[];
@@ -658,16 +665,14 @@ function ExpandedDetail({
   onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
   onEdit: (quote: OpsQuote) => void;
   onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
+  allQuotes: OpsQuote[];
 }) {
   const [editingField, setEditingField] = useState<string | null>(null);
   const [fieldValues, setFieldValues] = useState({
     key_points: q.key_points || '',
-    client_introduction: q.client_introduction || '',
     internal_notes: q.internal_notes || '',
     freelancer_notes: q.freelancer_notes || '',
   });
-  const [isMultiRun, setIsMultiRun] = useState(!!q.run_group);
-  const [runOrder, setRunOrder] = useState(q.run_order || 1);
 
   async function saveField(field: string) {
     const value = fieldValues[field as keyof typeof fieldValues] || null;
@@ -676,26 +681,50 @@ function ExpandedDetail({
   }
 
   function handleArrangementClick(field: string, currentStatus: string) {
-    const newStatus = nextArrangementStatus(currentStatus);
+    const newStatus = nextStatus(currentStatus, ARRANGEMENT_STATUSES);
     onUpdateDetails(q.id, { [field]: newStatus });
   }
 
-  async function toggleMultiRun() {
-    if (isMultiRun) {
-      // Turn off — remove run group
-      await onUpdateRunGroup(q.id, null, null);
-      setIsMultiRun(false);
-    } else {
-      // Turn on — create a new run group (using quote's own ID as group key)
-      setIsMultiRun(true);
-      await onUpdateRunGroup(q.id, q.id, 1);
-      setRunOrder(1);
-    }
+  function handleClientIntroClick() {
+    const newStatus = nextStatus(q.client_introduction || 'not_needed', CLIENT_INTRO_STATUSES);
+    onUpdateDetails(q.id, { client_introduction: newStatus });
   }
 
-  async function changeRunOrder(newOrder: number) {
-    setRunOrder(newOrder);
-    await onUpdateRunGroup(q.id, q.run_group || q.id, newOrder);
+  // Run grouping — find existing run groups on this job
+  const jobRunGroups = useMemo(() => {
+    if (!q.job_id) return [];
+    const groups = new Map<string, { letter: string; count: number }>();
+    const RUN_LETTERS = ['A', 'B', 'C', 'D', 'E'];
+    let letterIdx = 0;
+    for (const other of allQuotes) {
+      if (other.job_id === q.job_id && other.run_group && !groups.has(other.run_group)) {
+        groups.set(other.run_group, { letter: RUN_LETTERS[letterIdx] || String(letterIdx + 1), count: 0 });
+        letterIdx++;
+      }
+    }
+    // Count items per group
+    for (const other of allQuotes) {
+      if (other.job_id === q.job_id && other.run_group && groups.has(other.run_group)) {
+        groups.get(other.run_group)!.count++;
+      }
+    }
+    return Array.from(groups.entries()).map(([id, info]) => ({ id, ...info }));
+  }, [q.job_id, allQuotes]);
+
+  const currentRunLetter = useMemo(() => {
+    if (!q.run_group) return null;
+    const group = jobRunGroups.find((g) => g.id === q.run_group);
+    return group?.letter || '?';
+  }, [q.run_group, jobRunGroups]);
+
+  async function setRunGroup(groupId: string | null) {
+    const order = groupId ? (q.run_order || 1) : null;
+    await onUpdateRunGroup(q.id, groupId, order);
+  }
+
+  async function createNewRunGroup() {
+    // Use this quote's ID as the new run group UUID
+    await onUpdateRunGroup(q.id, q.id, 1);
   }
 
   return (
@@ -739,45 +768,72 @@ function ExpandedDetail({
             <div className="text-gray-500">{q.work_description}</div>
           )}
 
-          {/* Multiple runs */}
-          <div className="border-t border-gray-200 pt-2 mt-2">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={isMultiRun}
-                onChange={toggleMultiRun}
-                className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-              />
-              <span className="text-xs font-medium text-gray-700">Multiple runs</span>
-            </label>
-            {isMultiRun && (
-              <div className="mt-1.5 flex items-center gap-2">
-                <span className="text-xs text-gray-500">Run order:</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={runOrder}
-                  onChange={(e) => changeRunOrder(parseInt(e.target.value) || 1)}
-                  className="w-14 border border-gray-300 rounded px-2 py-0.5 text-xs text-center"
-                />
+          {/* Run grouping */}
+          {q.job_id && (
+            <div className="border-t border-gray-200 pt-2 mt-2">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-xs font-medium text-gray-700">Run group</span>
+                {currentRunLetter && (
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">
+                    Run {currentRunLetter}
+                  </span>
+                )}
               </div>
-            )}
-          </div>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  onClick={() => setRunGroup(null)}
+                  className={`text-xs px-2 py-0.5 rounded border ${
+                    !q.run_group ? 'bg-gray-200 border-gray-300 font-medium' : 'bg-white border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  None
+                </button>
+                {jobRunGroups.map((g) => (
+                  <button
+                    key={g.id}
+                    onClick={() => setRunGroup(g.id)}
+                    className={`text-xs px-2 py-0.5 rounded border ${
+                      q.run_group === g.id
+                        ? 'bg-violet-100 border-violet-300 text-violet-700 font-medium'
+                        : 'bg-white border-gray-200 hover:bg-violet-50'
+                    }`}
+                  >
+                    Run {g.letter} ({g.count})
+                  </button>
+                ))}
+                <button
+                  onClick={createNewRunGroup}
+                  className="text-xs px-2 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
+                >
+                  + New run
+                </button>
+              </div>
+              {q.run_group && (
+                <div className="mt-1.5 flex items-center gap-2">
+                  <span className="text-xs text-gray-500">Stop order:</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={q.run_order || 1}
+                    onChange={(e) => onUpdateRunGroup(q.id, q.run_group, parseInt(e.target.value) || 1)}
+                    className="w-14 border border-gray-300 rounded px-2 py-0.5 text-xs text-center"
+                  />
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Column 2: Arranging (inline-editable) */}
         <div className="space-y-2">
           <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Arranging</h4>
 
-          {/* Client introduction */}
-          <InlineEditField
+          {/* Client introduction — status pill */}
+          <ClickableStatusPill
             label="Client intro"
-            value={fieldValues.client_introduction}
-            isEditing={editingField === 'client_introduction'}
-            onStartEdit={() => setEditingField('client_introduction')}
-            onChange={(v) => setFieldValues((prev) => ({ ...prev, client_introduction: v }))}
-            onSave={() => saveField('client_introduction')}
-            onCancel={() => { setEditingField(null); setFieldValues((prev) => ({ ...prev, client_introduction: q.client_introduction || '' })); }}
+            status={q.client_introduction || 'not_needed'}
+            onClick={handleClientIntroClick}
+            statusList={CLIENT_INTRO_STATUSES}
           />
 
           {/* Key points */}
@@ -797,16 +853,19 @@ function ExpandedDetail({
               label="Tolls"
               status={q.tolls_status}
               onClick={() => handleArrangementClick('tolls_status', q.tolls_status)}
+              statusList={ARRANGEMENT_STATUSES}
             />
             <ClickableStatusPill
               label="Accom"
               status={q.accommodation_status}
               onClick={() => handleArrangementClick('accommodation_status', q.accommodation_status)}
+              statusList={ARRANGEMENT_STATUSES}
             />
             <ClickableStatusPill
               label="Flights"
               status={q.flight_status}
               onClick={() => handleArrangementClick('flight_status', q.flight_status)}
+              statusList={ARRANGEMENT_STATUSES}
             />
           </div>
 
@@ -951,26 +1010,42 @@ function InlineEditField({
 
 // ── Clickable Status Pill ───────────────────────────────────────────
 
-function ClickableStatusPill({ label, status, onClick }: { label: string; status: string; onClick: () => void }) {
+function ClickableStatusPill({
+  label,
+  status,
+  onClick,
+  statusList,
+}: {
+  label: string;
+  status: string;
+  onClick: () => void;
+  statusList: readonly string[];
+}) {
   const colours: Record<string, string> = {
     not_needed: 'bg-gray-100 text-gray-400',
     todo: 'bg-amber-100 text-amber-700',
     booked: 'bg-blue-100 text-blue-700',
     paid: 'bg-green-100 text-green-700',
+    working_on_it: 'bg-orange-100 text-orange-700',
+    done: 'bg-green-100 text-green-700',
   };
 
   const statusLabels: Record<string, string> = {
     not_needed: 'n/a',
-    todo: 'needed',
+    todo: 'to do',
     booked: 'booked',
     paid: 'paid',
+    working_on_it: 'working on it',
+    done: 'done',
   };
+
+  const cycleLabels = statusList.map((s) => statusLabels[s] || s).join(' → ');
 
   return (
     <button
       onClick={onClick}
       className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:opacity-80 transition-opacity ${colours[status] || 'bg-gray-100 text-gray-600'}`}
-      title={`Click to cycle: ${ARRANGEMENT_STATUSES.join(' → ')}`}
+      title={`Click to cycle: ${cycleLabels}`}
     >
       {label}: {statusLabels[status] || status}
     </button>
@@ -1147,33 +1222,31 @@ function EditQuoteModal({
             </select>
           </div>
 
-          {/* Fees (for local/fixed quotes) */}
-          {isLocal && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge</label>
-                <input
-                  type="number"
-                  min={0}
-                  step={5}
-                  value={form.client_charge_rounded}
-                  onChange={(e) => setForm((p) => ({ ...p, client_charge_rounded: parseFloat(e.target.value) || 0 }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Fee</label>
-                <input
-                  type="number"
-                  min={0}
-                  step={5}
-                  value={form.freelancer_fee_rounded}
-                  onChange={(e) => setForm((p) => ({ ...p, freelancer_fee_rounded: parseFloat(e.target.value) || 0 }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
+          {/* Fees — editable for all quotes (override calculator values or set local fees) */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge</label>
+              <input
+                type="number"
+                min={0}
+                step={5}
+                value={form.client_charge_rounded}
+                onChange={(e) => setForm((p) => ({ ...p, client_charge_rounded: parseFloat(e.target.value) || 0 }))}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
             </div>
-          )}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Fee</label>
+              <input
+                type="number"
+                min={0}
+                step={5}
+                value={form.freelancer_fee_rounded}
+                onChange={(e) => setForm((p) => ({ ...p, freelancer_fee_rounded: parseFloat(e.target.value) || 0 }))}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+          </div>
 
           {/* Notes */}
           <div>
@@ -1196,8 +1269,8 @@ function EditQuoteModal({
           </div>
 
           {!isLocal && (
-            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-700">
-              This is a calculator-generated quote. To recalculate costs, use the transport calculator from the Job Detail page. Core fields (venue, date, time, notes) can be updated here.
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
+              Fee overrides will replace the calculator values. To fully recalculate, use the transport calculator from the Job Detail page.
             </div>
           )}
         </div>

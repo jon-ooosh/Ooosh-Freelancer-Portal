@@ -445,6 +445,9 @@ export default function JobDetailPage() {
   const [peopleSearch, setPeopleSearch] = useState('');
   const [assignRole, setAssignRole] = useState('driver');
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  const [editingQuoteId, setEditingQuoteId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<Record<string, unknown>>({});
+  const [editSaving, setEditSaving] = useState(false);
   const [showLocalForm, setShowLocalForm] = useState(false);
   const [localFormData, setLocalFormData] = useState({
     jobType: 'delivery' as 'delivery' | 'collection',
@@ -589,6 +592,39 @@ export default function JobDetailPage() {
       setConfirmingDelete(null);
     } catch {
       console.error('Failed to delete quote');
+    }
+  }
+
+  function startEditQuote(q: SavedQuote) {
+    const dateStr = q.job_date
+      ? (typeof q.job_date === 'string' && q.job_date.includes('T') ? q.job_date.split('T')[0] : String(q.job_date))
+      : '';
+    setEditForm({
+      job_type: q.job_type,
+      venue_name: q.venue_name || '',
+      venue_id: q.venue_id || null,
+      job_date: dateStr,
+      arrival_time: q.arrival_time || '',
+      what_is_it: q.what_is_it || '',
+      internal_notes: q.internal_notes || '',
+      freelancer_notes: q.freelancer_notes || '',
+      client_charge_rounded: Number(q.client_charge_rounded ?? 0),
+      freelancer_fee_rounded: Number(q.freelancer_fee_rounded ?? 0),
+    });
+    setEditingQuoteId(q.id);
+  }
+
+  async function saveEditQuote() {
+    if (!editingQuoteId) return;
+    setEditSaving(true);
+    try {
+      await api.put(`/quotes/${editingQuoteId}`, editForm);
+      await loadQuotes();
+      setEditingQuoteId(null);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setEditSaving(false);
     }
   }
 
@@ -1373,6 +1409,16 @@ export default function JobDetailPage() {
                         {q.created_by_name && <p>{q.created_by_name}</p>}
                       </div>
 
+                      {/* Edit button */}
+                      {!isCancelled && (
+                        <button
+                          onClick={() => startEditQuote(q)}
+                          className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200 font-medium"
+                        >
+                          Edit
+                        </button>
+                      )}
+
                       {/* Status action buttons */}
                       {!isCancelled && (
                         <div className="flex flex-col gap-1">
@@ -1444,6 +1490,116 @@ export default function JobDetailPage() {
                 </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Edit Quote Modal */}
+          {editingQuoteId && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center">
+              <div className="absolute inset-0 bg-black/50" onClick={() => setEditingQuoteId(null)} />
+              <div className="relative bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[90vh] overflow-y-auto">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">Edit Quote</h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                    <select
+                      value={String(editForm.job_type || '')}
+                      onChange={(e) => setEditForm((p) => ({ ...p, job_type: e.target.value }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    >
+                      <option value="delivery">Delivery</option>
+                      <option value="collection">Collection</option>
+                      <option value="crewed">Crewed</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
+                    <input
+                      type="text"
+                      value={String(editForm.venue_name || '')}
+                      onChange={(e) => setEditForm((p) => ({ ...p, venue_name: e.target.value, venue_id: null }))}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                      <input
+                        type="date"
+                        value={String(editForm.job_date || '')}
+                        onChange={(e) => setEditForm((p) => ({ ...p, job_date: e.target.value }))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Arrival Time</label>
+                      <input
+                        type="time"
+                        value={String(editForm.arrival_time || '')}
+                        onChange={(e) => setEditForm((p) => ({ ...p, arrival_time: e.target.value }))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={5}
+                        value={Number(editForm.client_charge_rounded ?? 0)}
+                        onChange={(e) => setEditForm((p) => ({ ...p, client_charge_rounded: parseFloat(e.target.value) || 0 }))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Fee</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={5}
+                        value={Number(editForm.freelancer_fee_rounded ?? 0)}
+                        onChange={(e) => setEditForm((p) => ({ ...p, freelancer_fee_rounded: parseFloat(e.target.value) || 0 }))}
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Internal Notes</label>
+                    <textarea
+                      value={String(editForm.internal_notes || '')}
+                      onChange={(e) => setEditForm((p) => ({ ...p, internal_notes: e.target.value }))}
+                      rows={2}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Notes</label>
+                    <textarea
+                      value={String(editForm.freelancer_notes || '')}
+                      onChange={(e) => setEditForm((p) => ({ ...p, freelancer_notes: e.target.value }))}
+                      rows={2}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
+                </div>
+                <div className="mt-6 flex justify-end gap-2">
+                  <button
+                    onClick={() => setEditingQuoteId(null)}
+                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 font-medium"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveEditQuote}
+                    disabled={editSaving}
+                    className="px-4 py-2 bg-ooosh-600 text-white rounded-lg text-sm hover:bg-ooosh-700 font-medium disabled:opacity-50"
+                  >
+                    {editSaving ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
