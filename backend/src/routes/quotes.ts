@@ -46,7 +46,7 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
 
     const result = await query(
       `SELECT q.*,
-        j.job_name, j.hirehop_id, j.client_name, j.out_date, j.return_date,
+        j.job_name, j.hh_job_number, j.client_name, j.out_date, j.return_date,
         v.name as linked_venue_name, v.address as venue_address, v.city as venue_city,
         COALESCE(
           (SELECT json_agg(json_build_object(
