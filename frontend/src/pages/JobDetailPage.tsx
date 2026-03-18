@@ -390,6 +390,17 @@ export default function JobDetailPage() {
   const [peopleSearch, setPeopleSearch] = useState('');
   const [assignRole, setAssignRole] = useState('driver');
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  const [showLocalForm, setShowLocalForm] = useState(false);
+  const [localFormData, setLocalFormData] = useState({
+    jobType: 'delivery' as 'delivery' | 'collection',
+    fee: '',
+    clientCharge: '',
+    venueName: '',
+    jobDate: '',
+    arrivalTime: '',
+    notes: '',
+  });
+  const [localSubmitting, setLocalSubmitting] = useState(false);
 
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
@@ -987,13 +998,21 @@ export default function JobDetailPage() {
       {activeTab === 'transport' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-900">🚗 Crew & Transport</h3>
-            <button
-              onClick={() => setShowCalculator(true)}
-              className="flex items-center gap-1.5 px-4 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
-            >
-              + New Calculation
-            </button>
+            <h3 className="text-lg font-semibold text-gray-900">Crew & Transport</h3>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowLocalForm(true)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 text-sm font-medium"
+              >
+                + Local D/C
+              </button>
+              <button
+                onClick={() => setShowCalculator(true)}
+                className="flex items-center gap-1.5 px-4 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
+              >
+                + New Calculation
+              </button>
+            </div>
           </div>
 
           {quotesLoading ? (
@@ -1379,6 +1398,135 @@ export default function JobDetailPage() {
         jobEndDate={job.job_end || undefined}
         hhJobNumber={job.hh_job_number || undefined}
       />
+
+      {/* Local Delivery/Collection Form Modal */}
+      {showLocalForm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Local Delivery / Collection</h3>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                <div className="flex gap-2">
+                  {(['delivery', 'collection'] as const).map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setLocalFormData({ ...localFormData, jobType: t })}
+                      className={`flex-1 px-3 py-2 rounded-lg border text-sm font-medium ${
+                        localFormData.jobType === t
+                          ? 'border-ooosh-500 bg-ooosh-50 text-ooosh-700'
+                          : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                      }`}
+                    >
+                      {t === 'delivery' ? 'Delivery' : 'Collection'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Fee (£)</label>
+                  <input
+                    type="number" min="0" step="0.01"
+                    value={localFormData.fee}
+                    onChange={(e) => setLocalFormData({ ...localFormData, fee: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    placeholder="50.00"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge (£)</label>
+                  <input
+                    type="number" min="0" step="0.01"
+                    value={localFormData.clientCharge}
+                    onChange={(e) => setLocalFormData({ ...localFormData, clientCharge: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    placeholder="Same as fee"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
+                <input
+                  type="text"
+                  value={localFormData.venueName}
+                  onChange={(e) => setLocalFormData({ ...localFormData, venueName: e.target.value })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  placeholder={job.venue_name || 'Venue name'}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                  <input
+                    type="date"
+                    value={localFormData.jobDate}
+                    onChange={(e) => setLocalFormData({ ...localFormData, jobDate: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Time</label>
+                  <input
+                    type="time"
+                    value={localFormData.arrivalTime}
+                    onChange={(e) => setLocalFormData({ ...localFormData, arrivalTime: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                <textarea
+                  value={localFormData.notes}
+                  onChange={(e) => setLocalFormData({ ...localFormData, notes: e.target.value })}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  rows={2}
+                  placeholder="Optional notes..."
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowLocalForm(false)}
+                className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={localSubmitting || !localFormData.fee}
+                onClick={async () => {
+                  if (!localFormData.fee) return;
+                  setLocalSubmitting(true);
+                  try {
+                    await api.post('/quotes/local', {
+                      jobId: job.id,
+                      jobType: localFormData.jobType,
+                      fee: parseFloat(localFormData.fee),
+                      clientCharge: localFormData.clientCharge ? parseFloat(localFormData.clientCharge) : undefined,
+                      venueName: localFormData.venueName || job.venue_name || undefined,
+                      venueId: job.venue_id || undefined,
+                      jobDate: localFormData.jobDate || job.job_date || undefined,
+                      arrivalTime: localFormData.arrivalTime || undefined,
+                      notes: localFormData.notes || undefined,
+                    });
+                    setShowLocalForm(false);
+                    setLocalFormData({ jobType: 'delivery', fee: '', clientCharge: '', venueName: '', jobDate: '', arrivalTime: '', notes: '' });
+                    loadQuotes();
+                  } catch (err) {
+                    alert(err instanceof Error ? err.message : 'Failed to create');
+                  } finally {
+                    setLocalSubmitting(false);
+                  }
+                }}
+                className="px-4 py-2 text-sm bg-teal-600 text-white rounded-lg hover:bg-teal-700 disabled:opacity-50 font-medium"
+              >
+                {localSubmitting ? 'Saving...' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Assign Crew Modal */}
       {assignModalQuoteId && (

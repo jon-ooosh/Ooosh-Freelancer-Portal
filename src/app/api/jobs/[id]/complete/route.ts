@@ -23,14 +23,15 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
-import { 
-  getJobById, 
+import {
+  getJobById,
   DC_COLUMNS,
   uploadBase64ImageToColumn,
   getBoardIds,
   mondayQuery,
   getFreelancerNameByEmail
 } from '@/lib/monday'
+import { isOpMode, submitCompletionToOP } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES
@@ -115,6 +116,60 @@ export async function POST(
 
     console.log(`Complete API: Processing completion for job ${jobId} by ${session.email}`)
     console.log(`Complete API: customerPresent=${customerPresent}, signature=${!!signature}, photos=${photos?.length || 0}`)
+
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      const sessionToken = request.cookies.get('session')?.value
+      if (!sessionToken) {
+        return NextResponse.json(
+          { success: false, error: 'Session token missing' },
+          { status: 401 }
+        )
+      }
+
+      try {
+        // Build FormData for the OP backend
+        const formData = new FormData()
+        formData.append('notes', notes || '')
+        formData.append('customerPresent', String(customerPresent))
+
+        // Convert base64 photos to blobs
+        if (photos) {
+          for (const photoBase64 of photos) {
+            const match = photoBase64.match(/^data:([^;]+);base64,(.+)$/)
+            if (match) {
+              const buffer = Buffer.from(match[2], 'base64')
+              const blob = new Blob([buffer], { type: match[1] })
+              formData.append('photos', blob, `photo-${Date.now()}.jpg`)
+            }
+          }
+        }
+
+        // Convert base64 signature to blob
+        if (signature) {
+          const match = signature.match(/^data:([^;]+);base64,(.+)$/)
+          if (match) {
+            const buffer = Buffer.from(match[2], 'base64')
+            const blob = new Blob([buffer], { type: match[1] })
+            formData.append('signature', blob, `signature-${Date.now()}.png`)
+          }
+        }
+
+        const result = await submitCompletionToOP(sessionToken, jobId, formData)
+        return NextResponse.json({
+          success: true,
+          jobId,
+          completedAt: new Date().toISOString(),
+          backgroundProcessing: false,
+          ...result,
+        })
+      } catch (opError) {
+        console.error('OP backend completion error:', opError)
+        // Fall through to Monday.com
+        console.log('Complete API: Falling back to Monday.com')
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
 
     // Verify the job exists and is assigned to this user
     const job = await getJobById(jobId, session.email)

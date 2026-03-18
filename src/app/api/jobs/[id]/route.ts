@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobById, getCrewJobById, getVenueById, VenueRecord } from '@/lib/monday'
+import { isOpMode, getJobDetailFromOP } from '@/lib/op-api'
 
 /**
  * Check if a date is within 48 hours of now (before or after)
@@ -81,6 +82,27 @@ export async function GET(
     }
 
     console.log('Job API: Fetching', boardType, 'job', jobId, 'for user', session.email)
+
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      const sessionToken = request.cookies.get('session')?.value
+      if (!sessionToken) {
+        return NextResponse.json(
+          { success: false, error: 'Session token missing' },
+          { status: 401 }
+        )
+      }
+
+      try {
+        const opData = await getJobDetailFromOP(sessionToken, jobId)
+        return NextResponse.json(opData)
+      } catch (opError) {
+        console.error('OP backend job detail error:', opError)
+        // Fall through to Monday.com
+        console.log('Job API: Falling back to Monday.com')
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
 
     // Fetch the job from the appropriate Monday.com board
     let job: Awaited<ReturnType<typeof getJobById>> | Awaited<ReturnType<typeof getCrewJobById>> = null
