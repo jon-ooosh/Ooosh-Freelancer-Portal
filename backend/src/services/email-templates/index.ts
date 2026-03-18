@@ -168,6 +168,41 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+  hire_form: {
+    variant: 'client' as const,
+    preheader: 'Your vehicle hire agreement from Ooosh Tours',
+    subject: 'Your vehicle hire agreement for {{vehicleReg}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Vehicle Hire Agreement</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{driverName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Please find attached your vehicle hire agreement for your current hire:
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Vehicle</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{vehicleReg}} — {{vehicleModel}}</p>
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Hire Period</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{hireStart}} to {{hireEnd}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Please retain the attached document for your records.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We hope you have a great tour!
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If you have any questions, please call us on <strong>+44 (0) 1273 911382</strong>
+        or email <a href="mailto:info@oooshtours.co.uk" style="color:#f97316;">info@oooshtours.co.uk</a>.
+      </p>
+    `,
+  },
+
   referral_alert: {
     variant: 'internal',
     subject: 'Insurer Referral Required — {{driverName}}',
