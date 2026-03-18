@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 
@@ -51,7 +51,11 @@ interface OpsQuote {
   accommodation_status: string;
   flight_status: string;
   completed_at: string | null;
+  completed_by: string | null;
   completion_notes: string | null;
+  completion_signature: string | null;
+  completion_photos: string[] | null;
+  customer_present: boolean | null;
   what_is_it: string | null;
   internal_notes: string | null;
   freelancer_notes: string | null;
@@ -69,14 +73,13 @@ interface OpsQuote {
 
 // ── Constants ────────────────────────────────────────────────────────
 
-const OPS_STATUSES = ['todo', 'arranging', 'arranged', 'dispatched', 'arrived', 'completed', 'cancelled'] as const;
+const OPS_STATUSES = ['todo', 'arranging', 'arranged', 'dispatched', 'completed', 'cancelled'] as const;
 
 const OPS_STATUS_CONFIG: Record<string, { label: string; colour: string; bgColour: string }> = {
   todo: { label: 'To Be Arranged', colour: 'text-red-700', bgColour: 'bg-red-100' },
   arranging: { label: 'Arranging', colour: 'text-amber-700', bgColour: 'bg-amber-100' },
   arranged: { label: 'Arranged', colour: 'text-blue-700', bgColour: 'bg-blue-100' },
   dispatched: { label: 'Dispatched', colour: 'text-indigo-700', bgColour: 'bg-indigo-100' },
-  arrived: { label: 'Arrived', colour: 'text-purple-700', bgColour: 'bg-purple-100' },
   completed: { label: 'Completed', colour: 'text-green-700', bgColour: 'bg-green-100' },
   cancelled: { label: 'Cancelled', colour: 'text-gray-500', bgColour: 'bg-gray-100' },
 };
@@ -111,6 +114,7 @@ export default function TransportOpsPage() {
   const [filter, setFilter] = useState<'all' | 'transport' | 'crewed'>('all');
   const [viewMode, setViewMode] = useState<'table' | 'calendar'>('table');
   const [showCompleted, setShowCompleted] = useState(false);
+  const [showCancelled, setShowCancelled] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [assignRole, setAssignRole] = useState('driver');
@@ -318,15 +322,24 @@ export default function TransportOpsPage() {
             </button>
           </div>
 
-          {/* Show completed toggle */}
+          {/* Show completed/cancelled toggles */}
           <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
             <input
               type="checkbox"
               checked={showCompleted}
               onChange={(e) => setShowCompleted(e.target.checked)}
-              className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+              className="rounded border-gray-300 text-green-600 focus:ring-green-500"
             />
-            Show completed
+            Completed
+          </label>
+          <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showCancelled}
+              onChange={(e) => setShowCancelled(e.target.checked)}
+              className="rounded border-gray-300 text-gray-400 focus:ring-gray-400"
+            />
+            Cancelled
           </label>
         </div>
       </div>
@@ -338,7 +351,11 @@ export default function TransportOpsPage() {
       {/* Table view */}
       {viewMode === 'table' && (
         <div className="space-y-6">
-          {OPS_STATUSES.filter((s) => showCompleted || (s !== 'completed' && s !== 'cancelled')).map((status) => {
+          {OPS_STATUSES.filter((s) => {
+            if (s === 'completed') return showCompleted;
+            if (s === 'cancelled') return showCancelled;
+            return true;
+          }).map((status) => {
             const items = grouped[status] || [];
             if (items.length === 0 && (status === 'completed' || status === 'cancelled')) return null;
 
@@ -523,10 +540,38 @@ function QuoteRow({
     .map((a) => a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim())
     .filter(Boolean);
 
+  // Compute run letter for display
+  const runLetter = useMemo(() => {
+    if (!q.run_group || !q.job_id) return null;
+    const RUN_LETTERS = ['A', 'B', 'C', 'D', 'E'];
+    const uniqueGroups: string[] = [];
+    for (const other of allQuotes) {
+      if (other.job_id === q.job_id && other.run_group && !uniqueGroups.includes(other.run_group)) {
+        uniqueGroups.push(other.run_group);
+      }
+    }
+    const idx = uniqueGroups.indexOf(q.run_group);
+    return RUN_LETTERS[idx] || String(idx + 1);
+  }, [q.run_group, q.job_id, allQuotes]);
+
+  // Run group colour bands
+  const RUN_COLOURS = ['border-l-violet-500', 'border-l-emerald-500', 'border-l-sky-500', 'border-l-rose-500', 'border-l-amber-500'];
+  const runColourClass = useMemo(() => {
+    if (!q.run_group || !q.job_id) return '';
+    const uniqueGroups: string[] = [];
+    for (const other of allQuotes) {
+      if (other.job_id === q.job_id && other.run_group && !uniqueGroups.includes(other.run_group)) {
+        uniqueGroups.push(other.run_group);
+      }
+    }
+    const idx = uniqueGroups.indexOf(q.run_group);
+    return RUN_COLOURS[idx % RUN_COLOURS.length] || '';
+  }, [q.run_group, q.job_id, allQuotes]);
+
   return (
     <div>
       <div
-        className="px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors"
+        className={`px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${runColourClass ? `border-l-4 ${runColourClass}` : ''}`}
         onClick={onToggle}
       >
         {/* Expand chevron */}
@@ -561,9 +606,9 @@ function QuoteRow({
             {q.is_local && (
               <span className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 font-medium flex-shrink-0">Local</span>
             )}
-            {q.run_group && (
+            {q.run_group && runLetter && (
               <span className="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-medium flex-shrink-0">
-                Run {q.run_order || '?'}
+                Run {runLetter}
               </span>
             )}
             {q.hh_job_number && (
@@ -604,18 +649,11 @@ function QuoteRow({
         </div>
 
         {/* Status dropdown */}
-        <div className="w-32 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
-          <select
+        <div className="w-36 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          <StatusDropdown
             value={q.ops_status || 'todo'}
-            onChange={(e) => onStatusChange(q.id, e.target.value)}
-            className={`text-xs font-medium rounded px-2 py-1 border-0 cursor-pointer w-full ${
-              OPS_STATUS_CONFIG[q.ops_status]?.bgColour || 'bg-gray-100'
-            } ${OPS_STATUS_CONFIG[q.ops_status]?.colour || 'text-gray-700'}`}
-          >
-            {OPS_STATUSES.map((s) => (
-              <option key={s} value={s}>{OPS_STATUS_CONFIG[s].label}</option>
-            ))}
-          </select>
+            onChange={(v) => onStatusChange(q.id, v)}
+          />
         </div>
       </div>
 
@@ -631,6 +669,56 @@ function QuoteRow({
           onUpdateRunGroup={onUpdateRunGroup}
           allQuotes={allQuotes}
         />
+      )}
+    </div>
+  );
+}
+
+// ── Status Dropdown (colour-matched) ─────────────────────────────────
+
+function StatusDropdown({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    if (open) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [open]);
+
+  const config = OPS_STATUS_CONFIG[value] || OPS_STATUS_CONFIG.todo;
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className={`text-xs font-medium rounded px-2.5 py-1.5 w-full text-left flex items-center justify-between ${config.bgColour} ${config.colour}`}
+      >
+        <span>{config.label}</span>
+        <svg className={`w-3.5 h-3.5 ml-1 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-1 w-40 bg-white rounded-lg shadow-lg border border-gray-200 z-20 py-1 overflow-hidden">
+          {OPS_STATUSES.map((s) => {
+            const sc = OPS_STATUS_CONFIG[s];
+            return (
+              <button
+                key={s}
+                onClick={() => { onChange(s); setOpen(false); }}
+                className={`w-full text-left px-3 py-1.5 text-xs font-medium flex items-center gap-2 hover:opacity-80 ${
+                  s === value ? 'ring-1 ring-inset ring-gray-300' : ''
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${sc.bgColour} border ${sc.colour.replace('text-', 'border-')}`} />
+                <span className={sc.colour}>{sc.label}</span>
+              </button>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -942,6 +1030,73 @@ function ExpandedDetail({
           </div>
         </div>
       </div>
+
+      {/* Completion details (when completed) */}
+      {q.ops_status === 'completed' && q.completed_at && (
+        <div className="mt-4 pt-3 border-t border-gray-200">
+          <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider mb-2">Completion Details</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className="text-gray-500">Completed:</span>
+                <span className="font-medium text-gray-700">
+                  {new Date(q.completed_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                  {' at '}
+                  {new Date(q.completed_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              </div>
+              {q.completed_by && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-500">By:</span>
+                  <span className="font-medium text-gray-700">{q.completed_by}</span>
+                </div>
+              )}
+              {q.customer_present !== null && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-500">Customer present:</span>
+                  <span className={`font-medium ${q.customer_present ? 'text-green-600' : 'text-amber-600'}`}>
+                    {q.customer_present ? 'Yes' : 'No'}
+                  </span>
+                </div>
+              )}
+              {q.completion_notes && (
+                <div>
+                  <span className="text-gray-500">Notes:</span>
+                  <p className="mt-0.5 text-gray-700 bg-white rounded p-2 border border-gray-200">{q.completion_notes}</p>
+                </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              {/* Signature */}
+              {q.completion_signature && (
+                <div>
+                  <span className="text-gray-500">Signature:</span>
+                  <div className="mt-1 bg-white rounded border border-gray-200 p-2 inline-block">
+                    <img src={q.completion_signature} alt="Signature" className="h-16 max-w-[200px] object-contain" />
+                  </div>
+                </div>
+              )}
+              {/* Photos */}
+              {q.completion_photos && q.completion_photos.length > 0 && (
+                <div>
+                  <span className="text-gray-500">Photos ({q.completion_photos.length}):</span>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {q.completion_photos.map((photo, idx) => (
+                      <a key={idx} href={photo} target="_blank" rel="noopener noreferrer" className="block">
+                        <img
+                          src={photo}
+                          alt={`Completion photo ${idx + 1}`}
+                          className="h-20 w-20 object-cover rounded border border-gray-200 hover:border-ooosh-500 transition-colors"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
