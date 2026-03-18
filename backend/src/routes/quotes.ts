@@ -407,8 +407,8 @@ const editQuoteSchema = z.object({
   what_is_it: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
   internal_notes: z.string().optional().nullable(),
   freelancer_notes: z.string().optional().nullable(),
-  client_charge_rounded: z.number().min(0).optional().nullable(),
-  freelancer_fee_rounded: z.number().min(0).optional().nullable(),
+  client_charge_rounded: z.coerce.number().min(0).optional().nullable(),
+  freelancer_fee_rounded: z.coerce.number().min(0).optional().nullable(),
 });
 
 router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Response) => {
@@ -442,19 +442,16 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       }
     }
 
-    // For local/fixed quotes, also allow fee updates
-    const isLocal = existing.rows[0].is_local || existing.rows[0].calculation_mode === 'fixed';
-    if (isLocal) {
-      if (fields.client_charge_rounded !== undefined) {
-        updates.push(`client_charge_rounded = $${idx}, client_charge_total = $${idx}`);
-        params.push(fields.client_charge_rounded);
-        idx++;
-      }
-      if (fields.freelancer_fee_rounded !== undefined) {
-        updates.push(`freelancer_fee_rounded = $${idx}, freelancer_fee = $${idx}`);
-        params.push(fields.freelancer_fee_rounded);
-        idx++;
-      }
+    // Fee overrides (available for all quote types)
+    if (fields.client_charge_rounded !== undefined) {
+      updates.push(`client_charge_rounded = $${idx}, client_charge_total = $${idx}`);
+      params.push(fields.client_charge_rounded);
+      idx++;
+    }
+    if (fields.freelancer_fee_rounded !== undefined) {
+      updates.push(`freelancer_fee_rounded = $${idx}, freelancer_fee = $${idx}`);
+      params.push(fields.freelancer_fee_rounded);
+      idx++;
     }
 
     if (updates.length === 0) {
@@ -636,8 +633,8 @@ const opsDetailsSchema = z.object({
   key_points: z.string().optional().nullable(),
   client_introduction: z.string().optional().nullable(),
   tolls_status: z.enum(['not_needed', 'todo', 'booked', 'paid']).optional(),
-  accommodation_status: z.enum(['not_needed', 'todo', 'booked']).optional(),
-  flight_status: z.enum(['not_needed', 'todo', 'booked']).optional(),
+  accommodation_status: z.enum(['not_needed', 'todo', 'booked', 'paid']).optional(),
+  flight_status: z.enum(['not_needed', 'todo', 'booked', 'paid']).optional(),
   work_type: z.string().optional().nullable(),
   work_type_other: z.string().optional().nullable(),
   work_description: z.string().optional().nullable(),
