@@ -827,15 +827,18 @@ function DetailsTab({
               return (
                 <>
                   <div>
-                    <label className="block text-xs text-gray-500 mb-1">iDenfy Check Date (drives licence validity)</label>
+                    <label className="block text-xs text-gray-500 mb-1">Licence (90d from check)</label>
                     <input type="date" value={editData.idenfy_check_date || ''} onChange={(e) => setEditData({ ...editData, idenfy_check_date: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+                    {computed.licenceCapped && (
+                      <span className="block text-[10px] text-amber-600 mt-0.5">Capped by licence expiry {formatDate(driver.licence_valid_to)}</span>
+                    )}
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-500 mb-1">DVLA Check Date (drives DVLA validity)</label>
+                    <label className="block text-xs text-gray-500 mb-1">DVLA Check (30d from check)</label>
                     <input type="date" value={editData.dvla_check_date || ''} onChange={(e) => setEditData({ ...editData, dvla_check_date: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
                   </div>
-                  {validityField('POA 1', 'poa1_valid_until', 'poa1_provider')}
-                  {validityField('POA 2', 'poa2_valid_until', 'poa2_provider')}
+                  {validityField(`POA 1${editData.poa1_provider ? ` (${editData.poa1_provider})` : ''} (90d from doc)`, 'poa1_valid_until', undefined)}
+                  {validityField(`POA 2${editData.poa2_provider ? ` (${editData.poa2_provider})` : ''} (90d from doc)`, 'poa2_valid_until', undefined)}
                   {validityField('Passport', 'passport_valid_until')}
                 </>
               );
@@ -866,10 +869,6 @@ function DetailsTab({
                 <div>
                   <dt className="text-xs text-gray-400 mb-1">Passport{!computed.isUkDriver ? ' (30d from check)' : ''}</dt>
                   <dd><ValidityPill date={computed.passport} /></dd>
-                </div>
-                <div>
-                  <dt className="text-xs text-gray-400 mb-1">iDenfy Check</dt>
-                  <dd className="text-sm text-gray-900">{formatDate(driver.idenfy_check_date)}</dd>
                 </div>
               </>
             );
