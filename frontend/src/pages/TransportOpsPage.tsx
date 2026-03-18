@@ -57,7 +57,7 @@ interface OpsQuote {
   freelancer_notes: string | null;
   // Joined fields
   job_name: string | null;
-  hirehop_id: number | null;
+  hh_job_number: number | null;
   client_name: string | null;
   out_date: string | null;
   return_date: string | null;
@@ -337,8 +337,8 @@ function QuoteRow({
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium text-gray-900 truncate">
             {q.linked_venue_name || q.venue_name || 'No venue'}
-            {q.hirehop_id && (
-              <span className="ml-1.5 text-xs text-gray-400">HH#{q.hirehop_id}</span>
+            {q.hh_job_number && (
+              <span className="ml-1.5 text-xs text-gray-400">HH#{q.hh_job_number}</span>
             )}
           </div>
           <div className="text-xs text-gray-500 truncate">
@@ -609,7 +609,10 @@ function CalendarView({
 
 function formatDate(dateStr: string): string {
   try {
-    const d = new Date(dateStr + 'T00:00:00');
+    // Handle both DATE ("2026-03-20") and TIMESTAMPTZ ("2026-03-20T00:00:00.000Z") strings
+    const raw = dateStr.includes('T') ? dateStr : dateStr + 'T12:00:00';
+    const d = new Date(raw);
+    if (isNaN(d.getTime())) return dateStr;
     return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
   } catch {
     return dateStr;
