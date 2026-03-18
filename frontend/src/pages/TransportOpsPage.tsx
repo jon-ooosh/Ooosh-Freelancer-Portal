@@ -29,8 +29,8 @@ interface OpsQuote {
   venue_id: string | null;
   distance_miles: number | null;
   arrival_time: string | null;
-  job_date: string | null;
-  job_finish_date: string | null;
+  job_date: string | Date | null;
+  job_finish_date: string | Date | null;
   is_multi_day: boolean;
   status: string;
   ops_status: string;
@@ -93,6 +93,15 @@ const JOB_TYPE_COLOURS: Record<string, string> = {
   crewed: 'bg-purple-100 text-purple-700',
 };
 
+interface PersonOption {
+  id: string;
+  first_name: string;
+  last_name: string;
+  skills: string[];
+  is_insured_on_vehicles: boolean;
+  is_approved: boolean;
+}
+
 // ── Main Page ────────────────────────────────────────────────────────
 
 export default function TransportOpsPage() {
@@ -103,10 +112,27 @@ export default function TransportOpsPage() {
   const [viewMode, setViewMode] = useState<'table' | 'calendar'>('table');
   const [showCompleted, setShowCompleted] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
+  const [assignRole, setAssignRole] = useState('driver');
+  const [peopleSearch, setPeopleSearch] = useState('');
+  const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
 
   useEffect(() => {
     loadOps();
   }, [filter]);
+
+  // Escape key to close assign modal
+  useEffect(() => {
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === 'Escape' && assignModalQuoteId) {
+        setAssignModalQuoteId(null);
+        setPeopleSearch('');
+        setPeopleOptions([]);
+      }
+    }
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [assignModalQuoteId]);
 
   async function loadOps() {
     try {
@@ -132,6 +158,86 @@ export default function TransportOpsPage() {
     }
   }
 
+  async function searchPeople(search: string) {
+    try {
+      const data = await api.get<{ data: PersonOption[] }>(
+        `/people?search=${encodeURIComponent(search)}&limit=10&is_freelancer=true&is_approved=true`
+      );
+      setPeopleOptions(data.data);
+    } catch {
+      console.error('Failed to search people');
+    }
+  }
+
+  async function assignPerson(quoteId: string, personId: string, role: string) {
+    try {
+      await api.post(`/quotes/${quoteId}/assignments`, { personId, role });
+      await loadOps();
+      setAssignModalQuoteId(null);
+      setPeopleSearch('');
+      setPeopleOptions([]);
+      setAssignRole('driver');
+    } catch {
+      console.error('Failed to assign person');
+    }
+  }
+
+  async function removeAssignment(quoteId: string, assignmentId: string) {
+    try {
+      await api.delete(`/quotes/${quoteId}/assignments/${assignmentId}`);
+      await loadOps();
+    } catch {
+      console.error('Failed to remove assignment');
+    }
+  }
+
+  function openAssignModal(quoteId: string) {
+    setAssignModalQuoteId(quoteId);
+    setPeopleSearch('');
+    setPeopleOptions([]);
+    setAssignRole('driver');
+  }
+
+  // ── Editing handlers ──
+
+  const [editingQuote, setEditingQuote] = useState<OpsQuote | null>(null);
+
+  function openEditModal(quote: OpsQuote) {
+    setEditingQuote(quote);
+  }
+
+  async function updateOpsDetails(quoteId: string, fields: Record<string, unknown>) {
+    try {
+      await api.put(`/quotes/${quoteId}/ops-details`, fields);
+      setQuotes((prev) =>
+        prev.map((q) => (q.id === quoteId ? { ...q, ...fields } : q))
+      );
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update');
+    }
+  }
+
+  async function updateRunGroup(quoteId: string, runGroup: string | null, runOrder: number | null) {
+    try {
+      await api.put(`/quotes/${quoteId}/run-group`, { run_group: runGroup, run_order: runOrder });
+      setQuotes((prev) =>
+        prev.map((q) => (q.id === quoteId ? { ...q, run_group: runGroup, run_order: runOrder } : q))
+      );
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update run group');
+    }
+  }
+
+  async function saveQuoteEdit(quoteId: string, fields: Record<string, unknown>) {
+    try {
+      await api.put(`/quotes/${quoteId}`, fields);
+      await loadOps();
+      setEditingQuote(null);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save');
+    }
+  }
+
   // Group quotes by ops_status for table view
   const grouped = useMemo(() => {
     const groups: Record<string, OpsQuote[]> = {};
@@ -151,9 +257,14 @@ export default function TransportOpsPage() {
     const byDate: Record<string, OpsQuote[]> = {};
     for (const q of quotes) {
       if (q.ops_status === 'completed' || q.ops_status === 'cancelled') continue;
-      const date = q.job_date || 'unscheduled';
-      if (!byDate[date]) byDate[date] = [];
-      byDate[date].push(q);
+      let dateKey = 'unscheduled';
+      if (q.job_date instanceof Date) {
+        dateKey = q.job_date.toISOString().split('T')[0];
+      } else if (typeof q.job_date === 'string') {
+        dateKey = q.job_date.includes('T') ? q.job_date.split('T')[0] : q.job_date;
+      }
+      if (!byDate[dateKey]) byDate[dateKey] = [];
+      byDate[dateKey].push(q);
     }
     return byDate;
   }, [quotes]);
@@ -256,6 +367,11 @@ export default function TransportOpsPage() {
                         expanded={expandedId === q.id}
                         onToggle={() => setExpandedId(expandedId === q.id ? null : q.id)}
                         onStatusChange={updateOpsStatus}
+                        onAssign={openAssignModal}
+                        onRemoveAssignment={removeAssignment}
+                        onUpdateDetails={updateOpsDetails}
+                        onEdit={openEditModal}
+                        onUpdateRunGroup={updateRunGroup}
                       />
                     ))}
                   </div>
@@ -270,6 +386,108 @@ export default function TransportOpsPage() {
       {viewMode === 'calendar' && (
         <CalendarView data={calendarData} />
       )}
+
+      {/* Assign Crew Modal */}
+      {assignModalQuoteId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setAssignModalQuoteId(null)} />
+          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Assign Crew Member</h3>
+
+            <div className="space-y-4">
+              {/* Role */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <select
+                  value={assignRole}
+                  onChange={e => setAssignRole(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                >
+                  <option value="driver">Driver</option>
+                  <option value="crew">Crew</option>
+                  <option value="loader">Loader</option>
+                  <option value="tech">Tech</option>
+                  <option value="manager">Manager</option>
+                </select>
+              </div>
+
+              {/* Search */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Search People</label>
+                <input
+                  type="text"
+                  value={peopleSearch}
+                  onChange={e => {
+                    setPeopleSearch(e.target.value);
+                    if (e.target.value.length >= 2) searchPeople(e.target.value);
+                    else setPeopleOptions([]);
+                  }}
+                  placeholder="Type a name..."
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  autoFocus
+                />
+              </div>
+
+              {/* Results */}
+              {peopleOptions.length > 0 && (
+                <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
+                  {peopleOptions.map(p => {
+                    const currentQuote = quotes.find(q => q.id === assignModalQuoteId);
+                    const alreadyAssigned = currentQuote?.assignments?.some(a => a.person_id === p.id);
+                    return (
+                      <button
+                        key={p.id}
+                        disabled={alreadyAssigned}
+                        onClick={() => assignPerson(assignModalQuoteId!, p.id, assignRole)}
+                        className={`w-full text-left px-3 py-2.5 text-sm flex items-center justify-between ${
+                          alreadyAssigned ? 'opacity-40 cursor-not-allowed' : 'hover:bg-ooosh-50'
+                        }`}
+                      >
+                        <div>
+                          <span className="font-medium text-gray-900">{p.first_name} {p.last_name}</span>
+                          {p.skills?.length > 0 && (
+                            <span className="ml-2 text-xs text-gray-400">{p.skills.slice(0, 3).join(', ')}</span>
+                          )}
+                        </div>
+                        <div className="flex gap-1">
+                          {p.is_insured_on_vehicles && (
+                            <span className="text-xs bg-green-100 text-green-700 rounded px-1.5 py-0.5">Insured</span>
+                          )}
+                          {alreadyAssigned && (
+                            <span className="text-xs bg-gray-100 text-gray-500 rounded px-1.5 py-0.5">Assigned</span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {peopleSearch.length >= 2 && peopleOptions.length === 0 && (
+                <p className="text-sm text-gray-400 text-center py-2">No people found</p>
+              )}
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                onClick={() => setAssignModalQuoteId(null)}
+                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 font-medium"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Quote Modal */}
+      {editingQuote && (
+        <EditQuoteModal
+          quote={editingQuote}
+          onSave={saveQuoteEdit}
+          onClose={() => setEditingQuote(null)}
+        />
+      )}
     </div>
   );
 }
@@ -281,11 +499,21 @@ function QuoteRow({
   expanded,
   onToggle,
   onStatusChange,
+  onAssign,
+  onRemoveAssignment,
+  onUpdateDetails,
+  onEdit,
+  onUpdateRunGroup,
 }: {
   quote: OpsQuote;
   expanded: boolean;
   onToggle: () => void;
   onStatusChange: (id: string, status: string) => void;
+  onAssign: (quoteId: string) => void;
+  onRemoveAssignment: (quoteId: string, assignmentId: string) => void;
+  onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
+  onEdit: (quote: OpsQuote) => void;
+  onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
 }) {
   const assignments = Array.isArray(q.assignments) ? q.assignments : [];
   const crewNames = assignments
@@ -311,18 +539,6 @@ function QuoteRow({
           {JOB_TYPE_LABELS[q.job_type] || q.job_type}
         </span>
 
-        {/* Local badge */}
-        {q.is_local && (
-          <span className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 font-medium">Local</span>
-        )}
-
-        {/* Run group badge */}
-        {q.run_group && (
-          <span className="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-medium">
-            Run {q.run_order || '?'}
-          </span>
-        )}
-
         {/* Date & time */}
         <div className="w-28 flex-shrink-0">
           <div className="text-sm font-medium text-gray-900">
@@ -333,12 +549,22 @@ function QuoteRow({
           )}
         </div>
 
-        {/* Job / Venue name */}
+        {/* Job / Venue name + badges */}
         <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium text-gray-900 truncate">
-            {q.linked_venue_name || q.venue_name || 'No venue'}
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm font-medium text-gray-900 truncate">
+              {q.linked_venue_name || q.venue_name || 'No venue'}
+            </span>
+            {q.is_local && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 font-medium flex-shrink-0">Local</span>
+            )}
+            {q.run_group && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-medium flex-shrink-0">
+                Run {q.run_order || '?'}
+              </span>
+            )}
             {q.hh_job_number && (
-              <span className="ml-1.5 text-xs text-gray-400">HH#{q.hh_job_number}</span>
+              <span className="text-xs text-gray-400 flex-shrink-0">HH#{q.hh_job_number}</span>
             )}
           </div>
           <div className="text-xs text-gray-500 truncate">
@@ -347,11 +573,23 @@ function QuoteRow({
         </div>
 
         {/* Crew */}
-        <div className="w-40 flex-shrink-0 hidden lg:block">
+        <div className="w-40 flex-shrink-0 hidden lg:block" onClick={(e) => e.stopPropagation()}>
           {crewNames.length > 0 ? (
-            <div className="text-sm text-gray-700 truncate">{crewNames.join(', ')}</div>
+            <div className="text-sm text-gray-700 truncate">
+              {crewNames.join(', ')}
+              <button
+                onClick={() => onAssign(q.id)}
+                className="ml-1 text-xs text-ooosh-600 hover:text-ooosh-700"
+                title="Assign more crew"
+              >+</button>
+            </div>
           ) : (
-            <span className="text-xs text-red-500 font-medium">Unassigned</span>
+            <button
+              onClick={() => onAssign(q.id)}
+              className="text-xs text-red-500 hover:text-red-700 font-medium"
+            >
+              + Assign crew
+            </button>
           )}
         </div>
 
@@ -380,126 +618,610 @@ function QuoteRow({
 
       {/* Expanded detail */}
       {expanded && (
-        <div className="px-4 pb-4 pt-1 bg-gray-50 border-t border-gray-100">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-            {/* Column 1: Details */}
-            <div className="space-y-2">
-              <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Details</h4>
-              {q.job_id && (
-                <div>
-                  <Link to={`/jobs/${q.job_id}`} className="text-ooosh-600 hover:underline text-sm">
-                    View Job Detail
-                  </Link>
-                </div>
-              )}
-              {q.venue_address && (
-                <div className="text-gray-600">{q.venue_address}{q.venue_city ? `, ${q.venue_city}` : ''}</div>
-              )}
-              {q.distance_miles != null && q.distance_miles > 0 && (
-                <div className="text-gray-500">{q.distance_miles} miles</div>
-              )}
-              {q.what_is_it && (
-                <div className="text-gray-500">What: {q.what_is_it}</div>
-              )}
-              {q.work_type && (
-                <div className="text-gray-500">
-                  Work: {q.work_type === 'other' ? q.work_type_other || 'Other' : q.work_type}
-                </div>
-              )}
-              {q.work_description && (
-                <div className="text-gray-500">{q.work_description}</div>
-              )}
-            </div>
-
-            {/* Column 2: Arranging */}
-            <div className="space-y-2">
-              <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Arranging</h4>
-              {q.key_points && (
-                <div className="text-gray-600">
-                  <span className="font-medium">Key points:</span> {q.key_points}
-                </div>
-              )}
-              {q.client_introduction && (
-                <div className="text-gray-600">
-                  <span className="font-medium">Client intro:</span> {q.client_introduction}
-                </div>
-              )}
-              <div className="flex flex-wrap gap-2">
-                {q.tolls_status !== 'not_needed' && (
-                  <StatusPill label="Tolls" status={q.tolls_status} />
-                )}
-                {q.accommodation_status !== 'not_needed' && (
-                  <StatusPill label="Accommodation" status={q.accommodation_status} />
-                )}
-                {q.flight_status !== 'not_needed' && (
-                  <StatusPill label="Flights" status={q.flight_status} />
-                )}
-              </div>
-              {q.freelancer_notes && (
-                <div className="text-gray-500 text-xs italic">
-                  Freelancer notes: {q.freelancer_notes}
-                </div>
-              )}
-              {q.internal_notes && (
-                <div className="text-gray-500 text-xs">
-                  Internal: {q.internal_notes}
-                </div>
-              )}
-            </div>
-
-            {/* Column 3: Crew & Financials */}
-            <div className="space-y-2">
-              <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Crew & Costs</h4>
-              {assignments.length === 0 ? (
-                <div className="text-red-500 text-xs">No crew assigned</div>
-              ) : (
-                assignments.map((a) => (
-                  <div key={a.id} className="flex items-center justify-between text-xs">
-                    <span className="text-gray-700">
-                      {a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name} ${a.last_name}`}
-                      <span className="text-gray-400 ml-1">({a.role})</span>
-                    </span>
-                    <span className="text-gray-500">
-                      {a.agreed_rate ? `£${a.agreed_rate}` : '—'}
-                      {a.invoice_received && (
-                        <span className="ml-1 text-green-600" title={`Invoice: £${a.invoice_amount}`}>INV</span>
-                      )}
-                    </span>
-                  </div>
-                ))
-              )}
-              <div className="border-t border-gray-200 pt-1 mt-1">
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-500">Client charge</span>
-                  <span className="font-medium">{q.client_charge_rounded ? `£${q.client_charge_rounded}` : '—'}</span>
-                </div>
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-500">Freelancer cost</span>
-                  <span className="font-medium">{q.freelancer_fee_rounded ? `£${q.freelancer_fee_rounded}` : '—'}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <ExpandedDetail
+          q={q}
+          assignments={assignments}
+          onAssign={onAssign}
+          onRemoveAssignment={onRemoveAssignment}
+          onUpdateDetails={onUpdateDetails}
+          onEdit={onEdit}
+          onUpdateRunGroup={onUpdateRunGroup}
+        />
       )}
     </div>
   );
 }
 
-// ── Status Pill (for tolls/accommodation/flight) ─────────────────────
+// ── Expanded Detail Component ────────────────────────────────────────
 
-function StatusPill({ label, status }: { label: string; status: string }) {
-  const colours: Record<string, string> = {
-    todo: 'bg-amber-100 text-amber-700',
-    booked: 'bg-green-100 text-green-700',
-    paid: 'bg-emerald-100 text-emerald-700',
-  };
+const ARRANGEMENT_STATUSES = ['not_needed', 'todo', 'booked', 'paid'] as const;
+
+function nextArrangementStatus(current: string): string {
+  const idx = ARRANGEMENT_STATUSES.indexOf(current as typeof ARRANGEMENT_STATUSES[number]);
+  if (idx === -1) return 'todo';
+  return ARRANGEMENT_STATUSES[(idx + 1) % ARRANGEMENT_STATUSES.length];
+}
+
+function ExpandedDetail({
+  q,
+  assignments,
+  onAssign,
+  onRemoveAssignment,
+  onUpdateDetails,
+  onEdit,
+  onUpdateRunGroup,
+}: {
+  q: OpsQuote;
+  assignments: Assignment[];
+  onAssign: (quoteId: string) => void;
+  onRemoveAssignment: (quoteId: string, assignmentId: string) => void;
+  onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
+  onEdit: (quote: OpsQuote) => void;
+  onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
+}) {
+  const [editingField, setEditingField] = useState<string | null>(null);
+  const [fieldValues, setFieldValues] = useState({
+    key_points: q.key_points || '',
+    client_introduction: q.client_introduction || '',
+    internal_notes: q.internal_notes || '',
+    freelancer_notes: q.freelancer_notes || '',
+  });
+  const [isMultiRun, setIsMultiRun] = useState(!!q.run_group);
+  const [runOrder, setRunOrder] = useState(q.run_order || 1);
+
+  async function saveField(field: string) {
+    const value = fieldValues[field as keyof typeof fieldValues] || null;
+    await onUpdateDetails(q.id, { [field]: value });
+    setEditingField(null);
+  }
+
+  function handleArrangementClick(field: string, currentStatus: string) {
+    const newStatus = nextArrangementStatus(currentStatus);
+    onUpdateDetails(q.id, { [field]: newStatus });
+  }
+
+  async function toggleMultiRun() {
+    if (isMultiRun) {
+      // Turn off — remove run group
+      await onUpdateRunGroup(q.id, null, null);
+      setIsMultiRun(false);
+    } else {
+      // Turn on — create a new run group (using quote's own ID as group key)
+      setIsMultiRun(true);
+      await onUpdateRunGroup(q.id, q.id, 1);
+      setRunOrder(1);
+    }
+  }
+
+  async function changeRunOrder(newOrder: number) {
+    setRunOrder(newOrder);
+    await onUpdateRunGroup(q.id, q.run_group || q.id, newOrder);
+  }
+
   return (
-    <span className={`text-xs px-2 py-0.5 rounded-full ${colours[status] || 'bg-gray-100 text-gray-600'}`}>
-      {label}: {status}
-    </span>
+    <div className="px-4 pb-4 pt-1 bg-gray-50 border-t border-gray-100">
+      {/* Action bar */}
+      <div className="flex items-center justify-end gap-2 mb-3">
+        <button
+          onClick={() => onEdit(q)}
+          className="text-xs px-3 py-1.5 rounded-lg border border-gray-300 text-gray-700 hover:bg-white hover:border-gray-400 font-medium transition-colors"
+        >
+          Edit Quote
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+        {/* Column 1: Details */}
+        <div className="space-y-2">
+          <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Details</h4>
+          {q.job_id && (
+            <div>
+              <Link to={`/jobs/${q.job_id}`} className="text-ooosh-600 hover:underline text-sm">
+                View Job Detail
+              </Link>
+            </div>
+          )}
+          {q.venue_address && (
+            <div className="text-gray-600">{q.venue_address}{q.venue_city ? `, ${q.venue_city}` : ''}</div>
+          )}
+          {q.distance_miles != null && q.distance_miles > 0 && (
+            <div className="text-gray-500">{q.distance_miles} miles</div>
+          )}
+          {q.what_is_it && (
+            <div className="text-gray-500">What: {q.what_is_it}</div>
+          )}
+          {q.work_type && (
+            <div className="text-gray-500">
+              Work: {q.work_type === 'other' ? q.work_type_other || 'Other' : q.work_type}
+            </div>
+          )}
+          {q.work_description && (
+            <div className="text-gray-500">{q.work_description}</div>
+          )}
+
+          {/* Multiple runs */}
+          <div className="border-t border-gray-200 pt-2 mt-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={isMultiRun}
+                onChange={toggleMultiRun}
+                className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+              />
+              <span className="text-xs font-medium text-gray-700">Multiple runs</span>
+            </label>
+            {isMultiRun && (
+              <div className="mt-1.5 flex items-center gap-2">
+                <span className="text-xs text-gray-500">Run order:</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={runOrder}
+                  onChange={(e) => changeRunOrder(parseInt(e.target.value) || 1)}
+                  className="w-14 border border-gray-300 rounded px-2 py-0.5 text-xs text-center"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Column 2: Arranging (inline-editable) */}
+        <div className="space-y-2">
+          <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Arranging</h4>
+
+          {/* Client introduction */}
+          <InlineEditField
+            label="Client intro"
+            value={fieldValues.client_introduction}
+            isEditing={editingField === 'client_introduction'}
+            onStartEdit={() => setEditingField('client_introduction')}
+            onChange={(v) => setFieldValues((prev) => ({ ...prev, client_introduction: v }))}
+            onSave={() => saveField('client_introduction')}
+            onCancel={() => { setEditingField(null); setFieldValues((prev) => ({ ...prev, client_introduction: q.client_introduction || '' })); }}
+          />
+
+          {/* Key points */}
+          <InlineEditField
+            label="Key points"
+            value={fieldValues.key_points}
+            isEditing={editingField === 'key_points'}
+            onStartEdit={() => setEditingField('key_points')}
+            onChange={(v) => setFieldValues((prev) => ({ ...prev, key_points: v }))}
+            onSave={() => saveField('key_points')}
+            onCancel={() => { setEditingField(null); setFieldValues((prev) => ({ ...prev, key_points: q.key_points || '' })); }}
+          />
+
+          {/* Arrangement status pills — clickable to cycle */}
+          <div className="flex flex-wrap gap-2 pt-1">
+            <ClickableStatusPill
+              label="Tolls"
+              status={q.tolls_status}
+              onClick={() => handleArrangementClick('tolls_status', q.tolls_status)}
+            />
+            <ClickableStatusPill
+              label="Accom"
+              status={q.accommodation_status}
+              onClick={() => handleArrangementClick('accommodation_status', q.accommodation_status)}
+            />
+            <ClickableStatusPill
+              label="Flights"
+              status={q.flight_status}
+              onClick={() => handleArrangementClick('flight_status', q.flight_status)}
+            />
+          </div>
+
+          {/* Freelancer notes */}
+          <InlineEditField
+            label="Freelancer notes"
+            value={fieldValues.freelancer_notes}
+            isEditing={editingField === 'freelancer_notes'}
+            onStartEdit={() => setEditingField('freelancer_notes')}
+            onChange={(v) => setFieldValues((prev) => ({ ...prev, freelancer_notes: v }))}
+            onSave={() => saveField('freelancer_notes')}
+            onCancel={() => { setEditingField(null); setFieldValues((prev) => ({ ...prev, freelancer_notes: q.freelancer_notes || '' })); }}
+            multiline
+          />
+
+          {/* Internal notes */}
+          <InlineEditField
+            label="Internal notes"
+            value={fieldValues.internal_notes}
+            isEditing={editingField === 'internal_notes'}
+            onStartEdit={() => setEditingField('internal_notes')}
+            onChange={(v) => setFieldValues((prev) => ({ ...prev, internal_notes: v }))}
+            onSave={() => saveField('internal_notes')}
+            onCancel={() => { setEditingField(null); setFieldValues((prev) => ({ ...prev, internal_notes: q.internal_notes || '' })); }}
+            multiline
+          />
+        </div>
+
+        {/* Column 3: Crew & Financials */}
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Crew & Costs</h4>
+            <button
+              onClick={() => onAssign(q.id)}
+              className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+            >
+              + Assign
+            </button>
+          </div>
+          {assignments.length === 0 ? (
+            <div className="text-red-500 text-xs italic">No crew assigned</div>
+          ) : (
+            <div className="flex flex-wrap gap-1.5">
+              {assignments.map((a) => (
+                <div key={a.id} className="inline-flex items-center gap-1.5 bg-blue-50 border border-blue-200 rounded-full px-2.5 py-1 text-xs">
+                  <span className="font-medium text-blue-800">
+                    {a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name} ${a.last_name}`}
+                  </span>
+                  <span className="text-blue-500 capitalize">({a.role})</span>
+                  {a.agreed_rate != null && (
+                    <span className="text-blue-400">&pound;{Number(a.agreed_rate).toFixed(0)}</span>
+                  )}
+                  {a.invoice_received && (
+                    <span className="text-green-600" title={`Invoice: £${a.invoice_amount}`}>INV</span>
+                  )}
+                  <button
+                    onClick={() => onRemoveAssignment(q.id, a.id)}
+                    className="ml-0.5 text-blue-400 hover:text-red-500"
+                    title="Remove"
+                  >&times;</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="border-t border-gray-200 pt-1 mt-1">
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-500">Client charge</span>
+              <span className="font-medium">{q.client_charge_rounded ? `£${q.client_charge_rounded}` : '—'}</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-gray-500">Freelancer cost</span>
+              <span className="font-medium">{q.freelancer_fee_rounded ? `£${q.freelancer_fee_rounded}` : '—'}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
+
+// ── Inline Edit Field ───────────────────────────────────────────────
+
+function InlineEditField({
+  label,
+  value,
+  isEditing,
+  onStartEdit,
+  onChange,
+  onSave,
+  onCancel,
+  multiline,
+}: {
+  label: string;
+  value: string;
+  isEditing: boolean;
+  onStartEdit: () => void;
+  onChange: (v: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  multiline?: boolean;
+}) {
+  if (isEditing) {
+    const inputProps = {
+      value,
+      onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value),
+      onKeyDown: (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' && !multiline) onSave();
+        if (e.key === 'Escape') onCancel();
+      },
+      onBlur: onSave,
+      className: 'w-full border border-ooosh-300 rounded px-2 py-1 text-xs focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500',
+      autoFocus: true,
+    };
+
+    return (
+      <div>
+        <span className="text-xs font-medium text-gray-500">{label}</span>
+        {multiline ? (
+          <textarea {...inputProps} rows={2} />
+        ) : (
+          <input type="text" {...inputProps} />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      onClick={onStartEdit}
+      className="group cursor-pointer hover:bg-white hover:rounded px-1 py-0.5 -mx-1 transition-colors"
+      title="Click to edit"
+    >
+      <span className="text-xs font-medium text-gray-500">{label}: </span>
+      {value ? (
+        <span className="text-xs text-gray-700">{value}</span>
+      ) : (
+        <span className="text-xs text-gray-300 italic group-hover:text-gray-400">Click to add...</span>
+      )}
+    </div>
+  );
+}
+
+// ── Clickable Status Pill ───────────────────────────────────────────
+
+function ClickableStatusPill({ label, status, onClick }: { label: string; status: string; onClick: () => void }) {
+  const colours: Record<string, string> = {
+    not_needed: 'bg-gray-100 text-gray-400',
+    todo: 'bg-amber-100 text-amber-700',
+    booked: 'bg-blue-100 text-blue-700',
+    paid: 'bg-green-100 text-green-700',
+  };
+
+  const statusLabels: Record<string, string> = {
+    not_needed: 'n/a',
+    todo: 'needed',
+    booked: 'booked',
+    paid: 'paid',
+  };
+
+  return (
+    <button
+      onClick={onClick}
+      className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:opacity-80 transition-opacity ${colours[status] || 'bg-gray-100 text-gray-600'}`}
+      title={`Click to cycle: ${ARRANGEMENT_STATUSES.join(' → ')}`}
+    >
+      {label}: {statusLabels[status] || status}
+    </button>
+  );
+}
+
+// ── Edit Quote Modal ────────────────────────────────────────────────
+
+function EditQuoteModal({
+  quote,
+  onSave,
+  onClose,
+}: {
+  quote: OpsQuote;
+  onSave: (id: string, fields: Record<string, unknown>) => Promise<void>;
+  onClose: () => void;
+}) {
+  const isLocal = quote.is_local || quote.calculation_mode === 'fixed';
+  const [form, setForm] = useState({
+    job_type: quote.job_type,
+    venue_name: quote.linked_venue_name || quote.venue_name || '',
+    job_date: (() => {
+      if (!quote.job_date) return '';
+      if (quote.job_date instanceof Date) return quote.job_date.toISOString().split('T')[0];
+      return String(quote.job_date).includes('T') ? String(quote.job_date).split('T')[0] : String(quote.job_date);
+    })(),
+    arrival_time: quote.arrival_time || '',
+    what_is_it: quote.what_is_it || '',
+    internal_notes: quote.internal_notes || '',
+    freelancer_notes: quote.freelancer_notes || '',
+    client_charge_rounded: quote.client_charge_rounded || 0,
+    freelancer_fee_rounded: quote.freelancer_fee_rounded || 0,
+  });
+  const [saving, setSaving] = useState(false);
+
+  // Venue search
+  const [venueSearch, setVenueSearch] = useState('');
+  const [venueOptions, setVenueOptions] = useState<{ id: string; name: string; address?: string; city?: string }[]>([]);
+  const [selectedVenueId, setSelectedVenueId] = useState<string | null>(quote.venue_id || null);
+
+  async function searchVenues(search: string) {
+    try {
+      const data = await api.get<{ data: { id: string; name: string; address?: string; city?: string }[] }>(
+        `/venues?search=${encodeURIComponent(search)}&limit=8`
+      );
+      setVenueOptions(data.data);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await onSave(quote.id, {
+        job_type: form.job_type,
+        venue_name: form.venue_name,
+        venue_id: selectedVenueId,
+        job_date: form.job_date || null,
+        arrival_time: form.arrival_time || null,
+        what_is_it: form.what_is_it || null,
+        internal_notes: form.internal_notes || null,
+        freelancer_notes: form.freelancer_notes || null,
+        client_charge_rounded: form.client_charge_rounded,
+        freelancer_fee_rounded: form.freelancer_fee_rounded,
+      });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  useEffect(() => {
+    function handleEsc(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', handleEsc);
+    return () => document.removeEventListener('keydown', handleEsc);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[90vh] overflow-y-auto">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">
+          Edit {isLocal ? 'Local ' : ''}{form.job_type === 'delivery' ? 'Delivery' : form.job_type === 'collection' ? 'Collection' : 'Crewed Job'}
+        </h3>
+
+        <div className="space-y-4">
+          {/* Type */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+            <select
+              value={form.job_type}
+              onChange={(e) => setForm((p) => ({ ...p, job_type: e.target.value as OpsQuote['job_type'] }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+            >
+              <option value="delivery">Delivery</option>
+              <option value="collection">Collection</option>
+              <option value="crewed">Crewed</option>
+            </select>
+          </div>
+
+          {/* Venue */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
+            <input
+              type="text"
+              value={venueSearch || form.venue_name}
+              onChange={(e) => {
+                setVenueSearch(e.target.value);
+                setForm((p) => ({ ...p, venue_name: e.target.value }));
+                setSelectedVenueId(null);
+                if (e.target.value.length >= 2) searchVenues(e.target.value);
+                else setVenueOptions([]);
+              }}
+              onFocus={() => { if (form.venue_name.length >= 2) searchVenues(form.venue_name); }}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+            />
+            {venueOptions.length > 0 && !selectedVenueId && (
+              <div className="mt-1 border border-gray-200 rounded-lg max-h-32 overflow-y-auto divide-y divide-gray-100">
+                {venueOptions.map((v) => (
+                  <button
+                    key={v.id}
+                    onClick={() => {
+                      setForm((p) => ({ ...p, venue_name: v.name }));
+                      setSelectedVenueId(v.id);
+                      setVenueSearch('');
+                      setVenueOptions([]);
+                    }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-ooosh-50"
+                  >
+                    <span className="font-medium">{v.name}</span>
+                    {v.city && <span className="text-xs text-gray-400 ml-1">({v.city})</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Date & Time row */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+              <input
+                type="date"
+                value={form.job_date}
+                onChange={(e) => setForm((p) => ({ ...p, job_date: e.target.value }))}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Arrival Time</label>
+              <input
+                type="time"
+                value={form.arrival_time}
+                onChange={(e) => setForm((p) => ({ ...p, arrival_time: e.target.value }))}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+          </div>
+
+          {/* What is it */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">What is it</label>
+            <select
+              value={form.what_is_it}
+              onChange={(e) => setForm((p) => ({ ...p, what_is_it: e.target.value }))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+            >
+              <option value="">—</option>
+              <option value="vehicle">Vehicle</option>
+              <option value="equipment">Equipment</option>
+              <option value="people">People</option>
+            </select>
+          </div>
+
+          {/* Fees (for local/fixed quotes) */}
+          {isLocal && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={5}
+                  value={form.client_charge_rounded}
+                  onChange={(e) => setForm((p) => ({ ...p, client_charge_rounded: parseFloat(e.target.value) || 0 }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Fee</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={5}
+                  value={form.freelancer_fee_rounded}
+                  onChange={(e) => setForm((p) => ({ ...p, freelancer_fee_rounded: parseFloat(e.target.value) || 0 }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Notes */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Internal Notes</label>
+            <textarea
+              value={form.internal_notes}
+              onChange={(e) => setForm((p) => ({ ...p, internal_notes: e.target.value }))}
+              rows={2}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Notes</label>
+            <textarea
+              value={form.freelancer_notes}
+              onChange={(e) => setForm((p) => ({ ...p, freelancer_notes: e.target.value }))}
+              rows={2}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+            />
+          </div>
+
+          {!isLocal && (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-700">
+              This is a calculator-generated quote. To recalculate costs, use the transport calculator from the Job Detail page. Core fields (venue, date, time, notes) can be updated here.
+            </div>
+          )}
+        </div>
+
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 font-medium"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="px-4 py-2 bg-ooosh-600 text-white rounded-lg text-sm hover:bg-ooosh-700 font-medium disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 // ── Calendar View ────────────────────────────────────────────────────
 
@@ -607,14 +1329,21 @@ function CalendarView({
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function formatDate(dateStr: string): string {
+function formatDate(dateInput: string | Date): string {
   try {
-    // Handle both DATE ("2026-03-20") and TIMESTAMPTZ ("2026-03-20T00:00:00.000Z") strings
-    const raw = dateStr.includes('T') ? dateStr : dateStr + 'T12:00:00';
-    const d = new Date(raw);
-    if (isNaN(d.getTime())) return dateStr;
+    // node-pg returns DATE columns as JS Date objects, TIMESTAMPTZ as ISO strings
+    let d: Date;
+    if (dateInput instanceof Date) {
+      d = dateInput;
+    } else if (typeof dateInput === 'string') {
+      const raw = dateInput.includes('T') ? dateInput : dateInput + 'T12:00:00';
+      d = new Date(raw);
+    } else {
+      return String(dateInput);
+    }
+    if (isNaN(d.getTime())) return String(dateInput);
     return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
   } catch {
-    return dateStr;
+    return String(dateInput);
   }
 }

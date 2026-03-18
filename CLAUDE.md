@@ -533,13 +533,15 @@ Global operational view for what's currently happening / about to happen with tr
 - [x] Completion tracking (signature, photos, notes, customer present toggle)
 - [x] Arranging details (key points, client introductions, tolls/accommodation/flight booking status)
 - [x] Freelancer portal repointing: feature-flagged DATA_BACKEND=op (auth, jobs, completion, equipment) with Monday.com fallback
-- [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging)
+- [x] Inline crew assignment on Transport Ops page (same picker as Job Detail, bidirectional)
+- [x] Local D/C form improvements: venue address book lookup, smart date defaults, amber warning on change
 - [ ] Reminder system (unassigned deliveries approaching, overdue completions)
 - [ ] Change notifications to freelancers (date/time/venue changes → email alert)
 - [ ] "On the road" status tracking: dispatched, arrived, issues, completed
 - [ ] Issues on road reporting (breakdowns, delays, problems)
 - [ ] PDF delivery note generation (migrate from Netlify function to OP backend)
 - [ ] Client delivery note emails via OP email service
+- [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging) — nice-to-have, post go-live
 
 ##### Carnets (inline on Prep Checklist, with global overview)
 - [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed

@@ -396,6 +396,87 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── PUT /api/quotes/:id — edit quote core fields ─────────────────────
+
+const editQuoteSchema = z.object({
+  job_type: z.enum(['delivery', 'collection', 'crewed']).optional(),
+  venue_name: z.string().optional().nullable(),
+  venue_id: z.string().uuid().optional().nullable(),
+  job_date: z.string().optional().nullable(),
+  arrival_time: z.string().optional().nullable(),
+  what_is_it: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
+  internal_notes: z.string().optional().nullable(),
+  freelancer_notes: z.string().optional().nullable(),
+  client_charge_rounded: z.number().min(0).optional().nullable(),
+  freelancer_fee_rounded: z.number().min(0).optional().nullable(),
+});
+
+router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    // First check the quote exists
+    const existing = await query(
+      `SELECT id, calculation_mode, is_local FROM quotes WHERE id = $1 AND is_deleted = false`,
+      [req.params.id]
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+
+    const fields = req.body;
+    const updates: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+
+    // Map of allowed fields to their DB columns
+    const allowedFields = [
+      'job_type', 'venue_name', 'venue_id', 'job_date', 'arrival_time',
+      'what_is_it', 'internal_notes', 'freelancer_notes',
+    ];
+
+    for (const field of allowedFields) {
+      if (fields[field] !== undefined) {
+        updates.push(`${field} = $${idx}`);
+        params.push(fields[field]);
+        idx++;
+      }
+    }
+
+    // For local/fixed quotes, also allow fee updates
+    const isLocal = existing.rows[0].is_local || existing.rows[0].calculation_mode === 'fixed';
+    if (isLocal) {
+      if (fields.client_charge_rounded !== undefined) {
+        updates.push(`client_charge_rounded = $${idx}, client_charge_total = $${idx}`);
+        params.push(fields.client_charge_rounded);
+        idx++;
+      }
+      if (fields.freelancer_fee_rounded !== undefined) {
+        updates.push(`freelancer_fee_rounded = $${idx}, freelancer_fee = $${idx}`);
+        params.push(fields.freelancer_fee_rounded);
+        idx++;
+      }
+    }
+
+    if (updates.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+
+    updates.push('updated_at = NOW()');
+    params.push(req.params.id);
+
+    const result = await query(
+      `UPDATE quotes SET ${updates.join(', ')} WHERE id = $${idx} AND is_deleted = false RETURNING *`,
+      params
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Edit quote error:', error);
+    res.status(500).json({ error: 'Failed to update quote' });
+  }
+});
+
 // ── PATCH /api/quotes/:id/status — update quote status ──────────────
 
 const statusSchema = z.object({
@@ -615,7 +696,7 @@ const localQuoteSchema = z.object({
   arrivalTime: z.string().optional().nullable(),
   venueId: z.string().uuid().optional().nullable(),
   venueName: z.string().optional().nullable(),
-  fee: z.number().min(0),
+  fee: z.number().min(0).optional().nullable(),
   clientCharge: z.number().min(0).optional().nullable(),
   notes: z.string().optional().nullable(),
   whatIsIt: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
@@ -624,6 +705,8 @@ const localQuoteSchema = z.object({
 router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, whatIsIt } = req.body;
+    const feeVal = fee || 0;
+    const chargeVal = clientCharge || feeVal;
 
     const result = await query(
       `INSERT INTO quotes (
@@ -639,7 +722,7 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
       [
         jobId, jobType, venueId || null, venueName || null,
         jobDate || null, arrivalTime || null,
-        fee, clientCharge || fee,
+        feeVal, chargeVal,
         whatIsIt || null, notes || null,
         req.user!.id,
       ]
