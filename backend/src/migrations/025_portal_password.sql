@@ -14,5 +14,9 @@ ALTER TABLE people ADD COLUMN IF NOT EXISTS portal_last_login TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_people_portal_login
   ON people (LOWER(email)) WHERE is_freelancer = true;
 
--- Grant permissions for backup user
-GRANT SELECT ON people TO backup_user;
+-- Grant permissions for backup user (if role exists)
+DO $$ BEGIN
+  EXECUTE 'GRANT SELECT ON people TO backup_user';
+EXCEPTION WHEN undefined_object THEN
+  RAISE NOTICE 'Role backup_user does not exist, skipping GRANT';
+END $$;
