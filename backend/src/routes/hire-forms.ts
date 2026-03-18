@@ -392,7 +392,7 @@ router.post('/quick-assign', validate(quickAssignSchema), async (req: AuthReques
 router.get('/options/lists', async (_req: AuthRequest, res: Response) => {
   try {
     const drivers = await query(
-      `SELECT id, full_name, email, licence_points, overall_status FROM drivers WHERE is_active = true ORDER BY full_name`
+      `SELECT id, full_name, email, licence_points FROM drivers WHERE is_active = true ORDER BY full_name`
     );
     const vehicles = await query(
       `SELECT id, reg, vehicle_type, simple_type, hire_status FROM fleet_vehicles WHERE status = 'active' ORDER BY reg`
