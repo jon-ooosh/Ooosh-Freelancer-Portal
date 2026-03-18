@@ -12,6 +12,89 @@ import {
 const router = Router();
 router.use(authenticate);
 
+// ── GET /api/quotes/ops/overview — operations overview (must be before /:id) ──
+
+router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
+  try {
+    const { job_type, ops_status, date_from, date_to } = req.query;
+
+    let whereClause = 'WHERE q.is_deleted = false AND q.status != \'cancelled\'';
+    const params: unknown[] = [];
+
+    if (job_type) {
+      if (job_type === 'transport') {
+        whereClause += ` AND q.job_type IN ('delivery', 'collection')`;
+      } else if (job_type === 'crewed') {
+        whereClause += ` AND q.job_type = 'crewed'`;
+      }
+    }
+
+    if (ops_status) {
+      params.push(ops_status);
+      whereClause += ` AND q.ops_status = $${params.length}`;
+    }
+
+    if (date_from) {
+      params.push(date_from);
+      whereClause += ` AND q.job_date >= $${params.length}`;
+    }
+
+    if (date_to) {
+      params.push(date_to);
+      whereClause += ` AND q.job_date <= $${params.length}`;
+    }
+
+    const result = await query(
+      `SELECT q.*,
+        j.job_name, j.hirehop_id, j.client_name, j.out_date, j.return_date,
+        v.name as linked_venue_name, v.address as venue_address, v.city as venue_city,
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+            'id', qa.id,
+            'person_id', qa.person_id,
+            'first_name', ap.first_name,
+            'last_name', ap.last_name,
+            'role', qa.role,
+            'status', qa.status,
+            'agreed_rate', qa.agreed_rate,
+            'rate_type', qa.rate_type,
+            'is_ooosh_crew', qa.is_ooosh_crew,
+            'confirmed_at', qa.confirmed_at,
+            'expected_expenses', qa.expected_expenses,
+            'invoice_received', qa.invoice_received,
+            'invoice_amount', qa.invoice_amount
+          ) ORDER BY qa.created_at)
+          FROM quote_assignments qa
+          LEFT JOIN people ap ON ap.id = qa.person_id
+          WHERE qa.quote_id = q.id
+        ), '[]'::json) as assignments
+       FROM quotes q
+       LEFT JOIN jobs j ON j.id = q.job_id
+       LEFT JOIN venues v ON v.id = q.venue_id
+       ${whereClause}
+       ORDER BY
+         CASE q.ops_status
+           WHEN 'todo' THEN 1
+           WHEN 'arranging' THEN 2
+           WHEN 'arranged' THEN 3
+           WHEN 'dispatched' THEN 4
+           WHEN 'arrived' THEN 5
+           WHEN 'completed' THEN 6
+           WHEN 'cancelled' THEN 7
+           ELSE 8
+         END,
+         q.job_date ASC NULLS LAST,
+         q.arrival_time ASC NULLS LAST`,
+      params
+    );
+
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('Ops overview error:', error);
+    res.status(500).json({ error: 'Failed to load operations overview' });
+  }
+});
+
 // ── GET /api/quotes/settings — fetch all calculator settings ─────────
 
 router.get('/settings', async (_req: AuthRequest, res: Response) => {
@@ -429,6 +512,189 @@ router.delete('/:quoteId/assignments/:assignmentId', async (_req: AuthRequest, r
   } catch (error) {
     console.error('Remove quote assignment error:', error);
     res.status(500).json({ error: 'Failed to remove assignment' });
+  }
+});
+
+// ── PATCH /api/quotes/:id/ops-status — update operational status ────
+
+const opsStatusSchema = z.object({
+  ops_status: z.enum(['todo', 'arranging', 'arranged', 'dispatched', 'arrived', 'completed', 'cancelled']),
+});
+
+router.patch('/:id/ops-status', validate(opsStatusSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { ops_status } = req.body;
+    const updates: string[] = ['ops_status = $1', 'updated_at = NOW()'];
+    const params: unknown[] = [ops_status];
+
+    if (ops_status === 'completed') {
+      updates.push(`completed_at = NOW()`);
+      updates.push(`completed_by = $${params.length + 1}`);
+      params.push(req.user!.email);
+    }
+
+    params.push(req.params.id);
+    const result = await query(
+      `UPDATE quotes SET ${updates.join(', ')} WHERE id = $${params.length} AND is_deleted = false RETURNING id, ops_status`,
+      params
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update ops status error:', error);
+    res.status(500).json({ error: 'Failed to update operational status' });
+  }
+});
+
+// ── PUT /api/quotes/:id/ops-details — update arranging/ops fields ───
+
+const opsDetailsSchema = z.object({
+  key_points: z.string().optional().nullable(),
+  client_introduction: z.string().optional().nullable(),
+  tolls_status: z.enum(['not_needed', 'todo', 'booked', 'paid']).optional(),
+  accommodation_status: z.enum(['not_needed', 'todo', 'booked']).optional(),
+  flight_status: z.enum(['not_needed', 'todo', 'booked']).optional(),
+  work_type: z.string().optional().nullable(),
+  work_type_other: z.string().optional().nullable(),
+  work_description: z.string().optional().nullable(),
+  job_date: z.string().optional().nullable(),
+  arrival_time: z.string().optional().nullable(),
+  venue_name: z.string().optional().nullable(),
+  venue_id: z.string().uuid().optional().nullable(),
+  freelancer_notes: z.string().optional().nullable(),
+  internal_notes: z.string().optional().nullable(),
+});
+
+router.put('/:id/ops-details', validate(opsDetailsSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const fields = req.body;
+    const updates: string[] = [];
+    const params: unknown[] = [];
+    let idx = 1;
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (value !== undefined) {
+        updates.push(`${key} = $${idx}`);
+        params.push(value);
+        idx++;
+      }
+    }
+
+    if (updates.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+
+    updates.push('updated_at = NOW()');
+    params.push(req.params.id);
+
+    const result = await query(
+      `UPDATE quotes SET ${updates.join(', ')} WHERE id = $${idx} AND is_deleted = false RETURNING *`,
+      params
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update ops details error:', error);
+    res.status(500).json({ error: 'Failed to update details' });
+  }
+});
+
+// ── POST /api/quotes/local — create a local delivery/collection ─────
+
+const localQuoteSchema = z.object({
+  jobId: z.string().uuid(),
+  jobType: z.enum(['delivery', 'collection']),
+  jobDate: z.string().optional().nullable(),
+  arrivalTime: z.string().optional().nullable(),
+  venueId: z.string().uuid().optional().nullable(),
+  venueName: z.string().optional().nullable(),
+  fee: z.number().min(0),
+  clientCharge: z.number().min(0).optional().nullable(),
+  notes: z.string().optional().nullable(),
+  whatIsIt: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
+});
+
+router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId, jobType, jobDate, arrivalTime, venueId, venueName, fee, clientCharge, notes, whatIsIt } = req.body;
+
+    const result = await query(
+      `INSERT INTO quotes (
+        job_id, job_type, is_local, calculation_mode,
+        venue_id, venue_name, job_date, arrival_time,
+        freelancer_fee, freelancer_fee_rounded,
+        client_charge_total, client_charge_rounded,
+        what_is_it, internal_notes,
+        distance_miles, drive_time_mins,
+        created_by
+      ) VALUES ($1, $2, true, 'fixed', $3, $4, $5, $6, $7, $7, $8, $8, $9, $10, 0, 0, $11)
+      RETURNING id`,
+      [
+        jobId, jobType, venueId || null, venueName || null,
+        jobDate || null, arrivalTime || null,
+        fee, clientCharge || fee,
+        whatIsIt || null, notes || null,
+        req.user!.id,
+      ]
+    );
+
+    res.status(201).json({ id: result.rows[0].id });
+  } catch (error) {
+    console.error('Create local quote error:', error);
+    res.status(500).json({ error: 'Failed to create local delivery/collection' });
+  }
+});
+
+// ── PUT /api/quotes/:id/run-group — manage run grouping ─────────────
+
+const runGroupSchema = z.object({
+  run_group: z.string().uuid().nullable(),
+  run_order: z.number().optional().nullable(),
+  run_group_fee: z.number().optional().nullable(),
+});
+
+router.put('/:id/run-group', validate(runGroupSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { run_group, run_order, run_group_fee } = req.body;
+    const result = await query(
+      `UPDATE quotes SET run_group = $1, run_order = $2, run_group_fee = $3, updated_at = NOW()
+       WHERE id = $4 AND is_deleted = false RETURNING id, run_group, run_order, run_group_fee`,
+      [run_group, run_order || null, run_group_fee || null, req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update run group error:', error);
+    res.status(500).json({ error: 'Failed to update run group' });
+  }
+});
+
+// ── POST /api/quotes/:id/assignments/ooosh-crew — assign as Ooosh crew
+
+router.post('/:id/assignments/ooosh-crew', async (req: AuthRequest, res: Response) => {
+  try {
+    // Get or create a system "Ooosh Crew" assignment (no real person)
+    // We use person_id = NULL with is_ooosh_crew = true
+    const result = await query(
+      `INSERT INTO quote_assignments (quote_id, person_id, role, is_ooosh_crew, created_by)
+       VALUES ($1, NULL, 'driver', true, $2)
+       RETURNING id`,
+      [req.params.id, req.user!.id]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Assign Ooosh crew error:', error);
+    res.status(500).json({ error: 'Failed to assign Ooosh crew' });
   }
 });
 

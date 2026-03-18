@@ -16,6 +16,7 @@ import ProfilePage from './pages/ProfilePage';
 import DuplicatesPage from './pages/DuplicatesPage';
 import DriversPage from './pages/DriversPage';
 import DriverDetailPage from './pages/DriverDetailPage';
+import TransportOpsPage from './pages/TransportOpsPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 
@@ -55,6 +56,7 @@ export default function App() {
                 <Route path="/jobs" element={<JobsPage />} />
                 <Route path="/jobs/:id" element={<JobDetailPage />} />
                 <Route path="/pipeline" element={<PipelinePage />} />
+                <Route path="/operations/transport" element={<TransportOpsPage />} />
                 <Route path="/drivers" element={<DriversPage />} />
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
