@@ -10,6 +10,9 @@ import { z } from 'zod';
 import { query, getPool } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { generateHireFormPdf, fetchLogo, type HireFormData } from '../services/hire-form-pdf';
+import { uploadToR2, getFromR2 } from '../config/r2';
+import { emailService } from '../services/email-service';
 
 const router = Router();
 router.use(authenticate);
@@ -317,6 +320,417 @@ router.get('/by-driver/:driverId', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[hire-forms] By driver error:', error);
     res.status(500).json({ error: 'Failed to load hire forms' });
+  }
+});
+
+// ── GET /api/hire-forms/:id — Get single hire form with full details ──
+
+router.get('/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `SELECT vha.*,
+        fv.reg AS vehicle_reg,
+        fv.vehicle_type AS vehicle_model,
+        d.full_name AS driver_name,
+        d.email AS driver_email,
+        d.phone AS driver_phone,
+        d.phone_country AS driver_phone_country,
+        d.date_of_birth AS driver_dob,
+        d.address_full AS driver_home_address,
+        d.address_line1 AS driver_address_line1,
+        d.address_line2 AS driver_address_line2,
+        d.city AS driver_city,
+        d.postcode AS driver_postcode,
+        d.licence_address AS driver_licence_address,
+        d.licence_number AS driver_licence_number,
+        d.licence_issued_by AS driver_licence_issued_by,
+        d.licence_valid_to AS driver_licence_valid_to,
+        d.date_passed_test AS driver_date_passed_test,
+        d.licence_points AS driver_points,
+        d.requires_referral,
+        d.signature_date AS driver_signature_date,
+        d.files AS driver_files,
+        je.excess_amount_required,
+        je.excess_amount_taken,
+        je.excess_status
+      FROM vehicle_hire_assignments vha
+      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN drivers d ON d.id = vha.driver_id
+      LEFT JOIN job_excess je ON je.assignment_id = vha.id
+      WHERE vha.id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Hire form not found' });
+    }
+
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[hire-forms] Get by ID error:', error);
+    res.status(500).json({ error: 'Failed to load hire form' });
+  }
+});
+
+// ── PATCH /api/hire-forms/:id — Update hire assignment (mid-hire changes) ──
+
+const patchSchema = z.object({
+  vehicle_id: z.string().uuid().optional(),
+  hire_end: z.string().optional(),
+  start_time: z.string().optional(),
+  end_time: z.string().optional(),
+  ve103b_ref: z.string().max(100).optional(),
+  return_overnight: z.boolean().nullable().optional(),
+  client_email: z.string().email().nullable().optional(),
+  status: z.enum(['soft', 'confirmed', 'booked_out', 'active', 'returned', 'cancelled']).optional(),
+  notes: z.string().optional(),
+});
+
+router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    // Build dynamic SET clause
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    let paramIdx = 1;
+
+    const fieldMap: Record<string, string> = {
+      vehicle_id: 'vehicle_id',
+      hire_end: 'hire_end',
+      start_time: 'start_time',
+      end_time: 'end_time',
+      ve103b_ref: 've103b_ref',
+      return_overnight: 'return_overnight',
+      client_email: 'client_email',
+      status: 'status',
+      notes: 'notes',
+    };
+
+    for (const [key, col] of Object.entries(fieldMap)) {
+      if (updates[key] !== undefined) {
+        setClauses.push(`${col} = $${paramIdx}`);
+        values.push(updates[key]);
+        paramIdx++;
+      }
+    }
+
+    if (updates.status) {
+      setClauses.push(`status_changed_at = NOW()`);
+    }
+
+    setClauses.push('updated_at = NOW()');
+
+    if (setClauses.length === 1) {
+      // Only updated_at — nothing to change
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    values.push(id);
+
+    const result = await query(
+      `UPDATE vehicle_hire_assignments SET ${setClauses.join(', ')} WHERE id = $${paramIdx} RETURNING *`,
+      values
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Hire form not found' });
+    }
+
+    console.log(`[hire-forms] Updated assignment ${id}:`, Object.keys(updates).join(', '));
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[hire-forms] Patch error:', error);
+    res.status(500).json({ error: 'Failed to update hire form' });
+  }
+});
+
+// ── Helper: load full data for PDF generation ──
+
+async function loadHireFormData(assignmentId: string): Promise<HireFormData | null> {
+  const result = await query(
+    `SELECT vha.*,
+      fv.reg AS vehicle_reg,
+      fv.vehicle_type AS vehicle_model,
+      d.full_name AS driver_name,
+      d.email AS driver_email,
+      d.phone AS driver_phone,
+      d.phone_country AS driver_phone_country,
+      d.date_of_birth AS driver_dob,
+      d.address_full AS driver_home_address,
+      d.address_line1 AS driver_address_line1,
+      d.address_line2 AS driver_address_line2,
+      d.city AS driver_city,
+      d.postcode AS driver_postcode,
+      d.licence_address AS driver_licence_address,
+      d.licence_number AS driver_licence_number,
+      d.licence_issued_by AS driver_licence_issued_by,
+      d.licence_valid_to AS driver_licence_valid_to,
+      d.date_passed_test AS driver_date_passed_test,
+      d.signature_date AS driver_signature_date,
+      d.files AS driver_files,
+      je.excess_amount_required,
+      je.excess_status
+    FROM vehicle_hire_assignments vha
+    JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+    LEFT JOIN drivers d ON d.id = vha.driver_id
+    LEFT JOIN job_excess je ON je.assignment_id = vha.id
+    WHERE vha.id = $1`,
+    [assignmentId]
+  );
+
+  if (result.rows.length === 0) return null;
+
+  const row = result.rows[0];
+
+  // Build home address from parts if address_full not available
+  const homeAddress = row.driver_home_address || [
+    row.driver_address_line1, row.driver_address_line2,
+    row.driver_city, row.driver_postcode,
+  ].filter(Boolean).join(', ');
+
+  // Format excess amount
+  let excessStr = '';
+  if (row.excess_amount_required) {
+    excessStr = `\u00A3${parseFloat(row.excess_amount_required).toLocaleString('en-GB', { minimumFractionDigits: 0 })}`;
+  }
+
+  // Try to load signature from driver files (look for tag 'signature')
+  let signatureImage: Buffer | null = null;
+  if (row.driver_files) {
+    const files = typeof row.driver_files === 'string' ? JSON.parse(row.driver_files) : row.driver_files;
+    const sigFile = Array.isArray(files) ? files.find((f: any) => f.tag === 'signature') : null;
+    if (sigFile?.r2_key) {
+      try {
+        const resp = await getFromR2(sigFile.r2_key);
+        if (resp.Body) {
+          const chunks: Buffer[] = [];
+          const stream = resp.Body as NodeJS.ReadableStream;
+          for await (const chunk of stream) {
+            chunks.push(Buffer.from(chunk as Uint8Array));
+          }
+          signatureImage = Buffer.concat(chunks);
+        }
+      } catch (e) {
+        console.log('[hire-forms] Could not load signature from R2');
+      }
+    }
+  }
+
+  const logoImage = await fetchLogo();
+
+  return {
+    driverName: row.driver_name || '',
+    email: row.driver_email || row.client_email || '',
+    phoneCountry: row.driver_phone_country || '',
+    phoneNumber: row.driver_phone || '',
+    dateOfBirth: row.driver_dob ? String(row.driver_dob) : undefined,
+    homeAddress,
+    licenceAddress: row.driver_licence_address || undefined,
+    licenceNumber: row.driver_licence_number || '',
+    licenceIssuedBy: row.driver_licence_issued_by || '',
+    licenceValidTo: row.driver_licence_valid_to ? String(row.driver_licence_valid_to) : undefined,
+    datePassedTest: row.driver_date_passed_test ? String(row.driver_date_passed_test) : undefined,
+    vehicleReg: row.vehicle_reg || '',
+    vehicleModel: row.vehicle_model || '',
+    hireStartDate: row.hire_start ? String(row.hire_start) : undefined,
+    hireStartTime: row.start_time ? String(row.start_time) : undefined,
+    hireEndDate: row.hire_end ? String(row.hire_end) : undefined,
+    hireEndTime: row.end_time ? String(row.end_time) : undefined,
+    insuranceExcess: excessStr || undefined,
+    hireFormNumber: `OT-HF-${assignmentId.substring(0, 8).toUpperCase()}`,
+    contractNumber: row.hirehop_job_id ? String(row.hirehop_job_id) : '',
+    signatureDate: row.driver_signature_date ? String(row.driver_signature_date) : undefined,
+    signatureImage,
+    logoImage,
+  };
+}
+
+// ── POST /api/hire-forms/:id/generate-pdf — Generate hire form PDF ──
+
+router.post('/:id/generate-pdf', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const sendEmail = req.query.send_email === 'true';
+
+    // Load all data
+    const formData = await loadHireFormData(id);
+    if (!formData) {
+      return res.status(404).json({ error: 'Hire form not found' });
+    }
+
+    // Generate PDF
+    const { pdfBytes, filename } = await generateHireFormPdf(formData);
+
+    // Upload to R2
+    const r2Key = `hire-forms/${id}/${filename}`;
+    await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
+
+    // Update assignment record
+    await query(
+      `UPDATE vehicle_hire_assignments
+       SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(), updated_at = NOW()
+       WHERE id = $2`,
+      [r2Key, id]
+    );
+
+    console.log(`[hire-forms] PDF generated and stored: ${r2Key} (${pdfBytes.length} bytes)`);
+
+    // Send email if requested
+    let emailResult = null;
+    if (sendEmail && formData.email) {
+      emailResult = await emailService.send('hire_form', {
+        to: formData.email,
+        variables: {
+          driverName: formData.driverName,
+          vehicleReg: formData.vehicleReg || 'TBC',
+          vehicleModel: formData.vehicleModel || 'TBC',
+          hireStart: formData.hireStartDate || 'TBC',
+          hireEnd: formData.hireEndDate || 'TBC',
+        },
+        attachments: [{
+          filename,
+          content: Buffer.from(pdfBytes),
+          contentType: 'application/pdf',
+        }],
+      });
+
+      if (emailResult.success) {
+        await query(
+          `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
+          [id]
+        );
+        console.log(`[hire-forms] Email sent for ${id}`);
+      }
+    }
+
+    res.json({
+      data: {
+        pdf_key: r2Key,
+        filename,
+        size: pdfBytes.length,
+        email_sent: emailResult?.success || false,
+        email_redirected_to: emailResult?.redirectedTo || null,
+      },
+    });
+  } catch (error) {
+    console.error('[hire-forms] Generate PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate hire form PDF' });
+  }
+});
+
+// ── POST /api/hire-forms/:id/send-email — Re-send hire form email ──
+
+router.post('/:id/send-email', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // Get assignment with PDF key
+    const assignment = await query(
+      `SELECT vha.*, d.full_name AS driver_name, d.email AS driver_email,
+        fv.reg AS vehicle_reg, fv.vehicle_type AS vehicle_model
+      FROM vehicle_hire_assignments vha
+      LEFT JOIN drivers d ON d.id = vha.driver_id
+      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      WHERE vha.id = $1`,
+      [id]
+    );
+
+    if (assignment.rows.length === 0) {
+      return res.status(404).json({ error: 'Hire form not found' });
+    }
+
+    const row = assignment.rows[0];
+    const recipientEmail = row.client_email || row.driver_email;
+
+    if (!recipientEmail) {
+      return res.status(400).json({ error: 'No email address available' });
+    }
+
+    if (!row.hire_form_pdf_key) {
+      return res.status(400).json({ error: 'No PDF generated yet — generate first' });
+    }
+
+    // Fetch PDF from R2
+    const pdfResponse = await getFromR2(row.hire_form_pdf_key);
+    const chunks: Buffer[] = [];
+    const stream = pdfResponse.Body as NodeJS.ReadableStream;
+    for await (const chunk of stream) {
+      chunks.push(Buffer.from(chunk as Uint8Array));
+    }
+    const pdfBuffer = Buffer.concat(chunks);
+    const filename = row.hire_form_pdf_key.split('/').pop() || 'hire-form.pdf';
+
+    const emailResult = await emailService.send('hire_form', {
+      to: recipientEmail,
+      variables: {
+        driverName: row.driver_name || 'Driver',
+        vehicleReg: row.vehicle_reg || 'TBC',
+        vehicleModel: row.vehicle_model || 'TBC',
+        hireStart: row.hire_start ? String(row.hire_start) : 'TBC',
+        hireEnd: row.hire_end ? String(row.hire_end) : 'TBC',
+      },
+      attachments: [{
+        filename,
+        content: pdfBuffer,
+        contentType: 'application/pdf',
+      }],
+    });
+
+    if (emailResult.success) {
+      await query(
+        `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
+        [id]
+      );
+    }
+
+    res.json({
+      data: {
+        email_sent: emailResult.success,
+        recipient: recipientEmail,
+        redirected_to: emailResult.redirectedTo || null,
+        error: emailResult.error || null,
+      },
+    });
+  } catch (error) {
+    console.error('[hire-forms] Send email error:', error);
+    res.status(500).json({ error: 'Failed to send hire form email' });
+  }
+});
+
+// ── GET /api/hire-forms/:id/download — Download hire form PDF ──
+
+router.get('/:id/download', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `SELECT hire_form_pdf_key FROM vehicle_hire_assignments WHERE id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0 || !result.rows[0].hire_form_pdf_key) {
+      return res.status(404).json({ error: 'No PDF available' });
+    }
+
+    const pdfResponse = await getFromR2(result.rows[0].hire_form_pdf_key);
+    const chunks: Buffer[] = [];
+    const stream = pdfResponse.Body as NodeJS.ReadableStream;
+    for await (const chunk of stream) {
+      chunks.push(Buffer.from(chunk as Uint8Array));
+    }
+    const pdfBuffer = Buffer.concat(chunks);
+    const filename = result.rows[0].hire_form_pdf_key.split('/').pop() || 'hire-form.pdf';
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('[hire-forms] Download error:', error);
+    res.status(500).json({ error: 'Failed to download hire form PDF' });
   }
 });
 

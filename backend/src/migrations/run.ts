@@ -54,6 +54,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '022_fix_audit_log_permissions.sql',
         '023_user_profiles.sql',
         '024_transport_crew_ops.sql',
+        '024_hire_form_pdf.sql',
       ];
 
       for (const migration of migrations) {

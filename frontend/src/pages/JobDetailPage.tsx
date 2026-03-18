@@ -212,6 +212,165 @@ interface DispatchCheckResult {
   }>;
 }
 
+// ── Hire Forms Section (testing) ──────────────────────────────────────────
+function HireFormsSection({ hhJobNumber }: { hhJobNumber: number }) {
+  const [forms, setForms] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadForms();
+  }, [hhJobNumber]);
+
+  async function loadForms() {
+    try {
+      const res = await api.get<any[]>(`/hire-forms/by-job/${hhJobNumber}`);
+      setForms(res || []);
+    } catch {
+      setForms([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function generatePdf(assignmentId: string, sendEmail: boolean) {
+    setGenerating(assignmentId);
+    setMessage(null);
+    try {
+      const res = await api.post<{ pdf_key: string; filename: string; email_sent: boolean; email_redirected_to?: string }>(
+        `/hire-forms/${assignmentId}/generate-pdf?send_email=${sendEmail}`, {}
+      );
+      const parts = [];
+      parts.push(`PDF generated: ${res.filename}`);
+      if (res.email_sent) {
+        parts.push(res.email_redirected_to
+          ? `Email sent (test mode -> ${res.email_redirected_to})`
+          : 'Email sent');
+      }
+      setMessage(parts.join(' | '));
+      loadForms();
+    } catch (err) {
+      setMessage(`Error: ${err instanceof Error ? err.message : 'Failed'}`);
+    } finally {
+      setGenerating(null);
+    }
+  }
+
+  async function resendEmail(assignmentId: string) {
+    setGenerating(assignmentId);
+    setMessage(null);
+    try {
+      const res = await api.post<{ email_sent: boolean; recipient: string; redirected_to?: string }>(
+        `/hire-forms/${assignmentId}/send-email`, {}
+      );
+      if (res.email_sent) {
+        setMessage(res.redirected_to
+          ? `Email re-sent (test mode -> ${res.redirected_to})`
+          : `Email re-sent to ${res.recipient}`);
+      } else {
+        setMessage('Email send failed');
+      }
+    } catch (err) {
+      setMessage(`Error: ${err instanceof Error ? err.message : 'Failed'}`);
+    } finally {
+      setGenerating(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h4 className="text-sm font-semibold text-gray-700 mb-3">Driver Hire Forms</h4>
+        <div className="animate-pulse h-8 bg-gray-100 rounded" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div className="flex items-center justify-between mb-3">
+        <h4 className="text-sm font-semibold text-gray-700">Driver Hire Forms</h4>
+        <span className="text-xs text-amber-600 bg-amber-50 px-2 py-0.5 rounded">Testing</span>
+      </div>
+
+      {message && (
+        <div className={`text-xs px-3 py-2 rounded mb-3 ${message.startsWith('Error') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+          {message}
+        </div>
+      )}
+
+      {forms.length === 0 ? (
+        <p className="text-sm text-gray-400">No hire form assignments found for this job.</p>
+      ) : (
+        <div className="space-y-3">
+          {forms.map((f: any) => (
+            <div key={f.id} className="border border-gray-100 rounded-lg p-3 flex items-center justify-between">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-sm text-gray-900">{f.driver_name || 'Unknown driver'}</span>
+                  {f.vehicle_reg && (
+                    <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">{f.vehicle_reg}</span>
+                  )}
+                  <span className={`text-xs px-1.5 py-0.5 rounded ${
+                    f.status === 'booked_out' ? 'bg-indigo-100 text-indigo-700' :
+                    f.status === 'confirmed' ? 'bg-green-100 text-green-700' :
+                    f.status === 'active' ? 'bg-blue-100 text-blue-700' :
+                    f.status === 'returned' ? 'bg-teal-100 text-teal-700' :
+                    'bg-gray-100 text-gray-600'
+                  }`}>{f.status || 'pending'}</span>
+                </div>
+                <div className="text-xs text-gray-400 mt-0.5">
+                  {f.hire_start && f.hire_end && `${f.hire_start} to ${f.hire_end}`}
+                  {f.excess_amount_required && ` | Excess: \u00A3${parseFloat(f.excess_amount_required).toFixed(0)}`}
+                  {f.hire_form_generated_at && ` | PDF generated`}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 ml-3 flex-shrink-0">
+                <button
+                  onClick={() => generatePdf(f.id, false)}
+                  disabled={generating === f.id}
+                  className="text-xs px-2.5 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-50"
+                  title="Generate PDF only"
+                >
+                  {generating === f.id ? '...' : 'Generate PDF'}
+                </button>
+                <button
+                  onClick={() => generatePdf(f.id, true)}
+                  disabled={generating === f.id}
+                  className="text-xs px-2.5 py-1.5 bg-ooosh-100 text-ooosh-700 rounded hover:bg-ooosh-200 disabled:opacity-50"
+                  title="Generate PDF and send email"
+                >
+                  {generating === f.id ? '...' : 'Generate + Email'}
+                </button>
+                {f.hire_form_pdf_key && (
+                  <>
+                    <a
+                      href={`/api/hire-forms/${f.id}/download`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs px-2.5 py-1.5 bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+                    >
+                      View PDF
+                    </a>
+                    <button
+                      onClick={() => resendEmail(f.id)}
+                      disabled={generating === f.id}
+                      className="text-xs px-2.5 py-1.5 bg-amber-50 text-amber-700 rounded hover:bg-amber-100 disabled:opacity-50"
+                    >
+                      Re-send
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -1171,6 +1330,11 @@ export default function JobDetailPage() {
                 );
               })}
             </div>
+          )}
+
+          {/* Hire Forms Section (testing) */}
+          {job.hh_job_number && (
+            <HireFormsSection hhJobNumber={job.hh_job_number} />
           )}
         </div>
       )}

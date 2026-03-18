@@ -12,43 +12,56 @@
 
 | Agent | Branch Name | Domain | Status |
 |-------|------------|--------|--------|
-| Agent 1 | `feature/hire-form-cutover` | Hire Form Repointing & Allocations | 🔴 Not started |
+| Agent 1 | `claude/ooosh-platform-continuation-nRUmV` | Hire Form Repointing, PDF Gen & Allocations | 🟢 In progress |
 | Agent 2 | `feature/excess-gate-ledger` | Excess Gate UI & Ledger | 🔴 Not started |
 | Agent 3 | `feature/ops-dashboard-streams` | Global Ops Dashboard Widgets + Backline | 🔴 Not started |
 | Agent 4 | `feature/deliveries-payments` | Incoming Deliveries, Lost Property & Payment Tracking | 🔴 Not started |
 
 ---
 
-## Agent 1 — Hire Form Cutover & Allocations Migration
+## Agent 1 — Hire Form Cutover, PDF Generation & Allocations Migration
 
-**Branch:** `feature/hire-form-cutover`  
-**Priority:** 🔴 HIGHEST — blocks getting fully off Monday.com  
-**Estimated scope:** Phase C2 + C4 + Phase D from CLAUDE.md
+**Branch:** `claude/ooosh-platform-continuation-nRUmV`
+**Priority:** 🔴 HIGHEST — blocks getting fully off Monday.com
+**Estimated scope:** Phase C2 + C4 + Phase D + Hire Form PDF Generation from CLAUDE.md
 
 ### What to build
 1. **Phase C2 — Read path repointing** in OP vehicle module pages:
-   - Repoint `driver-hire-api.ts` from Monday.com GraphQL → `GET /api/hire-forms/by-job/:hirehopJobId`
-   - Verify `useDriverHireForms.ts` follows automatically
-   - Confirm OP backend returns data in `DriverHireForm` shape consumers expect
+   - ✅ Repoint `driver-hire-api.ts` from Monday.com GraphQL → `GET /api/hire-forms/by-job/:hirehopJobId`
+   - ✅ `useDriverHireForms.ts` follows automatically (imports from driver-hire-api)
+   - ✅ OP backend returns data in `DriverHireForm` shape consumers expect
    - No changes to BookOutPage, AllocationsPage, CheckInPage, CollectionPage themselves
 
-2. **Phase C4 — Go-live cutover checklist** (document + assist Jon to execute):
-   - Verify env vars on server: `HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`
-   - Confirm migration 020 has run on production
-   - Document test steps for `DATA_BACKEND=op` on Netlify deploy preview
-   - Prepare the Netlify env var flip instruction for Jon
+2. **Hire Form PDF Generation** (added scope — replaces Netlify generate-hire-form.js):
+   - ✅ `hire-form-pdf.ts` service: exact port of Netlify function (pdf-lib + Roboto fonts)
+   - ✅ Migration 024: `hire_form_pdf_key`, `hire_form_generated_at`, `hire_form_emailed_at` columns
+   - ✅ Endpoints: `POST /:id/generate-pdf`, `POST /:id/send-email`, `GET /:id/download`
+   - ✅ `PATCH /:id` for mid-hire changes (vehicle swap, date extension, status)
+   - ✅ `GET /:id` for single hire form with full driver/vehicle/excess details
+   - ✅ Email service: attachment support + `hire_form` template (client-facing, Ooosh branded)
+   - ✅ Testing UI: HireFormsSection on Job Detail Crew & Transport tab
 
-3. **Phase D — Allocations migration**:
-   - Switch `AllocationsPage.tsx` to read from `vehicle_hire_assignments` instead of R2
-   - Keep compatibility API for existing book-out/check-in flows
-   - R2 becomes read-only fallback (don't delete R2 writes yet)
+3. **Phase C4 — Go-live cutover checklist** (document + assist Jon to execute):
+   - [ ] Verify env vars on server: `HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`
+   - [ ] Confirm migration 020 has run on production
+   - [ ] Document test steps for `DATA_BACKEND=op` on Netlify deploy preview
+   - [ ] Prepare the Netlify env var flip instruction for Jon
+
+4. **Phase D — Allocations migration**:
+   - [ ] Switch `AllocationsPage.tsx` to read from `vehicle_hire_assignments` instead of R2
+   - [ ] Keep compatibility API for existing book-out/check-in flows
+   - [ ] R2 becomes read-only fallback (don't delete R2 writes yet)
 
 ### Files owned by Agent 1
 ```
 frontend/src/modules/vehicles/lib/driver-hire-api.ts
 frontend/src/modules/vehicles/hooks/useDriverHireForms.ts
 frontend/src/modules/vehicles/pages/AllocationsPage.tsx
-docs/HIRE-FORM-CUTOVER-CHECKLIST.md  (new file to create)
+backend/src/routes/hire-forms.ts
+backend/src/services/hire-form-pdf.ts              (new)
+backend/src/services/fonts/Roboto-*.ttf            (new)
+backend/src/migrations/024_hire_form_pdf.sql        (new)
+docs/HIRE-FORM-CUTOVER-CHECKLIST.md                (new file to create)
 ```
 
 ### Files to READ but NOT edit
@@ -56,21 +69,22 @@ docs/HIRE-FORM-CUTOVER-CHECKLIST.md  (new file to create)
 frontend/src/modules/vehicles/pages/BookOutPage.tsx
 frontend/src/modules/vehicles/pages/CheckInPage.tsx
 frontend/src/modules/vehicles/pages/CollectionPage.tsx
-backend/src/routes/hire-forms.ts
 backend/src/routes/driver-verification.ts
 ```
 
 ### Do NOT touch
 ```
-anything in frontend/src/pages/
-anything in backend/src/routes/ (except reading for reference)
 frontend/src/components/Layout.tsx
 ```
 
 ### Definition of done
-- [ ] `driver-hire-api.ts` calls OP backend, not Monday.com GraphQL
+- [x] `driver-hire-api.ts` calls OP backend, not Monday.com GraphQL
+- [x] Hire form PDF generation matches Netlify output exactly
+- [x] PDF stored in R2, downloadable, emailable via OP email service
+- [x] Mid-hire changes (vehicle swap, date extension) via PATCH endpoint
+- [x] Testing UI on Job Detail page for PDF generation verification
 - [ ] AllocationsPage reads from `vehicle_hire_assignments` table
-- [ ] BookOut/CheckIn flows unaffected (test manually)
+- [ ] BookOut/CheckIn flows tested manually
 - [ ] Cutover checklist doc written and ready for Jon to execute
 
 ---
@@ -390,9 +404,13 @@ Read AGENT_MAP.md to understand your exact file ownership and what to avoid.
 
 Update this section as work completes:
 
-### Agent 1 — Hire Form Cutover
-- [ ] Phase C2: driver-hire-api.ts repointed
-- [ ] Phase C2: useDriverHireForms confirmed working
+### Agent 1 — Hire Form Cutover & PDF Generation
+- [x] Phase C2: driver-hire-api.ts repointed to OP backend
+- [x] Phase C2: useDriverHireForms follows automatically
+- [x] Hire form PDF generation service (exact port of Netlify function)
+- [x] PDF endpoints: generate, download, send-email, PATCH for mid-hire changes
+- [x] Email service: attachment support + hire_form template
+- [x] Testing UI on Job Detail Crew & Transport tab
 - [ ] Phase D: AllocationsPage reading from vehicle_hire_assignments
 - [ ] Phase C4: cutover checklist document written
 - [ ] Branch ready for PR
