@@ -535,13 +535,26 @@ Global operational view for what's currently happening / about to happen with tr
 - [x] Freelancer portal repointing: feature-flagged DATA_BACKEND=op (auth, jobs, completion, equipment) with Monday.com fallback
 - [x] Inline crew assignment on Transport Ops page (same picker as Job Detail, bidirectional)
 - [x] Local D/C form improvements: venue address book lookup, smart date defaults, amber warning on change
+- [x] Quote editing: Edit Quote modal on Transport Ops page + Job Detail page (venue, date, time, fees, notes)
+- [x] Inline-editable arranging details: client intro status picker, key points, tolls/accom/flights clickable pills, notes
+- [x] Run grouping UI: letter-based display (Run A/B/C), coloured side bands, join/create run buttons per job
+- [x] Colour-matched status dropdown (replaces plain select)
+- [x] Completion details view: photos, signature, timestamp, customer present, notes
+- [x] Separate completed/cancelled toggles
 - [ ] Reminder system (unassigned deliveries approaching, overdue completions)
 - [ ] Change notifications to freelancers (date/time/venue changes → email alert)
-- [ ] "On the road" status tracking: dispatched, arrived, issues, completed
 - [ ] Issues on road reporting (breakdowns, delays, problems)
 - [ ] PDF delivery note generation (migrate from Netlify function to OP backend)
 - [ ] Client delivery note emails via OP email service
 - [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging) — nice-to-have, post go-live
+- [ ] **Arrangement pills → dashboard integration**: Surface arrangement statuses on Dashboard and Job Requirements
+  - Dashboard widget: "X jobs in next 7 days need client intros" (query `client_introduction = 'todo'` where `job_date` within 7 days)
+  - Dashboard widget: "X jobs with outstanding tolls/accommodation/flights" (query `*_status = 'todo'` on active quotes)
+  - Job Requirements integration: arrangement items auto-create as requirements on prep checklist
+  - Freelancer portal: show arrangement status in job details (e.g. "accommodation: booked")
+  - Notifications: auto-alert when job approaching and arrangements still outstanding
+- [ ] **Run group pricing**: Combined run pricing (individual prices crossed through, single run total displayed)
+- [ ] **Run group → freelancer portal alignment**: Ensure run groups display correctly as multi-drop runs in portal (group by run_group UUID + date, ±4h tolerance for overnight grouping)
 
 ##### Carnets (inline on Prep Checklist, with global overview)
 - [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed
