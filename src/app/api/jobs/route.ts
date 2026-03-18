@@ -15,9 +15,10 @@
  * Crew jobs are always displayed individually (no run grouping).
  */
 
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobsForFreelancer, JobRecord, getCrewJobsForFreelancer, CrewJobRecord } from '@/lib/monday'
+import { isOpMode, getJobsFromOP } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES
@@ -317,21 +318,59 @@ function groupJobs(jobs: OrganisedJob[]): DisplayItem[] {
 // API HANDLER
 // =============================================================================
 
-export async function GET(): Promise<NextResponse<JobsApiResponse>> {
+export async function GET(request: NextRequest): Promise<NextResponse<JobsApiResponse>> {
   const startTime = Date.now()
   console.log('Jobs API: Starting request')
-  
+
   try {
     // Get the logged-in user from session
     const user = await getSessionUser()
     console.log('Jobs API: Session check took', Date.now() - startTime, 'ms')
-    
+
     if (!user) {
       return NextResponse.json(
         { success: false, error: 'Authentication required' },
         { status: 401 }
       )
     }
+
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      console.log('Jobs API: Using OP backend for', user.email)
+      const sessionToken = request.cookies.get('session')?.value
+      if (!sessionToken) {
+        return NextResponse.json(
+          { success: false, error: 'Session token missing' },
+          { status: 401 }
+        )
+      }
+
+      try {
+        const opData = await getJobsFromOP(sessionToken)
+        console.log('Jobs API: OP backend took', Date.now() - startTime, 'ms')
+
+        // The OP portal API returns flat jobs (not grouped).
+        // Apply the same grouping logic as the Monday.com path.
+        const groupedToday = groupJobs((opData.today || []) as unknown as OrganisedJob[])
+        const groupedUpcoming = groupJobs((opData.upcoming || []) as unknown as OrganisedJob[])
+        const groupedCompleted = groupJobs((opData.completed || []) as unknown as OrganisedJob[])
+        const groupedCancelled = groupJobs((opData.cancelled || []) as unknown as OrganisedJob[])
+
+        return NextResponse.json({
+          success: true,
+          user: opData.user,
+          today: groupedToday,
+          upcoming: groupedUpcoming,
+          completed: groupedCompleted,
+          cancelled: groupedCancelled,
+        })
+      } catch (opError) {
+        console.error('OP backend error:', opError)
+        // Fall through to Monday.com as fallback
+        console.log('Jobs API: Falling back to Monday.com')
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
     
     console.log('Jobs API: Fetching jobs for', user.email)
     

@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
 import { SignJWT } from 'jose'
-import { 
-  findFreelancerByEmail, 
+import {
+  findFreelancerByEmail,
   updateFreelancerDateColumn,
-  FREELANCER_COLUMNS 
+  FREELANCER_COLUMNS
 } from '@/lib/monday'
+import { isOpMode, loginToOP } from '@/lib/op-api'
 
 // Session secret for JWT signing
 const getSessionSecret = () => {
@@ -82,6 +83,72 @@ export async function POST(request: NextRequest) {
         { status: 429 }
       )
     }
+
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      try {
+        const opResult = await loginToOP(normalizedEmail, password)
+
+        if (!opResult.success) {
+          recordFailedAttempt(normalizedEmail)
+          return NextResponse.json(
+            { error: opResult.error || 'Invalid email or password' },
+            { status: 401 }
+          )
+        }
+
+        clearFailedAttempts(normalizedEmail)
+
+        // If the OP backend returned a session token, use it directly
+        if (opResult.sessionToken) {
+          const response = NextResponse.json({
+            success: true,
+            user: opResult.user,
+          })
+
+          response.cookies.set('session', opResult.sessionToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+            maxAge: 30 * 24 * 60 * 60,
+            path: '/',
+          })
+
+          return response
+        }
+
+        // Fallback: create a local session token using the OP user data
+        const sessionToken = await new SignJWT({
+          id: opResult.user!.id,
+          email: opResult.user!.email,
+          name: opResult.user!.name,
+        })
+          .setProtectedHeader({ alg: 'HS256' })
+          .setIssuedAt()
+          .setExpirationTime('30d')
+          .sign(getSessionSecret())
+
+        const response = NextResponse.json({
+          success: true,
+          user: opResult.user,
+        })
+
+        response.cookies.set('session', sessionToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'lax',
+          maxAge: 30 * 24 * 60 * 60,
+          path: '/',
+        })
+
+        return response
+      } catch (opError) {
+        console.error('OP login error:', opError)
+        // Fall through to Monday.com
+        console.log('Login: Falling back to Monday.com')
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
 
     // Find freelancer in Monday
     const freelancer = await findFreelancerByEmail(normalizedEmail)
