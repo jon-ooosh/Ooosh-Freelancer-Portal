@@ -393,14 +393,16 @@ export default function JobDetailPage() {
   const [showLocalForm, setShowLocalForm] = useState(false);
   const [localFormData, setLocalFormData] = useState({
     jobType: 'delivery' as 'delivery' | 'collection',
-    fee: '',
-    clientCharge: '',
+    venueId: '',
     venueName: '',
     jobDate: '',
     arrivalTime: '',
     notes: '',
   });
   const [localSubmitting, setLocalSubmitting] = useState(false);
+  const [venueSearch, setVenueSearch] = useState('');
+  const [venueOptions, setVenueOptions] = useState<{ id: string; name: string; city: string | null }[]>([]);
+  const [showVenueDropdown, setShowVenueDropdown] = useState(false);
 
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
@@ -521,6 +523,44 @@ export default function JobDetailPage() {
     } catch {
       console.error('Failed to delete quote');
     }
+  }
+
+  async function searchVenues(search: string) {
+    try {
+      const data = await api.get<{ data: { id: string; name: string; city: string | null }[] }>(
+        `/venues?search=${encodeURIComponent(search)}&limit=10`
+      );
+      setVenueOptions(data.data);
+    } catch {
+      console.error('Failed to search venues');
+    }
+  }
+
+  function getDefaultDate(jobType: 'delivery' | 'collection'): string {
+    if (!job) return '';
+    const dateStr = jobType === 'delivery' ? job.out_date : job.return_date;
+    if (!dateStr) return '';
+    // Handle both Date objects and ISO strings
+    if (typeof dateStr === 'object' && dateStr !== null) return (dateStr as Date).toISOString().split('T')[0];
+    if (typeof dateStr === 'string') return dateStr.includes('T') ? dateStr.split('T')[0] : dateStr;
+    return '';
+  }
+
+  function openLocalForm() {
+    if (!job) return;
+    const defaultDate = getDefaultDate('delivery');
+    setLocalFormData({
+      jobType: 'delivery',
+      venueId: job.venue_id || '',
+      venueName: job.venue_name || '',
+      jobDate: defaultDate,
+      arrivalTime: '',
+      notes: '',
+    });
+    setVenueSearch(job.venue_name || '');
+    setVenueOptions([]);
+    setShowVenueDropdown(false);
+    setShowLocalForm(true);
   }
 
   async function searchPeople(search: string) {
@@ -1001,7 +1041,7 @@ export default function JobDetailPage() {
             <h3 className="text-lg font-semibold text-gray-900">Crew & Transport</h3>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setShowLocalForm(true)}
+                onClick={() => openLocalForm()}
                 className="flex items-center gap-1.5 px-3 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 text-sm font-medium"
               >
                 + Local D/C
@@ -1400,133 +1440,173 @@ export default function JobDetailPage() {
       />
 
       {/* Local Delivery/Collection Form Modal */}
-      {showLocalForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Local Delivery / Collection</h3>
-            <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
-                <div className="flex gap-2">
-                  {(['delivery', 'collection'] as const).map((t) => (
-                    <button
-                      key={t}
-                      onClick={() => setLocalFormData({ ...localFormData, jobType: t })}
-                      className={`flex-1 px-3 py-2 rounded-lg border text-sm font-medium ${
-                        localFormData.jobType === t
-                          ? 'border-ooosh-500 bg-ooosh-50 text-ooosh-700'
-                          : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+      {showLocalForm && (() => {
+        const defaultDate = getDefaultDate(localFormData.jobType);
+        const dateChanged = localFormData.jobDate && defaultDate && localFormData.jobDate !== defaultDate;
+        const defaultLabel = localFormData.jobType === 'delivery' ? 'hire start date' : 'hire end date';
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Local Delivery / Collection</h3>
+              <div className="space-y-3">
+                {/* Type toggle */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                  <div className="flex gap-2">
+                    {(['delivery', 'collection'] as const).map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => {
+                          const newDefault = getDefaultDate(t);
+                          setLocalFormData({ ...localFormData, jobType: t, jobDate: newDefault });
+                        }}
+                        className={`flex-1 px-3 py-2 rounded-lg border text-sm font-medium ${
+                          localFormData.jobType === t
+                            ? 'border-ooosh-500 bg-ooosh-50 text-ooosh-700'
+                            : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                        }`}
+                      >
+                        {t === 'delivery' ? 'Delivery' : 'Collection'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Venue search */}
+                <div className="relative">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
+                  <input
+                    type="text"
+                    value={venueSearch}
+                    onChange={(e) => {
+                      setVenueSearch(e.target.value);
+                      if (e.target.value.length >= 2) {
+                        searchVenues(e.target.value);
+                        setShowVenueDropdown(true);
+                      } else {
+                        setVenueOptions([]);
+                        setShowVenueDropdown(false);
+                      }
+                      // Clear venue selection if text changed
+                      if (e.target.value !== localFormData.venueName) {
+                        setLocalFormData({ ...localFormData, venueId: '', venueName: e.target.value });
+                      }
+                    }}
+                    onFocus={() => {
+                      if (venueOptions.length > 0) setShowVenueDropdown(true);
+                    }}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    placeholder="Search venues..."
+                  />
+                  {showVenueDropdown && venueOptions.length > 0 && (
+                    <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                      {venueOptions.map((v) => (
+                        <button
+                          key={v.id}
+                          onClick={() => {
+                            setLocalFormData({ ...localFormData, venueId: v.id, venueName: v.name });
+                            setVenueSearch(v.name);
+                            setShowVenueDropdown(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-ooosh-50 flex justify-between"
+                        >
+                          <span className="font-medium text-gray-900">{v.name}</span>
+                          {v.city && <span className="text-xs text-gray-400">{v.city}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Date & Time */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                    <input
+                      type="date"
+                      value={localFormData.jobDate}
+                      onChange={(e) => setLocalFormData({ ...localFormData, jobDate: e.target.value })}
+                      className={`w-full border rounded-lg px-3 py-2 text-sm ${
+                        dateChanged ? 'border-amber-400 bg-amber-50' : 'border-gray-300'
                       }`}
-                    >
-                      {t === 'delivery' ? 'Delivery' : 'Collection'}
-                    </button>
-                  ))}
+                    />
+                    {dateChanged && (
+                      <p className="text-xs text-amber-600 mt-1">
+                        Changed from {defaultLabel}
+                      </p>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Time</label>
+                    <input
+                      type="time"
+                      value={localFormData.arrivalTime}
+                      onChange={(e) => setLocalFormData({ ...localFormData, arrivalTime: e.target.value })}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </div>
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
+
+                {/* Notes */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Fee (£)</label>
-                  <input
-                    type="number" min="0" step="0.01"
-                    value={localFormData.fee}
-                    onChange={(e) => setLocalFormData({ ...localFormData, fee: e.target.value })}
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+                  <textarea
+                    value={localFormData.notes}
+                    onChange={(e) => setLocalFormData({ ...localFormData, notes: e.target.value })}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                    placeholder="50.00"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge (£)</label>
-                  <input
-                    type="number" min="0" step="0.01"
-                    value={localFormData.clientCharge}
-                    onChange={(e) => setLocalFormData({ ...localFormData, clientCharge: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                    placeholder="Same as fee"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
-                <input
-                  type="text"
-                  value={localFormData.venueName}
-                  onChange={(e) => setLocalFormData({ ...localFormData, venueName: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  placeholder={job.venue_name || 'Venue name'}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                  <input
-                    type="date"
-                    value={localFormData.jobDate}
-                    onChange={(e) => setLocalFormData({ ...localFormData, jobDate: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Time</label>
-                  <input
-                    type="time"
-                    value={localFormData.arrivalTime}
-                    onChange={(e) => setLocalFormData({ ...localFormData, arrivalTime: e.target.value })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    rows={2}
+                    placeholder="Optional notes..."
                   />
                 </div>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
-                <textarea
-                  value={localFormData.notes}
-                  onChange={(e) => setLocalFormData({ ...localFormData, notes: e.target.value })}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  rows={2}
-                  placeholder="Optional notes..."
-                />
+
+              <div className="flex justify-end gap-2 mt-4">
+                <button
+                  onClick={() => setShowLocalForm(false)}
+                  className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  disabled={localSubmitting}
+                  onClick={async () => {
+                    setLocalSubmitting(true);
+                    try {
+                      // Ensure date is a string, not a Date object
+                      let dateStr = localFormData.jobDate || undefined;
+                      if (!dateStr && job.out_date) {
+                        dateStr = typeof job.out_date === 'string'
+                          ? (job.out_date.includes('T') ? job.out_date.split('T')[0] : job.out_date)
+                          : undefined;
+                      }
+                      await api.post('/quotes/local', {
+                        jobId: job.id,
+                        jobType: localFormData.jobType,
+                        venueId: localFormData.venueId || job.venue_id || undefined,
+                        venueName: localFormData.venueName || job.venue_name || undefined,
+                        jobDate: dateStr,
+                        arrivalTime: localFormData.arrivalTime || undefined,
+                        notes: localFormData.notes || undefined,
+                      });
+                      setShowLocalForm(false);
+                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '' });
+                      loadQuotes();
+                    } catch (err) {
+                      alert(err instanceof Error ? err.message : 'Failed to create');
+                    } finally {
+                      setLocalSubmitting(false);
+                    }
+                  }}
+                  className="px-4 py-2 text-sm bg-teal-600 text-white rounded-lg hover:bg-teal-700 disabled:opacity-50 font-medium"
+                >
+                  {localSubmitting ? 'Saving...' : 'Create'}
+                </button>
               </div>
-            </div>
-            <div className="flex justify-end gap-2 mt-4">
-              <button
-                onClick={() => setShowLocalForm(false)}
-                className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                disabled={localSubmitting || !localFormData.fee}
-                onClick={async () => {
-                  if (!localFormData.fee) return;
-                  setLocalSubmitting(true);
-                  try {
-                    await api.post('/quotes/local', {
-                      jobId: job.id,
-                      jobType: localFormData.jobType,
-                      fee: parseFloat(localFormData.fee),
-                      clientCharge: localFormData.clientCharge ? parseFloat(localFormData.clientCharge) : undefined,
-                      venueName: localFormData.venueName || job.venue_name || undefined,
-                      venueId: job.venue_id || undefined,
-                      jobDate: localFormData.jobDate || job.job_date || undefined,
-                      arrivalTime: localFormData.arrivalTime || undefined,
-                      notes: localFormData.notes || undefined,
-                    });
-                    setShowLocalForm(false);
-                    setLocalFormData({ jobType: 'delivery', fee: '', clientCharge: '', venueName: '', jobDate: '', arrivalTime: '', notes: '' });
-                    loadQuotes();
-                  } catch (err) {
-                    alert(err instanceof Error ? err.message : 'Failed to create');
-                  } finally {
-                    setLocalSubmitting(false);
-                  }
-                }}
-                className="px-4 py-2 text-sm bg-teal-600 text-white rounded-lg hover:bg-teal-700 disabled:opacity-50 font-medium"
-              >
-                {localSubmitting ? 'Saving...' : 'Create'}
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Assign Crew Modal */}
       {assignModalQuoteId && (
