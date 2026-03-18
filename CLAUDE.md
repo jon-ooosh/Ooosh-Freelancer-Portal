@@ -36,7 +36,8 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── duplicates.ts  # Duplicate detection & merge
 │   │   │   ├── hirehop.ts  # HireHop sync endpoints
 │   │   │   ├── pipeline.ts     # Enquiry & sales pipeline (Kanban)
-│   │   │   ├── quotes.ts      # Transport quotes CRUD, calculator settings, crew assignments
+│   │   │   ├── quotes.ts      # Transport quotes CRUD, calculator settings, crew assignments, ops endpoints
+│   │   │   ├── portal.ts     # Freelancer portal API (own JWT auth, replaces Monday.com)
 │   │   │   ├── dashboard.ts   # Dashboard stats/metrics
 │   │   │   ├── search.ts      # Global search
 │   │   │   ├── users.ts       # User/team management
@@ -508,20 +509,25 @@ Per-job financial tracking, summarised on Dashboard rather than its own global p
 - [ ] Payment status feeds into gate conditions (deposit required before dispatch)
 - [ ] Dashboard payment summary widget (deposits pending, balances outstanding across all jobs)
 
-##### Stream 7: Transport & Crew Operations
+##### Stream 7: Transport & Crew Operations ← FOUNDATION COMPLETE
 Global operational view for what's currently happening / about to happen with transport and crew.
 **Full spec:** `docs/TRANSPORT-CREW-OPS-SPEC.md` — covers Monday.com board replacement, freelancer portal repointing, completion flow, and implementation plan.
-- [ ] Transport operations page (`/operations/transport`): replaces Monday.com D&C board
-- [ ] Crew operations page (`/operations/crew`): replaces Monday.com Crewed Jobs board
-- [ ] Operational status on quotes (`ops_status`: todo → arranging → arranged → dispatched → arrived → completed)
-- [ ] Completion tracking (signature, photos, notes, customer present toggle)
-- [ ] Arranging details (key points, client introductions, tolls/accommodation/flight booking status)
+- [x] Migration 024: ops_status, completion tracking, arranging details, run grouping, local delivery on quotes; freelancer confirmation, expense/invoice tracking on quote_assignments
+- [x] Backend ops endpoints: PATCH ops-status, PUT ops-details, POST /quotes/local, PUT run-group, POST assignments/ooosh-crew, GET /quotes/ops/overview
+- [x] Portal API route (`/api/portal/*`): auth/login, jobs list, job detail, equipment via HireHop broker, completion submission, venue detail
+- [x] Cookie-parser middleware for portal session cookies
+- [x] Transport operations page (`/operations/transport`): table view grouped by ops_status + calendar view, filter D&C/crewed, expandable rows, inline status dropdown
+- [x] Local delivery/collection button + form on Job Detail Crew & Transport tab
+- [x] Operations nav menu with "Crew & Transport" child
+- [x] Operational status on quotes (`ops_status`: todo → arranging → arranged → dispatched → arrived → completed)
+- [x] Completion tracking (signature, photos, notes, customer present toggle)
+- [x] Arranging details (key points, client introductions, tolls/accommodation/flight booking status)
+- [x] Freelancer portal repointing: feature-flagged DATA_BACKEND=op (auth, jobs, completion, equipment) with Monday.com fallback
 - [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging)
 - [ ] Reminder system (unassigned deliveries approaching, overdue completions)
 - [ ] Change notifications to freelancers (date/time/venue changes → email alert)
 - [ ] "On the road" status tracking: dispatched, arrived, issues, completed
 - [ ] Issues on road reporting (breakdowns, delays, problems)
-- [ ] Freelancer portal repointing: Monday.com → OP backend API (auth, jobs, completion, equipment, files)
 - [ ] PDF delivery note generation (migrate from Netlify function to OP backend)
 - [ ] Client delivery note emails via OP email service
 
