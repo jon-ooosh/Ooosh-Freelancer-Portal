@@ -97,6 +97,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!personId);
   const [showFreelancer, setShowFreelancer] = useState(false);
+  const [recordVersion, setRecordVersion] = useState<number | null>(null);
   const [emailWarning, setEmailWarning] = useState<{ name: string; id: string } | null>(null);
   const emailCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -136,6 +137,7 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         freelancer_references: (data.freelancer_references as string) || '',
       });
       setShowFreelancer((data.is_freelancer as boolean) || false);
+      if (data.version !== undefined) setRecordVersion(data.version as number);
     } catch {
       setError('Failed to load person');
     } finally {
@@ -220,7 +222,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
       };
 
       if (isEdit) {
-        await api.put(`/people/${personId}`, body);
+        const putBody = recordVersion !== null ? { ...body, version: recordVersion } : body;
+        const result = await api.put<Record<string, unknown>>(`/people/${personId}`, putBody);
+        if (result.version !== undefined) setRecordVersion(result.version as number);
       } else {
         await api.post('/people', body);
       }

@@ -53,6 +53,7 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!venueId);
+  const [recordVersion, setRecordVersion] = useState<number | null>(null);
 
   const isEdit = !!venueId;
 
@@ -82,6 +83,7 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
         default_return_cost: data.default_return_cost != null ? String(data.default_return_cost) : '',
         tags: (data.tags as string[]) || [],
       });
+      if (data.version !== undefined) setRecordVersion(data.version as number);
     } catch {
       setError('Failed to load venue');
     } finally {
@@ -136,7 +138,9 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
       };
 
       if (isEdit) {
-        await api.put(`/venues/${venueId}`, body);
+        const putBody = recordVersion !== null ? { ...body, version: recordVersion } : body;
+        const result = await api.put<Record<string, unknown>>(`/venues/${venueId}`, putBody);
+        if (result.version !== undefined) setRecordVersion(result.version as number);
       } else {
         await api.post('/venues', body);
       }

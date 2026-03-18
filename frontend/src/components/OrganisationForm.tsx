@@ -44,6 +44,7 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!orgId);
+  const [recordVersion, setRecordVersion] = useState<number | null>(null);
 
   const isEdit = !!orgId;
 
@@ -66,6 +67,7 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
         notes: (data.notes as string) || '',
         tags: (data.tags as string[]) || [],
       });
+      if (data.version !== undefined) setRecordVersion(data.version as number);
     } catch {
       setError('Failed to load organisation');
     } finally {
@@ -111,7 +113,9 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
       };
 
       if (isEdit) {
-        await api.put(`/organisations/${orgId}`, body);
+        const putBody = recordVersion !== null ? { ...body, version: recordVersion } : body;
+        const result = await api.put<Record<string, unknown>>(`/organisations/${orgId}`, putBody);
+        if (result.version !== undefined) setRecordVersion(result.version as number);
       } else {
         await api.post('/organisations', body);
       }

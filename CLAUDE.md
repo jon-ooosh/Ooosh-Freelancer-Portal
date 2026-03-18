@@ -88,9 +88,10 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │       │   ├── PipelinePage.tsx                    # Kanban board
 │       │   ├── TeamPage.tsx
 │       │   ├── SettingsPage.tsx
+│       │   ├── ProfilePage.tsx                  # User profile: avatar upload, password change, name edit
 │       │   └── DuplicatesPage.tsx
 │       ├── components/
-│       │   ├── Layout.tsx              # Nav with "Address Book" and "Jobs" submenus
+│       │   ├── Layout.tsx              # Nav with "Address Book"/"Jobs" submenus + user avatar dropdown
 │       │   ├── TransportCalculator.tsx  # Full calculator modal (delivery/collection/crewed)
 │       │   ├── FileUpload.tsx
 │       │   ├── ActivityTimeline.tsx
@@ -130,6 +131,68 @@ cd frontend && npm run build       # Production build
 # Server deployment
 cd deploy && bash deploy.sh        # Pull, build, restart on server
 ```
+
+## Deployment Playbook
+
+When the user asks to "deploy" or "merge and deploy", follow these steps. The production server is at `49.13.158.66` and the user SSHs in as root.
+
+### Multi-branch merge & deploy
+
+When work has been done on multiple Claude branches and needs merging to a deployment branch:
+
+1. **Identify branches to merge.** The user will tell you which branches contain new work.
+2. **Pick or create a target branch** (usually the branch the server is currently on — check with `git branch` on server).
+3. **Provide the user with these commands to run on the server** (Claude cannot SSH):
+
+```bash
+# On the production server (ssh root@49.13.158.66)
+cd /var/www/ooosh-portal
+
+# Step 1: Fetch the branches
+git fetch origin <branch-1>
+git fetch origin <branch-2>
+
+# Step 2: Checkout the target branch
+git checkout <target-branch>
+git pull origin <target-branch>
+
+# Step 3: Merge each source branch
+git merge origin/<branch-1>
+git merge origin/<branch-2>
+# (resolve conflicts if any, then git add + git commit)
+
+# Step 4: Run migrations (if any new ones)
+cd backend && npm run db:migrate
+
+# Step 5: Build
+cd /var/www/ooosh-portal/backend && npm run build
+cd /var/www/ooosh-portal/frontend && npm run build
+
+# Step 6: Restart the service
+sudo systemctl restart ooosh-portal
+
+# Step 7: Verify
+sudo systemctl status ooosh-portal
+# Check logs for errors:
+journalctl -u ooosh-portal -n 50 --no-pager
+```
+
+### Quick deploy (same branch, just pull latest)
+
+```bash
+cd /var/www/ooosh-portal
+git pull origin <current-branch>
+cd backend && npm run build
+cd ../frontend && npm run build
+sudo systemctl restart ooosh-portal
+sudo systemctl status ooosh-portal
+```
+
+### Post-deploy checks
+- Service should show `active (running)` within a few seconds
+- Check `journalctl -u ooosh-portal -n 50` for any startup errors (DB connection, migration issues, missing env vars)
+- Test the site at `https://staff.oooshtours.co.uk/`
+- If migrations fail, check the error and fix — the migration runner skips already-applied migrations, so re-running is safe
 
 ## Login Credentials (Demo Seed)
 
@@ -375,7 +438,7 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
 - [ ] Excess payment events recorded in Ooosh (financial record, not pipeline change)
 - [ ] Payment confirmation → pipeline status change (deposit = confirmed)
 
-#### Step 6: Operations Modules (Hire Readiness) ← PLANNING COMPLETE
+#### Step 6: Operations Modules (Hire Readiness) ← STREAM 1 FOUNDATION MOSTLY COMPLETE
 
 **Architecture:** Each confirmed job gets a **Prep Checklist** (the new default tab on Job Detail, replacing the old Overview). Each checklist item is a *requirement* — things that need doing before a job can go out. Requirements link into deeper per-job tabs, global overview pages, or expand inline for simple items.
 
@@ -388,12 +451,12 @@ Repoint payment portal from Monday.com → Ooosh status-transition API.
 - **Freelancer portal integration** — crew assignments, delivery jobs, studio sitter assignments all need to be readable/writable from the freelancer portal (currently reads from Monday.com, needs repointing to OP).
 
 ##### Stream 1: Core Requirements System (FOUNDATION — do first)
-- [ ] `job_requirements` table + migration
-- [ ] Requirements API: CRUD, non-linear status changes, templates
-- [ ] Wire Prep Checklist to real data (replace dummy prototype)
-- [ ] Replace Overview tab with Prep Checklist as default job tab
-- [ ] Non-linear status badges (styled like pipeline status dropdowns)
-- [ ] Progress indicators on Jobs list page (real data)
+- [x] `job_requirements` table + migration (migration 021)
+- [x] Requirements API: CRUD, non-linear status changes, templates
+- [x] Wire Prep Checklist to real data (replace dummy prototype)
+- [x] Replace Overview tab with Prep Checklist as default job tab (now called "Job Requirements")
+- [x] Non-linear status badges (styled like pipeline status dropdowns)
+- [x] Progress indicators on Jobs list page + Pipeline kanban cards (real data via bulk endpoint)
 - [ ] Deposit/payment progress bar on Prep Checklist (visual: deposit taken vs full fee)
 - [ ] "Compare" function: what we've said we need vs what HH tells us (flag discrepancies)
 
@@ -447,11 +510,20 @@ Per-job financial tracking, summarised on Dashboard rather than its own global p
 
 ##### Stream 7: Transport & Crew Operations
 Global operational view for what's currently happening / about to happen with transport and crew.
-- [ ] Transport operations page (`/operations/transport`): date/time/venue/who/status per delivery
-- [ ] Crew operations page (`/operations/crew`): who's assigned where, confirmation status
+**Full spec:** `docs/TRANSPORT-CREW-OPS-SPEC.md` — covers Monday.com board replacement, freelancer portal repointing, completion flow, and implementation plan.
+- [ ] Transport operations page (`/operations/transport`): replaces Monday.com D&C board
+- [ ] Crew operations page (`/operations/crew`): replaces Monday.com Crewed Jobs board
+- [ ] Operational status on quotes (`ops_status`: todo → arranging → arranged → dispatched → arrived → completed)
+- [ ] Completion tracking (signature, photos, notes, customer present toggle)
+- [ ] Arranging details (key points, client introductions, tolls/accommodation/flight booking status)
+- [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging)
+- [ ] Reminder system (unassigned deliveries approaching, overdue completions)
+- [ ] Change notifications to freelancers (date/time/venue changes → email alert)
 - [ ] "On the road" status tracking: dispatched, arrived, issues, completed
 - [ ] Issues on road reporting (breakdowns, delays, problems)
-- [ ] Freelancer portal: repoint from Monday.com to OP (crew can see their assignments, confirm, report issues)
+- [ ] Freelancer portal repointing: Monday.com → OP backend API (auth, jobs, completion, equipment, files)
+- [ ] PDF delivery note generation (migrate from Netlify function to OP backend)
+- [ ] Client delivery note emails via OP email service
 
 ##### Carnets (inline on Prep Checklist, with global overview)
 - [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed
@@ -484,6 +556,13 @@ Global operational view for what's currently happening / about to happen with tr
   - [x] Return window logic (midday day before through return_date)
   - [x] Time-based filter dropdown (Out Now / Next 2 Weeks / Over 2 Weeks)
   - [x] Prep Checklist prototype tab on Job Detail (dummy data, interactive demo)
+- [x] **User profiles & nav redesign** (17 Mar 2026)
+  - [x] Migration 023: avatar_url, force_password_change, password_changed_at on users
+  - [x] Profile page (`/profile`): edit name, upload avatar photo, change password
+  - [x] Nav bar redesign: user avatar + name as dropdown with My Profile / Settings / Sign out
+  - [x] Settings link removed from main nav, now in user dropdown (admin/manager only)
+  - [x] Admin force-password-reset from Settings page (sets temp password + force_password_change flag)
+  - [x] Avatar stored in R2 under `avatars/{userId}/`, displayed in nav bar and user lists
 - [ ] **Tasks system** — general-purpose task management (not tied to specific jobs)
   - Freelancer application review workflow
   - Annual licence/detail review reminders
@@ -628,11 +707,15 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 **Authentication & Authorization:**
 - [x] JWT access tokens (15 min) + refresh tokens (7 days)
 - [x] Bcrypt password hashing (12 salt rounds)
-- [x] RBAC middleware (`authorize()`) on sensitive routes
+- [x] RBAC middleware (`authorize()`) on sensitive routes — 6 roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, `freelancer`
+- [x] Account locking — `is_active = false` nulls refresh token via DB trigger, locks user out within 15 min (access token expiry)
+- [x] Optimistic locking — `version` column on people, organisations, venues, jobs tables. PUT requests can send `version` to detect concurrent edits (409 Conflict if stale). Backwards compatible — omitting `version` skips the check.
 - [x] JWT_SECRET required via env var (no default fallback) — app won't start without it
 - [x] Startup validation: JWT_SECRET must be set and ≥32 characters, DATABASE_URL required
 - [x] Rate limiting on login (10 attempts per 15 min per IP) and token refresh (20 per 15 min)
 - [x] Logout endpoint (`POST /api/auth/logout`) — nulls refresh token
+- [x] Password change (self-service `POST /auth/change-password`, admin force-reset `POST /users/:id/force-password`)
+- [x] User profile page with avatar upload, name editing
 - [x] Socket.io JWT authentication middleware — connections require valid token
 
 **Data Security:**
@@ -912,6 +995,11 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 
 ### Email (migration 016)
 `email_log` — audit trail for all outbound emails (template, recipient, status, mode)
+
+### User Profiles (migration 023)
+`users.avatar_url` — R2 key for profile photo
+`users.force_password_change` — admin-set flag, prompts user on next login
+`users.password_changed_at` — tracks when password was last changed
 
 ## Architecture Notes
 

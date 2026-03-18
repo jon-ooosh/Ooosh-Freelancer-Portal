@@ -258,7 +258,9 @@ router.put('/:id', validate(updatePersonSchema), async (req: AuthRequest, res: R
       return;
     }
 
-    const fields = Object.entries(req.body).filter(([, v]) => v !== undefined);
+    // Optimistic locking: if client sends version, check it matches
+    const clientVersion = req.body.version;
+    const fields = Object.entries(req.body).filter(([k, v]) => v !== undefined && k !== 'version');
     if (fields.length === 0) {
       res.json(current.rows[0]);
       return;
@@ -266,13 +268,26 @@ router.put('/:id', validate(updatePersonSchema), async (req: AuthRequest, res: R
 
     const setClauses = fields.map(([key], i) => `${key} = $${i + 1}`);
     setClauses.push(`updated_at = NOW()`);
+    setClauses.push(`version = version + 1`);
     const values = fields.map(([, v]) => v);
     values.push(req.params.id);
 
+    // Build WHERE clause with optional version check
+    let whereClause = `id = $${values.length} AND is_deleted = false`;
+    if (clientVersion !== undefined) {
+      values.push(clientVersion);
+      whereClause += ` AND version = $${values.length}`;
+    }
+
     const result = await query(
-      `UPDATE people SET ${setClauses.join(', ')} WHERE id = $${values.length} AND is_deleted = false RETURNING *`,
+      `UPDATE people SET ${setClauses.join(', ')} WHERE ${whereClause} RETURNING *`,
       values
     );
+
+    if (result.rows.length === 0 && clientVersion !== undefined) {
+      res.status(409).json({ error: 'This record was modified by someone else. Please reload and try again.' });
+      return;
+    }
 
     await logAudit(req.user!.id, 'people', req.params.id as string, 'update', current.rows[0], result.rows[0]);
 

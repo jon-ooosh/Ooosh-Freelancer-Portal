@@ -74,17 +74,15 @@ router.post('/bulk', async (req: AuthRequest, res: Response) => {
 // ── Add a requirement to a job ───────────────────────────────────────────
 
 const addRequirementSchema = z.object({
-  body: z.object({
-    requirement_type: z.string().min(1),
-    custom_label: z.string().optional(),
-    notes: z.string().optional(),
-    assigned_to: z.string().uuid().optional(),
-    due_date: z.string().optional(),
-    status: z.enum(VALID_STATUSES).optional(),
-    current_step: z.string().optional(),
-    source: z.string().optional(),
-    source_id: z.string().uuid().optional(),
-  }),
+  requirement_type: z.string().min(1),
+  custom_label: z.string().optional(),
+  notes: z.string().optional(),
+  assigned_to: z.string().uuid().optional(),
+  due_date: z.string().optional(),
+  status: z.enum(VALID_STATUSES).optional(),
+  current_step: z.string().optional(),
+  source: z.string().optional(),
+  source_id: z.string().uuid().optional(),
 });
 
 router.post('/job/:jobId', validate(addRequirementSchema), async (req: AuthRequest, res: Response) => {
@@ -193,15 +191,13 @@ router.post('/job/:jobId/template/:templateId', async (req: AuthRequest, res: Re
 // ── Update a requirement (status, step, notes, assigned_to, etc.) ────────
 
 const updateRequirementSchema = z.object({
-  body: z.object({
-    status: z.enum(VALID_STATUSES).optional(),
-    current_step: z.string().nullable().optional(),
-    notes: z.string().nullable().optional(),
-    assigned_to: z.string().uuid().nullable().optional(),
-    due_date: z.string().nullable().optional(),
-    custom_label: z.string().nullable().optional(),
-    sort_order: z.number().optional(),
-  }),
+  status: z.enum(VALID_STATUSES).optional(),
+  current_step: z.string().nullable().optional(),
+  notes: z.string().nullable().optional(),
+  assigned_to: z.string().uuid().nullable().optional(),
+  due_date: z.string().nullable().optional(),
+  custom_label: z.string().nullable().optional(),
+  sort_order: z.number().optional(),
 });
 
 router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest, res: Response) => {

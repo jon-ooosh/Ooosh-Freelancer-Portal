@@ -9,6 +9,7 @@ interface TeamUser {
   role: string;
   first_name: string | null;
   last_name: string | null;
+  avatar_url?: string | null;
 }
 
 interface BackupEntry {
@@ -19,7 +20,7 @@ interface BackupEntry {
   created_at: string;
 }
 
-const ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'] as const;
+const ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer'] as const;
 
 const ROLE_LABELS: Record<string, string> = {
   admin: 'Admin',
@@ -27,6 +28,7 @@ const ROLE_LABELS: Record<string, string> = {
   staff: 'Staff',
   general_assistant: 'General Assistant',
   weekend_manager: 'Weekend Manager',
+  freelancer: 'Freelancer',
 };
 
 const roleBadgeColors: Record<string, string> = {
@@ -35,6 +37,7 @@ const roleBadgeColors: Record<string, string> = {
   staff: 'bg-green-100 text-green-700',
   general_assistant: 'bg-amber-100 text-amber-700',
   weekend_manager: 'bg-purple-100 text-purple-700',
+  freelancer: 'bg-teal-100 text-teal-700',
 };
 
 function getPasswordStrength(pw: string): { score: number; label: string; color: string; checks: string[] } {
@@ -198,6 +201,21 @@ function SettingsContent() {
       loadUsers();
     } catch (err) {
       console.error('Failed to deactivate user:', err);
+    }
+  }
+
+  async function handleForcePassword(userId: string, userName: string) {
+    const newPw = prompt(`Set a new temporary password for ${userName}.\nThey will be prompted to change it on next login.\n\nNew password (min 8 characters):`);
+    if (!newPw) return;
+    if (newPw.length < 8) {
+      alert('Password must be at least 8 characters.');
+      return;
+    }
+    try {
+      await api.post(`/users/${userId}/force-password`, { new_password: newPw });
+      setSuccess(`Password reset for ${userName}. They will be prompted to change it on next login.`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to reset password');
     }
   }
 
@@ -429,9 +447,17 @@ function SettingsContent() {
                 /* View mode */
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-sm font-bold flex-shrink-0">
-                      {(u.first_name || u.email)[0].toUpperCase()}
-                    </div>
+                    {u.avatar_url ? (
+                      <img
+                        src={`/api/files/download?key=${encodeURIComponent(u.avatar_url)}`}
+                        alt=""
+                        className="w-9 h-9 rounded-full object-cover flex-shrink-0"
+                      />
+                    ) : (
+                      <div className="w-9 h-9 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-sm font-bold flex-shrink-0">
+                        {(u.first_name || u.email)[0].toUpperCase()}
+                      </div>
+                    )}
                     <div>
                       <div className="text-sm font-medium text-gray-900">
                         {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
@@ -450,12 +476,20 @@ function SettingsContent() {
                       Edit
                     </button>
                     {u.id !== currentUser?.id && (
-                      <button
-                        onClick={() => handleDeactivate(u.id)}
-                        className="text-xs text-gray-400 hover:text-red-600 transition-colors px-2 py-1"
-                      >
-                        Deactivate
-                      </button>
+                      <>
+                        <button
+                          onClick={() => handleForcePassword(u.id, `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email)}
+                          className="text-xs text-gray-400 hover:text-amber-600 transition-colors px-2 py-1"
+                        >
+                          Reset Password
+                        </button>
+                        <button
+                          onClick={() => handleDeactivate(u.id)}
+                          className="text-xs text-gray-400 hover:text-red-600 transition-colors px-2 py-1"
+                        >
+                          Deactivate
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>

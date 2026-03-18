@@ -621,7 +621,7 @@ export default function JobsPage() {
                     <table className="min-w-full divide-y divide-gray-200">
                       {renderTableHeader()}
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {sectionJobs.map((job) => renderJobRow(job, section === 'Next 2 Weeks'))}
+                        {sectionJobs.map((job) => renderJobRow(job, true))}
                       </tbody>
                     </table>
                   </div>
