@@ -314,14 +314,14 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt }: {
 }
 
 // ── Quick Assign Driver + Vehicle to Job (for testing) ──────────────────
-function QuickAssignButton({ jobId, onCreated }: { jobId: string; onCreated: () => void }) {
+function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: string; jobDate?: string; returnDate?: string; onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [drivers, setDrivers] = useState<any[]>([]);
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [driverId, setDriverId] = useState('');
   const [vehicleId, setVehicleId] = useState('');
-  const [hireStart, setHireStart] = useState(new Date().toISOString().substring(0, 10));
-  const [hireEnd, setHireEnd] = useState('');
+  const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : new Date().toISOString().substring(0, 10));
+  const [hireEnd, setHireEnd] = useState(returnDate ? returnDate.substring(0, 10) : '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -874,7 +874,7 @@ export default function JobDetailPage() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold text-gray-900">Drivers & Vehicles</h3>
-            {id && <QuickAssignButton jobId={id} onCreated={loadVehicleAssignments} />}
+            {id && <QuickAssignButton jobId={id} jobDate={job.job_date || undefined} returnDate={job.return_date || undefined} onCreated={loadVehicleAssignments} />}
           </div>
 
           {/* Referral/excess warnings */}

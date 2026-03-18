@@ -46,6 +46,11 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── backups.ts     # Database backup management
 │   │   │   ├── email.ts       # Email service admin endpoints
 │   │   │   ├── driver-verification.ts  # Public-facing hire form endpoints (own JWT auth)
+│   │   │   ├── drivers.ts     # Drivers CRUD
+│   │   │   ├── assignments.ts # Vehicle hire assignments
+│   │   │   ├── excess.ts      # Insurance excess tracking
+│   │   │   ├── hire-forms.ts  # Hire form CRUD, PDF generation, quick-assign
+│   │   │   ├── webhooks.ts    # HireHop inbound webhooks + external status transition
 │   │   │   └── health.ts
 │   │   ├── config/
 │   │   │   ├── hirehop.ts     # HireHop API configuration
@@ -56,10 +61,12 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   ├── services/
 │   │   │   ├── hirehop-sync.ts             # HireHop contact sync (read-only)
 │   │   │   ├── hirehop-job-sync.ts         # HireHop job sync (read-only)
+│   │   │   ├── hirehop-writeback.ts        # Push pipeline changes to HireHop
 │   │   │   ├── crew-transport-calculator.ts # Delivery/collection/crewed cost engine
 │   │   │   ├── hirehop-broker.ts          # Centralised HireHop API gateway (rate limit, cache, queue)
 │   │   │   ├── email-service.ts           # Email sending with SMTP, templates, test mode, audit
-│   │   │   └── email-templates/           # HTML email templates (base layout + per-template)
+│   │   │   ├── email-templates/           # HTML email templates (base layout + per-template)
+│   │   │   └── hire-form-pdf.ts           # PDF generation for driver hire forms (pdf-lib)
 │   │   ├── middleware/      # Auth, RBAC, validation (zod)
 │   │   ├── migrations/     # PostgreSQL migrations (hardcoded list in run.ts)
 │   │   │   ├── 001_foundation.sql         # Core tables: people, orgs, venues, interactions, users
@@ -374,11 +381,14 @@ Existing hire form app is NOT being rebuilt — just repointing its data layer f
 - [x] Mounted in routes/index.ts at `/driver-verification`
 - [x] Env vars needed: `HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`
 
-*Phase C2: Read path (OP vehicle module pages):*
-- [ ] Repoint `driver-hire-api.ts` — Monday.com GraphQL → OP backend (`GET /api/hire-forms/by-job/:id`)
-- [ ] Repoint `useDriverHireForms.ts` — follows automatically (imports from driver-hire-api)
-- [ ] Ensure OP backend returns data in `DriverHireForm` shape consumers expect
-- [ ] No changes to BookOutPage, AllocationsPage, CheckInPage, CollectionPage
+*Phase C2: Read path (OP vehicle module pages):* ✅ COMPLETE
+- [x] Repoint `driver-hire-api.ts` — Monday.com GraphQL → OP backend (`GET /api/hire-forms/by-job/:id`)
+- [x] Repoint `useDriverHireForms.ts` — follows automatically (imports from driver-hire-api)
+- [x] OP backend returns data in `DriverHireForm` shape consumers expect
+- [x] Hire form PDF generation backend service (`services/hire-form-pdf.ts`) + endpoint (`POST /api/hire-forms/:id/generate-pdf`)
+- [x] PDF stored in R2, emailed to driver via email service
+- [x] Quick-assign driver+vehicle button on Job Detail > Drivers & Vehicles tab (auto-populates job dates)
+- [ ] Wire into BookOutPage, AllocationsPage, CheckInPage, CollectionPage (currently Job Detail only)
 
 *Phase C3: Write path (standalone hire form app)* ✅ COMPLETE
 All Netlify functions repointed with `DATA_BACKEND` feature flag (default: `monday`, switch to `op` when ready):
