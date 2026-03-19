@@ -194,8 +194,12 @@ export function BookOutPage() {
   )
 
   // If pre-selected vehicle and form hasn't been set yet, auto-fill
+  // When both vehicle and job are pre-selected (e.g. from allocations), skip to step 1
   if (preSelectedVehicle && !form.vehicleId) {
     selectVehicle(preSelectedVehicle)
+    if (preSelectedJobId && step === 0) {
+      setStep(1)
+    }
   }
 
   // Allocations data — used for pre-selection from allocations page
@@ -1404,6 +1408,14 @@ function StepDriverHire({
     }
   }
 
+  // Default start/end times to 09:00 when a job is selected and times aren't set
+  const defaultTimesRef = useRef(false)
+  if (form.hireHopJob && !form.hireStartTime && !form.hireEndTime && !defaultTimesRef.current) {
+    defaultTimesRef.current = true
+    onUpdate('hireStartTime', '09:00')
+    onUpdate('hireEndTime', '09:00')
+  }
+
   return (
     <div className="space-y-4">
       {/* Vehicle summary */}
@@ -1557,31 +1569,50 @@ function StepDriverHire({
                 <label className="mb-1.5 block text-sm font-medium text-gray-700">
                   Who is collecting? <span className="text-red-500">*</span>
                 </label>
-                <div className="space-y-1.5">
-                  {hireForms.map(hf => (
-                    <button
-                      key={hf.id}
-                      onClick={() => handleSelectDriver(hf.driverName)}
-                      className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
-                        form.driverName === hf.driverName
-                          ? 'border-green-400 bg-green-50 font-medium text-green-800 ring-1 ring-green-400'
-                          : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
-                      }`}
-                    >
-                      <div>
-                        <span>{hf.driverName}</span>
-                        {hf.clientEmail && (
-                          <span className="ml-2 text-xs text-gray-400">{hf.clientEmail}</span>
+                {/* Check if any hire form has a driver name */}
+                {hireForms.some(hf => hf.driverName) ? (
+                  <div className="space-y-1.5">
+                    {hireForms.filter(hf => hf.driverName).map(hf => (
+                      <button
+                        key={hf.id}
+                        onClick={() => handleSelectDriver(hf.driverName)}
+                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
+                          form.driverName === hf.driverName
+                            ? 'border-green-400 bg-green-50 font-medium text-green-800 ring-1 ring-green-400'
+                            : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
+                        }`}
+                      >
+                        <div>
+                          <span>{hf.driverName}</span>
+                          {hf.clientEmail && (
+                            <span className="ml-2 text-xs text-gray-400">{hf.clientEmail}</span>
+                          )}
+                        </div>
+                        {form.driverName === hf.driverName && (
+                          <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
                         )}
-                      </div>
-                      {form.driverName === hf.driverName && (
-                        <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                      )}
-                    </button>
-                  ))}
-                </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5">
+                      <p className="text-xs text-amber-700">
+                        Assignment found but no driver linked yet — enter driver name below
+                      </p>
+                    </div>
+                    <input
+                      type="text"
+                      value={form.driverName}
+                      onChange={e => onUpdate('driverName', e.target.value)}
+                      placeholder="Driver full name"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                      autoFocus
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Hire dates */}
@@ -1695,7 +1726,7 @@ function StepDriverHire({
                   <label className="mb-1 block text-xs font-medium text-gray-600">Start Time</label>
                   <input
                     type="time"
-                    value={form.hireStartTime || ''}
+                    value={form.hireStartTime || '09:00'}
                     onChange={e => onUpdate('hireStartTime', e.target.value || null)}
                     className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
                   />
@@ -1704,7 +1735,7 @@ function StepDriverHire({
                   <label className="mb-1 block text-xs font-medium text-gray-600">End Time</label>
                   <input
                     type="time"
-                    value={form.hireEndTime || ''}
+                    value={form.hireEndTime || '09:00'}
                     onChange={e => onUpdate('hireEndTime', e.target.value || null)}
                     className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
                   />
