@@ -462,6 +462,18 @@ export default function JobDetailPage() {
   const [venueOptions, setVenueOptions] = useState<{ id: string; name: string; city: string | null }[]>([]);
   const [showVenueDropdown, setShowVenueDropdown] = useState(false);
 
+  // Job organisations (band, promoter, etc.)
+  const [jobOrgs, setJobOrgs] = useState<Array<{
+    id: string; job_id: string; organisation_id: string; role: string;
+    is_primary: boolean; notes: string | null; organisation_name: string; organisation_type: string;
+  }>>([]);
+  const [showAddJobOrg, setShowAddJobOrg] = useState(false);
+  const [jobOrgSearch, setJobOrgSearch] = useState('');
+  const [jobOrgResults, setJobOrgResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [jobOrgSelectedOrg, setJobOrgSelectedOrg] = useState<{ id: string; name: string; type: string } | null>(null);
+  const [jobOrgRole, setJobOrgRole] = useState('band');
+  const [jobOrgSaving, setJobOrgSaving] = useState(false);
+
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
@@ -548,8 +560,25 @@ export default function JobDetailPage() {
       loadInteractions();
       loadQuotes();
       loadVehicleAssignments();
+      loadJobOrgs();
     }
   }, [id]);
+
+  // Search orgs for job-org picker
+  useEffect(() => {
+    if (jobOrgSearch.length < 2) { setJobOrgResults([]); return; }
+    const timeout = setTimeout(async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(
+          `/organisations?search=${encodeURIComponent(jobOrgSearch)}&limit=10`
+        );
+        // Filter out orgs already linked
+        const linkedIds = new Set(jobOrgs.map(jo => jo.organisation_id));
+        setJobOrgResults(data.data.filter(o => !linkedIds.has(o.id)));
+      } catch { /* ignore */ }
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [jobOrgSearch]);
 
   // Load client history when job loads
   useEffect(() => {
@@ -705,6 +734,45 @@ export default function JobDetailPage() {
       navigate(backTo);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadJobOrgs() {
+    if (!id) return;
+    try {
+      const data = await api.get<{ data: typeof jobOrgs }>(`/pipeline/${id}/organisations`);
+      setJobOrgs(data.data);
+    } catch (err) {
+      console.error('Failed to load job organisations:', err);
+    }
+  }
+
+  async function handleAddJobOrg() {
+    if (!jobOrgSelectedOrg || !id) return;
+    setJobOrgSaving(true);
+    try {
+      await api.post(`/pipeline/${id}/organisations`, {
+        organisation_id: jobOrgSelectedOrg.id,
+        role: jobOrgRole,
+      });
+      setShowAddJobOrg(false);
+      setJobOrgSelectedOrg(null);
+      setJobOrgSearch('');
+      loadJobOrgs();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to add organisation');
+    } finally {
+      setJobOrgSaving(false);
+    }
+  }
+
+  async function handleRemoveJobOrg(linkId: string) {
+    if (!id) return;
+    try {
+      await api.delete(`/pipeline/${id}/organisations/${linkId}`);
+      loadJobOrgs();
+    } catch (err) {
+      console.error('Failed to remove job organisation:', err);
     }
   }
 
@@ -916,6 +984,109 @@ export default function JobDetailPage() {
             ))}
           </div>
         )}
+
+        {/* Linked Organisations (Band, Promoter, etc.) */}
+        <div className="mt-4 pt-4 border-t border-gray-100">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Organisations:</span>
+            {jobOrgs.map((jo) => {
+              const roleColors: Record<string, string> = {
+                band: 'bg-purple-100 text-purple-700 border-purple-200',
+                client: 'bg-blue-100 text-blue-700 border-blue-200',
+                promoter: 'bg-red-100 text-red-700 border-red-200',
+                management: 'bg-sky-100 text-sky-700 border-sky-200',
+                label: 'bg-green-100 text-green-700 border-green-200',
+                venue_operator: 'bg-teal-100 text-teal-700 border-teal-200',
+                supplier: 'bg-gray-100 text-gray-700 border-gray-200',
+              };
+              return (
+                <span key={jo.id} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${roleColors[jo.role] || 'bg-gray-100 text-gray-700 border-gray-200'}`}>
+                  <span className="opacity-70 capitalize">{jo.role.replace('_', ' ')}:</span>
+                  <Link to={`/organisations/${jo.organisation_id}`} className="hover:underline font-semibold">
+                    {jo.organisation_name}
+                  </Link>
+                  <button
+                    onClick={() => handleRemoveJobOrg(jo.id)}
+                    className="ml-0.5 opacity-40 hover:opacity-100 transition-opacity"
+                    title="Remove"
+                  >
+                    &times;
+                  </button>
+                </span>
+              );
+            })}
+            {!showAddJobOrg ? (
+              <button
+                onClick={() => { setShowAddJobOrg(true); setJobOrgSelectedOrg(null); setJobOrgSearch(''); }}
+                className="inline-flex items-center px-2 py-1 text-xs text-gray-500 hover:text-ooosh-600 hover:bg-gray-50 rounded border border-dashed border-gray-300 transition-colors"
+              >
+                + Add
+              </button>
+            ) : (
+              <div className="flex items-center gap-2 flex-wrap">
+                {!jobOrgSelectedOrg ? (
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={jobOrgSearch}
+                      onChange={(e) => setJobOrgSearch(e.target.value)}
+                      placeholder="Search organisations..."
+                      className="border border-gray-300 rounded px-2 py-1 text-xs w-48 focus:ring-ooosh-500 focus:border-ooosh-500"
+                      autoFocus
+                    />
+                    {jobOrgResults.length > 0 && (
+                      <div className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 w-64 max-h-48 overflow-y-auto">
+                        {jobOrgResults.map((o) => (
+                          <button
+                            key={o.id}
+                            onClick={() => { setJobOrgSelectedOrg(o); setJobOrgResults([]); }}
+                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-xs flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                          >
+                            <span className="font-medium">{o.name}</span>
+                            <span className="text-gray-400">{o.type}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <span className="text-xs font-medium text-gray-900 bg-gray-100 px-2 py-1 rounded">
+                      {jobOrgSelectedOrg.name}
+                    </span>
+                    <select
+                      value={jobOrgRole}
+                      onChange={(e) => setJobOrgRole(e.target.value)}
+                      className="border border-gray-300 rounded px-2 py-1 text-xs"
+                    >
+                      <option value="band">Band</option>
+                      <option value="client">Client</option>
+                      <option value="promoter">Promoter</option>
+                      <option value="management">Management</option>
+                      <option value="label">Label</option>
+                      <option value="venue_operator">Venue Operator</option>
+                      <option value="supplier">Supplier</option>
+                      <option value="other">Other</option>
+                    </select>
+                    <button
+                      onClick={handleAddJobOrg}
+                      disabled={jobOrgSaving}
+                      className="px-2 py-1 text-xs bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
+                    >
+                      {jobOrgSaving ? '...' : 'Add'}
+                    </button>
+                  </>
+                )}
+                <button
+                  onClick={() => { setShowAddJobOrg(false); setJobOrgSelectedOrg(null); setJobOrgSearch(''); }}
+                  className="text-xs text-gray-400 hover:text-gray-600"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Tabs */}

@@ -57,6 +57,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '024_hire_form_pdf.sql',
         '025_portal_password.sql',
         '026_fix_calculation_mode.sql',
+        '027_organisation_relationships.sql',
       ];
 
       for (const migration of migrations) {

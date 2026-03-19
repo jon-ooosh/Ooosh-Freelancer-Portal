@@ -118,7 +118,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const jobsResult = await query(
       `SELECT j.*,
         m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name,
-        m2p.first_name as manager2_first_name, m2p.last_name as manager2_last_name
+        m2p.first_name as manager2_first_name, m2p.last_name as manager2_last_name,
+        (SELECT o.name FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
+         WHERE jo.job_id = j.id AND jo.role = 'band' LIMIT 1) as band_name,
+        (SELECT json_agg(json_build_object('id', jo.id, 'role', jo.role, 'organisation_name', o.name, 'organisation_type', o.type, 'organisation_id', jo.organisation_id))
+         FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
+         WHERE jo.job_id = j.id) as linked_organisations
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id
@@ -593,6 +598,92 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     console.error('Client history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// JOB ORGANISATIONS — Multi-org links per job (band, client, promoter, etc.)
+// ============================================================================
+
+const createJobOrgSchema = z.object({
+  organisation_id: z.string().uuid(),
+  role: z.enum(['band', 'client', 'promoter', 'venue_operator', 'management', 'label', 'supplier', 'other']),
+  is_primary: z.boolean().optional().default(false),
+  notes: z.string().optional().nullable(),
+});
+
+// GET /api/pipeline/:jobId/organisations
+router.get('/:jobId/organisations', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT jo.*, o.name as organisation_name, o.type as organisation_type
+       FROM job_organisations jo
+       JOIN organisations o ON o.id = jo.organisation_id AND o.is_deleted = false
+       WHERE jo.job_id = $1
+       ORDER BY jo.role, o.name`,
+      [req.params.jobId]
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('Get job organisations error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/pipeline/:jobId/organisations
+router.post('/:jobId/organisations', validate(createJobOrgSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { organisation_id, role, is_primary, notes } = req.body;
+
+    // Verify job exists
+    const job = await query('SELECT id FROM jobs WHERE id = $1 AND is_deleted = false', [req.params.jobId]);
+    if (job.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const result = await query(
+      `INSERT INTO job_organisations (job_id, organisation_id, role, is_primary, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [req.params.jobId, organisation_id, role, is_primary, notes, req.user!.id]
+    );
+
+    // Fetch with org name
+    const full = await query(
+      `SELECT jo.*, o.name as organisation_name, o.type as organisation_type
+       FROM job_organisations jo
+       JOIN organisations o ON o.id = jo.organisation_id
+       WHERE jo.id = $1`,
+      [result.rows[0].id]
+    );
+
+    res.status(201).json(full.rows[0]);
+  } catch (error: any) {
+    if (error.constraint === 'uq_job_org_role') {
+      res.status(409).json({ error: 'This organisation already has this role on this job' });
+      return;
+    }
+    console.error('Create job organisation error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/pipeline/:jobId/organisations/:linkId
+router.delete('/:jobId/organisations/:linkId', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      'DELETE FROM job_organisations WHERE id = $1 AND job_id = $2 RETURNING *',
+      [req.params.linkId, req.params.jobId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Link not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error('Delete job organisation error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
