@@ -81,6 +81,68 @@ export interface PersonOrganisationRole {
   updated_at: string;
 }
 
+// Organisation-to-Organisation relationship types
+export type OrgRelationshipType = 'manages' | 'books_for' | 'does_accounts_for' | 'promotes' | 'supplies' | 'represents' | 'other';
+
+// Bidirectional display labels for org relationships
+export const ORG_RELATIONSHIP_LABELS: Record<OrgRelationshipType, { forward: string; reverse: string }> = {
+  manages: { forward: 'Manages', reverse: 'Managed by' },
+  books_for: { forward: 'Books for', reverse: 'Booked by' },
+  does_accounts_for: { forward: 'Does accounts for', reverse: 'Accounts done by' },
+  promotes: { forward: 'Promotes', reverse: 'Promoted by' },
+  supplies: { forward: 'Supplies', reverse: 'Supplied by' },
+  represents: { forward: 'Represents', reverse: 'Represented by' },
+  other: { forward: 'Related to', reverse: 'Related to' },
+};
+
+export interface OrganisationRelationship {
+  id: string;
+  from_org_id: string;
+  to_org_id: string;
+  relationship_type: OrgRelationshipType;
+  status: 'active' | 'historical';
+  start_date: string | null;
+  end_date: string | null;
+  notes: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  // Joined fields for display
+  from_org_name?: string;
+  from_org_type?: string;
+  to_org_name?: string;
+  to_org_type?: string;
+}
+
+// Job-Organisation link roles
+export type JobOrgRole = 'band' | 'client' | 'promoter' | 'venue_operator' | 'management' | 'label' | 'supplier' | 'other';
+
+export const JOB_ORG_ROLE_LABELS: Record<JobOrgRole, string> = {
+  band: 'Band',
+  client: 'Client',
+  promoter: 'Promoter',
+  venue_operator: 'Venue Operator',
+  management: 'Management',
+  label: 'Label',
+  supplier: 'Supplier',
+  other: 'Other',
+};
+
+export interface JobOrganisation {
+  id: string;
+  job_id: string;
+  organisation_id: string;
+  role: JobOrgRole;
+  is_primary: boolean;
+  notes: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  // Joined fields for display
+  organisation_name?: string;
+  organisation_type?: string;
+}
+
 export interface Venue {
   id: string;
   name: string;

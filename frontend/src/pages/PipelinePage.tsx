@@ -268,9 +268,16 @@ function PipelineCard({
       </div>
 
       {/* Row 3: Client */}
-      <div className="text-xs text-gray-500 truncate mb-2">
+      <div className="text-xs text-gray-500 truncate mb-0.5">
         {job.company_name || job.client_name || '—'}
       </div>
+
+      {/* Row 3b: Band (if linked) */}
+      {(job as any).band_name && (
+        <div className="text-xs text-purple-600 truncate mb-1">
+          <span className="text-purple-400">Band:</span> {(job as any).band_name}
+        </div>
+      )}
 
       {/* Row 4: Dates */}
       {job.job_date && (
@@ -754,6 +761,12 @@ function NewEnquiryModal({
   const [error, setError] = useState('');
   const [showOptional, setShowOptional] = useState(false);
 
+  // Band picker
+  const [bandName, setBandName] = useState('');
+  const [bandId, setBandId] = useState<string | null>(null);
+  const [bandSearch, setBandSearch] = useState('');
+  const [bandResults, setBandResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+
   // File staging
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const [fileTag, setFileTag] = useState('');
@@ -805,6 +818,20 @@ function NewEnquiryModal({
         .catch(() => {});
     }
   }, [isOpen]);
+
+  // Band search
+  useEffect(() => {
+    if (bandSearch.length < 2) { setBandResults([]); return; }
+    const timeout = setTimeout(async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(
+          `/organisations?search=${encodeURIComponent(bandSearch)}&limit=8`
+        );
+        setBandResults(data.data);
+      } catch { /* ignore */ }
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [bandSearch]);
 
   // Escape key to close
   useEffect(() => {
@@ -933,6 +960,18 @@ function NewEnquiryModal({
         chase_alert_user_id: chaseAlertUserId || undefined,
       });
 
+      // Link band if selected
+      if (bandId && created.id) {
+        try {
+          await api.post(`/pipeline/${created.id}/organisations`, {
+            organisation_id: bandId,
+            role: 'band',
+          });
+        } catch (err) {
+          console.error('Failed to link band:', err);
+        }
+      }
+
       // Upload staged files
       if (stagedFiles.length > 0 && created.id) {
         for (const staged of stagedFiles) {
@@ -956,6 +995,7 @@ function NewEnquiryModal({
       setOutLinked(true); setReturnLinked(true);
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setClientHistory(null);
+      setBandName(''); setBandId(null); setBandSearch(''); setBandResults([]);
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
       setNextChaseDate(addDaysToDate(5)); setSelectedChasePreset('5 days'); setChaseAlertUserId('');
@@ -993,6 +1033,48 @@ function NewEnquiryModal({
             />
             {clientId && (
               <p className="text-xs text-green-600 mt-1">Linked to organisation</p>
+            )}
+          </div>
+
+          {/* Band picker (optional) */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Band / Act <span className="text-gray-400 font-normal">(optional)</span>
+            </label>
+            {bandId ? (
+              <div className="flex items-center gap-2 bg-purple-50 border border-purple-200 rounded px-3 py-2">
+                <span className="text-sm font-medium text-purple-700">{bandName}</span>
+                <button
+                  onClick={() => { setBandId(null); setBandName(''); setBandSearch(''); }}
+                  className="ml-auto text-xs text-purple-400 hover:text-purple-600"
+                >
+                  &times; Remove
+                </button>
+              </div>
+            ) : (
+              <div className="relative">
+                <input
+                  type="text"
+                  value={bandSearch}
+                  onChange={(e) => setBandSearch(e.target.value)}
+                  placeholder="Search for band or organisation..."
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                />
+                {bandResults.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-48 overflow-y-auto">
+                    {bandResults.map((o) => (
+                      <button
+                        key={o.id}
+                        onClick={() => { setBandId(o.id); setBandName(o.name); setBandResults([]); setBandSearch(''); }}
+                        className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                      >
+                        <span className="font-medium">{o.name}</span>
+                        <span className="text-xs text-gray-400">{o.type}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </div>
 

@@ -563,6 +563,32 @@ Global operational view for what's currently happening / about to happen with tr
 
 **Parallelisation notes:** Streams 2-7 can all run simultaneously — they touch different tables, routes, and pages. Stream 1 is the foundation and should complete first (or at least the migration + API), as Streams 2-7 plug requirements into it. Streams 3-5 are fully independent of each other. Stream 6 has a dependency on the organisations table (payment terms) but is otherwise standalone.
 
+#### Pipeline & Enquiry Cleanup ← IN PROGRESS
+
+Two streams of work to improve the pipeline/enquiry/jobs experience:
+
+**Stream A: Job Detail Editing** (next chunk after Stream B)
+The Job Detail page needs inline editing for key fields. Currently status changes are Kanban-only and most fields are read-only.
+- [ ] **HH Job Number** — Where it says "NEW", make clickable/editable. Accept pasted HH URLs (`https://myhirehop.com/job.php?id=15564`) and extract the number. Once linked, sync takes over.
+- [ ] **Dates** — Reuse the four-date linked editor from New Enquiry form (Outgoing↔Job Start, Returning↔Job Finish toggleable links, date constraints enforced)
+- [ ] **Client** — Editable with org/person search picker
+- [ ] **Job name** — Inline editable
+- [ ] **Pipeline fields** — Likelihood, next chase date, job value — all inline editable on Job Detail
+- [ ] **Create in HireHop** button — Push Ooosh-native enquiry to create HH job, write back the number (follow-up after initial editing)
+
+**Stream B: Band-Centric Data Model** ← ACTIVE
+Organisation-to-organisation relationships and multi-org job links. Makes "bands" a first-class concept.
+- [ ] Migration: `organisation_relationships` table (org-to-org links with typed relationships: manages, books_for, does_accounts_for, promotes, supplies)
+- [ ] Migration: `job_organisations` junction table (band, client, promoter, venue_operator, supplier roles per job)
+- [ ] Backend: Org relationships CRUD endpoints
+- [ ] Backend: Job-organisation links CRUD endpoints
+- [ ] Frontend: "Relationships" section on Organisation Detail page (add/remove/view linked orgs with bidirectional display)
+- [ ] Frontend: Band/org links on Job Detail page (add band, client, promoter etc.)
+- [ ] Frontend: Person context surfacing in pickers (show org connections when selecting a person)
+- [ ] Frontend: Band picker on New Enquiry form with smart suggestions from org graph
+- [ ] Org-to-org relationship types: manages↔managed_by, books_for↔booked_by, does_accounts_for↔accounts_done_by, promotes↔promoted_by, supplies↔supplied_by
+- [ ] Person-to-org role types (already exist, confirm complete): Tour Manager, Manager, Production Manager, Engineer, Accountant, Promoter, Crew, Band Member, Driver
+
 #### Remaining Phase 2 work (no strict ordering)
 
 - [ ] **Crew & Transport refinements**
