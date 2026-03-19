@@ -331,6 +331,40 @@ router.get('/by-driver/:driverId', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/hire-forms/active — All active assignments with drivers (recent, non-cancelled) ──
+
+router.get('/active', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT vha.*,
+        fv.reg AS vehicle_reg,
+        d.full_name AS driver_name,
+        d.email AS driver_email,
+        d.licence_points AS driver_points,
+        d.requires_referral,
+        je.excess_amount_required,
+        je.excess_amount_taken,
+        je.excess_status
+      FROM vehicle_hire_assignments vha
+      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN drivers d ON d.id = vha.driver_id
+      LEFT JOIN job_excess je ON je.assignment_id = vha.id
+      WHERE vha.assignment_type = 'self_drive'
+        AND vha.status != 'cancelled'
+        AND d.id IS NOT NULL
+        AND d.full_name IS NOT NULL
+        AND d.full_name != ''
+      ORDER BY vha.created_at DESC
+      LIMIT 100`
+    );
+
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('[hire-forms] Active forms error:', error);
+    res.status(500).json({ error: 'Failed to load active hire forms' });
+  }
+});
+
 // ── POST /api/hire-forms/quick-assign — Quick-create assignment for testing ──
 
 const quickAssignSchema = z.object({

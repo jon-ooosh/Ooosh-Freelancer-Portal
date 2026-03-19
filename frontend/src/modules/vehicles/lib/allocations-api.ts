@@ -3,19 +3,20 @@
  *
  * Reads/writes via the OP assignments compat layer (/api/assignments/compat/allocations)
  * which stores allocations in the vehicle_hire_assignments database table.
+ *
+ * Uses apiFetch for automatic 401 retry with token refresh.
  */
 
 import type { VanAllocation } from '../types/hirehop'
-import { getAuthHeaders } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
-const COMPAT_URL = '/api/assignments/compat/allocations'
+const COMPAT_PATH = '/api/assignments/compat/allocations'
 
 /** Fetch all active allocations from the assignments database */
 export async function getAllocations(): Promise<VanAllocation[]> {
   try {
-    const resp = await fetch(COMPAT_URL, {
-      headers: getAuthHeaders(),
-    })
+    // Use absolute URL but via apiFetch so we get auto-refresh on 401
+    const resp = await apiFetch(COMPAT_PATH)
     if (!resp.ok) return []
     const data = await resp.json() as { allocations?: VanAllocation[] }
     return data.allocations || []
@@ -30,12 +31,9 @@ export async function saveAllocations(
   allocations: VanAllocation[],
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const resp = await fetch(COMPAT_URL, {
+    const resp = await apiFetch(COMPAT_PATH, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...getAuthHeaders(),
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ allocations }),
     })
 

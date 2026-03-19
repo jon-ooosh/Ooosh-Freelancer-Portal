@@ -31,9 +31,11 @@ interface DraftData {
 
 export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const suppressSaveRef = useRef(false)
   const [draftLoaded, setDraftLoaded] = useState<DraftData | null>(null)
   const [draftChecked, setDraftChecked] = useState(false)
+  // When true, all saves are permanently suppressed (draft was dismissed)
+  const [saveSuppressed, setSaveSuppressed] = useState(false)
+  const suppressedRef = useRef(false)
 
   // Check for existing draft on mount
   useEffect(() => {
@@ -80,10 +82,12 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
       signatureBlob: Blob | null
       vehicleReg: string
     }) => {
-      if (disabled || suppressSaveRef.current) return
+      if (disabled || saveSuppressed) return
 
       if (timerRef.current) clearTimeout(timerRef.current)
       timerRef.current = setTimeout(() => {
+        // Double-check suppression inside the debounced callback (captures ref, not stale state)
+        if (suppressedRef.current) return
         const draft: FormDraft = {
           id: flowType,
           flowType,
@@ -105,7 +109,7 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
         })
       }, DEBOUNCE_MS)
     },
-    [flowType, disabled],
+    [flowType, disabled, saveSuppressed],
   )
 
   // Clear draft (call on successful submit)
@@ -117,11 +121,16 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
     setDraftLoaded(null)
   }, [flowType])
 
-  // Dismiss draft without restoring — suppresses autosave so draft isn't re-created
+  // Dismiss draft without restoring — permanently suppresses autosave for this session
   const dismissDraft = useCallback(() => {
-    suppressSaveRef.current = true
-    clear()
-  }, [clear])
+    if (timerRef.current) clearTimeout(timerRef.current)
+    suppressedRef.current = true
+    setSaveSuppressed(true)
+    clearDraft(flowType).catch(err => {
+      console.warn('[autosave] Failed to clear draft:', err)
+    })
+    setDraftLoaded(null)
+  }, [flowType])
 
   // Cleanup timer on unmount
   useEffect(() => {

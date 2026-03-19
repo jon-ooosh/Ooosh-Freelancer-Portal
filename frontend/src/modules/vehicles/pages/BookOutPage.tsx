@@ -24,7 +24,7 @@ import { useSettings } from '../hooks/useSettings'
 import { DEFAULT_CHECKLIST_SETTINGS } from '../config/default-checklist-settings'
 import { useGoingOutJobs, useHireHopJob } from '../hooks/useHireHopJobs'
 import { useAllocations } from '../hooks/useAllocations'
-import { useDriverHireForms } from '../hooks/useDriverHireForms'
+import { useDriverHireForms, useActiveHireForms } from '../hooks/useDriverHireForms'
 import { updateDriverHireForm } from '../lib/driver-hire-api'
 import { extractVanRequirements } from '../lib/hirehop-api'
 import { fetchLastEventForVehicle } from '../lib/events-query'
@@ -1555,163 +1555,14 @@ function StepDriverHire({
         )}
       </div>
 
-      {/* Driver selection — unified flow */}
-      {form.hireHopJob ? (
-        <div>
-          {hireFormsLoading ? (
-            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
-              <div className="mx-auto mb-2 h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-ooosh-navy" />
-              <p className="text-xs text-gray-500">Loading registered drivers...</p>
-            </div>
-          ) : hireForms && hireForms.length > 0 ? (
-            <div className="space-y-3">
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-gray-700">
-                  Who is collecting? <span className="text-red-500">*</span>
-                </label>
-                {/* Check if any hire form has a driver name */}
-                {hireForms.some(hf => hf.driverName) ? (
-                  <div className="space-y-1.5">
-                    {hireForms.filter(hf => hf.driverName).map(hf => (
-                      <button
-                        key={hf.id}
-                        onClick={() => handleSelectDriver(hf.driverName)}
-                        className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
-                          form.driverName === hf.driverName
-                            ? 'border-green-400 bg-green-50 font-medium text-green-800 ring-1 ring-green-400'
-                            : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
-                        }`}
-                      >
-                        <div>
-                          <span>{hf.driverName}</span>
-                          {hf.clientEmail && (
-                            <span className="ml-2 text-xs text-gray-400">{hf.clientEmail}</span>
-                          )}
-                        </div>
-                        {form.driverName === hf.driverName && (
-                          <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                          </svg>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5">
-                      <p className="text-xs text-amber-700">
-                        Assignment found but no driver linked yet — enter driver name below
-                      </p>
-                    </div>
-                    <input
-                      type="text"
-                      value={form.driverName}
-                      onChange={e => onUpdate('driverName', e.target.value)}
-                      placeholder="Driver full name"
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-                      autoFocus
-                    />
-                  </div>
-                )}
-              </div>
-
-              {/* Hire dates */}
-              {(form.hireStartDate || form.hireEndDate) && (
-                <div className="flex flex-wrap gap-3 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
-                  {form.hireStartDate && (
-                    <span>Start: <strong>{formatShortDate(form.hireStartDate)}{form.hireStartTime ? ` ${form.hireStartTime}` : ''}</strong></span>
-                  )}
-                  {form.hireEndDate && (
-                    <span>End: <strong>{formatShortDate(form.hireEndDate)}{form.hireEndTime ? ` ${form.hireEndTime}` : ''}</strong></span>
-                  )}
-                </div>
-              )}
-
-              {/* Client email — auto-filled from selected driver, editable */}
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">
-                  Client Email
-                </label>
-                <input
-                  type="email"
-                  value={form.clientEmail}
-                  onChange={e => onUpdate('clientEmail', e.target.value)}
-                  placeholder="client@example.com"
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-                />
-                <p className="mt-1 text-xs text-gray-400">For condition report email</p>
-              </div>
-            </div>
-          ) : hireForms && hireForms.length === 0 ? (
-            <div className="space-y-3">
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                <p className="text-xs text-amber-700">
-                  No hire forms found for job #{form.hireHopJob} — enter driver details manually
-                </p>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">
-                  Collecting Driver Name <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={form.driverName}
-                  onChange={e => onUpdate('driverName', e.target.value)}
-                  placeholder="Driver full name"
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-                  autoFocus
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm font-medium text-gray-700">
-                  Client Email
-                </label>
-                <input
-                  type="email"
-                  value={form.clientEmail}
-                  onChange={e => onUpdate('clientEmail', e.target.value)}
-                  placeholder="client@example.com"
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-                />
-                <p className="mt-1 text-xs text-gray-400">For condition report email</p>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : (
-        /* No job selected — just show name + email inputs */
-        <div className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">
-              Collecting Driver Name <span className="text-red-500">*</span>
-            </label>
-            <input
-              type="text"
-              value={form.driverName}
-              onChange={e => onUpdate('driverName', e.target.value)}
-              placeholder="Driver full name"
-              className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-              autoFocus
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-sm font-medium text-gray-700">
-              Client Email
-            </label>
-            <input
-              type="email"
-              value={form.clientEmail}
-              onChange={e => onUpdate('clientEmail', e.target.value)}
-              placeholder="client@example.com"
-              className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-            />
-            <p className="mt-1 text-xs text-gray-400">For condition report email</p>
-          </div>
-        </div>
-      )}
+      {/* Driver selection — hire form based, no manual entry */}
+      <DriverSelection
+        form={form}
+        hireForms={hireForms || null}
+        hireFormsLoading={hireFormsLoading}
+        onSelectDriver={handleSelectDriver}
+        onUpdate={onUpdate}
+      />
 
       {/* Hire form fields — editable, auto-populated from Monday.com */}
       {form.hireHopJob && (
@@ -1767,6 +1618,197 @@ function StepDriverHire({
               <span className="ml-1 text-gray-400">(mirrored — edit in Monday.com)</span>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ──────────────────────────────────────────────
+ * Driver Selection sub-component
+ * Shows drivers from hire forms (job-specific first, then cross-job fallback)
+ * ────────────────────────────────────────────── */
+
+function DriverSelection({
+  form,
+  hireForms,
+  hireFormsLoading,
+  onSelectDriver,
+  onUpdate,
+}: {
+  form: BookOutFormState
+  hireForms: import('../lib/driver-hire-api').DriverHireForm[] | null
+  hireFormsLoading: boolean
+  onSelectDriver: (name: string) => void
+  onUpdate: <K extends keyof BookOutFormState>(key: K, value: BookOutFormState[K]) => void
+}) {
+  // Determine if we need cross-job fallback
+  const jobDrivers = (hireForms || []).filter(hf => hf.driverName)
+  const needsFallback = !hireFormsLoading && hireForms !== null && jobDrivers.length === 0
+
+  // Fetch active hire forms (cross-job) only when needed
+  const { data: activeForms, isLoading: activeFormsLoading } = useActiveHireForms(needsFallback)
+
+  // No job selected — show message
+  if (!form.hireHopJob) {
+    return (
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
+        <p className="text-sm text-gray-500">Select a HireHop job above to see registered drivers</p>
+      </div>
+    )
+  }
+
+  // Loading
+  if (hireFormsLoading) {
+    return (
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
+        <div className="mx-auto mb-2 h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-ooosh-navy" />
+        <p className="text-xs text-gray-500">Loading registered drivers...</p>
+      </div>
+    )
+  }
+
+  // Drivers found for this job — show them
+  if (jobDrivers.length > 0) {
+    return (
+      <div className="space-y-3">
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            Who is collecting? <span className="text-red-500">*</span>
+          </label>
+          <div className="space-y-1.5">
+            {jobDrivers.map(hf => (
+              <button
+                key={hf.id}
+                onClick={() => onSelectDriver(hf.driverName)}
+                className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
+                  form.driverName === hf.driverName
+                    ? 'border-green-400 bg-green-50 font-medium text-green-800 ring-1 ring-green-400'
+                    : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
+                }`}
+              >
+                <div>
+                  <span>{hf.driverName}</span>
+                  {hf.clientEmail && (
+                    <span className="ml-2 text-xs text-gray-400">{hf.clientEmail}</span>
+                  )}
+                </div>
+                {form.driverName === hf.driverName && (
+                  <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Hire dates display */}
+        {(form.hireStartDate || form.hireEndDate) && (
+          <div className="flex flex-wrap gap-3 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-600">
+            {form.hireStartDate && (
+              <span>Start: <strong>{formatShortDate(form.hireStartDate)}{form.hireStartTime ? ` ${form.hireStartTime}` : ''}</strong></span>
+            )}
+            {form.hireEndDate && (
+              <span>End: <strong>{formatShortDate(form.hireEndDate)}{form.hireEndTime ? ` ${form.hireEndTime}` : ''}</strong></span>
+            )}
+          </div>
+        )}
+
+        {/* Client email — auto-filled from driver, editable */}
+        <div>
+          <label className="mb-1 block text-sm font-medium text-gray-700">Client Email</label>
+          <input
+            type="email"
+            value={form.clientEmail}
+            onChange={e => onUpdate('clientEmail', e.target.value)}
+            placeholder="client@example.com"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+          />
+          <p className="mt-1 text-xs text-gray-400">For condition report email</p>
+        </div>
+      </div>
+    )
+  }
+
+  // No drivers for this job — show cross-job fallback
+  const crossJobDrivers = (activeForms || []).filter(hf => hf.driverName)
+  // Deduplicate by driver name
+  const uniqueDrivers = crossJobDrivers.reduce((acc, hf) => {
+    if (!acc.some(d => d.driverName === hf.driverName)) acc.push(hf)
+    return acc
+  }, [] as typeof crossJobDrivers)
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+        <p className="text-xs font-medium text-amber-800">
+          No hire forms received for job #{form.hireHopJob}
+        </p>
+        <p className="mt-1 text-xs text-amber-700">
+          A completed hire form is required before book-out. Select a driver from another job below, or ensure the driver completes their hire form first.
+        </p>
+      </div>
+
+      {activeFormsLoading ? (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+          <div className="mx-auto mb-2 h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-ooosh-navy" />
+          <p className="text-xs text-gray-500">Loading drivers from other jobs...</p>
+        </div>
+      ) : uniqueDrivers.length > 0 ? (
+        <div>
+          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            Select from other jobs <span className="text-red-500">*</span>
+          </label>
+          <div className="max-h-48 space-y-1.5 overflow-y-auto">
+            {uniqueDrivers.map(hf => (
+              <button
+                key={hf.id}
+                onClick={() => {
+                  onSelectDriver(hf.driverName)
+                  if (hf.clientEmail) onUpdate('clientEmail', hf.clientEmail)
+                }}
+                className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
+                  form.driverName === hf.driverName
+                    ? 'border-green-400 bg-green-50 font-medium text-green-800 ring-1 ring-green-400'
+                    : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
+                }`}
+              >
+                <div>
+                  <span>{hf.driverName}</span>
+                  {hf.hireHopJob && (
+                    <span className="ml-2 text-xs text-gray-400">Job #{hf.hireHopJob}</span>
+                  )}
+                </div>
+                {form.driverName === hf.driverName && (
+                  <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Client email */}
+          {form.driverName && (
+            <div className="mt-3">
+              <label className="mb-1 block text-sm font-medium text-gray-700">Client Email</label>
+              <input
+                type="email"
+                value={form.clientEmail}
+                onChange={e => onUpdate('clientEmail', e.target.value)}
+                placeholder="client@example.com"
+                className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+              />
+              <p className="mt-1 text-xs text-gray-400">For condition report email</p>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+          <p className="text-xs text-red-700">
+            No drivers with completed hire forms found. The driver must complete the hire form process before the vehicle can be booked out.
+          </p>
         </div>
       )}
     </div>
