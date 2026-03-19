@@ -380,10 +380,7 @@ export function VehicleDetailPage() {
           label="Warranty Expires" date={vehicle.warrantyExpires} warningDays={60}
           onSaveDate={v => saveField('warranty_expires', v)}
         />
-        <ComplianceDateRow
-          label="Finance Ends" date={vehicle.financeEnds} warningDays={0}
-          onSaveDate={v => saveField('finance_ends', v)}
-        />
+        <EditableRow label="Finance Ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
       </div>
 
       {/* Insurance Details */}

@@ -19,6 +19,7 @@ import { query } from '../config/database';
 import { isHireHopConfigured } from '../config/hirehop';
 import { hhBroker } from '../services/hirehop-broker';
 import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured } from '../config/r2';
+import { emailService } from '../services/email-service';
 
 const router = Router();
 router.use(authenticate);
@@ -1632,22 +1633,318 @@ router.get('/get-events', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Condition Report PDF Generation ──
+
+/**
+ * POST /api/vehicles/generate-pdf
+ * Generate a vehicle condition report PDF (book-out / check-in).
+ * Returns base64-encoded PDF + filename.
+ */
+router.post('/generate-pdf', async (req: AuthRequest, res: Response) => {
+  try {
+    const { PDFDocument, rgb, StandardFonts } = await import('pdf-lib');
+
+    const data = req.body;
+    const pdfDoc = await PDFDocument.create();
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+    const isCheckIn = data.isCheckIn === true;
+    const title = isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Book-Out Report';
+
+    let page = pdfDoc.addPage([595, 842]); // A4
+    let y = 800;
+    const leftMargin = 50;
+    const pageWidth = 595 - 100; // 50px margins
+
+    const drawText = (text: string, x: number, yPos: number, size: number, f = font) => {
+      page.drawText(text, { x, y: yPos, size, font: f, color: rgb(0.1, 0.1, 0.1) });
+    };
+
+    const addPageIfNeeded = (neededSpace: number) => {
+      if (y < neededSpace) {
+        page = pdfDoc.addPage([595, 842]);
+        y = 800;
+      }
+    };
+
+    // Header
+    drawText(title, leftMargin, y, 18, fontBold);
+    y -= 25;
+    drawText(`Generated: ${data.eventDateTime || data.eventDate || new Date().toISOString()}`, leftMargin, y, 9);
+    y -= 20;
+
+    // Divider
+    page.drawLine({ start: { x: leftMargin, y }, end: { x: leftMargin + pageWidth, y }, thickness: 1, color: rgb(0.8, 0.8, 0.8) });
+    y -= 20;
+
+    // Vehicle details
+    drawText('VEHICLE DETAILS', leftMargin, y, 11, fontBold); y -= 18;
+    drawText(`Registration: ${data.vehicleReg || '—'}`, leftMargin, y, 10); y -= 15;
+    drawText(`Type: ${data.vehicleType || '—'}`, leftMargin, y, 10); y -= 15;
+    if (data.vehicleMake) { drawText(`Make: ${data.vehicleMake}`, leftMargin, y, 10); y -= 15; }
+    if (data.vehicleModel) { drawText(`Model: ${data.vehicleModel}`, leftMargin, y, 10); y -= 15; }
+    if (data.vehicleColour) { drawText(`Colour: ${data.vehicleColour}`, leftMargin, y, 10); y -= 15; }
+    y -= 10;
+
+    // Hire details
+    drawText('HIRE DETAILS', leftMargin, y, 11, fontBold); y -= 18;
+    drawText(`Driver: ${data.driverName || '—'}`, leftMargin, y, 10); y -= 15;
+    if (data.clientEmail) { drawText(`Email: ${data.clientEmail}`, leftMargin, y, 10); y -= 15; }
+    if (data.hireHopJob) { drawText(`Job #: ${data.hireHopJob}`, leftMargin, y, 10); y -= 15; }
+    if (data.hireStartDate) { drawText(`Hire Start: ${data.hireStartDate}`, leftMargin, y, 10); y -= 15; }
+    if (data.hireEndDate) { drawText(`Hire End: ${data.hireEndDate}`, leftMargin, y, 10); y -= 15; }
+    if (data.allDrivers && data.allDrivers.length > 1) {
+      drawText(`All Drivers: ${data.allDrivers.join(', ')}`, leftMargin, y, 10); y -= 15;
+    }
+    y -= 10;
+
+    // Vehicle state
+    drawText('VEHICLE STATE', leftMargin, y, 11, fontBold); y -= 18;
+    drawText(`Mileage: ${data.mileage != null ? data.mileage.toLocaleString() : '—'}`, leftMargin, y, 10); y -= 15;
+    drawText(`Fuel Level: ${data.fuelLevel || '—'}`, leftMargin, y, 10); y -= 15;
+
+    if (isCheckIn && data.bookOutMileage != null) {
+      y -= 5;
+      drawText('COMPARISON (vs Book-Out)', leftMargin, y, 11, fontBold); y -= 18;
+      drawText(`Book-Out Mileage: ${data.bookOutMileage.toLocaleString()}`, leftMargin, y, 10); y -= 15;
+      drawText(`Book-Out Fuel: ${data.bookOutFuelLevel || '—'}`, leftMargin, y, 10); y -= 15;
+      if (data.bookOutDate) { drawText(`Book-Out Date: ${data.bookOutDate}`, leftMargin, y, 10); y -= 15; }
+      const milesDriven = (data.mileage || 0) - (data.bookOutMileage || 0);
+      if (milesDriven > 0) { drawText(`Miles Driven: ${milesDriven.toLocaleString()}`, leftMargin, y, 10); y -= 15; }
+    }
+    y -= 10;
+
+    // Briefing items
+    if (data.briefingItems && data.briefingItems.length > 0) {
+      addPageIfNeeded(100);
+      drawText('BRIEFING CHECKLIST', leftMargin, y, 11, fontBold); y -= 18;
+      for (const item of data.briefingItems) {
+        addPageIfNeeded(20);
+        drawText(`  ✓ ${item}`, leftMargin, y, 9); y -= 14;
+      }
+      y -= 10;
+    }
+
+    // Notes
+    if (data.bookOutNotes) {
+      addPageIfNeeded(60);
+      drawText('NOTES', leftMargin, y, 11, fontBold); y -= 18;
+      const lines = data.bookOutNotes.split('\n');
+      for (const line of lines) {
+        addPageIfNeeded(20);
+        drawText(line, leftMargin, y, 9); y -= 14;
+      }
+      y -= 10;
+    }
+
+    // Damage items (check-in)
+    if (isCheckIn && data.damageItems && data.damageItems.length > 0) {
+      addPageIfNeeded(100);
+      drawText('DAMAGE REPORT', leftMargin, y, 11, fontBold); y -= 18;
+      for (const item of data.damageItems) {
+        addPageIfNeeded(50);
+        drawText(`Location: ${item.location}  |  Severity: ${item.severity}`, leftMargin, y, 10, fontBold); y -= 15;
+        drawText(`Description: ${item.description}`, leftMargin, y, 9); y -= 20;
+      }
+      y -= 10;
+    }
+
+    // Photos section (embed thumbnails if base64 provided)
+    if (data.photos && data.photos.length > 0) {
+      addPageIfNeeded(200);
+      drawText('CONDITION PHOTOS', leftMargin, y, 11, fontBold); y -= 20;
+
+      for (const photo of data.photos) {
+        try {
+          if (!photo.base64) continue;
+          addPageIfNeeded(180);
+
+          // Extract raw base64 data
+          const base64Data = photo.base64.includes(',') ? photo.base64.split(',')[1] : photo.base64;
+          const imageBuffer = Buffer.from(base64Data!, 'base64');
+
+          let image;
+          try {
+            image = await pdfDoc.embedJpg(imageBuffer);
+          } catch {
+            try {
+              image = await pdfDoc.embedPng(imageBuffer);
+            } catch {
+              drawText(`[${photo.label}] — image could not be embedded`, leftMargin, y, 9);
+              y -= 15;
+              continue;
+            }
+          }
+
+          // Scale to fit width (max 200px wide, maintain aspect ratio)
+          const maxW = 200;
+          const maxH = 150;
+          const scale = Math.min(maxW / image.width, maxH / image.height, 1);
+          const w = image.width * scale;
+          const h = image.height * scale;
+
+          drawText(photo.label || photo.angle, leftMargin, y, 9, fontBold);
+          y -= h + 5;
+          page.drawImage(image, { x: leftMargin, y, width: w, height: h });
+          y -= 15;
+        } catch (imgErr) {
+          drawText(`[${photo.label}] — failed to embed`, leftMargin, y, 9);
+          y -= 15;
+        }
+      }
+    }
+
+    // Signature
+    if (data.signatureBase64) {
+      try {
+        addPageIfNeeded(120);
+        drawText('DRIVER SIGNATURE', leftMargin, y, 11, fontBold); y -= 20;
+        const sigBase64 = data.signatureBase64.includes(',') ? data.signatureBase64.split(',')[1] : data.signatureBase64;
+        const sigBuffer = Buffer.from(sigBase64!, 'base64');
+        const sigImage = await pdfDoc.embedPng(sigBuffer);
+        const scale = Math.min(200 / sigImage.width, 80 / sigImage.height, 1);
+        const w = sigImage.width * scale;
+        const h = sigImage.height * scale;
+        y -= h;
+        page.drawImage(sigImage, { x: leftMargin, y, width: w, height: h });
+        y -= 15;
+      } catch {
+        drawText('[Signature could not be embedded]', leftMargin, y, 9);
+        y -= 15;
+      }
+    }
+
+    const pdfBytes = await pdfDoc.save();
+    const base64Pdf = Buffer.from(pdfBytes).toString('base64');
+    const filename = `${isCheckIn ? 'check-in' : 'book-out'}_${data.vehicleReg || 'unknown'}_${new Date().toISOString().slice(0, 10)}.pdf`;
+
+    res.json({
+      pdf: base64Pdf,
+      size: pdfBytes.length,
+      filename,
+    });
+  } catch (error) {
+    console.error('[vehicles/pdf] Generate condition report error:', error);
+    res.status(500).json({ error: 'PDF generation failed' });
+  }
+});
+
+// ── Send Email (condition report with PDF attachment) ──
+
+/**
+ * POST /api/vehicles/send-email
+ * Send an email with optional PDF attachment.
+ * Used by book-out/check-in flows to email condition reports.
+ */
+router.post('/send-email', async (req: AuthRequest, res: Response) => {
+  try {
+    const { to, subject, html, pdfBase64, pdfFilename } = req.body;
+
+    if (!to || !subject) {
+      res.status(400).json({ error: 'to and subject are required' });
+      return;
+    }
+
+    const attachments = pdfBase64 && pdfFilename ? [{
+      filename: pdfFilename,
+      content: Buffer.from(pdfBase64, 'base64'),
+      contentType: 'application/pdf' as const,
+    }] : [];
+
+    // Use the email service's sendRaw for plain emails, or direct nodemailer for attachments
+    if (attachments.length > 0) {
+      const nodemailer = await import('nodemailer');
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.gmail.com',
+        port: parseInt(process.env.SMTP_PORT || '587', 10),
+        secure: false,
+        auth: {
+          user: process.env.SMTP_USER || '',
+          pass: process.env.SMTP_PASS || '',
+        },
+      });
+
+      const isTestMode = (process.env.EMAIL_MODE || 'test') === 'test';
+      const actualTo = isTestMode && process.env.EMAIL_TEST_REDIRECT
+        ? process.env.EMAIL_TEST_REDIRECT : to;
+
+      const mailResult = await transporter.sendMail({
+        from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
+        to: actualTo,
+        subject: isTestMode ? `[TEST] ${subject}` : subject,
+        html: html || '',
+        attachments,
+      });
+
+      res.json({ messageId: mailResult.messageId || 'sent' });
+    } else {
+      const result = await emailService.sendRaw({ to, subject, html: html || '' });
+      if (!result.success) {
+        res.status(500).json({ error: result.error || 'Email send failed' });
+        return;
+      }
+      res.json({ messageId: result.messageId || 'sent' });
+    }
+  } catch (error) {
+    console.error('[vehicles/email] Send error:', error);
+    res.status(500).json({ error: 'Email send failed', details: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
 // ── Photo Upload & List ──
 
 /**
  * POST /api/vehicles/upload-photo
  * Upload a photo to R2. Expects multipart form with 'file' and 'key' fields.
  */
-router.post('/upload-photo', async (req: AuthRequest, res: Response) => {
-  try {
-    // This endpoint needs multipart parsing — for now proxy to Netlify
-    // TODO: implement native R2 upload with multer
-    // Falling through to Netlify proxy will handle this
-    res.status(501).json({ error: 'Photo upload not yet migrated — use Netlify proxy' });
-  } catch (error) {
-    console.error('[vehicles/photos] Upload error:', error);
-    res.status(500).json({ error: 'Upload failed' });
-  }
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'));
+    }
+  },
+});
+
+router.post('/upload-photo', (req: AuthRequest, res: Response) => {
+  photoUpload.single('file')(req, res, async (err) => {
+    if (err) {
+      console.error('[vehicles/photos] Multer error:', err);
+      res.status(400).json({ error: err.message || 'Upload failed' });
+      return;
+    }
+
+    try {
+      if (!req.file) {
+        res.status(400).json({ error: 'No file provided' });
+        return;
+      }
+
+      const key = req.body.key as string;
+      if (!key) {
+        res.status(400).json({ error: 'No key provided' });
+        return;
+      }
+
+      // Sanitise key — prevent path traversal
+      const sanitisedKey = key.replace(/\.\./g, '').replace(/^\/+/, '');
+
+      await uploadToR2(sanitisedKey, req.file.buffer, req.file.mimetype);
+
+      res.json({
+        url: sanitisedKey,
+        key: sanitisedKey,
+        bucket: 'operations',
+      });
+    } catch (error) {
+      console.error('[vehicles/photos] Upload error:', error);
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
 });
 
 /**
