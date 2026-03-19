@@ -239,9 +239,10 @@ export default function TransportOpsPage() {
   async function updateRunGroup(quoteId: string, runGroup: string | null, runOrder: number | null) {
     try {
       await api.put(`/quotes/${quoteId}/run-group`, { run_group: runGroup, run_order: runOrder });
-      setQuotes((prev) =>
-        prev.map((q) => (q.id === quoteId ? { ...q, run_group: runGroup, run_order: runOrder } : q))
-      );
+      // Full reload to ensure all quotes see the updated run groups
+      const params = filter !== 'all' ? `?job_type=${filter}` : '';
+      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${params}`);
+      setQuotes(res.data);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update run group');
     }
@@ -845,8 +846,8 @@ function ExpandedDetail({
   }
 
   async function createNewRunGroup() {
-    // Use this quote's ID as the new run group UUID
-    await onUpdateRunGroup(q.id, q.id, 1);
+    const newGroupId = crypto.randomUUID();
+    await onUpdateRunGroup(q.id, newGroupId, 1);
   }
 
   return (
@@ -927,12 +928,14 @@ function ExpandedDetail({
                     </button>
                   );
                 })}
-                <button
-                  onClick={createNewRunGroup}
-                  className="text-xs px-2 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
-                >
-                  + New run
-                </button>
+                {!q.run_group && (
+                  <button
+                    onClick={createNewRunGroup}
+                    className="text-xs px-2 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
+                  >
+                    + New run
+                  </button>
+                )}
               </div>
             </div>
           )}
