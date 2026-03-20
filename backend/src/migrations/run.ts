@@ -58,6 +58,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '025_portal_password.sql',
         '026_fix_calculation_mode.sql',
         '027_organisation_relationships.sql',
+        '028_hh_user_mapping.sql',
       ];
 
       for (const migration of migrations) {

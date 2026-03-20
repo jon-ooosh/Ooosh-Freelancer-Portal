@@ -14,7 +14,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const includeInactive = req.query.include_inactive === 'true';
     const whereClause = includeInactive ? '' : 'WHERE u.is_active = true';
     const result = await query(
-      `SELECT u.id, u.email, u.role, u.is_active, u.last_login, u.avatar_url,
+      `SELECT u.id, u.email, u.role, u.is_active, u.last_login, u.avatar_url, u.hh_user_id,
         p.first_name, p.last_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
@@ -35,13 +35,14 @@ const updateUserSchema = z.object({
   email: z.string().email().optional(),
   role: z.enum(['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager', 'freelancer']).optional(),
   is_active: z.boolean().optional(),
+  hh_user_id: z.number().int().positive().nullable().optional(),
 });
 
 // PUT /api/users/:id — update a user (admin/manager only)
 router.put('/:id', authorize('admin', 'manager'), validate(updateUserSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { first_name, last_name, email, role, is_active } = req.body;
+    const { first_name, last_name, email, role, is_active, hh_user_id } = req.body;
 
     // Update person record (name)
     if (first_name || last_name) {
@@ -94,6 +95,11 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateUserSchema), as
       userParams.push(is_active);
       userParamIndex++;
     }
+    if (hh_user_id !== undefined) {
+      userUpdates.push(`hh_user_id = $${userParamIndex}`);
+      userParams.push(hh_user_id);
+      userParamIndex++;
+    }
 
     if (userUpdates.length > 0) {
       userParams.push(id);
@@ -105,7 +111,7 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateUserSchema), as
 
     // Return updated user
     const result = await query(
-      `SELECT u.id, u.email, u.role, u.is_active, u.avatar_url,
+      `SELECT u.id, u.email, u.role, u.is_active, u.avatar_url, u.hh_user_id,
         p.first_name, p.last_name
        FROM users u
        LEFT JOIN people p ON p.id = u.person_id
