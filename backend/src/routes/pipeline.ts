@@ -865,6 +865,15 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Look up the current user's HireHop user ID for manager assignment
+    let hhUserId: number | null = null;
+    if (req.user?.id) {
+      const userResult = await query('SELECT hh_user_id FROM users WHERE id = $1', [req.user.id]);
+      if (userResult.rows.length > 0 && userResult.rows[0].hh_user_id) {
+        hhUserId = userResult.rows[0].hh_user_id;
+      }
+    }
+
     // Build HireHop job payload
     // HH API: `name` is required for new jobs, `job_name` is the job title
     const hhBody: Record<string, unknown> = {
@@ -873,6 +882,9 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       job_name: job.job_name || '',
       no_webhook: 1,
     };
+
+    // Set manager to the OP user's HH account (avoids "API ONLY" as manager)
+    if (hhUserId) hhBody.user = hhUserId;
 
     if (hhClientId) hhBody.client_id = hhClientId;
     if (job.company_name) hhBody.company = job.company_name;
@@ -903,10 +915,19 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // HireHop returns the job ID in the response
-    const hhJobNumber = hhResponse.data.job || hhResponse.data.JOB_ID;
+    // Log full response to understand structure
+    console.log('[Pipeline] HireHop save_job response:', JSON.stringify(hhResponse.data));
+
+    // HireHop save_job.php returns various field names depending on version
+    // Note: we sent job=0 for create, so HH may echo back job=0 — need to find the CREATED job number
+    const data = hhResponse.data as Record<string, unknown>;
+    // Try multiple possible field names; skip zero (which is our input for "create new")
+    const candidates = [data.JOB_ID, data.NUMBER, data.job_number, data.id, data.ID, data.job_id];
+    // Also check data.job but only if it's non-zero (we sent 0 for create)
+    if (data.job && Number(data.job) > 0) candidates.unshift(data.job);
+    const hhJobNumber = candidates.find(v => v !== undefined && v !== null && v !== '' && Number(v) > 0);
     if (!hhJobNumber) {
-      console.error('[Pipeline] HireHop response missing job ID:', hhResponse.data);
+      console.error('[Pipeline] HireHop response missing job ID. Full response:', JSON.stringify(data));
       res.status(502).json({ error: 'HireHop did not return a job ID' });
       return;
     }

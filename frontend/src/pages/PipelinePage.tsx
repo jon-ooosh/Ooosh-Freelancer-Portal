@@ -854,6 +854,16 @@ function NewEnquiryModal({
     }
   };
 
+  // Today's date for min constraint (no past dates)
+  const today = new Date().toISOString().split('T')[0];
+
+  // Helper: add N days to a date string
+  const addDays = (dateStr: string, days: number): string => {
+    const d = new Date(dateStr);
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0];
+  };
+
   // HireHop-style date linking: Outgoing=Job Start, Returning=Job Finish by default
   // Constraint: Outgoing ≤ Job Start ≤ Job Finish ≤ Returning
   const handleOutDateChange = (val: string) => {
@@ -862,10 +872,11 @@ function NewEnquiryModal({
     setOutDate(val);
     if (outLinked) {
       setJobDate(val);
-      // Cascade: if new job start > job end, push job end forward
-      if (jobEnd && val > jobEnd) {
-        setJobEnd(val);
-        if (returnLinked) setReturnDate(val);
+      // Cascade: if new job start > job end, push job end to day after
+      if (jobEnd && val >= jobEnd) {
+        const nextDay = addDays(val, 1);
+        setJobEnd(nextDay);
+        if (returnLinked) setReturnDate(nextDay);
       }
     }
   };
@@ -878,10 +889,11 @@ function NewEnquiryModal({
       // If unlinked outgoing is after new job start, pull it back
       if (outDate && outDate > val) setOutDate(val);
     }
-    // Auto-set job end if empty or before start
+    // Auto-set job end to day after start if empty or before start
     if (!jobEnd || jobEnd < val) {
-      setJobEnd(val);
-      if (returnLinked) setReturnDate(val);
+      const nextDay = addDays(val, 1);
+      setJobEnd(nextDay);
+      if (returnLinked) setReturnDate(nextDay);
     }
   };
 
@@ -1109,6 +1121,7 @@ function NewEnquiryModal({
                 <input
                   type="date"
                   value={outDate}
+                  min={today}
                   max={jobDate || undefined}
                   onChange={(e) => handleOutDateChange(e.target.value)}
                   disabled={outLinked}
@@ -1129,6 +1142,7 @@ function NewEnquiryModal({
                 <input
                   type="date"
                   value={jobDate}
+                  min={today}
                   max={jobEnd || undefined}
                   onChange={(e) => handleJobDateChange(e.target.value)}
                   className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
@@ -1141,7 +1155,7 @@ function NewEnquiryModal({
                 <input
                   type="date"
                   value={jobEnd}
-                  min={jobDate || undefined}
+                  min={jobDate || today}
                   onChange={(e) => handleJobEndChange(e.target.value)}
                   className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 />
@@ -1153,7 +1167,7 @@ function NewEnquiryModal({
                 <input
                   type="date"
                   value={returnDate}
-                  min={jobEnd || undefined}
+                  min={jobEnd || today}
                   onChange={(e) => handleReturnDateChange(e.target.value)}
                   disabled={returnLinked}
                   className={`flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 ${returnLinked ? 'bg-gray-100 text-gray-400' : ''}`}
