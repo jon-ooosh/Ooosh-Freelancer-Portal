@@ -5,8 +5,9 @@
  * vehicle_hire_assignment, calculates the excess, and creates a job_excess
  * record — all in one transactional call.
  */
-import { Router, Response } from 'express';
+import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import crypto from 'crypto';
 import { query, getPool } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
@@ -23,7 +24,38 @@ function fmtDate(d?: string | Date | null): string {
 }
 
 const router = Router();
-router.use(authenticate);
+
+/**
+ * Dual auth: accepts OP user JWT OR HIRE_FORM_API_KEY.
+ * Used on POST /api/hire-forms which is called by both:
+ *   - OP frontend (user JWT)
+ *   - Netlify generate-hire-form.js function (API key)
+ */
+function authenticateOrApiKey(req: AuthRequest, res: Response, next: NextFunction): void {
+  // Try API key first (server-to-server from Netlify functions)
+  const apiKey = req.headers['x-api-key'] as string;
+  if (apiKey && process.env.HIRE_FORM_API_KEY) {
+    try {
+      const expected = Buffer.from(process.env.HIRE_FORM_API_KEY);
+      const provided = Buffer.from(apiKey);
+      if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
+        // API key auth — set a service user identity
+        req.user = { id: 'hire-form-service', email: 'hire-form@system', role: 'admin' };
+        next();
+        return;
+      }
+    } catch {
+      // Fall through to JWT auth
+    }
+  }
+
+  // Fall back to standard JWT auth
+  authenticate(req, res, next);
+}
+
+// NOTE: No global router.use(authenticate) — auth is per-route.
+// POST / uses authenticateOrApiKey (Netlify functions + OP frontend)
+// All other routes use authenticate (OP frontend only)
 
 // ── Schemas ──
 
@@ -84,7 +116,7 @@ const hireFormSchema = z.object({
 
 // ── POST /api/hire-forms — Submit completed hire form ──
 
-router.post('/', validate(hireFormSchema), async (req: AuthRequest, res: Response) => {
+router.post('/', authenticateOrApiKey, validate(hireFormSchema), async (req: AuthRequest, res: Response) => {
   const pool = getPool();
   const client = await pool.connect();
 
@@ -272,7 +304,7 @@ router.post('/', validate(hireFormSchema), async (req: AuthRequest, res: Respons
 
 // ── GET /api/hire-forms/by-job/:hirehopJobId — Get hire forms for a job ──
 
-router.get('/by-job/:hirehopJobId', async (req: AuthRequest, res: Response) => {
+router.get('/by-job/:hirehopJobId', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const hirehopJobId = parseInt(req.params.hirehopJobId as string);
 
@@ -306,7 +338,7 @@ router.get('/by-job/:hirehopJobId', async (req: AuthRequest, res: Response) => {
 
 // ── GET /api/hire-forms/by-driver/:driverId — Get all forms for a driver ──
 
-router.get('/by-driver/:driverId', async (req: AuthRequest, res: Response) => {
+router.get('/by-driver/:driverId', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const { driverId } = req.params;
 
@@ -333,7 +365,7 @@ router.get('/by-driver/:driverId', async (req: AuthRequest, res: Response) => {
 
 // ── GET /api/hire-forms/active — All active assignments with drivers + unassigned drivers ──
 
-router.get('/active', async (_req: AuthRequest, res: Response) => {
+router.get('/active', authenticate, async (_req: AuthRequest, res: Response) => {
   try {
     // First: assignments that have drivers linked
     const assignedResult = await query(
@@ -412,7 +444,7 @@ const quickAssignSchema = z.object({
   client_email: z.string().email().optional(),
 });
 
-router.post('/quick-assign', validate(quickAssignSchema), async (req: AuthRequest, res: Response) => {
+router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (req: AuthRequest, res: Response) => {
   try {
     const f = req.body;
 
@@ -467,7 +499,7 @@ router.post('/quick-assign', validate(quickAssignSchema), async (req: AuthReques
 
 // ── GET /api/hire-forms/options — Get available drivers and vehicles for assignment ──
 
-router.get('/options/lists', async (_req: AuthRequest, res: Response) => {
+router.get('/options/lists', authenticate, async (_req: AuthRequest, res: Response) => {
   try {
     const drivers = await query(
       `SELECT id, full_name, email, licence_points FROM drivers WHERE is_active = true ORDER BY full_name`
@@ -487,7 +519,7 @@ router.get('/options/lists', async (_req: AuthRequest, res: Response) => {
 
 // ── GET /api/hire-forms/:id — Get single hire form with full details ──
 
-router.get('/:id', async (req: AuthRequest, res: Response) => {
+router.get('/:id', authenticateOrApiKey, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
 
@@ -550,7 +582,7 @@ const patchSchema = z.object({
   notes: z.string().optional(),
 });
 
-router.patch('/:id', validate(patchSchema), async (req: AuthRequest, res: Response) => {
+router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const updates = req.body;
@@ -713,7 +745,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
 
 // ── POST /api/hire-forms/:id/generate-pdf — Generate hire form PDF ──
 
-router.post('/:id/generate-pdf', async (req: AuthRequest, res: Response) => {
+router.post('/:id/generate-pdf', authenticateOrApiKey, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const sendEmail = req.query.send_email === 'true';
@@ -786,7 +818,7 @@ router.post('/:id/generate-pdf', async (req: AuthRequest, res: Response) => {
 
 // ── POST /api/hire-forms/:id/send-email — Re-send hire form email ──
 
-router.post('/:id/send-email', async (req: AuthRequest, res: Response) => {
+router.post('/:id/send-email', authenticateOrApiKey, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
 
@@ -865,7 +897,7 @@ router.post('/:id/send-email', async (req: AuthRequest, res: Response) => {
 
 // ── GET /api/hire-forms/:id/download — Download hire form PDF ──
 
-router.get('/:id/download', async (req: AuthRequest, res: Response) => {
+router.get('/:id/download', authenticateOrApiKey, async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
 
