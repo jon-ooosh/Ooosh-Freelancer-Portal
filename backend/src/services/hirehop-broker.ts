@@ -411,9 +411,10 @@ class HireHopBroker {
   ): Promise<HireHopResponse<T>> {
     const { token, domain } = getHireHopConfig();
 
-    const url = `https://${domain}${endpoint}?token=${encodeURIComponent(token)}`;
+    const url = `https://${domain}${endpoint}`;
 
     const formData = new URLSearchParams();
+    formData.append('token', token);
     for (const [key, val] of Object.entries(body)) {
       if (val !== undefined && val !== null) {
         formData.append(key, typeof val === 'object' ? JSON.stringify(val) : String(val));
