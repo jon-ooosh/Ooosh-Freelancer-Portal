@@ -934,7 +934,7 @@ function NewEnquiryModal({
     setStagedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  const handleSave = async () => {
+  const handleSave = async (alsoCreateInHH = false) => {
     if (!clientName || !details) {
       setError('Client and description are required');
       return;
@@ -986,6 +986,16 @@ function NewEnquiryModal({
           } catch (uploadErr) {
             console.error('File upload failed:', uploadErr);
           }
+        }
+      }
+
+      // Push to HireHop if requested
+      if (alsoCreateInHH && created.id) {
+        try {
+          await api.post(`/pipeline/${created.id}/push-hirehop`, {});
+        } catch (hhErr) {
+          console.error('HireHop push failed:', hhErr);
+          // Don't block — enquiry was created, HH push can be retried from Job Detail
         }
       }
 
@@ -1360,11 +1370,19 @@ function NewEnquiryModal({
             Cancel
           </button>
           <button
-            onClick={handleSave}
+            onClick={() => handleSave(false)}
             disabled={saving}
             className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
           >
             {saving ? (stagedFiles.length > 0 ? 'Creating & uploading...' : 'Creating...') : 'Create Enquiry'}
+          </button>
+          <button
+            onClick={() => handleSave(true)}
+            disabled={saving}
+            className="px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+            title="Create enquiry and also create the job in HireHop"
+          >
+            {saving ? 'Creating...' : 'Create & Push to HireHop'}
           </button>
         </div>
         </div>

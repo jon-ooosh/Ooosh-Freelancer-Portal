@@ -790,9 +790,14 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
 
     res.json(result.rows[0]);
-  } catch (error) {
+  } catch (error: any) {
     console.error('Edit job fields error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    // Surface constraint violations (e.g. duplicate hh_job_number)
+    if (error?.code === '23505') {
+      res.status(409).json({ error: 'Duplicate value — a job with that HireHop number already exists' });
+      return;
+    }
+    res.status(500).json({ error: error?.message || 'Internal server error' });
   }
 });
 
@@ -886,7 +891,7 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     // POST to HireHop via broker
     const { hhBroker } = await import('../services/hirehop-broker');
     const hhResponse = await hhBroker.post<{ job?: number; JOB_ID?: number }>(
-      '/api/job_save.php',
+      '/frames/job_save.php',
       hhBody,
       { priority: 'high' }
     );
