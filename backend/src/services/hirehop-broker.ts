@@ -414,6 +414,7 @@ class HireHopBroker {
     const url = `https://${domain}${endpoint}?token=${encodeURIComponent(token)}`;
 
     const formData = new URLSearchParams();
+    formData.append('token', token);
     for (const [key, val] of Object.entries(body)) {
       if (val !== undefined && val !== null) {
         formData.append(key, typeof val === 'object' ? JSON.stringify(val) : String(val));
@@ -434,6 +435,7 @@ class HireHopBroker {
 
     // HTML response = auth failure
     if (text.trim().startsWith('<')) {
+      console.error('[HH Broker] Received HTML response (auth failure). Status:', response.status, 'URL:', response.url, 'First 200 chars:', text.substring(0, 200));
       return { success: false, error: 'Authentication failed — check API token', isAuthError: true };
     }
 

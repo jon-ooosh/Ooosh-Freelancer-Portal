@@ -118,7 +118,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const jobsResult = await query(
       `SELECT j.*,
         m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name,
-        m2p.first_name as manager2_first_name, m2p.last_name as manager2_last_name
+        m2p.first_name as manager2_first_name, m2p.last_name as manager2_last_name,
+        (SELECT o.name FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
+         WHERE jo.job_id = j.id AND jo.role = 'band' LIMIT 1) as band_name,
+        (SELECT json_agg(json_build_object('id', jo.id, 'role', jo.role, 'organisation_name', o.name, 'organisation_type', o.type, 'organisation_id', jo.organisation_id))
+         FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
+         WHERE jo.job_id = j.id) as linked_organisations
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id
@@ -593,6 +598,358 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     console.error('Client history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// JOB ORGANISATIONS — Multi-org links per job (band, client, promoter, etc.)
+// ============================================================================
+
+const createJobOrgSchema = z.object({
+  organisation_id: z.string().uuid(),
+  role: z.enum(['band', 'client', 'promoter', 'venue_operator', 'management', 'label', 'supplier', 'other']),
+  is_primary: z.boolean().optional().default(false),
+  notes: z.string().optional().nullable(),
+});
+
+// GET /api/pipeline/:jobId/organisations
+router.get('/:jobId/organisations', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT jo.*, o.name as organisation_name, o.type as organisation_type
+       FROM job_organisations jo
+       JOIN organisations o ON o.id = jo.organisation_id AND o.is_deleted = false
+       WHERE jo.job_id = $1
+       ORDER BY jo.role, o.name`,
+      [req.params.jobId]
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('Get job organisations error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/pipeline/:jobId/organisations
+router.post('/:jobId/organisations', validate(createJobOrgSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { organisation_id, role, is_primary, notes } = req.body;
+
+    // Verify job exists
+    const job = await query('SELECT id FROM jobs WHERE id = $1 AND is_deleted = false', [req.params.jobId]);
+    if (job.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const result = await query(
+      `INSERT INTO job_organisations (job_id, organisation_id, role, is_primary, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [req.params.jobId, organisation_id, role, is_primary, notes, req.user!.id]
+    );
+
+    // Fetch with org name
+    const full = await query(
+      `SELECT jo.*, o.name as organisation_name, o.type as organisation_type
+       FROM job_organisations jo
+       JOIN organisations o ON o.id = jo.organisation_id
+       WHERE jo.id = $1`,
+      [result.rows[0].id]
+    );
+
+    res.status(201).json(full.rows[0]);
+  } catch (error: any) {
+    if (error.constraint === 'uq_job_org_role') {
+      res.status(409).json({ error: 'This organisation already has this role on this job' });
+      return;
+    }
+    console.error('Create job organisation error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/pipeline/:jobId/organisations/:linkId
+router.delete('/:jobId/organisations/:linkId', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      'DELETE FROM job_organisations WHERE id = $1 AND job_id = $2 RETURNING *',
+      [req.params.linkId, req.params.jobId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Link not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error('Delete job organisation error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// JOB FIELD EDITING — Inline edit of key job fields from Job Detail page
+// ============================================================================
+
+const editJobSchema = z.object({
+  job_name: z.string().min(1).optional(),
+  out_date: z.string().optional().nullable(),
+  job_date: z.string().optional().nullable(),
+  job_end: z.string().optional().nullable(),
+  return_date: z.string().optional().nullable(),
+  client_id: z.string().uuid().optional().nullable(),
+  client_name: z.string().optional().nullable(),
+  hh_job_number: z.union([z.string(), z.number()]).optional().nullable(),
+  job_value: z.number().optional().nullable(),
+  likelihood: z.enum(['hot', 'warm', 'cold']).optional().nullable(),
+  next_chase_date: z.string().optional().nullable(),
+});
+
+router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+    const fields = req.body;
+
+    // Get current state
+    const current = await query(
+      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const currentJob = current.rows[0];
+
+    // Parse hh_job_number: accept URL like https://myhirehop.com/job.php?id=15564
+    if ('hh_job_number' in fields && fields.hh_job_number !== null && fields.hh_job_number !== undefined) {
+      const raw = String(fields.hh_job_number).trim();
+      const urlMatch = raw.match(/[?&]id=(\d+)/);
+      if (urlMatch) {
+        fields.hh_job_number = parseInt(urlMatch[1], 10);
+      } else {
+        const parsed = parseInt(raw, 10);
+        if (isNaN(parsed)) {
+          res.status(400).json({ error: 'Invalid hh_job_number — provide a number or HireHop URL' });
+          return;
+        }
+        fields.hh_job_number = parsed;
+      }
+    }
+
+    // Build dynamic update
+    const updates: string[] = ['updated_at = NOW()'];
+    const params: unknown[] = [];
+    let pIdx = 1;
+
+    const allowedFields = [
+      'job_name', 'out_date', 'job_date', 'job_end', 'return_date',
+      'client_id', 'client_name', 'hh_job_number', 'job_value',
+      'likelihood', 'next_chase_date',
+    ];
+
+    const changedFields: string[] = [];
+
+    for (const field of allowedFields) {
+      if (field in fields) {
+        const oldVal = currentJob[field];
+        const newVal = fields[field];
+        // Track what actually changed for the interaction log
+        if (String(oldVal ?? '') !== String(newVal ?? '')) {
+          changedFields.push(`${field}: ${oldVal ?? '(empty)'} → ${newVal ?? '(empty)'}`);
+        }
+        updates.push(`${field} = $${pIdx}`);
+        params.push(newVal ?? null);
+        pIdx++;
+      }
+    }
+
+    if (params.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+
+    params.push(jobId);
+    const result = await query(
+      `UPDATE jobs SET ${updates.join(', ')} WHERE id = $${pIdx} RETURNING *`,
+      params
+    );
+
+    // Log changes as an interaction
+    if (changedFields.length > 0) {
+      const content = `Job details updated: ${changedFields.join('; ')}`;
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+         VALUES ('note', $1, $2, $3, $4)`,
+        [content, jobId, req.user!.id, currentJob.pipeline_status]
+      );
+    }
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
+
+    res.json(result.rows[0]);
+  } catch (error: any) {
+    console.error('Edit job fields error:', error);
+    // Surface constraint violations (e.g. duplicate hh_job_number)
+    if (error?.code === '23505') {
+      res.status(409).json({ error: 'Duplicate value — a job with that HireHop number already exists' });
+      return;
+    }
+    res.status(500).json({ error: error?.message || 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// PUSH TO HIREHOP — Create a new HireHop job from an Ooosh-native enquiry
+// ============================================================================
+
+router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+
+    // Get job
+    const jobResult = await query(
+      `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+
+    if (job.hh_job_number) {
+      res.status(409).json({ error: `Job already linked to HireHop job #${job.hh_job_number}` });
+      return;
+    }
+
+    // Look up HireHop client_id from external_id_map
+    let hhClientId: number | null = null;
+    if (job.client_id) {
+      const extMap = await query(
+        `SELECT external_id FROM external_id_map WHERE entity_type = 'person' AND entity_id = $1 AND source = 'hirehop'
+         UNION
+         SELECT external_id FROM external_id_map WHERE entity_type = 'organisation' AND entity_id = $1 AND source = 'hirehop'`,
+        [job.client_id]
+      );
+      if (extMap.rows.length > 0) {
+        hhClientId = parseInt(extMap.rows[0].external_id, 10);
+      }
+    }
+
+    // Format dates as YYYY-MM-DD hh:mm (HireHop expects this)
+    const formatHHDate = (d: string | null): string | undefined => {
+      if (!d) return undefined;
+      try {
+        const date = new Date(d);
+        const yyyy = date.getFullYear();
+        const mm = String(date.getMonth() + 1).padStart(2, '0');
+        const dd = String(date.getDate()).padStart(2, '0');
+        const hh = String(date.getHours()).padStart(2, '0');
+        const min = String(date.getMinutes()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
+      } catch {
+        return undefined;
+      }
+    };
+
+    // Look up venue name if we have a venue_id
+    let venueName = job.venue_name || undefined;
+    if (!venueName && job.venue_id) {
+      const venueResult = await query('SELECT name FROM venues WHERE id = $1', [job.venue_id]);
+      if (venueResult.rows.length > 0) {
+        venueName = venueResult.rows[0].name;
+      }
+    }
+
+    // Look up the current user's HireHop user ID for manager assignment
+    let hhUserId: number | null = null;
+    if (req.user?.id) {
+      const userResult = await query('SELECT hh_user_id FROM users WHERE id = $1', [req.user.id]);
+      if (userResult.rows.length > 0 && userResult.rows[0].hh_user_id) {
+        hhUserId = userResult.rows[0].hh_user_id;
+      }
+    }
+
+    // Build HireHop job payload
+    // HH API: `name` is required for new jobs, `job_name` is the job title
+    const hhBody: Record<string, unknown> = {
+      job: 0, // 0 = create new
+      name: job.client_name || job.job_name || 'New Job', // required for new
+      job_name: job.job_name || '',
+      no_webhook: 1,
+    };
+
+    // Set manager to the OP user's HH account (avoids "API ONLY" as manager)
+    if (hhUserId) hhBody.user = hhUserId;
+
+    if (hhClientId) hhBody.client_id = hhClientId;
+    if (job.company_name) hhBody.company = job.company_name;
+    if (job.details) hhBody.details = job.details;
+    if (venueName) hhBody.venue = venueName;
+
+    const outDate = formatHHDate(job.out_date);
+    const startDate = formatHHDate(job.job_date);
+    const endDate = formatHHDate(job.job_end);
+    const toDate = formatHHDate(job.return_date);
+
+    if (outDate) hhBody.out = outDate;
+    if (startDate) hhBody.start = startDate;
+    if (endDate) hhBody.end = endDate;
+    if (toDate) hhBody.to = toDate;
+
+    // POST to HireHop via broker
+    const { hhBroker } = await import('../services/hirehop-broker');
+    const hhResponse = await hhBroker.post<{ job?: number; JOB_ID?: number }>(
+      '/api/save_job.php',
+      hhBody,
+      { priority: 'high' }
+    );
+
+    if (!hhResponse.success || !hhResponse.data) {
+      console.error('[Pipeline] HireHop job creation failed:', hhResponse.error);
+      res.status(502).json({ error: `HireHop API error: ${hhResponse.error || 'Unknown error'}` });
+      return;
+    }
+
+    // Log full response to understand structure
+    console.log('[Pipeline] HireHop save_job response:', JSON.stringify(hhResponse.data));
+
+    // HireHop save_job.php returns various field names depending on version
+    // Note: we sent job=0 for create, so HH may echo back job=0 — need to find the CREATED job number
+    const data = hhResponse.data as Record<string, unknown>;
+    // Try multiple possible field names; skip zero (which is our input for "create new")
+    const candidates = [data.JOB_ID, data.NUMBER, data.job_number, data.id, data.ID, data.job_id];
+    // Also check data.job but only if it's non-zero (we sent 0 for create)
+    if (data.job && Number(data.job) > 0) candidates.unshift(data.job);
+    const hhJobNumber = candidates.find(v => v !== undefined && v !== null && v !== '' && Number(v) > 0);
+    if (!hhJobNumber) {
+      console.error('[Pipeline] HireHop response missing job ID. Full response:', JSON.stringify(data));
+      res.status(502).json({ error: 'HireHop did not return a job ID' });
+      return;
+    }
+
+    // Write back the HH job number to OP
+    await query(
+      `UPDATE jobs SET hh_job_number = $1, updated_at = NOW() WHERE id = $2`,
+      [hhJobNumber, jobId]
+    );
+
+    // Log as interaction
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+       VALUES ('note', $1, $2, $3, $4)`,
+      [`Created HireHop job #${hhJobNumber}`, jobId, req.user!.id, job.pipeline_status]
+    );
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', job, { ...job, hh_job_number: hhJobNumber });
+
+    res.json({ hh_job_number: hhJobNumber });
+  } catch (error) {
+    console.error('Push to HireHop error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

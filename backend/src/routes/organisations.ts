@@ -123,7 +123,35 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    res.json(result.rows[0]);
+    // Fetch org-to-org relationships
+    const relationships = await query(
+      `SELECT r.*,
+        fo.name as from_org_name, fo.type as from_org_type,
+        tor.name as to_org_name, tor.type as to_org_type
+       FROM organisation_relationships r
+       JOIN organisations fo ON fo.id = r.from_org_id
+       JOIN organisations tor ON tor.id = r.to_org_id
+       WHERE (r.from_org_id = $1 OR r.to_org_id = $1)
+       ORDER BY r.status ASC, r.created_at DESC`,
+      [req.params.id]
+    );
+
+    // Fetch jobs linked via job_organisations
+    const linkedJobs = await query(
+      `SELECT jo.*, j.job_name, j.hh_job_number, j.pipeline_status, j.job_date, j.return_date, j.job_value
+       FROM job_organisations jo
+       JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+       WHERE jo.organisation_id = $1
+       ORDER BY j.job_date DESC NULLS LAST
+       LIMIT 20`,
+      [req.params.id]
+    );
+
+    const org = result.rows[0];
+    org.relationships = relationships.rows;
+    org.linked_jobs = linkedJobs.rows;
+
+    res.json(org);
   } catch (error) {
     console.error('Get organisation error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -194,6 +222,157 @@ router.put('/:id', validate(updateOrgSchema), async (req: AuthRequest, res: Resp
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Update organisation error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// ORGANISATION RELATIONSHIPS — Org-to-org links
+// ============================================================================
+
+const createRelationshipSchema = z.object({
+  from_org_id: z.string().uuid(),
+  to_org_id: z.string().uuid(),
+  relationship_type: z.enum(['manages', 'books_for', 'does_accounts_for', 'promotes', 'supplies', 'represents', 'other']),
+  status: z.enum(['active', 'historical']).optional().default('active'),
+  start_date: z.string().optional().nullable(),
+  end_date: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
+const updateRelationshipSchema = z.object({
+  relationship_type: z.enum(['manages', 'books_for', 'does_accounts_for', 'promotes', 'supplies', 'represents', 'other']).optional(),
+  status: z.enum(['active', 'historical']).optional(),
+  start_date: z.string().optional().nullable(),
+  end_date: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
+// GET /api/organisations/:id/relationships
+router.get('/:id/relationships', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT r.*,
+        fo.name as from_org_name, fo.type as from_org_type,
+        tor.name as to_org_name, tor.type as to_org_type
+       FROM organisation_relationships r
+       JOIN organisations fo ON fo.id = r.from_org_id
+       JOIN organisations tor ON tor.id = r.to_org_id
+       WHERE (r.from_org_id = $1 OR r.to_org_id = $1)
+       ORDER BY r.status ASC, r.created_at DESC`,
+      [req.params.id]
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('Get org relationships error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/organisations/:id/relationships
+router.post('/:id/relationships', validate(createRelationshipSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { from_org_id, to_org_id, relationship_type, status, start_date, end_date, notes } = req.body;
+
+    // Verify both orgs exist
+    const fromOrg = await query('SELECT id FROM organisations WHERE id = $1 AND is_deleted = false', [from_org_id]);
+    const toOrg = await query('SELECT id FROM organisations WHERE id = $1 AND is_deleted = false', [to_org_id]);
+    if (fromOrg.rows.length === 0 || toOrg.rows.length === 0) {
+      res.status(404).json({ error: 'One or both organisations not found' });
+      return;
+    }
+
+    const result = await query(
+      `INSERT INTO organisation_relationships (from_org_id, to_org_id, relationship_type, status, start_date, end_date, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [from_org_id, to_org_id, relationship_type, status, start_date, end_date, notes, req.user!.id]
+    );
+
+    // Fetch with joined org names for response
+    const full = await query(
+      `SELECT r.*,
+        fo.name as from_org_name, fo.type as from_org_type,
+        tor.name as to_org_name, tor.type as to_org_type
+       FROM organisation_relationships r
+       JOIN organisations fo ON fo.id = r.from_org_id
+       JOIN organisations tor ON tor.id = r.to_org_id
+       WHERE r.id = $1`,
+      [result.rows[0].id]
+    );
+
+    res.status(201).json(full.rows[0]);
+  } catch (error: any) {
+    if (error.constraint === 'uq_org_relationship') {
+      res.status(409).json({ error: 'This relationship already exists' });
+      return;
+    }
+    if (error.constraint === 'chk_no_self_relationship') {
+      res.status(400).json({ error: 'An organisation cannot have a relationship with itself' });
+      return;
+    }
+    console.error('Create org relationship error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/organisations/:orgId/relationships/:relId
+router.put('/:orgId/relationships/:relId', validate(updateRelationshipSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const fields = Object.entries(req.body).filter(([, v]) => v !== undefined);
+    if (fields.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+
+    const setClauses = fields.map(([key], i) => `${key} = $${i + 1}`);
+    setClauses.push('updated_at = NOW()');
+    const values = fields.map(([, v]) => v);
+    values.push(req.params.relId);
+
+    const result = await query(
+      `UPDATE organisation_relationships SET ${setClauses.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      values
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Relationship not found' });
+      return;
+    }
+
+    // Fetch full with joined names
+    const full = await query(
+      `SELECT r.*,
+        fo.name as from_org_name, fo.type as from_org_type,
+        tor.name as to_org_name, tor.type as to_org_type
+       FROM organisation_relationships r
+       JOIN organisations fo ON fo.id = r.from_org_id
+       JOIN organisations tor ON tor.id = r.to_org_id
+       WHERE r.id = $1`,
+      [result.rows[0].id]
+    );
+
+    res.json(full.rows[0]);
+  } catch (error) {
+    console.error('Update org relationship error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// DELETE /api/organisations/:orgId/relationships/:relId
+router.delete('/:orgId/relationships/:relId', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      'DELETE FROM organisation_relationships WHERE id = $1 RETURNING *',
+      [req.params.relId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Relationship not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (error) {
+    console.error('Delete org relationship error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

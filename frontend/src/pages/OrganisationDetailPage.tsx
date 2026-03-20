@@ -5,6 +5,7 @@ import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
+import { ORG_RELATIONSHIP_LABELS, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
 
 interface OrgDetail {
   id: string;
@@ -37,6 +38,18 @@ interface OrgDetail {
     name: string;
     type: string;
   }> | null;
+  relationships: OrganisationRelationship[];
+  linked_jobs: Array<{
+    id: string;
+    job_id: string;
+    role: string;
+    job_name: string | null;
+    hh_job_number: number | null;
+    pipeline_status: string;
+    job_date: string | null;
+    return_date: string | null;
+    job_value: number | null;
+  }>;
 }
 
 interface Interaction {
@@ -66,11 +79,20 @@ export default function OrganisationDetailPage() {
   const [org, setOrg] = useState<OrgDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'timeline' | 'people' | 'details'>('people');
+  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'timeline' | 'details'>('people');
 
   // Edit/delete
   const [showEdit, setShowEdit] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  // Add relationship
+  const [showAddRelationship, setShowAddRelationship] = useState(false);
+  const [relOrgSearch, setRelOrgSearch] = useState('');
+  const [relOrgResults, setRelOrgResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [relSelectedOrg, setRelSelectedOrg] = useState<{ id: string; name: string; type: string } | null>(null);
+  const [relType, setRelType] = useState<OrgRelationshipType>('manages');
+  const [relDirection, setRelDirection] = useState<'forward' | 'reverse'>('forward');
+  const [relSaving, setRelSaving] = useState(false);
 
   useEffect(() => {
     if (id) {
@@ -106,6 +128,63 @@ export default function OrganisationDetailPage() {
     } catch (err) {
       console.error('Failed to delete organisation:', err);
     }
+  }
+
+  // Search orgs for relationship picker
+  useEffect(() => {
+    if (relOrgSearch.length < 2) { setRelOrgResults([]); return; }
+    const timeout = setTimeout(async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(
+          `/organisations?search=${encodeURIComponent(relOrgSearch)}&limit=10`
+        );
+        setRelOrgResults(data.data.filter(o => o.id !== id));
+      } catch { /* ignore */ }
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [relOrgSearch, id]);
+
+  async function handleAddRelationship() {
+    if (!relSelectedOrg || !id) return;
+    setRelSaving(true);
+    try {
+      const from_org_id = relDirection === 'forward' ? id : relSelectedOrg.id;
+      const to_org_id = relDirection === 'forward' ? relSelectedOrg.id : id;
+      await api.post(`/organisations/${id}/relationships`, {
+        from_org_id,
+        to_org_id,
+        relationship_type: relType,
+      });
+      setShowAddRelationship(false);
+      setRelSelectedOrg(null);
+      setRelOrgSearch('');
+      loadOrg();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to add relationship');
+    } finally {
+      setRelSaving(false);
+    }
+  }
+
+  async function handleDeleteRelationship(relId: string) {
+    if (!confirm('Remove this relationship?')) return;
+    try {
+      await api.delete(`/organisations/${id}/relationships/${relId}`);
+      loadOrg();
+    } catch (err) {
+      console.error('Failed to delete relationship:', err);
+    }
+  }
+
+  // Get display text for a relationship from this org's perspective
+  function getRelationshipDisplay(rel: OrganisationRelationship) {
+    const isFrom = rel.from_org_id === id;
+    const labels = ORG_RELATIONSHIP_LABELS[rel.relationship_type as OrgRelationshipType];
+    const label = isFrom ? labels?.forward : labels?.reverse;
+    const linkedOrg = isFrom
+      ? { id: rel.to_org_id, name: rel.to_org_name!, type: rel.to_org_type! }
+      : { id: rel.from_org_id, name: rel.from_org_name!, type: rel.from_org_type! };
+    return { label: label || rel.relationship_type, linkedOrg };
   }
 
   function formatDate(dateStr: string) {
@@ -191,19 +270,26 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'timeline', 'details'] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab
-                  ? 'border-ooosh-600 text-ooosh-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {tab === 'people' ? `People (${(org.people || []).length})` : tab === 'timeline' ? 'Activity Timeline' : 'Details'}
-            </button>
-          ))}
+          {(['people', 'relationships', 'timeline', 'details'] as const).map((tab) => {
+            const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
+            const label = tab === 'people' ? `People (${(org.people || []).length})`
+              : tab === 'relationships' ? `Relationships${relCount ? ` (${relCount})` : ''}`
+              : tab === 'timeline' ? 'Activity Timeline'
+              : 'Details';
+            return (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
+                  activeTab === tab
+                    ? 'border-ooosh-600 text-ooosh-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
         </nav>
       </div>
 
@@ -301,6 +387,117 @@ export default function OrganisationDetailPage() {
         </div>
       )}
 
+      {activeTab === 'relationships' && (
+        <div className="space-y-6">
+          {/* Add relationship button */}
+          <div className="flex justify-end">
+            <button
+              onClick={() => { setShowAddRelationship(true); setRelSelectedOrg(null); setRelOrgSearch(''); }}
+              className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 transition-colors"
+            >
+              + Add Relationship
+            </button>
+          </div>
+
+          {/* Active relationships */}
+          {(() => {
+            const activeRels = (org.relationships || []).filter(r => r.status === 'active');
+            const historicalRels = (org.relationships || []).filter(r => r.status === 'historical');
+            return (
+              <>
+                {activeRels.length > 0 ? (
+                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 divide-y divide-gray-100">
+                    {activeRels.map((rel) => {
+                      const { label, linkedOrg } = getRelationshipDisplay(rel);
+                      return (
+                        <div key={rel.id} className="px-6 py-4 flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <span className="text-sm text-gray-500 w-36">{label}</span>
+                            <Link
+                              to={`/organisations/${linkedOrg.id}`}
+                              className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700"
+                            >
+                              {linkedOrg.name}
+                            </Link>
+                            <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${typeColors[linkedOrg.type] || 'bg-gray-100 text-gray-700'}`}>
+                              {linkedOrg.type}
+                            </span>
+                          </div>
+                          <button
+                            onClick={() => handleDeleteRelationship(rel.id)}
+                            className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-center text-sm text-gray-400 py-8">
+                    No relationships yet. Add one to link this organisation to bands, management companies, labels, etc.
+                  </p>
+                )}
+
+                {historicalRels.length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-500 mb-3">Historical</h3>
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-200 divide-y divide-gray-100 opacity-60">
+                      {historicalRels.map((rel) => {
+                        const { label, linkedOrg } = getRelationshipDisplay(rel);
+                        return (
+                          <div key={rel.id} className="px-6 py-3 flex items-center gap-3">
+                            <span className="text-sm text-gray-500 w-36">{label}</span>
+                            <Link to={`/organisations/${linkedOrg.id}`} className="text-sm text-ooosh-600 hover:text-ooosh-700">
+                              {linkedOrg.name}
+                            </Link>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+
+          {/* Linked jobs */}
+          {org.linked_jobs && org.linked_jobs.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-700 mb-3">Jobs linked as {org.type === 'band' ? 'band' : 'organisation'}</h3>
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Job</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                      <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Value</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {org.linked_jobs.map((lj) => (
+                      <tr key={lj.id} className="hover:bg-gray-50">
+                        <td className="px-6 py-3">
+                          <Link to={`/jobs/${lj.job_id}`} className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700">
+                            {lj.hh_job_number ? `J-${lj.hh_job_number}` : 'NEW'} {lj.job_name || ''}
+                          </Link>
+                        </td>
+                        <td className="px-6 py-3 text-sm text-gray-600 capitalize">{lj.role.replace('_', ' ')}</td>
+                        <td className="px-6 py-3 text-sm text-gray-500">{lj.job_date ? formatDate(lj.job_date) : '—'}</td>
+                        <td className="px-6 py-3 text-sm text-gray-700 text-right">
+                          {lj.job_value ? `£${Number(lj.job_value).toLocaleString()}` : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {activeTab === 'timeline' && id && (
         <ActivityTimeline
           entityType="organisation_id"
@@ -336,6 +533,115 @@ export default function OrganisationDetailPage() {
               onFilesChanged={(files) => setOrg(prev => prev ? { ...prev, files } : prev)}
               onActivityCreated={loadInteractions}
             />
+          </div>
+        </div>
+      )}
+
+      {/* Add Relationship Modal */}
+      {showAddRelationship && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">Add Relationship</h3>
+
+            {/* Step 1: Search and select org */}
+            {!relSelectedOrg ? (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Search for organisation</label>
+                <input
+                  type="text"
+                  value={relOrgSearch}
+                  onChange={(e) => setRelOrgSearch(e.target.value)}
+                  placeholder="Type to search organisations..."
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                  autoFocus
+                />
+                {relOrgResults.length > 0 && (
+                  <div className="mt-2 border border-gray-200 rounded-lg max-h-60 overflow-y-auto">
+                    {relOrgResults.map((o) => (
+                      <button
+                        key={o.id}
+                        onClick={() => { setRelSelectedOrg(o); setRelOrgResults([]); }}
+                        className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100 last:border-b-0"
+                      >
+                        <span className="text-sm font-medium text-gray-900">{o.name}</span>
+                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs ${typeColors[o.type] || 'bg-gray-100 text-gray-700'}`}>
+                          {o.type}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div>
+                {/* Selected org */}
+                <div className="flex items-center gap-2 mb-4 p-3 bg-gray-50 rounded-lg">
+                  <span className="text-sm font-medium text-gray-900">{relSelectedOrg.name}</span>
+                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs ${typeColors[relSelectedOrg.type] || 'bg-gray-100 text-gray-700'}`}>
+                    {relSelectedOrg.type}
+                  </span>
+                  <button
+                    onClick={() => { setRelSelectedOrg(null); setRelOrgSearch(''); }}
+                    className="ml-auto text-xs text-gray-400 hover:text-gray-600"
+                  >
+                    Change
+                  </button>
+                </div>
+
+                {/* Relationship type */}
+                <label className="block text-sm font-medium text-gray-700 mb-1">Relationship type</label>
+                <select
+                  value={relType}
+                  onChange={(e) => setRelType(e.target.value as OrgRelationshipType)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3"
+                >
+                  {Object.entries(ORG_RELATIONSHIP_LABELS).map(([key, labels]) => (
+                    <option key={key} value={key}>{labels.forward}</option>
+                  ))}
+                </select>
+
+                {/* Direction */}
+                <label className="block text-sm font-medium text-gray-700 mb-2">Direction</label>
+                <div className="space-y-2 mb-4">
+                  <label className="flex items-center gap-2 p-3 rounded-lg border cursor-pointer hover:bg-gray-50 transition-colors"
+                    style={{ borderColor: relDirection === 'forward' ? '#0ea5e9' : '#e5e7eb' }}
+                  >
+                    <input type="radio" name="direction" checked={relDirection === 'forward'}
+                      onChange={() => setRelDirection('forward')} className="text-ooosh-600" />
+                    <span className="text-sm">
+                      <strong>{org.name}</strong> {ORG_RELATIONSHIP_LABELS[relType]?.forward.toLowerCase()} <strong>{relSelectedOrg.name}</strong>
+                    </span>
+                  </label>
+                  <label className="flex items-center gap-2 p-3 rounded-lg border cursor-pointer hover:bg-gray-50 transition-colors"
+                    style={{ borderColor: relDirection === 'reverse' ? '#0ea5e9' : '#e5e7eb' }}
+                  >
+                    <input type="radio" name="direction" checked={relDirection === 'reverse'}
+                      onChange={() => setRelDirection('reverse')} className="text-ooosh-600" />
+                    <span className="text-sm">
+                      <strong>{relSelectedOrg.name}</strong> {ORG_RELATIONSHIP_LABELS[relType]?.forward.toLowerCase()} <strong>{org.name}</strong>
+                    </span>
+                  </label>
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 mt-4 pt-4 border-t">
+              <button
+                onClick={() => { setShowAddRelationship(false); setRelSelectedOrg(null); setRelOrgSearch(''); }}
+                className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              {relSelectedOrg && (
+                <button
+                  onClick={handleAddRelationship}
+                  disabled={relSaving}
+                  className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
+                >
+                  {relSaving ? 'Saving...' : 'Add Relationship'}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

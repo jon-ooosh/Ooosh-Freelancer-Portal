@@ -10,6 +10,7 @@ interface TeamUser {
   first_name: string | null;
   last_name: string | null;
   avatar_url?: string | null;
+  hh_user_id?: number | null;
 }
 
 interface BackupEntry {
@@ -100,6 +101,7 @@ function SettingsContent() {
   const [editLastName, setEditLastName] = useState('');
   const [editEmail, setEditEmail] = useState('');
   const [editRole, setEditRole] = useState('');
+  const [editHhUserId, setEditHhUserId] = useState('');
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState('');
 
@@ -163,6 +165,7 @@ function SettingsContent() {
     setEditLastName(u.last_name || '');
     setEditEmail(u.email);
     setEditRole(u.role);
+    setEditHhUserId(u.hh_user_id ? String(u.hh_user_id) : '');
     setEditError('');
   }
 
@@ -183,6 +186,7 @@ function SettingsContent() {
         last_name: editLastName.trim(),
         email: editEmail.trim().toLowerCase(),
         role: editRole,
+        hh_user_id: editHhUserId ? parseInt(editHhUserId, 10) : null,
       });
 
       setEditingUser(null);
@@ -424,6 +428,17 @@ function SettingsContent() {
                           <option key={r} value={r}>{ROLE_LABELS[r]}</option>
                         ))}
                       </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 mb-1">HireHop User ID</label>
+                      <input
+                        type="number"
+                        value={editHhUserId}
+                        onChange={(e) => setEditHhUserId(e.target.value)}
+                        placeholder="e.g. 42"
+                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                      <p className="text-xs text-gray-400 mt-0.5">Sets manager on HH jobs created by this user</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 mt-3">

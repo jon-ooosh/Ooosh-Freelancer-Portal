@@ -87,6 +87,16 @@ export default function PersonDetailPage() {
   const [roleIsPrimary, setRoleIsPrimary] = useState(false);
   const [roleSubmitting, setRoleSubmitting] = useState(false);
 
+  // End role confirmation
+  const [endingRoleId, setEndingRoleId] = useState<string | null>(null);
+  const [endReason, setEndReason] = useState('');
+  const [endRepoint, setEndRepoint] = useState(false);
+  const [repointOrgSearch, setRepointOrgSearch] = useState('');
+  const [repointOrgResults, setRepointOrgResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [repointSelectedOrg, setRepointSelectedOrg] = useState<{ id: string; name: string } | null>(null);
+  const [repointRole, setRepointRole] = useState('');
+  const [endingSaving, setEndingSaving] = useState(false);
+
   useEffect(() => {
     if (id) {
       loadPerson();
@@ -147,14 +157,68 @@ export default function PersonDetailPage() {
     }
   }
 
-  async function handleEndRole(roleId: string) {
+  async function handleEndRoleConfirmed() {
+    if (!endingRoleId) return;
+    setEndingSaving(true);
     try {
-      await api.put(`/people/${id}/roles/${roleId}/end`, {});
+      // End the current role
+      await api.put(`/people/${id}/roles/${endingRoleId}/end`, {});
+
+      // If reason provided, log it as an interaction
+      if (endReason.trim()) {
+        const endingOrg = activeOrgs.find(o => o.id === endingRoleId);
+        try {
+          await api.post('/interactions', {
+            type: 'note',
+            content: `Role ended at ${endingOrg?.organisation_name || 'organisation'}: ${endReason.trim()}`,
+            person_id: id,
+            organisation_id: endingOrg?.organisation_id,
+          });
+        } catch { /* non-critical */ }
+      }
+
+      // If repointing, create new role at the selected org
+      if (endRepoint && repointSelectedOrg && repointRole.trim()) {
+        try {
+          await api.post(`/people/${id}/roles`, {
+            organisation_id: repointSelectedOrg.id,
+            role: repointRole.trim(),
+            is_primary: true,
+          });
+        } catch (err) {
+          console.error('Failed to create repointed role:', err);
+        }
+      }
+
+      // Reset and reload
+      setEndingRoleId(null);
+      setEndReason('');
+      setEndRepoint(false);
+      setRepointSelectedOrg(null);
+      setRepointRole('');
+      setRepointOrgSearch('');
       loadPerson();
+      loadInteractions();
     } catch (err) {
       console.error('Failed to end role:', err);
+    } finally {
+      setEndingSaving(false);
     }
   }
+
+  // Search orgs for repoint picker
+  useEffect(() => {
+    if (repointOrgSearch.length < 2) { setRepointOrgResults([]); return; }
+    const timeout = setTimeout(async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(
+          `/organisations?search=${encodeURIComponent(repointOrgSearch)}&limit=10`
+        );
+        setRepointOrgResults(data.data);
+      } catch { /* ignore */ }
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [repointOrgSearch]);
 
   async function handleDelete() {
     try {
@@ -284,19 +348,25 @@ export default function PersonDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['timeline', 'details', 'relationships'] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab
-                  ? 'border-ooosh-600 text-ooosh-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {tab === 'timeline' ? 'Activity Timeline' : tab === 'details' ? 'Details' : 'Relationships'}
-            </button>
-          ))}
+          {(['timeline', 'details', 'relationships'] as const).map((tab) => {
+            const totalOrgs = (person.organisations || []).length;
+            const label = tab === 'timeline' ? 'Activity Timeline'
+              : tab === 'details' ? 'Details'
+              : `Relationships${totalOrgs ? ` (${totalOrgs})` : ''}`;
+            return (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
+                  activeTab === tab
+                    ? 'border-ooosh-600 text-ooosh-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
         </nav>
       </div>
 
@@ -425,12 +495,27 @@ export default function PersonDetailPage() {
                 <>
                   <div className="mt-3">
                     <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Role / Title</label>
-                    <input
+                    <select
                       value={roleTitle}
                       onChange={e => setRoleTitle(e.target.value)}
-                      placeholder="e.g. Tour Manager, Lead Vocalist, Account Manager"
                       className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                    />
+                    >
+                      <option value="">Select a role...</option>
+                      <option value="Tour Manager">Tour Manager</option>
+                      <option value="Manager">Manager</option>
+                      <option value="Production Manager">Production Manager</option>
+                      <option value="Engineer">Engineer</option>
+                      <option value="Accountant">Accountant</option>
+                      <option value="Promoter">Promoter</option>
+                      <option value="Crew">Crew</option>
+                      <option value="Band Member">Band Member</option>
+                      <option value="Driver">Driver</option>
+                      <option value="Agent">Agent</option>
+                      <option value="Site Contact">Site Contact</option>
+                      <option value="Owner">Owner</option>
+                      <option value="General Contact">General Contact</option>
+                      <option value="Other">Other</option>
+                    </select>
                   </div>
                   <label className="flex items-center gap-2 mt-3 cursor-pointer">
                     <input
@@ -477,7 +562,7 @@ export default function PersonDetailPage() {
                         <span className="text-xs text-gray-400">Since {formatDate(org.start_date)}</span>
                       )}
                       <button
-                        onClick={() => handleEndRole(org.id)}
+                        onClick={() => { setEndingRoleId(org.id); setEndReason(''); setEndRepoint(false); setRepointSelectedOrg(null); setRepointRole(''); }}
                         className="text-xs text-red-500 hover:text-red-700 px-2 py-1 border border-red-200 rounded hover:bg-red-50"
                       >
                         End
@@ -520,6 +605,121 @@ export default function PersonDetailPage() {
           )}
         </div>
       )}
+
+      {/* End Role Confirmation Modal */}
+      {endingRoleId && (() => {
+        const endingOrg = activeOrgs.find(o => o.id === endingRoleId);
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">End Role</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                End <strong>{person.first_name}'s</strong> role as <strong>{endingOrg?.role}</strong> at <strong>{endingOrg?.organisation_name}</strong>?
+                This will be marked as historical with today's date.
+              </p>
+
+              {/* Reason (optional) */}
+              <div className="mb-4">
+                <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Reason (optional)</label>
+                <input
+                  type="text"
+                  value={endReason}
+                  onChange={(e) => setEndReason(e.target.value)}
+                  placeholder="e.g. Moved to new management, left the band..."
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                />
+              </div>
+
+              {/* Repoint option */}
+              <label className="flex items-center gap-2 mb-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={endRepoint}
+                  onChange={(e) => setEndRepoint(e.target.checked)}
+                  className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+                />
+                <span className="text-sm text-gray-700">Immediately link to a new organisation</span>
+              </label>
+
+              {endRepoint && (
+                <div className="ml-6 mb-4 space-y-3 border-l-2 border-ooosh-200 pl-4">
+                  {!repointSelectedOrg ? (
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={repointOrgSearch}
+                        onChange={(e) => setRepointOrgSearch(e.target.value)}
+                        placeholder="Search for new organisation..."
+                        className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                        autoFocus
+                      />
+                      {repointOrgResults.length > 0 && (
+                        <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-10 max-h-40 overflow-y-auto">
+                          {repointOrgResults.map((o) => (
+                            <button
+                              key={o.id}
+                              onClick={() => { setRepointSelectedOrg({ id: o.id, name: o.name }); setRepointOrgResults([]); }}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2"
+                            >
+                              <span className="font-medium">{o.name}</span>
+                              <span className="text-xs text-gray-400">{o.type}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-gray-900 bg-ooosh-50 px-2 py-1 rounded">{repointSelectedOrg.name}</span>
+                      <button onClick={() => { setRepointSelectedOrg(null); setRepointOrgSearch(''); }} className="text-xs text-gray-400 hover:text-gray-600">Change</button>
+                    </div>
+                  )}
+
+                  {repointSelectedOrg && (
+                    <select
+                      value={repointRole}
+                      onChange={(e) => setRepointRole(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                    >
+                      <option value="">Select role at new org...</option>
+                      <option value="Tour Manager">Tour Manager</option>
+                      <option value="Manager">Manager</option>
+                      <option value="Production Manager">Production Manager</option>
+                      <option value="Engineer">Engineer</option>
+                      <option value="Accountant">Accountant</option>
+                      <option value="Promoter">Promoter</option>
+                      <option value="Crew">Crew</option>
+                      <option value="Band Member">Band Member</option>
+                      <option value="Driver">Driver</option>
+                      <option value="Agent">Agent</option>
+                      <option value="Site Contact">Site Contact</option>
+                      <option value="Owner">Owner</option>
+                      <option value="General Contact">General Contact</option>
+                      <option value="Other">Other</option>
+                    </select>
+                  )}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-4 border-t mt-4">
+                <button
+                  onClick={() => { setEndingRoleId(null); setEndReason(''); setEndRepoint(false); }}
+                  className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleEndRoleConfirmed}
+                  disabled={endingSaving || (endRepoint && (!repointSelectedOrg || !repointRole))}
+                  className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                >
+                  {endingSaving ? 'Saving...' : endRepoint ? 'End & Repoint' : 'End Role'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Edit Panel */}
       <SlidePanel open={showEdit} onClose={() => setShowEdit(false)} title="Edit Person">

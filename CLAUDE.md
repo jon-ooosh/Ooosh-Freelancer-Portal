@@ -535,13 +535,26 @@ Global operational view for what's currently happening / about to happen with tr
 - [x] Freelancer portal repointing: feature-flagged DATA_BACKEND=op (auth, jobs, completion, equipment) with Monday.com fallback
 - [x] Inline crew assignment on Transport Ops page (same picker as Job Detail, bidirectional)
 - [x] Local D/C form improvements: venue address book lookup, smart date defaults, amber warning on change
+- [x] Quote editing: Edit Quote modal on Transport Ops page + Job Detail page (venue, date, time, fees, notes)
+- [x] Inline-editable arranging details: client intro status picker, key points, tolls/accom/flights clickable pills, notes
+- [x] Run grouping UI: letter-based display (Run A/B/C), coloured side bands, join/create run buttons per job
+- [x] Colour-matched status dropdown (replaces plain select)
+- [x] Completion details view: photos, signature, timestamp, customer present, notes
+- [x] Separate completed/cancelled toggles
 - [ ] Reminder system (unassigned deliveries approaching, overdue completions)
 - [ ] Change notifications to freelancers (date/time/venue changes → email alert)
-- [ ] "On the road" status tracking: dispatched, arrived, issues, completed
 - [ ] Issues on road reporting (breakdowns, delays, problems)
 - [ ] PDF delivery note generation (migrate from Netlify function to OP backend)
 - [ ] Client delivery note emails via OP email service
 - [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging) — nice-to-have, post go-live
+- [ ] **Arrangement pills → dashboard integration**: Surface arrangement statuses on Dashboard and Job Requirements
+  - Dashboard widget: "X jobs in next 7 days need client intros" (query `client_introduction = 'todo'` where `job_date` within 7 days)
+  - Dashboard widget: "X jobs with outstanding tolls/accommodation/flights" (query `*_status = 'todo'` on active quotes)
+  - Job Requirements integration: arrangement items auto-create as requirements on prep checklist
+  - Freelancer portal: show arrangement status in job details (e.g. "accommodation: booked")
+  - Notifications: auto-alert when job approaching and arrangements still outstanding
+- [ ] **Run group pricing**: Combined run pricing (individual prices crossed through, single run total displayed)
+- [ ] **Run group → freelancer portal alignment**: Ensure run groups display correctly as multi-drop runs in portal (group by run_group UUID + date, ±4h tolerance for overnight grouping)
 
 ##### Carnets (inline on Prep Checklist, with global overview)
 - [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed
@@ -549,6 +562,61 @@ Global operational view for what's currently happening / about to happen with tr
 - [ ] Reminder automation: chase for return after hire ends
 
 **Parallelisation notes:** Streams 2-7 can all run simultaneously — they touch different tables, routes, and pages. Stream 1 is the foundation and should complete first (or at least the migration + API), as Streams 2-7 plug requirements into it. Streams 3-5 are fully independent of each other. Stream 6 has a dependency on the organisations table (payment terms) but is otherwise standalone.
+
+#### Pipeline & Enquiry Cleanup ← IN PROGRESS
+
+Two streams of work to improve the pipeline/enquiry/jobs experience:
+
+**Stream A: Job Detail Editing** (next chunk after Stream B)
+The Job Detail page needs inline editing for key fields. Currently status changes are Kanban-only and most fields are read-only.
+- [ ] **HH Job Number** — Where it says "NEW", make clickable/editable. Accept pasted HH URLs (`https://myhirehop.com/job.php?id=15564`) and extract the number. Once linked, sync takes over.
+- [ ] **Dates** — Reuse the four-date linked editor from New Enquiry form (Outgoing↔Job Start, Returning↔Job Finish toggleable links, date constraints enforced)
+- [ ] **Client** — Editable with org/person search picker
+- [ ] **Job name** — Inline editable
+- [ ] **Pipeline fields** — Likelihood, next chase date, job value — all inline editable on Job Detail
+- [ ] **Create in HireHop** button — Push Ooosh-native enquiry to create HH job, write back the number (follow-up after initial editing)
+
+**Stream B: Band-Centric Data Model** ← ACTIVE
+Organisation-to-organisation relationships and multi-org job links. Makes "bands" a first-class concept.
+- [x] Migration: `organisation_relationships` table (org-to-org links with typed relationships: manages, books_for, does_accounts_for, promotes, supplies)
+- [x] Migration: `job_organisations` junction table (band, client, promoter, venue_operator, supplier roles per job)
+- [x] Backend: Org relationships CRUD endpoints
+- [x] Backend: Job-organisation links CRUD endpoints
+- [x] Frontend: "Relationships" section on Organisation Detail page (add/remove/view linked orgs with bidirectional display)
+- [x] Frontend: Band/org links on Job Detail page (add band, client, promoter etc.)
+- [x] Frontend: Band picker on New Enquiry form with org search
+- [x] Person-to-org role picker (dropdown instead of free text) with standard roles
+- [x] End role confirmation dialog with optional reason and repoint flow
+- [ ] Frontend: Person context surfacing in pickers (show org connections when selecting a person)
+- [ ] Frontend: Smart suggestions from org graph (select band → auto-suggest management company as client)
+- [ ] Org-to-org relationship types: manages↔managed_by, books_for↔booked_by, does_accounts_for↔accounts_done_by, promotes↔promoted_by, supplies↔supplied_by
+- [ ] Person-to-org role types (already exist, confirm complete): Tour Manager, Manager, Production Manager, Engineer, Accountant, Promoter, Crew, Band Member, Driver
+
+**Stream C: HireHop Data Cleanup** (depends on Stream A "Create in HireHop" button)
+HireHop sync imported contacts literally — bands became people, management companies got typed as "client", etc.
+The cleanup strategy is: OP becomes master for relationship data, HH gets what it needs via push.
+
+*Step 1: OP→HH job creation* (part of Stream A)
+- [ ] `POST /api/pipeline/:id/push-hirehop` — create job in HH via `job_save.php` API
+- [ ] Map OP fields → HH: contact person → `name`, client org → `company`, dates → `out`/`start`/`end`/`to`, job name → `job_name`, details → `details`
+- [ ] Write back HH job number to OP `jobs.hh_job_number`
+- [ ] Include `no_webhook=1` to prevent sync loops
+- [ ] Band stays in OP only (HH has no band field)
+
+*Step 2: Sync guard rails*
+- [ ] HH contact sync: when Contact Name matches existing *organisation* (not person), flag as conflict → "needs review" queue
+- [ ] HH job sync: never overwrite OP-enriched org types or relationships
+- [ ] Surface "needs review" items on Dashboard or Settings page
+
+*Step 3: Data cleanup tools*
+- [ ] "Convert Person to Organisation" — reclassify a person as an org (e.g. "10cc" person → "10cc" band org), preserve relationships
+- [ ] "Merge duplicates" — merge person+org that represent the same entity
+- [ ] Bulk type correction — change org types (e.g. all "client" orgs that are actually bands)
+- [ ] "Needs review" page for sync conflicts
+
+*Step 4: Smart relationship suggestions*
+- [ ] When viewing a "Contact" at a "client" org, system suggests: "Is this actually a Band?"
+- [ ] When new HH sync creates entities, surface for review before they pollute the graph
 
 #### Remaining Phase 2 work (no strict ordering)
 

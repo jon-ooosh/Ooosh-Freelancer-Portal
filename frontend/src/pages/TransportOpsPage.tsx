@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 
@@ -51,7 +52,11 @@ interface OpsQuote {
   accommodation_status: string;
   flight_status: string;
   completed_at: string | null;
+  completed_by: string | null;
   completion_notes: string | null;
+  completion_signature: string | null;
+  completion_photos: string[] | null;
+  customer_present: boolean | null;
   what_is_it: string | null;
   internal_notes: string | null;
   freelancer_notes: string | null;
@@ -69,14 +74,13 @@ interface OpsQuote {
 
 // ── Constants ────────────────────────────────────────────────────────
 
-const OPS_STATUSES = ['todo', 'arranging', 'arranged', 'dispatched', 'arrived', 'completed', 'cancelled'] as const;
+const OPS_STATUSES = ['todo', 'arranging', 'arranged', 'dispatched', 'completed', 'cancelled'] as const;
 
 const OPS_STATUS_CONFIG: Record<string, { label: string; colour: string; bgColour: string }> = {
   todo: { label: 'To Be Arranged', colour: 'text-red-700', bgColour: 'bg-red-100' },
   arranging: { label: 'Arranging', colour: 'text-amber-700', bgColour: 'bg-amber-100' },
   arranged: { label: 'Arranged', colour: 'text-blue-700', bgColour: 'bg-blue-100' },
   dispatched: { label: 'Dispatched', colour: 'text-indigo-700', bgColour: 'bg-indigo-100' },
-  arrived: { label: 'Arrived', colour: 'text-purple-700', bgColour: 'bg-purple-100' },
   completed: { label: 'Completed', colour: 'text-green-700', bgColour: 'bg-green-100' },
   cancelled: { label: 'Cancelled', colour: 'text-gray-500', bgColour: 'bg-gray-100' },
 };
@@ -92,6 +96,20 @@ const JOB_TYPE_COLOURS: Record<string, string> = {
   collection: 'bg-orange-100 text-orange-700',
   crewed: 'bg-purple-100 text-purple-700',
 };
+
+const RUN_PILL_STYLES = [
+  { border: 'border-l-violet-500', pill: 'bg-violet-100 text-violet-700' },
+  { border: 'border-l-emerald-500', pill: 'bg-emerald-100 text-emerald-700' },
+  { border: 'border-l-sky-500', pill: 'bg-sky-100 text-sky-700' },
+  { border: 'border-l-rose-500', pill: 'bg-rose-100 text-rose-700' },
+  { border: 'border-l-amber-500', pill: 'bg-amber-100 text-amber-700' },
+];
+
+function normaliseDateKey(d: string | Date | null): string {
+  if (!d) return '';
+  if (d instanceof Date) return d.toISOString().split('T')[0];
+  return typeof d === 'string' ? (d.includes('T') ? d.split('T')[0] : d) : '';
+}
 
 interface PersonOption {
   id: string;
@@ -111,6 +129,7 @@ export default function TransportOpsPage() {
   const [filter, setFilter] = useState<'all' | 'transport' | 'crewed'>('all');
   const [viewMode, setViewMode] = useState<'table' | 'calendar'>('table');
   const [showCompleted, setShowCompleted] = useState(false);
+  const [showCancelled, setShowCancelled] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [assignRole, setAssignRole] = useState('driver');
@@ -220,9 +239,10 @@ export default function TransportOpsPage() {
   async function updateRunGroup(quoteId: string, runGroup: string | null, runOrder: number | null) {
     try {
       await api.put(`/quotes/${quoteId}/run-group`, { run_group: runGroup, run_order: runOrder });
-      setQuotes((prev) =>
-        prev.map((q) => (q.id === quoteId ? { ...q, run_group: runGroup, run_order: runOrder } : q))
-      );
+      // Full reload to ensure all quotes see the updated run groups
+      const params = filter !== 'all' ? `?job_type=${filter}` : '';
+      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${params}`);
+      setQuotes(res.data);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update run group');
     }
@@ -252,22 +272,18 @@ export default function TransportOpsPage() {
     return groups;
   }, [quotes]);
 
-  // Calendar data: group by date
+  // Calendar data: group by date (respects completed/cancelled toggles)
   const calendarData = useMemo(() => {
     const byDate: Record<string, OpsQuote[]> = {};
     for (const q of quotes) {
-      if (q.ops_status === 'completed' || q.ops_status === 'cancelled') continue;
-      let dateKey = 'unscheduled';
-      if (q.job_date instanceof Date) {
-        dateKey = q.job_date.toISOString().split('T')[0];
-      } else if (typeof q.job_date === 'string') {
-        dateKey = q.job_date.includes('T') ? q.job_date.split('T')[0] : q.job_date;
-      }
+      if (q.ops_status === 'completed' && !showCompleted) continue;
+      if (q.ops_status === 'cancelled' && !showCancelled) continue;
+      const dateKey = normaliseDateKey(q.job_date) || 'unscheduled';
       if (!byDate[dateKey]) byDate[dateKey] = [];
       byDate[dateKey].push(q);
     }
     return byDate;
-  }, [quotes]);
+  }, [quotes, showCompleted, showCancelled]);
 
   if (loading) {
     return (
@@ -318,15 +334,24 @@ export default function TransportOpsPage() {
             </button>
           </div>
 
-          {/* Show completed toggle */}
+          {/* Show completed/cancelled toggles */}
           <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
             <input
               type="checkbox"
               checked={showCompleted}
               onChange={(e) => setShowCompleted(e.target.checked)}
-              className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+              className="rounded border-gray-300 text-green-600 focus:ring-green-500"
             />
-            Show completed
+            Completed
+          </label>
+          <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showCancelled}
+              onChange={(e) => setShowCancelled(e.target.checked)}
+              className="rounded border-gray-300 text-gray-400 focus:ring-gray-400"
+            />
+            Cancelled
           </label>
         </div>
       </div>
@@ -338,7 +363,11 @@ export default function TransportOpsPage() {
       {/* Table view */}
       {viewMode === 'table' && (
         <div className="space-y-6">
-          {OPS_STATUSES.filter((s) => showCompleted || (s !== 'completed' && s !== 'cancelled')).map((status) => {
+          {OPS_STATUSES.filter((s) => {
+            if (s === 'completed') return showCompleted;
+            if (s === 'cancelled') return showCancelled;
+            return true;
+          }).map((status) => {
             const items = grouped[status] || [];
             if (items.length === 0 && (status === 'completed' || status === 'cancelled')) return null;
 
@@ -385,7 +414,16 @@ export default function TransportOpsPage() {
 
       {/* Calendar view */}
       {viewMode === 'calendar' && (
-        <CalendarView data={calendarData} />
+        <CalendarView
+          data={calendarData}
+          allQuotes={quotes}
+          onStatusChange={updateOpsStatus}
+          onAssign={openAssignModal}
+          onRemoveAssignment={removeAssignment}
+          onUpdateDetails={updateOpsDetails}
+          onEdit={openEditModal}
+          onUpdateRunGroup={updateRunGroup}
+        />
       )}
 
       {/* Assign Crew Modal */}
@@ -523,10 +561,25 @@ function QuoteRow({
     .map((a) => a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim())
     .filter(Boolean);
 
+  // Compute run letter and colour index for display (runs match by date, not job)
+  const qDate = normaliseDateKey(q.job_date);
+  const runInfo = useMemo(() => {
+    if (!q.run_group) return null;
+    const RUN_LETTERS = ['A', 'B', 'C', 'D', 'E'];
+    const uniqueGroups: string[] = [];
+    for (const other of allQuotes) {
+      if (normaliseDateKey(other.job_date) === qDate && other.run_group && !uniqueGroups.includes(other.run_group)) {
+        uniqueGroups.push(other.run_group);
+      }
+    }
+    const idx = uniqueGroups.indexOf(q.run_group);
+    return { letter: RUN_LETTERS[idx] || String(idx + 1), colourIdx: idx % RUN_PILL_STYLES.length };
+  }, [q.run_group, qDate, allQuotes]);
+
   return (
     <div>
       <div
-        className="px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors"
+        className={`px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${runInfo ? `border-l-4 ${RUN_PILL_STYLES[runInfo.colourIdx].border}` : ''}`}
         onClick={onToggle}
       >
         {/* Expand chevron */}
@@ -561,9 +614,9 @@ function QuoteRow({
             {q.is_local && (
               <span className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 font-medium flex-shrink-0">Local</span>
             )}
-            {q.run_group && (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-medium flex-shrink-0">
-                Run {q.run_order || '?'}
+            {q.run_group && runInfo && (
+              <span className={`text-xs px-1.5 py-0.5 rounded font-medium flex-shrink-0 ${RUN_PILL_STYLES[runInfo.colourIdx].pill}`}>
+                Run {runInfo.letter}
               </span>
             )}
             {q.hh_job_number && (
@@ -604,18 +657,11 @@ function QuoteRow({
         </div>
 
         {/* Status dropdown */}
-        <div className="w-32 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
-          <select
+        <div className="w-36 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          <StatusDropdown
             value={q.ops_status || 'todo'}
-            onChange={(e) => onStatusChange(q.id, e.target.value)}
-            className={`text-xs font-medium rounded px-2 py-1 border-0 cursor-pointer w-full ${
-              OPS_STATUS_CONFIG[q.ops_status]?.bgColour || 'bg-gray-100'
-            } ${OPS_STATUS_CONFIG[q.ops_status]?.colour || 'text-gray-700'}`}
-          >
-            {OPS_STATUSES.map((s) => (
-              <option key={s} value={s}>{OPS_STATUS_CONFIG[s].label}</option>
-            ))}
-          </select>
+            onChange={(v) => onStatusChange(q.id, v)}
+          />
         </div>
       </div>
 
@@ -631,6 +677,83 @@ function QuoteRow({
           onUpdateRunGroup={onUpdateRunGroup}
           allQuotes={allQuotes}
         />
+      )}
+    </div>
+  );
+}
+
+// ── Status Dropdown (colour-matched) ─────────────────────────────────
+
+function StatusDropdown({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+
+  const openMenu = useCallback(() => {
+    if (btnRef.current) {
+      const rect = btnRef.current.getBoundingClientRect();
+      const menuHeight = OPS_STATUSES.length * 30 + 8; // approx height
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const top = spaceBelow < menuHeight ? rect.top - menuHeight : rect.bottom + 4;
+      setMenuPos({ top, left: rect.right - 160 }); // 160 = w-40
+    }
+    setOpen(true);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (btnRef.current?.contains(e.target as Node)) return;
+      if (menuRef.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    }
+    function handleScroll() { setOpen(false); }
+    document.addEventListener('mousedown', handleClickOutside);
+    window.addEventListener('scroll', handleScroll, true);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('scroll', handleScroll, true);
+    };
+  }, [open]);
+
+  const config = OPS_STATUS_CONFIG[value] || OPS_STATUS_CONFIG.todo;
+
+  return (
+    <div>
+      <button
+        ref={btnRef}
+        onClick={() => open ? setOpen(false) : openMenu()}
+        className={`text-xs font-medium rounded px-2.5 py-1.5 w-full text-left flex items-center justify-between ${config.bgColour} ${config.colour}`}
+      >
+        <span>{config.label}</span>
+        <svg className={`w-3.5 h-3.5 ml-1 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && createPortal(
+        <div
+          ref={menuRef}
+          style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 9999 }}
+          className="w-40 bg-white rounded-lg shadow-lg border border-gray-200 py-1"
+        >
+          {OPS_STATUSES.map((s) => {
+            const sc = OPS_STATUS_CONFIG[s];
+            return (
+              <button
+                key={s}
+                onClick={() => { onChange(s); setOpen(false); }}
+                className={`w-full text-left px-3 py-1.5 text-xs font-medium flex items-center gap-2 hover:opacity-80 ${
+                  s === value ? 'ring-1 ring-inset ring-gray-300' : ''
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${sc.bgColour} border ${sc.colour.replace('text-', 'border-')}`} />
+                <span className={sc.colour}>{sc.label}</span>
+              </button>
+            );
+          })}
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -690,31 +813,31 @@ function ExpandedDetail({
     onUpdateDetails(q.id, { client_introduction: newStatus });
   }
 
-  // Run grouping — find existing run groups on this job
+  // Run grouping — find existing run groups on the same date (runs can span jobs)
+  const qDate = normaliseDateKey(q.job_date);
   const jobRunGroups = useMemo(() => {
-    if (!q.job_id) return [];
-    const groups = new Map<string, { letter: string; count: number }>();
+    const groups = new Map<string, { letter: string; count: number; colourIdx: number }>();
     const RUN_LETTERS = ['A', 'B', 'C', 'D', 'E'];
     let letterIdx = 0;
     for (const other of allQuotes) {
-      if (other.job_id === q.job_id && other.run_group && !groups.has(other.run_group)) {
-        groups.set(other.run_group, { letter: RUN_LETTERS[letterIdx] || String(letterIdx + 1), count: 0 });
+      if (normaliseDateKey(other.job_date) === qDate && other.run_group && !groups.has(other.run_group)) {
+        groups.set(other.run_group, { letter: RUN_LETTERS[letterIdx] || String(letterIdx + 1), count: 0, colourIdx: letterIdx % RUN_PILL_STYLES.length });
         letterIdx++;
       }
     }
-    // Count items per group
     for (const other of allQuotes) {
-      if (other.job_id === q.job_id && other.run_group && groups.has(other.run_group)) {
+      if (normaliseDateKey(other.job_date) === qDate && other.run_group && groups.has(other.run_group)) {
         groups.get(other.run_group)!.count++;
       }
     }
     return Array.from(groups.entries()).map(([id, info]) => ({ id, ...info }));
-  }, [q.job_id, allQuotes]);
+  }, [qDate, allQuotes]);
 
-  const currentRunLetter = useMemo(() => {
+  const currentRunInfo = useMemo(() => {
     if (!q.run_group) return null;
     const group = jobRunGroups.find((g) => g.id === q.run_group);
-    return group?.letter || '?';
+    if (!group) return null;
+    return { letter: group.letter, colourIdx: group.colourIdx };
   }, [q.run_group, jobRunGroups]);
 
   async function setRunGroup(groupId: string | null) {
@@ -723,8 +846,8 @@ function ExpandedDetail({
   }
 
   async function createNewRunGroup() {
-    // Use this quote's ID as the new run group UUID
-    await onUpdateRunGroup(q.id, q.id, 1);
+    const newGroupId = crypto.randomUUID();
+    await onUpdateRunGroup(q.id, newGroupId, 1);
   }
 
   return (
@@ -773,9 +896,9 @@ function ExpandedDetail({
             <div className="border-t border-gray-200 pt-2 mt-2">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-xs font-medium text-gray-700">Run group</span>
-                {currentRunLetter && (
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-violet-100 text-violet-700 font-bold">
-                    Run {currentRunLetter}
+                {currentRunInfo && (
+                  <span className={`text-xs px-1.5 py-0.5 rounded font-bold ${RUN_PILL_STYLES[currentRunInfo.colourIdx].pill}`}>
+                    Run {currentRunInfo.letter}
                   </span>
                 )}
               </div>
@@ -788,38 +911,32 @@ function ExpandedDetail({
                 >
                   None
                 </button>
-                {jobRunGroups.map((g) => (
+                {jobRunGroups.map((g) => {
+                  const style = RUN_PILL_STYLES[g.colourIdx];
+                  const isSelected = q.run_group === g.id;
+                  return (
+                    <button
+                      key={g.id}
+                      onClick={() => setRunGroup(g.id)}
+                      className={`text-xs px-2 py-0.5 rounded border font-medium ${
+                        isSelected
+                          ? `${style.pill} border-current`
+                          : `bg-white border-gray-200 hover:${style.pill}`
+                      }`}
+                    >
+                      Run {g.letter} ({g.count})
+                    </button>
+                  );
+                })}
+                {!q.run_group && (
                   <button
-                    key={g.id}
-                    onClick={() => setRunGroup(g.id)}
-                    className={`text-xs px-2 py-0.5 rounded border ${
-                      q.run_group === g.id
-                        ? 'bg-violet-100 border-violet-300 text-violet-700 font-medium'
-                        : 'bg-white border-gray-200 hover:bg-violet-50'
-                    }`}
+                    onClick={createNewRunGroup}
+                    className="text-xs px-2 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
                   >
-                    Run {g.letter} ({g.count})
+                    + New run
                   </button>
-                ))}
-                <button
-                  onClick={createNewRunGroup}
-                  className="text-xs px-2 py-0.5 rounded border border-dashed border-gray-300 text-gray-500 hover:bg-gray-50"
-                >
-                  + New run
-                </button>
+                )}
               </div>
-              {q.run_group && (
-                <div className="mt-1.5 flex items-center gap-2">
-                  <span className="text-xs text-gray-500">Stop order:</span>
-                  <input
-                    type="number"
-                    min={1}
-                    value={q.run_order || 1}
-                    onChange={(e) => onUpdateRunGroup(q.id, q.run_group, parseInt(e.target.value) || 1)}
-                    className="w-14 border border-gray-300 rounded px-2 py-0.5 text-xs text-center"
-                  />
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -942,6 +1059,73 @@ function ExpandedDetail({
           </div>
         </div>
       </div>
+
+      {/* Completion details (when completed) */}
+      {q.ops_status === 'completed' && q.completed_at && (
+        <div className="mt-4 pt-3 border-t border-gray-200">
+          <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider mb-2">Completion Details</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className="text-gray-500">Completed:</span>
+                <span className="font-medium text-gray-700">
+                  {new Date(q.completed_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                  {' at '}
+                  {new Date(q.completed_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                </span>
+              </div>
+              {q.completed_by && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-500">By:</span>
+                  <span className="font-medium text-gray-700">{q.completed_by}</span>
+                </div>
+              )}
+              {q.customer_present !== null && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-500">Customer present:</span>
+                  <span className={`font-medium ${q.customer_present ? 'text-green-600' : 'text-amber-600'}`}>
+                    {q.customer_present ? 'Yes' : 'No'}
+                  </span>
+                </div>
+              )}
+              {q.completion_notes && (
+                <div>
+                  <span className="text-gray-500">Notes:</span>
+                  <p className="mt-0.5 text-gray-700 bg-white rounded p-2 border border-gray-200">{q.completion_notes}</p>
+                </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              {/* Signature */}
+              {q.completion_signature && (
+                <div>
+                  <span className="text-gray-500">Signature:</span>
+                  <div className="mt-1 bg-white rounded border border-gray-200 p-2 inline-block">
+                    <img src={q.completion_signature} alt="Signature" className="h-16 max-w-[200px] object-contain" />
+                  </div>
+                </div>
+              )}
+              {/* Photos */}
+              {q.completion_photos && q.completion_photos.length > 0 && (
+                <div>
+                  <span className="text-gray-500">Photos ({q.completion_photos.length}):</span>
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {q.completion_photos.map((photo, idx) => (
+                      <a key={idx} href={photo} target="_blank" rel="noopener noreferrer" className="block">
+                        <img
+                          src={photo}
+                          alt={`Completion photo ${idx + 1}`}
+                          className="h-20 w-20 object-cover rounded border border-gray-200 hover:border-ooosh-500 transition-colors"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1300,102 +1484,327 @@ function EditQuoteModal({
 
 function CalendarView({
   data,
+  allQuotes,
+  onStatusChange,
+  onAssign,
+  onRemoveAssignment,
+  onUpdateDetails,
+  onEdit,
+  onUpdateRunGroup,
 }: {
   data: Record<string, OpsQuote[]>;
+  allQuotes: OpsQuote[];
+  onStatusChange: (id: string, status: string) => void;
+  onAssign: (quoteId: string) => void;
+  onRemoveAssignment: (quoteId: string, assignmentId: string) => void;
+  onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
+  onEdit: (quote: OpsQuote) => void;
+  onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
 }) {
-  const [currentMonth, setCurrentMonth] = useState(() => {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1);
-  });
-
-  const daysInMonth = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 0).getDate();
-  const firstDayOfWeek = currentMonth.getDay(); // 0=Sun
-  // Adjust to Monday-start: 0=Mon, 6=Sun
-  const startOffset = firstDayOfWeek === 0 ? 6 : firstDayOfWeek - 1;
-
-  const days: (number | null)[] = [];
-  for (let i = 0; i < startOffset; i++) days.push(null);
-  for (let d = 1; d <= daysInMonth; d++) days.push(d);
-
-  const monthStr = currentMonth.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-
-  function dateKey(day: number): string {
-    const y = currentMonth.getFullYear();
-    const m = String(currentMonth.getMonth() + 1).padStart(2, '0');
-    return `${y}-${m}-${String(day).padStart(2, '0')}`;
-  }
+  type CalViewMode = 'month' | 'week' | 'day';
+  const [calView, setCalView] = useState<CalViewMode>('month');
+  const [currentDate, setCurrentDate] = useState(() => new Date());
+  const [selectedQuote, setSelectedQuote] = useState<OpsQuote | null>(null);
 
   const todayKey = new Date().toISOString().split('T')[0];
 
+  function makeDateKey(d: Date): string {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  // Navigation
+  function navigate(dir: -1 | 1) {
+    setCurrentDate(prev => {
+      const d = new Date(prev);
+      if (calView === 'month') d.setMonth(d.getMonth() + dir);
+      else if (calView === 'week') d.setDate(d.getDate() + dir * 7);
+      else d.setDate(d.getDate() + dir);
+      return d;
+    });
+  }
+
+  function goToday() { setCurrentDate(new Date()); }
+
+  // Compute visible days
+  const visibleDays: Date[] = useMemo(() => {
+    const result: Date[] = [];
+    if (calView === 'month') {
+      const first = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+      const dow = first.getDay();
+      const startOffset = dow === 0 ? 6 : dow - 1;
+      const startDate = new Date(first);
+      startDate.setDate(startDate.getDate() - startOffset);
+      const daysInMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
+      const totalCells = Math.ceil((startOffset + daysInMonth) / 7) * 7;
+      for (let i = 0; i < totalCells; i++) {
+        const d = new Date(startDate);
+        d.setDate(d.getDate() + i);
+        result.push(d);
+      }
+    } else if (calView === 'week') {
+      const dow = currentDate.getDay();
+      const mondayOffset = dow === 0 ? -6 : 1 - dow;
+      const monday = new Date(currentDate);
+      monday.setDate(monday.getDate() + mondayOffset);
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(monday);
+        d.setDate(d.getDate() + i);
+        result.push(d);
+      }
+    } else {
+      result.push(new Date(currentDate));
+    }
+    return result;
+  }, [currentDate, calView]);
+
+  // Heading
+  const heading = useMemo(() => {
+    if (calView === 'month') return currentDate.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+    if (calView === 'week') {
+      const first = visibleDays[0];
+      const last = visibleDays[visibleDays.length - 1];
+      return `${first.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${last.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+    }
+    return currentDate.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  }, [currentDate, calView, visibleDays]);
+
+  // Quote detail panel
+  // Slide panel with full editable ExpandedDetail (same as table view)
+  function QuoteSlidePanel({ q, onClose }: { q: OpsQuote; onClose: () => void }) {
+    const assignments = Array.isArray(q.assignments) ? q.assignments : [];
+    return (
+      <div className="fixed inset-0 z-50 flex justify-end">
+        <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+        <div className="relative w-full max-w-2xl bg-white shadow-xl overflow-y-auto">
+          {/* Header with status, type, venue */}
+          <div className="p-4 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white z-10">
+            <div className="flex items-center gap-3">
+              <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'}`}>
+                {JOB_TYPE_LABELS[q.job_type] || q.job_type}
+              </span>
+              <span className="font-semibold text-gray-900">{q.linked_venue_name || q.venue_name || 'TBC'}</span>
+              {q.job_date && <span className="text-sm text-gray-500">{formatDate(q.job_date)}</span>}
+              {q.arrival_time && <span className="text-sm text-gray-500">{q.arrival_time}</span>}
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-28">
+                <StatusDropdown
+                  value={q.ops_status || 'todo'}
+                  onChange={(v) => onStatusChange(q.id, v)}
+                />
+              </div>
+              <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+              </button>
+            </div>
+          </div>
+          {/* Full editable detail */}
+          <ExpandedDetail
+            q={q}
+            assignments={assignments}
+            onAssign={onAssign}
+            onRemoveAssignment={onRemoveAssignment}
+            onUpdateDetails={onUpdateDetails}
+            onEdit={onEdit}
+            onUpdateRunGroup={onUpdateRunGroup}
+            allQuotes={allQuotes}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Render a single item pill (shared between month/week/day)
+  function ItemPill({ q }: { q: OpsQuote }) {
+    return (
+      <div
+        key={q.id}
+        onClick={(e) => { e.stopPropagation(); setSelectedQuote(q); }}
+        className={`text-[10px] leading-tight px-1 py-0.5 rounded truncate cursor-pointer hover:opacity-80 transition-opacity ${
+          JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'
+        }`}
+        title={`${JOB_TYPE_LABELS[q.job_type]} ${q.linked_venue_name || q.venue_name || ''} ${q.arrival_time || ''}`}
+      >
+        {q.arrival_time && <span className="font-semibold">{q.arrival_time} </span>}
+        {JOB_TYPE_LABELS[q.job_type]} {q.linked_venue_name || q.venue_name || '?'}
+      </div>
+    );
+  }
+
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-      {/* Month nav */}
+      {/* Header: nav + view mode */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
-        <button
-          onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() - 1, 1))}
-          className="p-1 hover:bg-gray-100 rounded"
-        >
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-          </svg>
-        </button>
-        <h2 className="font-semibold text-gray-900">{monthStr}</h2>
-        <button
-          onClick={() => setCurrentMonth(new Date(currentMonth.getFullYear(), currentMonth.getMonth() + 1, 1))}
-          className="p-1 hover:bg-gray-100 rounded"
-        >
-          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
-        </button>
-      </div>
-
-      {/* Day headers */}
-      <div className="grid grid-cols-7 border-b border-gray-200">
-        {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
-          <div key={d} className="px-2 py-1.5 text-xs font-semibold text-gray-500 text-center">{d}</div>
-        ))}
-      </div>
-
-      {/* Calendar grid */}
-      <div className="grid grid-cols-7">
-        {days.map((day, idx) => {
-          if (day === null) {
-            return <div key={`empty-${idx}`} className="min-h-[80px] border-b border-r border-gray-100 bg-gray-50" />;
-          }
-
-          const key = dateKey(day);
-          const items = data[key] || [];
-          const isToday = key === todayKey;
-
-          return (
-            <div
-              key={key}
-              className={`min-h-[80px] border-b border-r border-gray-100 p-1 ${isToday ? 'bg-ooosh-50' : ''}`}
+        <div className="flex items-center gap-2">
+          <button onClick={() => navigate(-1)} className="p-1 hover:bg-gray-100 rounded">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+          </button>
+          <button onClick={() => navigate(1)} className="p-1 hover:bg-gray-100 rounded">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+          </button>
+          <button onClick={goToday} className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50">Today</button>
+          <h2 className="font-semibold text-gray-900 ml-2">{heading}</h2>
+        </div>
+        <div className="flex rounded-lg border border-gray-300 overflow-hidden text-xs">
+          {(['month', 'week', 'day'] as CalViewMode[]).map(v => (
+            <button
+              key={v}
+              onClick={() => setCalView(v)}
+              className={`px-3 py-1.5 capitalize ${calView === v ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'}`}
             >
-              <div className={`text-xs font-medium mb-0.5 ${isToday ? 'text-ooosh-700 font-bold' : 'text-gray-500'}`}>
-                {day}
-              </div>
-              <div className="space-y-0.5">
-                {items.slice(0, 4).map((q) => (
-                  <div
-                    key={q.id}
-                    className={`text-[10px] leading-tight px-1 py-0.5 rounded truncate cursor-default ${
-                      JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'
-                    }`}
-                    title={`${JOB_TYPE_LABELS[q.job_type]} ${q.linked_venue_name || q.venue_name || ''} ${q.arrival_time || ''}`}
-                  >
-                    {JOB_TYPE_LABELS[q.job_type]} {q.linked_venue_name || q.venue_name || '?'}
-                  </div>
-                ))}
-                {items.length > 4 && (
-                  <div className="text-[10px] text-gray-400">+{items.length - 4} more</div>
-                )}
-              </div>
-            </div>
-          );
-        })}
+              {v}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {/* Month view */}
+      {calView === 'month' && (
+        <>
+          <div className="grid grid-cols-7 border-b border-gray-200">
+            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
+              <div key={d} className="px-2 py-1.5 text-xs font-semibold text-gray-500 text-center">{d}</div>
+            ))}
+          </div>
+          <div className="grid grid-cols-7">
+            {visibleDays.map((day) => {
+              const key = makeDateKey(day);
+              const items = data[key] || [];
+              const isToday = key === todayKey;
+              const isCurrentMonth = day.getMonth() === currentDate.getMonth();
+              return (
+                <div
+                  key={key}
+                  className={`min-h-[80px] border-b border-r border-gray-100 p-1 ${isToday ? 'bg-ooosh-50' : ''} ${!isCurrentMonth ? 'bg-gray-50' : ''}`}
+                >
+                  <div className={`text-xs font-medium mb-0.5 ${isToday ? 'text-ooosh-700 font-bold' : isCurrentMonth ? 'text-gray-500' : 'text-gray-300'}`}>
+                    {day.getDate()}
+                  </div>
+                  <div className="space-y-0.5">
+                    {items.slice(0, 4).map((q) => <ItemPill key={q.id} q={q} />)}
+                    {items.length > 4 && (
+                      <button
+                        onClick={() => { setCalView('day'); setCurrentDate(new Date(day)); }}
+                        className="text-[10px] text-ooosh-600 hover:underline"
+                      >
+                        +{items.length - 4} more
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Week view */}
+      {calView === 'week' && (
+        <>
+          <div className="grid grid-cols-7 border-b border-gray-200">
+            {visibleDays.map(day => {
+              const key = makeDateKey(day);
+              const isToday = key === todayKey;
+              return (
+                <div
+                  key={key}
+                  className={`px-2 py-2 text-center border-r border-gray-100 cursor-pointer hover:bg-gray-50 ${isToday ? 'bg-ooosh-50' : ''}`}
+                  onClick={() => { setCalView('day'); setCurrentDate(new Date(day)); }}
+                >
+                  <div className="text-xs text-gray-500">{day.toLocaleDateString('en-GB', { weekday: 'short' })}</div>
+                  <div className={`text-lg font-semibold ${isToday ? 'text-ooosh-700' : 'text-gray-900'}`}>{day.getDate()}</div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="grid grid-cols-7">
+            {visibleDays.map(day => {
+              const key = makeDateKey(day);
+              const items = data[key] || [];
+              const isToday = key === todayKey;
+              return (
+                <div key={key} className={`min-h-[200px] border-r border-gray-100 p-1.5 space-y-1 ${isToday ? 'bg-ooosh-50/30' : ''}`}>
+                  {items.map(q => {
+                    const sc = OPS_STATUS_CONFIG[q.ops_status || 'todo'] || OPS_STATUS_CONFIG.todo;
+                    const assignments = Array.isArray(q.assignments) ? q.assignments : [];
+                    return (
+                      <div
+                        key={q.id}
+                        onClick={() => setSelectedQuote(q)}
+                        className={`p-1.5 rounded border cursor-pointer hover:shadow-sm transition-shadow ${JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-50 border-gray-200'}`}
+                      >
+                        <div className="text-[10px] font-semibold">{q.arrival_time || '—'}</div>
+                        <div className="text-[10px] leading-tight truncate">{q.linked_venue_name || q.venue_name || 'TBC'}</div>
+                        <div className="flex items-center gap-1 mt-0.5">
+                          <span className={`text-[9px] rounded px-1 py-0.5 ${sc.bgColour} ${sc.colour}`}>{sc.label}</span>
+                        </div>
+                        {assignments.length > 0 && (
+                          <div className="text-[9px] text-gray-500 mt-0.5 truncate">
+                            {assignments.map(a => a.is_ooosh_crew ? 'Ooosh' : a.first_name || '').join(', ')}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {items.length === 0 && <div className="text-xs text-gray-300 text-center mt-4">—</div>}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* Day view */}
+      {calView === 'day' && (
+        <div className="p-4">
+          {(() => {
+            const key = makeDateKey(currentDate);
+            const items = (data[key] || []).sort((a, b) => (a.arrival_time || '').localeCompare(b.arrival_time || ''));
+            if (items.length === 0) return <p className="text-gray-400 text-sm text-center py-8">No transport scheduled for this day.</p>;
+            return (
+              <div className="space-y-2">
+                {items.map(q => {
+                  const sc = OPS_STATUS_CONFIG[q.ops_status || 'todo'] || OPS_STATUS_CONFIG.todo;
+                  const assignments = Array.isArray(q.assignments) ? q.assignments : [];
+                  return (
+                    <div
+                      key={q.id}
+                      onClick={() => setSelectedQuote(q)}
+                      className="flex items-start gap-4 p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
+                    >
+                      <div className="w-16 text-right">
+                        <div className="text-sm font-semibold text-gray-900">{q.arrival_time || '—'}</div>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-medium rounded px-2 py-0.5 ${JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'}`}>
+                            {JOB_TYPE_LABELS[q.job_type]}
+                          </span>
+                          <span className={`text-xs rounded px-2 py-0.5 ${sc.bgColour} ${sc.colour}`}>{sc.label}</span>
+                          {q.calculation_mode === 'fixed' && <span className="text-xs bg-amber-100 text-amber-700 rounded px-1.5 py-0.5">Local</span>}
+                        </div>
+                        <div className="text-sm font-medium text-gray-900 mt-1">{q.linked_venue_name || q.venue_name || 'TBC'}</div>
+                        {q.hh_job_number && <Link to={`/jobs/${q.job_id}`} className="text-xs text-ooosh-600 hover:underline">Job #{q.hh_job_number}</Link>}
+                        {assignments.length > 0 && (
+                          <div className="text-xs text-gray-500 mt-1">
+                            {assignments.map(a => a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim()).join(', ')}
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-right text-xs text-gray-500">
+                        {q.client_charge_rounded != null && <div>£{q.client_charge_rounded}</div>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Quote detail slide panel */}
+      {selectedQuote && <QuoteSlidePanel q={selectedQuote} onClose={() => setSelectedQuote(null)} />}
     </div>
   );
 }
