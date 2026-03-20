@@ -93,6 +93,7 @@ interface JobDetail {
   likelihood: string | null;
   enquiry_source: string | null;
   notes: string | null;
+  next_chase_date: string | null;
   tags: string[];
   files: FileAttachment[];
   created_at: string;
@@ -478,6 +479,225 @@ export default function JobDetailPage() {
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
+
+  // ── Inline editing state ──────────────────────────────────────────────────
+  const [editingName, setEditingName] = useState(false);
+  const [editNameValue, setEditNameValue] = useState('');
+  const [editingHHNumber, setEditingHHNumber] = useState(false);
+  const [editHHValue, setEditHHValue] = useState('');
+  const [editingDates, setEditingDates] = useState(false);
+  const [editOutDate, setEditOutDate] = useState('');
+  const [editJobDate, setEditJobDate] = useState('');
+  const [editJobEnd, setEditJobEnd] = useState('');
+  const [editReturnDate, setEditReturnDate] = useState('');
+  const [dateOutLinked, setDateOutLinked] = useState(true);
+  const [dateReturnLinked, setDateReturnLinked] = useState(true);
+  const [editingClient, setEditingClient] = useState(false);
+  const [clientSearch, setClientSearch] = useState('');
+  const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [editingValue, setEditingValue] = useState(false);
+  const [editValueAmount, setEditValueAmount] = useState('');
+  const [editingChaseDate, setEditingChaseDate] = useState(false);
+  const [editChaseDate, setEditChaseDate] = useState('');
+  const [inlineEditSaving, setInlineEditSaving] = useState(false);
+  const [pushingToHH, setPushingToHH] = useState(false);
+  const editNameRef = useRef<HTMLInputElement>(null);
+  const editHHRef = useRef<HTMLInputElement>(null);
+  const editValueRef = useRef<HTMLInputElement>(null);
+  const clientSearchRef = useRef<HTMLDivElement>(null);
+
+  // ── Inline edit helpers ──────────────────────────────────────────────────
+  function toDateInputValue(dateStr: string | null): string {
+    if (!dateStr) return '';
+    if (typeof dateStr === 'string' && dateStr.includes('T')) return dateStr.split('T')[0];
+    return dateStr;
+  }
+
+  async function saveInlineField(patch: Record<string, unknown>) {
+    if (!job) return;
+    setInlineEditSaving(true);
+    try {
+      await api.patch(`/pipeline/${job.id}/edit`, patch);
+      await loadJob();
+    } catch (err) {
+      console.error('Inline edit failed:', err);
+    } finally {
+      setInlineEditSaving(false);
+    }
+  }
+
+  function startEditName() {
+    if (!job) return;
+    setEditNameValue(job.job_name || '');
+    setEditingName(true);
+    setTimeout(() => editNameRef.current?.focus(), 50);
+  }
+
+  async function saveEditName() {
+    if (!editNameValue.trim()) return;
+    setEditingName(false);
+    await saveInlineField({ job_name: editNameValue.trim() });
+  }
+
+  function startEditHHNumber() {
+    setEditHHValue('');
+    setEditingHHNumber(true);
+    setTimeout(() => editHHRef.current?.focus(), 50);
+  }
+
+  async function saveEditHHNumber() {
+    if (!editHHValue.trim()) { setEditingHHNumber(false); return; }
+    setEditingHHNumber(false);
+    await saveInlineField({ hh_job_number: editHHValue.trim() });
+  }
+
+  function startEditDates() {
+    if (!job) return;
+    setEditOutDate(toDateInputValue(job.out_date));
+    setEditJobDate(toDateInputValue(job.job_date));
+    setEditJobEnd(toDateInputValue(job.job_end));
+    setEditReturnDate(toDateInputValue(job.return_date));
+    // Determine link state from current values
+    setDateOutLinked(toDateInputValue(job.out_date) === toDateInputValue(job.job_date));
+    setDateReturnLinked(toDateInputValue(job.return_date) === toDateInputValue(job.job_end));
+    setEditingDates(true);
+  }
+
+  // Date linking handlers (mirrored from PipelinePage New Enquiry form)
+  const handleEditOutDate = (val: string) => {
+    if (editJobDate && val > editJobDate) return;
+    setEditOutDate(val);
+    if (dateOutLinked) {
+      setEditJobDate(val);
+      if (editJobEnd && val > editJobEnd) {
+        setEditJobEnd(val);
+        if (dateReturnLinked) setEditReturnDate(val);
+      }
+    }
+  };
+
+  const handleEditJobDate = (val: string) => {
+    setEditJobDate(val);
+    if (dateOutLinked) {
+      setEditOutDate(val);
+    } else {
+      if (editOutDate && editOutDate > val) setEditOutDate(val);
+    }
+    if (!editJobEnd || editJobEnd < val) {
+      setEditJobEnd(val);
+      if (dateReturnLinked) setEditReturnDate(val);
+    }
+  };
+
+  const handleEditJobEnd = (val: string) => {
+    if (editJobDate && val < editJobDate) return;
+    setEditJobEnd(val);
+    if (dateReturnLinked) {
+      setEditReturnDate(val);
+    } else {
+      if (editReturnDate && editReturnDate < val) setEditReturnDate(val);
+    }
+  };
+
+  const handleEditReturnDate = (val: string) => {
+    if (editJobEnd && val < editJobEnd) return;
+    setEditReturnDate(val);
+    if (dateReturnLinked) {
+      setEditJobEnd(val);
+    }
+  };
+
+  async function saveDates() {
+    setEditingDates(false);
+    await saveInlineField({
+      out_date: editOutDate || null,
+      job_date: editJobDate || null,
+      job_end: editJobEnd || null,
+      return_date: editReturnDate || null,
+    });
+  }
+
+  function startEditClient() {
+    setClientSearch('');
+    setClientSearchResults([]);
+    setEditingClient(true);
+  }
+
+  async function selectClient(org: { id: string; name: string }) {
+    setEditingClient(false);
+    await saveInlineField({ client_id: org.id, client_name: org.name });
+  }
+
+  function startEditValue() {
+    if (!job) return;
+    setEditValueAmount(job.job_value != null ? String(job.job_value) : '');
+    setEditingValue(true);
+    setTimeout(() => editValueRef.current?.focus(), 50);
+  }
+
+  async function saveEditValue() {
+    setEditingValue(false);
+    const parsed = parseFloat(editValueAmount);
+    await saveInlineField({ job_value: isNaN(parsed) ? null : parsed });
+  }
+
+  async function cycleLikelihood() {
+    if (!job) return;
+    const cycle = ['hot', 'warm', 'cold'] as const;
+    const currentIdx = cycle.indexOf((job.likelihood || 'warm') as typeof cycle[number]);
+    const nextIdx = (currentIdx + 1) % cycle.length;
+    await saveInlineField({ likelihood: cycle[nextIdx] });
+  }
+
+  function startEditChaseDate() {
+    if (!job) return;
+    setEditChaseDate(toDateInputValue(job.next_chase_date));
+    setEditingChaseDate(true);
+  }
+
+  async function saveEditChaseDate() {
+    setEditingChaseDate(false);
+    await saveInlineField({ next_chase_date: editChaseDate || null });
+  }
+
+  async function pushToHireHop() {
+    if (!job) return;
+    setPushingToHH(true);
+    try {
+      await api.post(`/pipeline/${job.id}/push-hirehop`, {});
+      await loadJob();
+    } catch (err: any) {
+      alert(err?.message || 'Failed to create in HireHop');
+    } finally {
+      setPushingToHH(false);
+    }
+  }
+
+  // Search orgs for client picker
+  useEffect(() => {
+    if (!editingClient || clientSearch.length < 2) { setClientSearchResults([]); return; }
+    const timeout = setTimeout(async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(
+          `/organisations?search=${encodeURIComponent(clientSearch)}&limit=10`
+        );
+        setClientSearchResults(data.data);
+      } catch { /* ignore */ }
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [clientSearch, editingClient]);
+
+  // Close client search dropdown on outside click
+  useEffect(() => {
+    if (!editingClient) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (clientSearchRef.current && !clientSearchRef.current.contains(e.target as Node)) {
+        setEditingClient(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [editingClient]);
 
   // Escape key to close modals
   useEffect(() => {
@@ -866,8 +1086,9 @@ export default function JobDetailPage() {
       {/* Header Card */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
         <div className="flex items-start justify-between">
-          <div>
+          <div className="flex-1 min-w-0">
             <div className="flex items-center gap-3">
+              {/* HH Job Number — editable if NEW */}
               {job.hh_job_number ? (
                 <a
                   href={hhJobUrl!}
@@ -878,9 +1099,48 @@ export default function JobDetailPage() {
                 >
                   #{job.hh_job_number}
                 </a>
+              ) : editingHHNumber ? (
+                <input
+                  ref={editHHRef}
+                  type="text"
+                  value={editHHValue}
+                  onChange={(e) => setEditHHValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') saveEditHHNumber(); if (e.key === 'Escape') setEditingHHNumber(false); }}
+                  onBlur={saveEditHHNumber}
+                  placeholder="HH number or URL..."
+                  className="text-sm font-mono border border-ooosh-300 rounded px-2 py-0.5 w-56 focus:ring-ooosh-500 focus:border-ooosh-500"
+                />
               ) : (
-                <span className="text-sm font-mono text-gray-400">NEW</span>
+                <button
+                  onClick={startEditHHNumber}
+                  className="text-sm font-mono text-gray-400 hover:text-ooosh-600 hover:bg-ooosh-50 px-2 py-0.5 rounded cursor-pointer transition-colors"
+                  title="Click to link HireHop job (accepts number or URL)"
+                >
+                  NEW
+                </button>
               )}
+
+              {/* Create in HireHop button — only when no HH number */}
+              {!job.hh_job_number && !editingHHNumber && (
+                <button
+                  onClick={pushToHireHop}
+                  disabled={pushingToHH}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200 rounded-lg hover:bg-amber-100 disabled:opacity-50 transition-colors"
+                >
+                  {pushingToHH ? (
+                    <>Creating...</>
+                  ) : (
+                    <>
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
+                      Create in HireHop
+                    </>
+                  )}
+                </button>
+              )}
+
+              {/* Pipeline status dropdown */}
               {hasPipelineStatus ? (
                 <div ref={statusDropdownRef} className="relative">
                   <button
@@ -927,21 +1187,94 @@ export default function JobDetailPage() {
                 <span className="inline-flex px-2 py-0.5 rounded-full text-xs bg-gray-200 text-gray-600">Internal</span>
               )}
             </div>
-            <h1 className="text-2xl font-bold text-gray-900 mt-2">
-              {job.job_name || 'Untitled Job'}
-            </h1>
-            <div className="flex flex-wrap gap-4 mt-2 text-sm text-gray-600">
-              {(job.client_name || job.company_name) && (
-                <span>
-                  {job.client_id ? (
-                    <Link to={`/organisations/${job.client_id}`} className="text-ooosh-600 hover:text-ooosh-700">
-                      {job.client_name || job.company_name}
-                    </Link>
-                  ) : (
-                    job.client_name || job.company_name
-                  )}
-                </span>
-              )}
+
+            {/* Job Name — inline editable */}
+            {editingName ? (
+              <input
+                ref={editNameRef}
+                type="text"
+                value={editNameValue}
+                onChange={(e) => setEditNameValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') saveEditName(); if (e.key === 'Escape') { setEditingName(false); } }}
+                onBlur={saveEditName}
+                className="text-2xl font-bold text-gray-900 mt-2 w-full border-b-2 border-ooosh-400 bg-transparent outline-none px-0 py-0.5"
+              />
+            ) : (
+              <h1
+                className="text-2xl font-bold text-gray-900 mt-2 cursor-pointer hover:bg-gray-50 rounded px-1 -ml-1 transition-colors group"
+                onClick={startEditName}
+                title="Click to edit job name"
+              >
+                {job.job_name || 'Untitled Job'}
+                <svg className="w-4 h-4 inline-block ml-2 text-gray-300 group-hover:text-gray-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                </svg>
+              </h1>
+            )}
+
+            {/* Client, Venue, Dates summary row */}
+            <div className="flex flex-wrap gap-4 mt-2 text-sm text-gray-600 items-center">
+              {/* Client — editable */}
+              <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
+                {(job.client_name || job.company_name) ? (
+                  <>
+                    {job.client_id ? (
+                      <Link to={`/organisations/${job.client_id}`} className="text-ooosh-600 hover:text-ooosh-700">
+                        {job.client_name || job.company_name}
+                      </Link>
+                    ) : (
+                      <span>{job.client_name || job.company_name}</span>
+                    )}
+                    <button
+                      onClick={startEditClient}
+                      className="text-gray-300 hover:text-gray-500 transition-colors"
+                      title="Change client"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={startEditClient}
+                    className="text-gray-400 hover:text-ooosh-600 transition-colors text-xs border border-dashed border-gray-300 px-2 py-0.5 rounded"
+                  >
+                    + Add client
+                  </button>
+                )}
+                {editingClient && (
+                  <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64">
+                    <input
+                      type="text"
+                      value={clientSearch}
+                      onChange={(e) => setClientSearch(e.target.value)}
+                      placeholder="Search organisations..."
+                      className="w-full border-b border-gray-200 px-3 py-2 text-sm focus:ring-0 focus:outline-none rounded-t-lg"
+                      autoFocus
+                    />
+                    {clientSearchResults.length > 0 && (
+                      <div className="max-h-48 overflow-y-auto">
+                        {clientSearchResults.map((o) => (
+                          <button
+                            key={o.id}
+                            onClick={() => selectClient(o)}
+                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                          >
+                            <span className="font-medium">{o.name}</span>
+                            <span className="text-gray-400 text-xs">{o.type}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {clientSearch.length >= 2 && clientSearchResults.length === 0 && (
+                      <div className="px-3 py-2 text-sm text-gray-400">No results</div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Venue */}
               {job.venue_name && (
                 <span>
                   {job.venue_id ? (
@@ -953,12 +1286,207 @@ export default function JobDetailPage() {
                   )}
                 </span>
               )}
-              {job.job_value != null && (
-                <span className="font-semibold text-gray-900">
-                  £{job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+
+              {/* Dates summary + edit button */}
+              {(job.out_date || job.job_date || job.job_end || job.return_date) && (
+                <span className="inline-flex items-center gap-1 text-gray-500">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                  {formatDate(job.job_date || job.out_date)}
+                  {(job.job_end || job.return_date) && job.job_end !== job.job_date && (
+                    <> &ndash; {formatDate(job.job_end || job.return_date)}</>
+                  )}
+                  <button
+                    onClick={startEditDates}
+                    className="text-gray-300 hover:text-gray-500 transition-colors ml-0.5"
+                    title="Edit dates"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                    </svg>
+                  </button>
                 </span>
               )}
+              {!job.out_date && !job.job_date && !job.job_end && !job.return_date && (
+                <button
+                  onClick={startEditDates}
+                  className="text-gray-400 hover:text-ooosh-600 transition-colors text-xs border border-dashed border-gray-300 px-2 py-0.5 rounded"
+                >
+                  + Add dates
+                </button>
+              )}
             </div>
+
+            {/* Dates editor panel */}
+            {editingDates && (
+              <div className="mt-3 p-4 bg-gray-50 rounded-lg border border-gray-200">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Outgoing</label>
+                    <input
+                      type="date"
+                      value={editOutDate}
+                      onChange={(e) => handleEditOutDate(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                    />
+                  </div>
+                  <div className="relative">
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Job Start</label>
+                    <input
+                      type="date"
+                      value={editJobDate}
+                      onChange={(e) => handleEditJobDate(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                    />
+                    <button
+                      onClick={() => { if (!dateOutLinked) setEditOutDate(editJobDate); setDateOutLinked(!dateOutLinked); }}
+                      className={`absolute -left-4 top-8 w-4 text-center text-xs ${dateOutLinked ? 'text-ooosh-600' : 'text-gray-300 hover:text-gray-500'}`}
+                      title={dateOutLinked ? 'Linked to Outgoing (click to unlink)' : 'Click to link to Outgoing'}
+                    >
+                      {dateOutLinked ? (
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clipRule="evenodd" /></svg>
+                      ) : (
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.172 13.828a4 4 0 015.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" /></svg>
+                      )}
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Job End</label>
+                    <input
+                      type="date"
+                      value={editJobEnd}
+                      onChange={(e) => handleEditJobEnd(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                    />
+                  </div>
+                  <div className="relative">
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Returning</label>
+                    <input
+                      type="date"
+                      value={editReturnDate}
+                      onChange={(e) => handleEditReturnDate(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                    />
+                    <button
+                      onClick={() => { if (!dateReturnLinked) setEditReturnDate(editJobEnd); setDateReturnLinked(!dateReturnLinked); }}
+                      className={`absolute -left-4 top-8 w-4 text-center text-xs ${dateReturnLinked ? 'text-ooosh-600' : 'text-gray-300 hover:text-gray-500'}`}
+                      title={dateReturnLinked ? 'Linked to Job End (click to unlink)' : 'Click to link to Job End'}
+                    >
+                      {dateReturnLinked ? (
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clipRule="evenodd" /></svg>
+                      ) : (
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.172 13.828a4 4 0 015.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" /></svg>
+                      )}
+                    </button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 mt-3">
+                  <button
+                    onClick={saveDates}
+                    disabled={inlineEditSaving}
+                    className="px-3 py-1.5 text-xs font-medium bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
+                  >
+                    {inlineEditSaving ? 'Saving...' : 'Save dates'}
+                  </button>
+                  <button
+                    onClick={() => setEditingDates(false)}
+                    className="px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-100 rounded"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Pipeline fields row: Likelihood, Next Chase, Value */}
+            {hasPipelineStatus && (
+              <div className="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-gray-100">
+                {/* Likelihood */}
+                <button
+                  onClick={cycleLikelihood}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold cursor-pointer transition-colors ${
+                    job.likelihood === 'hot'
+                      ? 'bg-red-100 text-red-700 hover:bg-red-200'
+                      : job.likelihood === 'warm'
+                      ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                      : job.likelihood === 'cold'
+                      ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                      : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                  }`}
+                  title="Click to cycle likelihood: hot / warm / cold"
+                >
+                  {job.likelihood === 'hot' && (
+                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M12.395 2.553a1 1 0 00-1.45-.385c-.345.23-.614.558-.822.88-.214.33-.403.713-.57 1.116-.334.804-.614 1.768-.84 2.734a31.365 31.365 0 00-.613 3.58 2.64 2.64 0 01-.945-1.067c-.328-.68-.398-1.534-.398-2.654A1 1 0 005.05 6.05 6.981 6.981 0 003 11a7 7 0 1011.95-4.95c-.592-.591-.98-.985-1.348-1.467-.363-.476-.724-1.063-1.207-2.03zM12.12 15.12A3 3 0 017 13s.879.5 2.5.5c0-1 .5-4 1.25-4.5.5 1 .786 1.293 1.371 1.879A2.99 2.99 0 0113 13a2.99 2.99 0 01-.879 2.121z" clipRule="evenodd" /></svg>
+                  )}
+                  {job.likelihood ? (job.likelihood.charAt(0).toUpperCase() + job.likelihood.slice(1)) : 'Set likelihood'}
+                </button>
+
+                {/* Next Chase Date */}
+                <div className="inline-flex items-center gap-1.5 text-xs text-gray-500">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  {editingChaseDate ? (
+                    <input
+                      type="date"
+                      value={editChaseDate}
+                      onChange={(e) => setEditChaseDate(e.target.value)}
+                      onBlur={saveEditChaseDate}
+                      onKeyDown={(e) => { if (e.key === 'Enter') saveEditChaseDate(); if (e.key === 'Escape') setEditingChaseDate(false); }}
+                      className="border border-gray-300 rounded px-1.5 py-0.5 text-xs focus:ring-ooosh-500 focus:border-ooosh-500"
+                      autoFocus
+                    />
+                  ) : (
+                    <button
+                      onClick={startEditChaseDate}
+                      className={`hover:text-ooosh-600 transition-colors ${
+                        job.next_chase_date && new Date(job.next_chase_date) < new Date() ? 'text-red-600 font-semibold' : ''
+                      }`}
+                      title="Click to set next chase date"
+                    >
+                      {job.next_chase_date
+                        ? `Chase: ${formatDate(job.next_chase_date)}`
+                        : 'Set chase date'}
+                    </button>
+                  )}
+                </div>
+
+                {/* Job Value */}
+                <div className="inline-flex items-center text-xs">
+                  {editingValue ? (
+                    <div className="flex items-center gap-0.5">
+                      <span className="text-gray-500 font-medium">£</span>
+                      <input
+                        ref={editValueRef}
+                        type="number"
+                        value={editValueAmount}
+                        onChange={(e) => setEditValueAmount(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') saveEditValue(); if (e.key === 'Escape') { setEditingValue(false); } }}
+                        onBlur={saveEditValue}
+                        className="border border-gray-300 rounded px-1.5 py-0.5 text-xs w-24 focus:ring-ooosh-500 focus:border-ooosh-500"
+                        step="1"
+                        min="0"
+                      />
+                    </div>
+                  ) : (
+                    <button
+                      onClick={startEditValue}
+                      className="font-semibold text-gray-900 hover:text-ooosh-600 transition-colors"
+                      title="Click to edit job value"
+                    >
+                      {job.job_value != null
+                        ? `£${job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+                        : <span className="text-gray-400 font-normal">Set value</span>}
+                    </button>
+                  )}
+                </div>
+
+                {inlineEditSaving && (
+                  <span className="text-xs text-gray-400 animate-pulse">Saving...</span>
+                )}
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {hhJobUrl && (
