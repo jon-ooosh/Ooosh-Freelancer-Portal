@@ -777,10 +777,12 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
     analysis.licence.valid = effectiveEnd > today;
     analysis.licence.expiryDate = effectiveEnd.toISOString().split('T')[0];
   } else if (driver.licence_next_check_due) {
-    // Legacy fallback
-    const checkDate = new Date(driver.licence_next_check_due as string);
-    analysis.licence.valid = checkDate > today;
-    analysis.licence.expiryDate = (driver.licence_next_check_due as string);
+    // licence_next_check_due stores the actual expiry date (already check date + 90 days)
+    // If value looks like a past date relative to driver creation, it's the raw check date — add 90 days
+    const storedDate = new Date(driver.licence_next_check_due as string);
+    // Treat the stored value as the expiry date directly (it should already be check date + 90d)
+    analysis.licence.valid = storedDate > today;
+    analysis.licence.expiryDate = storedDate.toISOString().split('T')[0];
   }
 
   // POA1: 90 days from doc date (stored as poa1_valid_until by hire form)
@@ -1039,7 +1041,7 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
         status: analysis.passport.valid ? 'valid' : (driver.passport_valid_until ? 'expired' : 'not_required'),
       },
     },
-    insuranceData: driver.date_passed_test ? {
+    insuranceData: {
       datePassedTest: (driver.date_passed_test as string) || '',
       hasDisability: (driver.has_disability as boolean) || false,
       hasConvictions: (driver.has_convictions as boolean) || false,
@@ -1048,10 +1050,10 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
       hasInsuranceIssues: (driver.has_insurance_issues as boolean) || false,
       hasDrivingBan: (driver.has_driving_ban as boolean) || false,
       additionalDetails: (driver.additional_details as string) || '',
-    } : null,
+    },
     boardAId: driver.id || null,
     lastUpdated: driver.updated_at || null,
-    licenseNextCheckDue: driver.licence_next_check_due || null,
+    licenseNextCheckDue: analysis.licence.expiryDate || driver.licence_next_check_due || null,
     poa1ValidUntil: driver.poa1_valid_until || null,
     poa2ValidUntil: driver.poa2_valid_until || null,
     dvlaValidUntil: driver.dvla_valid_until || null,
