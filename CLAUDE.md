@@ -578,16 +578,45 @@ The Job Detail page needs inline editing for key fields. Currently status change
 
 **Stream B: Band-Centric Data Model** ← ACTIVE
 Organisation-to-organisation relationships and multi-org job links. Makes "bands" a first-class concept.
-- [ ] Migration: `organisation_relationships` table (org-to-org links with typed relationships: manages, books_for, does_accounts_for, promotes, supplies)
-- [ ] Migration: `job_organisations` junction table (band, client, promoter, venue_operator, supplier roles per job)
-- [ ] Backend: Org relationships CRUD endpoints
-- [ ] Backend: Job-organisation links CRUD endpoints
-- [ ] Frontend: "Relationships" section on Organisation Detail page (add/remove/view linked orgs with bidirectional display)
-- [ ] Frontend: Band/org links on Job Detail page (add band, client, promoter etc.)
+- [x] Migration: `organisation_relationships` table (org-to-org links with typed relationships: manages, books_for, does_accounts_for, promotes, supplies)
+- [x] Migration: `job_organisations` junction table (band, client, promoter, venue_operator, supplier roles per job)
+- [x] Backend: Org relationships CRUD endpoints
+- [x] Backend: Job-organisation links CRUD endpoints
+- [x] Frontend: "Relationships" section on Organisation Detail page (add/remove/view linked orgs with bidirectional display)
+- [x] Frontend: Band/org links on Job Detail page (add band, client, promoter etc.)
+- [x] Frontend: Band picker on New Enquiry form with org search
+- [x] Person-to-org role picker (dropdown instead of free text) with standard roles
+- [x] End role confirmation dialog with optional reason and repoint flow
 - [ ] Frontend: Person context surfacing in pickers (show org connections when selecting a person)
-- [ ] Frontend: Band picker on New Enquiry form with smart suggestions from org graph
+- [ ] Frontend: Smart suggestions from org graph (select band → auto-suggest management company as client)
 - [ ] Org-to-org relationship types: manages↔managed_by, books_for↔booked_by, does_accounts_for↔accounts_done_by, promotes↔promoted_by, supplies↔supplied_by
 - [ ] Person-to-org role types (already exist, confirm complete): Tour Manager, Manager, Production Manager, Engineer, Accountant, Promoter, Crew, Band Member, Driver
+
+**Stream C: HireHop Data Cleanup** (depends on Stream A "Create in HireHop" button)
+HireHop sync imported contacts literally — bands became people, management companies got typed as "client", etc.
+The cleanup strategy is: OP becomes master for relationship data, HH gets what it needs via push.
+
+*Step 1: OP→HH job creation* (part of Stream A)
+- [ ] `POST /api/pipeline/:id/push-hirehop` — create job in HH via `job_save.php` API
+- [ ] Map OP fields → HH: contact person → `name`, client org → `company`, dates → `out`/`start`/`end`/`to`, job name → `job_name`, details → `details`
+- [ ] Write back HH job number to OP `jobs.hh_job_number`
+- [ ] Include `no_webhook=1` to prevent sync loops
+- [ ] Band stays in OP only (HH has no band field)
+
+*Step 2: Sync guard rails*
+- [ ] HH contact sync: when Contact Name matches existing *organisation* (not person), flag as conflict → "needs review" queue
+- [ ] HH job sync: never overwrite OP-enriched org types or relationships
+- [ ] Surface "needs review" items on Dashboard or Settings page
+
+*Step 3: Data cleanup tools*
+- [ ] "Convert Person to Organisation" — reclassify a person as an org (e.g. "10cc" person → "10cc" band org), preserve relationships
+- [ ] "Merge duplicates" — merge person+org that represent the same entity
+- [ ] Bulk type correction — change org types (e.g. all "client" orgs that are actually bands)
+- [ ] "Needs review" page for sync conflicts
+
+*Step 4: Smart relationship suggestions*
+- [ ] When viewing a "Contact" at a "client" org, system suggests: "Is this actually a Band?"
+- [ ] When new HH sync creates entities, surface for review before they pollute the graph
 
 #### Remaining Phase 2 work (no strict ordering)
 
