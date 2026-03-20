@@ -118,6 +118,7 @@ interface PersonOption {
   skills: string[];
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
+  current_organisations?: Array<{ organisation_name: string; role: string }> | null;
 }
 
 // ── Main Page ────────────────────────────────────────────────────────
@@ -484,9 +485,13 @@ export default function TransportOpsPage() {
                       >
                         <div>
                           <span className="font-medium text-gray-900">{p.first_name} {p.last_name}</span>
-                          {p.skills?.length > 0 && (
+                          {p.current_organisations?.length ? (
+                            <span className="ml-2 text-xs text-gray-400">
+                              {p.current_organisations.slice(0, 2).map(o => `${o.role} at ${o.organisation_name}`).join(', ')}
+                            </span>
+                          ) : p.skills?.length > 0 ? (
                             <span className="ml-2 text-xs text-gray-400">{p.skills.slice(0, 3).join(', ')}</span>
-                          )}
+                          ) : null}
                         </div>
                         <div className="flex gap-1">
                           {p.is_insured_on_vehicles && (

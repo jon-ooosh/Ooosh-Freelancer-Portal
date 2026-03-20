@@ -1087,7 +1087,20 @@ function NewEnquiryModal({
                     {bandResults.map((o) => (
                       <button
                         key={o.id}
-                        onClick={() => { setBandId(o.id); setBandName(o.name); setBandResults([]); setBandSearch(''); }}
+                        onClick={async () => {
+                          setBandId(o.id); setBandName(o.name); setBandResults([]); setBandSearch('');
+                          // Auto-suggest client from org graph if client is empty
+                          if (!clientName && !clientId) {
+                            try {
+                              const suggestions = await api.get<{ data: Array<{ org_id: string; org_name: string; suggested_role: string; relationship_type: string }> }>(`/organisations/${o.id}/suggestions`);
+                              const clientSuggestion = suggestions.data.find(s => s.suggested_role === 'client' || s.suggested_role === 'management');
+                              if (clientSuggestion) {
+                                setClientName(clientSuggestion.org_name);
+                                setClientId(clientSuggestion.org_id);
+                              }
+                            } catch { /* suggestions are nice-to-have */ }
+                          }
+                        }}
                         className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
                       >
                         <span className="font-medium">{o.name}</span>
