@@ -519,8 +519,10 @@ export default function JobDetailPage() {
     try {
       await api.patch(`/pipeline/${job.id}/edit`, patch);
       await loadJob();
-    } catch (err) {
-      console.error('Inline edit failed:', err);
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to save';
+      console.error('Inline edit failed:', msg);
+      alert(msg);
     } finally {
       setInlineEditSaving(false);
     }
