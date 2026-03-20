@@ -866,14 +866,15 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     }
 
     // Build HireHop job payload
+    // HH API: `name` is required for new jobs, `job_name` is the job title
     const hhBody: Record<string, unknown> = {
       job: 0, // 0 = create new
+      name: job.client_name || job.job_name || 'New Job', // required for new
       job_name: job.job_name || '',
       no_webhook: 1,
     };
 
     if (hhClientId) hhBody.client_id = hhClientId;
-    if (job.client_name) hhBody.name = job.client_name;
     if (job.company_name) hhBody.company = job.company_name;
     if (job.details) hhBody.details = job.details;
     if (venueName) hhBody.venue = venueName;
@@ -891,7 +892,7 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     // POST to HireHop via broker
     const { hhBroker } = await import('../services/hirehop-broker');
     const hhResponse = await hhBroker.post<{ job?: number; JOB_ID?: number }>(
-      '/frames/job_save.php',
+      '/api/save_job.php',
       hhBody,
       { priority: 'high' }
     );
