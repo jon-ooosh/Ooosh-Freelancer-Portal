@@ -331,11 +331,12 @@ router.get('/by-driver/:driverId', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// ── GET /api/hire-forms/active — All active assignments with drivers (recent, non-cancelled) ──
+// ── GET /api/hire-forms/active — All active assignments with drivers + unassigned drivers ──
 
 router.get('/active', async (_req: AuthRequest, res: Response) => {
   try {
-    const result = await query(
+    // First: assignments that have drivers linked
+    const assignedResult = await query(
       `SELECT vha.*,
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name,
@@ -358,7 +359,42 @@ router.get('/active', async (_req: AuthRequest, res: Response) => {
       LIMIT 100`
     );
 
-    res.json({ data: result.rows });
+    // Second: active drivers not yet assigned to any job (available for selection)
+    const unassignedResult = await query(
+      `SELECT d.id AS driver_id, d.full_name AS driver_name, d.email AS driver_email,
+        d.licence_points AS driver_points, d.requires_referral
+      FROM drivers d
+      WHERE d.is_active = true
+        AND d.full_name IS NOT NULL
+        AND d.full_name != ''
+        AND NOT EXISTS (
+          SELECT 1 FROM vehicle_hire_assignments vha
+          WHERE vha.driver_id = d.id AND vha.status != 'cancelled'
+        )
+      ORDER BY d.full_name
+      LIMIT 50`
+    );
+
+    // Combine: assigned first, then unassigned (with synthetic shape)
+    const combined = [
+      ...assignedResult.rows,
+      ...unassignedResult.rows.map((d: any) => ({
+        id: `unassigned-${d.driver_id}`,
+        driver_id: d.driver_id,
+        driver_name: d.driver_name,
+        driver_email: d.driver_email,
+        driver_points: d.driver_points,
+        requires_referral: d.requires_referral,
+        hirehop_job_id: null,
+        hirehop_job_name: null,
+        vehicle_id: null,
+        vehicle_reg: null,
+        status: 'available',
+        assignment_type: 'self_drive',
+      })),
+    ];
+
+    res.json({ data: combined });
   } catch (error) {
     console.error('[hire-forms] Active forms error:', error);
     res.status(500).json({ error: 'Failed to load active hire forms' });
