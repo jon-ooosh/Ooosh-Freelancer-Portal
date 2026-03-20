@@ -396,4 +396,52 @@ router.delete('/:id', authorize('admin', 'manager'), async (req: AuthRequest, re
   }
 });
 
+// GET /api/organisations/:id/suggestions — suggest related orgs for job roles
+// e.g. select a band → suggest its management company as client
+router.get('/:id/suggestions', async (req: AuthRequest, res: Response) => {
+  try {
+    // Get all active relationships for this org
+    const result = await query(
+      `SELECT r.relationship_type, r.from_org_id, r.to_org_id,
+        o.id as org_id, o.name as org_name, o.type as org_type
+       FROM organisation_relationships r
+       JOIN organisations o ON o.id = CASE WHEN r.from_org_id = $1 THEN r.to_org_id ELSE r.from_org_id END
+       WHERE (r.from_org_id = $1 OR r.to_org_id = $1)
+         AND r.status = 'active'
+         AND o.is_deleted = false
+       ORDER BY o.name`,
+      [req.params.id]
+    );
+
+    // Map relationships to suggested job roles
+    const suggestions = result.rows.map(row => {
+      const isFrom = row.from_org_id === req.params.id;
+      const relType = row.relationship_type;
+      // Determine suggested job role based on relationship
+      let suggestedRole = 'client';
+      if (relType === 'manages' && isFrom) suggestedRole = 'client'; // band's manager → client
+      if (relType === 'manages' && !isFrom) suggestedRole = 'management'; // managed by → management
+      if (relType === 'books_for') suggestedRole = 'client';
+      if (relType === 'promotes' && isFrom) suggestedRole = 'promoter';
+      if (relType === 'promotes' && !isFrom) suggestedRole = 'promoter';
+      if (relType === 'supplies') suggestedRole = 'supplier';
+      if (relType === 'represents') suggestedRole = isFrom ? 'management' : 'client';
+
+      return {
+        org_id: row.org_id,
+        org_name: row.org_name,
+        org_type: row.org_type,
+        relationship_type: relType,
+        suggested_role: suggestedRole,
+        direction: isFrom ? 'outgoing' : 'incoming',
+      };
+    });
+
+    res.json({ data: suggestions });
+  } catch (error) {
+    console.error('Get org suggestions error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

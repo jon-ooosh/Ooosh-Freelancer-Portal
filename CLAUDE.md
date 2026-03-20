@@ -567,16 +567,16 @@ Global operational view for what's currently happening / about to happen with tr
 
 Two streams of work to improve the pipeline/enquiry/jobs experience:
 
-**Stream A: Job Detail Editing** (next chunk after Stream B)
-The Job Detail page needs inline editing for key fields. Currently status changes are Kanban-only and most fields are read-only.
-- [ ] **HH Job Number** — Where it says "NEW", make clickable/editable. Accept pasted HH URLs (`https://myhirehop.com/job.php?id=15564`) and extract the number. Once linked, sync takes over.
-- [ ] **Dates** — Reuse the four-date linked editor from New Enquiry form (Outgoing↔Job Start, Returning↔Job Finish toggleable links, date constraints enforced)
-- [ ] **Client** — Editable with org/person search picker
-- [ ] **Job name** — Inline editable
-- [ ] **Pipeline fields** — Likelihood, next chase date, job value — all inline editable on Job Detail
-- [ ] **Create in HireHop** button — Push Ooosh-native enquiry to create HH job, write back the number (follow-up after initial editing)
+**Stream A: Job Detail Editing** ✅ COMPLETE
+The Job Detail page has inline editing for all key fields.
+- [x] **HH Job Number** — Clickable/editable "NEW" badge. Accepts pasted HH URLs (`https://myhirehop.com/job.php?id=15564`) and extracts the number. Once linked, sync takes over.
+- [x] **Dates** — Four-date linked editor (Outgoing↔Job Start, Returning↔Job Finish toggleable links, date constraints enforced)
+- [x] **Client** — Editable with org search picker
+- [x] **Job name** — Inline editable
+- [x] **Pipeline fields** — Likelihood, next chase date, job value — all inline editable on Job Detail
+- [x] **Create in HireHop** button — Push Ooosh-native enquiry to create HH job, write back the number. HH user/manager mapping via `hh_user_id` on users table (migration 028).
 
-**Stream B: Band-Centric Data Model** ← ACTIVE
+**Stream B: Band-Centric Data Model** ✅ COMPLETE
 Organisation-to-organisation relationships and multi-org job links. Makes "bands" a first-class concept.
 - [x] Migration: `organisation_relationships` table (org-to-org links with typed relationships: manages, books_for, does_accounts_for, promotes, supplies)
 - [x] Migration: `job_organisations` junction table (band, client, promoter, venue_operator, supplier roles per job)
@@ -587,10 +587,10 @@ Organisation-to-organisation relationships and multi-org job links. Makes "bands
 - [x] Frontend: Band picker on New Enquiry form with org search
 - [x] Person-to-org role picker (dropdown instead of free text) with standard roles
 - [x] End role confirmation dialog with optional reason and repoint flow
-- [ ] Frontend: Person context surfacing in pickers (show org connections when selecting a person)
-- [ ] Frontend: Smart suggestions from org graph (select band → auto-suggest management company as client)
-- [ ] Org-to-org relationship types: manages↔managed_by, books_for↔booked_by, does_accounts_for↔accounts_done_by, promotes↔promoted_by, supplies↔supplied_by
-- [ ] Person-to-org role types (already exist, confirm complete): Tour Manager, Manager, Production Manager, Engineer, Accountant, Promoter, Crew, Band Member, Driver
+- [x] Frontend: Person context surfacing in pickers (show org connections when selecting a person — crew picker shows "role at Org Name")
+- [x] Frontend: Smart suggestions from org graph (select band → auto-suggest management company as client on Job Detail + auto-populate client on New Enquiry)
+- [x] Org-to-org relationship types: manages↔managed_by, books_for↔booked_by, does_accounts_for↔accounts_done_by, promotes↔promoted_by, supplies↔supplied_by, represents↔represented_by
+- [x] Person-to-org role types: Tour Manager, Manager, Production Manager, Engineer, Accountant, Promoter, Crew, Band Member, Driver, Agent, Site Contact, Owner, General Contact, Other
 
 **Stream C: HireHop Data Cleanup** (depends on Stream A "Create in HireHop" button)
 HireHop sync imported contacts literally — bands became people, management companies got typed as "client", etc.
