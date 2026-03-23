@@ -378,7 +378,7 @@ router.get('/by-job/:hirehopJobId', authenticate, async (req: AuthRequest, res: 
         je.excess_amount_taken,
         je.excess_status
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.hirehop_job_id = $1
@@ -407,7 +407,7 @@ router.get('/by-driver/:driverId', authenticate, async (req: AuthRequest, res: R
         je.excess_amount_required,
         je.excess_status
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.driver_id = $1
         AND vha.assignment_type = 'self_drive'
@@ -438,7 +438,7 @@ router.get('/active', authenticate, async (_req: AuthRequest, res: Response) => 
         je.excess_amount_taken,
         je.excess_status
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.assignment_type = 'self_drive'
@@ -609,7 +609,7 @@ router.get('/:id', authenticateOrApiKey, async (req: AuthRequest, res: Response)
         je.excess_amount_taken,
         je.excess_status
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.id = $1`,
@@ -887,7 +887,7 @@ router.post('/:id/send-email', authenticateOrApiKey, async (req: AuthRequest, re
         fv.reg AS vehicle_reg, fv.vehicle_type AS vehicle_model
       FROM vehicle_hire_assignments vha
       LEFT JOIN drivers d ON d.id = vha.driver_id
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       WHERE vha.id = $1`,
       [id]
     );

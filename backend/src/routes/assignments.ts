@@ -620,11 +620,12 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // Get current active assignments
+    // Get current active assignments (allocations-created only — exclude hire-form-created)
     const existing = await query(
-      `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id
+      `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id
        FROM vehicle_hire_assignments
-       WHERE status IN ('soft', 'confirmed')`
+       WHERE status IN ('soft', 'confirmed')
+         AND driver_id IS NULL`
     );
 
     const existingMap = new Map(
