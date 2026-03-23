@@ -163,6 +163,12 @@ interface SavedQuote {
   created_at: string;
 }
 
+interface PersonOrgLink {
+  organisation_id: string;
+  organisation_name: string;
+  role: string;
+}
+
 interface PersonOption {
   id: string;
   first_name: string;
@@ -170,6 +176,7 @@ interface PersonOption {
   skills: string[];
   is_insured_on_vehicles: boolean;
   is_approved: boolean;
+  current_organisations?: PersonOrgLink[] | null;
 }
 
 interface VehicleAssignment {
@@ -474,6 +481,10 @@ export default function JobDetailPage() {
   const [jobOrgSelectedOrg, setJobOrgSelectedOrg] = useState<{ id: string; name: string; type: string } | null>(null);
   const [jobOrgRole, setJobOrgRole] = useState('band');
   const [jobOrgSaving, setJobOrgSaving] = useState(false);
+  const [orgSuggestions, setOrgSuggestions] = useState<Array<{
+    org_id: string; org_name: string; org_type: string;
+    relationship_type: string; suggested_role: string;
+  }>>([]);
 
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
@@ -548,9 +559,20 @@ export default function JobDetailPage() {
   }
 
   async function saveEditHHNumber() {
-    if (!editHHValue.trim()) { setEditingHHNumber(false); return; }
+    const raw = editHHValue.trim();
+    if (!raw) { setEditingHHNumber(false); return; }
+    // Extract job number from pasted HireHop URLs (e.g. https://myhirehop.com/job.php?id=15564)
+    let jobNumber = raw;
+    const urlMatch = raw.match(/[?&]id=(\d+)/);
+    if (urlMatch) {
+      jobNumber = urlMatch[1];
+    } else {
+      // Strip non-numeric characters in case they pasted something like "#15564"
+      const numMatch = raw.match(/\d+/);
+      if (numMatch) jobNumber = numMatch[0];
+    }
     setEditingHHNumber(false);
-    await saveInlineField({ hh_job_number: editHHValue.trim() });
+    await saveInlineField({ hh_job_number: jobNumber });
   }
 
   function startEditDates() {
@@ -977,6 +999,17 @@ export default function JobDetailPage() {
         organisation_id: jobOrgSelectedOrg.id,
         role: jobOrgRole,
       });
+      // After adding a band, fetch org graph suggestions
+      if (jobOrgRole === 'band') {
+        try {
+          const suggestions = await api.get<{ data: typeof orgSuggestions }>(`/organisations/${jobOrgSelectedOrg.id}/suggestions`);
+          // Filter out orgs already linked to this job
+          const linkedIds = new Set(jobOrgs.map(jo => jo.organisation_id));
+          linkedIds.add(jobOrgSelectedOrg.id);
+          const filtered = suggestions.data.filter(s => !linkedIds.has(s.org_id));
+          if (filtered.length > 0) setOrgSuggestions(filtered);
+        } catch { /* suggestions are nice-to-have, don't block */ }
+      }
       setShowAddJobOrg(false);
       setJobOrgSelectedOrg(null);
       setJobOrgSearch('');
@@ -985,6 +1018,20 @@ export default function JobDetailPage() {
       alert(err?.response?.data?.error || 'Failed to add organisation');
     } finally {
       setJobOrgSaving(false);
+    }
+  }
+
+  async function acceptOrgSuggestion(suggestion: typeof orgSuggestions[0]) {
+    if (!id) return;
+    try {
+      await api.post(`/pipeline/${id}/organisations`, {
+        organisation_id: suggestion.org_id,
+        role: suggestion.suggested_role,
+      });
+      setOrgSuggestions(prev => prev.filter(s => s.org_id !== suggestion.org_id));
+      loadJobOrgs();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to add organisation');
     }
   }
 
@@ -1329,6 +1376,7 @@ export default function JobDetailPage() {
                     <input
                       type="date"
                       value={editOutDate}
+                      min={new Date().toISOString().split('T')[0]}
                       onChange={(e) => handleEditOutDate(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
                     />
@@ -1338,6 +1386,7 @@ export default function JobDetailPage() {
                     <input
                       type="date"
                       value={editJobDate}
+                      min={new Date().toISOString().split('T')[0]}
                       onChange={(e) => handleEditJobDate(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
                     />
@@ -1358,6 +1407,7 @@ export default function JobDetailPage() {
                     <input
                       type="date"
                       value={editJobEnd}
+                      min={editJobDate || new Date().toISOString().split('T')[0]}
                       onChange={(e) => handleEditJobEnd(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
                     />
@@ -1367,6 +1417,7 @@ export default function JobDetailPage() {
                     <input
                       type="date"
                       value={editReturnDate}
+                      min={editJobEnd || new Date().toISOString().split('T')[0]}
                       onChange={(e) => handleEditReturnDate(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
                     />
@@ -1616,6 +1667,28 @@ export default function JobDetailPage() {
               </div>
             )}
           </div>
+          {/* Smart suggestions from org graph */}
+          {orgSuggestions.length > 0 && (
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-amber-600 font-medium">Suggested:</span>
+              {orgSuggestions.map(s => (
+                <button
+                  key={s.org_id}
+                  onClick={() => acceptOrgSuggestion(s)}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors"
+                  title={`Add as ${s.suggested_role} (${s.relationship_type.replace('_', ' ')} relationship)`}
+                >
+                  + {s.org_name} <span className="opacity-60">as {s.suggested_role}</span>
+                </button>
+              ))}
+              <button
+                onClick={() => setOrgSuggestions([])}
+                className="text-xs text-gray-400 hover:text-gray-600"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -2592,9 +2665,13 @@ export default function JobDetailPage() {
                       >
                         <div>
                           <span className="font-medium text-gray-900">{p.first_name} {p.last_name}</span>
-                          {p.skills?.length > 0 && (
+                          {p.current_organisations?.length ? (
+                            <span className="ml-2 text-xs text-gray-400">
+                              {p.current_organisations.slice(0, 2).map(o => `${o.role} at ${o.organisation_name}`).join(', ')}
+                            </span>
+                          ) : p.skills?.length > 0 ? (
                             <span className="ml-2 text-xs text-gray-400">{p.skills.slice(0, 3).join(', ')}</span>
-                          )}
+                          ) : null}
                         </div>
                         <div className="flex gap-1">
                           {p.is_insured_on_vehicles && (
