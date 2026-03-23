@@ -25,5 +25,9 @@ CREATE TABLE IF NOT EXISTS sync_review_queue (
 CREATE INDEX idx_sync_review_status ON sync_review_queue (status);
 CREATE INDEX idx_sync_review_entity ON sync_review_queue (entity_type, entity_id);
 
--- Grant permissions for backup user
-GRANT SELECT ON sync_review_queue TO ooosh_backup;
+-- Grant permissions for backup user (if role exists)
+DO $$ BEGIN
+  EXECUTE 'GRANT SELECT ON sync_review_queue TO ooosh_backup';
+EXCEPTION WHEN undefined_object THEN
+  RAISE NOTICE 'Role ooosh_backup does not exist, skipping GRANT';
+END $$;

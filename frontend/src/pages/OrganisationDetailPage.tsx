@@ -267,6 +267,52 @@ export default function OrganisationDetailPage() {
         )}
       </div>
 
+      {/* Smart suggestions */}
+      {(() => {
+        const suggestions: Array<{ text: string; action: string; newType: string }> = [];
+        const type = org.type?.toLowerCase() || '';
+        const name = org.name || '';
+        const companyWords = ['ltd', 'limited', 'group', 'management', 'agency', 'inc', 'llc', 'plc', 'services', 'productions', 'consulting'];
+        const looksLikeCompany = companyWords.some(w => name.toLowerCase().includes(w));
+        const hasJobsAsBand = (org.linked_jobs || []).some(j => j.role === 'band');
+        const peopleCount = (org.people || []).length;
+
+        // Suggest band if typed as client/unknown but linked as band in jobs
+        if ((type === 'client' || type === 'unknown') && hasJobsAsBand) {
+          suggestions.push({ text: `This is typed as "${type}" but appears as a band on ${(org.linked_jobs || []).filter(j => j.role === 'band').length} job(s). Should it be a band?`, action: 'Change to Band', newType: 'band' });
+        }
+        // Suggest band if typed as client/unknown, no company-like words, and few/no people
+        if ((type === 'client' || type === 'unknown') && !looksLikeCompany && peopleCount <= 1 && !hasJobsAsBand) {
+          suggestions.push({ text: `"${name}" is typed as "${type}" — could this be a band or artist?`, action: 'Change to Band', newType: 'band' });
+        }
+        // Suggest management if typed as client but has "management" in name
+        if (type === 'client' && name.toLowerCase().includes('management')) {
+          suggestions.push({ text: `"${name}" is typed as "client" but looks like a management company.`, action: 'Change to Management', newType: 'management' });
+        }
+
+        if (suggestions.length === 0) return null;
+        return (
+          <div className="mb-4 space-y-2">
+            {suggestions.map((s, i) => (
+              <div key={i} className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-center justify-between">
+                <p className="text-sm text-amber-800">{s.text}</p>
+                <button
+                  onClick={async () => {
+                    try {
+                      await api.put(`/organisations/${id}`, { type: s.newType });
+                      loadOrg();
+                    } catch (err) { console.error(err); }
+                  }}
+                  className="ml-4 flex-shrink-0 text-xs font-medium px-3 py-1.5 bg-amber-100 text-amber-700 rounded hover:bg-amber-200"
+                >
+                  {s.action}
+                </button>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
