@@ -8,21 +8,49 @@ const protectedRoutes = ['/dashboard', '/earnings', '/settings', '/job']
 // Routes that should redirect to dashboard if already logged in
 const authRoutes = ['/login', '/register']
 
+// Cache the encoded secret to avoid re-encoding on every request
+let cachedSecret: Uint8Array | null = null
+
+function getSecret(): Uint8Array | null {
+  if (cachedSecret) return cachedSecret
+
+  const secret = process.env.SESSION_SECRET
+  if (!secret) {
+    console.error('Middleware: SESSION_SECRET environment variable is not set — all sessions will fail verification')
+    return null
+  }
+
+  cachedSecret = new TextEncoder().encode(secret)
+  return cachedSecret
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
   const sessionToken = request.cookies.get('session')?.value
 
   // Check if user has a valid session
   let isAuthenticated = false
-  
+
   if (sessionToken) {
-    try {
-      const secret = new TextEncoder().encode(process.env.SESSION_SECRET)
-      await jwtVerify(sessionToken, secret)
-      isAuthenticated = true
-    } catch {
-      // Invalid or expired token
-      isAuthenticated = false
+    const secret = getSecret()
+    if (secret) {
+      try {
+        await jwtVerify(sessionToken, secret)
+        isAuthenticated = true
+      } catch (err) {
+        // Invalid or expired token — clear the stale cookie on protected routes
+        // so the user doesn't get stuck in a redirect loop
+        const isProtectedRoute = protectedRoutes.some(route => pathname.startsWith(route))
+        if (isProtectedRoute) {
+          console.error('Middleware: Session verification failed for', pathname, '- clearing stale cookie')
+          const loginUrl = new URL('/login', request.url)
+          loginUrl.searchParams.set('from', pathname)
+          const response = NextResponse.redirect(loginUrl)
+          response.cookies.delete('session')
+          return response
+        }
+        isAuthenticated = false
+      }
     }
   }
 
