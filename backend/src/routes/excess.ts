@@ -95,7 +95,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         d.full_name AS driver_name
       FROM job_excess je
       JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       ${where}
       ORDER BY je.created_at DESC
@@ -290,7 +290,7 @@ router.get('/ledger/:xeroContactId', authorize('admin', 'manager'), async (req: 
         d.full_name AS driver_name
       FROM job_excess je
       JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       WHERE je.xero_contact_id = $1
       ORDER BY je.created_at DESC`,
@@ -323,7 +323,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         d.full_name AS driver_name
       FROM job_excess je
       JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       WHERE je.id = $1`,
       [id]

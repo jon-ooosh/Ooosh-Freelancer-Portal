@@ -728,7 +728,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
       je.excess_amount_required,
       je.excess_status
     FROM vehicle_hire_assignments vha
-    JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+    LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
     LEFT JOIN drivers d ON d.id = vha.driver_id
     LEFT JOIN job_excess je ON je.assignment_id = vha.id
     WHERE vha.id = $1`,

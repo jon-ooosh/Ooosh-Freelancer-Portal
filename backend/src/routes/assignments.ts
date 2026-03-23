@@ -77,7 +77,7 @@ const BASE_SELECT = `
     je.excess_amount_required,
     je.excess_amount_taken
   FROM vehicle_hire_assignments vha
-  JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+  LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
   LEFT JOIN drivers d ON d.id = vha.driver_id
   LEFT JOIN people p ON p.id = vha.freelancer_person_id
   LEFT JOIN job_excess je ON je.assignment_id = vha.id
@@ -378,8 +378,8 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
 
     const assignment = result.rows[0];
 
-    // Dual-write mileage to vehicle_mileage_log
-    if (mileage_out > 0) {
+    // Dual-write mileage to vehicle_mileage_log (only if vehicle assigned)
+    if (mileage_out > 0 && assignment.vehicle_id) {
       await query(
         `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
          VALUES ($1, $2, 'book_out', $3, $4)`,
@@ -432,8 +432,8 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
 
     const assignment = result.rows[0];
 
-    // Dual-write mileage
-    if (mileage_in > 0) {
+    // Dual-write mileage (only if vehicle assigned)
+    if (mileage_in > 0 && assignment.vehicle_id) {
       await query(
         `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
          VALUES ($1, $2, 'check_in', $3, $4)`,
@@ -449,11 +449,13 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
       );
     }
 
-    // Update vehicle hire_status to Prep Needed
-    await query(
-      `UPDATE fleet_vehicles SET hire_status = 'Prep Needed' WHERE id = $1`,
-      [assignment.vehicle_id]
-    );
+    // Update vehicle hire_status to Prep Needed (only if vehicle assigned)
+    if (assignment.vehicle_id) {
+      await query(
+        `UPDATE fleet_vehicles SET hire_status = 'Prep Needed' WHERE id = $1`,
+        [assignment.vehicle_id]
+      );
+    }
 
     res.json({ data: assignment });
   } catch (error) {
@@ -512,7 +514,7 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
         d.requires_referral,
         d.referral_status
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.job_id = $1
@@ -580,7 +582,7 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       WHERE vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
       ORDER BY vha.created_at ASC`
