@@ -533,14 +533,14 @@ export default function JobsPage() {
         <div className="mt-8 text-center text-sm text-gray-500">No jobs found.</div>
       ) : (
         <div className="mt-6 space-y-6">
-          {/* ═══════ HAPPENING TODAY ═══════ */}
-          {happeningToday.length > 0 && (
+          {/* ═══════ TODAY'S ACTIVITY (Going Out + Returning) ═══════ */}
+          {(goingOut.length > 0 || returning.length > 0) && (
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                <h2 className="text-sm font-bold text-gray-900 uppercase tracking-wide">Happening Today</h2>
+                <h2 className="text-sm font-bold text-gray-900 uppercase tracking-wide">Today&apos;s Activity</h2>
                 <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
-                  {happeningToday.length}
+                  {goingOut.length + returning.length}
                 </span>
               </div>
 
@@ -580,21 +580,31 @@ export default function JobsPage() {
                           )}
                         </>
                       )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
 
-                      {/* Currently Out */}
-                      {currentlyOut.length > 0 && (
-                        <>
-                          <tr>
-                            <td colSpan={8} className="px-4 py-2 bg-indigo-50">
-                              <span className="text-xs font-semibold text-indigo-700 uppercase tracking-wide">
-                                Out Now ({currentlyOut.length})
-                              </span>
-                            </td>
-                          </tr>
-                          {currentlyOut.map((h: HappeningJob) =>
-                            renderJobRow(h.job, true, happeningLabel(h.categories))
-                          )}
-                        </>
+          {/* ═══════ OUT NOW (separate group) ═══════ */}
+          {currentlyOut.length > 0 && (
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <div className="w-2 h-2 rounded-full bg-indigo-500" />
+                <h2 className="text-sm font-bold text-gray-900 uppercase tracking-wide">Out Now</h2>
+                <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+                  {currentlyOut.length}
+                </span>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-md border border-indigo-200 border-l-4 border-l-indigo-500 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    {renderTableHeader()}
+                    <tbody className="bg-white divide-y divide-gray-100">
+                      {currentlyOut.map((h: HappeningJob) =>
+                        renderJobRow(h.job, true, happeningLabel(h.categories))
                       )}
                     </tbody>
                   </table>
