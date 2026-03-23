@@ -40,7 +40,7 @@ function authenticateOrApiKey(req: AuthRequest, res: Response, next: NextFunctio
       const provided = Buffer.from(apiKey);
       if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
         // API key auth — set a service user identity
-        req.user = { id: 'hire-form-service', email: 'hire-form@system', role: 'admin' };
+        req.user = { id: '00000000-0000-0000-0000-000000000000', email: 'hire-form@system', role: 'admin' };
         next();
         return;
       }
