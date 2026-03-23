@@ -167,12 +167,24 @@ function normalizeHireFormBody(body: Record<string, unknown>): Record<string, un
     xeroContactName: 'xero_contact_name',
     clientName: 'client_name',
   };
+
+  // Fields that must be coerced from string to number (hire form app sends strings)
+  const numericFields = new Set([
+    'hirehop_job_id', 'van_requirement_index', 'licence_points', 'excess_amount',
+  ]);
+
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(body)) {
     const snakeKey = map[key] || key;
     // Don't overwrite if the snake_case key is already set
     if (!(snakeKey in result) || result[snakeKey] == null) {
-      result[snakeKey] = value;
+      // Coerce string→number for numeric fields (hire form app sends strings from form inputs)
+      if (numericFields.has(snakeKey) && typeof value === 'string' && value.trim() !== '') {
+        const parsed = Number(value);
+        result[snakeKey] = isNaN(parsed) ? null : parsed;
+      } else {
+        result[snakeKey] = value;
+      }
     }
   }
   return result;
@@ -370,7 +382,7 @@ router.get('/by-job/:hirehopJobId', authenticate, async (req: AuthRequest, res: 
     const result = await query(
       `SELECT vha.*,
         fv.reg AS vehicle_reg,
-        COALESCE(d.full_name, vha.notes) AS driver_name,
+        d.full_name AS driver_name,
         d.email AS driver_email,
         d.licence_points AS driver_points,
         d.requires_referral,
@@ -426,12 +438,11 @@ router.get('/by-driver/:driverId', authenticate, async (req: AuthRequest, res: R
 
 router.get('/active', authenticate, async (_req: AuthRequest, res: Response) => {
   try {
-    // First: assignments that have drivers linked (from hire form app OR matched from allocations)
-    // Also include allocations where driver name was manually entered (stored in notes)
+    // Assignments with real drivers linked (from hire form submissions)
     const assignedResult = await query(
       `SELECT vha.*,
         fv.reg AS vehicle_reg,
-        COALESCE(d.full_name, vha.notes) AS driver_name,
+        d.full_name AS driver_name,
         d.email AS driver_email,
         d.licence_points AS driver_points,
         d.requires_referral,
@@ -444,10 +455,9 @@ router.get('/active', authenticate, async (_req: AuthRequest, res: Response) => 
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.assignment_type = 'self_drive'
         AND vha.status != 'cancelled'
-        AND (
-          (d.id IS NOT NULL AND d.full_name IS NOT NULL AND d.full_name != '')
-          OR (vha.notes IS NOT NULL AND vha.notes != '')
-        )
+        AND d.id IS NOT NULL
+        AND d.full_name IS NOT NULL
+        AND d.full_name != ''
       ORDER BY vha.created_at DESC
       LIMIT 100`
     );
