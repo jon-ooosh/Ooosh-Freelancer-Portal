@@ -87,26 +87,33 @@ export async function POST(request: NextRequest) {
     // ── OP Backend mode ──────────────────────────────────────────
     if (isOpMode()) {
       try {
+        console.log('Login: OP mode enabled, trying OP backend for:', normalizedEmail)
         const opResult = await loginToOP(normalizedEmail, password)
 
-        if (!opResult.success) {
-          recordFailedAttempt(normalizedEmail)
-          return NextResponse.json(
-            { error: opResult.error || 'Invalid email or password' },
-            { status: 401 }
-          )
-        }
+        if (opResult.success && opResult.user) {
+          clearFailedAttempts(normalizedEmail)
 
-        clearFailedAttempts(normalizedEmail)
+          // Always create a LOCAL session token signed with SESSION_SECRET.
+          // The OP backend's token is signed with PORTAL_SESSION_SECRET which
+          // differs from the SESSION_SECRET used by Next.js middleware to verify
+          // sessions. Using the OP token directly causes verification failures
+          // and login redirect loops.
+          const sessionToken = await new SignJWT({
+            id: opResult.user.id,
+            email: opResult.user.email,
+            name: opResult.user.name,
+          })
+            .setProtectedHeader({ alg: 'HS256' })
+            .setIssuedAt()
+            .setExpirationTime('30d')
+            .sign(getSessionSecret())
 
-        // If the OP backend returned a session token, use it directly
-        if (opResult.sessionToken) {
           const response = NextResponse.json({
             success: true,
             user: opResult.user,
           })
 
-          response.cookies.set('session', opResult.sessionToken, {
+          response.cookies.set('session', sessionToken, {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
             sameSite: 'lax',
@@ -114,46 +121,25 @@ export async function POST(request: NextRequest) {
             path: '/',
           })
 
+          console.log('Login: OP backend login successful for:', normalizedEmail)
           return response
         }
 
-        // Fallback: create a local session token using the OP user data
-        const sessionToken = await new SignJWT({
-          id: opResult.user!.id,
-          email: opResult.user!.email,
-          name: opResult.user!.name,
-        })
-          .setProtectedHeader({ alg: 'HS256' })
-          .setIssuedAt()
-          .setExpirationTime('30d')
-          .sign(getSessionSecret())
-
-        const response = NextResponse.json({
-          success: true,
-          user: opResult.user,
-        })
-
-        response.cookies.set('session', sessionToken, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: 'lax',
-          maxAge: 30 * 24 * 60 * 60,
-          path: '/',
-        })
-
-        return response
+        // OP backend returned failure — fall through to Monday.com
+        // During transition, freelancers may only exist in Monday.com
+        console.log('Login: OP backend rejected credentials for:', normalizedEmail, '- falling back to Monday.com')
       } catch (opError) {
-        console.error('OP login error:', opError)
-        // Fall through to Monday.com
-        console.log('Login: Falling back to Monday.com')
+        console.error('Login: OP backend error, falling back to Monday.com:', opError)
       }
     }
     // ── End OP Backend mode ──────────────────────────────────────
 
-    // Find freelancer in Monday
+    // Find freelancer in Monday.com
+    console.log('Login: Looking up freelancer in Monday.com:', normalizedEmail)
     const freelancer = await findFreelancerByEmail(normalizedEmail)
 
     if (!freelancer) {
+      console.log('Login: Freelancer not found in Monday.com:', normalizedEmail)
       recordFailedAttempt(normalizedEmail)
       return NextResponse.json(
         { error: 'Invalid email or password' },
@@ -163,6 +149,7 @@ export async function POST(request: NextRequest) {
 
     // Check if email is verified
     if (!freelancer.emailVerified) {
+      console.log('Login: Freelancer email not verified:', normalizedEmail)
       return NextResponse.json(
         { error: 'Please complete registration first. Check your email for verification.' },
         { status: 401 }
@@ -171,6 +158,7 @@ export async function POST(request: NextRequest) {
 
     // Check password
     if (!freelancer.passwordHash) {
+      console.log('Login: Freelancer has no password hash set:', normalizedEmail)
       return NextResponse.json(
         { error: 'Account not set up. Please register first.' },
         { status: 401 }
@@ -180,6 +168,7 @@ export async function POST(request: NextRequest) {
     const passwordValid = await bcrypt.compare(password, freelancer.passwordHash)
 
     if (!passwordValid) {
+      console.log('Login: Password mismatch for:', normalizedEmail)
       recordFailedAttempt(normalizedEmail)
       return NextResponse.json(
         { error: 'Invalid email or password' },
@@ -188,6 +177,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Clear failed attempts on successful login
+    console.log('Login: Monday.com login successful for:', normalizedEmail)
     clearFailedAttempts(normalizedEmail)
 
     // Update last login timestamp in Monday
