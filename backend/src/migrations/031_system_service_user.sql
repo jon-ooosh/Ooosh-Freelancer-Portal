@@ -6,14 +6,15 @@
 --
 -- The users table requires a person_id FK to people, so we create both.
 
--- Create the system person record
-INSERT INTO people (id, first_name, last_name, email, notes)
+-- Create the system person record (created_by references itself)
+INSERT INTO people (id, first_name, last_name, email, notes, created_by)
 VALUES (
   '00000000-0000-0000-0000-000000000000',
   'System',
   'Service',
   'system@oooshtours.co.uk',
-  'System service account for API key authentication. Do not delete.'
+  'System service account for API key authentication. Do not delete.',
+  'system'
 )
 ON CONFLICT (id) DO NOTHING;
 
