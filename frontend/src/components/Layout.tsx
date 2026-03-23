@@ -7,7 +7,7 @@ import NotificationBell from './NotificationBell';
 interface NavItem {
   path: string;
   label: string;
-  children?: { path: string; label: string }[];
+  children?: { path: string; label: string; roles?: string[] }[];
 }
 
 const navItems: NavItem[] = [
@@ -18,7 +18,7 @@ const navItems: NavItem[] = [
       { path: '/people', label: 'People' },
       { path: '/organisations', label: 'Organisations' },
       { path: '/venues', label: 'Venues' },
-      { path: '/data-cleanup', label: 'Data Cleanup' },
+      { path: '/data-cleanup', label: 'Data Cleanup', roles: ['admin', 'manager'] },
     ],
   },
   {
@@ -55,9 +55,10 @@ const navItems: NavItem[] = [
   },
 ];
 
-function NavDropdown({ item, isActive }: { item: NavItem; isActive: boolean }) {
+function NavDropdown({ item, isActive, userRole }: { item: NavItem; isActive: boolean; userRole?: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const visibleChildren = item.children?.filter(c => !c.roles || (userRole && c.roles.includes(userRole)));
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -82,9 +83,9 @@ function NavDropdown({ item, isActive }: { item: NavItem; isActive: boolean }) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      {open && item.children && (
+      {open && visibleChildren && visibleChildren.length > 0 && (
         <div className="absolute top-full left-0 mt-1 w-48 max-h-[70vh] overflow-y-auto bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50">
-          {item.children.map((child) => (
+          {visibleChildren.map((child) => (
             <Link
               key={child.path}
               to={child.path}
@@ -232,7 +233,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               <nav className="hidden md:flex gap-1">
                 {navItems.map((item) =>
                   item.children ? (
-                    <NavDropdown key={item.path} item={item} isActive={isItemActive(item)} />
+                    <NavDropdown key={item.path} item={item} isActive={isItemActive(item)} userRole={user?.role} />
                   ) : (
                     <Link
                       key={item.path}
