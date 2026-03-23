@@ -1376,6 +1376,7 @@ export default function JobDetailPage() {
                     <input
                       type="date"
                       value={editOutDate}
+                      min={new Date().toISOString().split('T')[0]}
                       onChange={(e) => handleEditOutDate(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
                     />
@@ -1385,6 +1386,7 @@ export default function JobDetailPage() {
                     <input
                       type="date"
                       value={editJobDate}
+                      min={new Date().toISOString().split('T')[0]}
                       onChange={(e) => handleEditJobDate(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
                     />
@@ -1405,6 +1407,7 @@ export default function JobDetailPage() {
                     <input
                       type="date"
                       value={editJobEnd}
+                      min={editJobDate || new Date().toISOString().split('T')[0]}
                       onChange={(e) => handleEditJobEnd(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
                     />
@@ -1414,6 +1417,7 @@ export default function JobDetailPage() {
                     <input
                       type="date"
                       value={editReturnDate}
+                      min={editJobEnd || new Date().toISOString().split('T')[0]}
                       onChange={(e) => handleEditReturnDate(e.target.value)}
                       className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
                     />

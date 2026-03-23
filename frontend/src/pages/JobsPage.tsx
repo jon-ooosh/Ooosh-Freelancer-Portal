@@ -565,22 +565,6 @@ export default function JobsPage() {
                         </>
                       )}
 
-                      {/* Currently Out */}
-                      {currentlyOut.length > 0 && (
-                        <>
-                          <tr>
-                            <td colSpan={8} className="px-4 py-2 bg-indigo-50">
-                              <span className="text-xs font-semibold text-indigo-700 uppercase tracking-wide">
-                                Out Now ({currentlyOut.length})
-                              </span>
-                            </td>
-                          </tr>
-                          {currentlyOut.map((h: HappeningJob) =>
-                            renderJobRow(h.job, true, happeningLabel(h.categories))
-                          )}
-                        </>
-                      )}
-
                       {/* Returning */}
                       {returning.length > 0 && (
                         <>
@@ -592,6 +576,22 @@ export default function JobsPage() {
                             </td>
                           </tr>
                           {returning.map((h: HappeningJob) =>
+                            renderJobRow(h.job, true, happeningLabel(h.categories))
+                          )}
+                        </>
+                      )}
+
+                      {/* Currently Out */}
+                      {currentlyOut.length > 0 && (
+                        <>
+                          <tr>
+                            <td colSpan={8} className="px-4 py-2 bg-indigo-50">
+                              <span className="text-xs font-semibold text-indigo-700 uppercase tracking-wide">
+                                Out Now ({currentlyOut.length})
+                              </span>
+                            </td>
+                          </tr>
+                          {currentlyOut.map((h: HappeningJob) =>
                             renderJobRow(h.job, true, happeningLabel(h.categories))
                           )}
                         </>
