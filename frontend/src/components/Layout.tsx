@@ -18,6 +18,7 @@ const navItems: NavItem[] = [
       { path: '/people', label: 'People' },
       { path: '/organisations', label: 'Organisations' },
       { path: '/venues', label: 'Venues' },
+      { path: '/data-cleanup', label: 'Data Cleanup' },
     ],
   },
   {
