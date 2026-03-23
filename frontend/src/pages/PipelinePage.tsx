@@ -1692,15 +1692,22 @@ export default function PipelinePage() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Pipeline</h1>
             {stats && (
-              <p className="text-sm text-gray-500 mt-0.5">
-                Active pipeline: <span className="font-semibold text-gray-900">{formatCurrency(stats.active_pipeline_value)}</span>
+              <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                <span className="text-sm text-gray-500">
+                  Active pipeline: <span className="font-semibold text-gray-900">{formatCurrency(stats.active_pipeline_value)}</span>
+                </span>
                 {stats.chase.overdue !== '0' && (
-                  <span className="ml-3 text-red-600 font-medium">{stats.chase.overdue} overdue chases</span>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                    {stats.chase.overdue} overdue
+                  </span>
                 )}
                 {stats.chase.due_today !== '0' && (
-                  <span className="ml-3 text-amber-600 font-medium">{stats.chase.due_today} due today</span>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">
+                    {stats.chase.due_today} due today
+                  </span>
                 )}
-              </p>
+              </div>
             )}
           </div>
           <div className="flex items-center gap-3">
@@ -1852,10 +1859,118 @@ export default function PipelinePage() {
           </div>
         </div>
       ) : (
-        /* List view */
-        <div className="flex-1 overflow-y-auto p-4">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-            <table className="w-full">
+        /* List view — grouped by urgency */
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {(() => {
+            const sorted = sortJobs(jobs, sortMode);
+            const today = new Date(); today.setHours(0, 0, 0, 0);
+
+            // Group jobs into sections
+            const actionRequired: Job[] = []; // overdue, due today, new enquiries with no chase date
+            const waiting: Job[] = [];        // chasing with future chase date
+            const paused: Job[] = [];         // paused status
+            const provisional: Job[] = [];    // provisional
+            const other: Job[] = [];          // everything else
+
+            sorted.forEach(job => {
+              const status = job.pipeline_status || 'new_enquiry';
+              if (status === 'paused') {
+                paused.push(job);
+              } else if (status === 'provisional') {
+                provisional.push(job);
+              } else {
+                const chase = job.next_chase_date ? new Date(job.next_chase_date) : null;
+                if (chase) chase.setHours(0, 0, 0, 0);
+                const isOverdue = chase && chase.getTime() <= today.getTime();
+                const isNew = status === 'new_enquiry' && !chase;
+
+                if (isOverdue || isNew) {
+                  actionRequired.push(job);
+                } else if (chase && chase.getTime() > today.getTime()) {
+                  waiting.push(job);
+                } else {
+                  other.push(job);
+                }
+              }
+            });
+
+            const renderListRow = (job: Job) => {
+              const statusConfig = PIPELINE_STATUS_CONFIG[job.pipeline_status || 'new_enquiry'];
+              const chase = chaseDueLabel(job.next_chase_date);
+              return (
+                <tr
+                  key={job.id}
+                  onClick={() => handleCardClick(job)}
+                  className="hover:bg-gray-50 cursor-pointer"
+                >
+                  <td className="px-4 py-3">
+                    <div className="text-sm font-medium text-gray-900">{job.job_name || 'Untitled'}</div>
+                    <div className="text-xs font-mono">
+                      {job.hh_job_number ? (
+                        <a
+                          href={`https://myhirehop.com/job.php?id=${job.hh_job_number}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                        >
+                          J-{job.hh_job_number}
+                        </a>
+                      ) : (
+                        <span className="text-gray-400">NEW</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-600">
+                    {job.company_name || job.client_name || '—'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium text-white"
+                      style={{ backgroundColor: statusConfig?.colour }}
+                    >
+                      {statusConfig?.label}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-gray-600">
+                    {formatDateRange(job.job_date, job.job_end)}
+                  </td>
+                  <td className="px-4 py-3 text-sm font-medium text-gray-900 text-right">
+                    {formatCurrency(job.job_value)}
+                  </td>
+                  <td className="px-4 py-3">
+                    {job.likelihood && (
+                      <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${likelihoodColour(job.likelihood)}`}>
+                        {job.likelihood.charAt(0).toUpperCase() + job.likelihood.slice(1)}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2 text-xs">
+                      {chase.text && (
+                        <span className={`font-medium ${
+                          chase.urgency === 'overdue' ? 'text-red-600' :
+                          chase.urgency === 'today' ? 'text-amber-600' : 'text-gray-500'
+                        }`}>
+                          {chase.text}
+                        </span>
+                      )}
+                      {job.chase_count > 0 && (
+                        <span className="text-gray-400">x{job.chase_count}</span>
+                      )}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setChaseModal(job); }}
+                        className="text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
+                      >
+                        Chase
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            };
+
+            const tableHead = (
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Job</th>
@@ -1867,92 +1982,62 @@ export default function PipelinePage() {
                   <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Chase</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-200">
-                {sortJobs(jobs, sortMode).map((job) => {
-                  const statusConfig = PIPELINE_STATUS_CONFIG[job.pipeline_status || 'new_enquiry'];
-                  const chase = chaseDueLabel(job.next_chase_date);
+            );
+
+            const sections = [
+              { key: 'action', label: 'Action Required', jobs: actionRequired, bgHeader: 'bg-red-50', textColor: 'text-red-700', borderColor: 'border-red-200 border-l-red-500' },
+              { key: 'waiting', label: 'Waiting', jobs: waiting, bgHeader: 'bg-amber-50', textColor: 'text-amber-700', borderColor: 'border-amber-200 border-l-amber-500' },
+              { key: 'provisional', label: 'Provisional', jobs: provisional, bgHeader: 'bg-blue-50', textColor: 'text-blue-700', borderColor: 'border-blue-200 border-l-blue-500' },
+              { key: 'other', label: 'Other', jobs: other, bgHeader: 'bg-gray-50', textColor: 'text-gray-700', borderColor: 'border-gray-200 border-l-gray-400' },
+              { key: 'paused', label: 'Paused', jobs: paused, bgHeader: 'bg-gray-100', textColor: 'text-gray-500', borderColor: 'border-gray-200 border-l-gray-300' },
+            ];
+
+            return (
+              <>
+                {/* Overdue alert banner */}
+                {actionRequired.length > 0 && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center gap-3">
+                    <span className="text-red-600 text-lg">!</span>
+                    <div>
+                      <span className="text-sm font-semibold text-red-700">
+                        {actionRequired.length} enquir{actionRequired.length === 1 ? 'y' : 'ies'} need{actionRequired.length === 1 ? 's' : ''} attention
+                      </span>
+                      <span className="text-sm text-red-600 ml-2">
+                        — overdue chases, due today, or new enquiries without a chase date
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {sections.map(section => {
+                  if (section.jobs.length === 0) return null;
                   return (
-                    <tr
-                      key={job.id}
-                      onClick={() => handleCardClick(job)}
-                      className="hover:bg-gray-50 cursor-pointer"
-                    >
-                      <td className="px-4 py-3">
-                        <div className="text-sm font-medium text-gray-900">{job.job_name || 'Untitled'}</div>
-                        <div className="text-xs font-mono">
-                          {job.hh_job_number ? (
-                            <a
-                              href={`https://myhirehop.com/job.php?id=${job.hh_job_number}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-ooosh-600 hover:text-ooosh-700 hover:underline"
-                            >
-                              J-{job.hh_job_number}
-                            </a>
-                          ) : (
-                            <span className="text-gray-400">NEW</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-gray-600">
-                        {job.company_name || job.client_name || '—'}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium text-white"
-                          style={{ backgroundColor: statusConfig?.colour }}
-                        >
-                          {statusConfig?.label}
+                    <div key={section.key} className={`bg-white rounded-xl shadow-sm border border-l-4 ${section.borderColor} overflow-hidden`}>
+                      <div className={`${section.bgHeader} px-4 py-2.5 border-b border-gray-200`}>
+                        <span className={`text-xs font-semibold ${section.textColor} uppercase tracking-wide`}>
+                          {section.label} ({section.jobs.length})
                         </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-gray-600">
-                        {formatDateRange(job.job_date, job.job_end)}
-                      </td>
-                      <td className="px-4 py-3 text-sm font-medium text-gray-900 text-right">
-                        {formatCurrency(job.job_value)}
-                      </td>
-                      <td className="px-4 py-3">
-                        {job.likelihood && (
-                          <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${likelihoodColour(job.likelihood)}`}>
-                            {job.likelihood.charAt(0).toUpperCase() + job.likelihood.slice(1)}
-                          </span>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2 text-xs">
-                          {chase.text && (
-                            <span className={`font-medium ${
-                              chase.urgency === 'overdue' ? 'text-red-600' :
-                              chase.urgency === 'today' ? 'text-amber-600' : 'text-gray-500'
-                            }`}>
-                              {chase.text}
-                            </span>
-                          )}
-                          {job.chase_count > 0 && (
-                            <span className="text-gray-400">x{job.chase_count}</span>
-                          )}
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setChaseModal(job); }}
-                            className="text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
-                          >
-                            Chase
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="w-full">
+                          {tableHead}
+                          <tbody className="divide-y divide-gray-200">
+                            {section.jobs.map(renderListRow)}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
                   );
                 })}
+
                 {jobs.length === 0 && (
-                  <tr>
-                    <td colSpan={7} className="px-4 py-12 text-center text-sm text-gray-400">
-                      No jobs match your filters
-                    </td>
-                  </tr>
+                  <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-12 text-center text-sm text-gray-400">
+                    No jobs match your filters
+                  </div>
                 )}
-              </tbody>
-            </table>
-          </div>
+              </>
+            );
+          })()}
         </div>
       )}
 

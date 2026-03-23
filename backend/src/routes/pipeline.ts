@@ -896,10 +896,18 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     const endDate = formatHHDate(job.job_end);
     const toDate = formatHHDate(job.return_date);
 
+    // HireHop save_job.php date field names: out, start, end, return
     if (outDate) hhBody.out = outDate;
     if (startDate) hhBody.start = startDate;
     if (endDate) hhBody.end = endDate;
-    if (toDate) hhBody.to = toDate;
+    if (toDate) hhBody.return = toDate;
+
+    // If job_end is set but no separate out/return dates, default them
+    // so HH gets a complete date range
+    if (startDate && endDate && !outDate) hhBody.out = startDate;
+    if (startDate && endDate && !toDate) hhBody.return = endDate;
+
+    console.log('[Pipeline] Pushing dates to HireHop:', { out: hhBody.out, start: hhBody.start, end: hhBody.end, return: hhBody.return });
 
     // POST to HireHop via broker
     const { hhBroker } = await import('../services/hirehop-broker');
