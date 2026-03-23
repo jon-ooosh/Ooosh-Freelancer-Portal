@@ -157,11 +157,11 @@ export async function POST(
 
         const result = await submitCompletionToOP(sessionToken, jobId, formData)
         return NextResponse.json({
+          ...result,
           success: true,
           jobId,
           completedAt: new Date().toISOString(),
           backgroundProcessing: false,
-          ...result,
         })
       } catch (opError) {
         console.error('OP backend completion error:', opError)
