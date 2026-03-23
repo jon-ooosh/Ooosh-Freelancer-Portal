@@ -589,14 +589,16 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
     );
 
     // Map to VanAllocation shape
+    // Use driver_name from drivers table if linked, otherwise fall back to notes (freetext)
     const allocations = result.rows.map((row: any) => ({
       id: row.id,
       hireHopJobId: row.hirehop_job_id,
       hireHopJobName: row.hirehop_job_name || '',
       vanRequirementIndex: row.van_requirement_index,
       vehicleId: row.vehicle_id,
-      vehicleReg: row.vehicle_reg,
-      driverName: row.driver_name || null,
+      vehicleReg: row.vehicle_reg || null,
+      driverName: row.driver_name || row.notes || null,
+      driverId: row.driver_id || null,
       status: row.status === 'soft' ? 'soft' : 'confirmed',
       allocatedAt: row.created_at,
       allocatedBy: row.allocated_by_name || 'Unknown',
@@ -622,12 +624,15 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // Get current active assignments (allocations-created only — exclude hire-form-created)
+    // Get current active assignments (allocations-managed only — exclude hire-form-created
+    // which have assignment_type='self_drive', driver_id set, and were created by hire form)
+    // We manage allocations that were created by the compat layer (created_by is a user UUID)
+    // OR that don't have a driver from the hire form app.
     const existing = await query(
-      `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id
+      `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id, notes
        FROM vehicle_hire_assignments
        WHERE status IN ('soft', 'confirmed')
-         AND driver_id IS NULL`
+         AND (driver_id IS NULL OR notes IS NOT NULL)`
     );
 
     const existingMap = new Map(
@@ -641,6 +646,17 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       incomingIds.add(key);
 
       const existingRow = existingMap.get(key);
+
+      // Resolve driver_id from driverName if provided
+      let driverId: string | null = alloc.driverId || null;
+      const driverName = alloc.driverName || null;
+      if (driverName && !driverId) {
+        const dResult = await query(
+          `SELECT id FROM drivers WHERE full_name ILIKE $1 AND is_active = true ORDER BY updated_at DESC LIMIT 1`,
+          [driverName.trim()]
+        );
+        driverId = dResult.rows[0]?.id || null;
+      }
 
       if (existingRow) {
         // Update existing — resolve vehicle by reg if needed
@@ -659,13 +675,17 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
                hirehop_job_name = $2,
                status = $3,
                allocated_by_name = $4,
+               notes = $5,
+               driver_id = COALESCE($6, driver_id),
                updated_at = NOW()
-           WHERE id = $5`,
+           WHERE id = $7`,
           [
             vehicleId,
             alloc.hireHopJobName || null,
             alloc.status === 'confirmed' ? 'confirmed' : 'soft',
             alloc.allocatedBy || null,
+            driverName,
+            driverId,
             existingRow.id,
           ]
         );
@@ -685,8 +705,9 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
           `INSERT INTO vehicle_hire_assignments (
             vehicle_id, hirehop_job_id, hirehop_job_name,
             van_requirement_index, status, allocated_by_name,
+            notes, driver_id,
             assignment_type, created_by
-          ) VALUES ($1, $2, $3, $4, $5, $6, 'self_drive', $7)`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'self_drive', $9)`,
           [
             vehicleId,
             alloc.hireHopJobId,
@@ -694,6 +715,8 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
             alloc.vanRequirementIndex ?? 0,
             alloc.status === 'confirmed' ? 'confirmed' : 'soft',
             alloc.allocatedBy || null,
+            driverName,
+            driverId,
             req.user!.id,
           ]
         );

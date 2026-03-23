@@ -10,7 +10,7 @@
  * Data: HireHop jobs (API) + fleet vehicles (Monday) + allocations (R2).
  */
 
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { vmPath } from '../config/route-paths'
 import { useUpcomingJobs, useUpcomingDueBackJobs } from '../hooks/useHireHopJobs'
@@ -29,6 +29,59 @@ type ViewMode = 'going-out' | 'due-back'
 
 /** How many days ahead the allocations page looks */
 const ALLOCATIONS_DAYS_AHEAD = 14
+
+/** Debounced driver name input — saves on blur or after 800ms idle, not on every keystroke */
+function DebouncedDriverInput({
+  allocationId,
+  initialValue,
+  onSave,
+}: {
+  allocationId: string
+  initialValue: string
+  onSave: (allocationId: string, driverName: string) => void
+}) {
+  const [localValue, setLocalValue] = useState(initialValue)
+  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const savedRef = useRef(initialValue)
+
+  // Sync from parent when server data changes (e.g. after initial load)
+  useEffect(() => {
+    if (initialValue !== savedRef.current) {
+      setLocalValue(initialValue)
+      savedRef.current = initialValue
+    }
+  }, [initialValue])
+
+  const doSave = useCallback((value: string) => {
+    if (value !== savedRef.current) {
+      savedRef.current = value
+      onSave(allocationId, value)
+    }
+  }, [allocationId, onSave])
+
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value
+    setLocalValue(val)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => doSave(val), 800)
+  }, [doSave])
+
+  const handleBlur = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current)
+    doSave(localValue)
+  }, [localValue, doSave])
+
+  return (
+    <input
+      type="text"
+      placeholder="Driver name"
+      value={localValue}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      className="w-full rounded border border-gray-200 bg-white px-2 py-1.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+    />
+  )
+}
 
 export function AllocationsPage() {
   const [searchParams] = useSearchParams()
@@ -533,12 +586,10 @@ function RequirementSlots({
 
             {/* Driver name input + hire form suggestions */}
             <div className="mt-2">
-              <input
-                type="text"
-                placeholder="Driver name"
-                value={allocation.driverName || ''}
-                onChange={e => onUpdateDriver(allocation.id, e.target.value)}
-                className="w-full rounded border border-gray-200 bg-white px-2 py-1.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+              <DebouncedDriverInput
+                allocationId={allocation.id}
+                initialValue={allocation.driverName || ''}
+                onSave={onUpdateDriver}
               />
               {/* Quick-assign buttons from hire form drivers */}
               {hireForms.length > 0 && !allocation.driverName && (

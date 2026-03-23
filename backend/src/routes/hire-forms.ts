@@ -370,7 +370,7 @@ router.get('/by-job/:hirehopJobId', authenticate, async (req: AuthRequest, res: 
     const result = await query(
       `SELECT vha.*,
         fv.reg AS vehicle_reg,
-        d.full_name AS driver_name,
+        COALESCE(d.full_name, vha.notes) AS driver_name,
         d.email AS driver_email,
         d.licence_points AS driver_points,
         d.requires_referral,
@@ -426,11 +426,12 @@ router.get('/by-driver/:driverId', authenticate, async (req: AuthRequest, res: R
 
 router.get('/active', authenticate, async (_req: AuthRequest, res: Response) => {
   try {
-    // First: assignments that have drivers linked
+    // First: assignments that have drivers linked (from hire form app OR matched from allocations)
+    // Also include allocations where driver name was manually entered (stored in notes)
     const assignedResult = await query(
       `SELECT vha.*,
         fv.reg AS vehicle_reg,
-        d.full_name AS driver_name,
+        COALESCE(d.full_name, vha.notes) AS driver_name,
         d.email AS driver_email,
         d.licence_points AS driver_points,
         d.requires_referral,
@@ -443,9 +444,10 @@ router.get('/active', authenticate, async (_req: AuthRequest, res: Response) => 
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.assignment_type = 'self_drive'
         AND vha.status != 'cancelled'
-        AND d.id IS NOT NULL
-        AND d.full_name IS NOT NULL
-        AND d.full_name != ''
+        AND (
+          (d.id IS NOT NULL AND d.full_name IS NOT NULL AND d.full_name != '')
+          OR (vha.notes IS NOT NULL AND vha.notes != '')
+        )
       ORDER BY vha.created_at DESC
       LIMIT 100`
     );

@@ -25,7 +25,21 @@ export function useSaveAllocations() {
 
   return useMutation({
     mutationFn: (allocations: VanAllocation[]) => saveAllocations(allocations),
-    onSuccess: () => {
+    // Optimistic update — immediately reflect changes in the UI
+    onMutate: async (newAllocations) => {
+      await queryClient.cancelQueries({ queryKey: ['allocations'] })
+      const previous = queryClient.getQueryData<VanAllocation[]>(['allocations'])
+      queryClient.setQueryData(['allocations'], newAllocations)
+      return { previous }
+    },
+    onError: (_err, _new, context) => {
+      // Revert on error
+      if (context?.previous) {
+        queryClient.setQueryData(['allocations'], context.previous)
+      }
+    },
+    onSettled: () => {
+      // Refetch after mutation settles to sync with server
       queryClient.invalidateQueries({ queryKey: ['allocations'] })
     },
   })
