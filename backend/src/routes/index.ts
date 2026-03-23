@@ -25,6 +25,7 @@ import webhooksRouter from './webhooks';
 import driverVerificationRouter from './driver-verification';
 import requirementsRouter from './requirements';
 import portalRouter from './portal';
+import dataCleanupRouter from './data-cleanup';
 
 const router = Router();
 
@@ -52,6 +53,7 @@ router.use('/excess', excessRouter);
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
+router.use('/data-cleanup', dataCleanupRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
 router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
 

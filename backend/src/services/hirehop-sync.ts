@@ -67,6 +67,10 @@ function splitName(fullName: string): { first_name: string; last_name: string } 
 
 // ── Organisation type from HH flags ─────────────────────────────────────
 
+// Types that HireHop can assign — if the org already has a different type,
+// it was manually classified in OP and should NOT be overwritten by sync.
+const HH_DERIVED_ORG_TYPES = new Set(['client', 'venue', 'supplier', 'unknown']);
+
 function getOrgType(contact: HHContactRow): string {
   const types: string[] = [];
   if (contact.CLIENT === 1) types.push('client');
@@ -124,8 +128,38 @@ export interface SyncResult {
   peopleUpdated: number;
   rolesCreated: number;
   venuesCreated: number;
+  reviewsFlagged: number;
   errors: string[];
   total: number;
+}
+
+// Helper to flag an entity for manual review (dedupes by entity + review_type)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function flagForReview(
+  dbClient: any,
+  params: {
+    entity_type: string;
+    entity_id: string | null;
+    external_id: string;
+    review_type: string;
+    summary: string;
+    details?: Record<string, unknown>;
+  }
+): Promise<boolean> {
+  // Don't create duplicate pending reviews for the same entity+type
+  const existing = await dbClient.query(
+    `SELECT id FROM sync_review_queue
+     WHERE entity_type = $1 AND external_id = $2 AND review_type = $3 AND status = 'pending'`,
+    [params.entity_type, params.external_id, params.review_type]
+  );
+  if (existing.rows.length > 0) return false;
+
+  await dbClient.query(
+    `INSERT INTO sync_review_queue (entity_type, entity_id, external_id, review_type, summary, details)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [params.entity_type, params.entity_id, params.external_id, params.review_type, params.summary, JSON.stringify(params.details || {})]
+  );
+  return true;
 }
 
 export async function syncContactsFromHireHop(userId: string): Promise<SyncResult> {
@@ -136,6 +170,7 @@ export async function syncContactsFromHireHop(userId: string): Promise<SyncResul
     peopleUpdated: 0,
     rolesCreated: 0,
     venuesCreated: 0,
+    reviewsFlagged: 0,
     errors: [],
     total: 0,
   };
@@ -178,23 +213,56 @@ export async function syncContactsFromHireHop(userId: string): Promise<SyncResul
         if (existingMap.rows.length > 0) {
           orgId = existingMap.rows[0].entity_id;
 
-          // Update existing org
+          // Check current org type — only overwrite if it's a HH-derived type
+          // (preserve manually-set types like 'band', 'management', 'label', etc.)
+          const currentOrg = await client.query(
+            `SELECT type, tags FROM organisations WHERE id = $1`,
+            [orgId]
+          );
+          const currentType = currentOrg.rows[0]?.type || 'unknown';
+          const hhType = getOrgType(rep);
+          const shouldUpdateType = HH_DERIVED_ORG_TYPES.has(currentType);
+
+          // Merge HH tags into existing tags (don't replace)
+          const existingTags: string[] = currentOrg.rows[0]?.tags || [];
+          const hhTags = getOrgTags(rep);
+          const mergedTags = [...new Set([...existingTags, ...hhTags])];
+
+          // Update existing org — conditionally update type
           await client.query(
             `UPDATE organisations SET
                name = $1, address = $2, phone = $3, website = $4,
-               notes = $5, type = $6, tags = $7, updated_at = NOW()
-             WHERE id = $8`,
+               notes = $5,
+               type = CASE WHEN $6 THEN $7 ELSE type END,
+               tags = $8, updated_at = NOW()
+             WHERE id = $9`,
             [
               rep.COMPANY.trim(),
               rep.ADDRESS || null,
               rep.TELEPHONE || null,
               rep.WEB || null,
               rep.MEMO || null,
-              getOrgType(rep),
-              getOrgTags(rep),
+              shouldUpdateType,
+              hhType,
+              mergedTags,
               orgId,
             ]
           );
+
+          if (!shouldUpdateType && hhType !== currentType) {
+            console.log(`[HH Sync] Preserved org type '${currentType}' for "${rep.COMPANY.trim()}" (HH says '${hhType}')`);
+            // Flag for review if HH thinks it's a different type
+            const flagged = await flagForReview(client, {
+              entity_type: 'organisation',
+              entity_id: orgId,
+              external_id: String(companyId),
+              review_type: 'type_mismatch',
+              summary: `"${rep.COMPANY.trim()}" is '${currentType}' in OP but HireHop says '${hhType}'`,
+              details: { op_type: currentType, hh_type: hhType, hh_flags: { client: rep.CLIENT, venue: rep.VENUE, subcontractor: rep.SUBCONTRACTOR } },
+            });
+            if (flagged) result.reviewsFlagged++;
+          }
+
           result.orgsUpdated++;
         } else {
           // Create new org
@@ -378,6 +446,7 @@ export async function syncContactsFromHireHop(userId: string): Promise<SyncResul
     peopleUpdated: result.peopleUpdated,
     rolesCreated: result.rolesCreated,
     venuesCreated: result.venuesCreated,
+    reviewsFlagged: result.reviewsFlagged,
     errors: result.errors.length,
   });
 

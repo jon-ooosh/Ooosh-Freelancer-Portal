@@ -14,6 +14,7 @@ import PipelinePage from './pages/PipelinePage';
 import SettingsPage from './pages/SettingsPage';
 import ProfilePage from './pages/ProfilePage';
 import DuplicatesPage from './pages/DuplicatesPage';
+import DataCleanupPage from './pages/DataCleanupPage';
 import DriversPage from './pages/DriversPage';
 import DriverDetailPage from './pages/DriverDetailPage';
 import TransportOpsPage from './pages/TransportOpsPage';
@@ -60,6 +61,7 @@ export default function App() {
                 <Route path="/drivers" element={<DriversPage />} />
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
+                <Route path="/data-cleanup" element={<DataCleanupPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/profile" element={<ProfilePage />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />

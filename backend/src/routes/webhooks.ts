@@ -204,11 +204,10 @@ async function handleJobStatusChange(
     // Log as interaction (status transition)
     await query(
       `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, $3, $4)`,
+       VALUES ('status_transition', $1, $2, NULL, $3)`,
       [
         `Status changed via HireHop: ${fromLabel} → ${toLabel}`,
         job.id,
-        'system',  // system user for webhook-triggered changes
         job.pipeline_status,
       ],
     );
@@ -394,7 +393,7 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
 
     await query(
       `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-       VALUES ('status_transition', $1, $2, 'system', $3)`,
+       VALUES ('status_transition', $1, $2, NULL, $3)`,
       [
         `Status changed via ${source || 'external'}: ${fromLabel} → ${toLabel}${trigger ? ` (${trigger})` : ''}`,
         job.id,
