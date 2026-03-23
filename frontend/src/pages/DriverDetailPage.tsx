@@ -145,9 +145,17 @@ function formatDateTime(d: string | null): string {
 function toInputDate(d: string | null): string {
   if (!d) return '';
   try {
+    // Already in yyyy-MM-dd format — return as-is
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+    // ISO format with time component — extract date part directly (no timezone shift)
+    if (d.includes('T')) return d.split('T')[0];
+    // Fallback: parse and format
     const date = new Date(d);
     if (isNaN(date.getTime())) return '';
-    return date.toISOString().split('T')[0];
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
   } catch {
     return '';
   }

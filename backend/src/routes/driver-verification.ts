@@ -1038,7 +1038,7 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
       },
     },
     insuranceData: {
-      datePassedTest: (driver.date_passed_test as string) || '',
+      datePassedTest: driver.date_passed_test ? String(driver.date_passed_test).split('T')[0] : '',
       hasDisability: (driver.has_disability as boolean) || false,
       hasConvictions: (driver.has_convictions as boolean) || false,
       hasProsecution: (driver.has_prosecution as boolean) || false,

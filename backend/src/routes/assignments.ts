@@ -624,15 +624,13 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // Get current active assignments (allocations-managed only — exclude hire-form-created
-    // which have assignment_type='self_drive', driver_id set, and were created by hire form)
-    // We manage allocations that were created by the compat layer (created_by is a user UUID)
-    // OR that don't have a driver from the hire form app.
+    // Get ALL current active assignments — including hire-form-created ones.
+    // The frontend GET returns all of them, so if one is missing from the incoming list
+    // it means the user explicitly removed it.
     const existing = await query(
       `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id, notes
        FROM vehicle_hire_assignments
-       WHERE status IN ('soft', 'confirmed')
-         AND (driver_id IS NULL OR notes IS NOT NULL)`
+       WHERE status IN ('soft', 'confirmed')`
     );
 
     const existingMap = new Map(
