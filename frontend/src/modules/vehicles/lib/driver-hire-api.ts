@@ -8,7 +8,7 @@
  * with BookOutPage, AllocationsPage, CheckInPage, CollectionPage.
  */
 
-import { getAuthHeaders } from '../config/api-config'
+import { apiFetch } from '../config/api-config'
 
 /** Parsed driver hire form entry (same shape as Monday.com version) */
 export interface DriverHireForm {
@@ -75,17 +75,9 @@ function mapToDriverHireForm(row: any): DriverHireForm {
 }
 
 /**
- * Helper: fetch from OP backend with auth headers.
- * Uses absolute paths since hire-forms is mounted at /api/hire-forms,
- * not under the vehicle module's /api/vehicles base URL.
+ * Helper: fetch from OP backend with auth headers + automatic token refresh.
+ * Uses apiFetch which handles 401→refresh→retry automatically.
  */
-async function opFetch(path: string, init?: RequestInit): Promise<Response> {
-  const headers: Record<string, string> = {
-    ...getAuthHeaders(),
-    ...(init?.headers as Record<string, string> | undefined),
-  }
-  return fetch(path, { ...init, headers })
-}
 
 /**
  * Fetch driver hire forms matching a HireHop job number.
@@ -99,7 +91,7 @@ export async function fetchHireFormsByJobNumber(
   try {
     console.log('[driver-hire-api] Fetching hire forms for job:', hireHopJobNumber)
 
-    const response = await opFetch(`/api/hire-forms/by-job/${encodeURIComponent(hireHopJobNumber)}`)
+    const response = await apiFetch(`/api/hire-forms/by-job/${encodeURIComponent(hireHopJobNumber)}`)
 
     if (!response.ok) {
       if (response.status === 404) {
@@ -127,7 +119,7 @@ export async function fetchActiveHireForms(): Promise<DriverHireForm[]> {
   try {
     console.log('[driver-hire-api] Fetching active hire forms')
 
-    const response = await opFetch('/api/hire-forms/active')
+    const response = await apiFetch('/api/hire-forms/active')
 
     if (!response.ok) {
       // If endpoint doesn't exist yet, return empty gracefully
@@ -182,7 +174,7 @@ export async function updateDriverHireForm(params: {
   try {
     console.log('[driver-hire-api] Updating hire form', params.hireFormItemId, ':', JSON.stringify(body))
 
-    const response = await opFetch(`/api/hire-forms/${encodeURIComponent(params.hireFormItemId)}`, {
+    const response = await apiFetch(`/api/hire-forms/${encodeURIComponent(params.hireFormItemId)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
