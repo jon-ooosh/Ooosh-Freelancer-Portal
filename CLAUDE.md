@@ -390,27 +390,32 @@ Existing hire form app is NOT being rebuilt — just repointing its data layer f
 - [x] Quick-assign driver+vehicle button on Job Detail > Drivers & Vehicles tab (auto-populates job dates)
 - [ ] Wire into BookOutPage, AllocationsPage, CheckInPage, CollectionPage (currently Job Detail only)
 
-*Phase C3: Write path (standalone hire form app)* ✅ COMPLETE
-All Netlify functions repointed with `DATA_BACKEND` feature flag (default: `monday`, switch to `op` when ready):
+*Phase C3: Write path (standalone hire form app)* — IN PROGRESS
+Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `monday`, switch to `op` when ready):
 - [x] `functions/op-backend.js` — shared helper with `opFetch()`, `opUpload()`, `isOpMode()`, retry logic
-- [x] `monday-integration.js` (v4.1) — all 7 actions → OP `/driver-verification/*` endpoints
 - [x] `driver-status.js` (v3.2) → `GET /api/driver-verification/status?email=` (returns "new driver" on 404)
 - [x] `get-next-step.js` (v2.7) → `POST /api/driver-verification/next-step` (falls back to local routing + Monday.com on failure)
 - [x] `validate-job.js` (v2.0) → `GET /api/jobs/:jobId` (falls back to Monday.com Q&H Board)
-- [x] `generate-hire-form.js` (v5.6) → `GET /api/hire-forms/:id` + `POST /api/files` (logo still from Monday.com templates board)
 - [x] `send-verification-code`, `verify-code`, `create-idenfy-session`, `document-processor` — NO CHANGE
 - [x] Netlify env vars: `DATA_BACKEND` (monday|op), `OP_BACKEND_URL`, `OP_API_KEY`
+- [x] OP backend `POST /api/hire-forms` accepts API key auth (X-API-Key), camelCase field names, optional vehicle_id
+- [x] OP backend excess: passed through from hire form app (not recalculated from excess_rules table)
+- [ ] **`monday-integration.js` `copy-a-to-b` action** — needs updating for OP mode: must call `POST /api/hire-forms` with driver data + excess amount from DVLA check. Currently sends data that doesn't match the schema (was returning 400).
+- [ ] **`SignaturePage.js`** — after successful `copy-a-to-b` in OP mode, needs to trigger `generate-hire-form.js` directly (no Monday.com automation to trigger it)
+- [ ] `generate-hire-form.js` (v5.6) → `GET /api/hire-forms/:id` + `POST /api/files` (logo still from Monday.com templates board) — verify `fetchDriverDataFromOP` handles null vehicle_reg gracefully
 
 *Phase C4: Go-live cutover:*
-- [ ] Set env vars on OP server (`HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`)
-- [ ] Run migration 020 on production (`npm run db:migrate`)
+- [x] Set env vars on OP server (`HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`) — confirmed present
+- [x] Run migration 020 on production (`npm run db:migrate`) — done
+- [ ] Fix `monday-integration.js` copy-a-to-b + SignaturePage trigger (see Phase C3 above)
 - [ ] Test end-to-end with `DATA_BACKEND=op` on Netlify deploy preview
 - [ ] Flip `DATA_BACKEND=op` on Netlify production
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
 
-**Phase D — Allocations Migration** (next)
-- [ ] Switch AllocationsPage to read from `vehicle_hire_assignments`
-- [ ] Keep compatibility API for existing book-out/check-in flows
+**Phase D — Allocations Migration** ✅ MOSTLY COMPLETE
+- [x] Switch AllocationsPage to read from `vehicle_hire_assignments` (compat layer)
+- [x] Keep compatibility API for existing book-out/check-in flows
+- [x] Book-out flow: driver selection from hire forms, token refresh, draft autosave
 - [ ] Remove R2 allocation writes (R2 becomes read-only fallback)
 
 #### Step 3: Insurance Excess Tracking
