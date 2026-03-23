@@ -89,24 +89,44 @@ export async function POST(request: NextRequest) {
       try {
         const opResult = await loginToOP(normalizedEmail, password)
 
-        if (!opResult.success) {
-          recordFailedAttempt(normalizedEmail)
-          return NextResponse.json(
-            { error: opResult.error || 'Invalid email or password' },
-            { status: 401 }
-          )
-        }
+        if (opResult.success) {
+          clearFailedAttempts(normalizedEmail)
 
-        clearFailedAttempts(normalizedEmail)
+          // If the OP backend returned a session token, use it directly
+          if (opResult.sessionToken) {
+            const response = NextResponse.json({
+              success: true,
+              user: opResult.user,
+            })
 
-        // If the OP backend returned a session token, use it directly
-        if (opResult.sessionToken) {
+            response.cookies.set('session', opResult.sessionToken, {
+              httpOnly: true,
+              secure: process.env.NODE_ENV === 'production',
+              sameSite: 'lax',
+              maxAge: 30 * 24 * 60 * 60,
+              path: '/',
+            })
+
+            return response
+          }
+
+          // Fallback: create a local session token using the OP user data
+          const sessionToken = await new SignJWT({
+            id: opResult.user!.id,
+            email: opResult.user!.email,
+            name: opResult.user!.name,
+          })
+            .setProtectedHeader({ alg: 'HS256' })
+            .setIssuedAt()
+            .setExpirationTime('30d')
+            .sign(getSessionSecret())
+
           const response = NextResponse.json({
             success: true,
             user: opResult.user,
           })
 
-          response.cookies.set('session', opResult.sessionToken, {
+          response.cookies.set('session', sessionToken, {
             httpOnly: true,
             secure: process.env.NODE_ENV === 'production',
             sameSite: 'lax',
@@ -117,31 +137,9 @@ export async function POST(request: NextRequest) {
           return response
         }
 
-        // Fallback: create a local session token using the OP user data
-        const sessionToken = await new SignJWT({
-          id: opResult.user!.id,
-          email: opResult.user!.email,
-          name: opResult.user!.name,
-        })
-          .setProtectedHeader({ alg: 'HS256' })
-          .setIssuedAt()
-          .setExpirationTime('30d')
-          .sign(getSessionSecret())
-
-        const response = NextResponse.json({
-          success: true,
-          user: opResult.user,
-        })
-
-        response.cookies.set('session', sessionToken, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: 'lax',
-          maxAge: 30 * 24 * 60 * 60,
-          path: '/',
-        })
-
-        return response
+        // OP backend returned failure — fall through to Monday.com
+        // During transition, freelancers may only exist in Monday.com
+        console.log('Login: OP backend rejected credentials, falling back to Monday.com')
       } catch (opError) {
         console.error('OP login error:', opError)
         // Fall through to Monday.com
