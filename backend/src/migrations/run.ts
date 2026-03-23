@@ -59,7 +59,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '026_fix_calculation_mode.sql',
         '027_organisation_relationships.sql',
         '028_hh_user_mapping.sql',
-        '029_sync_review_queue.sql',
+        '029_nullable_vehicle_id.sql',
+        '030_sync_review_queue.sql',
       ];
 
       for (const migration of migrations) {
