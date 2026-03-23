@@ -896,18 +896,30 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     const endDate = formatHHDate(job.job_end);
     const toDate = formatHHDate(job.return_date);
 
-    // HireHop save_job.php date field names: out, start, end, return
-    if (outDate) hhBody.out = outDate;
-    if (startDate) hhBody.start = startDate;
-    if (endDate) hhBody.end = endDate;
-    if (toDate) hhBody.return = toDate;
-
     // If job_end is set but no separate out/return dates, default them
-    // so HH gets a complete date range
-    if (startDate && endDate && !outDate) hhBody.out = startDate;
-    if (startDate && endDate && !toDate) hhBody.return = endDate;
+    const effectiveOut = outDate || startDate;
+    const effectiveReturn = toDate || endDate;
 
-    console.log('[Pipeline] Pushing dates to HireHop:', { out: hhBody.out, start: hhBody.start, end: hhBody.end, return: hhBody.return });
+    // HireHop save_job.php date fields — send both short and long forms
+    // to ensure compatibility (HH docs inconsistent on field names)
+    if (effectiveOut) hhBody.out = effectiveOut;
+    if (startDate) hhBody.start = startDate;
+    if (endDate) {
+      hhBody.end = endDate;
+      hhBody.finish = endDate;       // alternative HH field name
+      hhBody.job_end = endDate;      // alternative HH field name
+    }
+    if (effectiveReturn) {
+      hhBody.to = effectiveReturn;
+      hhBody.return = effectiveReturn;       // alternative HH field name
+      hhBody.return_date = effectiveReturn;  // alternative HH field name
+    }
+
+    console.log('[Pipeline] Pushing dates to HireHop:', {
+      out: hhBody.out, start: hhBody.start, end: hhBody.end,
+      finish: hhBody.finish, job_end: hhBody.job_end,
+      to: hhBody.to, return: hhBody.return, return_date: hhBody.return_date,
+    });
 
     // POST to HireHop via broker
     const { hhBroker } = await import('../services/hirehop-broker');
