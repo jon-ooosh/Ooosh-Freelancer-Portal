@@ -201,7 +201,7 @@ export async function mondayQuery<T>(query: string, variables?: Record<string, u
     headers: {
       'Content-Type': 'application/json',
       'Authorization': getApiToken(),
-      'API-Version': '2025-04',
+      'API-Version': '2025-10',
     },
     body: JSON.stringify({ query, variables }),
   })
