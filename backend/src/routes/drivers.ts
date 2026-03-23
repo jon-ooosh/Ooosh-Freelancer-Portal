@@ -229,7 +229,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         fv.reg AS vehicle_reg,
         fv.simple_type AS vehicle_type
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       WHERE vha.driver_id = $1
       ORDER BY vha.created_at DESC`,
       [id]
@@ -256,7 +256,7 @@ router.get('/:id/excess-history', async (req: AuthRequest, res: Response) => {
         vha.hire_end
       FROM job_excess je
       JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       WHERE vha.driver_id = $1
       ORDER BY je.created_at DESC`,
       [id]
