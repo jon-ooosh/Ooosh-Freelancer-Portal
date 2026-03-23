@@ -10,6 +10,9 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } from '../services/driver-snapshot-pdf';
+import { uploadToR2 } from '../config/r2';
+import { fetchLogo } from '../services/hire-form-pdf';
 
 const router = Router();
 router.use(authenticate);
@@ -437,6 +440,192 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
   } catch (error) {
     console.error('[drivers] Update error:', error);
     res.status(500).json({ error: 'Failed to update driver' });
+  }
+});
+
+// ── POST /api/drivers/:id/resolve-referral — Resolve insurance referral ──
+
+const resolveReferralSchema = z.object({
+  outcome: z.enum(['approved', 'declined']),
+  notes: z.string().optional().default(''),
+  // Optional adjusted excess amount (insurer may approve with higher excess)
+  adjusted_excess: z.number().min(0).nullable().optional(),
+  // Optional: extend specific validity dates on approval
+  extend_dates: z.object({
+    idenfy_check_date: z.string().nullable().optional(),      // Licence: 90d from this
+    dvla_check_date: z.string().nullable().optional(),         // DVLA: 30d from this
+    poa1_valid_until: z.string().nullable().optional(),        // POA1: set directly
+    poa2_valid_until: z.string().nullable().optional(),        // POA2: set directly
+    passport_valid_until: z.string().nullable().optional(),    // Passport: set directly
+  }).optional(),
+});
+
+router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(resolveReferralSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { outcome, notes, adjusted_excess, extend_dates } = req.body;
+
+    // Fetch current driver
+    const current = await query('SELECT * FROM drivers WHERE id = $1', [id]);
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Driver not found' });
+      return;
+    }
+    const driver = current.rows[0];
+
+    if (!driver.requires_referral) {
+      res.status(400).json({ error: 'Driver does not have a pending referral' });
+      return;
+    }
+
+    // Build update fields
+    const updates: Record<string, unknown> = {
+      referral_status: outcome,
+      referral_notes: [driver.referral_notes, notes].filter(Boolean).join(' | '),
+      insurance_status: outcome === 'approved' ? 'Approved' : 'Failed',
+    };
+
+    // If approved, optionally extend validity dates
+    if (outcome === 'approved' && extend_dates) {
+      for (const [key, value] of Object.entries(extend_dates)) {
+        if (value) updates[key] = value;
+      }
+    }
+
+    // Build dynamic SQL
+    const setClauses: string[] = [];
+    const params: unknown[] = [];
+    const changedFields: Record<string, { old: unknown; new: unknown }> = {};
+
+    for (const [key, value] of Object.entries(updates)) {
+      const prev = driver[key];
+      const newVal = value ?? null;
+      if (String(prev ?? '') !== String(newVal ?? '')) {
+        changedFields[key] = { old: prev, new: newVal };
+      }
+      params.push(newVal);
+      setClauses.push(`${key} = $${params.length}`);
+    }
+
+    setClauses.push('updated_at = NOW()');
+    params.push(id);
+
+    const result = await query(
+      `UPDATE drivers SET ${setClauses.join(', ')} WHERE id = $${params.length} RETURNING *`,
+      params
+    );
+
+    // Update excess records if adjusted_excess provided
+    if (adjusted_excess != null) {
+      await query(
+        `UPDATE job_excess SET excess_amount_required = $1, excess_calculation_basis = $2, updated_at = NOW()
+         WHERE assignment_id IN (
+           SELECT id FROM vehicle_hire_assignments WHERE driver_id = $3 AND status IN ('soft', 'confirmed', 'booked_out', 'active')
+         )`,
+        [adjusted_excess, `Referral ${outcome}: ${notes || 'insurer adjustment'}`, id]
+      );
+    }
+
+    // Audit log
+    if (Object.keys(changedFields).length > 0) {
+      const oldVals: Record<string, unknown> = {};
+      const newVals: Record<string, unknown> = {};
+      for (const [key, { old: o, new: n }] of Object.entries(changedFields)) {
+        oldVals[key] = o;
+        newVals[key] = n;
+      }
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+         VALUES ($1, 'driver', $2, 'resolve_referral', $3, $4)`,
+        [req.user!.id, id, JSON.stringify(oldVals), JSON.stringify(newVals)]
+      );
+    }
+
+    console.log(`[drivers] Referral resolved: driver=${id}, outcome=${outcome}`);
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[drivers] Resolve referral error:', error);
+    res.status(500).json({ error: 'Failed to resolve referral' });
+  }
+});
+
+// ── POST /api/drivers/:id/snapshot — Generate verification snapshot PDF ──
+
+router.post('/:id/snapshot', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { hirehop_job_id } = req.body || {};
+
+    const result = await query('SELECT * FROM drivers WHERE id = $1', [id]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Driver not found' });
+      return;
+    }
+    const d = result.rows[0];
+
+    // Load document files from R2
+    const documents = await loadDriverDocuments(d.files || []);
+
+    // Load logo
+    let logoImage: Buffer | null = null;
+    try { logoImage = await fetchLogo(); } catch { /* no logo is fine */ }
+
+    const isUk = (d.licence_issue_country || '').toUpperCase() === 'GB' ||
+      (d.licence_issued_by || '').toUpperCase().includes('DVLA');
+
+    const snapshotData: DriverSnapshotData = {
+      driverName: d.full_name || '',
+      email: d.email || '',
+      phone: d.phone ? `${d.phone_country || ''} ${d.phone}` : '',
+      dateOfBirth: d.date_of_birth || '',
+      nationality: d.nationality || '',
+      homeAddress: d.address_full || [d.address_line1, d.address_line2, d.city, d.postcode].filter(Boolean).join(', '),
+      licenceAddress: d.licence_address || '',
+      licenceNumber: d.licence_number || '',
+      licenceIssuedBy: d.licence_issued_by || d.licence_issue_country || '',
+      licenceValidTo: d.licence_valid_to || '',
+      datePassedTest: d.date_passed_test || '',
+      dvlaPoints: String(d.licence_points || 0),
+      dvlaEndorsements: Array.isArray(d.licence_endorsements)
+        ? d.licence_endorsements.map((e: any) => e.code).join(', ') || 'None'
+        : 'None',
+      calculatedExcess: '', // Will be populated from job_excess if available
+      isUkDriver: isUk,
+      hasDisability: d.has_disability || false,
+      hasConvictions: d.has_convictions || false,
+      hasProsecution: d.has_prosecution || false,
+      hasAccidents: d.has_accidents || false,
+      hasInsuranceIssues: d.has_insurance_issues || false,
+      hasDrivingBan: d.has_driving_ban || false,
+      additionalDetails: d.additional_details || '',
+      jobId: hirehop_job_id ? String(hirehop_job_id) : 'N/A',
+      documents,
+      logoImage,
+    };
+
+    // Try to get excess from latest active assignment
+    const excessResult = await query(
+      `SELECT je.excess_amount_required FROM job_excess je
+       JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+       WHERE vha.driver_id = $1 AND vha.status IN ('soft','confirmed','booked_out','active')
+       ORDER BY je.created_at DESC LIMIT 1`,
+      [id]
+    );
+    if (excessResult.rows[0]?.excess_amount_required) {
+      snapshotData.calculatedExcess = `£${Number(excessResult.rows[0].excess_amount_required).toLocaleString()}`;
+    }
+
+    const { pdfBytes, filename } = await generateDriverSnapshot(snapshotData);
+
+    // Upload to R2
+    const r2Key = `driver-snapshots/${id}/${filename}`;
+    await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
+
+    console.log(`[drivers] Snapshot generated: ${filename} (${pdfBytes.length} bytes)`);
+    res.json({ data: { filename, r2Key, size: pdfBytes.length } });
+  } catch (error) {
+    console.error('[drivers] Snapshot error:', error);
+    res.status(500).json({ error: 'Failed to generate snapshot' });
   }
 });
 
