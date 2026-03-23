@@ -40,7 +40,7 @@ function authenticateOrApiKey(req: AuthRequest, res: Response, next: NextFunctio
       const provided = Buffer.from(apiKey);
       if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
         // API key auth — set a service user identity
-        req.user = { id: 'hire-form-service', email: 'hire-form@system', role: 'admin' };
+        req.user = { id: '00000000-0000-0000-0000-000000000000', email: 'hire-form@system', role: 'admin' };
         next();
         return;
       }
@@ -88,8 +88,9 @@ const hireFormSchema = z.object({
   dvla_check_code: z.string().max(50).nullable().optional(),
   dvla_check_date: z.string().nullable().optional(),
 
-  // Assignment details
-  vehicle_id: z.string().uuid(),
+  // Assignment details — vehicle_id OR vehicle_reg, both optional (vehicle assigned later)
+  vehicle_id: z.string().uuid().nullable().optional(),
+  vehicle_reg: z.string().max(20).nullable().optional(),   // Alternative: look up UUID by reg
   job_id: z.string().uuid().nullable().optional(),
   hirehop_job_id: z.number().int().nullable().optional(),
   hirehop_job_name: z.string().max(500).nullable().optional(),
@@ -104,9 +105,11 @@ const hireFormSchema = z.object({
   ve103b_ref: z.string().max(100).nullable().optional(),
   client_email: z.string().email().nullable().optional(),
 
-  // Excess override
-  excess_amount_override: z.number().min(0).nullable().optional(),
-  excess_override_reason: z.string().nullable().optional(),
+  // Excess — passed from hire form app (DVLA-calculated), NOT recalculated here
+  excess_amount: z.number().min(0).nullable().optional(),
+  excess_calculation_basis: z.string().nullable().optional(),
+  requires_referral: z.boolean().optional(),
+  referral_reason: z.string().nullable().optional(),
 
   // Xero
   xero_contact_id: z.string().max(100).nullable().optional(),
@@ -116,7 +119,70 @@ const hireFormSchema = z.object({
 
 // ── POST /api/hire-forms — Submit completed hire form ──
 
-router.post('/', authenticateOrApiKey, validate(hireFormSchema), async (req: AuthRequest, res: Response) => {
+/**
+ * camelCase → snake_case transform for Netlify function compatibility.
+ * The hire form app sends camelCase; the schema expects snake_case.
+ */
+function normalizeHireFormBody(body: Record<string, unknown>): Record<string, unknown> {
+  const map: Record<string, string> = {
+    driverId: 'driver_id',
+    fullName: 'full_name',
+    dateOfBirth: 'date_of_birth',
+    addressLine1: 'address_line1',
+    addressLine2: 'address_line2',
+    licenceNumber: 'licence_number',
+    licenseNumber: 'licence_number',
+    licenceType: 'licence_type',
+    licenceValidFrom: 'licence_valid_from',
+    licenceValidTo: 'licence_valid_to',
+    licenceIssueCountry: 'licence_issue_country',
+    licenceIssuedBy: 'licence_issue_country',
+    licencePoints: 'licence_points',
+    licenceEndorsements: 'licence_endorsements',
+    licenceRestrictions: 'licence_restrictions',
+    dvlaCheckCode: 'dvla_check_code',
+    dvlaCheckDate: 'dvla_check_date',
+    vehicleId: 'vehicle_id',
+    vehicleReg: 'vehicle_reg',
+    jobId: 'job_id',
+    hirehopJobId: 'hirehop_job_id',
+    hirehopJobName: 'hirehop_job_name',
+    hireHopJobId: 'hirehop_job_id',
+    hireHopJobName: 'hirehop_job_name',
+    vanRequirementIndex: 'van_requirement_index',
+    requiredType: 'required_type',
+    requiredGearbox: 'required_gearbox',
+    hireStart: 'hire_start',
+    hireEnd: 'hire_end',
+    startTime: 'start_time',
+    endTime: 'end_time',
+    returnOvernight: 'return_overnight',
+    ve103bRef: 've103b_ref',
+    clientEmail: 'client_email',
+    excessAmount: 'excess_amount',
+    excessCalculationBasis: 'excess_calculation_basis',
+    requiresReferral: 'requires_referral',
+    referralReason: 'referral_reason',
+    xeroContactId: 'xero_contact_id',
+    xeroContactName: 'xero_contact_name',
+    clientName: 'client_name',
+  };
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    const snakeKey = map[key] || key;
+    // Don't overwrite if the snake_case key is already set
+    if (!(snakeKey in result) || result[snakeKey] == null) {
+      result[snakeKey] = value;
+    }
+  }
+  return result;
+}
+
+router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: NextFunction) => {
+  // Transform camelCase to snake_case before validation
+  req.body = normalizeHireFormBody(req.body);
+  next();
+}, validate(hireFormSchema), async (req: AuthRequest, res: Response) => {
   const pool = getPool();
   const client = await pool.connect();
 
@@ -126,6 +192,17 @@ router.post('/', authenticateOrApiKey, validate(hireFormSchema), async (req: Aut
 
     // 1. Create or update driver
     let driverId: string;
+
+    // Try to find existing driver by email if no driver_id provided
+    if (!f.driver_id && f.email) {
+      const existingDriver = await client.query(
+        `SELECT id FROM drivers WHERE email = $1 AND is_active = true ORDER BY updated_at DESC LIMIT 1`,
+        [f.email]
+      );
+      if (existingDriver.rows[0]) {
+        f.driver_id = existingDriver.rows[0].id;
+      }
+    }
 
     if (f.driver_id) {
       // Update existing driver with latest details
@@ -178,33 +255,10 @@ router.post('/', authenticateOrApiKey, validate(hireFormSchema), async (req: Aut
       driverId = driverResult.rows[0].id;
     }
 
-    // 2. Check for referral triggers
-    let requiresReferral = false;
-    let referralReason = '';
+    // 2. Referral status — accept from hire form app or detect from endorsements
+    const requiresReferral = f.requires_referral || false;
+    const referralReason = f.referral_reason || '';
 
-    // Check endorsement codes
-    const referralRules = await client.query(
-      `SELECT * FROM excess_rules WHERE is_active = true AND requires_referral = true ORDER BY sort_order`
-    );
-
-    const endorsementCodes = (f.licence_endorsements || []).map((e: any) => e.code);
-
-    for (const rule of referralRules.rows) {
-      if (rule.rule_type === 'endorsement_referral' && rule.condition_code) {
-        if (endorsementCodes.some((code: string) => code.toUpperCase().startsWith(rule.condition_code.toUpperCase()))) {
-          requiresReferral = true;
-          referralReason = rule.description;
-          break;
-        }
-      }
-      if (rule.rule_type === 'licence_type' && f.licence_issue_country !== 'GB') {
-        requiresReferral = true;
-        referralReason = rule.description;
-        break;
-      }
-    }
-
-    // Update driver referral status
     if (requiresReferral) {
       await client.query(
         `UPDATE drivers SET requires_referral = true, referral_status = 'pending', referral_notes = $1 WHERE id = $2`,
@@ -212,30 +266,33 @@ router.post('/', authenticateOrApiKey, validate(hireFormSchema), async (req: Aut
       );
     }
 
-    // 3. Calculate excess amount
-    let excessAmount: number | null = null;
-    let calculationBasis = '';
+    // 3. Excess amount — passed from hire form app, NOT recalculated here
+    //    The hire form app calculates excess from DVLA points during the verification flow.
+    //    We store whatever they send. If nothing sent, store null (UI shows red alert).
+    const excessAmount: number | null = f.excess_amount ?? null;
+    const calculationBasis = f.excess_calculation_basis || (requiresReferral ? `Referral required: ${referralReason}` : '');
 
-    if (f.excess_amount_override != null) {
-      excessAmount = f.excess_amount_override;
-      calculationBasis = `Manual override: ${f.excess_override_reason || 'No reason given'}`;
-    } else if (!requiresReferral) {
-      const tierResult = await client.query(
-        `SELECT * FROM excess_rules
-         WHERE is_active = true AND rule_type = 'points_tier'
-           AND condition_min <= $1 AND condition_max >= $1
-         ORDER BY sort_order LIMIT 1`,
-        [f.licence_points]
+    // 4. Resolve vehicle_id from vehicle_reg if needed
+    let vehicleId = f.vehicle_id || null;
+    if (!vehicleId && f.vehicle_reg) {
+      const vResult = await client.query(
+        'SELECT id FROM fleet_vehicles WHERE reg = $1',
+        [f.vehicle_reg.toUpperCase()]
       );
-      if (tierResult.rows[0]) {
-        excessAmount = tierResult.rows[0].excess_amount ? parseFloat(tierResult.rows[0].excess_amount) : null;
-        calculationBasis = tierResult.rows[0].description || `${f.licence_points} points`;
-      }
-    } else {
-      calculationBasis = `Referral required: ${referralReason}`;
+      vehicleId = vResult.rows[0]?.id || null;
     }
 
-    // 4. Create vehicle hire assignment
+    // 5. Resolve job_id from hirehop_job_id if needed
+    let jobId = f.job_id || null;
+    if (!jobId && f.hirehop_job_id) {
+      const jResult = await client.query(
+        'SELECT id FROM jobs WHERE hh_job_number = $1 LIMIT 1',
+        [f.hirehop_job_id]
+      );
+      jobId = jResult.rows[0]?.id || null;
+    }
+
+    // 6. Create vehicle hire assignment
     const assignmentResult = await client.query(
       `INSERT INTO vehicle_hire_assignments (
         vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
@@ -253,7 +310,7 @@ router.post('/', authenticateOrApiKey, validate(hireFormSchema), async (req: Aut
         $14, $15
       ) RETURNING *`,
       [
-        f.vehicle_id, f.job_id || null, f.hirehop_job_id || null, f.hirehop_job_name || null,
+        vehicleId, jobId, f.hirehop_job_id || null, f.hirehop_job_name || null,
         driverId,
         f.van_requirement_index, f.required_type || null, f.required_gearbox || null,
         f.hire_start || null, f.hire_end || null, f.start_time || null, f.end_time || null, f.return_overnight ?? null,
@@ -263,7 +320,7 @@ router.post('/', authenticateOrApiKey, validate(hireFormSchema), async (req: Aut
 
     const assignment = assignmentResult.rows[0];
 
-    // 5. Create excess record
+    // 7. Create excess record (stores whatever the hire form app calculated)
     const excessResult = await client.query(
       `INSERT INTO job_excess (
         assignment_id, job_id, hirehop_job_id,
@@ -274,15 +331,17 @@ router.post('/', authenticateOrApiKey, validate(hireFormSchema), async (req: Aut
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *`,
       [
-        assignment.id, f.job_id || null, f.hirehop_job_id || null,
+        assignment.id, jobId, f.hirehop_job_id || null,
         excessAmount, calculationBasis,
-        requiresReferral ? 'pending' : 'pending',
+        'pending',
         f.xero_contact_id || null, f.xero_contact_name || null, f.client_name || null,
         req.user!.id,
       ]
     );
 
     await client.query('COMMIT');
+
+    console.log(`[hire-forms] Created: driver=${driverId}, assignment=${assignment.id}, vehicle=${vehicleId || 'none'}, job=${f.hirehop_job_id || 'none'}, excess=${excessAmount || 'none'}`);
 
     res.status(201).json({
       data: {

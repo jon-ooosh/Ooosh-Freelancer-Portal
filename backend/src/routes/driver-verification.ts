@@ -274,7 +274,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       licenceEndorsements: 'licence_endorsements',
       requiresReferral: 'requires_referral',
       referralStatus: 'referral_status',
-      referralReasons: 'referral_reasons',
+      referralReasons: 'referral_notes',
       referralDate: 'referral_date',
       referralNotes: 'referral_notes',
     };
@@ -294,7 +294,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'insurance_status', 'overall_status',
       'idenfy_check_date', 'idenfy_scan_ref', 'signature_date',
       'licence_points', 'licence_endorsements',
-      'requires_referral', 'referral_status', 'referral_reasons', 'referral_date', 'referral_notes',
+      'requires_referral', 'referral_status', 'referral_date', 'referral_notes',
     ]);
 
     const setClauses: string[] = [];
