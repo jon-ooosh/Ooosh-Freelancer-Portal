@@ -304,7 +304,40 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       jobId = jResult.rows[0]?.id || null;
     }
 
-    // 6. Create vehicle hire assignment
+    // 6. Check for existing non-cancelled assignment (deduplication)
+    //    If the same driver+vehicle+job combo already exists and is not cancelled, return it instead of creating a duplicate.
+    const dedup: string[] = [];
+    const dedupParams: unknown[] = [];
+    let dedupIdx = 1;
+    dedup.push(`driver_id = $${dedupIdx++}`); dedupParams.push(driverId);
+    if (vehicleId) { dedup.push(`vehicle_id = $${dedupIdx++}`); dedupParams.push(vehicleId); }
+    if (jobId) { dedup.push(`job_id = $${dedupIdx++}`); dedupParams.push(jobId); }
+    else if (f.hirehop_job_id) { dedup.push(`hirehop_job_id = $${dedupIdx++}`); dedupParams.push(f.hirehop_job_id); }
+
+    const existingAssignment = await client.query(
+      `SELECT id FROM vehicle_hire_assignments
+       WHERE ${dedup.join(' AND ')} AND status NOT IN ('cancelled')
+       ORDER BY created_at DESC LIMIT 1`,
+      dedupParams
+    );
+
+    if (existingAssignment.rows.length > 0) {
+      // Duplicate — commit driver updates but skip assignment creation
+      await client.query('COMMIT');
+      client.release();
+      console.log(`[hire-forms] Deduplicated: existing assignment ${existingAssignment.rows[0].id} for driver ${driverId}`);
+      const full = await getPool().query(
+        `SELECT a.*, d.full_name AS driver_name, fv.reg AS vehicle_reg
+         FROM vehicle_hire_assignments a
+         LEFT JOIN drivers d ON d.id = a.driver_id
+         LEFT JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+         WHERE a.id = $1`,
+        [existingAssignment.rows[0].id]
+      );
+      return res.status(200).json({ data: full.rows[0], deduplicated: true });
+    }
+
+    // 7. Create vehicle hire assignment
     const assignmentResult = await client.query(
       `INSERT INTO vehicle_hire_assignments (
         vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
