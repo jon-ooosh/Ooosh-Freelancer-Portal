@@ -143,7 +143,7 @@ async function fetchJobItems(jobId: number): Promise<HireHopJobItem[]> {
 // Original problem: 30+ concurrent items_to_supply_list.php calls → error 327.
 // Fix: max 3 concurrent + 150ms stagger + 5-min cache + deduplication.
 
-const ITEMS_CACHE_TTL = 5 * 60 * 1000 // 5 minutes — matches React Query staleTime
+const ITEMS_CACHE_TTL = 10 * 60 * 1000 // 10 minutes — matches broker cache TTL for items
 const FETCH_DELAY_MS = 1200 // ms between starting new fetches — keeps us under 60 req/min
 const MAX_CONCURRENT = 1   // max in-flight item requests (serialize to avoid error 327)
 

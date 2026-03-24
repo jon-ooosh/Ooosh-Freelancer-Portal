@@ -577,9 +577,9 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
 
 router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
   try {
-    // First, clean up duplicate assignments (same job + same vehicle, multiple active rows).
-    // This can happen due to a previous bug where the save handler created duplicates.
-    // Keep the most "progressed" row (booked_out > active > confirmed > soft), cancel the rest.
+    // Clean up duplicate assignments (same job + same vehicle, multiple active rows).
+    // Only touch allocations-created rows (driver_id IS NULL).
+    // Hire-form-created assignments (driver_id IS NOT NULL) are managed by the hire form flow.
     await query(
       `WITH ranked AS (
         SELECT id,
@@ -595,6 +595,7 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
         FROM vehicle_hire_assignments
         WHERE status IN ('soft', 'confirmed', 'booked_out', 'active')
           AND vehicle_id IS NOT NULL
+          AND driver_id IS NULL
       )
       UPDATE vehicle_hire_assignments
       SET status = 'cancelled', status_changed_at = NOW(), updated_at = NOW()
@@ -809,9 +810,11 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Cancel soft/confirmed assignments that are no longer referenced
+    // Cancel soft/confirmed assignments that are no longer referenced.
+    // Only cancel allocations-created rows (driver_id IS NULL).
+    // Hire-form-created assignments (driver_id set) are managed by the hire form flow.
     for (const row of existing.rows) {
-      if (['soft', 'confirmed'].includes(row.status) && !touchedIds.has(row.id)) {
+      if (['soft', 'confirmed'].includes(row.status) && !touchedIds.has(row.id) && !row.driver_id) {
         await query(
           `UPDATE vehicle_hire_assignments
            SET status = 'cancelled', status_changed_at = NOW(), updated_at = NOW()
