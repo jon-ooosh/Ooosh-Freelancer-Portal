@@ -21,7 +21,6 @@ import { useDriverHireForms } from '../hooks/useDriverHireForms'
 import { extractVanRequirements } from '../lib/hirehop-api'
 import { findMatchingVehicles, formatVanType, getVehicleGearboxLabel, vehicleNeedsPrepWarning } from '../lib/van-matching'
 import type { HireHopJob, VanAllocation, VanRequirement } from '../types/hirehop'
-import type { DriverHireForm } from '../lib/driver-hire-api'
 import type { Vehicle } from '../types/vehicle'
 
 type DateFilter = 'today' | 'tomorrow' | 'this-week' | 'all'
