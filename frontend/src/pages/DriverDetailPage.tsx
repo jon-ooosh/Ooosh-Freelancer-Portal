@@ -500,23 +500,14 @@ export default function DriverDetailPage() {
         </div>
       </div>
 
-      {/* Status banners */}
+      {/* Referral panel — shown prominently at top when applicable */}
       {driver.requires_referral && (
-        <div className={`mt-4 rounded-lg px-4 py-3 text-sm border ${
-          driver.referral_status === 'approved'
-            ? 'bg-green-50 border-green-200 text-green-700'
-            : driver.referral_status === 'declined'
-            ? 'bg-red-50 border-red-200 text-red-700'
-            : 'bg-amber-50 border-amber-200 text-amber-700'
-        }`}>
-          {driver.referral_status === 'approved'
-            ? 'Insurance referral approved.'
-            : driver.referral_status === 'declined'
-            ? 'Insurance referral declined.'
-            : 'Insurance referral required — pending review.'}
-          {driver.referral_notes && <span className="ml-1 text-gray-600">({driver.referral_notes})</span>}
+        <div className="mt-4">
+          <ReferralPanel driver={driver} onDriverUpdate={setDriver} />
         </div>
       )}
+
+      {/* DVLA stale warning */}
       {dvlaCheckStale && (
         <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-700">
           DVLA check is {dvlaCheckAge} days old (last: {formatDate(driver.dvla_check_date)}). Consider requesting a fresh check code.
@@ -723,7 +714,7 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
   const [adjustedExcess, setAdjustedExcess] = useState('');
   const [showResolve, setShowResolve] = useState(false);
   const [error, setError] = useState('');
-  // Compute suggested dates based on validity rules
+  // Pre-populate dates from existing driver data, falling back to today + standard validity
   const today = new Date().toISOString().split('T')[0];
   const addDays = (d: string, days: number) => {
     const dt = new Date(d);
@@ -731,11 +722,11 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
     return dt.toISOString().split('T')[0];
   };
   const [extendDates, setExtendDates] = useState({
-    idenfy_check_date: today,     // Licence: 90d from this
-    dvla_check_date: today,       // DVLA: 30d from this
-    poa1_valid_until: addDays(today, 90),
-    poa2_valid_until: addDays(today, 90),
-    passport_valid_until: addDays(today, 90),
+    idenfy_check_date: toInputDate(driver.idenfy_check_date) || today,
+    dvla_check_date: toInputDate(driver.dvla_check_date) || today,
+    poa1_valid_until: toInputDate(driver.poa1_valid_until) || addDays(today, 90),
+    poa2_valid_until: toInputDate(driver.poa2_valid_until) || addDays(today, 90),
+    passport_valid_until: toInputDate(driver.passport_valid_until) || addDays(today, 90),
   });
 
   // Build referral reasons from driver data
@@ -813,21 +804,8 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
           <dt className="text-xs text-gray-500">Referral Date</dt>
           <dd className="text-sm text-gray-900">{formatDate(driver.referral_date) || formatDate(driver.created_at)}</dd>
         </div>
-        <div>
-          <dt className="text-xs text-gray-500">Insurance Status</dt>
-          <dd className="text-sm">
-            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${
-              driver.insurance_status === 'Approved' ? 'bg-green-100 text-green-700'
-                : driver.insurance_status === 'Failed' ? 'bg-red-100 text-red-700'
-                : driver.insurance_status === 'Referral' ? 'bg-amber-100 text-amber-700'
-                : 'bg-gray-100 text-gray-600'
-            }`}>
-              {driver.insurance_status || 'Not set'}
-            </span>
-          </dd>
-        </div>
         {driver.referral_notes && (
-          <div className="md:col-span-1">
+          <div className="md:col-span-2">
             <dt className="text-xs text-gray-500">Notes</dt>
             <dd className="text-sm text-gray-900">{driver.referral_notes}</dd>
           </div>
@@ -1213,7 +1191,7 @@ function DetailsTab({
           ))}
         </div>
         {editing ? (
-          <div className="mt-3 pt-3 border-t border-gray-100 space-y-3">
+          <div className="mt-3 pt-3 border-t border-gray-100">
             <div>
               <label className="block text-xs text-gray-500 mb-1">Additional Details</label>
               <textarea
@@ -1222,19 +1200,6 @@ function DetailsTab({
                 rows={2}
                 className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">Insurance Status</label>
-              <select
-                value={editData.insurance_status || ''}
-                onChange={(e) => setEditData({ ...editData, insurance_status: e.target.value })}
-                className="rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              >
-                <option value="">Not set</option>
-                <option value="Approved">Approved</option>
-                <option value="Referral">Referral</option>
-                <option value="Failed">Failed</option>
-              </select>
             </div>
           </div>
         ) : (
@@ -1245,25 +1210,9 @@ function DetailsTab({
                 <dd className="text-sm text-gray-700 mt-1">{driver.additional_details}</dd>
               </div>
             )}
-            {driver.insurance_status && (
-              <div className="mt-3 pt-3 border-t border-gray-100">
-                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${
-                  driver.insurance_status === 'Approved' ? 'bg-green-100 text-green-700' :
-                  driver.insurance_status === 'Failed' ? 'bg-red-100 text-red-700' :
-                  'bg-amber-100 text-amber-700'
-                }`}>
-                  Insurance: {driver.insurance_status}
-                </span>
-              </div>
-            )}
           </>
         )}
       </div>
-
-      {/* Referral Action Panel */}
-      {driver.requires_referral && (
-        <ReferralPanel driver={driver} onDriverUpdate={onDriverUpdate} />
-      )}
 
       {/* Documents — categorised file slots */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
