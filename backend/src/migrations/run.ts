@@ -63,6 +63,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '030_sync_review_queue.sql',
         '031_system_service_user.sql',
         '032_fix_audit_log_action_constraint.sql',
+        '033_address_book_enhancements.sql',
       ];
 
       for (const migration of migrations) {

@@ -28,6 +28,13 @@ const createOrgSchema = z.object({
   notes: z.string().optional().nullable(),
   tags: z.array(z.string()).optional().default([]),
   files: z.array(fileSchema).optional().default([]),
+  // Working terms
+  working_terms_type: z.enum(['usual', 'flex_balance', 'no_deposit', 'credit', 'custom']).optional().nullable(),
+  working_terms_credit_days: z.number().int().optional().nullable(),
+  working_terms_notes: z.string().optional().nullable(),
+  // AI text fields
+  ai_summary: z.string().optional().nullable(),
+  ai_research: z.string().optional().nullable(),
 });
 
 const updateOrgSchema = createOrgSchema.partial();
@@ -469,6 +476,33 @@ router.get('/:id/suggestions', async (req: AuthRequest, res: Response) => {
     res.json({ data: suggestions });
   } catch (error) {
     console.error('Get org suggestions error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/organisations/:id/do-not-hire — Toggle do-not-hire flag
+router.post('/:id/do-not-hire', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { do_not_hire, reason } = req.body;
+    const result = await query(
+      `UPDATE organisations SET
+        do_not_hire = $1,
+        do_not_hire_reason = $2,
+        do_not_hire_set_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
+        do_not_hire_set_by = CASE WHEN $1 THEN $3 ELSE NULL END,
+        updated_at = NOW()
+      WHERE id = $4 AND is_deleted = false
+      RETURNING id, do_not_hire, do_not_hire_reason`,
+      [do_not_hire, do_not_hire ? (reason || null) : null, req.user?.email || 'unknown', req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Organisation not found' });
+      return;
+    }
+    await logAudit(req.user!.id, 'organisations', req.params.id as string, 'update', null, { do_not_hire, reason });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Do not hire error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

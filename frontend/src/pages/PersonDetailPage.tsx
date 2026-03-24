@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { useAuthStore } from '../hooks/useAuthStore';
 import SlidePanel from '../components/SlidePanel';
 import PersonForm from '../components/PersonForm';
 import FileUpload from '../components/FileUpload';
@@ -39,6 +40,15 @@ interface PersonDetail {
   emergency_contact_phone: string | null;
   licence_details: string | null;
   freelancer_references: string | null;
+  do_not_hire: boolean;
+  do_not_hire_reason: string | null;
+  do_not_hire_set_at: string | null;
+  do_not_hire_set_by: string | null;
+  working_terms_type: string | null;
+  working_terms_credit_days: number | null;
+  working_terms_notes: string | null;
+  ai_summary: string | null;
+  ai_research: string | null;
   files: FileAttachment[];
   created_at: string;
   organisations: Array<{
@@ -68,8 +78,12 @@ interface Interaction {
 export default function PersonDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = user?.role === 'admin' || user?.role === 'manager';
 
   const [person, setPerson] = useState<PersonDetail | null>(null);
+  const [dnoReason, setDnoReason] = useState('');
+  const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'timeline' | 'details' | 'relationships'>('timeline');
@@ -345,6 +359,61 @@ export default function PersonDetailPage() {
         )}
       </div>
 
+      {/* Do Not Hire Banner */}
+      {person.do_not_hire && (
+        <div className="mb-4 bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-red-800">DO NOT HIRE</p>
+            {person.do_not_hire_reason && <p className="text-sm text-red-600 mt-0.5">{person.do_not_hire_reason}</p>}
+            {person.do_not_hire_set_by && <p className="text-xs text-red-400 mt-0.5">Set by {person.do_not_hire_set_by}</p>}
+          </div>
+          {isAdmin && (
+            <button
+              onClick={async () => {
+                await api.post(`/people/${id}/do-not-hire`, { do_not_hire: false });
+                loadPerson();
+              }}
+              className="text-xs px-3 py-1.5 bg-red-100 text-red-700 rounded hover:bg-red-200"
+            >
+              Lift restriction
+            </button>
+          )}
+        </div>
+      )}
+      {!person.do_not_hire && isAdmin && (
+        <div className="mb-4">
+          {showDnoForm ? (
+            <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
+              <input
+                value={dnoReason}
+                onChange={e => setDnoReason(e.target.value)}
+                placeholder="Reason (optional)..."
+                className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm"
+              />
+              <button
+                onClick={async () => {
+                  await api.post(`/people/${id}/do-not-hire`, { do_not_hire: true, reason: dnoReason || null });
+                  setShowDnoForm(false);
+                  setDnoReason('');
+                  loadPerson();
+                }}
+                className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700"
+              >
+                Confirm
+              </button>
+              <button onClick={() => { setShowDnoForm(false); setDnoReason(''); }} className="text-xs px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowDnoForm(true)}
+              className="text-xs px-3 py-1.5 border border-red-200 text-red-600 rounded hover:bg-red-50"
+            >
+              Flag as Do Not Hire
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
@@ -415,12 +484,57 @@ export default function PersonDetailPage() {
             )}
           </div>
 
-          {person.notes && (
-            <div className="mt-6 pt-4 border-t">
-              <h3 className="text-sm font-semibold text-gray-700 mb-2">Notes</h3>
+          {/* Working Terms */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Working Terms</h3>
+            {person.working_terms_type ? (
+              <div className="text-sm text-gray-600">
+                <span className="font-medium">{
+                  { usual: 'USUAL (25% deposit, full balance before hire)',
+                    flex_balance: 'FLEX BALANCE (25% deposit, flexible balance)',
+                    no_deposit: 'NO DEPOSIT (balance by start of hire)',
+                    credit: 'CREDIT (no deposit, flexible balance)',
+                    custom: 'CUSTOM' }[person.working_terms_type] || person.working_terms_type
+                }</span>
+                {(person.working_terms_type === 'flex_balance' || person.working_terms_type === 'credit') && person.working_terms_credit_days && (
+                  <span className="ml-2 text-gray-500">({person.working_terms_credit_days} day credit)</span>
+                )}
+                {person.working_terms_notes && <p className="mt-1 text-gray-500">{person.working_terms_notes}</p>}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-400 italic">Not set — edit to configure</p>
+            )}
+          </div>
+
+          {/* Internal Notes */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Internal Notes</h3>
+            {person.notes ? (
               <p className="text-sm text-gray-600 whitespace-pre-wrap">{person.notes}</p>
-            </div>
-          )}
+            ) : (
+              <p className="text-sm text-gray-400 italic">No notes — edit to add</p>
+            )}
+          </div>
+
+          {/* AI Summary */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">AI Summary</h3>
+            {person.ai_summary ? (
+              <p className="text-sm text-gray-600 whitespace-pre-wrap">{person.ai_summary}</p>
+            ) : (
+              <p className="text-sm text-gray-400 italic">No AI summary yet — this will auto-populate with a summary of activity in the system</p>
+            )}
+          </div>
+
+          {/* AI Research */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">AI Research</h3>
+            {person.ai_research ? (
+              <p className="text-sm text-gray-600 whitespace-pre-wrap">{person.ai_research}</p>
+            ) : (
+              <p className="text-sm text-gray-400 italic">No AI research yet — this will show discovered context from external sources</p>
+            )}
+          </div>
 
           {isFreelancer && (
             <div className="mt-6 pt-4 border-t">

@@ -12,6 +12,9 @@ interface OrgFormData {
   location: string;
   notes: string;
   tags: string[];
+  working_terms_type: string;
+  working_terms_credit_days: string;
+  working_terms_notes: string;
 }
 
 interface OrganisationFormProps {
@@ -36,6 +39,9 @@ const emptyForm: OrgFormData = {
   location: '',
   notes: '',
   tags: [],
+  working_terms_type: '',
+  working_terms_credit_days: '',
+  working_terms_notes: '',
 };
 
 export default function OrganisationForm({ orgId, onSaved, onCancel }: OrganisationFormProps) {
@@ -66,6 +72,9 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
         location: (data.location as string) || '',
         notes: (data.notes as string) || '',
         tags: (data.tags as string[]) || [],
+        working_terms_type: (data.working_terms_type as string) || '',
+        working_terms_credit_days: data.working_terms_credit_days != null ? String(data.working_terms_credit_days) : '',
+        working_terms_notes: (data.working_terms_notes as string) || '',
       });
       if (data.version !== undefined) setRecordVersion(data.version as number);
     } catch {
@@ -110,6 +119,9 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
         address: form.address || null,
         location: form.location || null,
         notes: form.notes || null,
+        working_terms_type: form.working_terms_type || null,
+        working_terms_credit_days: form.working_terms_credit_days ? parseInt(form.working_terms_credit_days) : null,
+        working_terms_notes: form.working_terms_notes || null,
       };
 
       if (isEdit) {
@@ -180,6 +192,30 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
           <button type="button" onClick={addTag} className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Add</button>
         </div>
       </div>
+
+      {/* Working Terms */}
+      <h3 className="text-sm font-semibold text-gray-700 pt-2">Working Terms</h3>
+      <div>
+        <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Payment Terms</label>
+        <select
+          value={form.working_terms_type}
+          onChange={e => set('working_terms_type', e.target.value)}
+          className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        >
+          <option value="">Not set</option>
+          <option value="usual">USUAL (25% deposit, full balance before hire)</option>
+          <option value="flex_balance">FLEX BALANCE (25% deposit, flexible balance)</option>
+          <option value="no_deposit">NO DEPOSIT (balance by start of hire)</option>
+          <option value="credit">CREDIT (no deposit, flexible balance)</option>
+          <option value="custom">CUSTOM</option>
+        </select>
+      </div>
+      {(form.working_terms_type === 'flex_balance' || form.working_terms_type === 'credit') && (
+        <Field label="Credit Days" type="number" value={form.working_terms_credit_days} onChange={v => set('working_terms_credit_days', v)} placeholder="e.g. 30" />
+      )}
+      {form.working_terms_type && (
+        <Field label="Terms Notes" value={form.working_terms_notes} onChange={v => set('working_terms_notes', v)} placeholder="Any additional terms details..." />
+      )}
 
       {/* Notes */}
       <div>

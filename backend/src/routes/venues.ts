@@ -38,6 +38,9 @@ const createVenueSchema = z.object({
   default_return_cost: z.number().optional().nullable(),
   tags: z.array(z.string()).optional().default([]),
   files: z.array(fileSchema).optional().default([]),
+  // AI text fields
+  ai_summary: z.string().optional().nullable(),
+  ai_research: z.string().optional().nullable(),
 });
 
 const updateVenueSchema = createVenueSchema.partial();
