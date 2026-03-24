@@ -145,9 +145,17 @@ function formatDateTime(d: string | null): string {
 function toInputDate(d: string | null): string {
   if (!d) return '';
   try {
+    // Already in yyyy-MM-dd format — return as-is
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+    // ISO format with time component — extract date part directly (no timezone shift)
+    if (d.includes('T')) return d.split('T')[0];
+    // Fallback: parse and format
     const date = new Date(d);
     if (isNaN(date.getTime())) return '';
-    return date.toISOString().split('T')[0];
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
   } catch {
     return '';
   }
@@ -232,6 +240,28 @@ function normaliseAddress(addr: string): string {
 
 function addressesDiffer(a: string, b: string): boolean {
   return normaliseAddress(a) !== normaliseAddress(b);
+}
+
+/**
+ * Unified driver status — single source of truth, same as DriversPage.
+ */
+function deriveDriverStatus(driver: { requires_referral: boolean; referral_status: string | null; licence_valid_to: string | null; dvla_valid_until?: string | null; poa1_valid_until: string | null; signature_date: string | null; licence_number: string | null; dvla_check_date: string | null; email: string | null }): { label: string; colour: string } {
+  if (driver.requires_referral) {
+    if (driver.referral_status === 'approved') return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
+    if (driver.referral_status === 'declined') return { label: 'Not Approved', colour: 'bg-red-100 text-red-700' };
+    if (driver.referral_status === 'pending') return { label: 'Referred & Waiting', colour: 'bg-amber-100 text-amber-700' };
+    return { label: 'Refer to Insurers', colour: 'bg-red-100 text-red-700' };
+  }
+  if (isDateExpired(driver.licence_valid_to) || isDateExpired(driver.poa1_valid_until)) {
+    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+  }
+  if (!driver.signature_date && driver.email && !driver.licence_number && !driver.dvla_check_date) {
+    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+  }
+  if (driver.signature_date && !driver.licence_valid_to) {
+    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+  }
+  return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
 }
 
 function statusBadge(status: string) {
@@ -464,7 +494,17 @@ export default function DriverDetailPage() {
             </svg>
             Drivers
           </button>
-          <h1 className="text-2xl font-bold text-gray-900">{driver.full_name}</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-gray-900">{driver.full_name}</h1>
+            {(() => {
+              const s = deriveDriverStatus(driver);
+              return (
+                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${s.colour}`}>
+                  {s.label}
+                </span>
+              );
+            })()}
+          </div>
           <div className="mt-1 flex items-center gap-3 text-sm text-gray-500">
             {driver.email && <span>{driver.email}</span>}
             {driver.phone && (
@@ -492,13 +532,14 @@ export default function DriverDetailPage() {
         </div>
       </div>
 
-      {/* Status banners */}
+      {/* Referral panel — shown prominently at top when applicable */}
       {driver.requires_referral && (
-        <div className="mt-4 bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700">
-          Insurance referral {driver.referral_status === 'approved' ? 'approved' : driver.referral_status === 'declined' ? 'declined' : 'required'}.
-          {driver.referral_notes && <span className="ml-1">{driver.referral_notes}</span>}
+        <div className="mt-4">
+          <ReferralPanel driver={driver} onDriverUpdate={setDriver} />
         </div>
       )}
+
+      {/* DVLA stale warning */}
       {dvlaCheckStale && (
         <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-700">
           DVLA check is {dvlaCheckAge} days old (last: {formatDate(driver.dvla_check_date)}). Consider requesting a fresh check code.
@@ -692,6 +733,241 @@ function DocumentCategoryRow({
           {uploading ? 'Uploading...' : latestFile ? 'Replace' : 'Upload'}
         </button>
       </div>
+    </div>
+  );
+}
+
+// ── Referral Action Panel ──
+
+function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDriverUpdate: (d: DriverDetail) => void }) {
+  const [resolving, setResolving] = useState(false);
+  const [outcome, setOutcome] = useState<'approved' | 'declined'>('approved');
+  const [notes, setNotes] = useState('');
+  const [adjustedExcess, setAdjustedExcess] = useState('');
+  const [showResolve, setShowResolve] = useState(false);
+  const [error, setError] = useState('');
+  // Pre-populate dates from existing driver data, falling back to today + standard validity
+  const today = new Date().toISOString().split('T')[0];
+  const addDays = (d: string, days: number) => {
+    const dt = new Date(d);
+    dt.setDate(dt.getDate() + days);
+    return dt.toISOString().split('T')[0];
+  };
+  const [extendDates, setExtendDates] = useState({
+    idenfy_check_date: toInputDate(driver.idenfy_check_date) || today,
+    dvla_check_date: toInputDate(driver.dvla_check_date) || today,
+    poa1_valid_until: toInputDate(driver.poa1_valid_until) || addDays(today, 90),
+    poa2_valid_until: toInputDate(driver.poa2_valid_until) || addDays(today, 90),
+    passport_valid_until: toInputDate(driver.passport_valid_until) || addDays(today, 90),
+  });
+
+  // Build referral reasons from driver data
+  const reasons: string[] = [];
+  if (driver.referral_notes) reasons.push(driver.referral_notes);
+  if (driver.has_disability) reasons.push('Declared disability/medical condition');
+  if (driver.has_convictions) reasons.push('Declared motoring convictions');
+  if (driver.has_prosecution) reasons.push('Declared pending prosecution');
+  if (driver.has_accidents) reasons.push('Declared previous accidents');
+  if (driver.has_insurance_issues) reasons.push('Declared insurance issues (declined/cancelled/special terms)');
+  if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
+  if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
+  if (driver.licence_issue_country && !['GB', 'UK', 'DVLA'].includes(driver.licence_issue_country.toUpperCase())) {
+    reasons.push(`Non-standard licence country: ${driver.licence_issue_country}`);
+  }
+  if (reasons.length === 0 && driver.additional_details) reasons.push(driver.additional_details);
+  if (reasons.length === 0) reasons.push('Flagged by hire form verification process');
+
+  const isResolved = driver.referral_status === 'approved' || driver.referral_status === 'declined';
+
+  async function handleResolve() {
+    setResolving(true);
+    setError('');
+    try {
+      const payload: Record<string, unknown> = {
+        outcome,
+        notes,
+      };
+      if (adjustedExcess) {
+        payload.adjusted_excess = parseFloat(adjustedExcess);
+      }
+      if (outcome === 'approved') {
+        payload.extend_dates = extendDates;
+      }
+      const result = await api.post<{ data: DriverDetail }>(`/drivers/${driver.id}/resolve-referral`, payload);
+      onDriverUpdate(result.data);
+      setShowResolve(false);
+    } catch (err: any) {
+      setError(err.message || 'Failed to resolve referral');
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  return (
+    <div className={`bg-white rounded-xl shadow-sm border-2 p-6 ${
+      driver.referral_status === 'approved' ? 'border-green-200'
+        : driver.referral_status === 'declined' ? 'border-red-200'
+        : 'border-amber-300'
+    }`}>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-gray-700">Insurance Referral</h3>
+        {(() => {
+          const s = deriveDriverStatus(driver);
+          return (
+            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${s.colour}`}>
+              {s.label}
+            </span>
+          );
+        })()}
+      </div>
+
+      {/* Referral reasons */}
+      <div className="mb-4">
+        <dt className="text-xs text-gray-500 mb-1">Reasons for referral</dt>
+        <dd className="text-sm text-gray-700">
+          <ul className="list-disc list-inside space-y-0.5">
+            {reasons.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </dd>
+      </div>
+
+      {/* Metadata row */}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-4">
+        <div>
+          <dt className="text-xs text-gray-500">Referral Date</dt>
+          <dd className="text-sm text-gray-900">{formatDate(driver.referral_date) || formatDate(driver.created_at)}</dd>
+        </div>
+        {driver.referral_notes && (
+          <div className="md:col-span-2">
+            <dt className="text-xs text-gray-500">Notes</dt>
+            <dd className="text-sm text-gray-900">{driver.referral_notes}</dd>
+          </div>
+        )}
+      </div>
+
+      {/* Action buttons — depends on current referral state */}
+      {!isResolved && !showResolve && (
+        <div className="flex gap-2">
+          {/* If not yet marked as referred, show "Mark as Referred" to transition to pending */}
+          {!driver.referral_status && (
+            <button
+              onClick={async () => {
+                setError('');
+                try {
+                  const result = await api.put<{ data: DriverDetail }>(`/drivers/${driver.id}`, { referral_status: 'pending' });
+                  onDriverUpdate(result.data);
+                } catch (err: any) {
+                  setError(err.message || 'Failed to update');
+                }
+              }}
+              className="bg-amber-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-amber-700 transition-colors"
+            >
+              Mark as Referred
+            </button>
+          )}
+          <button
+            onClick={() => setShowResolve(true)}
+            className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
+          >
+            Resolve Referral
+          </button>
+        </div>
+      )}
+
+      {showResolve && (
+        <div className="mt-4 border-t border-gray-200 pt-4 space-y-4">
+          {error && <div className="bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-sm">{error}</div>}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Outcome</label>
+              <select
+                value={outcome}
+                onChange={(e) => setOutcome(e.target.value as 'approved' | 'declined')}
+                className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              >
+                <option value="approved">Approved by insurer</option>
+                <option value="declined">Declined by insurer</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Adjusted Excess (optional)</label>
+              <div className="relative">
+                <span className="absolute left-3 top-1.5 text-gray-400 text-sm">£</span>
+                <input
+                  type="number"
+                  value={adjustedExcess}
+                  onChange={(e) => setAdjustedExcess(e.target.value)}
+                  placeholder="e.g. 2500"
+                  className="w-full rounded border border-gray-300 pl-7 pr-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                />
+              </div>
+              <p className="text-xs text-gray-400 mt-0.5">Leave blank if standard excess applies</p>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Resolution Notes</label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={2}
+              placeholder="e.g. Spoke to insurer, confirmed OK with increased excess..."
+              className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            />
+          </div>
+
+          {/* Date extensions — only for approved outcome */}
+          {outcome === 'approved' && (
+            <div>
+              <label className="block text-xs text-gray-500 mb-2">Extend Validity Dates</label>
+              <p className="text-xs text-gray-400 mb-2">Pre-filled with today's date. Adjusts so driver can proceed with hire form.</p>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">Licence check date (90d validity)</label>
+                  <input type="date" value={extendDates.idenfy_check_date} onChange={(e) => setExtendDates({ ...extendDates, idenfy_check_date: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-xs" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">DVLA check date (30d validity)</label>
+                  <input type="date" value={extendDates.dvla_check_date} onChange={(e) => setExtendDates({ ...extendDates, dvla_check_date: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-xs" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">POA 1 valid until</label>
+                  <input type="date" value={extendDates.poa1_valid_until} onChange={(e) => setExtendDates({ ...extendDates, poa1_valid_until: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-xs" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">POA 2 valid until</label>
+                  <input type="date" value={extendDates.poa2_valid_until} onChange={(e) => setExtendDates({ ...extendDates, poa2_valid_until: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-xs" />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-500 mb-0.5">Passport valid until</label>
+                  <input type="date" value={extendDates.passport_valid_until} onChange={(e) => setExtendDates({ ...extendDates, passport_valid_until: e.target.value })} className="w-full rounded border border-gray-300 px-2 py-1 text-xs" />
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <button
+              onClick={handleResolve}
+              disabled={resolving}
+              className={`px-4 py-2 rounded text-sm font-medium text-white transition-colors ${
+                outcome === 'approved'
+                  ? 'bg-green-600 hover:bg-green-700'
+                  : 'bg-red-600 hover:bg-red-700'
+              } disabled:opacity-50`}
+            >
+              {resolving ? 'Saving...' : outcome === 'approved' ? 'Approve Referral' : 'Decline Referral'}
+            </button>
+            <button
+              onClick={() => setShowResolve(false)}
+              className="px-4 py-2 rounded text-sm text-gray-600 border border-gray-300 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -967,7 +1243,7 @@ function DetailsTab({
           ))}
         </div>
         {editing ? (
-          <div className="mt-3 pt-3 border-t border-gray-100 space-y-3">
+          <div className="mt-3 pt-3 border-t border-gray-100">
             <div>
               <label className="block text-xs text-gray-500 mb-1">Additional Details</label>
               <textarea
@@ -976,19 +1252,6 @@ function DetailsTab({
                 rows={2}
                 className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">Insurance Status</label>
-              <select
-                value={editData.insurance_status || ''}
-                onChange={(e) => setEditData({ ...editData, insurance_status: e.target.value })}
-                className="rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-              >
-                <option value="">Not set</option>
-                <option value="Approved">Approved</option>
-                <option value="Referral">Referral</option>
-                <option value="Failed">Failed</option>
-              </select>
             </div>
           </div>
         ) : (
@@ -999,51 +1262,9 @@ function DetailsTab({
                 <dd className="text-sm text-gray-700 mt-1">{driver.additional_details}</dd>
               </div>
             )}
-            {driver.insurance_status && (
-              <div className="mt-3 pt-3 border-t border-gray-100">
-                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${
-                  driver.insurance_status === 'Approved' ? 'bg-green-100 text-green-700' :
-                  driver.insurance_status === 'Failed' ? 'bg-red-100 text-red-700' :
-                  'bg-amber-100 text-amber-700'
-                }`}>
-                  Insurance: {driver.insurance_status}
-                </span>
-              </div>
-            )}
           </>
         )}
       </div>
-
-      {/* Referral */}
-      {driver.requires_referral && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h3 className="text-sm font-semibold text-gray-700 mb-4">Insurance Referral</h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-            <div>
-              <dt className="text-xs text-gray-500">Status</dt>
-              <dd className="text-sm">
-                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${
-                  driver.referral_status === 'approved' ? 'bg-green-100 text-green-700'
-                    : driver.referral_status === 'declined' ? 'bg-red-100 text-red-700'
-                    : 'bg-yellow-100 text-yellow-700'
-                }`}>
-                  {driver.referral_status || 'pending'}
-                </span>
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs text-gray-500">Referral Date</dt>
-              <dd className="text-sm text-gray-900">{formatDate(driver.referral_date)}</dd>
-            </div>
-            {editing ? field('Notes', 'referral_notes') : (
-              <div>
-                <dt className="text-xs text-gray-500">Notes</dt>
-                <dd className="text-sm text-gray-900">{driver.referral_notes || '—'}</dd>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Documents — categorised file slots */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">

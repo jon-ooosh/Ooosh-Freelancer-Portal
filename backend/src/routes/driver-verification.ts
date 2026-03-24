@@ -979,14 +979,10 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
     else status = 'partial';
   } else if (driver.full_name) status = 'pending';
 
-  // Compute excess from points
-  let excessDisplay: string | null = null;
+  // Excess display — not calculated here, just show points for reference.
+  // All excess calculations are done within the hire form app.
   const points = (driver.licence_points as number) || 0;
-  if (points >= 10) excessDisplay = 'Referral Required';
-  else if (points >= 7) excessDisplay = '£1,000';
-  else if (points >= 4) excessDisplay = '£750';
-  else if (points >= 1) excessDisplay = '£500';
-  else excessDisplay = '£250';
+  const excessDisplay: string | null = null;
 
   // Build endorsements display
   let endorsementsDisplay: string | null = null;
@@ -1042,7 +1038,7 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
       },
     },
     insuranceData: {
-      datePassedTest: (driver.date_passed_test as string) || '',
+      datePassedTest: driver.date_passed_test ? String(driver.date_passed_test).split('T')[0] : '',
       hasDisability: (driver.has_disability as boolean) || false,
       hasConvictions: (driver.has_convictions as boolean) || false,
       hasProsecution: (driver.has_prosecution as boolean) || false,

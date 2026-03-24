@@ -400,7 +400,7 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [x] Netlify env vars: `DATA_BACKEND` (monday|op), `OP_BACKEND_URL`, `OP_API_KEY`
 - [x] OP backend `POST /api/hire-forms` accepts API key auth (X-API-Key), camelCase field names, optional vehicle_id
 - [x] OP backend excess: passed through from hire form app (not recalculated from excess_rules table)
-- [ ] **`monday-integration.js` `copy-a-to-b` action** — needs updating for OP mode: must call `POST /api/hire-forms` with driver data + excess amount from DVLA check. Currently sends data that doesn't match the schema (was returning 400).
+- [ ] **`monday-integration.js` `copy-a-to-b` action** — needs updating for OP mode: must call `POST /api/hire-forms` with driver data + excess amount from DVLA check. **String→number coercion fixed** (23 Mar 2026): `normalizeHireFormBody` now coerces `hirehop_job_id`, `van_requirement_index`, `licence_points`, `excess_amount` from strings to numbers. Previous test submissions stored `hirehop_job_id = NULL` — re-submit to get correct job matching.
 - [ ] **`SignaturePage.js`** — after successful `copy-a-to-b` in OP mode, needs to trigger `generate-hire-form.js` directly (no Monday.com automation to trigger it)
 - [ ] `generate-hire-form.js` (v5.6) → `GET /api/hire-forms/:id` + `POST /api/files` (logo still from Monday.com templates board) — verify `fetchDriverDataFromOP` handles null vehicle_reg gracefully
 
@@ -416,7 +416,30 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [x] Switch AllocationsPage to read from `vehicle_hire_assignments` (compat layer)
 - [x] Keep compatibility API for existing book-out/check-in flows
 - [x] Book-out flow: driver selection from hire forms, token refresh, draft autosave
+- [x] Compat layer persists driverName (notes column + driver_id lookup), debounced input (23 Mar 2026)
+- [x] LEFT JOIN fleet_vehicles across all assignment/hire-form queries (nullable vehicle_id support)
+- [x] Compat layer cancel includes hire-form-created assignments (was excluding them, causing "remove" to re-attach)
+- [x] Removed DebouncedDriverInput from Allocations — linked driver shown read-only from hire form data
 - [ ] Remove R2 allocation writes (R2 becomes read-only fallback)
+
+**Phase D2 — Insurance Referral Workflow** ✅ COMPLETE (23 Mar 2026)
+Joined-up referral management: flag → email → review → resolve → date extension.
+
+- [x] Referral action panel on DriverDetailPage: shows reasons, status, resolve form
+- [x] `POST /api/drivers/:id/resolve-referral` — approve/decline with date extensions + adjusted excess
+- [x] Contextual warning banner: amber (pending), green (approved), red (declined)
+- [x] Referral email notification (`referral_alert` template) on hire form submission when `requires_referral=true`
+- [x] Driver verification snapshot PDF generation (`driver-snapshot-pdf.ts`) — ported from Monday.com Netlify function
+- [x] Snapshot PDF attached to referral notification email
+- [x] Date extension on approval: pre-fills with standard validity periods (Licence 90d, DVLA 30d, POA 90d, Passport 90d)
+- [x] Adjusted excess field on resolution (for insurer-imposed excess increases, stored on `job_excess` records)
+- [x] Audit trail for referral resolution (`resolve_referral` action in audit_log)
+
+**Future referral integration (not yet built):**
+- [ ] Dashboard widget: "X drivers awaiting referral" with click-through to driver list
+- [ ] Pipeline/Job Detail: referral status shown per-job where driver has pending referral (blocks dispatch)
+- [ ] `post-signature-notifications.js` repointing: currently reads from Monday.com to check referral — needs OP backend repoint (reads from driver-verification status endpoint instead)
+- [ ] Excess module integration: adjusted excess from referral resolution flows into excess tracking/payment portal
 
 #### Step 3: Insurance Excess Tracking
 Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (can't move to "Out" without excess collected).

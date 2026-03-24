@@ -61,6 +61,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '028_hh_user_mapping.sql',
         '029_nullable_vehicle_id.sql',
         '030_sync_review_queue.sql',
+        '031_system_service_user.sql',
+        '032_fix_audit_log_action_constraint.sql',
       ];
 
       for (const migration of migrations) {

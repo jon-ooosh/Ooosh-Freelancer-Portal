@@ -148,6 +148,15 @@ async function blobRequest(path: string): Promise<{ blob: Blob; contentType: str
   return { blob, contentType };
 }
 
+/**
+ * Shared token refresh — used by both the main OP API and the vehicle module
+ * to ensure only ONE refresh happens at a time across the whole app.
+ */
+export async function sharedRefreshToken(): Promise<Record<string, string>> {
+  const tokens = await refreshAccessToken();
+  return { Authorization: `Bearer ${tokens.accessToken}` };
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body: unknown) =>

@@ -29,12 +29,13 @@ export async function getAllocations(): Promise<VanAllocation[]> {
 /** Save the full allocations array (syncs to vehicle_hire_assignments table) */
 export async function saveAllocations(
   allocations: VanAllocation[],
+  managedJobIds?: number[],
 ): Promise<{ success: boolean; error?: string }> {
   try {
     const resp = await apiFetch(COMPAT_PATH, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ allocations }),
+      body: JSON.stringify({ allocations, managedJobIds }),
     })
 
     if (!resp.ok) {

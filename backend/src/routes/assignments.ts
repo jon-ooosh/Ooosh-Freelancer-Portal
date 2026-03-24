@@ -77,7 +77,7 @@ const BASE_SELECT = `
     je.excess_amount_required,
     je.excess_amount_taken
   FROM vehicle_hire_assignments vha
-  JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+  LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
   LEFT JOIN drivers d ON d.id = vha.driver_id
   LEFT JOIN people p ON p.id = vha.freelancer_person_id
   LEFT JOIN job_excess je ON je.assignment_id = vha.id
@@ -378,8 +378,8 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
 
     const assignment = result.rows[0];
 
-    // Dual-write mileage to vehicle_mileage_log
-    if (mileage_out > 0) {
+    // Dual-write mileage to vehicle_mileage_log (only if vehicle assigned)
+    if (mileage_out > 0 && assignment.vehicle_id) {
       await query(
         `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
          VALUES ($1, $2, 'book_out', $3, $4)`,
@@ -432,8 +432,8 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
 
     const assignment = result.rows[0];
 
-    // Dual-write mileage
-    if (mileage_in > 0) {
+    // Dual-write mileage (only if vehicle assigned)
+    if (mileage_in > 0 && assignment.vehicle_id) {
       await query(
         `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
          VALUES ($1, $2, 'check_in', $3, $4)`,
@@ -449,11 +449,13 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
       );
     }
 
-    // Update vehicle hire_status to Prep Needed
-    await query(
-      `UPDATE fleet_vehicles SET hire_status = 'Prep Needed' WHERE id = $1`,
-      [assignment.vehicle_id]
-    );
+    // Update vehicle hire_status to Prep Needed (only if vehicle assigned)
+    if (assignment.vehicle_id) {
+      await query(
+        `UPDATE fleet_vehicles SET hire_status = 'Prep Needed' WHERE id = $1`,
+        [assignment.vehicle_id]
+      );
+    }
 
     res.json({ data: assignment });
   } catch (error) {
@@ -512,7 +514,7 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
         d.requires_referral,
         d.referral_status
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.job_id = $1
@@ -580,21 +582,23 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
         fv.reg AS vehicle_reg,
         d.full_name AS driver_name
       FROM vehicle_hire_assignments vha
-      JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       WHERE vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
       ORDER BY vha.created_at ASC`
     );
 
     // Map to VanAllocation shape
+    // Use driver_name from drivers table if linked, otherwise fall back to notes (freetext)
     const allocations = result.rows.map((row: any) => ({
       id: row.id,
       hireHopJobId: row.hirehop_job_id,
       hireHopJobName: row.hirehop_job_name || '',
       vanRequirementIndex: row.van_requirement_index,
       vehicleId: row.vehicle_id,
-      vehicleReg: row.vehicle_reg,
-      driverName: row.driver_name || null,
+      vehicleReg: row.vehicle_reg || null,
+      driverName: row.driver_name || row.notes || null,
+      driverId: row.driver_id || null,
       status: row.status === 'soft' ? 'soft' : 'confirmed',
       allocatedAt: row.created_at,
       allocatedBy: row.allocated_by_name || 'Unknown',
@@ -613,20 +617,37 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
 
 router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
   try {
-    const { allocations } = req.body;
+    const { allocations, managedJobIds } = req.body;
 
     if (!Array.isArray(allocations)) {
       res.status(400).json({ error: 'allocations array required' });
       return;
     }
 
-    // Get current active assignments (allocations-created only — exclude hire-form-created)
-    const existing = await query(
-      `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id
-       FROM vehicle_hire_assignments
-       WHERE status IN ('soft', 'confirmed')
-         AND driver_id IS NULL`
+    // Collect the set of job IDs being managed in this save request.
+    // This includes both jobs with allocations AND jobs the frontend is displaying
+    // (so removing the last allocation for a job still cancels it).
+    const incomingJobIds = new Set<number>(
+      allocations.map((a: any) => Number(a.hireHopJobId)).filter((n: number) => !isNaN(n))
     );
+    // Also include explicitly managed job IDs (all visible jobs on the allocations page)
+    if (Array.isArray(managedJobIds)) {
+      for (const jid of managedJobIds) {
+        const n = Number(jid);
+        if (!isNaN(n)) incomingJobIds.add(n);
+      }
+    }
+
+    // Only load existing assignments for jobs that are in scope
+    const existing = incomingJobIds.size > 0
+      ? await query(
+          `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id, notes
+           FROM vehicle_hire_assignments
+           WHERE status IN ('soft', 'confirmed')
+             AND hirehop_job_id = ANY($1)`,
+          [Array.from(incomingJobIds)]
+        )
+      : { rows: [] };
 
     const existingMap = new Map(
       existing.rows.map((r: any) => [`${r.hirehop_job_id}-${r.van_requirement_index}`, r])
@@ -639,6 +660,17 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       incomingIds.add(key);
 
       const existingRow = existingMap.get(key);
+
+      // Resolve driver_id from driverName if provided
+      let driverId: string | null = alloc.driverId || null;
+      const driverName = alloc.driverName || null;
+      if (driverName && !driverId) {
+        const dResult = await query(
+          `SELECT id FROM drivers WHERE full_name ILIKE $1 AND is_active = true ORDER BY updated_at DESC LIMIT 1`,
+          [driverName.trim()]
+        );
+        driverId = dResult.rows[0]?.id || null;
+      }
 
       if (existingRow) {
         // Update existing — resolve vehicle by reg if needed
@@ -657,13 +689,17 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
                hirehop_job_name = $2,
                status = $3,
                allocated_by_name = $4,
+               notes = $5,
+               driver_id = COALESCE($6, driver_id),
                updated_at = NOW()
-           WHERE id = $5`,
+           WHERE id = $7`,
           [
             vehicleId,
             alloc.hireHopJobName || null,
             alloc.status === 'confirmed' ? 'confirmed' : 'soft',
             alloc.allocatedBy || null,
+            driverName,
+            driverId,
             existingRow.id,
           ]
         );
@@ -683,8 +719,9 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
           `INSERT INTO vehicle_hire_assignments (
             vehicle_id, hirehop_job_id, hirehop_job_name,
             van_requirement_index, status, allocated_by_name,
+            notes, driver_id,
             assignment_type, created_by
-          ) VALUES ($1, $2, $3, $4, $5, $6, 'self_drive', $7)`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'self_drive', $9)`,
           [
             vehicleId,
             alloc.hireHopJobId,
@@ -692,6 +729,8 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
             alloc.vanRequirementIndex ?? 0,
             alloc.status === 'confirmed' ? 'confirmed' : 'soft',
             alloc.allocatedBy || null,
+            driverName,
+            driverId,
             req.user!.id,
           ]
         );

@@ -21,7 +21,6 @@ import { useDriverHireForms } from '../hooks/useDriverHireForms'
 import { extractVanRequirements } from '../lib/hirehop-api'
 import { findMatchingVehicles, formatVanType, getVehicleGearboxLabel, vehicleNeedsPrepWarning } from '../lib/van-matching'
 import type { HireHopJob, VanAllocation, VanRequirement } from '../types/hirehop'
-import type { DriverHireForm } from '../lib/driver-hire-api'
 import type { Vehicle } from '../types/vehicle'
 
 type DateFilter = 'today' | 'tomorrow' | 'this-week' | 'all'
@@ -41,7 +40,6 @@ export function AllocationsPage() {
   const { data: dueBackJobs, isLoading: dueBackLoading, error: dueBackError } = useUpcomingDueBackJobs(ALLOCATIONS_DAYS_AHEAD)
   const { data: allVehicles } = useVehicles()
   const { data: allocations, isLoading: allocationsLoading } = useAllocations()
-  const saveAllocations = useSaveAllocations()
 
   const allocationsList = allocations || []
 
@@ -89,6 +87,15 @@ export function AllocationsPage() {
     })
   }, [viewMode, upcomingJobs, dueBackJobs, dateFilter, today, tomorrow, endOfWeek])
 
+  // All visible job IDs — sent to backend so it knows which jobs are "in scope"
+  // for cancellation (even if they have zero allocations)
+  const managedJobIds = useMemo(
+    () => filteredJobs.map(j => j.id),
+    [filteredJobs],
+  )
+
+  const saveAllocations = useSaveAllocations(managedJobIds)
+
   const isLoading = viewMode === 'going-out' ? upcomingLoading : dueBackLoading
   const hirehopError = viewMode === 'going-out' ? upcomingError : dueBackError
 
@@ -120,13 +127,6 @@ export function AllocationsPage() {
 
   const handleRemoveAllocation = useCallback(async (allocationId: string) => {
     const updated = allocationsList.filter(a => a.id !== allocationId)
-    saveAllocations.mutate(updated)
-  }, [allocationsList, saveAllocations])
-
-  const handleUpdateDriver = useCallback(async (allocationId: string, driverName: string) => {
-    const updated = allocationsList.map(a =>
-      a.id === allocationId ? { ...a, driverName: driverName || null } : a,
-    )
     saveAllocations.mutate(updated)
   }, [allocationsList, saveAllocations])
 
@@ -225,7 +225,6 @@ export function AllocationsPage() {
               viewMode={viewMode}
               onAllocate={handleAllocateVan}
               onRemove={handleRemoveAllocation}
-              onUpdateDriver={handleUpdateDriver}
               saving={saveAllocations.isPending}
             />
           ))}
@@ -247,7 +246,6 @@ function JobAllocationCard({
   viewMode,
   onAllocate,
   onRemove,
-  onUpdateDriver,
   saving,
 }: {
   job: HireHopJob
@@ -257,7 +255,6 @@ function JobAllocationCard({
   viewMode: ViewMode
   onAllocate: (job: HireHopJob, reqIndex: number, vehicle: Vehicle, staffName: string) => void
   onRemove: (allocationId: string) => void
-  onUpdateDriver: (allocationId: string, driverName: string) => void
   saving: boolean
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded)
@@ -373,10 +370,8 @@ function JobAllocationCard({
               allocations={jobAllocations}
               allAllocations={allocations}
               vehicles={vehicles}
-              hireForms={hireForms || []}
               onAllocate={onAllocate}
               onRemove={onRemove}
-              onUpdateDriver={onUpdateDriver}
               saving={saving}
             />
           ))}
@@ -426,10 +421,8 @@ function RequirementSlots({
   allocations: jobAllocations,
   allAllocations,
   vehicles,
-  hireForms,
   onAllocate,
   onRemove,
-  onUpdateDriver,
   saving,
 }: {
   job: HireHopJob
@@ -438,10 +431,8 @@ function RequirementSlots({
   allocations: VanAllocation[]
   allAllocations: VanAllocation[]
   vehicles: Vehicle[]
-  hireForms: DriverHireForm[]
   onAllocate: (job: HireHopJob, reqIndex: number, vehicle: Vehicle, staffName: string) => void
   onRemove: (allocationId: string) => void
-  onUpdateDriver: (allocationId: string, driverName: string) => void
   saving: boolean
 }) {
   const [showPicker, setShowPicker] = useState(false)
@@ -531,30 +522,15 @@ function RequirementSlots({
               </div>
             )}
 
-            {/* Driver name input + hire form suggestions */}
-            <div className="mt-2">
-              <input
-                type="text"
-                placeholder="Driver name"
-                value={allocation.driverName || ''}
-                onChange={e => onUpdateDriver(allocation.id, e.target.value)}
-                className="w-full rounded border border-gray-200 bg-white px-2 py-1.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-              />
-              {/* Quick-assign buttons from hire form drivers */}
-              {hireForms.length > 0 && !allocation.driverName && (
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {hireForms.map(hf => (
-                    <button
-                      key={hf.id}
-                      onClick={() => onUpdateDriver(allocation.id, hf.driverName)}
-                      className="rounded-full border border-green-200 bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700 active:bg-green-100"
-                    >
-                      {hf.driverName}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* Driver name — read-only display from linked hire form */}
+            {allocation.driverName && (
+              <div className="mt-2">
+                <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2.5 py-1 text-xs font-medium text-green-700">
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+                  {allocation.driverName}
+                </span>
+              </div>
+            )}
 
             {/* Book Out link — only for soft allocations when vehicle is available */}
             {allocation.status === 'soft' && (
