@@ -117,8 +117,7 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
             Old &amp; Sold
           </span>
         )}
-        <StatusBadge label={vehicle.damageStatus} colourMap={damageColours} prefix="Damage" />
-        <StatusBadge label={vehicle.serviceStatus} colourMap={serviceColours} prefix="Service" />
+        {/* Damage/service status badges removed — not useful on fleet overview */}
       </div>
 
       {/* Key dates that need attention */}

@@ -17,6 +17,7 @@ import { uploadAllPhotos } from '../lib/photo-upload'
 import { withRetry } from '../lib/retry'
 import { saveIssue } from '../lib/issues-r2-api'
 import { mapPrepItemToCategory, mapPrepItemToComponent, mapMondaySeverityToIssueSeverity } from '../lib/issue-mapping'
+import { getOpAuthState } from '../adapters/auth-adapter'
 import { getStock } from '../lib/stock-api'
 import { recordPrepConsumption } from '../lib/stock-api'
 import { buildConsumptionTransactions } from '../lib/stock-consumption'
@@ -270,7 +271,9 @@ export function PrepPage() {
     setCollapsedSections({})
     setMileage('')
     setFuelLevel(null)
-    setPreparedBy('')
+    // Pre-fill with logged-in user's name (overwritable for freelancers)
+    const opAuth = getOpAuthState()
+    setPreparedBy(opAuth?.userName || '')
     setShowValidation(false)
     setPhase('prepping')
 
@@ -1507,13 +1510,6 @@ function VehiclePrepCard({
   vehicle: Vehicle
   onStartPrep: (v: Vehicle) => void
 }) {
-  const dmgColor =
-    vehicle.damageStatus === 'ALL GOOD'
-      ? 'text-green-600'
-      : vehicle.damageStatus.includes('REPAIR') || vehicle.damageStatus.includes('NEEDED')
-        ? 'text-red-600'
-        : 'text-amber-600'
-
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
       <div className="flex items-start justify-between">
@@ -1543,14 +1539,13 @@ function VehiclePrepCard({
         </div>
       </div>
 
-      <div className="mt-2 flex items-center justify-between">
-        <div className="flex gap-3">
-          {vehicle.damageStatus && (
-            <span className={`text-xs font-medium ${dmgColor}`}>
-              {vehicle.damageStatus}
-            </span>
-          )}
-        </div>
+      <div className="mt-2 flex items-center justify-end gap-2">
+        <Link
+          to={vmPath(`/vehicles/${vehicle.id}?tab=preps`)}
+          className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 active:bg-gray-100"
+        >
+          Prep History
+        </Link>
         <button
           onClick={() => onStartPrep(vehicle)}
           className="rounded-lg bg-ooosh-navy px-4 py-1.5 text-xs font-medium text-white active:bg-opacity-90"

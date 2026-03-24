@@ -376,19 +376,20 @@ export function VehicleDetailPage() {
           onSaveDate={v => saveField('last_service_date', v)}
           onSaveBooked={v => saveField('service_booked_in_date', v)}
         />
-        <ComplianceDateRow
-          label="Warranty Expires" date={vehicle.warrantyExpires} warningDays={60}
-          onSaveDate={v => saveField('warranty_expires', v)}
-        />
+        <EditableRow label="Warranty Expires" value={vehicle.warrantyExpires} type="date" onSave={v => saveField('warranty_expires', v)} />
         <EditableRow label="Finance Ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
       </div>
 
-      {/* Insurance Details */}
-      <div className="rounded-lg border border-gray-200 bg-white p-4">
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Insurance</h3>
-        <EditableRow label="Provider" value={vehicle.insuranceProvider} type="text" onSave={v => saveField('insurance_provider', v)} />
-        <EditableRow label="Policy Number" value={vehicle.insurancePolicyNumber} type="text" onSave={v => saveField('insurance_policy_number', v)} />
-      </div>
+      {/* Insurance Details (collapsible — fleet insurance, rarely needed per-van) */}
+      <details className="rounded-lg border border-gray-200 bg-white">
+        <summary className="cursor-pointer p-4 text-sm font-semibold uppercase tracking-wide text-gray-500 select-none hover:bg-gray-50">
+          Insurance Details
+        </summary>
+        <div className="px-4 pb-4">
+          <EditableRow label="Provider" value={vehicle.insuranceProvider} type="text" onSave={v => saveField('insurance_provider', v)} />
+          <EditableRow label="Policy Number" value={vehicle.insurancePolicyNumber} type="text" onSave={v => saveField('insurance_policy_number', v)} />
+        </div>
+      </details>
 
       {/* Mileage & Service */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
