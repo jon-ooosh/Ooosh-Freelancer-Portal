@@ -1,22 +1,21 @@
 /**
  * React Query hooks for HireHop job data.
  *
- * Previously: Cache-first from R2, fallback to live HireHop API.
- * Now: Reads from the OP backend's jobs table via /api/vehicles/jobs/*.
+ * All data reads from the OP backend's jobs table via /api/vehicles/jobs/*.
+ * The OP backend syncs jobs AND line items from HireHop every 30 minutes.
  *
- * The OP backend syncs jobs from HireHop every 30 minutes, so data
- * is always reasonably fresh without any direct HireHop API calls.
+ * Line items are stored in the jobs.line_items JSONB column, so the
+ * Allocations page loads instantly (single DB query) with no per-job
+ * HireHop API calls.
  *
- * For line items (van requirements on allocations page), we still
- * fetch from HireHop via the proxy at /api/vehicles/hirehop since
- * the OP doesn't store line items.
+ * "Refresh from HireHop" button triggers on-demand item sync for
+ * visible jobs via POST /api/vehicles/jobs/refresh-items.
  */
 
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../config/api-config'
 import type { HireHopJob } from '../types/hirehop'
 import { useState, useCallback } from 'react'
-import { fetchJobItemsQueued } from '../lib/hirehop-api'
 
 /** Fetch jobs from the OP backend */
 async function fetchJobsFromOP(endpoint: string): Promise<HireHopJob[]> {
@@ -28,27 +27,15 @@ async function fetchJobsFromOP(endpoint: string): Promise<HireHopJob[]> {
 }
 
 /**
- * Fetch jobs from OP backend, then enrich with HireHop line items.
- * Items are needed by the Allocations page to extract van requirements.
+ * Fetch jobs from OP backend. Line items are now stored locally in the
+ * jobs table (synced from HireHop every 30 min). No per-job HireHop
+ * API calls needed — the Allocations page loads instantly.
+ *
+ * Jobs with empty line_items (not yet synced) are returned as-is.
+ * Use the "Refresh from HireHop" button to trigger an on-demand sync.
  */
-async function fetchAndEnrichJobs(endpoint: string): Promise<HireHopJob[]> {
-  const jobs = await fetchJobsFromOP(endpoint)
-  if (jobs.length === 0) return jobs
-
-  // Enrich each job with items from HireHop via the throttled queue
-  const enriched = await Promise.all(
-    jobs.map(async (job) => {
-      if (job.id <= 0) return job
-      try {
-        const items = await fetchJobItemsQueued(job.id)
-        return { ...job, items }
-      } catch (err) {
-        console.warn(`[useHireHopJobs] Failed to fetch items for job ${job.id}:`, err)
-        return { ...job, itemsFetchFailed: true }
-      }
-    })
-  )
-  return enriched
+async function fetchJobsWithItems(endpoint: string): Promise<HireHopJob[]> {
+  return fetchJobsFromOP(endpoint)
 }
 
 /**
@@ -82,7 +69,7 @@ export function useDueBackJobs() {
 export function useUpcomingJobs(daysAhead: number = 7) {
   return useQuery<HireHopJob[]>({
     queryKey: ['hirehop-upcoming', daysAhead],
-    queryFn: () => fetchAndEnrichJobs(`/jobs/upcoming?days=${daysAhead}`),
+    queryFn: () => fetchJobsWithItems(`/jobs/upcoming?days=${daysAhead}`),
     staleTime: 2 * 60 * 1000,
     gcTime: 15 * 60 * 1000,
   })
@@ -95,7 +82,7 @@ export function useUpcomingJobs(daysAhead: number = 7) {
 export function useUpcomingDueBackJobs(daysAhead: number = 7) {
   return useQuery<HireHopJob[]>({
     queryKey: ['hirehop-upcoming-due-back', daysAhead],
-    queryFn: () => fetchAndEnrichJobs(`/jobs/upcoming-due-back?days=${daysAhead}`),
+    queryFn: () => fetchJobsWithItems(`/jobs/upcoming-due-back?days=${daysAhead}`),
     staleTime: 2 * 60 * 1000,
     gcTime: 15 * 60 * 1000,
   })
@@ -150,17 +137,31 @@ export function useHireHopCacheMeta() {
 
 /**
  * Hook for triggering a data refresh.
- * Invalidates all job queries so they re-fetch from the OP backend.
+ * Optionally triggers an on-demand HireHop item sync for visible jobs,
+ * then invalidates all job queries so they re-fetch from the OP backend.
  */
 export function useRefreshHireHopCache() {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const queryClient = useQueryClient()
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (jobNumbers?: number[]) => {
     setIsRefreshing(true)
     setError(null)
     try {
+      // If job numbers provided, trigger on-demand item sync from HireHop
+      if (jobNumbers && jobNumbers.length > 0) {
+        const response = await apiFetch('/jobs/refresh-items', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobNumbers }),
+        })
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({})) as { error?: string }
+          throw new Error(err.error || `Refresh failed: ${response.status}`)
+        }
+      }
+
       // Invalidate all job queries — they'll re-fetch from OP backend
       await queryClient.invalidateQueries({ queryKey: ['hirehop-going-out'] })
       await queryClient.invalidateQueries({ queryKey: ['hirehop-due-back'] })

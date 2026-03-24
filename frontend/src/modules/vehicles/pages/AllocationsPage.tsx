@@ -43,6 +43,12 @@ export function AllocationsPage() {
 
   const allocationsList = allocations || []
 
+  // All visible job numbers (for on-demand HireHop refresh)
+  const allVisibleJobs = useMemo(
+    () => [...(upcomingJobs || []), ...(dueBackJobs || [])].filter((j, i, arr) => arr.findIndex(x => x.id === j.id) === i),
+    [upcomingJobs, dueBackJobs],
+  )
+
   // Active fleet vehicles only
   const activeVehicles = useMemo(
     () => (allVehicles || []).filter(v => !v.isOldSold),
@@ -71,8 +77,8 @@ export function AllocationsPage() {
 
     return jobs.filter(job => {
       // Only show jobs that have van items — skip non-vehicle jobs
-      // But keep jobs where items couldn't be fetched (e.g. dispatched jobs return error 327)
-      if (!job.itemsFetchFailed && extractVanRequirements(job).length === 0) return false
+      // Jobs with empty items (not yet synced) are kept — use "Refresh from HireHop" to populate
+      if (job.items.length > 0 && extractVanRequirements(job).length === 0) return false
 
       const jobDate = job[dateField]
       if (dateFilter === 'today') return jobDate === today
@@ -141,7 +147,7 @@ export function AllocationsPage() {
           ← Dashboard
         </Link>
       </div>
-      <HireHopCacheStatus />
+      <HireHopCacheStatus jobNumbers={allVisibleJobs.map(j => j.id)} />
 
       {/* View mode tabs */}
       <div className="flex gap-2">
