@@ -318,7 +318,127 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
     errors: result.errors.length,
   });
 
+  // Post-sync: fetch line items for active jobs that don't have them yet
+  // or haven't been refreshed recently (stale > 1 hour)
+  await syncLineItemsForActiveJobs();
+
   return result;
+}
+
+// ── Line Items Sync ──────────────────────────────────────────────────────
+
+/**
+ * Fetch line items for a single job from HireHop.
+ * Returns array of { ITEM_ID, ITEM_NAME, QUANTITY, CATEGORY_ID }.
+ */
+async function fetchLineItemsForJob(jobNumber: number): Promise<Array<{
+  ITEM_ID: number; ITEM_NAME: string; QUANTITY: number; CATEGORY_ID: number;
+}>> {
+  const result = await hhBroker.get<unknown>('/frames/items_to_supply_list.php', {
+    job: jobNumber,
+  }, { priority: 'low', cacheTTL: 600 });
+
+  if (!result.success || !result.data) return [];
+
+  // Detect error response
+  const data = result.data as any;
+  if (data && typeof data === 'object' && !Array.isArray(data) && data.error) return [];
+
+  const rawItems: any[] = Array.isArray(data) ? data : (data.items || []);
+
+  return rawItems
+    .filter((item: any) => {
+      const kind = Number(item.kind ?? 2);
+      if (kind === 0 || kind === 3) return false; // Skip headers and notes
+      return true;
+    })
+    .map((item: any) => ({
+      ITEM_ID: Number(item.ITEM_ID ?? item.item_id ?? item.LIST_ID ?? item.ID ?? 0),
+      ITEM_NAME: String(item.NAME ?? item.title ?? item.ITEM_NAME ?? ''),
+      QUANTITY: Number(item.QTY ?? item.qty ?? item.quantity ?? item.QUANTITY ?? 1),
+      CATEGORY_ID: Number(item.CATEGORY_ID ?? 0),
+    }))
+    .filter((item: any) => item.ITEM_ID > 0);
+}
+
+/**
+ * Sync line items for active jobs (statuses 1-6).
+ * Only fetches for jobs that have empty line_items or haven't been
+ * updated in the last hour.
+ */
+async function syncLineItemsForActiveJobs(): Promise<void> {
+  try {
+    // Get active jobs that need line items refreshed
+    const jobsResult = await query(
+      `SELECT hh_job_number FROM jobs
+       WHERE is_deleted = false
+         AND status = ANY($1)
+         AND hh_job_number IS NOT NULL
+         AND (
+           line_items IS NULL
+           OR line_items = '[]'::jsonb
+           OR updated_at < NOW() - INTERVAL '1 hour'
+         )
+       ORDER BY out_date ASC NULLS LAST
+       LIMIT 80`,
+      [[1, 2, 3, 4, 5, 6]]
+    );
+
+    if (jobsResult.rows.length === 0) {
+      console.log('[HH Job Sync] No jobs need line item refresh');
+      return;
+    }
+
+    console.log(`[HH Job Sync] Fetching line items for ${jobsResult.rows.length} jobs`);
+    let updated = 0;
+
+    for (const row of jobsResult.rows) {
+      try {
+        const items = await fetchLineItemsForJob(row.hh_job_number);
+        await query(
+          `UPDATE jobs SET line_items = $1, updated_at = NOW()
+           WHERE hh_job_number = $2`,
+          [JSON.stringify(items), row.hh_job_number]
+        );
+        updated++;
+      } catch (err) {
+        console.warn(`[HH Job Sync] Failed to fetch items for job ${row.hh_job_number}:`, err);
+      }
+      // Small delay between requests (broker handles rate limiting too)
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    console.log(`[HH Job Sync] Line items updated for ${updated}/${jobsResult.rows.length} jobs`);
+  } catch (err) {
+    console.error('[HH Job Sync] Line items sync error:', err);
+  }
+}
+
+/**
+ * On-demand sync: fetch line items for specific jobs.
+ * Called by the "Refresh from HireHop" button on the Allocations page.
+ */
+export async function syncLineItemsForJobs(jobNumbers: number[]): Promise<{ updated: number; errors: number }> {
+  let updated = 0;
+  let errors = 0;
+
+  for (const jobNumber of jobNumbers) {
+    try {
+      const items = await fetchLineItemsForJob(jobNumber);
+      await query(
+        `UPDATE jobs SET line_items = $1, updated_at = NOW()
+         WHERE hh_job_number = $2`,
+        [JSON.stringify(items), jobNumber]
+      );
+      updated++;
+    } catch (err) {
+      console.warn(`[HH Job Sync] On-demand items fetch failed for job ${jobNumber}:`, err);
+      errors++;
+    }
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+
+  return { updated, errors };
 }
 
 /**

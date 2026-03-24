@@ -1072,6 +1072,42 @@ router.get('/jobs/cache-meta', async (_req: AuthRequest, res: Response) => {
 });
 
 /**
+ * POST /api/vehicles/jobs/refresh-items
+ * On-demand sync: fetch line items from HireHop for specific jobs.
+ * Called by the "Refresh from HireHop" button on the Allocations page.
+ * Body: { jobNumbers: number[] }
+ */
+router.post('/jobs/refresh-items', async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobNumbers } = req.body;
+    if (!Array.isArray(jobNumbers) || jobNumbers.length === 0) {
+      res.status(400).json({ error: 'jobNumbers array required' });
+      return;
+    }
+
+    // Limit to 50 jobs per request to prevent abuse
+    const limited = jobNumbers.slice(0, 50).map(Number).filter(n => !isNaN(n) && n > 0);
+    if (limited.length === 0) {
+      res.status(400).json({ error: 'No valid job numbers provided' });
+      return;
+    }
+
+    const { syncLineItemsForJobs } = await import('../services/hirehop-job-sync');
+    const result = await syncLineItemsForJobs(limited);
+
+    res.json({
+      success: true,
+      updated: result.updated,
+      errors: result.errors,
+      total: limited.length,
+    });
+  } catch (error) {
+    console.error('[vehicles/jobs] Refresh items error:', error);
+    res.status(500).json({ error: 'Failed to refresh items' });
+  }
+});
+
+/**
  * GET /api/vehicles/jobs/:jobNumber
  * Get a single job by HireHop job number.
  */
@@ -2646,7 +2682,7 @@ function mapJobRowToHireHopJob(row: Record<string, unknown>) {
     jobDate: formatDate(row.job_date),
     jobEndDate: formatDate(row.job_end),
     returnDate: formatDate(row.return_date),
-    items: [], // Line items not stored in OP — fetched from HireHop on demand
+    items: Array.isArray(row.line_items) ? row.line_items : (typeof row.line_items === 'string' ? JSON.parse(row.line_items) : []),
     depot: row.depot_name ? null : null, // OP stores depot_name (string), not depot ID
     notes: row.notes as string | null,
   };
