@@ -17,33 +17,6 @@ const typeColours: Record<string, string> = {
   Vito: 'bg-slate-100 text-slate-700',
 }
 
-/** Colour classes for damage status */
-const damageColours: Record<string, string> = {
-  'ALL GOOD': 'bg-green-100 text-green-800',
-  'BOOK REPAIR!': 'bg-amber-100 text-amber-800',
-  'QUOTE NEEDED': 'bg-red-100 text-red-800',
-  'REPAIR BOOKED': 'bg-indigo-100 text-indigo-800',
-}
-
-/** Colour classes for service status */
-const serviceColours: Record<string, string> = {
-  'OK': 'bg-green-100 text-green-800',
-  'SERVICE BOOKED': 'bg-amber-100 text-amber-800',
-  'SERVICE DUE!': 'bg-red-100 text-red-800',
-  'SERVICE DUE SOON': 'bg-blue-100 text-blue-800',
-  'CHECK': 'bg-yellow-100 text-yellow-800',
-}
-
-function StatusBadge({ label, colourMap, prefix }: { label: string; colourMap: Record<string, string>; prefix?: string }) {
-  if (!label) return null
-  const cls = colourMap[label] || 'bg-gray-100 text-gray-600'
-  return (
-    <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-      {prefix ? `${prefix}: ${label}` : label}
-    </span>
-  )
-}
-
 function DateBadge({ label, date, warningDays = 30 }: { label: string; date: string | null; warningDays?: number }) {
   const urgency = getDateUrgency(date, warningDays)
   if (urgency === 'unknown') return null
