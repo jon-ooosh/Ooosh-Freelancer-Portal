@@ -11,6 +11,8 @@ interface DraftResumePromptProps {
   totalSteps: number
   onResume: () => void
   onDiscard: () => void
+  /** Permanently discard the draft and go back (don't start fresh) */
+  onDiscardAndGoBack?: () => void
 }
 
 export function DraftResumePrompt({
@@ -21,6 +23,7 @@ export function DraftResumePrompt({
   totalSteps,
   onResume,
   onDiscard,
+  onDiscardAndGoBack,
 }: DraftResumePromptProps) {
   const savedDate = new Date(savedAt)
   const timeAgo = getTimeAgo(savedDate)
@@ -45,19 +48,29 @@ export function DraftResumePrompt({
         </div>
       </div>
 
-      <div className="mt-4 flex gap-3">
-        <button
-          onClick={onResume}
-          className="flex-1 rounded-lg bg-blue-600 py-2.5 text-center text-sm font-semibold text-white active:bg-blue-700"
-        >
-          Resume
-        </button>
-        <button
-          onClick={onDiscard}
-          className="flex-1 rounded-lg border border-blue-200 bg-white py-2.5 text-center text-sm font-semibold text-blue-700 active:bg-blue-50"
-        >
-          Start Fresh
-        </button>
+      <div className="mt-4 flex flex-col gap-2">
+        <div className="flex gap-3">
+          <button
+            onClick={onResume}
+            className="flex-1 rounded-lg bg-blue-600 py-2.5 text-center text-sm font-semibold text-white active:bg-blue-700"
+          >
+            Resume
+          </button>
+          <button
+            onClick={onDiscard}
+            className="flex-1 rounded-lg border border-blue-200 bg-white py-2.5 text-center text-sm font-semibold text-blue-700 active:bg-blue-50"
+          >
+            Start Fresh
+          </button>
+        </div>
+        {onDiscardAndGoBack && (
+          <button
+            onClick={onDiscardAndGoBack}
+            className="w-full rounded-lg py-2 text-center text-xs font-medium text-gray-500 hover:text-red-600 active:bg-gray-50"
+          >
+            Discard draft entirely
+          </button>
+        )}
       </div>
     </div>
   )

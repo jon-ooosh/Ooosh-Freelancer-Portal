@@ -819,6 +819,7 @@ export function BookOutPage() {
         totalSteps={STEPS.length}
         onResume={handleResumeDraft}
         onDiscard={dismissDraft}
+        onDiscardAndGoBack={() => { dismissDraft(); window.history.back() }}
       />
     )
   }
