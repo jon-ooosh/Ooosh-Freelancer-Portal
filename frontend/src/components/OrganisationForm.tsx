@@ -21,7 +21,7 @@ interface OrganisationFormProps {
 }
 
 const orgTypes = [
-  'band', 'management', 'label', 'agency', 'promoter',
+  'band', 'client', 'management', 'label', 'agency', 'promoter',
   'venue', 'festival', 'supplier', 'hire_company', 'booking_agent', 'other',
 ];
 

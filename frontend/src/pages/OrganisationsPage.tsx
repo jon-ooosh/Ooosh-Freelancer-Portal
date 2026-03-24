@@ -90,6 +90,7 @@ export default function OrganisationsPage() {
         >
           <option value="">All types</option>
           <option value="band">Band</option>
+          <option value="client">Client</option>
           <option value="management">Management</option>
           <option value="label">Label</option>
           <option value="agency">Agency</option>
@@ -97,6 +98,9 @@ export default function OrganisationsPage() {
           <option value="venue">Venue</option>
           <option value="festival">Festival</option>
           <option value="supplier">Supplier</option>
+          <option value="hire_company">Hire Company</option>
+          <option value="booking_agent">Booking Agent</option>
+          <option value="other">Other</option>
         </select>
       </div>
 
@@ -132,6 +136,31 @@ export default function OrganisationsPage() {
           </tbody>
         </table>
       </div>
+
+      {/* Pagination */}
+      {pagination.totalPages > 1 && (
+        <div className="mt-4 flex justify-between items-center">
+          <p className="text-sm text-gray-500">
+            Page {pagination.page} of {pagination.totalPages}
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => loadOrgs(pagination.page - 1)}
+              disabled={pagination.page <= 1}
+              className="px-3 py-1 text-sm border rounded disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => loadOrgs(pagination.page + 1)}
+              disabled={pagination.page >= pagination.totalPages}
+              className="px-3 py-1 text-sm border rounded disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Add Organisation Panel */}
       <SlidePanel open={showForm} onClose={() => setShowForm(false)} title="Add Organisation">

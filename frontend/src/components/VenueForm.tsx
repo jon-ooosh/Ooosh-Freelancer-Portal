@@ -3,6 +3,7 @@ import { api } from '../services/api';
 
 interface VenueFormData {
   name: string;
+  organisation_id: string;
   address: string;
   city: string;
   postcode: string;
@@ -29,6 +30,7 @@ interface VenueFormProps {
 
 const emptyForm: VenueFormData = {
   name: '',
+  organisation_id: '',
   address: '',
   city: '',
   postcode: '',
@@ -54,6 +56,10 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(!!venueId);
   const [recordVersion, setRecordVersion] = useState<number | null>(null);
+  const [orgSearch, setOrgSearch] = useState('');
+  const [orgResults, setOrgResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [orgName, setOrgName] = useState('');
+  const [showOrgDropdown, setShowOrgDropdown] = useState(false);
 
   const isEdit = !!venueId;
 
@@ -66,6 +72,7 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
       const data = await api.get<Record<string, unknown>>(`/venues/${id}`);
       setForm({
         name: (data.name as string) || '',
+        organisation_id: (data.organisation_id as string) || '',
         address: (data.address as string) || '',
         city: (data.city as string) || '',
         postcode: (data.postcode as string) || '',
@@ -84,6 +91,12 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
         tags: (data.tags as string[]) || [],
       });
       if (data.version !== undefined) setRecordVersion(data.version as number);
+      if (data.organisation_id) {
+        try {
+          const org = await api.get<{ name: string }>(`/organisations/${data.organisation_id}`);
+          setOrgName(org.name);
+        } catch { /* org may have been deleted */ }
+      }
     } catch {
       setError('Failed to load venue');
     } finally {
@@ -107,6 +120,18 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
     set('tags', form.tags.filter(t => t !== tag));
   }
 
+  useEffect(() => {
+    if (orgSearch.length < 2) { setOrgResults([]); return; }
+    const timeout = setTimeout(async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(`/organisations?search=${encodeURIComponent(orgSearch)}&limit=8`);
+        setOrgResults(data.data);
+        setShowOrgDropdown(true);
+      } catch { /* ignore */ }
+    }, 300);
+    return () => clearTimeout(timeout);
+  }, [orgSearch]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.name.trim()) {
@@ -119,6 +144,7 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
     try {
       const body = {
         name: form.name,
+        organisation_id: form.organisation_id || null,
         address: form.address || null,
         city: form.city || null,
         postcode: form.postcode || null,
@@ -163,6 +189,46 @@ export default function VenueForm({ venueId, onSaved, onCancel }: VenueFormProps
       )}
 
       <Field label="Venue Name *" value={form.name} onChange={v => set('name', v)} />
+
+      {/* Organisation */}
+      <div className="relative">
+        <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Organisation</label>
+        {form.organisation_id && orgName ? (
+          <div className="flex items-center gap-2 px-3 py-2 border border-gray-300 rounded text-sm bg-gray-50">
+            <span className="flex-1">{orgName}</span>
+            <button type="button" onClick={() => { set('organisation_id', ''); setOrgName(''); setOrgSearch(''); }} className="text-gray-400 hover:text-gray-600">&times;</button>
+          </div>
+        ) : (
+          <input
+            value={orgSearch}
+            onChange={e => setOrgSearch(e.target.value)}
+            onFocus={() => orgResults.length > 0 && setShowOrgDropdown(true)}
+            onBlur={() => setTimeout(() => setShowOrgDropdown(false), 200)}
+            placeholder="Search organisations..."
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+        )}
+        {showOrgDropdown && orgResults.length > 0 && (
+          <div className="absolute z-10 w-full mt-1 bg-white border border-gray-200 rounded shadow-lg max-h-48 overflow-y-auto">
+            {orgResults.map(o => (
+              <button
+                key={o.id}
+                type="button"
+                onMouseDown={() => {
+                  set('organisation_id', o.id);
+                  setOrgName(o.name);
+                  setOrgSearch('');
+                  setShowOrgDropdown(false);
+                }}
+                className="w-full text-left px-3 py-2 text-sm hover:bg-ooosh-50 flex items-center gap-2"
+              >
+                <span>{o.name}</span>
+                <span className="text-xs text-gray-400">{o.type}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Address */}
       <h3 className="text-sm font-semibold text-gray-700 pt-2">Address</h3>

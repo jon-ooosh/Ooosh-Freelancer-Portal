@@ -97,6 +97,31 @@ export default function VenuesPage() {
         )}
       </div>
 
+      {/* Pagination */}
+      {pagination.totalPages > 1 && (
+        <div className="mt-4 flex justify-between items-center">
+          <p className="text-sm text-gray-500">
+            Page {pagination.page} of {pagination.totalPages}
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => loadVenues(pagination.page - 1)}
+              disabled={pagination.page <= 1}
+              className="px-3 py-1 text-sm border rounded disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => loadVenues(pagination.page + 1)}
+              disabled={pagination.page >= pagination.totalPages}
+              className="px-3 py-1 text-sm border rounded disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Add Venue Panel */}
       <SlidePanel open={showForm} onClose={() => setShowForm(false)} title="Add Venue" wide>
         <VenueForm
