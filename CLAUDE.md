@@ -624,27 +624,32 @@ Organisation-to-organisation relationships and multi-org job links. Makes "bands
 HireHop sync imported contacts literally — bands became people, management companies got typed as "client", etc.
 The cleanup strategy is: OP becomes master for relationship data, HH gets what it needs via push.
 
-*Step 1: OP→HH job creation* (part of Stream A)
-- [ ] `POST /api/pipeline/:id/push-hirehop` — create job in HH via `job_save.php` API
-- [ ] Map OP fields → HH: contact person → `name`, client org → `company`, dates → `out`/`start`/`end`/`to`, job name → `job_name`, details → `details`
-- [ ] Write back HH job number to OP `jobs.hh_job_number`
-- [ ] Include `no_webhook=1` to prevent sync loops
-- [ ] Band stays in OP only (HH has no band field)
+*Step 1: OP→HH job creation* ✅ COMPLETE (part of Stream A)
+- [x] `POST /api/pipeline/:id/push-hirehop` — create job in HH via `save_job.php` API
+- [x] Map OP fields → HH: contact person → `name`, client org → `company`, dates → `out`/`start`/`end`/`to`, job name → `job_name`, details → `details`
+- [x] Write back HH job number to OP `jobs.hh_job_number`
+- [x] Include `no_webhook=1` to prevent sync loops
+- [x] Band stays in OP only (HH has no band field)
+- [x] Frontend: "Create in HireHop" button on Job Detail + optional checkbox on New Enquiry form
 
-*Step 2: Sync guard rails*
-- [ ] HH contact sync: when Contact Name matches existing *organisation* (not person), flag as conflict → "needs review" queue
-- [ ] HH job sync: never overwrite OP-enriched org types or relationships
-- [ ] Surface "needs review" items on Dashboard or Settings page
+*Step 2: Sync guard rails* ✅ COMPLETE
+- [x] HH contact sync: when new person name matches existing *organisation*, flag as `name_conflict` → review queue
+- [x] HH contact sync: when new org typed 'client' doesn't look like a company name, flag as `possible_band` → review queue
+- [x] HH contact sync: type mismatches flagged as `type_mismatch` → review queue (preserves manually-set types, only overwrites HH-derived types: client/venue/supplier/unknown)
+- [x] HH contact sync: tags merged (not replaced) on existing orgs
+- [x] HH job sync: only updates HH-owned fields (status, dates, names), uses COALESCE for org links, never touches pipeline_status/org types/relationships/job_organisations
+- [x] Surface "needs review" items on Data Cleanup page (Sync Review Queue tab with resolve/dismiss actions)
 
-*Step 3: Data cleanup tools*
-- [ ] "Convert Person to Organisation" — reclassify a person as an org (e.g. "10cc" person → "10cc" band org), preserve relationships
-- [ ] "Merge duplicates" — merge person+org that represent the same entity
-- [ ] Bulk type correction — change org types (e.g. all "client" orgs that are actually bands)
-- [ ] "Needs review" page for sync conflicts
+*Step 3: Data cleanup tools* ✅ MOSTLY COMPLETE
+- [x] "Convert Person to Organisation" — transactional: creates org, copies external IDs, moves interactions + job links, soft-deletes person
+- [ ] "Merge duplicates" — merge person+org that represent the same entity (person+person merge exists on DuplicatesPage)
+- [x] Bulk type correction — multi-select orgs by type, change type in bulk (auto-resolves pending type_mismatch reviews)
+- [x] "Needs review" page — Data Cleanup page (`/data-cleanup`) with Sync Review Queue, Org Types, Convert Person tabs
+- [x] Organisation type stats breakdown with click-through to orgs of each type
 
-*Step 4: Smart relationship suggestions*
-- [ ] When viewing a "Contact" at a "client" org, system suggests: "Is this actually a Band?"
-- [ ] When new HH sync creates entities, surface for review before they pollute the graph
+*Step 4: Smart relationship suggestions* ✅ COMPLETE
+- [x] When viewing a "Contact" at a "client" org, system suggests: "Is this actually a Band?" (amber banner on Org Detail)
+- [x] When new HH sync creates entities, surface for review before they pollute the graph (sync flagging → review queue)
 
 #### Remaining Phase 2 work (no strict ordering)
 
