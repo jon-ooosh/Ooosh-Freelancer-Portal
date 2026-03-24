@@ -113,7 +113,8 @@ export interface VanAllocation {
   allocatedAt: string            // ISO timestamp
   allocatedBy: string            // Staff name who made the allocation
   confirmedAt: string | null     // When booked out (null for soft allocations)
-  readOnly?: boolean             // true for booked_out/active — not modifiable via allocations save
+  readOnly?: boolean             // true for booked_out/active or hire-form-linked — not modifiable via allocations save
+  hireFormLinked?: boolean        // true if created by hire form (has driver_id) — managed via hire forms, not allocations
 }
 
 /** Fleet-wide allocations index — single file in R2 at allocations/_index.json */

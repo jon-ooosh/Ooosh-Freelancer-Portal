@@ -615,7 +615,8 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
 
     // Map to VanAllocation shape
     // Use driver_name from drivers table if linked, otherwise fall back to notes (freetext)
-    // Tag booked_out/active as readOnly so frontend knows not to manage them via save
+    // Tag as readOnly if: booked_out/active status, OR hire-form-created (has driver_id).
+    // Hire-form assignments are managed via the hire forms / driver pages, not allocations.
     const allocations = result.rows.map((row: any) => ({
       id: row.id,
       hireHopJobId: row.hirehop_job_id,
@@ -629,7 +630,8 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
       allocatedAt: row.created_at,
       allocatedBy: row.allocated_by_name || 'Unknown',
       confirmedAt: row.status !== 'soft' ? row.status_changed_at : null,
-      readOnly: ['booked_out', 'active'].includes(row.status),
+      readOnly: ['booked_out', 'active'].includes(row.status) || !!row.driver_id,
+      hireFormLinked: !!row.driver_id,
     }));
 
     res.json({ allocations });
