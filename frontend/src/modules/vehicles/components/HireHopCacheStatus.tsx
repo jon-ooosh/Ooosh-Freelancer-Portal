@@ -1,6 +1,10 @@
 /**
  * HireHop cache status indicator + refresh button.
  * Shows when data was last synced and lets users trigger a manual refresh.
+ *
+ * When jobNumbers are provided (e.g. from Allocations page), the refresh
+ * button triggers an on-demand HireHop sync for those specific jobs,
+ * pulling fresh line items from HireHop into the OP database.
  */
 
 import { useHireHopCacheMeta, useRefreshHireHopCache } from '../hooks/useHireHopJobs'
@@ -15,7 +19,12 @@ function formatAge(syncedAt: string): string {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
-export function HireHopCacheStatus() {
+interface HireHopCacheStatusProps {
+  /** Pass visible job numbers to trigger on-demand item sync on refresh */
+  jobNumbers?: number[]
+}
+
+export function HireHopCacheStatus({ jobNumbers }: HireHopCacheStatusProps) {
   const { syncedAt, hasCache } = useHireHopCacheMeta()
   const { refresh, isRefreshing, error } = useRefreshHireHopCache()
 
@@ -30,11 +39,12 @@ export function HireHopCacheStatus() {
       )}
 
       <button
-        onClick={refresh}
+        onClick={() => refresh(jobNumbers)}
         disabled={isRefreshing}
         className="rounded border border-gray-200 px-2 py-0.5 text-xs font-medium text-gray-500 hover:bg-gray-50 active:bg-gray-100 disabled:opacity-50"
+        title={jobNumbers?.length ? `Refresh ${jobNumbers.length} jobs from HireHop` : 'Refresh from database'}
       >
-        {isRefreshing ? 'Syncing...' : 'Refresh'}
+        {isRefreshing ? 'Syncing from HireHop...' : 'Refresh from HireHop'}
       </button>
 
       {error && (
