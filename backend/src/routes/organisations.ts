@@ -35,14 +35,15 @@ const updateOrgSchema = createOrgSchema.partial();
 // GET /api/organisations
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, type, page = '1', limit = '50' } = req.query;
+    const { search, type, page = '1', limit = '50', tag, has_email, has_people, location, sort } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
       SELECT o.*,
         (SELECT COUNT(*) FROM person_organisation_roles por
          WHERE por.organisation_id = o.id AND por.status = 'active') as active_people_count,
-        parent.name as parent_name
+        parent.name as parent_name,
+        (SELECT MAX(i.created_at) FROM interactions i WHERE i.organisation_id = o.id) as last_interaction_at
       FROM organisations o
       LEFT JOIN organisations parent ON parent.id = o.parent_id
       WHERE o.is_deleted = false
@@ -62,13 +63,41 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       paramIndex++;
     }
 
+    if (tag) {
+      sql += ` AND $${paramIndex} = ANY(o.tags)`;
+      params.push(tag);
+      paramIndex++;
+    }
+
+    if (has_email === 'true') {
+      sql += ` AND o.email IS NOT NULL AND o.email != ''`;
+    }
+
+    if (has_people === 'true') {
+      sql += ` AND (SELECT COUNT(*) FROM person_organisation_roles por WHERE por.organisation_id = o.id AND por.status = 'active') > 0`;
+    }
+
+    if (location) {
+      sql += ` AND o.location ILIKE $${paramIndex}`;
+      params.push(`%${location}%`);
+      paramIndex++;
+    }
+
     const countResult = await query(
       sql.replace(/SELECT o\.\*.*FROM organisations o/s, 'SELECT COUNT(*) FROM organisations o'),
       params
     );
     const total = parseInt(countResult.rows[0].count);
 
-    sql += ` ORDER BY o.name LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    const sortMap: Record<string, string> = {
+      'name': 'o.name',
+      'recently_added': 'o.created_at DESC',
+      'recently_updated': 'o.updated_at DESC',
+      'last_contacted': '(SELECT MAX(i.created_at) FROM interactions i WHERE i.organisation_id = o.id) DESC NULLS LAST',
+    };
+    const orderBy = sortMap[sort as string] || 'o.name';
+
+    sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
 
     const result = await query(sql, params);

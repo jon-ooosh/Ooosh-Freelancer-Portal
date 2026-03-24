@@ -21,6 +21,8 @@ interface VenuesResponse {
 export default function VenuesPage() {
   const [venues, setVenues] = useState<Venue[]>([]);
   const [search, setSearch] = useState('');
+  const [filterHasOrg, setFilterHasOrg] = useState(false);
+  const [sortBy, setSortBy] = useState('name');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
   const [showForm, setShowForm] = useState(false);
@@ -28,13 +30,15 @@ export default function VenuesPage() {
 
   useEffect(() => {
     loadVenues();
-  }, [search]);
+  }, [search, filterHasOrg, sortBy]);
 
   async function loadVenues(page = 1) {
     setLoading(true);
     try {
       const params = new URLSearchParams({ page: String(page), limit: '50' });
       if (search) params.set('search', search);
+      if (filterHasOrg) params.set('has_org', 'true');
+      if (sortBy !== 'name') params.set('sort', sortBy);
 
       const data = await api.get<VenuesResponse>(`/venues?${params}`);
       setVenues(data.data);
@@ -61,7 +65,7 @@ export default function VenuesPage() {
         </button>
       </div>
 
-      <div className="mt-6">
+      <div className="mt-6 flex flex-wrap items-center gap-4">
         <input
           type="text"
           placeholder="Search venues by name, address, or city..."
@@ -69,6 +73,25 @@ export default function VenuesPage() {
           onChange={(e) => setSearch(e.target.value)}
           className="w-full max-w-md rounded border border-gray-300 px-4 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
         />
+        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
+          <input
+            type="checkbox"
+            checked={filterHasOrg}
+            onChange={(e) => setFilterHasOrg(e.target.checked)}
+            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+          />
+          Linked to org
+        </label>
+        <select
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value)}
+          className="rounded border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none"
+        >
+          <option value="name">Sort: Name</option>
+          <option value="recently_added">Sort: Recently added</option>
+          <option value="recently_updated">Sort: Recently updated</option>
+          <option value="city">Sort: City</option>
+        </select>
       </div>
 
       <div className="mt-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -96,6 +119,31 @@ export default function VenuesPage() {
           ))
         )}
       </div>
+
+      {/* Pagination */}
+      {pagination.totalPages > 1 && (
+        <div className="mt-4 flex justify-between items-center">
+          <p className="text-sm text-gray-500">
+            Page {pagination.page} of {pagination.totalPages}
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => loadVenues(pagination.page - 1)}
+              disabled={pagination.page <= 1}
+              className="px-3 py-1 text-sm border rounded disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => loadVenues(pagination.page + 1)}
+              disabled={pagination.page >= pagination.totalPages}
+              className="px-3 py-1 text-sm border rounded disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Add Venue Panel */}
       <SlidePanel open={showForm} onClose={() => setShowForm(false)} title="Add Venue" wide>

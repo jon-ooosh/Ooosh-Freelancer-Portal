@@ -58,7 +58,7 @@ const personOrgRoleSchema = z.object({
 // GET /api/people — list with search and pagination
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, page = '1', limit = '50', tag, is_freelancer, is_approved } = req.query;
+    const { search, page = '1', limit = '50', tag, is_freelancer, is_approved, has_email, has_phone, location, sort } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
@@ -73,7 +73,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         )) FROM person_organisation_roles por
         JOIN organisations o ON o.id = por.organisation_id
         WHERE por.person_id = p.id AND por.status = 'active'
-        ) as current_organisations
+        ) as current_organisations,
+        (SELECT MAX(i.created_at) FROM interactions i WHERE i.person_id = p.id) as last_interaction_at
       FROM people p
       WHERE p.is_deleted = false
     `;
@@ -105,6 +106,20 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       sql += ` AND p.is_approved = true`;
     }
 
+    if (has_email === 'true') {
+      sql += ` AND p.email IS NOT NULL AND p.email != ''`;
+    }
+
+    if (has_phone === 'true') {
+      sql += ` AND (p.mobile IS NOT NULL AND p.mobile != '' OR p.phone IS NOT NULL AND p.phone != '')`;
+    }
+
+    if (location) {
+      sql += ` AND p.location ILIKE $${paramIndex}`;
+      params.push(`%${location}%`);
+      paramIndex++;
+    }
+
     // Count total
     const countResult = await query(
       sql.replace(/SELECT p\.\*.*FROM people p/s, 'SELECT COUNT(*) FROM people p'),
@@ -112,7 +127,16 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     );
     const total = parseInt(countResult.rows[0].count);
 
-    sql += ` ORDER BY p.last_name, p.first_name LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    // Sort
+    const sortMap: Record<string, string> = {
+      'name': 'p.last_name, p.first_name',
+      'recently_added': 'p.created_at DESC',
+      'recently_updated': 'p.updated_at DESC',
+      'last_contacted': '(SELECT MAX(i.created_at) FROM interactions i WHERE i.person_id = p.id) DESC NULLS LAST',
+    };
+    const orderBy = sortMap[sort as string] || 'p.last_name, p.first_name';
+
+    sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
 
     const result = await query(sql, params);

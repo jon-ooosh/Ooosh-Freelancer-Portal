@@ -9,6 +9,7 @@ import ActivityTimeline from '../components/ActivityTimeline';
 interface VenueDetail {
   id: string;
   name: string;
+  organisation_id: string | null;
   address: string | null;
   city: string | null;
   postcode: string | null;
@@ -46,6 +47,7 @@ export default function VenueDetailPage() {
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'info' | 'timeline'>('info');
+  const [orgName, setOrgName] = useState<string | null>(null);
 
   // Edit/delete
   const [showEdit, setShowEdit] = useState(false);
@@ -62,6 +64,14 @@ export default function VenueDetailPage() {
     try {
       const data = await api.get<VenueDetail>(`/venues/${id}`);
       setVenue(data);
+      if (data.organisation_id) {
+        try {
+          const org = await api.get<{ name: string }>(`/organisations/${data.organisation_id}`);
+          setOrgName(org.name);
+        } catch { setOrgName(null); }
+      } else {
+        setOrgName(null);
+      }
     } catch {
       navigate('/venues');
     } finally {
@@ -103,6 +113,11 @@ export default function VenueDetailPage() {
         <div className="flex items-start justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">{venue.name}</h1>
+            {venue.organisation_id && orgName && (
+              <p className="mt-1 text-sm text-gray-500">
+                <Link to={`/organisations/${venue.organisation_id}`} className="text-ooosh-600 hover:text-ooosh-700">{orgName}</Link>
+              </p>
+            )}
             {fullAddress && <p className="mt-1 text-sm text-gray-500">{fullAddress}</p>}
           </div>
           <div className="flex items-center gap-2">

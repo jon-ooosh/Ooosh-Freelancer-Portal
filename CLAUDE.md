@@ -704,6 +704,22 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Email notifications** — add SMTP/transactional email channel alongside in-app bell notifications (needs email service config)
 - **Per-user notification preferences** — allow users to opt in/out of specific notification categories (compliance, chase reminders, etc.)
 - **Freelancer portal repointing** — switch freelancer-facing app from Monday.com read/write to OP API for crew assignments, delivery jobs, studio sitter assignments, hire form status
+- **Address Book CRM & Filtering Enhancements:**
+  - *Tier 1 (quick wins):*
+    - [x] Multi-filter on People page: has email, has phone, linked org type, tags, location/city
+    - [x] Multi-filter on Organisations page: tags, location, has email, has people
+    - [x] Multi-filter on Venues page: city, has org link
+    - [x] Sort options on all list pages: alphabetical, recently added, recently updated
+    - [x] "Last contacted" indicator on People/Orgs — show most recent interaction date, flag overdue contacts
+  - *Tier 2 (medium effort):*
+    - [ ] Saved filters / smart lists — save filter combinations as named views (e.g. "London promoters", "Bands without management link", "Contacts not chased in 90 days")
+    - [ ] Bulk tagging — select multiple orgs/people, apply tag in one click (campaign prep)
+    - [ ] Export to CSV — filtered results exportable for mailouts or spreadsheet work
+    - [ ] "Related to jobs" filter — show orgs/people involved in jobs within a date range, or who've never had a job (partially available via job_organisations links already)
+  - *Tier 3 (larger lift):*
+    - [ ] Pipeline-style contact nurturing — track where leads/contacts are in a relationship lifecycle
+    - [ ] Campaign/mailout integration — tag contacts for a promo, send via email service
+    - [ ] Activity scoring — surface who's most engaged / least contacted
 
 ### Phase 3–5
 

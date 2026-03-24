@@ -45,7 +45,7 @@ const updateVenueSchema = createVenueSchema.partial();
 // GET /api/venues
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, city, page = '1', limit = '50' } = req.query;
+    const { search, city, page = '1', limit = '50', has_org, sort } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = 'SELECT * FROM venues WHERE is_deleted = false';
@@ -64,10 +64,22 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       paramIndex++;
     }
 
+    if (has_org === 'true') {
+      sql += ` AND organisation_id IS NOT NULL`;
+    }
+
     const countResult = await query(sql.replace('SELECT *', 'SELECT COUNT(*)'), params);
     const total = parseInt(countResult.rows[0].count);
 
-    sql += ` ORDER BY name LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    const sortMap: Record<string, string> = {
+      'name': 'name',
+      'recently_added': 'created_at DESC',
+      'recently_updated': 'updated_at DESC',
+      'city': 'city, name',
+    };
+    const orderBy = sortMap[sort as string] || 'name';
+
+    sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
 
     const result = await query(sql, params);
