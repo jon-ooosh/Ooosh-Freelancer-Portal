@@ -10,7 +10,7 @@
  * Data: HireHop jobs (API) + fleet vehicles (Monday) + allocations (R2).
  */
 
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { vmPath } from '../config/route-paths'
 import { useUpcomingJobs, useUpcomingDueBackJobs } from '../hooks/useHireHopJobs'
@@ -21,7 +21,6 @@ import { useDriverHireForms } from '../hooks/useDriverHireForms'
 import { extractVanRequirements } from '../lib/hirehop-api'
 import { findMatchingVehicles, formatVanType, getVehicleGearboxLabel, vehicleNeedsPrepWarning } from '../lib/van-matching'
 import type { HireHopJob, VanAllocation, VanRequirement } from '../types/hirehop'
-import type { DriverHireForm } from '../lib/driver-hire-api'
 import type { Vehicle } from '../types/vehicle'
 
 type DateFilter = 'today' | 'tomorrow' | 'this-week' | 'all'
@@ -29,59 +28,6 @@ type ViewMode = 'going-out' | 'due-back'
 
 /** How many days ahead the allocations page looks */
 const ALLOCATIONS_DAYS_AHEAD = 14
-
-/** Debounced driver name input — saves on blur or after 800ms idle, not on every keystroke */
-function DebouncedDriverInput({
-  allocationId,
-  initialValue,
-  onSave,
-}: {
-  allocationId: string
-  initialValue: string
-  onSave: (allocationId: string, driverName: string) => void
-}) {
-  const [localValue, setLocalValue] = useState(initialValue)
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
-  const savedRef = useRef(initialValue)
-
-  // Sync from parent when server data changes (e.g. after initial load)
-  useEffect(() => {
-    if (initialValue !== savedRef.current) {
-      setLocalValue(initialValue)
-      savedRef.current = initialValue
-    }
-  }, [initialValue])
-
-  const doSave = useCallback((value: string) => {
-    if (value !== savedRef.current) {
-      savedRef.current = value
-      onSave(allocationId, value)
-    }
-  }, [allocationId, onSave])
-
-  const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value
-    setLocalValue(val)
-    if (timerRef.current) clearTimeout(timerRef.current)
-    timerRef.current = setTimeout(() => doSave(val), 800)
-  }, [doSave])
-
-  const handleBlur = useCallback(() => {
-    if (timerRef.current) clearTimeout(timerRef.current)
-    doSave(localValue)
-  }, [localValue, doSave])
-
-  return (
-    <input
-      type="text"
-      placeholder="Driver name"
-      value={localValue}
-      onChange={handleChange}
-      onBlur={handleBlur}
-      className="w-full rounded border border-gray-200 bg-white px-2 py-1.5 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-    />
-  )
-}
 
 export function AllocationsPage() {
   const [searchParams] = useSearchParams()
@@ -173,13 +119,6 @@ export function AllocationsPage() {
 
   const handleRemoveAllocation = useCallback(async (allocationId: string) => {
     const updated = allocationsList.filter(a => a.id !== allocationId)
-    saveAllocations.mutate(updated)
-  }, [allocationsList, saveAllocations])
-
-  const handleUpdateDriver = useCallback(async (allocationId: string, driverName: string) => {
-    const updated = allocationsList.map(a =>
-      a.id === allocationId ? { ...a, driverName: driverName || null } : a,
-    )
     saveAllocations.mutate(updated)
   }, [allocationsList, saveAllocations])
 
@@ -278,7 +217,6 @@ export function AllocationsPage() {
               viewMode={viewMode}
               onAllocate={handleAllocateVan}
               onRemove={handleRemoveAllocation}
-              onUpdateDriver={handleUpdateDriver}
               saving={saveAllocations.isPending}
             />
           ))}
@@ -300,7 +238,6 @@ function JobAllocationCard({
   viewMode,
   onAllocate,
   onRemove,
-  onUpdateDriver,
   saving,
 }: {
   job: HireHopJob
@@ -310,7 +247,6 @@ function JobAllocationCard({
   viewMode: ViewMode
   onAllocate: (job: HireHopJob, reqIndex: number, vehicle: Vehicle, staffName: string) => void
   onRemove: (allocationId: string) => void
-  onUpdateDriver: (allocationId: string, driverName: string) => void
   saving: boolean
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded)
@@ -426,10 +362,8 @@ function JobAllocationCard({
               allocations={jobAllocations}
               allAllocations={allocations}
               vehicles={vehicles}
-              hireForms={hireForms || []}
               onAllocate={onAllocate}
               onRemove={onRemove}
-              onUpdateDriver={onUpdateDriver}
               saving={saving}
             />
           ))}
@@ -479,10 +413,8 @@ function RequirementSlots({
   allocations: jobAllocations,
   allAllocations,
   vehicles,
-  hireForms,
   onAllocate,
   onRemove,
-  onUpdateDriver,
   saving,
 }: {
   job: HireHopJob
@@ -491,10 +423,8 @@ function RequirementSlots({
   allocations: VanAllocation[]
   allAllocations: VanAllocation[]
   vehicles: Vehicle[]
-  hireForms: DriverHireForm[]
   onAllocate: (job: HireHopJob, reqIndex: number, vehicle: Vehicle, staffName: string) => void
   onRemove: (allocationId: string) => void
-  onUpdateDriver: (allocationId: string, driverName: string) => void
   saving: boolean
 }) {
   const [showPicker, setShowPicker] = useState(false)
