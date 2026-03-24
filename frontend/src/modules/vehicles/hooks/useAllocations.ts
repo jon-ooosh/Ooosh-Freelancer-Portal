@@ -20,11 +20,11 @@ export function useAllocations() {
 }
 
 /** Mutation hook for saving allocations (replaces full array) */
-export function useSaveAllocations() {
+export function useSaveAllocations(managedJobIds?: number[]) {
   const queryClient = useQueryClient()
 
   return useMutation({
-    mutationFn: (allocations: VanAllocation[]) => saveAllocations(allocations),
+    mutationFn: (allocations: VanAllocation[]) => saveAllocations(allocations, managedJobIds),
     // Optimistic update — immediately reflect changes in the UI
     onMutate: async (newAllocations) => {
       await queryClient.cancelQueries({ queryKey: ['allocations'] })

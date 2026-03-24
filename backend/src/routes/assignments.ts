@@ -617,7 +617,7 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
 
 router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
   try {
-    const { allocations } = req.body;
+    const { allocations, managedJobIds } = req.body;
 
     if (!Array.isArray(allocations)) {
       res.status(400).json({ error: 'allocations array required' });
@@ -625,14 +625,20 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
     }
 
     // Collect the set of job IDs being managed in this save request.
-    // We must ONLY touch assignments for jobs that are in the incoming list.
-    // The Allocations page only shows a subset of jobs (e.g. today/tomorrow),
-    // so we must not cancel assignments for jobs outside that scope.
+    // This includes both jobs with allocations AND jobs the frontend is displaying
+    // (so removing the last allocation for a job still cancels it).
     const incomingJobIds = new Set<number>(
       allocations.map((a: any) => Number(a.hireHopJobId)).filter((n: number) => !isNaN(n))
     );
+    // Also include explicitly managed job IDs (all visible jobs on the allocations page)
+    if (Array.isArray(managedJobIds)) {
+      for (const jid of managedJobIds) {
+        const n = Number(jid);
+        if (!isNaN(n)) incomingJobIds.add(n);
+      }
+    }
 
-    // Only load existing assignments for jobs that are in the incoming payload
+    // Only load existing assignments for jobs that are in scope
     const existing = incomingJobIds.size > 0
       ? await query(
           `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id, notes

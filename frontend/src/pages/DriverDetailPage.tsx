@@ -242,6 +242,28 @@ function addressesDiffer(a: string, b: string): boolean {
   return normaliseAddress(a) !== normaliseAddress(b);
 }
 
+/**
+ * Unified driver status — single source of truth, same as DriversPage.
+ */
+function deriveDriverStatus(driver: { requires_referral: boolean; referral_status: string | null; licence_valid_to: string | null; dvla_valid_until?: string | null; poa1_valid_until: string | null; signature_date: string | null; licence_number: string | null; dvla_check_date: string | null; email: string | null }): { label: string; colour: string } {
+  if (driver.requires_referral) {
+    if (driver.referral_status === 'approved') return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
+    if (driver.referral_status === 'declined') return { label: 'Not Approved', colour: 'bg-red-100 text-red-700' };
+    if (driver.referral_status === 'pending') return { label: 'Referred & Waiting', colour: 'bg-amber-100 text-amber-700' };
+    return { label: 'Refer to Insurers', colour: 'bg-red-100 text-red-700' };
+  }
+  if (isDateExpired(driver.licence_valid_to) || isDateExpired(driver.poa1_valid_until)) {
+    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+  }
+  if (!driver.signature_date && driver.email && !driver.licence_number && !driver.dvla_check_date) {
+    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+  }
+  if (driver.signature_date && !driver.licence_valid_to) {
+    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+  }
+  return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
+}
+
 function statusBadge(status: string) {
   const colours: Record<string, string> = {
     soft: 'bg-gray-100 text-gray-700',
@@ -472,7 +494,17 @@ export default function DriverDetailPage() {
             </svg>
             Drivers
           </button>
-          <h1 className="text-2xl font-bold text-gray-900">{driver.full_name}</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-gray-900">{driver.full_name}</h1>
+            {(() => {
+              const s = deriveDriverStatus(driver);
+              return (
+                <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${s.colour}`}>
+                  {s.label}
+                </span>
+              );
+            })()}
+          </div>
           <div className="mt-1 flex items-center gap-3 text-sm text-gray-500">
             {driver.email && <span>{driver.email}</span>}
             {driver.phone && (
@@ -773,19 +805,20 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
 
   return (
     <div className={`bg-white rounded-xl shadow-sm border-2 p-6 ${
-      isResolved
-        ? driver.referral_status === 'approved' ? 'border-green-200' : 'border-red-200'
+      driver.referral_status === 'approved' ? 'border-green-200'
+        : driver.referral_status === 'declined' ? 'border-red-200'
         : 'border-amber-300'
     }`}>
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-semibold text-gray-700">Insurance Referral</h3>
-        <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${
-          driver.referral_status === 'approved' ? 'bg-green-100 text-green-700'
-            : driver.referral_status === 'declined' ? 'bg-red-100 text-red-700'
-            : 'bg-amber-100 text-amber-700'
-        }`}>
-          {driver.referral_status || 'pending'}
-        </span>
+        {(() => {
+          const s = deriveDriverStatus(driver);
+          return (
+            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${s.colour}`}>
+              {s.label}
+            </span>
+          );
+        })()}
       </div>
 
       {/* Referral reasons */}
@@ -812,14 +845,33 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
         )}
       </div>
 
-      {/* Resolve button / form */}
+      {/* Action buttons — depends on current referral state */}
       {!isResolved && !showResolve && (
-        <button
-          onClick={() => setShowResolve(true)}
-          className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
-        >
-          Resolve Referral
-        </button>
+        <div className="flex gap-2">
+          {/* If not yet marked as referred, show "Mark as Referred" to transition to pending */}
+          {!driver.referral_status && (
+            <button
+              onClick={async () => {
+                setError('');
+                try {
+                  const result = await api.put<{ data: DriverDetail }>(`/drivers/${driver.id}`, { referral_status: 'pending' });
+                  onDriverUpdate(result.data);
+                } catch (err: any) {
+                  setError(err.message || 'Failed to update');
+                }
+              }}
+              className="bg-amber-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-amber-700 transition-colors"
+            >
+              Mark as Referred
+            </button>
+          )}
+          <button
+            onClick={() => setShowResolve(true)}
+            className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
+          >
+            Resolve Referral
+          </button>
+        </div>
       )}
 
       {showResolve && (
