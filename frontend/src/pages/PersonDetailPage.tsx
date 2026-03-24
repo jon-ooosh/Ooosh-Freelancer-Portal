@@ -488,18 +488,19 @@ export default function PersonDetailPage() {
           <div className="mt-6 pt-4 border-t">
             <h3 className="text-sm font-semibold text-gray-700 mb-2">Working Terms</h3>
             {person.working_terms_type ? (
-              <div className="text-sm text-gray-600">
-                <span className="font-medium">{
-                  { usual: 'USUAL (25% deposit, full balance before hire)',
-                    flex_balance: 'FLEX BALANCE (25% deposit, flexible balance)',
-                    no_deposit: 'NO DEPOSIT (balance by start of hire)',
-                    credit: 'CREDIT (no deposit, flexible balance)',
-                    custom: 'CUSTOM' }[person.working_terms_type] || person.working_terms_type
+              <div className="text-sm">
+                <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold text-white ${
+                  { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[person.working_terms_type] || 'bg-gray-500'
+                }`}>{
+                  { usual: 'USUAL', flex_balance: 'FLEX BALANCE', no_deposit: 'NO DEPOSIT', credit: 'CREDIT', custom: 'CUSTOM' }[person.working_terms_type] || person.working_terms_type
+                }</span>
+                <span className="ml-2 text-gray-500 text-xs">{
+                  { usual: '25% deposit, full balance before hire', flex_balance: '25% deposit, flexible balance', no_deposit: 'Balance by start of hire', credit: 'No deposit, flexible balance', custom: '' }[person.working_terms_type]
                 }</span>
                 {(person.working_terms_type === 'flex_balance' || person.working_terms_type === 'credit') && person.working_terms_credit_days && (
-                  <span className="ml-2 text-gray-500">({person.working_terms_credit_days} day credit)</span>
+                  <span className="ml-1 text-gray-500 text-xs">({person.working_terms_credit_days} day credit)</span>
                 )}
-                {person.working_terms_notes && <p className="mt-1 text-gray-500">{person.working_terms_notes}</p>}
+                {person.working_terms_notes && <p className="mt-1 text-gray-500 text-xs">{person.working_terms_notes}</p>}
               </div>
             ) : (
               <p className="text-sm text-gray-400 italic">Not set — edit to configure</p>
