@@ -529,6 +529,23 @@ export default function DriverDetailPage() {
               Edit
             </button>
           )}
+          {!editing && user?.role === 'admin' && (
+            <button
+              onClick={async () => {
+                if (!confirm(`Permanently delete driver record for ${driver.full_name}? This cannot be undone.`)) return;
+                try {
+                  await api.delete(`/drivers/${id}`);
+                  navigate('/drivers');
+                } catch (err) {
+                  console.error('Failed to delete driver:', err);
+                  alert('Failed to delete driver. Check console for details.');
+                }
+              }}
+              className="border border-red-300 text-red-600 px-4 py-2 rounded text-sm font-medium hover:bg-red-50 transition-colors"
+            >
+              Delete
+            </button>
+          )}
         </div>
       </div>
 
