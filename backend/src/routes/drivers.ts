@@ -226,6 +226,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    const includeCancelled = req.query.include_cancelled === 'true';
 
     const result = await query(
       `SELECT vha.*,
@@ -234,6 +235,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
       FROM vehicle_hire_assignments vha
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       WHERE vha.driver_id = $1
+        ${includeCancelled ? '' : "AND vha.status != 'cancelled'"}
       ORDER BY vha.created_at DESC`,
       [id]
     );
