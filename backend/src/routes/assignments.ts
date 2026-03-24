@@ -624,14 +624,24 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // Get ALL current active assignments — including hire-form-created ones.
-    // The frontend GET returns all of them, so if one is missing from the incoming list
-    // it means the user explicitly removed it.
-    const existing = await query(
-      `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id, notes
-       FROM vehicle_hire_assignments
-       WHERE status IN ('soft', 'confirmed')`
+    // Collect the set of job IDs being managed in this save request.
+    // We must ONLY touch assignments for jobs that are in the incoming list.
+    // The Allocations page only shows a subset of jobs (e.g. today/tomorrow),
+    // so we must not cancel assignments for jobs outside that scope.
+    const incomingJobIds = new Set<number>(
+      allocations.map((a: any) => Number(a.hireHopJobId)).filter((n: number) => !isNaN(n))
     );
+
+    // Only load existing assignments for jobs that are in the incoming payload
+    const existing = incomingJobIds.size > 0
+      ? await query(
+          `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id, notes
+           FROM vehicle_hire_assignments
+           WHERE status IN ('soft', 'confirmed')
+             AND hirehop_job_id = ANY($1)`,
+          [Array.from(incomingJobIds)]
+        )
+      : { rows: [] };
 
     const existingMap = new Map(
       existing.rows.map((r: any) => [`${r.hirehop_job_id}-${r.van_requirement_index}`, r])
