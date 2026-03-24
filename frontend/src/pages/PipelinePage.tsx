@@ -791,6 +791,12 @@ function NewEnquiryModal({
       total_confirmed_value: string; total_value: string;
       first_job_date: string | null; last_job_date: string | null;
     };
+    client_info?: {
+      id: string; name: string;
+      do_not_hire: boolean; do_not_hire_reason: string | null;
+      working_terms_type: string | null; working_terms_credit_days: number | null;
+      working_terms_notes: string | null; internal_notes: string | null;
+    } | null;
   } | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -1030,7 +1036,7 @@ function NewEnquiryModal({
     }
   };
 
-  const hasHistory = clientHistory && parseInt(clientHistory.stats.total_jobs) > 0;
+  const hasHistory = clientHistory && (parseInt(clientHistory.stats.total_jobs) > 0 || clientHistory.client_info);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -1418,6 +1424,47 @@ function NewEnquiryModal({
         {hasHistory && (
           <div className="hidden lg:block w-80 border-l border-gray-200 bg-gray-50 p-4 overflow-y-auto rounded-r-xl">
             <h4 className="text-sm font-semibold text-gray-700 mb-3">Client History</h4>
+
+            {/* Do Not Hire warning */}
+            {clientHistory!.client_info?.do_not_hire && (
+              <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg">
+                <div className="flex items-center gap-2 mb-1">
+                  <svg className="w-4 h-4 text-red-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                  <span className="text-sm font-bold text-red-700">DO NOT HIRE</span>
+                </div>
+                {clientHistory!.client_info.do_not_hire_reason && (
+                  <p className="text-xs text-red-600 mt-1">{clientHistory!.client_info.do_not_hire_reason}</p>
+                )}
+              </div>
+            )}
+
+            {/* Working Terms */}
+            {clientHistory!.client_info?.working_terms_type && (
+              <div className="mb-3 p-2.5 bg-white border border-gray-200 rounded-lg">
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
+                <div className="text-sm font-medium text-gray-900">
+                  {clientHistory!.client_info.working_terms_type === 'usual' ? 'USUAL (25% deposit, full balance before hire)' :
+                   clientHistory!.client_info.working_terms_type === 'flex_balance' ? 'FLEX BALANCE (25% deposit, flexible balance)' :
+                   clientHistory!.client_info.working_terms_type === 'no_deposit' ? 'NO DEPOSIT (balance by start of hire)' :
+                   clientHistory!.client_info.working_terms_type === 'credit' ? 'CREDIT (no deposit, flexible balance)' :
+                   'CUSTOM'}
+                </div>
+                {clientHistory!.client_info.working_terms_credit_days && (
+                  <div className="text-xs text-gray-500 mt-0.5">{clientHistory!.client_info.working_terms_credit_days} day credit terms</div>
+                )}
+                {clientHistory!.client_info.working_terms_notes && (
+                  <p className="text-xs text-gray-500 mt-1">{clientHistory!.client_info.working_terms_notes}</p>
+                )}
+              </div>
+            )}
+
+            {/* Internal Notes */}
+            {clientHistory!.client_info?.internal_notes && (
+              <div className="mb-3 p-2.5 bg-amber-50 border border-amber-200 rounded-lg">
+                <div className="text-xs font-semibold text-amber-700 uppercase mb-1">Internal Notes</div>
+                <p className="text-xs text-gray-700 whitespace-pre-wrap">{clientHistory!.client_info.internal_notes}</p>
+              </div>
+            )}
 
             {/* Stats summary */}
             <div className="grid grid-cols-2 gap-2 mb-4">

@@ -12,7 +12,7 @@ interface FileAttachment {
 }
 
 interface FileUploadProps {
-  entityType: 'people' | 'organisations' | 'venues' | 'interactions' | 'drivers';
+  entityType: 'people' | 'organisations' | 'venues' | 'interactions' | 'drivers' | 'jobs';
   entityId: string;
   files: FileAttachment[];
   onFilesChanged: (files: FileAttachment[]) => void;
@@ -153,7 +153,15 @@ export default function FileUpload({ entityType, entityId, files, onFilesChanged
               {showShareToggle && !readOnly && (
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
+                    try {
+                      await api.patch('/files/update-metadata', {
+                        entity_type: entityType,
+                        entity_id: entityId,
+                        file_url: file.url,
+                        updates: { share_with_freelancer: !file.share_with_freelancer },
+                      });
+                    } catch { /* best effort */ }
                     const updated = files.map((f, i) => i === idx ? { ...f, share_with_freelancer: !f.share_with_freelancer } : f);
                     onFilesChanged(updated);
                   }}

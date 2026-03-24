@@ -592,9 +592,25 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
       statsParams
     );
 
+    // If we have a client_id (org), fetch org details for context (do_not_hire, working_terms, notes)
+    let client_info = null;
+    if (client_id) {
+      const orgResult = await query(
+        `SELECT id, name, do_not_hire, do_not_hire_reason,
+                working_terms_type, working_terms_credit_days, working_terms_notes,
+                notes as internal_notes
+         FROM organisations WHERE id = $1`,
+        [client_id]
+      );
+      if (orgResult.rows.length > 0) {
+        client_info = orgResult.rows[0];
+      }
+    }
+
     res.json({
       jobs: result.rows,
       stats: statsResult.rows[0],
+      client_info,
     });
   } catch (error) {
     console.error('Client history error:', error);
