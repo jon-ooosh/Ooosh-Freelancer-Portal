@@ -394,13 +394,19 @@ function JobAllocationCard({
                       <span className="font-mono text-sm font-bold text-ooosh-navy">{allocation.vehicleReg}</span>
                       <span className="text-[10px] text-red-600">No matching requirement</span>
                     </div>
-                    <button
-                      onClick={() => onRemove(allocation.id)}
-                      disabled={saving}
-                      className="text-xs font-medium text-red-600 disabled:text-gray-400"
-                    >
-                      Remove
-                    </button>
+                    {allocation.hireFormLinked ? (
+                      <span className="text-[10px] font-medium text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">
+                        Hire Form
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => onRemove(allocation.id)}
+                        disabled={saving}
+                        className="text-xs font-medium text-red-600 disabled:text-gray-400"
+                      >
+                        Remove
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -495,6 +501,11 @@ function RequirementSlots({
                 </span>
               </div>
               <div className="flex items-center gap-2">
+                {allocation.readOnly && allocation.hireFormLinked && (
+                  <span className="text-[10px] font-medium text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">
+                    Hire Form
+                  </span>
+                )}
                 {!allocation.readOnly && (
                   <button
                     onClick={() => onRemove(allocation.id)}
