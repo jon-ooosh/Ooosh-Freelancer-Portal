@@ -1443,13 +1443,13 @@ function NewEnquiryModal({
               <div className="mb-3 p-2.5 bg-white border border-gray-200 rounded-lg">
                 <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
                 <div className="flex items-center gap-2">
-                  <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold text-white ${
+                  <span className={`inline-block px-2.5 py-1 rounded text-sm font-semibold text-white ${
                     { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[clientHistory!.client_info.working_terms_type] || 'bg-gray-500'
                   }`}>{
                     { usual: 'USUAL', flex_balance: 'FLEX BALANCE', no_deposit: 'NO DEPOSIT', credit: 'CREDIT', custom: 'CUSTOM' }[clientHistory!.client_info.working_terms_type] || clientHistory!.client_info.working_terms_type
                   }</span>
                   {clientHistory!.client_info.working_terms_credit_days && (
-                    <span className="text-xs text-gray-500">{clientHistory!.client_info.working_terms_credit_days} day credit</span>
+                    <span className="text-sm text-gray-500">{clientHistory!.client_info.working_terms_credit_days} day credit</span>
                   )}
                 </div>
                 {clientHistory!.client_info.working_terms_notes && (
