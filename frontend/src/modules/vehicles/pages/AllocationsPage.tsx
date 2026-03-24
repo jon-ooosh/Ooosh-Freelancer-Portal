@@ -584,28 +584,15 @@ function RequirementSlots({
               </div>
             )}
 
-            {/* Driver name input + hire form suggestions */}
-            <div className="mt-2">
-              <DebouncedDriverInput
-                allocationId={allocation.id}
-                initialValue={allocation.driverName || ''}
-                onSave={onUpdateDriver}
-              />
-              {/* Quick-assign buttons from hire form drivers */}
-              {hireForms.length > 0 && !allocation.driverName && (
-                <div className="mt-1 flex flex-wrap gap-1">
-                  {hireForms.map(hf => (
-                    <button
-                      key={hf.id}
-                      onClick={() => onUpdateDriver(allocation.id, hf.driverName)}
-                      className="rounded-full border border-green-200 bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-700 active:bg-green-100"
-                    >
-                      {hf.driverName}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            {/* Driver name — read-only display from linked hire form */}
+            {allocation.driverName && (
+              <div className="mt-2">
+                <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2.5 py-1 text-xs font-medium text-green-700">
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+                  {allocation.driverName}
+                </span>
+              </div>
+            )}
 
             {/* Book Out link — only for soft allocations when vehicle is available */}
             {allocation.status === 'soft' && (

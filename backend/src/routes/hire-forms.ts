@@ -355,6 +355,12 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
 
     console.log(`[hire-forms] Created: driver=${driverId}, assignment=${assignment.id}, vehicle=${vehicleId || 'none'}, job=${f.hirehop_job_id || 'none'}, excess=${excessAmount || 'none'}`);
 
+    // Send referral notification email (non-blocking — don't fail the request)
+    if (requiresReferral) {
+      sendReferralNotification(driverId, f.full_name, f.email || '', referralReason, f.hirehop_job_id || null)
+        .catch(err => console.error('[hire-forms] Referral notification error:', err));
+    }
+
     res.status(201).json({
       data: {
         driver_id: driverId,
@@ -998,5 +1004,116 @@ router.get('/:id/download', authenticateOrApiKey, async (req: AuthRequest, res: 
     res.status(500).json({ error: 'Failed to download hire form PDF' });
   }
 });
+
+// ── Referral notification helper ──
+
+async function sendReferralNotification(
+  driverId: string,
+  driverName: string,
+  driverEmail: string,
+  referralReason: string,
+  hirehopJobId: number | null,
+): Promise<void> {
+  try {
+    // Build referral reasons list from driver data
+    const driverResult = await query(
+      `SELECT d.*,
+        COALESCE(
+          (SELECT string_agg(CONCAT('#', vha.hirehop_job_id, ' ', vha.hirehop_job_name), ', ')
+           FROM vehicle_hire_assignments vha
+           WHERE vha.driver_id = d.id AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')),
+          'No active hires'
+        ) AS linked_jobs
+      FROM drivers d WHERE d.id = $1`,
+      [driverId]
+    );
+
+    if (driverResult.rows.length === 0) return;
+    const driver = driverResult.rows[0];
+
+    // Build human-readable reasons
+    const reasons: string[] = [];
+    if (referralReason) reasons.push(referralReason);
+    if (driver.has_disability) reasons.push('Declared disability/medical condition');
+    if (driver.has_convictions) reasons.push('Declared motoring convictions');
+    if (driver.has_prosecution) reasons.push('Declared pending prosecution');
+    if (driver.has_accidents) reasons.push('Declared previous accidents');
+    if (driver.has_insurance_issues) reasons.push('Declared insurance issues');
+    if (driver.has_driving_ban) reasons.push('Declared previous driving ban');
+    if (driver.licence_points >= 9) reasons.push(`${driver.licence_points} penalty points on licence`);
+    if (driver.licence_issue_country && !['GB', 'UK', 'DVLA'].includes(driver.licence_issue_country.toUpperCase())) {
+      reasons.push(`Non-standard licence country: ${driver.licence_issue_country}`);
+    }
+    if (reasons.length === 0) reasons.push('Flagged by hire form verification process');
+
+    const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+
+    // Try to generate snapshot PDF for attachment
+    let attachments: Array<{ filename: string; content: Buffer; contentType: string }> | undefined;
+    try {
+      const { generateDriverSnapshot, loadDriverDocuments } = await import('../services/driver-snapshot-pdf');
+      const { fetchLogo } = await import('../services/hire-form-pdf');
+
+      const documents = await loadDriverDocuments(driver.files || []);
+      let logoImage: Buffer | null = null;
+      try { logoImage = await fetchLogo(); } catch { /* skip */ }
+
+      const isUk = (driver.licence_issue_country || '').toUpperCase() === 'GB' ||
+        (driver.licence_issued_by || '').toUpperCase().includes('DVLA');
+
+      const snapshotData = {
+        driverName: driver.full_name || driverName,
+        email: driver.email || driverEmail,
+        phone: driver.phone ? `${driver.phone_country || ''} ${driver.phone}` : '',
+        dateOfBirth: driver.date_of_birth || '',
+        nationality: driver.nationality || '',
+        homeAddress: driver.address_full || [driver.address_line1, driver.address_line2, driver.city, driver.postcode].filter(Boolean).join(', '),
+        licenceAddress: driver.licence_address || '',
+        licenceNumber: driver.licence_number || '',
+        licenceIssuedBy: driver.licence_issued_by || driver.licence_issue_country || '',
+        licenceValidTo: driver.licence_valid_to || '',
+        datePassedTest: driver.date_passed_test || '',
+        dvlaPoints: String(driver.licence_points || 0),
+        dvlaEndorsements: Array.isArray(driver.licence_endorsements)
+          ? driver.licence_endorsements.map((e: any) => e.code).join(', ') || 'None'
+          : 'None',
+        calculatedExcess: '',
+        isUkDriver: isUk,
+        hasDisability: driver.has_disability || false,
+        hasConvictions: driver.has_convictions || false,
+        hasProsecution: driver.has_prosecution || false,
+        hasAccidents: driver.has_accidents || false,
+        hasInsuranceIssues: driver.has_insurance_issues || false,
+        hasDrivingBan: driver.has_driving_ban || false,
+        additionalDetails: driver.additional_details || '',
+        jobId: hirehopJobId ? String(hirehopJobId) : 'N/A',
+        documents,
+        logoImage,
+      };
+
+      const { pdfBytes, filename } = await generateDriverSnapshot(snapshotData);
+      attachments = [{ filename, content: Buffer.from(pdfBytes), contentType: 'application/pdf' }];
+      console.log(`[hire-forms] Snapshot PDF generated for referral email: ${filename}`);
+    } catch (snapshotErr) {
+      console.warn('[hire-forms] Could not generate snapshot PDF for referral email:', (snapshotErr as Error).message);
+    }
+
+    await emailService.send('referral_alert', {
+      to: 'info@oooshtours.co.uk',
+      variables: {
+        driverName: driverName || 'Unknown',
+        driverEmail: driverEmail || 'N/A',
+        referralReasons: reasons.map(r => `• ${r}`).join('<br/>'),
+        linkedJobs: driver.linked_jobs || 'No active hires',
+        driverUrl: `${frontendUrl}/drivers/${driverId}`,
+      },
+      attachments,
+    });
+
+    console.log(`[hire-forms] Referral notification sent for driver ${driverName}`);
+  } catch (err) {
+    console.error('[hire-forms] Failed to send referral notification:', err);
+  }
+}
 
 export default router;
