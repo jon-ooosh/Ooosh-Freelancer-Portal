@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { validate } from '../middleware/validate';
 import { authenticate, AuthRequest } from '../middleware/auth';
-import { uploadToR2, deleteFromR2, isR2Configured } from '../config/r2';
+import { uploadToR2, deleteFromR2, getFromR2, isR2Configured } from '../config/r2';
 
 const router = Router();
 
@@ -399,6 +399,53 @@ router.delete('/avatar', authenticate, async (req: AuthRequest, res: Response) =
     res.json({ success: true });
   } catch (error) {
     console.error('Avatar delete error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/auth/avatar/:filename — public avatar endpoint (no auth required)
+// Looks up which user owns this avatar file and streams it from R2
+router.get('/avatar/:filename', async (req: Request, res: Response) => {
+  try {
+    const { filename } = req.params;
+    // Validate filename to prevent path traversal
+    if (!filename || filename.includes('/') || filename.includes('..')) {
+      res.status(400).json({ error: 'Invalid filename' });
+      return;
+    }
+
+    // Find user with this avatar filename
+    const result = await query(
+      "SELECT avatar_url FROM users WHERE avatar_url LIKE $1 LIMIT 1",
+      [`%/${filename}`]
+    );
+
+    if (!result.rows[0]?.avatar_url) {
+      res.status(404).json({ error: 'Avatar not found' });
+      return;
+    }
+
+    const key = result.rows[0].avatar_url;
+    const object = await getFromR2(key);
+
+    if (!object.Body) {
+      res.status(404).json({ error: 'Avatar not found' });
+      return;
+    }
+
+    // Cache for 1 hour (avatars don't change often)
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    if (object.ContentType) {
+      res.setHeader('Content-Type', object.ContentType);
+    }
+    if (object.ContentLength) {
+      res.setHeader('Content-Length', object.ContentLength.toString());
+    }
+
+    const stream = object.Body as NodeJS.ReadableStream;
+    stream.pipe(res);
+  } catch (error) {
+    console.error('Avatar serve error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
