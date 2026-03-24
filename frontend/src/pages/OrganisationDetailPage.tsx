@@ -6,6 +6,7 @@ import OrganisationForm from '../components/OrganisationForm';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import { ORG_RELATIONSHIP_LABELS, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
+import { useAuthStore } from '../hooks/useAuthStore';
 
 interface OrgDetail {
   id: string;
@@ -21,6 +22,15 @@ interface OrgDetail {
   files: Array<{ name: string; url: string; type: 'document' | 'image' | 'other'; uploaded_at: string; uploaded_by: string }>;
   parent_name: string | null;
   parent_id: string | null;
+  do_not_hire: boolean;
+  do_not_hire_reason: string | null;
+  do_not_hire_set_at: string | null;
+  do_not_hire_set_by: string | null;
+  working_terms_type: string | null;
+  working_terms_credit_days: number | null;
+  working_terms_notes: string | null;
+  ai_summary: string | null;
+  ai_research: string | null;
   created_at: string;
   people: Array<{
     id: string;
@@ -75,8 +85,12 @@ const typeColors: Record<string, string> = {
 export default function OrganisationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = user?.role === 'admin' || user?.role === 'manager';
 
   const [org, setOrg] = useState<OrgDetail | null>(null);
+  const [dnoReason, setDnoReason] = useState('');
+  const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'timeline' | 'details'>('people');
@@ -266,6 +280,61 @@ export default function OrganisationDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Do Not Hire Banner */}
+      {org.do_not_hire && (
+        <div className="mb-4 bg-red-50 border border-red-200 rounded-lg px-4 py-3 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-red-800">DO NOT HIRE</p>
+            {org.do_not_hire_reason && <p className="text-sm text-red-600 mt-0.5">{org.do_not_hire_reason}</p>}
+            {org.do_not_hire_set_by && <p className="text-xs text-red-400 mt-0.5">Set by {org.do_not_hire_set_by}</p>}
+          </div>
+          {isAdmin && (
+            <button
+              onClick={async () => {
+                await api.post(`/organisations/${id}/do-not-hire`, { do_not_hire: false });
+                loadOrg();
+              }}
+              className="text-xs px-3 py-1.5 bg-red-100 text-red-700 rounded hover:bg-red-200"
+            >
+              Lift restriction
+            </button>
+          )}
+        </div>
+      )}
+      {!org.do_not_hire && isAdmin && (
+        <div className="mb-4">
+          {showDnoForm ? (
+            <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
+              <input
+                value={dnoReason}
+                onChange={e => setDnoReason(e.target.value)}
+                placeholder="Reason (optional)..."
+                className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm"
+              />
+              <button
+                onClick={async () => {
+                  await api.post(`/organisations/${id}/do-not-hire`, { do_not_hire: true, reason: dnoReason || null });
+                  setShowDnoForm(false);
+                  setDnoReason('');
+                  loadOrg();
+                }}
+                className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700"
+              >
+                Confirm
+              </button>
+              <button onClick={() => { setShowDnoForm(false); setDnoReason(''); }} className="text-xs px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowDnoForm(true)}
+              className="text-xs px-3 py-1.5 border border-red-200 text-red-600 rounded hover:bg-red-50"
+            >
+              Flag as Do Not Hire
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Smart suggestions */}
       {(() => {
@@ -564,12 +633,57 @@ export default function OrganisationDetailPage() {
             <DetailField label="Address" value={org.address} />
             <DetailField label="Created" value={formatDate(org.created_at)} />
           </div>
-          {org.notes && (
-            <div className="mt-6 pt-4 border-t">
-              <h3 className="text-sm font-semibold text-gray-700 mb-2">Notes</h3>
+          {/* Working Terms */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Working Terms</h3>
+            {org.working_terms_type ? (
+              <div className="text-sm text-gray-600">
+                <span className="font-medium">{
+                  { usual: 'USUAL (25% deposit, full balance before hire)',
+                    flex_balance: 'FLEX BALANCE (25% deposit, flexible balance)',
+                    no_deposit: 'NO DEPOSIT (balance by start of hire)',
+                    credit: 'CREDIT (no deposit, flexible balance)',
+                    custom: 'CUSTOM' }[org.working_terms_type] || org.working_terms_type
+                }</span>
+                {(org.working_terms_type === 'flex_balance' || org.working_terms_type === 'credit') && org.working_terms_credit_days && (
+                  <span className="ml-2 text-gray-500">({org.working_terms_credit_days} day credit)</span>
+                )}
+                {org.working_terms_notes && <p className="mt-1 text-gray-500">{org.working_terms_notes}</p>}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-400 italic">Not set — edit to configure</p>
+            )}
+          </div>
+
+          {/* Internal Notes */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Internal Notes</h3>
+            {org.notes ? (
               <p className="text-sm text-gray-600 whitespace-pre-wrap">{org.notes}</p>
-            </div>
-          )}
+            ) : (
+              <p className="text-sm text-gray-400 italic">No notes — edit to add</p>
+            )}
+          </div>
+
+          {/* AI Summary */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">AI Summary</h3>
+            {org.ai_summary ? (
+              <p className="text-sm text-gray-600 whitespace-pre-wrap">{org.ai_summary}</p>
+            ) : (
+              <p className="text-sm text-gray-400 italic">No AI summary yet — this will auto-populate with a summary of activity in the system</p>
+            )}
+          </div>
+
+          {/* AI Research */}
+          <div className="mt-6 pt-4 border-t">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">AI Research</h3>
+            {org.ai_research ? (
+              <p className="text-sm text-gray-600 whitespace-pre-wrap">{org.ai_research}</p>
+            ) : (
+              <p className="text-sm text-gray-400 italic">No AI research yet — this will show discovered context from external sources</p>
+            )}
+          </div>
 
           <div className="mt-6 pt-4 border-t">
             <FileUpload

@@ -653,6 +653,22 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
 
 #### Remaining Phase 2 work (no strict ordering)
 
+- [x] **Address Book Enhancements** (24 Mar 2026)
+  - [x] Do Not Hire flag on People + Organisations (red banner, admin set/lift, audit logged, non-blocking)
+  - [x] Working Terms dropdown on People + Organisations (USUAL/FLEX BALANCE/NO DEPOSIT/CREDIT/CUSTOM + credit days)
+  - [x] AI text panels on all address book entities: Internal Notes (always shown), AI Summary (placeholder), AI Research (placeholder)
+  - [x] File sharing flag (`share_with_freelancer`) on venue files (green Shared badge, hover toggle)
+  - [x] Google Maps link on venue addresses (map pin icon)
+  - [x] Organisation picker on venue form + org display on venue detail
+  - [x] Pagination on Organisations and Venues pages
+  - [x] Missing org type "client" added to form dropdown + filter (was causing default-to-band bug)
+  - [x] Multi-filter on People: has email, has phone, freelancers, approved
+  - [x] Multi-filter on Organisations: has email, has people, type
+  - [x] Multi-filter on Venues: linked to org
+  - [x] Sort options on all list pages: name, recently added, recently updated, last contacted
+  - [x] "Last Contact" column on People + Organisations (colour-coded: green <30d, amber 30-90d, red >90d)
+  - [x] Smart suggestions on Org Detail (suggest band retype for misclassified clients)
+  - [x] Data Cleanup page restricted to admin/manager roles in nav
 - [ ] **Crew & Transport refinements**
   - [x] `is_freelancer` flag + freelancer filtering in crew assignment
   - [x] Tab badge count fix (show quote count on initial load)

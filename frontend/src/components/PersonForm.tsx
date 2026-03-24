@@ -26,6 +26,9 @@ interface PersonFormData {
   emergency_contact_phone: string;
   licence_details: string;
   freelancer_references: string;
+  working_terms_type: string;
+  working_terms_credit_days: string;
+  working_terms_notes: string;
 }
 
 interface PersonFormProps {
@@ -87,6 +90,9 @@ const emptyForm: PersonFormData = {
   emergency_contact_phone: '',
   licence_details: '',
   freelancer_references: '',
+  working_terms_type: '',
+  working_terms_credit_days: '',
+  working_terms_notes: '',
 };
 
 export default function PersonForm({ personId, onSaved, onCancel }: PersonFormProps) {
@@ -135,6 +141,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         emergency_contact_phone: (data.emergency_contact_phone as string) || '',
         licence_details: (data.licence_details as string) || '',
         freelancer_references: (data.freelancer_references as string) || '',
+        working_terms_type: (data.working_terms_type as string) || '',
+        working_terms_credit_days: data.working_terms_credit_days != null ? String(data.working_terms_credit_days) : '',
+        working_terms_notes: (data.working_terms_notes as string) || '',
       });
       setShowFreelancer((data.is_freelancer as boolean) || false);
       if (data.version !== undefined) setRecordVersion(data.version as number);
@@ -219,6 +228,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         freelancer_joined_date: form.freelancer_joined_date || null,
         freelancer_next_review_date: form.freelancer_next_review_date || null,
         freelancer_references: form.freelancer_references || null,
+        working_terms_type: form.working_terms_type || null,
+        working_terms_credit_days: form.working_terms_credit_days ? parseInt(form.working_terms_credit_days) : null,
+        working_terms_notes: form.working_terms_notes || null,
       };
 
       if (isEdit) {
@@ -314,6 +326,36 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
           <button type="button" onClick={addTag} className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Add</button>
         </div>
       </div>
+
+      {/* Working Terms */}
+      <h3 className="text-sm font-semibold text-gray-700 pt-2">Working Terms</h3>
+      <div>
+        <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Payment Terms</label>
+        <select
+          value={form.working_terms_type}
+          onChange={e => set('working_terms_type', e.target.value)}
+          className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        >
+          <option value="">Not set</option>
+          <option value="usual">USUAL (25% deposit, full balance before hire)</option>
+          <option value="flex_balance">FLEX BALANCE (25% deposit, flexible balance)</option>
+          <option value="no_deposit">NO DEPOSIT (balance by start of hire)</option>
+          <option value="credit">CREDIT (no deposit, flexible balance)</option>
+          <option value="custom">CUSTOM</option>
+        </select>
+      </div>
+      {(form.working_terms_type === 'flex_balance' || form.working_terms_type === 'credit') && (
+        <div>
+          <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Credit Days</label>
+          <input type="number" value={form.working_terms_credit_days} onChange={e => set('working_terms_credit_days', e.target.value)} placeholder="e.g. 30" className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+        </div>
+      )}
+      {form.working_terms_type && (
+        <div>
+          <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Terms Notes</label>
+          <input value={form.working_terms_notes} onChange={e => set('working_terms_notes', e.target.value)} placeholder="Any additional terms details..." className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500" />
+        </div>
+      )}
 
       {/* Notes */}
       <div>

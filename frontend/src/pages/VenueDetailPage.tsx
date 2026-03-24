@@ -26,6 +26,8 @@ interface VenueDetail {
   default_drive_time_mins: number | null;
   default_return_cost: number | null;
   tags: string[];
+  ai_summary: string | null;
+  ai_research: string | null;
   files: Array<{ name: string; url: string; type: 'document' | 'image' | 'other'; uploaded_at: string; uploaded_by: string }>;
   created_at: string;
 }
@@ -118,7 +120,20 @@ export default function VenueDetailPage() {
                 <Link to={`/organisations/${venue.organisation_id}`} className="text-ooosh-600 hover:text-ooosh-700">{orgName}</Link>
               </p>
             )}
-            {fullAddress && <p className="mt-1 text-sm text-gray-500">{fullAddress}</p>}
+            {fullAddress && (
+              <p className="mt-1 text-sm text-gray-500">
+                {fullAddress}
+                <a
+                  href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fullAddress)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="ml-2 text-ooosh-600 hover:text-ooosh-700"
+                  title="Open in Google Maps"
+                >
+                  <svg className="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                </a>
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -221,11 +236,29 @@ export default function VenueDetailPage() {
             </InfoSection>
           )}
 
-          {venue.general_notes && (
-            <InfoSection title="General Notes">
+          <InfoSection title="General Notes">
+            {venue.general_notes ? (
               <p className="text-sm text-gray-700 whitespace-pre-wrap">{venue.general_notes}</p>
-            </InfoSection>
-          )}
+            ) : (
+              <p className="text-sm text-gray-400 italic">No notes — edit to add</p>
+            )}
+          </InfoSection>
+
+          <InfoSection title="AI Summary">
+            {venue.ai_summary ? (
+              <p className="text-sm text-gray-700 whitespace-pre-wrap">{venue.ai_summary}</p>
+            ) : (
+              <p className="text-sm text-gray-400 italic">No AI summary yet — this will auto-populate with a summary of activity in the system</p>
+            )}
+          </InfoSection>
+
+          <InfoSection title="AI Research">
+            {venue.ai_research ? (
+              <p className="text-sm text-gray-700 whitespace-pre-wrap">{venue.ai_research}</p>
+            ) : (
+              <p className="text-sm text-gray-400 italic">No AI research yet — this will show discovered context from external sources</p>
+            )}
+          </InfoSection>
 
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <FileUpload
@@ -234,6 +267,7 @@ export default function VenueDetailPage() {
               files={venue.files || []}
               onFilesChanged={(files) => setVenue(prev => prev ? { ...prev, files } : prev)}
               onActivityCreated={loadInteractions}
+              showShareToggle
             />
           </div>
         </div>
