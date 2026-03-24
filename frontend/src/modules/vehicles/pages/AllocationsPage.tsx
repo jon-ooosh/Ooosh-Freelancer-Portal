@@ -40,7 +40,6 @@ export function AllocationsPage() {
   const { data: dueBackJobs, isLoading: dueBackLoading, error: dueBackError } = useUpcomingDueBackJobs(ALLOCATIONS_DAYS_AHEAD)
   const { data: allVehicles } = useVehicles()
   const { data: allocations, isLoading: allocationsLoading } = useAllocations()
-  const saveAllocations = useSaveAllocations()
 
   const allocationsList = allocations || []
 
@@ -87,6 +86,15 @@ export function AllocationsPage() {
       return dateCmp !== 0 ? dateCmp : a.id - b.id
     })
   }, [viewMode, upcomingJobs, dueBackJobs, dateFilter, today, tomorrow, endOfWeek])
+
+  // All visible job IDs — sent to backend so it knows which jobs are "in scope"
+  // for cancellation (even if they have zero allocations)
+  const managedJobIds = useMemo(
+    () => filteredJobs.map(j => j.id),
+    [filteredJobs],
+  )
+
+  const saveAllocations = useSaveAllocations(managedJobIds)
 
   const isLoading = viewMode === 'going-out' ? upcomingLoading : dueBackLoading
   const hirehopError = viewMode === 'going-out' ? upcomingError : dueBackError

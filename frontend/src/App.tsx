@@ -20,6 +20,7 @@ import DriverDetailPage from './pages/DriverDetailPage';
 import TransportOpsPage from './pages/TransportOpsPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
+import { sharedRefreshToken } from './services/api';
 
 // Initialize Vehicle Module with OP auth and API config
 initVehicleModule({
@@ -29,6 +30,7 @@ initVehicleModule({
     return token ? { Authorization: `Bearer ${token}` } : {};
   },
   authStoreGetter: () => useAuthStore.getState(),
+  sharedRefreshToken,
 });
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {

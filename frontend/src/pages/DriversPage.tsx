@@ -54,43 +54,49 @@ function isDateExpired(d: string | null): boolean {
   }
 }
 
+/**
+ * Unified driver status — single source of truth.
+ * Five statuses: Approved / Manual Review / Refer to Insurers / Referred & Waiting / Not Approved
+ */
 function deriveDriverStatus(driver: DriverListItem): { label: string; colour: string } {
-  // Referral takes priority
+  // Referral statuses take priority
   if (driver.requires_referral) {
     if (driver.referral_status === 'approved') {
-      return { label: 'Referral Approved', colour: 'bg-blue-100 text-blue-700' };
+      return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
     }
     if (driver.referral_status === 'declined') {
-      return { label: 'Referral Declined', colour: 'bg-red-100 text-red-700' };
+      return { label: 'Not Approved', colour: 'bg-red-100 text-red-700' };
     }
-    return { label: 'Referral Required', colour: 'bg-red-100 text-red-700' };
+    if (driver.referral_status === 'pending') {
+      return { label: 'Referred & Waiting', colour: 'bg-amber-100 text-amber-700' };
+    }
+    // requires_referral but no referral_status = needs referring
+    return { label: 'Refer to Insurers', colour: 'bg-red-100 text-red-700' };
   }
 
-  // Check for expired documents
+  // Check for expired/missing documents or incomplete form
   const expiredDocs: string[] = [];
   if (isDateExpired(driver.licence_valid_to)) expiredDocs.push('Licence');
   if (isDateExpired(driver.dvla_valid_until)) expiredDocs.push('DVLA');
   if (isDateExpired(driver.poa1_valid_until)) expiredDocs.push('POA');
 
   if (expiredDocs.length > 0) {
-    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
+    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
   }
 
-  // In progress — has started form but not signed
+  // In progress — has started form but not signed, or missing key data
   if (!driver.signature_date && driver.email) {
     const hasLicence = !!driver.licence_number;
     const hasDvla = !!driver.dvla_check_date;
     if (!hasLicence && !hasDvla) {
-      return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+      return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
     }
   }
-
-  // If signed but missing key validity dates, still in progress
   if (driver.signature_date && !driver.dvla_valid_until && !driver.licence_valid_to) {
-    return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
   }
 
-  return { label: 'Clear', colour: 'bg-green-100 text-green-700' };
+  return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
 }
 
 export default function DriversPage() {
