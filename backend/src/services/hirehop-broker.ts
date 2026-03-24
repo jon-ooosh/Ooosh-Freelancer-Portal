@@ -45,6 +45,8 @@ const DEFAULT_CACHE_TTLS: Array<{ pattern: RegExp; ttl: number }> = [
   // Static data: contacts, stock lists — 30 min
   { pattern: /\/modules\/contacts\//, ttl: 1800 },
   { pattern: /\/api\/contact_/, ttl: 1800 },
+  // Job line items — 10 min (rarely change, main bottleneck on Allocations page)
+  { pattern: /\/frames\/items_to_supply_list/, ttl: 600 },
   // Job data — 5 min
   { pattern: /\/api\/job_data/, ttl: 300 },
   { pattern: /\/php_functions\/search_list/, ttl: 300 },

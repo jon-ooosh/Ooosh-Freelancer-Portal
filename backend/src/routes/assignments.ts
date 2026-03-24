@@ -577,6 +577,31 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
 
 router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
   try {
+    // Clean up duplicate assignments (same job + same vehicle, multiple active rows).
+    // Only touch allocations-created rows (driver_id IS NULL).
+    // Hire-form-created assignments (driver_id IS NOT NULL) are managed by the hire form flow.
+    await query(
+      `WITH ranked AS (
+        SELECT id,
+          ROW_NUMBER() OVER (
+            PARTITION BY hirehop_job_id, vehicle_id
+            ORDER BY
+              CASE status
+                WHEN 'booked_out' THEN 1 WHEN 'active' THEN 2
+                WHEN 'confirmed' THEN 3 WHEN 'soft' THEN 4
+              END,
+              created_at ASC
+          ) AS rn
+        FROM vehicle_hire_assignments
+        WHERE status IN ('soft', 'confirmed', 'booked_out', 'active')
+          AND vehicle_id IS NOT NULL
+          AND driver_id IS NULL
+      )
+      UPDATE vehicle_hire_assignments
+      SET status = 'cancelled', status_changed_at = NOW(), updated_at = NOW()
+      WHERE id IN (SELECT id FROM ranked WHERE rn > 1)`
+    );
+
     const result = await query(
       `SELECT vha.*,
         fv.reg AS vehicle_reg,
@@ -590,6 +615,7 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
 
     // Map to VanAllocation shape
     // Use driver_name from drivers table if linked, otherwise fall back to notes (freetext)
+    // Tag booked_out/active as readOnly so frontend knows not to manage them via save
     const allocations = result.rows.map((row: any) => ({
       id: row.id,
       hireHopJobId: row.hirehop_job_id,
@@ -603,6 +629,7 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
       allocatedAt: row.created_at,
       allocatedBy: row.allocated_by_name || 'Unknown',
       confirmedAt: row.status !== 'soft' ? row.status_changed_at : null,
+      readOnly: ['booked_out', 'active'].includes(row.status),
     }));
 
     res.json({ allocations });
@@ -614,6 +641,10 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
 
 // ── POST /api/assignments/compat/allocations — Save old-format allocations ──
 // Converts VanAllocation[] to assignment rows. Used by existing frontend.
+//
+// Strategy: Match existing DB rows by UUID (id). Only modify soft/confirmed
+// assignments — booked_out/active are managed by book-out/hire-form flows.
+// Uses (job_id, vehicle_id) dedup to prevent duplicate rows.
 
 router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
   try {
@@ -625,12 +656,9 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
     }
 
     // Collect the set of job IDs being managed in this save request.
-    // This includes both jobs with allocations AND jobs the frontend is displaying
-    // (so removing the last allocation for a job still cancels it).
     const incomingJobIds = new Set<number>(
       allocations.map((a: any) => Number(a.hireHopJobId)).filter((n: number) => !isNaN(n))
     );
-    // Also include explicitly managed job IDs (all visible jobs on the allocations page)
     if (Array.isArray(managedJobIds)) {
       for (const jid of managedJobIds) {
         const n = Number(jid);
@@ -638,42 +666,53 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Only load existing assignments for jobs that are in scope
-    const existing = incomingJobIds.size > 0
-      ? await query(
-          `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id, notes
-           FROM vehicle_hire_assignments
-           WHERE status IN ('soft', 'confirmed')
-             AND hirehop_job_id = ANY($1)`,
-          [Array.from(incomingJobIds)]
-        )
-      : { rows: [] };
+    if (incomingJobIds.size === 0) {
+      res.json({ success: true });
+      return;
+    }
 
-    const existingMap = new Map(
-      existing.rows.map((r: any) => [`${r.hirehop_job_id}-${r.van_requirement_index}`, r])
+    // Load ALL existing active assignments for managed jobs (all statuses the GET returns)
+    const existing = await query(
+      `SELECT id, hirehop_job_id, van_requirement_index, vehicle_id, driver_id, notes, status
+       FROM vehicle_hire_assignments
+       WHERE status IN ('soft', 'confirmed', 'booked_out', 'active')
+         AND hirehop_job_id = ANY($1)`,
+      [Array.from(incomingJobIds)]
     );
 
-    const incomingIds = new Set<string>();
+    // Index by UUID for matching incoming allocations to existing DB rows
+    const existingById = new Map<string, any>(
+      existing.rows.map((r: any) => [r.id, r])
+    );
+    // Index by (job, vehicle) for dedup — prevents creating duplicate rows
+    const existingByJobVehicle = new Map<string, any>();
+    for (const r of existing.rows) {
+      if (r.vehicle_id) {
+        existingByJobVehicle.set(`${r.hirehop_job_id}-${r.vehicle_id}`, r);
+      }
+    }
+
+    // Track which existing rows are still referenced by the incoming data
+    const touchedIds = new Set<string>();
 
     for (const alloc of allocations) {
-      const key = `${alloc.hireHopJobId}-${alloc.vanRequirementIndex}`;
-      incomingIds.add(key);
-
-      const existingRow = existingMap.get(key);
-
-      // Resolve driver_id from driverName if provided
-      let driverId: string | null = alloc.driverId || null;
-      const driverName = alloc.driverName || null;
-      if (driverName && !driverId) {
-        const dResult = await query(
-          `SELECT id FROM drivers WHERE full_name ILIKE $1 AND is_active = true ORDER BY updated_at DESC LIMIT 1`,
-          [driverName.trim()]
-        );
-        driverId = dResult.rows[0]?.id || null;
+      // Skip readOnly allocations — booked_out/active are not managed here
+      if (alloc.readOnly) {
+        const existingRow = existingById.get(alloc.id);
+        if (existingRow) touchedIds.add(existingRow.id);
+        continue;
       }
 
+      // Try to match by UUID (DB ID returned from GET)
+      const existingRow = existingById.get(alloc.id);
+
       if (existingRow) {
-        // Update existing — resolve vehicle by reg if needed
+        touchedIds.add(existingRow.id);
+
+        // Only update soft/confirmed assignments
+        if (!['soft', 'confirmed'].includes(existingRow.status)) continue;
+
+        // Resolve vehicle by reg if needed
         let vehicleId = alloc.vehicleId;
         if (!vehicleId || !/^[0-9a-f-]{36}$/i.test(vehicleId)) {
           const vResult = await query(
@@ -683,15 +722,22 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
           vehicleId = vResult.rows[0]?.id || existingRow.vehicle_id;
         }
 
+        // Resolve driver
+        let driverId: string | null = alloc.driverId || null;
+        const driverName = alloc.driverName || null;
+        if (driverName && !driverId) {
+          const dResult = await query(
+            `SELECT id FROM drivers WHERE full_name ILIKE $1 AND is_active = true ORDER BY updated_at DESC LIMIT 1`,
+            [driverName.trim()]
+          );
+          driverId = dResult.rows[0]?.id || null;
+        }
+
         await query(
           `UPDATE vehicle_hire_assignments
-           SET vehicle_id = $1,
-               hirehop_job_name = $2,
-               status = $3,
-               allocated_by_name = $4,
-               notes = $5,
-               driver_id = COALESCE($6, driver_id),
-               updated_at = NOW()
+           SET vehicle_id = $1, hirehop_job_name = $2, status = $3,
+               allocated_by_name = $4, notes = $5,
+               driver_id = COALESCE($6, driver_id), updated_at = NOW()
            WHERE id = $7`,
           [
             vehicleId,
@@ -704,24 +750,46 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
           ]
         );
       } else {
-        // Create new — resolve vehicle by reg
+        // New allocation (frontend-generated UUID, not yet in DB)
+        // Resolve vehicle
         let vehicleId = alloc.vehicleId;
         if (!vehicleId || !/^[0-9a-f-]{36}$/i.test(vehicleId)) {
           const vResult = await query(
             'SELECT id FROM fleet_vehicles WHERE reg = $1',
             [alloc.vehicleReg?.toUpperCase()]
           );
-          if (!vResult.rows[0]) continue; // Skip if vehicle not found
+          if (!vResult.rows[0]) continue;
           vehicleId = vResult.rows[0].id;
         }
 
-        await query(
+        // Check for existing assignment with same job+vehicle (dedup)
+        const dupeKey = `${alloc.hireHopJobId}-${vehicleId}`;
+        const existingDupe = existingByJobVehicle.get(dupeKey);
+        if (existingDupe) {
+          // Already assigned — don't create duplicate, just mark as touched
+          touchedIds.add(existingDupe.id);
+          continue;
+        }
+
+        // Resolve driver
+        let driverId: string | null = alloc.driverId || null;
+        const driverName = alloc.driverName || null;
+        if (driverName && !driverId) {
+          const dResult = await query(
+            `SELECT id FROM drivers WHERE full_name ILIKE $1 AND is_active = true ORDER BY updated_at DESC LIMIT 1`,
+            [driverName.trim()]
+          );
+          driverId = dResult.rows[0]?.id || null;
+        }
+
+        const insertResult = await query(
           `INSERT INTO vehicle_hire_assignments (
             vehicle_id, hirehop_job_id, hirehop_job_name,
             van_requirement_index, status, allocated_by_name,
             notes, driver_id,
             assignment_type, created_by
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'self_drive', $9)`,
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'self_drive', $9)
+          RETURNING id`,
           [
             vehicleId,
             alloc.hireHopJobId,
@@ -734,17 +802,24 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
             req.user!.id,
           ]
         );
+
+        // Track in dedup map to prevent further duplicates in this batch
+        if (insertResult.rows[0]) {
+          existingByJobVehicle.set(dupeKey, { id: insertResult.rows[0].id });
+        }
       }
     }
 
-    // Cancel assignments that are no longer in the incoming list
-    for (const [key, row] of existingMap) {
-      if (!incomingIds.has(key)) {
+    // Cancel soft/confirmed assignments that are no longer referenced.
+    // Only cancel allocations-created rows (driver_id IS NULL).
+    // Hire-form-created assignments (driver_id set) are managed by the hire form flow.
+    for (const row of existing.rows) {
+      if (['soft', 'confirmed'].includes(row.status) && !touchedIds.has(row.id) && !row.driver_id) {
         await query(
           `UPDATE vehicle_hire_assignments
            SET status = 'cancelled', status_changed_at = NOW(), updated_at = NOW()
            WHERE id = $1`,
-          [(row as any).id]
+          [row.id]
         );
       }
     }

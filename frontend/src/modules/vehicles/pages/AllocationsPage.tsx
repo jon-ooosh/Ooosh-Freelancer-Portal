@@ -126,6 +126,8 @@ export function AllocationsPage() {
   }, [allocationsList, saveAllocations])
 
   const handleRemoveAllocation = useCallback(async (allocationId: string) => {
+    const target = allocationsList.find(a => a.id === allocationId)
+    if (target?.readOnly) return // Can't remove booked_out/active allocations via allocations page
     const updated = allocationsList.filter(a => a.id !== allocationId)
     saveAllocations.mutate(updated)
   }, [allocationsList, saveAllocations])
@@ -493,13 +495,15 @@ function RequirementSlots({
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => onRemove(allocation.id)}
-                  disabled={saving}
-                  className="text-xs font-medium text-red-600 disabled:text-gray-400"
-                >
-                  Remove
-                </button>
+                {!allocation.readOnly && (
+                  <button
+                    onClick={() => onRemove(allocation.id)}
+                    disabled={saving}
+                    className="text-xs font-medium text-red-600 disabled:text-gray-400"
+                  >
+                    Remove
+                  </button>
+                )}
               </div>
             </div>
 
