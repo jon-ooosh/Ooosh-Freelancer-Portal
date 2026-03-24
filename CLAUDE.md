@@ -657,7 +657,7 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - [x] Do Not Hire flag on People + Organisations (red banner, admin set/lift, audit logged, non-blocking)
   - [x] Working Terms dropdown on People + Organisations (USUAL/FLEX BALANCE/NO DEPOSIT/CREDIT/CUSTOM + credit days)
   - [x] AI text panels on all address book entities: Internal Notes (always shown), AI Summary (placeholder), AI Research (placeholder)
-  - [x] File sharing flag (`share_with_freelancer`) on venue files (green Shared badge, hover toggle)
+  - [x] File sharing flag (`share_with_freelancer`) on venue files and job files (green Shared badge, hover toggle, persisted via `PATCH /api/files/update-metadata`)
   - [x] Google Maps link on venue addresses (map pin icon)
   - [x] Organisation picker on venue form + org display on venue detail
   - [x] Pagination on Organisations and Venues pages
@@ -669,6 +669,7 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - [x] "Last Contact" column on People + Organisations (colour-coded: green <30d, amber 30-90d, red >90d)
   - [x] Smart suggestions on Org Detail (suggest band retype for misclassified clients)
   - [x] Data Cleanup page restricted to admin/manager roles in nav
+  - [x] Client info surfacing on New Enquiry form + Job Detail sidebar: Do Not Hire warning (red banner), Working Terms, Internal Notes — via enhanced `/pipeline/client-history` endpoint returning `client_info` from organisations table
 - [ ] **Crew & Transport refinements**
   - [x] `is_freelancer` flag + freelancer filtering in crew assignment
   - [x] Tab badge count fix (show quote count on initial load)
@@ -724,7 +725,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Mileage-based service threshold notifications** — add to daily compliance check, alert when vehicle within configurable miles of `next_service_due`
 - **Email notifications** — add SMTP/transactional email channel alongside in-app bell notifications (needs email service config)
 - **Per-user notification preferences** — allow users to opt in/out of specific notification categories (compliance, chase reminders, etc.)
-- **Freelancer portal repointing** — switch freelancer-facing app from Monday.com read/write to OP API for crew assignments, delivery jobs, studio sitter assignments, hire form status
+- **Freelancer portal repointing** — switch freelancer-facing app from Monday.com read/write to OP API for crew assignments, delivery jobs, studio sitter assignments, hire form status. **Note:** `share_with_freelancer` flag exists on venue files and job files — portal should filter files by this flag when serving to freelancers (only show files where `share_with_freelancer = true`). Backend endpoint: `PATCH /api/files/update-metadata` persists the toggle.
 - **Address Book CRM & Filtering Enhancements:**
   - *Tier 1 (quick wins):*
     - [x] Multi-filter on People page: has email, has phone, linked org type, tags, location/city

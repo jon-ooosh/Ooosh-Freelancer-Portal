@@ -13,6 +13,7 @@ export interface FileAttachment {
   type: 'document' | 'image' | 'other';
   uploaded_at: string;
   uploaded_by: string;
+  share_with_freelancer?: boolean;
 }
 
 export interface Person {

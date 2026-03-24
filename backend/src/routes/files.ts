@@ -222,4 +222,50 @@ router.delete('/delete', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// PATCH /api/files/update-metadata — update file metadata (e.g. share_with_freelancer toggle)
+router.patch('/update-metadata', async (req: AuthRequest, res: Response) => {
+  try {
+    const { entity_type, entity_id, file_url, updates } = req.body;
+    if (!entity_type || !entity_id || !file_url || !updates) {
+      res.status(400).json({ error: 'entity_type, entity_id, file_url, and updates are required' });
+      return;
+    }
+
+    const validTypes = ['people', 'organisations', 'venues', 'interactions', 'jobs', 'drivers'];
+    if (!validTypes.includes(entity_type)) {
+      res.status(400).json({ error: 'Invalid entity_type' });
+      return;
+    }
+
+    // Only allow safe metadata fields to be updated
+    const allowedFields = ['share_with_freelancer', 'label', 'comment'];
+    const safeUpdates: Record<string, unknown> = {};
+    for (const key of Object.keys(updates)) {
+      if (allowedFields.includes(key)) {
+        safeUpdates[key] = updates[key];
+      }
+    }
+
+    const entity = await query(`SELECT files FROM ${entity_type} WHERE id = $1`, [entity_id]);
+    if (entity.rows.length === 0) {
+      res.status(404).json({ error: 'Entity not found' });
+      return;
+    }
+
+    const files = (entity.rows[0].files || []).map(
+      (f: Record<string, unknown>) => f.url === file_url ? { ...f, ...safeUpdates } : f
+    );
+
+    await query(
+      `UPDATE ${entity_type} SET files = $1::jsonb, updated_at = NOW() WHERE id = $2`,
+      [JSON.stringify(files), entity_id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('File metadata update error:', error);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
 export default router;

@@ -796,6 +796,12 @@ export default function JobDetailPage() {
       total_jobs: string; confirmed_jobs: string; lost_jobs: string;
       total_confirmed_value: string; total_value: string;
     };
+    client_info?: {
+      id: string; name: string;
+      do_not_hire: boolean; do_not_hire_reason: string | null;
+      working_terms_type: string | null; working_terms_credit_days: number | null;
+      working_terms_notes: string | null; internal_notes: string | null;
+    } | null;
   } | null>(null);
 
   useEffect(() => {
@@ -1122,7 +1128,7 @@ export default function JobDetailPage() {
     ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
     : null;
 
-  const showClientHistory = clientHistoryData && parseInt(clientHistoryData.stats.total_jobs) > 0;
+  const showClientHistory = clientHistoryData && (parseInt(clientHistoryData.stats.total_jobs) > 0 || clientHistoryData.client_info);
 
   return (
     <div className={showClientHistory ? 'lg:flex lg:gap-6' : ''}>
@@ -2726,6 +2732,47 @@ export default function JobDetailPage() {
               Client History — {job.client_name || job.company_name}
             </h3>
 
+            {/* Do Not Hire warning */}
+            {clientHistoryData!.client_info?.do_not_hire && (
+              <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg">
+                <div className="flex items-center gap-2 mb-1">
+                  <svg className="w-4 h-4 text-red-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                  <span className="text-sm font-bold text-red-700">DO NOT HIRE</span>
+                </div>
+                {clientHistoryData!.client_info.do_not_hire_reason && (
+                  <p className="text-xs text-red-600 mt-1">{clientHistoryData!.client_info.do_not_hire_reason}</p>
+                )}
+              </div>
+            )}
+
+            {/* Working Terms */}
+            {clientHistoryData!.client_info?.working_terms_type && (
+              <div className="mb-3 p-2 bg-gray-50 rounded-lg">
+                <div className="text-[10px] font-semibold text-gray-500 uppercase mb-0.5">Working Terms</div>
+                <div className="text-xs font-medium text-gray-900">
+                  {clientHistoryData!.client_info.working_terms_type === 'usual' ? 'USUAL (25% deposit, full before hire)' :
+                   clientHistoryData!.client_info.working_terms_type === 'flex_balance' ? 'FLEX BALANCE (25% deposit, flexible)' :
+                   clientHistoryData!.client_info.working_terms_type === 'no_deposit' ? 'NO DEPOSIT (balance by start)' :
+                   clientHistoryData!.client_info.working_terms_type === 'credit' ? 'CREDIT (no deposit, flexible)' :
+                   'CUSTOM'}
+                </div>
+                {clientHistoryData!.client_info.working_terms_credit_days && (
+                  <div className="text-[10px] text-gray-500">{clientHistoryData!.client_info.working_terms_credit_days} day credit terms</div>
+                )}
+                {clientHistoryData!.client_info.working_terms_notes && (
+                  <p className="text-[10px] text-gray-500 mt-0.5">{clientHistoryData!.client_info.working_terms_notes}</p>
+                )}
+              </div>
+            )}
+
+            {/* Internal Notes */}
+            {clientHistoryData!.client_info?.internal_notes && (
+              <div className="mb-3 p-2 bg-amber-50 border border-amber-100 rounded-lg">
+                <div className="text-[10px] font-semibold text-amber-700 uppercase mb-0.5">Internal Notes</div>
+                <p className="text-[10px] text-gray-700 whitespace-pre-wrap leading-relaxed">{clientHistoryData!.client_info.internal_notes}</p>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-2 mb-4">
               <div className="bg-gray-50 rounded-lg p-2 text-center">
                 <div className="text-lg font-bold text-gray-900">{clientHistoryData!.stats.total_jobs}</div>
@@ -3295,6 +3342,20 @@ function JobFilesSection({
   const [filterTag, setFilterTag] = useState('');
   const [viewingFile, setViewingFile] = useState<FileAttachment | null>(null);
 
+  const handleToggleShare = async (file: FileAttachment) => {
+    try {
+      await api.patch('/files/update-metadata', {
+        entity_type: 'jobs',
+        entity_id: jobId,
+        file_url: file.url,
+        updates: { share_with_freelancer: !file.share_with_freelancer },
+      });
+      onFilesChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update share status');
+    }
+  };
+
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -3480,17 +3541,28 @@ function JobFilesSection({
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 ml-2">
+                  <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                    <button
+                      onClick={() => handleToggleShare(file)}
+                      className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                        file.share_with_freelancer
+                          ? 'bg-green-50 border-green-200 text-green-700'
+                          : 'bg-gray-50 border-gray-200 text-gray-400 opacity-0 group-hover:opacity-100'
+                      }`}
+                      title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
+                    >
+                      {file.share_with_freelancer ? 'Shared' : 'Share'}
+                    </button>
                     <button
                       onClick={() => setViewingFile(file)}
-                      className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                      className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
                     >
                       View
                     </button>
                     <button
                       onClick={() => handleDelete(file.url)}
                       disabled={deleting === file.url}
-                      className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50"
+                      className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-0 group-hover:opacity-100 transition-opacity"
                     >
                       {deleting === file.url ? '...' : 'Delete'}
                     </button>
