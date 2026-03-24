@@ -113,6 +113,7 @@ export interface VanAllocation {
   allocatedAt: string            // ISO timestamp
   allocatedBy: string            // Staff name who made the allocation
   confirmedAt: string | null     // When booked out (null for soft allocations)
+  readOnly?: boolean             // true for booked_out/active — not modifiable via allocations save
 }
 
 /** Fleet-wide allocations index — single file in R2 at allocations/_index.json */

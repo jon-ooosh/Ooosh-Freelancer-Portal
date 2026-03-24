@@ -32,8 +32,9 @@ export function useSaveAllocations(managedJobIds?: number[]) {
       queryClient.setQueryData(['allocations'], newAllocations)
       return { previous }
     },
-    onError: (_err, _new, context) => {
+    onError: (err, _new, context) => {
       // Revert on error
+      console.error('[allocations] Save failed, reverting:', err)
       if (context?.previous) {
         queryClient.setQueryData(['allocations'], context.previous)
       }
