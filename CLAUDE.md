@@ -624,30 +624,51 @@ Organisation-to-organisation relationships and multi-org job links. Makes "bands
 HireHop sync imported contacts literally — bands became people, management companies got typed as "client", etc.
 The cleanup strategy is: OP becomes master for relationship data, HH gets what it needs via push.
 
-*Step 1: OP→HH job creation* (part of Stream A)
-- [ ] `POST /api/pipeline/:id/push-hirehop` — create job in HH via `job_save.php` API
-- [ ] Map OP fields → HH: contact person → `name`, client org → `company`, dates → `out`/`start`/`end`/`to`, job name → `job_name`, details → `details`
-- [ ] Write back HH job number to OP `jobs.hh_job_number`
-- [ ] Include `no_webhook=1` to prevent sync loops
-- [ ] Band stays in OP only (HH has no band field)
+*Step 1: OP→HH job creation* ✅ COMPLETE (part of Stream A)
+- [x] `POST /api/pipeline/:id/push-hirehop` — create job in HH via `save_job.php` API
+- [x] Map OP fields → HH: contact person → `name`, client org → `company`, dates → `out`/`start`/`end`/`to`, job name → `job_name`, details → `details`
+- [x] Write back HH job number to OP `jobs.hh_job_number`
+- [x] Include `no_webhook=1` to prevent sync loops
+- [x] Band stays in OP only (HH has no band field)
+- [x] Frontend: "Create in HireHop" button on Job Detail + optional checkbox on New Enquiry form
 
-*Step 2: Sync guard rails*
-- [ ] HH contact sync: when Contact Name matches existing *organisation* (not person), flag as conflict → "needs review" queue
-- [ ] HH job sync: never overwrite OP-enriched org types or relationships
-- [ ] Surface "needs review" items on Dashboard or Settings page
+*Step 2: Sync guard rails* ✅ COMPLETE
+- [x] HH contact sync: when new person name matches existing *organisation*, flag as `name_conflict` → review queue
+- [x] HH contact sync: when new org typed 'client' doesn't look like a company name, flag as `possible_band` → review queue
+- [x] HH contact sync: type mismatches flagged as `type_mismatch` → review queue (preserves manually-set types, only overwrites HH-derived types: client/venue/supplier/unknown)
+- [x] HH contact sync: tags merged (not replaced) on existing orgs
+- [x] HH job sync: only updates HH-owned fields (status, dates, names), uses COALESCE for org links, never touches pipeline_status/org types/relationships/job_organisations
+- [x] Surface "needs review" items on Data Cleanup page (Sync Review Queue tab with resolve/dismiss actions)
 
-*Step 3: Data cleanup tools*
-- [ ] "Convert Person to Organisation" — reclassify a person as an org (e.g. "10cc" person → "10cc" band org), preserve relationships
-- [ ] "Merge duplicates" — merge person+org that represent the same entity
-- [ ] Bulk type correction — change org types (e.g. all "client" orgs that are actually bands)
-- [ ] "Needs review" page for sync conflicts
+*Step 3: Data cleanup tools* ✅ MOSTLY COMPLETE
+- [x] "Convert Person to Organisation" — transactional: creates org, copies external IDs, moves interactions + job links, soft-deletes person
+- [ ] "Merge duplicates" — merge person+org that represent the same entity (person+person merge exists on DuplicatesPage)
+- [x] Bulk type correction — multi-select orgs by type, change type in bulk (auto-resolves pending type_mismatch reviews)
+- [x] "Needs review" page — Data Cleanup page (`/data-cleanup`) with Sync Review Queue, Org Types, Convert Person tabs
+- [x] Organisation type stats breakdown with click-through to orgs of each type
 
-*Step 4: Smart relationship suggestions*
-- [ ] When viewing a "Contact" at a "client" org, system suggests: "Is this actually a Band?"
-- [ ] When new HH sync creates entities, surface for review before they pollute the graph
+*Step 4: Smart relationship suggestions* ✅ COMPLETE
+- [x] When viewing a "Contact" at a "client" org, system suggests: "Is this actually a Band?" (amber banner on Org Detail)
+- [x] When new HH sync creates entities, surface for review before they pollute the graph (sync flagging → review queue)
 
 #### Remaining Phase 2 work (no strict ordering)
 
+- [x] **Address Book Enhancements** (24 Mar 2026)
+  - [x] Do Not Hire flag on People + Organisations (red banner, admin set/lift, audit logged, non-blocking)
+  - [x] Working Terms dropdown on People + Organisations (USUAL/FLEX BALANCE/NO DEPOSIT/CREDIT/CUSTOM + credit days)
+  - [x] AI text panels on all address book entities: Internal Notes (always shown), AI Summary (placeholder), AI Research (placeholder)
+  - [x] File sharing flag (`share_with_freelancer`) on venue files (green Shared badge, hover toggle)
+  - [x] Google Maps link on venue addresses (map pin icon)
+  - [x] Organisation picker on venue form + org display on venue detail
+  - [x] Pagination on Organisations and Venues pages
+  - [x] Missing org type "client" added to form dropdown + filter (was causing default-to-band bug)
+  - [x] Multi-filter on People: has email, has phone, freelancers, approved
+  - [x] Multi-filter on Organisations: has email, has people, type
+  - [x] Multi-filter on Venues: linked to org
+  - [x] Sort options on all list pages: name, recently added, recently updated, last contacted
+  - [x] "Last Contact" column on People + Organisations (colour-coded: green <30d, amber 30-90d, red >90d)
+  - [x] Smart suggestions on Org Detail (suggest band retype for misclassified clients)
+  - [x] Data Cleanup page restricted to admin/manager roles in nav
 - [ ] **Crew & Transport refinements**
   - [x] `is_freelancer` flag + freelancer filtering in crew assignment
   - [x] Tab badge count fix (show quote count on initial load)
@@ -704,6 +725,22 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Email notifications** — add SMTP/transactional email channel alongside in-app bell notifications (needs email service config)
 - **Per-user notification preferences** — allow users to opt in/out of specific notification categories (compliance, chase reminders, etc.)
 - **Freelancer portal repointing** — switch freelancer-facing app from Monday.com read/write to OP API for crew assignments, delivery jobs, studio sitter assignments, hire form status
+- **Address Book CRM & Filtering Enhancements:**
+  - *Tier 1 (quick wins):*
+    - [x] Multi-filter on People page: has email, has phone, linked org type, tags, location/city
+    - [x] Multi-filter on Organisations page: tags, location, has email, has people
+    - [x] Multi-filter on Venues page: city, has org link
+    - [x] Sort options on all list pages: alphabetical, recently added, recently updated
+    - [x] "Last contacted" indicator on People/Orgs — show most recent interaction date, flag overdue contacts
+  - *Tier 2 (medium effort):*
+    - [ ] Saved filters / smart lists — save filter combinations as named views (e.g. "London promoters", "Bands without management link", "Contacts not chased in 90 days")
+    - [ ] Bulk tagging — select multiple orgs/people, apply tag in one click (campaign prep)
+    - [ ] Export to CSV — filtered results exportable for mailouts or spreadsheet work
+    - [ ] "Related to jobs" filter — show orgs/people involved in jobs within a date range, or who've never had a job (partially available via job_organisations links already)
+  - *Tier 3 (larger lift):*
+    - [ ] Pipeline-style contact nurturing — track where leads/contacts are in a relationship lifecycle
+    - [ ] Campaign/mailout integration — tag contacts for a promo, send via email service
+    - [ ] Activity scoring — surface who's most engaged / least contacted
 
 ### Phase 3–5
 

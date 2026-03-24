@@ -28,6 +28,13 @@ const createOrgSchema = z.object({
   notes: z.string().optional().nullable(),
   tags: z.array(z.string()).optional().default([]),
   files: z.array(fileSchema).optional().default([]),
+  // Working terms
+  working_terms_type: z.enum(['usual', 'flex_balance', 'no_deposit', 'credit', 'custom']).optional().nullable(),
+  working_terms_credit_days: z.number().int().optional().nullable(),
+  working_terms_notes: z.string().optional().nullable(),
+  // AI text fields
+  ai_summary: z.string().optional().nullable(),
+  ai_research: z.string().optional().nullable(),
 });
 
 const updateOrgSchema = createOrgSchema.partial();
@@ -35,14 +42,15 @@ const updateOrgSchema = createOrgSchema.partial();
 // GET /api/organisations
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, type, page = '1', limit = '50' } = req.query;
+    const { search, type, page = '1', limit = '50', tag, has_email, has_people, location, sort } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
       SELECT o.*,
         (SELECT COUNT(*) FROM person_organisation_roles por
          WHERE por.organisation_id = o.id AND por.status = 'active') as active_people_count,
-        parent.name as parent_name
+        parent.name as parent_name,
+        (SELECT MAX(i.created_at) FROM interactions i WHERE i.organisation_id = o.id) as last_interaction_at
       FROM organisations o
       LEFT JOIN organisations parent ON parent.id = o.parent_id
       WHERE o.is_deleted = false
@@ -62,13 +70,41 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       paramIndex++;
     }
 
+    if (tag) {
+      sql += ` AND $${paramIndex} = ANY(o.tags)`;
+      params.push(tag);
+      paramIndex++;
+    }
+
+    if (has_email === 'true') {
+      sql += ` AND o.email IS NOT NULL AND o.email != ''`;
+    }
+
+    if (has_people === 'true') {
+      sql += ` AND (SELECT COUNT(*) FROM person_organisation_roles por WHERE por.organisation_id = o.id AND por.status = 'active') > 0`;
+    }
+
+    if (location) {
+      sql += ` AND o.location ILIKE $${paramIndex}`;
+      params.push(`%${location}%`);
+      paramIndex++;
+    }
+
     const countResult = await query(
       sql.replace(/SELECT o\.\*.*FROM organisations o/s, 'SELECT COUNT(*) FROM organisations o'),
       params
     );
     const total = parseInt(countResult.rows[0].count);
 
-    sql += ` ORDER BY o.name LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    const sortMap: Record<string, string> = {
+      'name': 'o.name',
+      'recently_added': 'o.created_at DESC',
+      'recently_updated': 'o.updated_at DESC',
+      'last_contacted': '(SELECT MAX(i.created_at) FROM interactions i WHERE i.organisation_id = o.id) DESC NULLS LAST',
+    };
+    const orderBy = sortMap[sort as string] || 'o.name';
+
+    sql += ` ORDER BY ${orderBy} LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(parseInt(limit as string), offset);
 
     const result = await query(sql, params);
@@ -440,6 +476,33 @@ router.get('/:id/suggestions', async (req: AuthRequest, res: Response) => {
     res.json({ data: suggestions });
   } catch (error) {
     console.error('Get org suggestions error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/organisations/:id/do-not-hire — Toggle do-not-hire flag
+router.post('/:id/do-not-hire', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { do_not_hire, reason } = req.body;
+    const result = await query(
+      `UPDATE organisations SET
+        do_not_hire = $1,
+        do_not_hire_reason = $2,
+        do_not_hire_set_at = CASE WHEN $1 THEN NOW() ELSE NULL END,
+        do_not_hire_set_by = CASE WHEN $1 THEN $3 ELSE NULL END,
+        updated_at = NOW()
+      WHERE id = $4 AND is_deleted = false
+      RETURNING id, do_not_hire, do_not_hire_reason`,
+      [do_not_hire, do_not_hire ? (reason || null) : null, req.user?.email || 'unknown', req.params.id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Organisation not found' });
+      return;
+    }
+    await logAudit(req.user!.id, 'organisations', req.params.id as string, 'update', null, { do_not_hire, reason });
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Do not hire error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -8,6 +8,7 @@ interface FileAttachment {
   type: 'document' | 'image' | 'other';
   uploaded_at: string;
   uploaded_by: string;
+  share_with_freelancer?: boolean;
 }
 
 interface FileUploadProps {
@@ -18,6 +19,7 @@ interface FileUploadProps {
   onActivityCreated?: () => void;
   readOnly?: boolean;
   labelSuggestions?: string[];
+  showShareToggle?: boolean;
 }
 
 const FILE_ICONS: Record<string, string> = {
@@ -31,7 +33,7 @@ const LABEL_SUGGESTIONS = [
   'Contract', 'Risk assessment', 'Photo', 'Invoice', 'Other',
 ];
 
-export default function FileUpload({ entityType, entityId, files, onFilesChanged, onActivityCreated, readOnly, labelSuggestions }: FileUploadProps) {
+export default function FileUpload({ entityType, entityId, files, onFilesChanged, onActivityCreated, readOnly, labelSuggestions, showShareToggle }: FileUploadProps) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -148,6 +150,26 @@ export default function FileUpload({ entityType, entityId, files, onFilesChanged
                 )}
               </button>
               <span className="text-xs text-gray-400 hidden sm:inline whitespace-nowrap">{formatDate(file.uploaded_at)}</span>
+              {showShareToggle && !readOnly && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const updated = files.map((f, i) => i === idx ? { ...f, share_with_freelancer: !f.share_with_freelancer } : f);
+                    onFilesChanged(updated);
+                  }}
+                  className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                    file.share_with_freelancer
+                      ? 'bg-green-50 border-green-200 text-green-700'
+                      : 'bg-gray-50 border-gray-200 text-gray-400 opacity-0 group-hover:opacity-100'
+                  }`}
+                  title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
+                >
+                  {file.share_with_freelancer ? 'Shared' : 'Share'}
+                </button>
+              )}
+              {showShareToggle && readOnly && file.share_with_freelancer && (
+                <span className="text-xs px-2 py-0.5 rounded bg-green-50 border border-green-200 text-green-700">Shared</span>
+              )}
               {!readOnly && (
                 <button
                   type="button"
