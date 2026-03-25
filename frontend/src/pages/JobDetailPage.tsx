@@ -612,7 +612,7 @@ export default function JobDetailPage() {
     } else {
       if (editOutDate && editOutDate > val) setEditOutDate(val);
     }
-    if (!editJobEnd || editJobEnd < val) {
+    if (editJobEnd && editJobEnd < val) {
       setEditJobEnd(val);
       if (dateReturnLinked) setEditReturnDate(val);
     }
