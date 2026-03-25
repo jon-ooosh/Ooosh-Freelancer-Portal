@@ -968,7 +968,7 @@ function ExpandedDetail({
           {q.work_description && (
             <div className="text-gray-500">{q.work_description}</div>
           )}
-          {q.is_multi_day && q.job_finish_date && (
+          {q.is_multi_day && q.job_date && q.job_finish_date && (
             <div className="text-gray-600">
               <span className="text-gray-400">Dates:</span> {formatDate(q.job_date)} – {formatDate(q.job_finish_date)}
               {q.num_days && q.num_days > 1 && <span className="ml-1 text-purple-600 font-medium">({q.num_days} days)</span>}
