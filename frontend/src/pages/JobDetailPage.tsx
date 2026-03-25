@@ -2348,7 +2348,7 @@ export default function JobDetailPage() {
                       />
                       Multi-day
                     </label>
-                    {editForm.is_multi_day && (
+                    {!!editForm.is_multi_day && (
                       <>
                         <input
                           type="date"
