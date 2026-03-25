@@ -2747,20 +2747,20 @@ export default function JobDetailPage() {
 
             {/* Working Terms */}
             {clientHistoryData!.client_info?.working_terms_type && (
-              <div className="mb-3 p-2 bg-gray-50 rounded-lg">
-                <div className="text-[10px] font-semibold text-gray-500 uppercase mb-0.5">Working Terms</div>
-                <div className="text-xs font-medium text-gray-900">
-                  {clientHistoryData!.client_info.working_terms_type === 'usual' ? 'USUAL (25% deposit, full before hire)' :
-                   clientHistoryData!.client_info.working_terms_type === 'flex_balance' ? 'FLEX BALANCE (25% deposit, flexible)' :
-                   clientHistoryData!.client_info.working_terms_type === 'no_deposit' ? 'NO DEPOSIT (balance by start)' :
-                   clientHistoryData!.client_info.working_terms_type === 'credit' ? 'CREDIT (no deposit, flexible)' :
-                   'CUSTOM'}
+              <div className="mb-3 p-2.5 bg-gray-50 rounded-lg">
+                <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block px-2.5 py-1 rounded text-sm font-semibold text-white ${
+                    { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[clientHistoryData!.client_info.working_terms_type] || 'bg-gray-500'
+                  }`}>{
+                    { usual: 'USUAL', flex_balance: 'FLEX BALANCE', no_deposit: 'NO DEPOSIT', credit: 'CREDIT', custom: 'CUSTOM' }[clientHistoryData!.client_info.working_terms_type] || clientHistoryData!.client_info.working_terms_type
+                  }</span>
+                  {clientHistoryData!.client_info.working_terms_credit_days && (
+                    <span className="text-sm text-gray-500">{clientHistoryData!.client_info.working_terms_credit_days}d credit</span>
+                  )}
                 </div>
-                {clientHistoryData!.client_info.working_terms_credit_days && (
-                  <div className="text-[10px] text-gray-500">{clientHistoryData!.client_info.working_terms_credit_days} day credit terms</div>
-                )}
                 {clientHistoryData!.client_info.working_terms_notes && (
-                  <p className="text-[10px] text-gray-500 mt-0.5">{clientHistoryData!.client_info.working_terms_notes}</p>
+                  <p className="text-xs text-gray-500 mt-1">{clientHistoryData!.client_info.working_terms_notes}</p>
                 )}
               </div>
             )}

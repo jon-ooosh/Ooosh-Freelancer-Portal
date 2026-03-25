@@ -1442,16 +1442,16 @@ function NewEnquiryModal({
             {clientHistory!.client_info?.working_terms_type && (
               <div className="mb-3 p-2.5 bg-white border border-gray-200 rounded-lg">
                 <div className="text-xs font-semibold text-gray-500 uppercase mb-1">Working Terms</div>
-                <div className="text-sm font-medium text-gray-900">
-                  {clientHistory!.client_info.working_terms_type === 'usual' ? 'USUAL (25% deposit, full balance before hire)' :
-                   clientHistory!.client_info.working_terms_type === 'flex_balance' ? 'FLEX BALANCE (25% deposit, flexible balance)' :
-                   clientHistory!.client_info.working_terms_type === 'no_deposit' ? 'NO DEPOSIT (balance by start of hire)' :
-                   clientHistory!.client_info.working_terms_type === 'credit' ? 'CREDIT (no deposit, flexible balance)' :
-                   'CUSTOM'}
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block px-2.5 py-1 rounded text-sm font-semibold text-white ${
+                    { usual: 'bg-green-600', flex_balance: 'bg-emerald-500', no_deposit: 'bg-blue-800', credit: 'bg-purple-600', custom: 'bg-orange-500' }[clientHistory!.client_info.working_terms_type] || 'bg-gray-500'
+                  }`}>{
+                    { usual: 'USUAL', flex_balance: 'FLEX BALANCE', no_deposit: 'NO DEPOSIT', credit: 'CREDIT', custom: 'CUSTOM' }[clientHistory!.client_info.working_terms_type] || clientHistory!.client_info.working_terms_type
+                  }</span>
+                  {clientHistory!.client_info.working_terms_credit_days && (
+                    <span className="text-sm text-gray-500">{clientHistory!.client_info.working_terms_credit_days} day credit</span>
+                  )}
                 </div>
-                {clientHistory!.client_info.working_terms_credit_days && (
-                  <div className="text-xs text-gray-500 mt-0.5">{clientHistory!.client_info.working_terms_credit_days} day credit terms</div>
-                )}
                 {clientHistory!.client_info.working_terms_notes && (
                   <p className="text-xs text-gray-500 mt-1">{clientHistory!.client_info.working_terms_notes}</p>
                 )}
