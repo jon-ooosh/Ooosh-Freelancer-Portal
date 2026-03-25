@@ -107,7 +107,7 @@ function UserAvatar({ size = 'sm' }: { size?: 'sm' | 'md' | 'lg' }) {
   if (user?.avatar_url) {
     return (
       <img
-        src={`/api/files/download?key=${encodeURIComponent(user.avatar_url)}`}
+        src={`/api/auth/avatar/${user.avatar_url.split('/').pop()}`}
         alt={`${user.first_name} ${user.last_name}`}
         className={`${sizeClasses[size]} rounded-full object-cover ring-2 ring-ooosh-400`}
       />
@@ -226,7 +226,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <div className="flex items-center gap-6">
               <Link to="/" className="flex items-center gap-2">
                 <img src="/favicon-32x32.png" alt="Ooosh" className="h-7 w-7" />
-                <span className="text-lg font-bold tracking-tight">Ooosh</span>
+                <span className="text-lg font-bold tracking-tight hidden sm:inline">Ooosh</span>
               </Link>
               <nav className="hidden md:flex gap-1">
                 {navItems.map((item) =>
