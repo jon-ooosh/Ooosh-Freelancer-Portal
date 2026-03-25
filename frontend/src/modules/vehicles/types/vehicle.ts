@@ -89,6 +89,7 @@ export interface VehicleListFilters {
   search: string
   simpleType: string | null
   damageStatus: string | null
+  hireStatus: string | null
   showOldSold: boolean
 }
 

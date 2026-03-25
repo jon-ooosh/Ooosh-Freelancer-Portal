@@ -42,15 +42,13 @@ const navItems: NavItem[] = [
     label: 'Vehicles',
     children: [
       { path: '/vehicles', label: 'Dashboard' },
+      { path: '/drivers', label: 'Drivers' },
       { path: '/vehicles/fleet', label: 'Fleet' },
-      { path: '/vehicles/book-out', label: 'Book Out' },
-      { path: '/vehicles/check-in', label: 'Check In' },
       { path: '/vehicles/allocations', label: 'Allocations' },
       { path: '/vehicles/prep', label: 'Prep' },
       { path: '/vehicles/issues', label: 'Issues' },
       { path: '/vehicles/fleet-map', label: 'Fleet Map' },
       { path: '/vehicles/settings', label: 'Settings' },
-      { path: '/drivers', label: 'Drivers' },
     ],
   },
 ];
