@@ -758,14 +758,14 @@ function DocumentCategoryRow({
 
 function SnapshotPdfButton({ driverId, driverName }: { driverId: string; driverName: string }) {
   const [generating, setGenerating] = useState(false);
-  const { token } = useAuthStore();
+  const accessToken = useAuthStore((s) => s.accessToken);
 
   const handleGenerate = async () => {
     setGenerating(true);
     try {
       const res = await fetch(`/api/drivers/${driverId}/generate-snapshot`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (!res.ok) throw new Error('Failed to generate snapshot');
       const blob = await res.blob();

@@ -1191,7 +1191,7 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
         if (isHireHopConfigured()) {
           const { default: hhBroker } = await import('../services/hirehop-broker');
           const jobData = await hhBroker.get<{ STATUS: string }>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 });
-          const hhStatus = parseFloat(String((jobData as Record<string, unknown>).STATUS || '0'));
+          const hhStatus = parseFloat(String(jobData.data?.STATUS || '0'));
           const isDispatched = [5, 6].includes(hhStatus);
 
           if (isDispatched) {
@@ -1330,9 +1330,10 @@ async function processAdditionalDriverCharge(hhJobId: number, jobId: string | nu
   }
 
   // Check job status (don't add to locked/closed jobs)
-  const jobData = await hhBroker.get<Record<string, unknown>>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 30 });
-  const locked = jobData.LOCKED === 1;
-  const hhStatus = parseFloat(String(jobData.STATUS || 0));
+  const jobResp = await hhBroker.get<Record<string, unknown>>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 30 });
+  const jd = jobResp.data || {};
+  const locked = jd.LOCKED === 1;
+  const hhStatus = parseFloat(String(jd.STATUS || 0));
   const isClosed = [7, 9, 10, 11].includes(hhStatus);
 
   if (locked || isClosed) {
