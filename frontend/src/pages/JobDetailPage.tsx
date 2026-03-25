@@ -131,9 +131,14 @@ interface SavedQuote {
   arrival_time: string | null;
   job_date: string | null;
   job_finish_date: string | null;
+  is_multi_day: boolean;
+  num_days: number | null;
   collection_date: string | null;
   add_collection: boolean;
   what_is_it: string | null;
+  work_type: string | null;
+  work_description: string | null;
+  crew_count: number | null;
   client_charge_labour: number | null;
   client_charge_fuel: number | null;
   client_charge_expenses: number | null;
