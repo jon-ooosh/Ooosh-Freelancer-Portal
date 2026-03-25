@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
@@ -129,7 +129,11 @@ export function VehicleDetailPage() {
     staleTime: 5 * 60 * 1000,
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
-  const [activeTab, setActiveTab] = useState<'details' | 'service' | 'fuel' | 'location' | 'preps'>('details')
+  const [searchParams] = useSearchParams()
+  const validTabs = ['details', 'service', 'fuel', 'location', 'preps'] as const
+  type TabName = typeof validTabs[number]
+  const initialTab = validTabs.includes(searchParams.get('tab') as TabName) ? (searchParams.get('tab') as TabName) : 'details'
+  const [activeTab, setActiveTab] = useState<TabName>(initialTab)
   const [editingTracker, setEditingTracker] = useState(false)
   const [trackerInput, setTrackerInput] = useState('')
   const queryClient = useQueryClient()
