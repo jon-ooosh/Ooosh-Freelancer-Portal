@@ -1199,7 +1199,14 @@ function NewEnquiryModal({
                 </button>
               </div>
             </div>
-            <p className="text-xs text-gray-400">Leave blank if dates not yet known</p>
+            <p className="text-xs text-gray-400">
+              {jobDate && jobEnd ? (() => {
+                const start = new Date(jobDate);
+                const end = new Date(jobEnd);
+                const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+                return days > 0 ? <span className="text-gray-600 font-medium">{days} day{days !== 1 ? 's' : ''}</span> : null;
+              })() : 'Leave blank if dates not yet known'}
+            </p>
           </div>
 
           {/* Chase scheduling */}

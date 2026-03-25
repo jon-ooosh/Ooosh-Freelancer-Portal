@@ -1450,6 +1450,12 @@ export default function JobDetailPage() {
                     </button>
                   </div>
                 </div>
+                {editJobDate && editJobEnd && (() => {
+                  const start = new Date(editJobDate);
+                  const end = new Date(editJobEnd);
+                  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+                  return days > 0 ? <p className="text-xs text-gray-500 font-medium mt-1">{days} day{days !== 1 ? 's' : ''}</p> : null;
+                })()}
                 <div className="flex items-center gap-2 mt-3">
                   <button
                     onClick={saveDates}
