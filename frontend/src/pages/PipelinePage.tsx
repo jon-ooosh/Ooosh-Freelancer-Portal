@@ -878,7 +878,7 @@ function NewEnquiryModal({
     setOutDate(val);
     if (outLinked) {
       setJobDate(val);
-      // Cascade: if new job start > job end, push job end to day after
+      // Cascade: if job end exists and new job start >= it, push job end forward
       if (jobEnd && val >= jobEnd) {
         const nextDay = addDays(val, 1);
         setJobEnd(nextDay);
@@ -895,8 +895,8 @@ function NewEnquiryModal({
       // If unlinked outgoing is after new job start, pull it back
       if (outDate && outDate > val) setOutDate(val);
     }
-    // Auto-set job end to day after start if empty or before start
-    if (!jobEnd || jobEnd < val) {
+    // If job end exists but is before new start, push it forward
+    if (jobEnd && jobEnd < val) {
       const nextDay = addDays(val, 1);
       setJobEnd(nextDay);
       if (returnLinked) setReturnDate(nextDay);
