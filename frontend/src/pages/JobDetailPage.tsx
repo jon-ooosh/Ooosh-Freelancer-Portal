@@ -528,6 +528,12 @@ export default function JobDetailPage() {
     return dateStr;
   }
 
+  function addDays(dateStr: string, days: number): string {
+    const d = new Date(dateStr);
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0];
+  }
+
   async function saveInlineField(patch: Record<string, unknown>) {
     if (!job) return;
     setInlineEditSaving(true);
@@ -593,13 +599,14 @@ export default function JobDetailPage() {
 
   // Date linking handlers (mirrored from PipelinePage New Enquiry form)
   const handleEditOutDate = (val: string) => {
-    if (editJobDate && val > editJobDate) return;
+    if (val && editJobDate && val > editJobDate) return;
     setEditOutDate(val);
-    if (dateOutLinked) {
+    if (dateOutLinked && val) {
       setEditJobDate(val);
-      if (editJobEnd && val > editJobEnd) {
-        setEditJobEnd(val);
-        if (dateReturnLinked) setEditReturnDate(val);
+      if (!editJobEnd || editJobEnd <= val) {
+        const nextDay = addDays(val, 1);
+        setEditJobEnd(nextDay);
+        if (dateReturnLinked) setEditReturnDate(nextDay);
       }
     }
   };
@@ -611,14 +618,17 @@ export default function JobDetailPage() {
     } else {
       if (editOutDate && editOutDate > val) setEditOutDate(val);
     }
-    if (editJobEnd && editJobEnd < val) {
-      setEditJobEnd(val);
-      if (dateReturnLinked) setEditReturnDate(val);
+    if (val) {
+      if (!editJobEnd || editJobEnd < val) {
+        const nextDay = addDays(val, 1);
+        setEditJobEnd(nextDay);
+        if (dateReturnLinked) setEditReturnDate(nextDay);
+      }
     }
   };
 
   const handleEditJobEnd = (val: string) => {
-    if (editJobDate && val < editJobDate) return;
+    if (val && editJobDate && val < editJobDate) return;
     setEditJobEnd(val);
     if (dateReturnLinked) {
       setEditReturnDate(val);
@@ -628,7 +638,7 @@ export default function JobDetailPage() {
   };
 
   const handleEditReturnDate = (val: string) => {
-    if (editJobEnd && val < editJobEnd) return;
+    if (val && editJobEnd && val < editJobEnd) return;
     setEditReturnDate(val);
     if (dateReturnLinked) {
       setEditJobEnd(val);
