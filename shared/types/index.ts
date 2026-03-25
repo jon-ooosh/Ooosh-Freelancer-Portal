@@ -456,6 +456,8 @@ export interface SavedQuote {
   collection_date: string | null;
   client_name: string | null;
   work_type: string | null;
+  work_description: string | null;
+  crew_count: number | null;
   expenses: QuoteExpenseItem[];
   // Calculated
   client_charge_labour: number | null;
