@@ -227,7 +227,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         qa.agreed_rate, qa.rate_type,
         qa.expected_expenses as assignment_expected_expenses,
         j.job_name, j.hirehop_id, j.client_name as job_client_name,
-        j.out_date, j.return_date,
+        j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address, v.city as venue_city
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
@@ -304,7 +304,7 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         qa.agreed_rate, qa.rate_type,
         qa.expected_expenses as assignment_expected_expenses,
         j.job_name, j.hirehop_id, j.client_name as job_client_name,
-        j.out_date, j.return_date,
+        j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address,
         v.city as venue_city, v.what_three_words as venue_w3w,
         v.contact_name as venue_contact1, v.contact_phone as venue_phone,
@@ -647,6 +647,43 @@ function formatJobForPortal(row: Record<string, unknown>) {
     runGroupFee: row.run_group_fee as number | null,
     // Fee info
     driverPay: Number(row.agreed_rate || row.freelancer_fee_rounded || row.freelancer_fee || 0),
+    // Freelancer notes
+    freelancerNotes: row.freelancer_notes as string | null,
+    // Arrangement details (so freelancer knows what's booked for them)
+    tollsStatus: row.tolls_status as string | null,
+    accommodationStatus: row.accommodation_status as string | null,
+    flightStatus: row.flight_status as string | null,
+    clientIntroduction: row.client_introduction as string | null,
+    // Shared files from the job (filtered: only share_with_freelancer = true)
+    sharedFiles: (() => {
+      try {
+        const files = row.job_files as unknown[];
+        if (!Array.isArray(files)) return [];
+        return files.filter((f: any) => f?.share_with_freelancer === true).map((f: any) => ({
+          name: f.name || f.original_name || 'File',
+          url: f.url,
+          type: f.type || f.content_type || '',
+          label: f.label || '',
+        }));
+      } catch { return []; }
+    })(),
+    // Expense clarity
+    expensesIncluded: (() => {
+      try {
+        const expenses = row.expenses as unknown[];
+        if (!Array.isArray(expenses)) return 0;
+        return expenses.filter((e: any) => e?.includedInCharge === true && e?.type !== 'fuel')
+          .reduce((sum: number, e: any) => sum + (Number(e.amount) || 0), 0);
+      } catch { return 0; }
+    })(),
+    expensesNotIncluded: (() => {
+      try {
+        const expenses = row.expenses as unknown[];
+        if (!Array.isArray(expenses)) return 0;
+        return expenses.filter((e: any) => e?.includedInCharge === false && e?.type !== 'fuel')
+          .reduce((sum: number, e: any) => sum + (Number(e.amount) || 0), 0);
+      } catch { return 0; }
+    })(),
   };
 
   if (isCrew) {
