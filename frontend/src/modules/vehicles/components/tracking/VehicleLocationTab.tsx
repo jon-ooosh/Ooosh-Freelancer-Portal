@@ -147,8 +147,25 @@ function TripRow({ trip }: { trip: TraccarTrip }) {
   const durationMins = Math.round(trip.duration / 60000)
   const avgSpeed = knotsToMph(trip.averageSpeed)
 
+  // Sanity check: flag trips with impossible values (GPS glitches / Traccar bugs)
+  const isBogus = avgSpeed > 200 || (durationMins <= 1 && distance > 50)
+
   const timeRange = `${format(startTime, 'HH:mm')} – ${format(endTime, 'HH:mm')}`
   const dateLabel = format(startTime, 'EEE d MMM')
+
+  if (isBogus) {
+    return (
+      <div className="flex items-center justify-between rounded-md bg-gray-50 px-3 py-2 opacity-50">
+        <div>
+          <div className="text-sm font-medium text-gray-900">{dateLabel}</div>
+          <div className="text-xs text-gray-500">{timeRange}</div>
+        </div>
+        <div className="text-right">
+          <div className="text-xs text-gray-400 italic">GPS data error — ignored</div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex items-center justify-between rounded-md bg-gray-50 px-3 py-2">

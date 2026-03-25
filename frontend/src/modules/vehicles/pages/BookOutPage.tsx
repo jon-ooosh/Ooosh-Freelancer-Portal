@@ -100,6 +100,8 @@ export function BookOutPage() {
   // Autosave on every form/step change
   useEffect(() => {
     if (!draftChecked || submitSuccess || queuedOffline) return
+    // Don't save empty state before a vehicle is selected
+    if (!form.vehicleId) return
     autosave({
       step,
       formData: {

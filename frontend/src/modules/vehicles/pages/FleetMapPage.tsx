@@ -220,8 +220,8 @@ export function FleetMapPage() {
         </span>
       </div>
 
-      {/* Map */}
-      <div className="relative">
+      {/* Map — z-0 keeps Leaflet tiles (z-400+) below nav dropdown (z-50) */}
+      <div className="relative z-0">
         <div
           ref={mapRef}
           className="rounded-lg overflow-hidden border border-gray-200"
