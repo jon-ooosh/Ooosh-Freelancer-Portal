@@ -872,13 +872,13 @@ function NewEnquiryModal({
   // HireHop-style date linking: Outgoing=Job Start, Returning=Job Finish by default
   // Constraint: Outgoing ≤ Job Start ≤ Job Finish ≤ Returning
   const handleOutDateChange = (val: string) => {
-    // Outgoing must be ≤ Job Start (if set)
-    if (jobDate && val > jobDate) return;
+    // Allow clearing, but block setting after job start
+    if (val && jobDate && val > jobDate) return;
     setOutDate(val);
-    if (outLinked) {
+    if (outLinked && val) {
       setJobDate(val);
-      // Cascade: if job end exists and new job start >= it, push job end forward
-      if (jobEnd && val >= jobEnd) {
+      // Auto-set job end if empty, or push forward if before new start
+      if (!jobEnd || jobEnd <= val) {
         const nextDay = addDays(val, 1);
         setJobEnd(nextDay);
         if (returnLinked) setReturnDate(nextDay);
@@ -894,16 +894,19 @@ function NewEnquiryModal({
       // If unlinked outgoing is after new job start, pull it back
       if (outDate && outDate > val) setOutDate(val);
     }
-    // If job end exists but is before new start, push it forward
-    if (jobEnd && jobEnd < val) {
-      const nextDay = addDays(val, 1);
-      setJobEnd(nextDay);
-      if (returnLinked) setReturnDate(nextDay);
+    if (val) {
+      // Auto-set job end to day after start if empty, or push forward if before start
+      if (!jobEnd || jobEnd < val) {
+        const nextDay = addDays(val, 1);
+        setJobEnd(nextDay);
+        if (returnLinked) setReturnDate(nextDay);
+      }
     }
   };
 
   const handleJobEndChange = (val: string) => {
-    if (jobDate && val < jobDate) return;
+    // Allow clearing (empty string), but block setting before start date
+    if (val && jobDate && val < jobDate) return;
     setJobEnd(val);
     if (returnLinked) {
       setReturnDate(val);
@@ -914,8 +917,8 @@ function NewEnquiryModal({
   };
 
   const handleReturnDateChange = (val: string) => {
-    // Returning must be ≥ Job Finish (if set)
-    if (jobEnd && val < jobEnd) return;
+    // Allow clearing, but block setting before job end
+    if (val && jobEnd && val < jobEnd) return;
     setReturnDate(val);
     if (returnLinked) {
       setJobEnd(val);
