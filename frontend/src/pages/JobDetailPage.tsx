@@ -683,11 +683,6 @@ export default function JobDetailPage() {
     setEditingChaseDate(true);
   }
 
-  async function saveEditChaseDate() {
-    setEditingChaseDate(false);
-    await saveInlineField({ next_chase_date: editChaseDate || null });
-  }
-
   async function pushToHireHop() {
     if (!job) return;
     setPushingToHH(true);
