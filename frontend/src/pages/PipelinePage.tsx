@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import DatePicker from '../components/DatePicker';
 import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
@@ -656,11 +657,9 @@ function ChaseModal({
               ))}
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <input
-                type="date"
+              <DatePicker
                 value={nextChaseDate}
-                onChange={(e) => { setNextChaseDate(e.target.value); setSelectedChasePreset(null); }}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                onChange={(val) => { setNextChaseDate(val); setSelectedChasePreset(null); }}
               />
               <select
                 value={chaseAlertUserId}
@@ -1137,14 +1136,13 @@ function NewEnquiryModal({
               {/* Row 1: Outgoing */}
               <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200">
                 <span className="text-xs text-gray-500 w-20 shrink-0">Outgoing</span>
-                <input
-                  type="date"
+                <DatePicker
                   value={outDate}
                   min={today}
                   max={jobDate || undefined}
-                  onChange={(e) => handleOutDateChange(e.target.value)}
+                  onChange={(val) => handleOutDateChange(val)}
                   disabled={outLinked}
-                  className={`flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 ${outLinked ? 'bg-gray-100 text-gray-400' : ''}`}
+                  className="flex-1"
                 />
                 <button
                   type="button"
@@ -1158,38 +1156,35 @@ function NewEnquiryModal({
               {/* Row 2: Job Start */}
               <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-200">
                 <span className="text-xs text-gray-500 w-20 shrink-0">Job start</span>
-                <input
-                  type="date"
+                <DatePicker
                   value={jobDate}
                   min={today}
                   max={jobEnd || undefined}
-                  onChange={(e) => handleJobDateChange(e.target.value)}
-                  className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  onChange={(val) => handleJobDateChange(val)}
+                  className="flex-1"
                 />
                 <div className="w-[52px]" />
               </div>
               {/* Row 3: Job Finish */}
               <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-200">
                 <span className="text-xs text-gray-500 w-20 shrink-0">Job finish</span>
-                <input
-                  type="date"
+                <DatePicker
                   value={jobEnd}
                   min={jobDate || today}
-                  onChange={(e) => handleJobEndChange(e.target.value)}
-                  className="flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  onChange={(val) => handleJobEndChange(val)}
+                  className="flex-1"
                 />
                 <div className="w-[52px]" />
               </div>
               {/* Row 4: Returning */}
               <div className="flex items-center gap-2 px-3 py-2 bg-gray-50">
                 <span className="text-xs text-gray-500 w-20 shrink-0">Returning</span>
-                <input
-                  type="date"
+                <DatePicker
                   value={returnDate}
                   min={jobEnd || today}
-                  onChange={(e) => handleReturnDateChange(e.target.value)}
+                  onChange={(val) => handleReturnDateChange(val)}
                   disabled={returnLinked}
-                  className={`flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 ${returnLinked ? 'bg-gray-100 text-gray-400' : ''}`}
+                  className="flex-1"
                 />
                 <button
                   type="button"
@@ -1229,11 +1224,9 @@ function NewEnquiryModal({
               ))}
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <input
-                type="date"
+              <DatePicker
                 value={nextChaseDate}
-                onChange={(e) => { setNextChaseDate(e.target.value); setSelectedChasePreset(null); }}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                onChange={(val) => { setNextChaseDate(val); setSelectedChasePreset(null); }}
               />
               <select
                 value={chaseAlertUserId}
