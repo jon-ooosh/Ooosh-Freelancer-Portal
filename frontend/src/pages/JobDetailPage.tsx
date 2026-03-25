@@ -205,6 +205,9 @@ interface VehicleAssignment {
   booked_out_at: string | null;
   checked_in_at: string | null;
   has_damage: boolean;
+  notes: string | null;
+  swap_reason: string | null;
+  swapped_to_assignment_id: string | null;
   hire_form_pdf_key?: string | null;
   hire_form_generated_at?: string | null;
   excess?: {
