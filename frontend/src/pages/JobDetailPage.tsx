@@ -2597,13 +2597,10 @@ export default function JobDetailPage() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                    <input
-                      type="date"
+                    <DatePicker
                       value={localFormData.jobDate}
-                      onChange={(e) => setLocalFormData({ ...localFormData, jobDate: e.target.value })}
-                      className={`w-full border rounded-lg px-3 py-2 text-sm ${
-                        dateChanged ? 'border-amber-400 bg-amber-50' : 'border-gray-300'
-                      }`}
+                      onChange={(val) => setLocalFormData({ ...localFormData, jobDate: val })}
+                      className={dateChanged ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
                     />
                     {dateChanged && (
                       <p className="text-xs text-amber-600 mt-1">
