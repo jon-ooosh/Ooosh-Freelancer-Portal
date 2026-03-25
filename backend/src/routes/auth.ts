@@ -414,6 +414,12 @@ router.get('/avatar/:filename', async (req: Request, res: Response) => {
       return;
     }
 
+    if (!isR2Configured()) {
+      console.error('[Avatar GET] R2 not configured');
+      res.status(503).json({ error: 'File storage not configured' });
+      return;
+    }
+
     // Find user with this avatar filename
     const result = await query(
       "SELECT avatar_url FROM users WHERE avatar_url LIKE $1 LIMIT 1",
@@ -421,18 +427,22 @@ router.get('/avatar/:filename', async (req: Request, res: Response) => {
     );
 
     if (!result.rows[0]?.avatar_url) {
+      console.error(`[Avatar GET] No DB row found for filename: ${filename}`);
       res.status(404).json({ error: 'Avatar not found' });
       return;
     }
 
     const key = result.rows[0].avatar_url;
+    console.log(`[Avatar GET] Found key in DB: ${key}, fetching from R2...`);
     const object = await getFromR2(key);
 
     if (!object.Body) {
-      res.status(404).json({ error: 'Avatar not found' });
+      console.error(`[Avatar GET] R2 returned no Body for key: ${key}`);
+      res.status(404).json({ error: 'Avatar not found in storage' });
       return;
     }
 
+    console.log(`[Avatar GET] Streaming avatar, ContentType=${object.ContentType}, ContentLength=${object.ContentLength}`);
     // Cache for 1 hour (avatars don't change often)
     res.setHeader('Cache-Control', 'public, max-age=3600');
     if (object.ContentType) {
@@ -445,7 +455,7 @@ router.get('/avatar/:filename', async (req: Request, res: Response) => {
     const stream = object.Body as NodeJS.ReadableStream;
     stream.pipe(res);
   } catch (error) {
-    console.error('Avatar serve error:', error);
+    console.error('[Avatar GET] Error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
