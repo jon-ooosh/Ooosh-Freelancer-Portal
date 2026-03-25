@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   format,
   parse,
@@ -44,6 +45,9 @@ function displayDate(dateStr: string): string {
   return format(d, 'dd/MM/yyyy');
 }
 
+const DROPDOWN_HEIGHT = 320;
+const DROPDOWN_WIDTH = 280;
+
 export default function DatePicker({
   value,
   onChange,
@@ -54,9 +58,8 @@ export default function DatePicker({
   placeholder = 'dd/mm/yyyy',
 }: DatePickerProps) {
   const [open, setOpen] = useState(false);
-  const [dropUp, setDropUp] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number; dropUp: boolean }>({ top: 0, left: 0, dropUp: false });
+  const buttonRef = useRef<HTMLButtonElement>(null);
 
   // Determine initial viewing month
   const getInitialMonth = useCallback(() => {
@@ -77,29 +80,52 @@ export default function DatePicker({
     }
   }, [value]);
 
-  // Close on outside click
+  // Close on outside click — check if click target is inside the portal dropdown
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const target = e.target as Node;
+      // Don't close if clicking inside the button
+      if (buttonRef.current?.contains(target)) return;
+      // Don't close if clicking inside the portal dropdown
+      const dropdown = document.getElementById('datepicker-portal-dropdown');
+      if (dropdown?.contains(target)) return;
+      setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  // Position dropdown above or below
-  useEffect(() => {
-    if (!open || !containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
+  // Calculate position when opening
+  const updatePosition = useCallback(() => {
+    if (!buttonRef.current) return;
+    const rect = buttonRef.current.getBoundingClientRect();
     const spaceBelow = window.innerHeight - rect.bottom;
-    setDropUp(spaceBelow < 320);
-  }, [open]);
+    const dropUp = spaceBelow < DROPDOWN_HEIGHT;
+    setPos({
+      top: dropUp ? rect.top - 4 : rect.bottom + 4,
+      left: Math.min(rect.left, window.innerWidth - DROPDOWN_WIDTH - 8),
+      dropUp,
+    });
+  }, []);
+
+  // Reposition on scroll/resize while open
+  useEffect(() => {
+    if (!open) return;
+    updatePosition();
+    const handler = () => updatePosition();
+    window.addEventListener('scroll', handler, true);
+    window.addEventListener('resize', handler);
+    return () => {
+      window.removeEventListener('scroll', handler, true);
+      window.removeEventListener('resize', handler);
+    };
+  }, [open, updatePosition]);
 
   const handleOpen = () => {
     if (disabled) return;
     setViewMonth(getInitialMonth());
+    updatePosition();
     setOpen(true);
   };
 
@@ -142,33 +168,19 @@ export default function DatePicker({
   const selectedDate = parseISO(value);
   const todayDate = new Date();
 
-  return (
-    <div ref={containerRef} className={`relative ${className}`}>
-      {/* Text input display */}
-      <button
-        type="button"
-        onClick={handleOpen}
-        disabled={disabled}
-        className={`w-full text-left border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500 focus:outline-none flex items-center justify-between ${
-          disabled ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white hover:border-gray-400 cursor-pointer'
-        }`}
-      >
-        <span className={value ? 'text-gray-900' : 'text-gray-400'}>
-          {value ? displayDate(value) : placeholder}
-        </span>
-        <svg className="w-4 h-4 text-gray-400 shrink-0 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-        </svg>
-      </button>
-
-      {/* Calendar dropdown */}
-      {open && (
+  const calendarDropdown = open
+    ? createPortal(
         <div
-          ref={dropdownRef}
-          className={`absolute z-[9999] bg-white border border-gray-200 rounded-lg shadow-lg p-3 w-[280px] ${
-            dropUp ? 'bottom-full mb-1' : 'top-full mt-1'
-          }`}
-          style={{ left: 0 }}
+          id="datepicker-portal-dropdown"
+          className="bg-white border border-gray-200 rounded-lg shadow-lg p-3"
+          style={{
+            position: 'fixed',
+            zIndex: 99999,
+            width: DROPDOWN_WIDTH,
+            top: pos.dropUp ? undefined : pos.top,
+            bottom: pos.dropUp ? window.innerHeight - pos.top : undefined,
+            left: pos.left,
+          }}
         >
           {/* Month/Year navigation */}
           <div className="flex items-center justify-between mb-2">
@@ -253,8 +265,32 @@ export default function DatePicker({
               Today
             </button>
           </div>
-        </div>
-      )}
+        </div>,
+        document.body,
+      )
+    : null;
+
+  return (
+    <div className={`relative ${className}`}>
+      {/* Text input display */}
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={handleOpen}
+        disabled={disabled}
+        className={`w-full text-left border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500 focus:outline-none flex items-center justify-between ${
+          disabled ? 'bg-gray-100 text-gray-400 cursor-not-allowed' : 'bg-white hover:border-gray-400 cursor-pointer'
+        }`}
+      >
+        <span className={value ? 'text-gray-900' : 'text-gray-400'}>
+          {value ? displayDate(value) : placeholder}
+        </span>
+        <svg className="w-4 h-4 text-gray-400 shrink-0 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+      </button>
+
+      {calendarDropdown}
     </div>
   );
 }
