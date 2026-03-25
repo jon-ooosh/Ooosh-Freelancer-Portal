@@ -76,6 +76,7 @@ interface FormData {
   workTypeOther: string;
   workDurationHours: number;
   workDescription: string;
+  crewCount: number;
   numberOfDays: number;
   earlyStartMinutes: number;
   lateFinishMinutes: number;
@@ -202,6 +203,24 @@ function calculateAutoOOH(
 }
 
 function calculateCosts(formData: FormData, settings: CostingSettings): CalculatedResult {
+  const singleResult = calculateSingleCrewCosts(formData, settings);
+  const cc = formData.jobType === 'crewed' && formData.crewCount > 1 ? formData.crewCount : 1;
+  if (cc <= 1) return singleResult;
+
+  // Multi-crew: multiply labour/fee costs, keep time/fuel unchanged
+  return {
+    ...singleResult,
+    clientChargeLabour: r2(singleResult.clientChargeLabour * cc),
+    clientChargeTotal: r2(singleResult.clientChargeTotal * cc),
+    clientChargeTotalRounded: Math.round(singleResult.clientChargeTotalRounded * cc),
+    freelancerFee: r2(singleResult.freelancerFee * cc),
+    freelancerFeeRounded: Math.ceil((singleResult.freelancerFeeRounded * cc) / 5) * 5,
+    ourTotalCost: r2(singleResult.ourTotalCost * cc),
+    ourMargin: r2((singleResult.clientChargeTotalRounded * cc) - (singleResult.ourTotalCost * cc)),
+  };
+}
+
+function calculateSingleCrewCosts(formData: FormData, settings: CostingSettings): CalculatedResult {
   const {
     jobType, whatIsIt, distanceMiles, driveTimeMinutes,
     workDurationHours, calculationMode, numberOfDays,
@@ -393,6 +412,7 @@ const INITIAL_FORM: FormData = {
   workTypeOther: '',
   workDurationHours: 0,
   workDescription: '',
+  crewCount: 1,
   numberOfDays: 1,
   earlyStartMinutes: 0,
   lateFinishMinutes: 0,
@@ -680,6 +700,7 @@ export default function TransportCalculator({
         travelCost: formData.travelCost || null,
         internalNotes: formData.internalNotes || null,
         freelancerNotes: formData.freelancerNotes || null,
+        crewCount: formData.crewCount > 1 ? formData.crewCount : 1,
       });
 
       // Write back venue distance/drive time if changed or newly filled
@@ -1077,7 +1098,7 @@ export default function TransportCalculator({
               {step === 3 && isCrewedJob && (
                 <div className="space-y-6">
                   <h3 className="text-lg font-semibold text-gray-900">🔧 Work Details</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">Work Type</label>
                       <select value={formData.workType} onChange={(e) => updateField('workType', e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg">
@@ -1085,13 +1106,20 @@ export default function TransportCalculator({
                         {WORK_TYPE_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                       </select>
                     </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Number of Crew</label>
+                      <input type="number" value={formData.crewCount} onChange={(e) => updateField('crewCount', Math.max(1, parseInt(e.target.value) || 1))} min={1} max={20} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                      {formData.crewCount > 1 && (
+                        <p className="text-xs text-purple-600 mt-1">Costs will be multiplied by {formData.crewCount} crew</p>
+                      )}
+                    </div>
                     {formData.workType === 'other' && (
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">Describe the work</label>
                         <input type="text" value={formData.workTypeOther} onChange={(e) => updateField('workTypeOther', e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
                       </div>
                     )}
-                    <div className="md:col-span-2">
+                    <div className="md:col-span-3">
                       <label className="block text-sm font-medium text-gray-700 mb-2">Additional Notes</label>
                       <textarea value={formData.workDescription} onChange={(e) => updateField('workDescription', e.target.value)} rows={2} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
                     </div>
@@ -1205,6 +1233,13 @@ export default function TransportCalculator({
                     </div>
                   )}
 
+                  {/* Multi-crew info banner */}
+                  {isCrewedJob && formData.crewCount > 1 && (
+                    <div className="text-sm px-4 py-3 rounded-lg bg-purple-50 text-purple-700 border border-purple-200">
+                      👥 {formData.crewCount} crew — costs below are the total for all {formData.crewCount} crew members
+                    </div>
+                  )}
+
                   {/* Cost summary cards */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div className="bg-green-50 rounded-xl p-4">
@@ -1278,6 +1313,9 @@ export default function TransportCalculator({
                       )}
                       {isCrewedJob && formData.workType && (
                         <div><span className="text-gray-500">Work:</span> <span className="ml-1">{WORK_TYPE_OPTIONS.find(o => o.value === formData.workType)?.label || formData.workType}{formData.workType === 'other' && formData.workTypeOther ? ` — ${formData.workTypeOther}` : ''}</span></div>
+                      )}
+                      {isCrewedJob && formData.crewCount > 1 && (
+                        <div><span className="text-gray-500">Crew:</span> <span className="ml-1 font-medium text-purple-700">{formData.crewCount} people</span></div>
                       )}
                       {formData.distanceMiles > 0 && (
                         <div><span className="text-gray-500">Distance:</span> <span className="ml-1">{formData.distanceMiles} mi · {formData.driveTimeMinutes} mins</span></div>

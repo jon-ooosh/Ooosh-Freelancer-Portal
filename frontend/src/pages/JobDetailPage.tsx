@@ -878,13 +878,22 @@ export default function JobDetailPage() {
     const dateStr = q.job_date
       ? (typeof q.job_date === 'string' && q.job_date.includes('T') ? q.job_date.split('T')[0] : String(q.job_date))
       : '';
+    const finishDateStr = q.job_finish_date
+      ? (typeof q.job_finish_date === 'string' && q.job_finish_date.includes('T') ? q.job_finish_date.split('T')[0] : String(q.job_finish_date))
+      : '';
     setEditForm({
       job_type: q.job_type,
       venue_name: q.venue_name || '',
       venue_id: q.venue_id || null,
       job_date: dateStr,
+      job_finish_date: finishDateStr,
+      is_multi_day: q.is_multi_day || false,
+      num_days: q.num_days || 1,
       arrival_time: q.arrival_time || '',
       what_is_it: q.what_is_it || '',
+      work_type: q.work_type || '',
+      work_description: q.work_description || '',
+      crew_count: q.crew_count || 1,
       internal_notes: q.internal_notes || '',
       freelancer_notes: q.freelancer_notes || '',
       client_charge_rounded: Number(q.client_charge_rounded ?? 0),
@@ -2122,6 +2131,11 @@ export default function JobDetailPage() {
                       <div className="mt-3 pt-3 border-t border-gray-100">
                         <div className="flex items-center gap-2 mb-1.5">
                           <span className="text-xs font-medium text-gray-500">Crew</span>
+                          {(q.crew_count || 1) > 1 && (
+                            <span className={`text-xs font-medium ${assignments.length >= (q.crew_count || 1) ? 'text-green-600' : 'text-amber-600'}`}>
+                              {assignments.length}/{q.crew_count} assigned
+                            </span>
+                          )}
                           {!isCancelled && (
                             <button
                               onClick={() => { setAssignModalQuoteId(q.id); setPeopleSearch(''); setPeopleOptions([]); }}
@@ -2132,7 +2146,9 @@ export default function JobDetailPage() {
                           )}
                         </div>
                         {assignments.length === 0 ? (
-                          <p className="text-xs text-gray-400 italic">No crew assigned</p>
+                          <p className="text-xs text-gray-400 italic">
+                            No crew assigned{(q.crew_count || 1) > 1 ? ` (${q.crew_count} needed)` : ''}
+                          </p>
                         ) : (
                           <div className="flex flex-wrap gap-2">
                             {assignments.map((a) => (
@@ -2303,7 +2319,7 @@ export default function JobDetailPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">{editForm.is_multi_day ? 'Start Date' : 'Date'}</label>
                       <input
                         type="date"
                         value={String(editForm.job_date || '')}
@@ -2321,6 +2337,68 @@ export default function JobDetailPage() {
                       />
                     </div>
                   </div>
+                  {/* Multi-day toggle */}
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={!!editForm.is_multi_day}
+                        onChange={(e) => setEditForm((p) => ({ ...p, is_multi_day: e.target.checked, num_days: e.target.checked ? Math.max(Number(p.num_days) || 1, 2) : 1 }))}
+                        className="w-4 h-4 text-ooosh-600 rounded"
+                      />
+                      Multi-day
+                    </label>
+                    {editForm.is_multi_day && (
+                      <>
+                        <input
+                          type="date"
+                          value={String(editForm.job_finish_date || '')}
+                          onChange={(e) => {
+                            const end = e.target.value;
+                            const start = String(editForm.job_date || '');
+                            const days = start && end
+                              ? Math.max(1, Math.ceil((new Date(end + 'T00:00:00').getTime() - new Date(start + 'T00:00:00').getTime()) / 86400000) + 1)
+                              : Number(editForm.num_days) || 1;
+                            setEditForm((p) => ({ ...p, job_finish_date: end, num_days: days }));
+                          }}
+                          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
+                        />
+                        <span className="text-xs text-purple-600 font-medium">{Number(editForm.num_days) || 1} days</span>
+                      </>
+                    )}
+                  </div>
+                  {/* Crewed-specific fields */}
+                  {editForm.job_type === 'crewed' && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Work Type</label>
+                        <select
+                          value={String(editForm.work_type || '')}
+                          onChange={(e) => setEditForm((p) => ({ ...p, work_type: e.target.value }))}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                        >
+                          <option value="">--</option>
+                          <option value="backline_tech">Backline Tech</option>
+                          <option value="general_assist">General Assist</option>
+                          <option value="engineer_foh">Engineer - FOH</option>
+                          <option value="engineer_mons">Engineer - mons</option>
+                          <option value="driving_only">Driving Only</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Crew Needed</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={Number(editForm.crew_count) || 1}
+                          onChange={(e) => setEditForm((p) => ({ ...p, crew_count: Math.max(1, parseInt(e.target.value) || 1) }))}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                        />
+                      </div>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge</label>
