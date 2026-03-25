@@ -405,13 +405,16 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [ ] **`SignaturePage.js` OP mode repointing** (hire form app side) — In OP mode, after signature:
   1. Call `POST /api/hire-forms` (already working — creates assignment)
   2. Call `POST /api/hire-forms/:id/generate-pdf` (OP endpoint exists, needs triggering from SignaturePage)
-  3. Call new `POST /api/hire-forms/:id/post-signature` endpoint (see below) for additional driver charges + mid-tour notification
-  4. Send confirmation email to driver via OP email service
+  3. Call new `POST /api/hire-forms/:id/post-signature` endpoint (see below) for additional driver charges + mid-tour detection
+  4. Confirmation email already handled by hire form app (no OP duplication needed)
 - [ ] **Post-signature automations (OP backend)** — new endpoint `POST /api/hire-forms/:id/post-signature`:
   - Count `vehicle_hire_assignments` for job → count vehicles in HH → add additional driver charge (item 1324, £20+VAT per extra driver beyond 2 per vehicle)
-  - Check if job is dispatched (status 5/6) → send mid-tour notification email
-  - Generate driver snapshot PDF (button also available on Hire History per-assignment)
-  - Send confirmation email to driver
+  - Check if job is dispatched (HH status 5/6) → mid-tour driver flow:
+    - Set hire_start to NOW (not original job start — driver shouldn't have been driving before form submission)
+    - Send mid-tour notification email to team (bell notification + email)
+    - Driver appears on Job Detail > Drivers & Vehicles with "Hire form complete — not yet booked out" status
+    - Badge on Fleet page on-hire cards: "New driver pending" when assignment exists without book-out event
+  - Return result summary (charges added, mid-tour detected, etc.)
 - [ ] `generate-hire-form.js` (v5.6) → repoint to `POST /api/hire-forms/:id/generate-pdf` in OP mode (hire form app side)
 
 *Phase C4: Go-live cutover:*
@@ -419,8 +422,9 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [x] Run migration 020 on production (`npm run db:migrate`) — done
 - [ ] Repoint `SignaturePage.js` to OP endpoints (see Phase C3 above)
 - [ ] Build `POST /api/hire-forms/:id/post-signature` (additional driver charge + mid-tour notification)
-- [ ] Add "Generate Snapshot PDF" button on Hire History (per-assignment)
-- [ ] Confirmation email template for driver (post-signature)
+- [ ] Add "Generate Snapshot PDF" button on Insurance Referral panel (DriverDetailPage)
+- [ ] Mid-tour driver surfacing: badge on Fleet on-hire cards + status on Job Detail Drivers tab
+- [ ] Vehicle swap flow (see Phase D3 below)
 - [ ] Test end-to-end with `DATA_BACKEND=op` on Netlify deploy preview
 - [ ] Flip `DATA_BACKEND=op` on Netlify production
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
@@ -456,11 +460,30 @@ Joined-up referral management: flag → email → review → resolve → date ex
 - [x] Adjusted excess field on resolution (for insurer-imposed excess increases, stored on `job_excess` records)
 - [x] Audit trail for referral resolution (`resolve_referral` action in audit_log)
 
+**Snapshot PDF UI:**
+- [ ] "Generate Snapshot PDF" button on Insurance Referral panel (DriverDetailPage) for drivers with `requires_referral = true`
+- [x] Backend: `driver-snapshot-pdf.ts` service already built
+- [ ] Wire button → call snapshot endpoint → download/attach PDF
+
 **Future referral integration (not yet built):**
 - [ ] Dashboard widget: "X drivers awaiting referral" with click-through to driver list
 - [ ] Pipeline/Job Detail: referral status shown per-job where driver has pending referral (blocks dispatch)
 - [ ] `post-signature-notifications.js` repointing: currently reads from Monday.com to check referral — needs OP backend repoint (reads from driver-verification status endpoint instead)
 - [ ] Excess module integration: adjusted excess from referral resolution flows into excess tracking/payment portal
+
+**Phase D3 — Vehicle Swap (Breakdown / Reallocation)**
+When a vehicle breaks down mid-hire and needs swapping to a replacement:
+
+- [ ] "Swap Vehicle" button on Job Detail > Drivers & Vehicles tab (per-assignment)
+- [ ] Swap flow: select replacement vehicle → original assignment gets `status = 'swapped'` with `swap_reason`, `swapped_at`, `swapped_to_assignment_id`
+- [ ] New assignment auto-created for same driver + replacement vehicle, inheriting job/dates
+- [ ] Both assignments visible in driver Hire History (audit trail: "was in GX17DHN → swapped to RX22SWN on 25 Mar")
+- [ ] Original vehicle's book-out event gets "swapped" note; new vehicle gets fresh book-out
+- [ ] New hire form PDF can be generated for replacement vehicle
+- [ ] VE103b regenerated for new vehicle (when VE103b generation is built)
+- [ ] Migration: add `swap_reason`, `swapped_at`, `swapped_to_assignment_id` to `vehicle_hire_assignments`
+- [ ] Future: tie into vehicle Issues module (breakdown creates issue) + job activity timeline notes
+- [ ] Future: client notification of vehicle change
 
 #### Step 3: Insurance Excess Tracking
 Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (can't move to "Out" without excess collected).
