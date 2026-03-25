@@ -42,6 +42,7 @@ export function useFilteredVehicles() {
     search: '',
     simpleType: null,
     damageStatus: null,
+    hireStatus: null,
     showOldSold: false,
   })
 
@@ -73,6 +74,13 @@ export function useFilteredVehicles() {
       // Filter by damage status
       if (filters.damageStatus && v.damageStatus !== filters.damageStatus) {
         return false
+      }
+
+      // Filter by hire status
+      if (filters.hireStatus) {
+        if (filters.hireStatus === 'Available' && v.hireStatus !== 'Available') return false
+        if (filters.hireStatus === 'On Hire' && v.hireStatus !== 'On Hire') return false
+        if (filters.hireStatus === 'Prep Needed' && v.hireStatus !== 'Prep Needed') return false
       }
 
       return true

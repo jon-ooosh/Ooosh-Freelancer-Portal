@@ -1,5 +1,5 @@
 import { Link, useSearchParams } from 'react-router-dom'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useFilteredVehicles } from '../hooks/useVehicles'
 import { useAllocations } from '../hooks/useAllocations'
 import { getGearbox } from '../lib/van-matching'
@@ -17,32 +17,6 @@ const typeColours: Record<string, string> = {
   Vito: 'bg-slate-100 text-slate-700',
 }
 
-/** Colour classes for damage status */
-const damageColours: Record<string, string> = {
-  'ALL GOOD': 'bg-green-100 text-green-800',
-  'BOOK REPAIR!': 'bg-amber-100 text-amber-800',
-  'QUOTE NEEDED': 'bg-red-100 text-red-800',
-  'REPAIR BOOKED': 'bg-indigo-100 text-indigo-800',
-}
-
-/** Colour classes for service status */
-const serviceColours: Record<string, string> = {
-  'OK': 'bg-green-100 text-green-800',
-  'SERVICE BOOKED': 'bg-amber-100 text-amber-800',
-  'SERVICE DUE!': 'bg-red-100 text-red-800',
-  'SERVICE DUE SOON': 'bg-blue-100 text-blue-800',
-  'CHECK': 'bg-yellow-100 text-yellow-800',
-}
-
-function StatusBadge({ label, colourMap, prefix }: { label: string; colourMap: Record<string, string>; prefix?: string }) {
-  if (!label) return null
-  const cls = colourMap[label] || 'bg-gray-100 text-gray-600'
-  return (
-    <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${cls}`}>
-      {prefix ? `${prefix}: ${label}` : label}
-    </span>
-  )
-}
 
 function DateBadge({ label, date, warningDays = 30 }: { label: string; date: string | null; warningDays?: number }) {
   const urgency = getDateUrgency(date, warningDays)
@@ -71,62 +45,104 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
   const gearboxLabel = gearbox === 'auto' ? 'Auto' : gearbox === 'manual' ? 'Manual' : null
 
   return (
-    <Link
-      to={vmPath(`/vehicles/${vehicle.id}`)}
-      className="block rounded-lg border border-gray-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md active:bg-gray-50"
-    >
-      {/* Top row: reg + type badges */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h3 className="text-lg font-bold text-ooosh-navy">{vehicle.reg}</h3>
-          <p className="text-sm text-gray-500">
-            {vehicle.make} {vehicle.colour ? `· ${vehicle.colour}` : ''}
-          </p>
+    <div className="rounded-lg border border-gray-200 bg-white shadow-sm transition-shadow hover:shadow-md">
+      <Link
+        to={vmPath(`/vehicles/${vehicle.id}`)}
+        className="block p-4 active:bg-gray-50"
+      >
+        {/* Top row: reg + type badges */}
+        <div className="flex items-start justify-between">
+          <div>
+            <h3 className="text-lg font-bold text-ooosh-navy">{vehicle.reg}</h3>
+            <p className="text-sm text-gray-500">
+              {vehicle.make} {vehicle.colour ? `· ${vehicle.colour}` : ''}
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1">
+            {vehicle.simpleType && (
+              <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${typeColours[vehicle.simpleType] || 'bg-gray-100 text-gray-600'}`}>
+                {vehicle.simpleType}{gearboxLabel ? ` · ${gearboxLabel}` : ''}
+              </span>
+            )}
+            {vehicle.seats && (
+              <span className="text-xs text-gray-400">{vehicle.seats} seats</span>
+            )}
+          </div>
         </div>
-        <div className="flex flex-col items-end gap-1">
-          {vehicle.simpleType && (
-            <span className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${typeColours[vehicle.simpleType] || 'bg-gray-100 text-gray-600'}`}>
-              {vehicle.simpleType}{gearboxLabel ? ` · ${gearboxLabel}` : ''}
+
+        {/* Status badges */}
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          {vehicle.hireStatus === 'On Hire' && (
+            <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-blue-100 text-blue-700">
+              On Hire
             </span>
           )}
-          {vehicle.seats && (
-            <span className="text-xs text-gray-400">{vehicle.seats} seats</span>
+          {vehicle.hireStatus === 'Prep Needed' && (
+            <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700">
+              Prep Needed
+            </span>
+          )}
+          {vehicle.hireStatus === 'Available' && (
+            <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700">
+              Ready
+            </span>
+          )}
+          {isAllocated && vehicle.hireStatus !== 'On Hire' && (
+            <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-700">
+              Allocated
+            </span>
+          )}
+          {vehicle.isOldSold && (
+            <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-orange-100 text-orange-700">
+              Old &amp; Sold
+            </span>
           )}
         </div>
-      </div>
 
-      {/* Status badges */}
-      <div className="mt-2.5 flex flex-wrap gap-1.5">
-        {vehicle.hireStatus === 'On Hire' && (
-          <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-blue-100 text-blue-700">
-            On Hire
-          </span>
-        )}
-        {vehicle.hireStatus === 'Prep Needed' && (
-          <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700">
-            Prep Needed
-          </span>
-        )}
-        {isAllocated && vehicle.hireStatus !== 'On Hire' && (
-          <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-700">
-            Allocated
-          </span>
-        )}
-        {vehicle.isOldSold && (
-          <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-orange-100 text-orange-700">
-            Old &amp; Sold
-          </span>
-        )}
-        {/* Damage/service status badges removed — not useful on fleet overview */}
-      </div>
+        {/* Key dates that need attention */}
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5">
+          <DateBadge label="MOT" date={vehicle.motDue} />
+          <DateBadge label="Tax" date={vehicle.taxDue} />
+          {vehicle.tflDue && <DateBadge label="TFL" date={vehicle.tflDue} />}
+        </div>
+      </Link>
 
-      {/* Key dates that need attention */}
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5">
-        <DateBadge label="MOT" date={vehicle.motDue} />
-        <DateBadge label="Tax" date={vehicle.taxDue} />
-        {vehicle.tflDue && <DateBadge label="TFL" date={vehicle.tflDue} />}
-      </div>
-    </Link>
+      {/* Quick-action buttons */}
+      {!vehicle.isOldSold && (
+        <div className="flex border-t border-gray-100">
+          {vehicle.hireStatus !== 'On Hire' && (
+            <Link
+              to={vmPath(`/book-out?vehicle=${encodeURIComponent(vehicle.reg)}`)}
+              className="flex-1 py-2 text-center text-xs font-medium text-gray-500 hover:bg-gray-50 hover:text-ooosh-navy active:bg-gray-100 border-r border-gray-100"
+            >
+              Book Out
+            </Link>
+          )}
+          {vehicle.hireStatus === 'On Hire' && (
+            <Link
+              to={vmPath(`/check-in?vehicle=${encodeURIComponent(vehicle.reg)}`)}
+              className="flex-1 py-2 text-center text-xs font-medium text-gray-500 hover:bg-gray-50 hover:text-ooosh-navy active:bg-gray-100 border-r border-gray-100"
+            >
+              Check In
+            </Link>
+          )}
+          {vehicle.hireStatus === 'Prep Needed' && (
+            <Link
+              to={vmPath('/prep')}
+              className="flex-1 py-2 text-center text-xs font-medium text-amber-600 hover:bg-amber-50 active:bg-amber-100 border-r border-gray-100"
+            >
+              Start Prep
+            </Link>
+          )}
+          <Link
+            to={vmPath(`/vehicles/${vehicle.id}?tab=service`)}
+            className="flex-1 py-2 text-center text-xs font-medium text-gray-500 hover:bg-gray-50 hover:text-ooosh-navy active:bg-gray-100"
+          >
+            Service
+          </Link>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -146,15 +162,20 @@ export function VehiclesPage() {
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
 
-  // When ?status=on-hire, sort on-hire vehicles to the top
-  const sortedVehicles = useMemo(() => {
-    if (statusHighlight !== 'on-hire') return vehicles
-    return [...vehicles].sort((a, b) => {
-      const aOnHire = a.hireStatus === 'On Hire' ? 0 : 1
-      const bOnHire = b.hireStatus === 'On Hire' ? 0 : 1
-      return aOnHire - bOnHire
-    })
-  }, [vehicles, statusHighlight])
+  // Auto-apply hireStatus filter from URL param (e.g. ?status=on-hire from dashboard links)
+  useEffect(() => {
+    const statusMap: Record<string, string> = {
+      'on-hire': 'On Hire',
+      'available': 'Available',
+      'prep-needed': 'Prep Needed',
+    }
+    const mapped = statusMap[statusHighlight || '']
+    if (mapped) {
+      setFilters(f => ({ ...f, hireStatus: mapped, simpleType: null, showOldSold: false }))
+    }
+  }, []) // Only on mount — don't re-run as filters change
+
+  const sortedVehicles = vehicles
 
   return (
     <div className="space-y-4">
@@ -164,7 +185,7 @@ export function VehiclesPage() {
           Vehicles
           {!isLoading && (
             <span className="ml-2 text-sm font-normal text-gray-400">
-              {vehicles.length}{filters.search || filters.simpleType || filters.showOldSold ? ` / ${allVehicles.length}` : ''}
+              {vehicles.length}{filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold ? ` / ${allVehicles.length}` : ''}
             </span>
           )}
         </h2>
@@ -210,9 +231,9 @@ export function VehiclesPage() {
       {/* Type filter pills */}
       <div className="flex flex-wrap gap-2">
         <button
-          onClick={() => setFilters(f => ({ ...f, simpleType: null, showOldSold: false }))}
+          onClick={() => setFilters(f => ({ ...f, simpleType: null, hireStatus: null, showOldSold: false }))}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
-            !filters.simpleType && !filters.showOldSold
+            !filters.simpleType && !filters.hireStatus && !filters.showOldSold
               ? 'bg-ooosh-navy text-white'
               : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
           }`}
@@ -225,6 +246,7 @@ export function VehiclesPage() {
             onClick={() => setFilters(f => ({
               ...f,
               simpleType: f.simpleType === type ? null : type,
+              hireStatus: null,
               showOldSold: false,
             }))}
             className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
@@ -236,10 +258,62 @@ export function VehiclesPage() {
             {type}
           </button>
         ))}
+
+        {/* Divider */}
+        <span className="self-center text-gray-300">|</span>
+
+        {/* Status filter pills */}
+        <button
+          onClick={() => setFilters(f => ({
+            ...f,
+            hireStatus: f.hireStatus === 'On Hire' ? null : 'On Hire',
+            simpleType: null,
+            showOldSold: false,
+          }))}
+          className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+            filters.hireStatus === 'On Hire'
+              ? 'bg-blue-600 text-white'
+              : 'bg-blue-100 text-blue-700 hover:opacity-80'
+          }`}
+        >
+          On Hire
+        </button>
+        <button
+          onClick={() => setFilters(f => ({
+            ...f,
+            hireStatus: f.hireStatus === 'Available' ? null : 'Available',
+            simpleType: null,
+            showOldSold: false,
+          }))}
+          className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+            filters.hireStatus === 'Available'
+              ? 'bg-green-600 text-white'
+              : 'bg-green-100 text-green-700 hover:opacity-80'
+          }`}
+        >
+          Ready
+        </button>
+        <button
+          onClick={() => setFilters(f => ({
+            ...f,
+            hireStatus: f.hireStatus === 'Prep Needed' ? null : 'Prep Needed',
+            simpleType: null,
+            showOldSold: false,
+          }))}
+          className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+            filters.hireStatus === 'Prep Needed'
+              ? 'bg-amber-600 text-white'
+              : 'bg-amber-100 text-amber-700 hover:opacity-80'
+          }`}
+        >
+          Needs Prep
+        </button>
+
         <button
           onClick={() => setFilters(f => ({
             ...f,
             simpleType: null,
+            hireStatus: null,
             showOldSold: !f.showOldSold,
           }))}
           className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
@@ -282,19 +356,12 @@ export function VehiclesPage() {
         </div>
       )}
 
-      {/* On Hire highlight banner */}
-      {statusHighlight === 'on-hire' && !isLoading && (
-        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700">
-          Showing on-hire vehicles first
-        </div>
-      )}
-
       {/* Vehicle cards */}
       {!isLoading && !isError && (
         <div className="space-y-3">
           {sortedVehicles.length === 0 ? (
             <div className="rounded-lg border border-gray-200 bg-white p-6 text-center text-sm text-gray-400">
-              {filters.search || filters.simpleType || filters.showOldSold
+              {filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold
                 ? 'No vehicles match your filters'
                 : 'No vehicles found'}
             </div>
