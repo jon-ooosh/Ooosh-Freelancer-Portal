@@ -228,6 +228,100 @@ interface DispatchCheckResult {
   }>;
 }
 
+// ── Swap Vehicle Button ─────────────────────────────────────────────────────
+function SwapVehicleButton({ assignmentId, currentVehicleReg, onSwapped }: {
+  assignmentId: string;
+  currentVehicleReg: string;
+  onSwapped: () => void;
+}) {
+  const [showForm, setShowForm] = useState(false);
+  const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string }[]>([]);
+  const [selectedVehicle, setSelectedVehicle] = useState('');
+  const [reason, setReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (showForm && vehicles.length === 0) {
+      api.get<{ data: { id: string; reg: string; simple_type: string }[] }>('/vehicles/fleet')
+        .then(r => setVehicles((r.data || []).map(v => ({ id: v.id, reg: v.reg, simpleType: v.simple_type }))))
+        .catch(() => {});
+    }
+  }, [showForm]);
+
+  const handleSwap = async () => {
+    if (!selectedVehicle || !reason.trim()) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      await api.post(`/assignments/${assignmentId}/swap-vehicle`, {
+        new_vehicle_id: selectedVehicle,
+        swap_reason: reason,
+      });
+      setShowForm(false);
+      onSwapped();
+    } catch (err: any) {
+      setError(err.message || 'Swap failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!showForm) {
+    return (
+      <button
+        onClick={() => setShowForm(true)}
+        className="text-xs text-orange-600 hover:text-orange-800 font-medium"
+      >
+        Swap Vehicle
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2 border border-orange-200 rounded-lg p-3 bg-orange-50 space-y-2">
+      <p className="text-xs font-medium text-orange-800">
+        Swap <strong>{currentVehicleReg}</strong> to:
+      </p>
+      <select
+        value={selectedVehicle}
+        onChange={e => setSelectedVehicle(e.target.value)}
+        className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+      >
+        <option value="">Select replacement vehicle...</option>
+        {vehicles
+          .filter(v => v.reg !== currentVehicleReg)
+          .map(v => (
+            <option key={v.id} value={v.id}>{v.reg} ({v.simpleType})</option>
+          ))}
+      </select>
+      <input
+        type="text"
+        value={reason}
+        onChange={e => setReason(e.target.value)}
+        placeholder="Reason for swap (e.g. breakdown)"
+        className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+      />
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          onClick={handleSwap}
+          disabled={!selectedVehicle || !reason.trim() || submitting}
+          className="bg-orange-600 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-orange-700 disabled:opacity-50"
+        >
+          {submitting ? 'Swapping...' : 'Confirm Swap'}
+        </button>
+        <button
+          onClick={() => { setShowForm(false); setError(''); }}
+          className="text-xs text-gray-500 hover:text-gray-700"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ── Hire Form PDF Actions (per assignment, in Drivers & Vehicles tab) ────────
 function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt }: {
   assignmentId: string;
@@ -1801,6 +1895,7 @@ export default function JobDetailPage() {
                   active: { label: 'On Hire', bg: 'bg-green-100', text: 'text-green-700' },
                   returned: { label: 'Returned', bg: 'bg-teal-100', text: 'text-teal-700' },
                   cancelled: { label: 'Cancelled', bg: 'bg-red-100', text: 'text-red-700' },
+                  swapped: { label: 'Swapped', bg: 'bg-orange-100', text: 'text-orange-700' },
                 };
                 const sc = statusConfig[a.status] || statusConfig.soft;
 
@@ -1915,10 +2010,32 @@ export default function JobDetailPage() {
                       {a.has_damage && <span className="text-red-600 font-medium">Damage reported</span>}
                     </div>
 
-                    {/* Hire Form PDF actions */}
-                    {a.assignment_type === 'self_drive' && (
-                      <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} />
+                    {/* Swap info for swapped assignments */}
+                    {a.status === 'swapped' && a.notes && (
+                      <div className="mt-2 text-xs text-orange-600 italic">{a.notes}</div>
                     )}
+
+                    {/* Actions row */}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {/* Hire Form PDF actions */}
+                      {a.assignment_type === 'self_drive' && (
+                        <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} />
+                      )}
+
+                      {/* Swap Vehicle button — only for active/confirmed assignments */}
+                      {!['cancelled', 'swapped'].includes(a.status) && (
+                        <SwapVehicleButton
+                          assignmentId={a.id}
+                          currentVehicleReg={a.vehicle_reg}
+                          onSwapped={() => {
+                            // Refresh assignments
+                            api.get<{ data: VehicleAssignment[] }>(`/assignments?job_id=${job.id}`)
+                              .then(r => setVehicleAssignments(r.data || []))
+                              .catch(() => {});
+                          }}
+                        />
+                      )}
+                    </div>
                   </div>
                 );
               })}

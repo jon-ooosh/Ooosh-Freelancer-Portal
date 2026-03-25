@@ -1149,4 +1149,215 @@ async function sendReferralNotification(
   }
 }
 
+// ─── POST-SIGNATURE AUTOMATIONS ─────────────────────────────────────────────
+// Called by hire form app after successful signature + assignment creation.
+// Handles: additional driver charges in HireHop + mid-tour detection.
+router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  const results: Record<string, unknown> = {};
+
+  try {
+    // 1. Load the assignment
+    const assignmentResult = await query(
+      `SELECT a.*, fv.reg AS vehicle_reg, d.full_name AS driver_name, d.email AS driver_email
+       FROM vehicle_hire_assignments a
+       LEFT JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+       LEFT JOIN drivers d ON d.id = a.driver_id
+       WHERE a.id = $1`,
+      [id]
+    );
+    if (assignmentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    const assignment = assignmentResult.rows[0];
+    const hhJobId = assignment.hirehop_job_id;
+
+    // 2. Additional driver charge check
+    if (hhJobId) {
+      try {
+        const chargeResult = await processAdditionalDriverCharge(hhJobId, assignment.job_id);
+        results.additionalDriverCharge = chargeResult;
+        console.log(`[post-signature] Additional driver charge result for HH job ${hhJobId}:`, chargeResult);
+      } catch (err) {
+        console.warn('[post-signature] Additional driver charge failed (non-blocking):', (err as Error).message);
+        results.additionalDriverCharge = { error: (err as Error).message };
+      }
+    }
+
+    // 3. Mid-tour detection — is the job already dispatched?
+    if (hhJobId) {
+      try {
+        const { isHireHopConfigured } = await import('../config/hirehop');
+        if (isHireHopConfigured()) {
+          const { default: hhBroker } = await import('../services/hirehop-broker');
+          const jobData = await hhBroker.get<{ STATUS: string }>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 });
+          const hhStatus = parseFloat(String((jobData as Record<string, unknown>).STATUS || '0'));
+          const isDispatched = [5, 6].includes(hhStatus);
+
+          if (isDispatched) {
+            console.log(`[post-signature] MID-TOUR DETECTED — HH job ${hhJobId} status ${hhStatus}`);
+
+            // Set hire_start to NOW (driver shouldn't have been driving before form submission)
+            await query(
+              `UPDATE vehicle_hire_assignments SET hire_start = NOW() WHERE id = $1 AND hire_start IS NULL`,
+              [id]
+            );
+
+            // Send notification to team
+            const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+            try {
+              // Bell notification to admins/managers
+              const adminUsers = await query(`SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`);
+              for (const user of adminUsers.rows) {
+                await query(
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4)`,
+                  [
+                    user.id,
+                    `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
+                    `${assignment.driver_name || 'A driver'} submitted a hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}) which is already dispatched. Hire form assigned to ${assignment.vehicle_reg || 'unassigned vehicle'}.`,
+                    id,
+                  ]
+                );
+              }
+
+              // Email notification
+              await emailService.send('mid_tour_driver', {
+                to: 'info@oooshtours.co.uk',
+                variables: {
+                  driverName: assignment.driver_name || 'Unknown Driver',
+                  driverEmail: assignment.driver_email || 'N/A',
+                  vehicleReg: assignment.vehicle_reg || 'Not assigned',
+                  jobNumber: String(hhJobId),
+                  jobName: assignment.hirehop_job_name || '',
+                  jobUrl: `${frontendUrl}/jobs/${assignment.job_id || ''}`,
+                },
+              });
+            } catch (notifyErr) {
+              console.warn('[post-signature] Mid-tour notification failed:', (notifyErr as Error).message);
+            }
+
+            results.midTour = { detected: true, hhStatus, notified: true };
+          } else {
+            results.midTour = { detected: false, hhStatus };
+          }
+        }
+      } catch (err) {
+        console.warn('[post-signature] Mid-tour check failed (non-blocking):', (err as Error).message);
+        results.midTour = { error: (err as Error).message };
+      }
+    }
+
+    res.json({ success: true, assignmentId: id, results });
+  } catch (error) {
+    console.error('[post-signature] Error:', error);
+    res.status(500).json({ error: 'Post-signature processing failed' });
+  }
+});
+
+/**
+ * Count drivers for a job and add additional driver charges to HireHop if needed.
+ * 2 drivers per vehicle are free; each additional = item 1324, £20+VAT.
+ */
+async function processAdditionalDriverCharge(hhJobId: number, jobId: string | null) {
+  const ADDITIONAL_DRIVER_ITEM_ID = 1324;
+  const VEHICLE_CATEGORY_ID = 370;
+  const DRIVERS_PER_VEHICLE = 2;
+
+  // Count drivers from our assignments table
+  let driverCount = 0;
+  if (jobId) {
+    const driverResult = await query(
+      `SELECT COUNT(DISTINCT driver_id) AS cnt FROM vehicle_hire_assignments
+       WHERE job_id = $1 AND status NOT IN ('cancelled', 'swapped')`,
+      [jobId]
+    );
+    driverCount = parseInt(driverResult.rows[0]?.cnt || '0');
+  } else {
+    const driverResult = await query(
+      `SELECT COUNT(DISTINCT driver_id) AS cnt FROM vehicle_hire_assignments
+       WHERE hirehop_job_id = $1 AND status NOT IN ('cancelled', 'swapped')`,
+      [hhJobId]
+    );
+    driverCount = parseInt(driverResult.rows[0]?.cnt || '0');
+  }
+
+  if (driverCount === 0) {
+    return { driverCount: 0, chargesAdded: 0, message: 'No drivers found' };
+  }
+
+  // Get job items from HireHop to count vehicles + existing charges
+  const { isHireHopConfigured } = await import('../config/hirehop');
+  if (!isHireHopConfigured()) {
+    return { driverCount, chargesAdded: 0, message: 'HireHop not configured' };
+  }
+
+  const { default: hhBroker } = await import('../services/hirehop-broker');
+  const { getHireHopConfig } = await import('../config/hirehop');
+  const config = getHireHopConfig();
+
+  // Fetch job items
+  const itemsResponse = await hhBroker.get<unknown[]>(
+    '/frames/items_to_supply_list.php',
+    { job: hhJobId },
+    { priority: 'high', cacheTTL: 30 }
+  );
+
+  const items = Array.isArray(itemsResponse) ? itemsResponse : [];
+  let vehicleCount = 0;
+  let existingCharges = 0;
+
+  for (const item of items as Record<string, unknown>[]) {
+    const categoryId = parseInt(String(item.CATEGORY_ID || 0));
+    const itemId = parseInt(String(item.ITEM_ID || item.LIST_ID || item.ID || 0));
+    const qty = parseFloat(String(item.qty || item.QTY || item.quantity || item.QUANTITY || 1));
+    const isVirtual = item.VIRTUAL === '1';
+
+    if (categoryId === VEHICLE_CATEGORY_ID && !isVirtual) {
+      vehicleCount += qty;
+    }
+    if (itemId === ADDITIONAL_DRIVER_ITEM_ID) {
+      existingCharges += qty;
+    }
+  }
+
+  const freeDrivers = vehicleCount * DRIVERS_PER_VEHICLE;
+  const chargeableDrivers = Math.max(0, driverCount - freeDrivers);
+  const newChargesNeeded = Math.max(0, chargeableDrivers - existingCharges);
+
+  if (newChargesNeeded <= 0) {
+    return { driverCount, vehicleCount, freeDrivers, existingCharges, chargesAdded: 0, message: 'No additional charges needed' };
+  }
+
+  // Check job status (don't add to locked/closed jobs)
+  const jobData = await hhBroker.get<Record<string, unknown>>('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 30 });
+  const locked = jobData.LOCKED === 1;
+  const hhStatus = parseFloat(String(jobData.STATUS || 0));
+  const isClosed = [7, 9, 10, 11].includes(hhStatus);
+
+  if (locked || isClosed) {
+    return {
+      driverCount, vehicleCount, chargesAdded: 0, newChargesNeeded,
+      message: `Job is ${locked ? 'locked' : 'closed'} — ${newChargesNeeded} charge(s) needed manually`,
+      manualActionRequired: true,
+    };
+  }
+
+  // Add the charges via save_job.php
+  const itemKey = `b${ADDITIONAL_DRIVER_ITEM_ID}`;
+  await hhBroker.post('/api/save_job.php', {
+    job: hhJobId,
+    items: JSON.stringify({ [itemKey]: newChargesNeeded }),
+    no_webhook: 1,
+  }, { priority: 'high' });
+
+  // Add a note to the HireHop job
+  await hhBroker.get('/api/job_note.php', {
+    job: hhJobId,
+    note: `Additional driver charge(s) added automatically. Drivers: ${driverCount}, Vehicles: ${vehicleCount}, Charges added: ${newChargesNeeded} × £20+VAT. (${new Date().toLocaleDateString('en-GB')})`,
+  }, { priority: 'low' });
+
+  return { driverCount, vehicleCount, freeDrivers, existingCharges, chargesAdded: newChargesNeeded };
+}
+
 export default router;

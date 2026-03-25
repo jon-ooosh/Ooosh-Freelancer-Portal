@@ -412,17 +412,41 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [x] Netlify env vars: `DATA_BACKEND` (monday|op), `OP_BACKEND_URL`, `OP_API_KEY`
 - [x] OP backend `POST /api/hire-forms` accepts API key auth (X-API-Key), camelCase field names, optional vehicle_id
 - [x] OP backend excess: passed through from hire form app (not recalculated from excess_rules table)
-- [ ] **`monday-integration.js` `copy-a-to-b` action** — needs updating for OP mode: must call `POST /api/hire-forms` with driver data + excess amount from DVLA check. **String→number coercion fixed** (23 Mar 2026): `normalizeHireFormBody` now coerces `hirehop_job_id`, `van_requirement_index`, `licence_points`, `excess_amount` from strings to numbers. Previous test submissions stored `hirehop_job_id = NULL` — re-submit to get correct job matching.
-- [ ] **`SignaturePage.js`** — after successful `copy-a-to-b` in OP mode, needs to trigger `generate-hire-form.js` directly (no Monday.com automation to trigger it)
-- [ ] `generate-hire-form.js` (v5.6) → `GET /api/hire-forms/:id` + `POST /api/files` (logo still from Monday.com templates board) — verify `fetchDriverDataFromOP` handles null vehicle_reg gracefully
+- [x] **`monday-integration.js` `copy-a-to-b` action** — SUPERSEDED in OP mode. `POST /api/hire-forms` creates the assignment directly. No Board B needed. String→number coercion fixed (23 Mar 2026).
+- [ ] **`SignaturePage.js` OP mode repointing** (hire form app side) — In OP mode, after signature:
+  1. Call `POST /api/hire-forms` (already working — creates assignment)
+  2. Call `POST /api/hire-forms/:id/generate-pdf` (OP endpoint exists, needs triggering from SignaturePage)
+  3. Call new `POST /api/hire-forms/:id/post-signature` endpoint (see below) for additional driver charges + mid-tour detection
+  4. Confirmation email already handled by hire form app (no OP duplication needed)
+- [ ] **Post-signature automations (OP backend)** — new endpoint `POST /api/hire-forms/:id/post-signature`:
+  - Count `vehicle_hire_assignments` for job → count vehicles in HH → add additional driver charge (item 1324, £20+VAT per extra driver beyond 2 per vehicle)
+  - Check if job is dispatched (HH status 5/6) → mid-tour driver flow:
+    - Set hire_start to NOW (not original job start — driver shouldn't have been driving before form submission)
+    - Send mid-tour notification email to team (bell notification + email)
+    - Driver appears on Job Detail > Drivers & Vehicles with "Hire form complete — not yet booked out" status
+    - Badge on Fleet page on-hire cards: "New driver pending" when assignment exists without book-out event
+  - Return result summary (charges added, mid-tour detected, etc.)
+- [ ] `generate-hire-form.js` (v5.6) → repoint to `POST /api/hire-forms/:id/generate-pdf` in OP mode (hire form app side)
 
 *Phase C4: Go-live cutover:*
 - [x] Set env vars on OP server (`HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`) — confirmed present
 - [x] Run migration 020 on production (`npm run db:migrate`) — done
-- [ ] Fix `monday-integration.js` copy-a-to-b + SignaturePage trigger (see Phase C3 above)
+- [ ] Repoint `SignaturePage.js` to OP endpoints (see Phase C3 above)
+- [ ] Build `POST /api/hire-forms/:id/post-signature` (additional driver charge + mid-tour notification)
+- [ ] Add "Generate Snapshot PDF" button on Insurance Referral panel (DriverDetailPage)
+- [ ] Mid-tour driver surfacing: badge on Fleet on-hire cards + status on Job Detail Drivers tab
+- [ ] Vehicle swap flow (see Phase D3 below)
 - [ ] Test end-to-end with `DATA_BACKEND=op` on Netlify deploy preview
 - [ ] Flip `DATA_BACKEND=op` on Netlify production
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
+
+**Phase C5 — VE103b Certificate Generation** (TODO — not yet specced)
+VE103b is a letter/certificate authorising a named driver to drive a specific vehicle on behalf of the company. Currently produced manually. Needs:
+- [ ] VE103b PDF generation (driver name, vehicle reg, dates, company details)
+- [ ] Trigger from book-out flow or hire form assignment
+- [ ] `ve103b_ref` field already exists on `vehicle_hire_assignments` — link generated PDF ref here
+- [ ] Email to driver and/or store in R2
+- *Awaiting full requirements from user — what fields, what template, when triggered*
 
 **Phase D — Allocations Migration** ✅ MOSTLY COMPLETE
 - [x] Switch AllocationsPage to read from `vehicle_hire_assignments` (compat layer)
@@ -447,11 +471,30 @@ Joined-up referral management: flag → email → review → resolve → date ex
 - [x] Adjusted excess field on resolution (for insurer-imposed excess increases, stored on `job_excess` records)
 - [x] Audit trail for referral resolution (`resolve_referral` action in audit_log)
 
+**Snapshot PDF UI:**
+- [ ] "Generate Snapshot PDF" button on Insurance Referral panel (DriverDetailPage) for drivers with `requires_referral = true`
+- [x] Backend: `driver-snapshot-pdf.ts` service already built
+- [ ] Wire button → call snapshot endpoint → download/attach PDF
+
 **Future referral integration (not yet built):**
 - [ ] Dashboard widget: "X drivers awaiting referral" with click-through to driver list
 - [ ] Pipeline/Job Detail: referral status shown per-job where driver has pending referral (blocks dispatch)
 - [ ] `post-signature-notifications.js` repointing: currently reads from Monday.com to check referral — needs OP backend repoint (reads from driver-verification status endpoint instead)
 - [ ] Excess module integration: adjusted excess from referral resolution flows into excess tracking/payment portal
+
+**Phase D3 — Vehicle Swap (Breakdown / Reallocation)**
+When a vehicle breaks down mid-hire and needs swapping to a replacement:
+
+- [ ] "Swap Vehicle" button on Job Detail > Drivers & Vehicles tab (per-assignment)
+- [ ] Swap flow: select replacement vehicle → original assignment gets `status = 'swapped'` with `swap_reason`, `swapped_at`, `swapped_to_assignment_id`
+- [ ] New assignment auto-created for same driver + replacement vehicle, inheriting job/dates
+- [ ] Both assignments visible in driver Hire History (audit trail: "was in GX17DHN → swapped to RX22SWN on 25 Mar")
+- [ ] Original vehicle's book-out event gets "swapped" note; new vehicle gets fresh book-out
+- [ ] New hire form PDF can be generated for replacement vehicle
+- [ ] VE103b regenerated for new vehicle (when VE103b generation is built)
+- [ ] Migration: add `swap_reason`, `swapped_at`, `swapped_to_assignment_id` to `vehicle_hire_assignments`
+- [ ] Future: tie into vehicle Issues module (breakdown creates issue) + job activity timeline notes
+- [ ] Future: client notification of vehicle change
 
 #### Step 3: Insurance Excess Tracking
 Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (can't move to "Out" without excess collected).
