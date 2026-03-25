@@ -100,6 +100,8 @@ export function CheckInPage() {
   // Autosave on every form/step change
   useEffect(() => {
     if (!draftChecked || submitSuccess || queuedOffline) return
+    // Don't save empty state before a vehicle is selected
+    if (!form.vehicleId) return
     // Convert Map to plain object for IDB storage
     const bookOutPhotosObj: Record<string, string> = {}
     form.bookOutPhotos.forEach((v, k) => { bookOutPhotosObj[k] = v })

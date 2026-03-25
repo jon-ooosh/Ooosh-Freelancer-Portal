@@ -197,6 +197,17 @@ sudo systemctl restart ooosh-portal
 sudo systemctl status ooosh-portal
 ```
 
+### Nginx configuration — IMPORTANT
+
+**The live Nginx config is `/etc/nginx/sites-available/default` (NOT `ooosh-portal`).** The repo file `deploy/nginx-ooosh-portal.conf` is a reference copy but is NOT symlinked into `sites-enabled`. The active symlink is `default → /etc/nginx/sites-available/default`.
+
+If you need to change Nginx behaviour (new location blocks, proxy rules, headers, etc.):
+1. Edit `deploy/nginx-ooosh-portal.conf` in the repo (so the change is tracked in git)
+2. Tell the user to **also apply the change** to `/etc/nginx/sites-available/default` on the server
+3. After editing on server: `sudo nginx -t && sudo systemctl reload nginx`
+
+**Do NOT** assume `deploy.sh` or `git pull` will update Nginx — it won't. Nginx changes require manual server-side application.
+
 ### Post-deploy checks
 - Service should show `active (running)` within a few seconds
 - Check `journalctl -u ooosh-portal -n 50` for any startup errors (DB connection, migration issues, missing env vars)
