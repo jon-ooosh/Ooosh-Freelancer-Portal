@@ -654,4 +654,71 @@ router.delete('/:id', authorize('admin'), async (req: AuthRequest, res: Response
   }
 });
 
+// ─── GENERATE SNAPSHOT PDF ──────────────────────────────────────────────────
+// Downloads a driver verification snapshot PDF for audit/referral purposes.
+router.post('/:id/generate-snapshot', authenticate, async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  try {
+    const driverResult = await query(
+      `SELECT d.*,
+              COALESCE(
+                (SELECT string_agg('#' || COALESCE(a.hirehop_job_id::text, 'N/A'), ', ')
+                 FROM vehicle_hire_assignments a WHERE a.driver_id = d.id AND a.status NOT IN ('cancelled')),
+                'No active hires'
+              ) AS linked_jobs
+       FROM drivers d WHERE d.id = $1 AND d.is_active = true`,
+      [id]
+    );
+    if (driverResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver not found' });
+    }
+    const driver = driverResult.rows[0];
+
+    const documents = await loadDriverDocuments(driver.files || []);
+    let logoImage: Buffer | null = null;
+    try { logoImage = await fetchLogo(); } catch { /* skip */ }
+
+    const isUk = (driver.licence_issue_country || '').toUpperCase() === 'GB' ||
+      (driver.licence_issued_by || '').toUpperCase().includes('DVLA');
+
+    const snapshotData = {
+      driverName: driver.full_name || 'Unknown',
+      email: driver.email || '',
+      phone: driver.phone ? `${driver.phone_country || ''} ${driver.phone}` : '',
+      dateOfBirth: driver.date_of_birth || '',
+      nationality: driver.nationality || '',
+      homeAddress: [driver.address_line1, driver.address_line2, driver.city, driver.postcode].filter(Boolean).join(', '),
+      licenceAddress: driver.licence_address || '',
+      licenceNumber: driver.licence_number || '',
+      licenceIssuedBy: driver.licence_issued_by || driver.licence_issue_country || '',
+      licenceValidTo: driver.licence_valid_to || '',
+      datePassedTest: driver.date_passed_test || '',
+      dvlaPoints: String(driver.licence_points || 0),
+      dvlaEndorsements: Array.isArray(driver.licence_endorsements)
+        ? driver.licence_endorsements.map((e: any) => e.code).join(', ') || 'None'
+        : 'None',
+      calculatedExcess: '',
+      isUkDriver: isUk,
+      hasDisability: driver.has_disability || false,
+      hasConvictions: driver.has_convictions || false,
+      hasProsecution: driver.has_prosecution || false,
+      hasAccidents: driver.has_accidents || false,
+      hasInsuranceIssues: driver.has_insurance_issues || false,
+      hasDrivingBan: driver.has_driving_ban || false,
+      additionalDetails: driver.additional_details || '',
+      jobId: driver.linked_jobs || 'N/A',
+      documents,
+      logoImage,
+    };
+
+    const { pdfBytes, filename } = await generateDriverSnapshot(snapshotData);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(Buffer.from(pdfBytes));
+  } catch (error) {
+    console.error('[drivers] Snapshot PDF error:', error);
+    res.status(500).json({ error: 'Failed to generate snapshot PDF' });
+  }
+});
+
 export default router;
