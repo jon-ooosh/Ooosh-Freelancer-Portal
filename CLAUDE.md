@@ -21,6 +21,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 
 **Server:** Hetzner CAX11 (2 vCPU, 4GB RAM) at `49.13.158.66`
 **Domain:** `staff.oooshtours.co.uk` (SSL via Let's Encrypt)
+**Database name:** `ooosh_operations` (PostgreSQL, access via `sudo -u postgres psql -d ooosh_operations`)
 
 ## Repository Structure
 
