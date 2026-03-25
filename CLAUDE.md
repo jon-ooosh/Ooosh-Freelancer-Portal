@@ -401,17 +401,37 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [x] Netlify env vars: `DATA_BACKEND` (monday|op), `OP_BACKEND_URL`, `OP_API_KEY`
 - [x] OP backend `POST /api/hire-forms` accepts API key auth (X-API-Key), camelCase field names, optional vehicle_id
 - [x] OP backend excess: passed through from hire form app (not recalculated from excess_rules table)
-- [ ] **`monday-integration.js` `copy-a-to-b` action** — needs updating for OP mode: must call `POST /api/hire-forms` with driver data + excess amount from DVLA check. **String→number coercion fixed** (23 Mar 2026): `normalizeHireFormBody` now coerces `hirehop_job_id`, `van_requirement_index`, `licence_points`, `excess_amount` from strings to numbers. Previous test submissions stored `hirehop_job_id = NULL` — re-submit to get correct job matching.
-- [ ] **`SignaturePage.js`** — after successful `copy-a-to-b` in OP mode, needs to trigger `generate-hire-form.js` directly (no Monday.com automation to trigger it)
-- [ ] `generate-hire-form.js` (v5.6) → `GET /api/hire-forms/:id` + `POST /api/files` (logo still from Monday.com templates board) — verify `fetchDriverDataFromOP` handles null vehicle_reg gracefully
+- [x] **`monday-integration.js` `copy-a-to-b` action** — SUPERSEDED in OP mode. `POST /api/hire-forms` creates the assignment directly. No Board B needed. String→number coercion fixed (23 Mar 2026).
+- [ ] **`SignaturePage.js` OP mode repointing** (hire form app side) — In OP mode, after signature:
+  1. Call `POST /api/hire-forms` (already working — creates assignment)
+  2. Call `POST /api/hire-forms/:id/generate-pdf` (OP endpoint exists, needs triggering from SignaturePage)
+  3. Call new `POST /api/hire-forms/:id/post-signature` endpoint (see below) for additional driver charges + mid-tour notification
+  4. Send confirmation email to driver via OP email service
+- [ ] **Post-signature automations (OP backend)** — new endpoint `POST /api/hire-forms/:id/post-signature`:
+  - Count `vehicle_hire_assignments` for job → count vehicles in HH → add additional driver charge (item 1324, £20+VAT per extra driver beyond 2 per vehicle)
+  - Check if job is dispatched (status 5/6) → send mid-tour notification email
+  - Generate driver snapshot PDF (button also available on Hire History per-assignment)
+  - Send confirmation email to driver
+- [ ] `generate-hire-form.js` (v5.6) → repoint to `POST /api/hire-forms/:id/generate-pdf` in OP mode (hire form app side)
 
 *Phase C4: Go-live cutover:*
 - [x] Set env vars on OP server (`HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`) — confirmed present
 - [x] Run migration 020 on production (`npm run db:migrate`) — done
-- [ ] Fix `monday-integration.js` copy-a-to-b + SignaturePage trigger (see Phase C3 above)
+- [ ] Repoint `SignaturePage.js` to OP endpoints (see Phase C3 above)
+- [ ] Build `POST /api/hire-forms/:id/post-signature` (additional driver charge + mid-tour notification)
+- [ ] Add "Generate Snapshot PDF" button on Hire History (per-assignment)
+- [ ] Confirmation email template for driver (post-signature)
 - [ ] Test end-to-end with `DATA_BACKEND=op` on Netlify deploy preview
 - [ ] Flip `DATA_BACKEND=op` on Netlify production
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
+
+**Phase C5 — VE103b Certificate Generation** (TODO — not yet specced)
+VE103b is a letter/certificate authorising a named driver to drive a specific vehicle on behalf of the company. Currently produced manually. Needs:
+- [ ] VE103b PDF generation (driver name, vehicle reg, dates, company details)
+- [ ] Trigger from book-out flow or hire form assignment
+- [ ] `ve103b_ref` field already exists on `vehicle_hire_assignments` — link generated PDF ref here
+- [ ] Email to driver and/or store in R2
+- *Awaiting full requirements from user — what fields, what template, when triggered*
 
 **Phase D — Allocations Migration** ✅ MOSTLY COMPLETE
 - [x] Switch AllocationsPage to read from `vehicle_hire_assignments` (compat layer)
