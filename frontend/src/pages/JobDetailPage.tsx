@@ -795,6 +795,10 @@ export default function JobDetailPage() {
 
   async function pushToHireHop() {
     if (!job) return;
+    if (!job.job_date || !job.job_end) {
+      alert('Start date and end date are required before creating a job in HireHop. Please set both dates first.');
+      return;
+    }
     setPushingToHH(true);
     try {
       await api.post(`/pipeline/${job.id}/push-hirehop`, {});

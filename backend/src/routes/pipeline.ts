@@ -842,6 +842,14 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       return;
     }
 
+    if (!job.job_date || !job.job_end) {
+      const missing = [];
+      if (!job.job_date) missing.push('start date');
+      if (!job.job_end) missing.push('end date');
+      res.status(400).json({ error: `Cannot create in HireHop: ${missing.join(' and ')} required` });
+      return;
+    }
+
     // Look up HireHop client_id from external_id_map
     let hhClientId: number | null = null;
     if (job.client_id) {
