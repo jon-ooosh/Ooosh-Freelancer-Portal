@@ -496,10 +496,37 @@ When a vehicle breaks down mid-hire and needs swapping to a replacement:
 - [ ] Future: tie into vehicle Issues module (breakdown creates issue) + job activity timeline notes
 - [ ] Future: client notification of vehicle change
 
-#### Step 3: Insurance Excess Tracking
-Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (warnings on dispatch when excess not collected, with manager override).
+#### Step 3: Money System (Unified Financial View) ← IN PROGRESS
+The OP becomes the staff's financial view of every job, reading from HireHop for accounting data and adding intelligence on top. HireHop stays the accounting engine; the OP is the operational dashboard.
 
-**Database layer** ✅ COMPLETE (built in Step 2 Phase A + migration 034)
+**Architectural principle:** One "Money" tab per job showing the complete financial picture — hire value, deposits, insurance excess, VAT adjustments, payment history. Excess tracking is a component within the Money system, not a separate silo.
+
+**What each system does:**
+| System | Role | Good at | Bad at |
+|---|---|---|---|
+| HireHop | Accounting engine | Deposits, invoices, Xero sync, billing | Knowing what kind of deposit it is, driver linkage, lifecycle |
+| OP | Operational dashboard | Context (this deposit = excess for driver X), lifecycle, gate conditions, VAT intelligence | Accounting / Xero sync |
+| Payment Portal | Client-facing collection | Stripe checkout, payment options display | Staff workflow, lifecycle tracking |
+
+**Data flow — how money moves:**
+```
+Client pays via Payment Portal (Stripe)
+  → Stripe webhook fires
+  → Portal creates HH deposit (accounting record)
+  → Portal calls OP: "payment recorded for job X, type: excess/deposit/balance"
+  → OP updates job_excess status if excess payment
+  → OP records in job_payments for unified history
+  → OP fires email to client
+  → Both systems in sync
+
+Staff records manual payment (bank transfer, card in office, cash)
+  → Records on OP Money tab: "£1200 bank transfer, type: excess"
+  → OP creates HH deposit automatically (via write-back)
+  → OP updates job_excess if excess payment
+  → One entry point, both systems updated
+```
+
+##### Phase A — Insurance Excess (Database + Backend) ✅ COMPLETE
 - [x] `job_excess` table with full financial lifecycle fields
 - [x] `excess_rules` table (configurable points tiers + referral triggers)
 - [x] `client_excess_ledger` view (running balance per Xero contact, includes override count)
@@ -511,49 +538,102 @@ Financial lifecycle tracking for insurance excesses — NOT a pipeline status, b
 - [x] By-org endpoint (`GET /api/excess/by-org/:orgId`) — address book integration
 - [x] Client balance check (`GET /api/excess/client-balance/:xeroContactId`) — for auto-suggest
 
-**Phase E — Excess Gate + Ledger UI** ✅ MOSTLY COMPLETE (26 Mar 2026)
-- [x] `ExcessGateBanner.tsx` — amber warning on Job Detail Drivers & Vehicles tab with manager override flow (reason picklist: client on credit, pre-auth to follow, staff vehicle, balance on account, other)
+**Excess calculation — "Top N Drivers" algorithm:**
+The hire form process calculates excess. The principle: charge the excess of the highest-risk drivers, one per van. Sort all drivers by excess descending, take top N (N = van count), sum. If fewer drivers than vans, fill remaining slots with standard £1,200/van. The OP stores the calculated total via `job_excess.excess_amount_required`.
+
+##### Phase B — Excess Gate + Ledger UI ✅ MOSTLY COMPLETE (26 Mar 2026)
+- [x] `ExcessGateBanner.tsx` — amber warning on Job Detail Drivers & Vehicles tab with manager override flow
 - [x] `ExcessPaymentModal.tsx` — record payment, claim, reimburse, waive, rollover, move to different entity
-- [x] `ExcessLedgerPage.tsx` at `/money/excess` — global view with client ledger + all-records views, status filters, click-through drill-down
+- [x] `ExcessLedgerPage.tsx` at `/money/excess` — global view with client ledger + all-records views
 - [x] `ExcessHistorySection.tsx` — reusable component for address book pages (person/org detail)
 - [x] "Excess History" tab on PersonDetailPage and OrganisationDetailPage
 - [x] "Money > Excess" nav group in Layout.tsx (admin/manager only)
-- [x] 6 email templates for excess lifecycle (payment confirmed, pre-auth confirmed, reimbursed, partial reimbursed, claimed, pre-auth released)
-- [ ] Wire email triggers to status transition actions (send emails on payment/reimburse/claim)
+- [x] 6 email templates for excess lifecycle (payment confirmed, pre-auth confirmed, reimbursed, partial, claimed, pre-auth released)
+- [ ] Wire email triggers to status transition actions
 - [ ] Auto-suggest "client has £X on account" on new hire assignments (endpoint exists, UI wiring pending)
-- [ ] HireHop excess-as-deposit sync (read deposit field from HH, cross-reference with job_excess records)
 
-**Phase F — Payment Portal Repointing** (NOT YET STARTED — depends on portal-side work)
-The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads excess amounts from Monday.com and writes payment status to both Monday.com and HireHop. It needs repointing to the OP.
+##### Phase C — Money Tab on Job Detail (NEXT UP)
+Add a "Money" tab to Job Detail showing the unified financial picture for the job. Excess components slot into this tab.
 
-*Current Payment Portal architecture (from analysis):*
-- Excess amount source: Monday.com Driver Hire Form board (841453886), via mirror column
-- Excess calculation: "Top N drivers" algorithm — sort drivers by excess descending, take top N (N = van count), sum. If fewer drivers than vans, fill remaining with standard £1,200/van
-- Card payments: Stripe Checkout → webhook → HireHop deposit + Monday.com status update
-- Pre-auth: Stripe `capture_method: 'manual'`, 7-day hold, admin captures via admin portal
-- Bank/PayPal: informational only, staff manually creates HireHop deposit
-- No `DATA_BACKEND` flag exists — repointing requires replacing Monday.com GraphQL calls in ~6 functions
+*Financial Summary section (read from HireHop via broker):*
+- [ ] Read hire value (ex/inc VAT) from HH `billing_list.php`
+- [ ] Read deposits/payments made from HH billing list (kind=6 = deposits)
+- [ ] Calculate balance outstanding
+- [ ] Show payment progress bar (deposit → balance → paid in full)
 
-*Repointing plan (non-destructive, env var toggle):*
-- [ ] Add `DATA_BACKEND` env var to Payment Portal Netlify config (default: `monday`, switch to `op`)
-- [ ] Create `backend-client.js` abstraction layer in portal repo
-- [ ] Repoint `monday-driver-excess.js` → `GET /api/excess?job_id=X` (reads from OP instead of Monday.com board)
-- [ ] Repoint `monday-integration.js` payment status updates → `POST /api/excess/:id/payment`
-- [ ] Repoint `monday-excess-checker.js` pre-auth status → `GET /api/excess?hirehop_job_id=X`
-- [ ] Repoint `handle-stripe-webhook.js` post-payment Monday.com updates → OP excess endpoints
-- [ ] Repoint `admin-claim-preauth.js` post-capture updates → `POST /api/excess/:id/payment` (pre-auth capture becomes payment)
-- [ ] Repoint `admin-refund-payment.js` post-refund updates → `POST /api/excess/:id/reimburse`
-- [ ] OP webhook receiver for Stripe events (alternative to portal calling OP — TBD)
+*Insurance Excess section (from OP data, already built):*
+- [ ] Show excess required, status, driver, suggested collection method
+- [ ] Embed `ExcessPaymentModal` for actions (record payment, reimburse, claim etc.)
+- [ ] Show dispatch override status if applicable
+- [ ] Auto-suggest if client has balance on account
+
+*Payment History section (merged from HH + OP):*
+- [ ] `job_payments` table — unified payment recording (job_id, type, amount, method, status, date, reference, source)
+- [ ] Merge HH deposits with OP-recorded payments into single timeline
+- [ ] Each entry shows: date, amount, type (deposit/balance/excess/refund), method, reference
+
+*Record Payment form:*
+- [ ] "Record Manual Payment" — amount, method (bank/card/cash/PayPal), type (deposit/balance/excess), reference
+- [ ] On submit: create HH deposit via write-back + record in OP `job_payments`
+- [ ] If type = excess: also update `job_excess` status
+- [ ] One entry point → both systems updated
+
+*Client Account section:*
+- [ ] Show rolled-over balance from previous hires
+- [ ] Link to client's full excess history (address book)
+- [ ] Client payment terms (from organisations table)
+
+##### Phase D — VAT Adjustment Display
+Port the international VAT calculation from the Payment Portal into the OP. Currently staff access this via the client-facing payment portal URL — after this phase, they see it directly on the Money tab.
+
+*Backend service (port from `vat-adjustment.js`):*
+- [ ] `services/vat-adjustment.ts` — port calculation logic from Payment Portal
+- [ ] Read job items from HH `items_to_supply_list.php` via broker
+- [ ] Read revenue by nominal from HH `job_margins.php` via broker
+- [ ] Detect trigger item ("Non-standard VAT rules..." with non-UK days as quantity)
+- [ ] Apply HMRC rules: vehicles (proportional or 0% if 31+ days), equipment (proportional), services (always 20%)
+- [ ] Return breakdown with penny-perfect figures per category
+- [ ] Endpoint: `GET /api/money/:jobId/vat-adjustment`
+
+*Frontend display:*
+- [ ] VAT adjustment section on Money tab (only shown when trigger item detected)
+- [ ] Category breakdown: Vehicles / Equipment & Backline / Services
+- [ ] Per-category: net amount, VAT amount, rule applied
+- [ ] Original vs adjusted total, VAT saved
+- [ ] Explanation text for client-facing context
+
+##### Phase E — Payment Portal Repointing (non-destructive, env var toggle)
+The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from Monday.com and writes to both Monday.com and HireHop. Repointing to OP, protected by `DATA_BACKEND` env var (default: `monday`, flip to `op` when ready).
+
+*OP endpoints needed for portal:*
+- [ ] `GET /api/money/:jobId/summary` — hire value, deposits, balance, excess status (replaces portal's `get-job-details-v2.js` Monday.com calls)
+- [ ] `POST /api/money/:jobId/payment-event` — receive payment events from portal (replaces Monday.com status updates)
+- [ ] `GET /api/money/:jobId/excess-info` — excess amount, driver breakdown, pre-auth eligibility (replaces `monday-driver-excess.js`)
+
+*Portal-side changes (in payment portal repo):*
+- [ ] Add `DATA_BACKEND` env var to Netlify config (default: `monday`)
+- [ ] Create `backend-client.js` abstraction layer
+- [ ] Repoint `monday-driver-excess.js` → OP excess-info endpoint
+- [ ] Repoint `monday-integration.js` payment status → OP payment-event endpoint
+- [ ] Repoint `monday-excess-checker.js` pre-auth status → OP excess endpoint
+- [ ] Repoint `handle-stripe-webhook.js` post-payment → OP payment-event endpoint
+- [ ] Repoint `admin-claim-preauth.js` post-capture → OP payment endpoint
+- [ ] Repoint `admin-refund-payment.js` post-refund → OP reimburse endpoint
 - [ ] Test on Netlify deploy preview with `DATA_BACKEND=op`
-- [ ] Flip to `op` on production, monitor for 1-2 weeks
+- [ ] Flip to `op` on production, monitor 1-2 weeks
 - [ ] Remove Monday.com fallback code
 
-*Key design decisions:*
-- Pre-auth is NOT a separate status lifecycle — it's a hint to the Payment Portal about what card option to show (hire ≤4 days → pre-auth, >4 days → payment). `suggested_collection_method` field on `job_excess` stores this.
-- Dispatch gate is a **warning, not a wall** — staff see amber banner, can override with captured reason. Override doesn't change excess status (still pending), just lifts the gate for that dispatch.
-- Excess is always tied to a Xero contact ID (stable identifier, survives HH client name changes) AND a person (driver). Can be moved between entities if entered incorrectly.
-- Client balance/rollover is entirely new capability — no equivalent exists in Monday.com or portal today.
-- Bank/PayPal payments are now trackable — staff can record via ExcessPaymentModal, giving visibility that doesn't exist in the current system.
+##### Phase F — Staff Card Payments (future)
+Allow staff to take card payments directly from the Money tab, rather than walking to the card terminal.
+- [ ] Stripe integration in OP (PaymentIntent creation from backend)
+- [ ] "Take Card Payment" button on Money tab → amount, generates Stripe payment link or embedded checkout
+- [ ] Webhook receiver for direct OP Stripe payments
+- [ ] Auto-record in HH as deposit + OP as job_payment
+
+##### Global Money Views
+- [x] `/money/excess` — Insurance excess ledger (client balances, all records, drill-down)
+- [ ] `/money/overview` — Global financial dashboard (deposits pending, balances outstanding, excess held) — *replaces Stream 6 dashboard widget*
+- [ ] `/money/payments` — All recorded payments across all jobs (future)
 
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.
@@ -569,11 +649,7 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [ ] Gate conditions: check excess collected before allowing dispatch
 
 #### Step 5: Payment Portal Repointing
-Repoint payment portal from Monday.com → Ooosh status-transition API.
-
-- [ ] Payment portal calls Ooosh webhook instead of Monday.com
-- [ ] Excess payment events recorded in Ooosh (financial record, not pipeline change)
-- [ ] Payment confirmation → pipeline status change (deposit = confirmed)
+*Merged into Step 3 Phase E (Money System).* See above for full repointing plan with `DATA_BACKEND` env var toggle.
 
 #### Step 6: Operations Modules (Hire Readiness) ← STREAM 1 FOUNDATION MOSTLY COMPLETE
 
@@ -637,13 +713,7 @@ Aggregate views on the Dashboard page — click through to individual jobs from 
 - [ ] Freelancer portal integration: push rehearsal assignments to studio sitters
 
 ##### Stream 6: Payment Tracking (pre-Xero)
-Per-job financial tracking, summarised on Dashboard rather than its own global page.
-- [ ] `job_payments` table (job_id, type: deposit/balance/refund, amount, method, status, date, reference)
-- [ ] Per-job payment summary on Prep Checklist (progress bar: deposit → balance → paid in full)
-- [ ] Client payment terms on `organisations` table (upfront / credit / credit up to £X)
-- [ ] Address Book UI for managing client payment terms
-- [ ] Payment status feeds into gate conditions (deposit required before dispatch)
-- [ ] Dashboard payment summary widget (deposits pending, balances outstanding across all jobs)
+*Merged into Step 3 (Money System).* `job_payments` table, per-job financial summary, payment recording, and client payment terms are all part of the unified Money tab on Job Detail. See Step 3 Phases C-F for full spec.
 
 ##### Stream 7: Transport & Crew Operations ← FOUNDATION COMPLETE
 Global operational view for what's currently happening / about to happen with transport and crew.
