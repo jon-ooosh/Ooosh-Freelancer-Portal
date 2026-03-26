@@ -565,6 +565,7 @@ export default function JobDetailPage() {
     jobDate: '',
     arrivalTime: '',
     notes: '',
+    pushToHirehop: true,
   });
   const [localSubmitting, setLocalSubmitting] = useState(false);
   const [venueSearch, setVenueSearch] = useState('');
@@ -2761,6 +2762,19 @@ export default function JobDetailPage() {
                     placeholder="Optional notes..."
                   />
                 </div>
+
+                {/* Push to HireHop toggle */}
+                {job.hh_job_number && (
+                  <label className="flex items-center gap-2 text-sm text-gray-700 pt-1">
+                    <input
+                      type="checkbox"
+                      checked={localFormData.pushToHirehop}
+                      onChange={(e) => setLocalFormData({ ...localFormData, pushToHirehop: e.target.checked })}
+                      className="w-4 h-4 text-ooosh-600 rounded"
+                    />
+                    Add to HireHop job #{job.hh_job_number}
+                  </label>
+                )}
               </div>
 
               <div className="flex justify-end gap-2 mt-4">
@@ -2782,7 +2796,7 @@ export default function JobDetailPage() {
                           ? (job.out_date.includes('T') ? job.out_date.split('T')[0] : job.out_date)
                           : undefined;
                       }
-                      await api.post('/quotes/local', {
+                      const localResult = await api.post<{ id: string }>('/quotes/local', {
                         jobId: job.id,
                         jobType: localFormData.jobType,
                         venueId: localFormData.venueId || job.venue_id || undefined,
@@ -2791,8 +2805,16 @@ export default function JobDetailPage() {
                         arrivalTime: localFormData.arrivalTime || undefined,
                         notes: localFormData.notes || undefined,
                       });
+                      // Push to HireHop if toggled on
+                      if (localFormData.pushToHirehop && job.hh_job_number && localResult?.id) {
+                        try {
+                          await api.post(`/quotes/${localResult.id}/push-hirehop`, {});
+                        } catch (hhErr) {
+                          console.warn('HireHop push failed for local D/C:', hhErr);
+                        }
+                      }
                       setShowLocalForm(false);
-                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '' });
+                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '', pushToHirehop: true });
                       loadQuotes();
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Failed to create');
