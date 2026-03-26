@@ -47,8 +47,6 @@ export default function PeoplePage() {
   const [showForm, setShowForm] = useState(false);
   const [filterFreelancer, setFilterFreelancer] = useState(false);
   const [filterApproved, setFilterApproved] = useState(false);
-  const [filterHasEmail, setFilterHasEmail] = useState(false);
-  const [filterHasPhone, setFilterHasPhone] = useState(false);
   const [filterMissingEmail, setFilterMissingEmail] = useState(false);
   const [filterMissingPhone, setFilterMissingPhone] = useState(false);
   const [sortBy, setSortBy] = useState('name');
@@ -56,7 +54,7 @@ export default function PeoplePage() {
 
   useEffect(() => {
     loadPeople();
-  }, [search, filterFreelancer, filterApproved, filterHasEmail, filterHasPhone, filterMissingEmail, filterMissingPhone, sortBy]);
+  }, [search, filterFreelancer, filterApproved, filterMissingEmail, filterMissingPhone, sortBy]);
 
   async function loadPeople(page = 1) {
     setLoading(true);
@@ -65,8 +63,6 @@ export default function PeoplePage() {
       if (search) params.set('search', search);
       if (filterFreelancer) params.set('is_freelancer', 'true');
       if (filterApproved) params.set('is_approved', 'true');
-      if (filterHasEmail) params.set('has_email', 'true');
-      if (filterHasPhone) params.set('has_phone', 'true');
       if (filterMissingEmail) params.set('missing_email', 'true');
       if (filterMissingPhone) params.set('missing_phone', 'true');
       if (sortBy !== 'name') params.set('sort', sortBy);
@@ -133,38 +129,20 @@ export default function PeoplePage() {
           />
           Approved only
         </label>
-        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
-          <input
-            type="checkbox"
-            checked={filterHasEmail}
-            onChange={(e) => { setFilterHasEmail(e.target.checked); if (e.target.checked) setFilterMissingEmail(false); }}
-            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-          />
-          Has email
-        </label>
         <label className="flex items-center gap-1.5 cursor-pointer text-sm text-amber-600">
           <input
             type="checkbox"
             checked={filterMissingEmail}
-            onChange={(e) => { setFilterMissingEmail(e.target.checked); if (e.target.checked) setFilterHasEmail(false); }}
+            onChange={(e) => setFilterMissingEmail(e.target.checked)}
             className="rounded border-gray-300 text-amber-500 focus:ring-amber-500"
           />
           Missing email
-        </label>
-        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
-          <input
-            type="checkbox"
-            checked={filterHasPhone}
-            onChange={(e) => { setFilterHasPhone(e.target.checked); if (e.target.checked) setFilterMissingPhone(false); }}
-            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-          />
-          Has phone
         </label>
         <label className="flex items-center gap-1.5 cursor-pointer text-sm text-amber-600">
           <input
             type="checkbox"
             checked={filterMissingPhone}
-            onChange={(e) => { setFilterMissingPhone(e.target.checked); if (e.target.checked) setFilterHasPhone(false); }}
+            onChange={(e) => setFilterMissingPhone(e.target.checked)}
             className="rounded border-gray-300 text-amber-500 focus:ring-amber-500"
           />
           Missing phone
