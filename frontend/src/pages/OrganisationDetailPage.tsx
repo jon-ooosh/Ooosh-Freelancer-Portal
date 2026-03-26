@@ -5,6 +5,7 @@ import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
+import ExcessHistorySection from '../components/ExcessHistorySection';
 import { ORG_RELATIONSHIP_LABELS, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -93,7 +94,7 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'timeline' | 'details'>('people');
+  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'timeline' | 'details' | 'excess'>('people');
 
   // Edit/delete
   const [showEdit, setShowEdit] = useState(false);
@@ -385,11 +386,12 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'timeline', 'details'] as const).map((tab) => {
+          {(['people', 'relationships', 'timeline', 'details', 'excess'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
             const label = tab === 'people' ? `People (${(org.people || []).length})`
               : tab === 'relationships' ? `Relationships${relCount ? ` (${relCount})` : ''}`
               : tab === 'timeline' ? 'Activity Timeline'
+              : tab === 'excess' ? 'Excess History'
               : 'Details';
             return (
               <button
@@ -805,6 +807,11 @@ export default function OrganisationDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Excess History Tab */}
+      {activeTab === 'excess' && id && (
+        <ExcessHistorySection entityType="organisation" entityId={id} />
       )}
 
       {/* Edit Panel */}

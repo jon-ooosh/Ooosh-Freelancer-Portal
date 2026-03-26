@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
+import ExcessGateBanner from '../components/ExcessGateBanner';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
 
@@ -1745,25 +1746,32 @@ export default function JobDetailPage() {
             {id && <QuickAssignButton jobId={id} jobDate={job.job_date || undefined} returnDate={job.return_date || undefined} onCreated={loadVehicleAssignments} />}
           </div>
 
-          {/* Referral/excess warnings */}
-          {dispatchCheck && dispatchCheck.blockers.length > 0 && (
+          {/* Referral warnings */}
+          {dispatchCheck && dispatchCheck.blockers.filter(b => b.type === 'referral_pending').length > 0 && (
             <div className="space-y-2">
-              {dispatchCheck.blockers.map((b, i) => (
-                <div key={i} className={`flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium ${
-                  b.type === 'referral_pending'
-                    ? 'bg-orange-50 border border-orange-200 text-orange-800'
-                    : 'bg-amber-50 border border-amber-200 text-amber-800'
-                }`}>
-                  <span>{b.type === 'referral_pending' ? '!' : '$'}</span>
+              {dispatchCheck.blockers.filter(b => b.type === 'referral_pending').map((b, i) => (
+                <div key={i} className="flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-orange-50 border border-orange-200 text-orange-800">
+                  <span>!</span>
                   <span>
-                    {b.type === 'referral_pending'
-                      ? `Referral pending for ${b.driverName || 'Unknown driver'} (${b.vehicleReg || '?'}) — cannot book out until approved`
-                      : `Excess pending for ${b.driverName || 'Unknown driver'} (${b.vehicleReg || '?'})${b.amountRequired ? ` — £${b.amountRequired.toFixed(2)} required` : ''}`
-                    }
+                    Referral pending for {b.driverName || 'Unknown driver'} ({b.vehicleReg || '?'}) — cannot book out until approved
                   </span>
                 </div>
               ))}
             </div>
+          )}
+
+          {/* Excess gate banner */}
+          {dispatchCheck && dispatchCheck.blockers.filter(b => b.type === 'excess_pending').length > 0 && (
+            <ExcessGateBanner
+              blockers={dispatchCheck.blockers.filter(b => b.type === 'excess_pending').map(b => ({
+                ...b,
+                excessId: vehicleAssignments.find(a => a.id === b.assignmentId)?.excess?.id,
+                excessStatus: vehicleAssignments.find(a => a.id === b.assignmentId)?.excess?.excess_status,
+                dispatchOverride: false,
+              }))}
+              onOverrideComplete={loadVehicleAssignments}
+              onNavigateToRequirements={() => setActiveTab('overview')}
+            />
           )}
 
           {vehicleAssignmentsLoading ? (
