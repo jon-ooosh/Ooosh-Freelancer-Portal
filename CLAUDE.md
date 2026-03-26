@@ -497,20 +497,63 @@ When a vehicle breaks down mid-hire and needs swapping to a replacement:
 - [ ] Future: client notification of vehicle change
 
 #### Step 3: Insurance Excess Tracking
-Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (can't move to "Out" without excess collected).
+Financial lifecycle tracking for insurance excesses — NOT a pipeline status, but a **gate condition** (warnings on dispatch when excess not collected, with manager override).
 
-**Database layer** ✅ COMPLETE (built in Step 2 Phase A)
+**Database layer** ✅ COMPLETE (built in Step 2 Phase A + migration 034)
 - [x] `job_excess` table with full financial lifecycle fields
 - [x] `excess_rules` table (configurable points tiers + referral triggers)
-- [x] `client_excess_ledger` view (running balance per Xero contact)
+- [x] `client_excess_ledger` view (running balance per Xero contact, includes override count)
 - [x] Excess CRUD + payment/claim/reimburse/waive endpoints (`excess.ts`)
+- [x] Migration 034: `dispatch_override` fields, `suggested_collection_method`, `person_id` linkage, `notes`
+- [x] Override endpoint (`POST /api/excess/:id/override`) — manager+ auth with reason picklist
+- [x] Move/reassign endpoint (`POST /api/excess/:id/move`) — move excess to different Xero contact/person
+- [x] By-person endpoint (`GET /api/excess/by-person/:personId`) — address book integration
+- [x] By-org endpoint (`GET /api/excess/by-org/:orgId`) — address book integration
+- [x] Client balance check (`GET /api/excess/client-balance/:xeroContactId`) — for auto-suggest
 
-**Phase E — Excess Gate + Ledger UI** (after Phase D)
-- [ ] Excess gate UI — warning banners on Job Detail when excess pending
-- [ ] Wire gate into status transition engine (block dispatch)
-- [ ] Excess ledger page (`/excess`) — client balances, history, actions
-- [ ] Payment recording UI (record payment, claim, reimburse)
-- [ ] HireHop excess-as-deposit sync
+**Phase E — Excess Gate + Ledger UI** ✅ MOSTLY COMPLETE (26 Mar 2026)
+- [x] `ExcessGateBanner.tsx` — amber warning on Job Detail Drivers & Vehicles tab with manager override flow (reason picklist: client on credit, pre-auth to follow, staff vehicle, balance on account, other)
+- [x] `ExcessPaymentModal.tsx` — record payment, claim, reimburse, waive, rollover, move to different entity
+- [x] `ExcessLedgerPage.tsx` at `/money/excess` — global view with client ledger + all-records views, status filters, click-through drill-down
+- [x] `ExcessHistorySection.tsx` — reusable component for address book pages (person/org detail)
+- [x] "Excess History" tab on PersonDetailPage and OrganisationDetailPage
+- [x] "Money > Excess" nav group in Layout.tsx (admin/manager only)
+- [x] 6 email templates for excess lifecycle (payment confirmed, pre-auth confirmed, reimbursed, partial reimbursed, claimed, pre-auth released)
+- [ ] Wire email triggers to status transition actions (send emails on payment/reimburse/claim)
+- [ ] Auto-suggest "client has £X on account" on new hire assignments (endpoint exists, UI wiring pending)
+- [ ] HireHop excess-as-deposit sync (read deposit field from HH, cross-reference with job_excess records)
+
+**Phase F — Payment Portal Repointing** (NOT YET STARTED — depends on portal-side work)
+The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads excess amounts from Monday.com and writes payment status to both Monday.com and HireHop. It needs repointing to the OP.
+
+*Current Payment Portal architecture (from analysis):*
+- Excess amount source: Monday.com Driver Hire Form board (841453886), via mirror column
+- Excess calculation: "Top N drivers" algorithm — sort drivers by excess descending, take top N (N = van count), sum. If fewer drivers than vans, fill remaining with standard £1,200/van
+- Card payments: Stripe Checkout → webhook → HireHop deposit + Monday.com status update
+- Pre-auth: Stripe `capture_method: 'manual'`, 7-day hold, admin captures via admin portal
+- Bank/PayPal: informational only, staff manually creates HireHop deposit
+- No `DATA_BACKEND` flag exists — repointing requires replacing Monday.com GraphQL calls in ~6 functions
+
+*Repointing plan (non-destructive, env var toggle):*
+- [ ] Add `DATA_BACKEND` env var to Payment Portal Netlify config (default: `monday`, switch to `op`)
+- [ ] Create `backend-client.js` abstraction layer in portal repo
+- [ ] Repoint `monday-driver-excess.js` → `GET /api/excess?job_id=X` (reads from OP instead of Monday.com board)
+- [ ] Repoint `monday-integration.js` payment status updates → `POST /api/excess/:id/payment`
+- [ ] Repoint `monday-excess-checker.js` pre-auth status → `GET /api/excess?hirehop_job_id=X`
+- [ ] Repoint `handle-stripe-webhook.js` post-payment Monday.com updates → OP excess endpoints
+- [ ] Repoint `admin-claim-preauth.js` post-capture updates → `POST /api/excess/:id/payment` (pre-auth capture becomes payment)
+- [ ] Repoint `admin-refund-payment.js` post-refund updates → `POST /api/excess/:id/reimburse`
+- [ ] OP webhook receiver for Stripe events (alternative to portal calling OP — TBD)
+- [ ] Test on Netlify deploy preview with `DATA_BACKEND=op`
+- [ ] Flip to `op` on production, monitor for 1-2 weeks
+- [ ] Remove Monday.com fallback code
+
+*Key design decisions:*
+- Pre-auth is NOT a separate status lifecycle — it's a hint to the Payment Portal about what card option to show (hire ≤4 days → pre-auth, >4 days → payment). `suggested_collection_method` field on `job_excess` stores this.
+- Dispatch gate is a **warning, not a wall** — staff see amber banner, can override with captured reason. Override doesn't change excess status (still pending), just lifts the gate for that dispatch.
+- Excess is always tied to a Xero contact ID (stable identifier, survives HH client name changes) AND a person (driver). Can be moved between entities if entered incorrectly.
+- Client balance/rollover is entirely new capability — no equivalent exists in Monday.com or portal today.
+- Bank/PayPal payments are now trackable — staff can record via ExcessPaymentModal, giving visibility that doesn't exist in the current system.
 
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.

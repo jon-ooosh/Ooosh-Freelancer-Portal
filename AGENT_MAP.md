@@ -416,12 +416,19 @@ Update this section as work completes:
 - [ ] Branch ready for PR
 
 ### Agent 2 — Excess Gate & Ledger
-- [ ] Excess gate banner on Job Detail
-- [ ] Dispatch blocking logic wired in
-- [ ] Admin override with reason capture
-- [ ] /excess ledger page built
-- [ ] Payment/claim/reimburse/waive actions
-- [ ] Branch ready for PR
+- [x] Excess gate banner on Job Detail (ExcessGateBanner.tsx with manager override)
+- [x] Dispatch warning with override (not hard block — amber warning, manager can override with reason)
+- [x] Manager override with reason capture (picklist + notes, logged to audit trail)
+- [x] /money/excess ledger page built (client ledger + all-records views, status filters)
+- [x] Payment/claim/reimburse/waive/rollover/move actions (ExcessPaymentModal.tsx)
+- [x] Excess History tabs on PersonDetailPage + OrganisationDetailPage
+- [x] Migration 034 (dispatch_override, suggested_collection_method, person_id, notes)
+- [x] Backend: override, move, by-person, by-org, client-balance endpoints
+- [x] 6 email templates for excess lifecycle events
+- [x] Branch merged to main (26 Mar 2026)
+- [ ] Wire email triggers to status transitions
+- [ ] Auto-suggest client balance on new assignments
+- [ ] Payment Portal repointing (Phase F — see CLAUDE.md)
 
 ### Agent 3 — Ops Dashboard & Backline
 - [ ] Dashboard transport widget
