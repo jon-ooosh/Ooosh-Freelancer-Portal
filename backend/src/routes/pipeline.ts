@@ -854,9 +854,9 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     let hhClientId: number | null = null;
     if (job.client_id) {
       const extMap = await query(
-        `SELECT external_id FROM external_id_map WHERE entity_type = 'person' AND entity_id = $1 AND source = 'hirehop'
+        `SELECT external_id FROM external_id_map WHERE entity_type = 'person' AND entity_id = $1 AND external_system = 'hirehop'
          UNION
-         SELECT external_id FROM external_id_map WHERE entity_type = 'organisation' AND entity_id = $1 AND source = 'hirehop'`,
+         SELECT external_id FROM external_id_map WHERE entity_type = 'organisation' AND entity_id = $1 AND external_system = 'hirehop'`,
         [job.client_id]
       );
       if (extMap.rows.length > 0) {
