@@ -164,7 +164,7 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
         </select>
       </div>
 
-      <Field label="Email" type="email" value={form.email} onChange={v => set('email', v)} />
+      <Field label="Email" type="email" value={form.email} onChange={v => set('email', v)} emailValidation />
       <Field label="Phone" value={form.phone} onChange={v => set('phone', v)} />
       <Field label="Website" value={form.website} onChange={v => set('website', v)} placeholder="https://..." />
       <Field label="Address" value={form.address} onChange={v => set('address', v)} />
@@ -249,10 +249,13 @@ export default function OrganisationForm({ orgId, onSaved, onCancel }: Organisat
   );
 }
 
-function Field({ label, value, onChange, type = 'text', placeholder }: {
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function Field({ label, value, onChange, type = 'text', placeholder, emailValidation }: {
   label: string; value: string; onChange: (v: string) => void;
-  type?: string; placeholder?: string;
+  type?: string; placeholder?: string; emailValidation?: boolean;
 }) {
+  const showEmailError = emailValidation && value.trim() !== '' && !EMAIL_REGEX.test(value.trim());
   return (
     <div>
       <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">{label}</label>
@@ -261,8 +264,11 @@ function Field({ label, value, onChange, type = 'text', placeholder }: {
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        className={`w-full rounded border px-3 py-2 text-sm focus:outline-none focus:ring-1 ${showEmailError ? 'border-red-400 focus:border-red-500 focus:ring-red-500' : 'border-gray-300 focus:border-ooosh-500 focus:ring-ooosh-500'}`}
       />
+      {showEmailError && (
+        <p className="mt-1 text-xs text-red-500">Please enter a valid email address</p>
+      )}
     </div>
   );
 }

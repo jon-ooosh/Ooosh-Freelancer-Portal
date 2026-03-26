@@ -1005,9 +1005,15 @@ function NewEnquiryModal({
     setStagedFiles(prev => prev.filter((_, i) => i !== index));
   };
 
+  const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
   const handleSave = async (alsoCreateInHH = false) => {
     if (!clientName || !details) {
       setError('Client and description are required');
+      return;
+    }
+    if (isNewClient && newClientEmail.trim() && !EMAIL_REGEX.test(newClientEmail.trim())) {
+      setError('Please enter a valid email address for the new client');
       return;
     }
     setSaving(true);
@@ -1080,11 +1086,15 @@ function NewEnquiryModal({
 
       // Push to HireHop if requested
       if (alsoCreateInHH && created.id) {
-        try {
-          await api.post(`/pipeline/${created.id}/push-hirehop`, {});
-        } catch (hhErr) {
-          console.error('HireHop push failed:', hhErr);
-          // Don't block — enquiry was created, HH push can be retried from Job Detail
+        if (!jobDate || !jobEnd) {
+          alert('Enquiry created, but start and end dates are required to push to HireHop. You can push from the Job Detail page after adding dates.');
+        } else {
+          try {
+            await api.post(`/pipeline/${created.id}/push-hirehop`, {});
+          } catch (hhErr) {
+            console.error('HireHop push failed:', hhErr);
+            // Don't block — enquiry was created, HH push can be retried from Job Detail
+          }
         }
       }
 
@@ -1154,8 +1164,11 @@ function NewEnquiryModal({
                     value={newClientEmail}
                     onChange={(e) => setNewClientEmail(e.target.value)}
                     placeholder="Email (optional)"
-                    className="w-full border border-green-200 rounded px-3 py-1.5 text-sm focus:border-green-400 focus:outline-none focus:ring-1 focus:ring-green-400 bg-white"
+                    className={`w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 bg-white ${newClientEmail.trim() && !EMAIL_REGEX.test(newClientEmail.trim()) ? 'border-red-400 focus:border-red-500 focus:ring-red-500' : 'border-green-200 focus:border-green-400 focus:ring-green-400'}`}
                   />
+                  {newClientEmail.trim() && !EMAIL_REGEX.test(newClientEmail.trim()) && (
+                    <p className="text-xs text-red-500 mt-0.5">Please enter a valid email address</p>
+                  )}
                   <input
                     type="tel"
                     value={newClientPhone}

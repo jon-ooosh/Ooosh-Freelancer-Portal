@@ -44,8 +44,6 @@ export default function OrganisationsPage() {
   const [orgs, setOrgs] = useState<Organisation[]>([]);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
-  const [filterHasEmail, setFilterHasEmail] = useState(false);
-  const [filterHasPeople, setFilterHasPeople] = useState(false);
   const [filterMissingEmail, setFilterMissingEmail] = useState(false);
   const [filterMissingPhone, setFilterMissingPhone] = useState(false);
   const [sortBy, setSortBy] = useState('name');
@@ -56,7 +54,7 @@ export default function OrganisationsPage() {
 
   useEffect(() => {
     loadOrgs();
-  }, [search, typeFilter, filterHasEmail, filterHasPeople, filterMissingEmail, filterMissingPhone, sortBy]);
+  }, [search, typeFilter, filterMissingEmail, filterMissingPhone, sortBy]);
 
   async function loadOrgs(page = 1) {
     setLoading(true);
@@ -64,8 +62,6 @@ export default function OrganisationsPage() {
       const params = new URLSearchParams({ page: String(page), limit: '50' });
       if (search) params.set('search', search);
       if (typeFilter) params.set('type', typeFilter);
-      if (filterHasEmail) params.set('has_email', 'true');
-      if (filterHasPeople) params.set('has_people', 'true');
       if (filterMissingEmail) params.set('missing_email', 'true');
       if (filterMissingPhone) params.set('missing_phone', 'true');
       if (sortBy !== 'name') params.set('sort', sortBy);
@@ -122,20 +118,11 @@ export default function OrganisationsPage() {
           <option value="booking_agent">Booking Agent</option>
           <option value="other">Other</option>
         </select>
-        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
-          <input
-            type="checkbox"
-            checked={filterHasEmail}
-            onChange={(e) => { setFilterHasEmail(e.target.checked); if (e.target.checked) setFilterMissingEmail(false); }}
-            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-          />
-          Has email
-        </label>
         <label className="flex items-center gap-1.5 cursor-pointer text-sm text-amber-600">
           <input
             type="checkbox"
             checked={filterMissingEmail}
-            onChange={(e) => { setFilterMissingEmail(e.target.checked); if (e.target.checked) setFilterHasEmail(false); }}
+            onChange={(e) => setFilterMissingEmail(e.target.checked)}
             className="rounded border-gray-300 text-amber-500 focus:ring-amber-500"
           />
           Missing email
@@ -148,15 +135,6 @@ export default function OrganisationsPage() {
             className="rounded border-gray-300 text-amber-500 focus:ring-amber-500"
           />
           Missing phone
-        </label>
-        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
-          <input
-            type="checkbox"
-            checked={filterHasPeople}
-            onChange={(e) => setFilterHasPeople(e.target.checked)}
-            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-          />
-          Has people
         </label>
         <select
           value={sortBy}
