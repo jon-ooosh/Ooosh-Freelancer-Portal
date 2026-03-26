@@ -833,4 +833,107 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ─── VEHICLE SWAP ──────────────────────────────────────────────────────────
+// Swap a vehicle on an existing assignment (e.g. breakdown → replacement).
+// Original assignment gets status 'swapped'; new assignment is created for the replacement vehicle.
+const swapSchema = z.object({
+  new_vehicle_id: z.string().uuid(),
+  swap_reason: z.string().min(1).max(500),
+});
+
+router.post('/:id/swap-vehicle', validate(swapSchema), async (req: AuthRequest, res: Response) => {
+  const { id } = req.params;
+  const { new_vehicle_id, swap_reason } = req.body;
+
+  try {
+    // 1. Load original assignment
+    const origResult = await query(
+      `SELECT a.*, fv.reg AS vehicle_reg, d.full_name AS driver_name
+       FROM vehicle_hire_assignments a
+       LEFT JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+       LEFT JOIN drivers d ON d.id = a.driver_id
+       WHERE a.id = $1 AND a.status NOT IN ('cancelled', 'swapped')`,
+      [id]
+    );
+    if (origResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Assignment not found or already swapped/cancelled' });
+    }
+    const orig = origResult.rows[0];
+
+    // 2. Verify new vehicle exists
+    const newVehicleResult = await query(`SELECT id, reg FROM fleet_vehicles WHERE id = $1`, [new_vehicle_id]);
+    if (newVehicleResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Replacement vehicle not found' });
+    }
+    const newVehicle = newVehicleResult.rows[0];
+
+    // 3. Create new assignment for replacement vehicle (same driver, job, dates)
+    const newResult = await query(
+      `INSERT INTO vehicle_hire_assignments (
+        vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
+        driver_id, assignment_type,
+        van_requirement_index, required_type, required_gearbox,
+        status, status_changed_at,
+        hire_start, hire_end, start_time, end_time, return_overnight,
+        client_email, notes, created_by
+      ) VALUES (
+        $1, $2, $3, $4,
+        $5, $6,
+        $7, $8, $9,
+        'confirmed', NOW(),
+        NOW(), $10, $11, $12, $13,
+        $14, $15, $16
+      ) RETURNING *`,
+      [
+        new_vehicle_id, orig.job_id, orig.hirehop_job_id, orig.hirehop_job_name,
+        orig.driver_id, orig.assignment_type,
+        orig.van_requirement_index, orig.required_type, orig.required_gearbox,
+        orig.hire_end, orig.start_time, orig.end_time, orig.return_overnight,
+        orig.client_email,
+        `Swapped from ${orig.vehicle_reg || 'unknown'}: ${swap_reason}`,
+        req.user!.id,
+      ]
+    );
+    const newAssignment = newResult.rows[0];
+
+    // 4. Mark original as swapped
+    await query(
+      `UPDATE vehicle_hire_assignments
+       SET status = 'swapped', swap_reason = $1, swapped_at = NOW(), swapped_to_assignment_id = $2, status_changed_at = NOW()
+       WHERE id = $3`,
+      [swap_reason, newAssignment.id, id]
+    );
+
+    // 5. Copy excess record to new assignment
+    await query(
+      `INSERT INTO job_excess (assignment_id, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, created_by)
+       SELECT $1, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, $2
+       FROM job_excess WHERE assignment_id = $3 LIMIT 1`,
+      [newAssignment.id, req.user!.id, id]
+    );
+
+    console.log(`[assignments] Vehicle swapped: ${orig.vehicle_reg} → ${newVehicle.reg} (assignment ${id} → ${newAssignment.id})`);
+
+    // Return both assignments
+    const fullNew = await query(
+      `SELECT a.*, fv.reg AS vehicle_reg, d.full_name AS driver_name
+       FROM vehicle_hire_assignments a
+       LEFT JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+       LEFT JOIN drivers d ON d.id = a.driver_id
+       WHERE a.id = $1`,
+      [newAssignment.id]
+    );
+
+    res.status(201).json({
+      data: {
+        original: { id, status: 'swapped', swap_reason, vehicle_reg: orig.vehicle_reg },
+        replacement: fullNew.rows[0],
+      },
+    });
+  } catch (error) {
+    console.error('[assignments] Vehicle swap error:', error);
+    res.status(500).json({ error: 'Failed to swap vehicle' });
+  }
+});
+
 export default router;

@@ -65,6 +65,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '032_fix_audit_log_action_constraint.sql',
         '033_address_book_enhancements.sql',
         '033_job_line_items.sql',
+        '034_vehicle_swap.sql',
+        '034_crewed_jobs_enhancements.sql',
         '034_excess_enhancements.sql',
       ];
 

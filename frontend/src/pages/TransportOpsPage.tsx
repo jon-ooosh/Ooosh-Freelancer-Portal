@@ -58,6 +58,10 @@ interface OpsQuote {
   completion_photos: string[] | null;
   customer_present: boolean | null;
   what_is_it: string | null;
+  num_days: number | null;
+  crew_count: number | null;
+  expenses_included: number | null;
+  expenses_not_included: number | null;
   internal_notes: string | null;
   freelancer_notes: string | null;
   // Joined fields
@@ -136,6 +140,7 @@ export default function TransportOpsPage() {
   const [assignRole, setAssignRole] = useState('driver');
   const [peopleSearch, setPeopleSearch] = useState('');
   const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
+  const [crewHistory, setCrewHistory] = useState<{ person_id: string; first_name: string; last_name: string; role: string; job_count: number; last_job_date: string; avg_rate: number }[]>([]);
 
   useEffect(() => {
     loadOps();
@@ -216,6 +221,21 @@ export default function TransportOpsPage() {
     setPeopleSearch('');
     setPeopleOptions([]);
     setAssignRole('driver');
+    setCrewHistory([]);
+
+    // Load crew history for this quote's job/venue/client
+    const quote = quotes.find(q => q.id === quoteId);
+    if (quote && quote.job_type === 'crewed') {
+      const params = new URLSearchParams();
+      if (quote.job_id) params.set('job_id', quote.job_id);
+      if (quote.venue_id) params.set('venue_id', quote.venue_id);
+      if (quote.client_name) params.set('client_name', quote.client_name);
+      if (params.toString()) {
+        api.get<{ data: typeof crewHistory }>(`/quotes/crew-history?${params}`)
+          .then(res => setCrewHistory(res.data || []))
+          .catch(() => {});
+      }
+    }
   }
 
   // ── Editing handlers ──
@@ -468,6 +488,45 @@ export default function TransportOpsPage() {
                 />
               </div>
 
+              {/* Previously sent crew suggestions */}
+              {crewHistory.length > 0 && peopleSearch.length < 2 && (
+                <div>
+                  <p className="text-xs font-medium text-gray-500 mb-1">Previously sent to this client/venue</p>
+                  <div className="border border-purple-200 rounded-lg divide-y divide-purple-100 bg-purple-50/50">
+                    {crewHistory.map(h => {
+                      const currentQuote = quotes.find(q => q.id === assignModalQuoteId);
+                      const alreadyAssigned = currentQuote?.assignments?.some(a => a.person_id === h.person_id);
+                      return (
+                        <button
+                          key={h.person_id}
+                          disabled={alreadyAssigned}
+                          onClick={() => assignPerson(assignModalQuoteId!, h.person_id, assignRole)}
+                          className={`w-full text-left px-3 py-2 text-sm flex items-center justify-between ${
+                            alreadyAssigned ? 'opacity-40 cursor-not-allowed' : 'hover:bg-purple-100'
+                          }`}
+                        >
+                          <div>
+                            <span className="font-medium text-gray-900">{h.first_name} {h.last_name}</span>
+                            <span className="ml-2 text-xs text-purple-600">{h.role}</span>
+                            <span className="ml-1 text-xs text-gray-400">
+                              ({h.job_count} job{h.job_count !== 1 ? 's' : ''})
+                            </span>
+                          </div>
+                          <div className="flex gap-1 items-center">
+                            {h.avg_rate > 0 && (
+                              <span className="text-xs text-gray-500">avg &pound;{h.avg_rate}</span>
+                            )}
+                            {alreadyAssigned && (
+                              <span className="text-xs bg-gray-100 text-gray-500 rounded px-1.5 py-0.5">Assigned</span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Results */}
               {peopleOptions.length > 0 && (
                 <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg divide-y divide-gray-100">
@@ -601,13 +660,20 @@ function QuoteRow({
         </span>
 
         {/* Date & time */}
-        <div className="w-28 flex-shrink-0">
+        <div className="w-32 flex-shrink-0">
           <div className="text-sm font-medium text-gray-900">
-            {q.job_date ? formatDate(q.job_date) : <span className="text-gray-400">No date</span>}
+            {q.job_date ? (
+              q.is_multi_day && q.job_finish_date ? (
+                <>{formatDate(q.job_date)} – {formatDate(q.job_finish_date)}</>
+              ) : formatDate(q.job_date)
+            ) : <span className="text-gray-400">No date</span>}
           </div>
-          {q.arrival_time && (
-            <div className="text-xs text-gray-500">{q.arrival_time}</div>
-          )}
+          <div className="text-xs text-gray-500 flex items-center gap-1.5">
+            {q.arrival_time && <span>{q.arrival_time}</span>}
+            {q.is_multi_day && q.num_days && q.num_days > 1 && (
+              <span className="text-purple-600 font-medium">{q.num_days}d</span>
+            )}
+          </div>
         </div>
 
         {/* Job / Venue name + badges */}
@@ -634,22 +700,29 @@ function QuoteRow({
         </div>
 
         {/* Crew */}
-        <div className="w-40 flex-shrink-0 hidden lg:block" onClick={(e) => e.stopPropagation()}>
+        <div className="w-44 flex-shrink-0 hidden lg:block" onClick={(e) => e.stopPropagation()}>
           {crewNames.length > 0 ? (
-            <div className="text-sm text-gray-700 truncate">
-              {crewNames.join(', ')}
-              <button
-                onClick={() => onAssign(q.id)}
-                className="ml-1 text-xs text-ooosh-600 hover:text-ooosh-700"
-                title="Assign more crew"
-              >+</button>
+            <div className="text-sm text-gray-700">
+              <div className="truncate">{crewNames.join(', ')}</div>
+              <div className="flex items-center gap-1.5">
+                {(q.crew_count || 1) > 1 && (
+                  <span className={`text-xs font-medium ${crewNames.length >= (q.crew_count || 1) ? 'text-green-600' : 'text-amber-600'}`}>
+                    {crewNames.length}/{q.crew_count} assigned
+                  </span>
+                )}
+                <button
+                  onClick={() => onAssign(q.id)}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-700"
+                  title="Assign more crew"
+                >+</button>
+              </div>
             </div>
           ) : (
             <button
               onClick={() => onAssign(q.id)}
-              className="text-xs text-red-500 hover:text-red-700 font-medium"
+              className={`text-xs font-medium ${(q.crew_count || 1) > 1 ? 'text-red-500 hover:text-red-700' : 'text-red-500 hover:text-red-700'}`}
             >
-              + Assign crew
+              + Assign crew{(q.crew_count || 1) > 1 ? ` (${q.crew_count} needed)` : ''}
             </button>
           )}
         </div>
@@ -895,6 +968,20 @@ function ExpandedDetail({
           {q.work_description && (
             <div className="text-gray-500">{q.work_description}</div>
           )}
+          {q.is_multi_day && q.job_date && q.job_finish_date && (
+            <div className="text-gray-600">
+              <span className="text-gray-400">Dates:</span> {formatDate(q.job_date)} – {formatDate(q.job_finish_date)}
+              {q.num_days && q.num_days > 1 && <span className="ml-1 text-purple-600 font-medium">({q.num_days} days)</span>}
+            </div>
+          )}
+          {(q.crew_count || 1) > 1 && (
+            <div className="text-gray-600">
+              <span className="text-gray-400">Crew needed:</span>{' '}
+              <span className={`font-medium ${q.assignments.length >= (q.crew_count || 1) ? 'text-green-600' : 'text-amber-600'}`}>
+                {q.assignments.length}/{q.crew_count} assigned
+              </span>
+            </div>
+          )}
 
           {/* Run grouping */}
           {q.job_id && (
@@ -1052,6 +1139,14 @@ function ExpandedDetail({
               ))}
             </div>
           )}
+          {/* Total crew cost (sum of agreed rates) */}
+          {assignments.length > 0 && assignments.some(a => a.agreed_rate != null) && (
+            <div className="text-xs text-gray-500 mt-1">
+              Total crew cost: <span className="font-medium text-gray-700">
+                &pound;{assignments.reduce((sum, a) => sum + (Number(a.agreed_rate) || 0), 0).toFixed(0)}
+              </span>
+            </div>
+          )}
           <div className="border-t border-gray-200 pt-1 mt-1">
             <div className="flex justify-between text-xs">
               <span className="text-gray-500">Client charge</span>
@@ -1061,6 +1156,18 @@ function ExpandedDetail({
               <span className="text-gray-500">Freelancer cost</span>
               <span className="font-medium">{q.freelancer_fee_rounded ? `£${q.freelancer_fee_rounded}` : '—'}</span>
             </div>
+            {(q.expenses_included != null && q.expenses_included > 0) && (
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-500">Expenses (in quote)</span>
+                <span className="font-medium text-gray-600">&pound;{Number(q.expenses_included).toFixed(2)}</span>
+              </div>
+            )}
+            {(q.expenses_not_included != null && q.expenses_not_included > 0) && (
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-500">Expenses (freelancer claims)</span>
+                <span className="font-medium text-amber-600">&pound;{Number(q.expenses_not_included).toFixed(2)}</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1253,16 +1360,23 @@ function EditQuoteModal({
   onClose: () => void;
 }) {
   const isLocal = quote.is_local || quote.calculation_mode === 'fixed';
+  const parseDateField = (d: string | Date | null) => {
+    if (!d) return '';
+    if (d instanceof Date) return d.toISOString().split('T')[0];
+    return String(d).includes('T') ? String(d).split('T')[0] : String(d);
+  };
   const [form, setForm] = useState({
     job_type: quote.job_type,
     venue_name: quote.linked_venue_name || quote.venue_name || '',
-    job_date: (() => {
-      if (!quote.job_date) return '';
-      if (quote.job_date instanceof Date) return quote.job_date.toISOString().split('T')[0];
-      return String(quote.job_date).includes('T') ? String(quote.job_date).split('T')[0] : String(quote.job_date);
-    })(),
+    job_date: parseDateField(quote.job_date),
+    job_finish_date: parseDateField(quote.job_finish_date),
+    is_multi_day: quote.is_multi_day || false,
+    num_days: quote.num_days || 1,
     arrival_time: quote.arrival_time || '',
     what_is_it: quote.what_is_it || '',
+    work_type: quote.work_type || '',
+    work_description: quote.work_description || '',
+    crew_count: quote.crew_count || 1,
     internal_notes: quote.internal_notes || '',
     freelancer_notes: quote.freelancer_notes || '',
     client_charge_rounded: quote.client_charge_rounded || 0,
@@ -1294,8 +1408,14 @@ function EditQuoteModal({
         venue_name: form.venue_name,
         venue_id: selectedVenueId,
         job_date: form.job_date || null,
+        job_finish_date: form.job_finish_date || null,
+        is_multi_day: form.is_multi_day,
+        num_days: form.num_days,
         arrival_time: form.arrival_time || null,
         what_is_it: form.what_is_it || null,
+        work_type: form.work_type || null,
+        work_description: form.work_description || null,
+        crew_count: form.crew_count > 1 ? form.crew_count : 1,
         internal_notes: form.internal_notes || null,
         freelancer_notes: form.freelancer_notes || null,
         client_charge_rounded: form.client_charge_rounded,
@@ -1377,7 +1497,7 @@ function EditQuoteModal({
           {/* Date & Time row */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{form.is_multi_day ? 'Start Date' : 'Date'}</label>
               <input
                 type="date"
                 value={form.job_date}
@@ -1396,20 +1516,98 @@ function EditQuoteModal({
             </div>
           </div>
 
-          {/* What is it */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">What is it</label>
-            <select
-              value={form.what_is_it}
-              onChange={(e) => setForm((p) => ({ ...p, what_is_it: e.target.value }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-            >
-              <option value="">—</option>
-              <option value="vehicle">Vehicle</option>
-              <option value="equipment">Equipment</option>
-              <option value="people">People</option>
-            </select>
+          {/* Multi-day toggle + finish date */}
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={form.is_multi_day}
+                onChange={(e) => setForm((p) => ({ ...p, is_multi_day: e.target.checked, num_days: e.target.checked ? Math.max(p.num_days, 2) : 1 }))}
+                className="w-4 h-4 text-ooosh-600 rounded"
+              />
+              Multi-day
+            </label>
+            {form.is_multi_day && (
+              <>
+                <div>
+                  <input
+                    type="date"
+                    value={form.job_finish_date}
+                    onChange={(e) => {
+                      const end = e.target.value;
+                      const days = form.job_date && end
+                        ? Math.max(1, Math.ceil((new Date(end + 'T00:00:00').getTime() - new Date(form.job_date + 'T00:00:00').getTime()) / 86400000) + 1)
+                        : form.num_days;
+                      setForm((p) => ({ ...p, job_finish_date: end, num_days: days }));
+                    }}
+                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
+                  />
+                </div>
+                <span className="text-xs text-purple-600 font-medium">{form.num_days} days</span>
+              </>
+            )}
           </div>
+
+          {/* Crewed-specific fields */}
+          {form.job_type === 'crewed' && (
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Work Type</label>
+                <select
+                  value={form.work_type}
+                  onChange={(e) => setForm((p) => ({ ...p, work_type: e.target.value }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                >
+                  <option value="">—</option>
+                  <option value="backline_tech">Backline Tech</option>
+                  <option value="general_assist">General Assist</option>
+                  <option value="engineer_foh">Engineer - FOH</option>
+                  <option value="engineer_mons">Engineer - mons</option>
+                  <option value="driving_only">Driving Only</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Crew Needed</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={form.crew_count}
+                  onChange={(e) => setForm((p) => ({ ...p, crew_count: Math.max(1, parseInt(e.target.value) || 1) }))}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+              {form.work_type && (
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Work Description</label>
+                  <textarea
+                    value={form.work_description}
+                    onChange={(e) => setForm((p) => ({ ...p, work_description: e.target.value }))}
+                    rows={2}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* What is it (D&C only) */}
+          {form.job_type !== 'crewed' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">What is it</label>
+              <select
+                value={form.what_is_it}
+                onChange={(e) => setForm((p) => ({ ...p, what_is_it: e.target.value }))}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              >
+                <option value="">—</option>
+                <option value="vehicle">Vehicle</option>
+                <option value="equipment">Equipment</option>
+                <option value="people">People</option>
+              </select>
+            </div>
+          )}
 
           {/* Fees — editable for all quotes (override calculator values or set local fees) */}
           <div className="grid grid-cols-2 gap-3">

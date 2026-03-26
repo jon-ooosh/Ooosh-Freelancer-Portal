@@ -8,6 +8,8 @@ import {
   CalculatorSettings,
   CalculatorInput,
 } from '../services/crew-transport-calculator';
+import { emailService } from '../services/email-service';
+import { hhBroker } from '../services/hirehop-broker';
 
 const router = Router();
 router.use(authenticate);
@@ -199,6 +201,7 @@ const saveQuoteSchema = calculateSchema.extend({
   travelCost: z.number().optional().nullable(),
   internalNotes: z.string().optional().nullable(),
   freelancerNotes: z.string().optional().nullable(),
+  crewCount: z.number().int().min(1).optional().nullable(),
 });
 
 router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Response) => {
@@ -220,7 +223,20 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
       expenses: req.body.expenses || [],
     };
 
-    const result = calculateCosts(calculatorInput, settings);
+    const singleCrewResult = calculateCosts(calculatorInput, settings);
+
+    // Multi-crew: multiply costs by crew_count for crewed jobs
+    const crewCount = (req.body.jobType === 'crewed' && req.body.crewCount > 1) ? req.body.crewCount : 1;
+    const result = crewCount > 1 ? {
+      ...singleCrewResult,
+      clientChargeLabour: Math.round(singleCrewResult.clientChargeLabour * crewCount * 100) / 100,
+      clientChargeTotal: Math.round(singleCrewResult.clientChargeTotal * crewCount * 100) / 100,
+      clientChargeTotalRounded: Math.round(singleCrewResult.clientChargeTotalRounded * crewCount),
+      freelancerFee: Math.round(singleCrewResult.freelancerFee * crewCount * 100) / 100,
+      freelancerFeeRounded: Math.ceil((singleCrewResult.freelancerFeeRounded * crewCount) / 5) * 5,
+      ourTotalCost: Math.round(singleCrewResult.ourTotalCost * crewCount * 100) / 100,
+      ourMargin: Math.round((singleCrewResult.clientChargeTotalRounded * crewCount) - (singleCrewResult.ourTotalCost * crewCount) * 100) / 100,
+    } : singleCrewResult;
 
     const saved = await query(
       `INSERT INTO quotes (
@@ -241,12 +257,13 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
         our_total_cost, our_margin,
         estimated_time_mins, estimated_time_hrs,
         settings_snapshot, internal_notes, freelancer_notes,
-        travel_time_mins, travel_cost, created_by, client_introduction
+        travel_time_mins, travel_cost, created_by, client_introduction,
+        crew_count
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
         $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
-        $49, $50, $51, 'todo'
+        $49, $50, $51, 'todo', $52
       ) RETURNING id`,
       [
         req.body.jobId || null,
@@ -300,6 +317,7 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
         req.body.travelTimeMins || null,
         req.body.travelCost || null,
         req.user!.id,
+        crewCount,
       ]
     );
 
@@ -403,8 +421,14 @@ const editQuoteSchema = z.object({
   venue_name: z.string().optional().nullable(),
   venue_id: z.string().uuid().optional().nullable(),
   job_date: z.string().optional().nullable(),
+  job_finish_date: z.string().optional().nullable(),
+  is_multi_day: z.boolean().optional().nullable(),
+  num_days: z.number().int().min(1).optional().nullable(),
   arrival_time: z.string().optional().nullable(),
   what_is_it: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
+  work_type: z.string().optional().nullable(),
+  work_description: z.string().optional().nullable(),
+  crew_count: z.number().int().min(1).optional().nullable(),
   internal_notes: z.string().optional().nullable(),
   freelancer_notes: z.string().optional().nullable(),
   client_charge_rounded: z.coerce.number().min(0).optional().nullable(),
@@ -413,15 +437,21 @@ const editQuoteSchema = z.object({
 
 router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Response) => {
   try {
-    // First check the quote exists
+    // Fetch existing quote + assignments for change detection
     const existing = await query(
-      `SELECT id, calculation_mode, is_local FROM quotes WHERE id = $1 AND is_deleted = false`,
+      `SELECT q.id, q.calculation_mode, q.is_local, q.job_date, q.arrival_time,
+              q.venue_name, q.venue_id, q.job_name, q.status,
+              j.job_name as linked_job_name
+       FROM quotes q
+       LEFT JOIN jobs j ON j.id = q.job_id
+       WHERE q.id = $1 AND q.is_deleted = false`,
       [req.params.id]
     );
     if (existing.rows.length === 0) {
       res.status(404).json({ error: 'Quote not found' });
       return;
     }
+    const oldQuote = existing.rows[0];
 
     const fields = req.body;
     const updates: string[] = [];
@@ -430,8 +460,10 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
 
     // Map of allowed fields to their DB columns
     const allowedFields = [
-      'job_type', 'venue_name', 'venue_id', 'job_date', 'arrival_time',
-      'what_is_it', 'internal_notes', 'freelancer_notes',
+      'job_type', 'venue_name', 'venue_id', 'job_date', 'job_finish_date',
+      'is_multi_day', 'num_days', 'arrival_time',
+      'what_is_it', 'work_type', 'work_description', 'crew_count',
+      'internal_notes', 'freelancer_notes',
     ];
 
     for (const field of allowedFields) {
@@ -467,7 +499,57 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       params
     );
 
-    res.json(result.rows[0]);
+    const updatedQuote = result.rows[0];
+
+    // Check if key fields changed and notify assigned crew
+    const keyFieldsChanged: string[] = [];
+    if (fields.job_date !== undefined && fields.job_date !== (oldQuote.job_date ? String(oldQuote.job_date).split('T')[0] : null)) {
+      keyFieldsChanged.push(`Date changed to ${fields.job_date}`);
+    }
+    if (fields.arrival_time !== undefined && fields.arrival_time !== oldQuote.arrival_time) {
+      keyFieldsChanged.push(`Arrival time changed to ${fields.arrival_time}`);
+    }
+    if (fields.venue_name !== undefined && fields.venue_name !== oldQuote.venue_name) {
+      keyFieldsChanged.push(`Venue changed to ${fields.venue_name}`);
+    }
+
+    if (keyFieldsChanged.length > 0 && updatedQuote.status === 'confirmed') {
+      // Fire-and-forget: send notifications to assigned crew
+      (async () => {
+        try {
+          const assignees = await query(
+            `SELECT qa.person_id, p.first_name, p.last_name, p.email
+             FROM quote_assignments qa
+             JOIN people p ON p.id = qa.person_id
+             WHERE qa.quote_id = $1 AND qa.status NOT IN ('declined', 'cancelled')
+               AND p.email IS NOT NULL`,
+            [req.params.id]
+          );
+
+          const jobName = oldQuote.linked_job_name || oldQuote.job_name || 'a job';
+          for (const crew of assignees.rows) {
+            try {
+              await emailService.send('job_change_notification', {
+                to: crew.email,
+                variables: {
+                  freelancerName: crew.first_name || 'there',
+                  jobName,
+                  jobDate: updatedQuote.job_date ? String(updatedQuote.job_date).split('T')[0] : 'TBC',
+                  venueName: updatedQuote.venue_name || 'TBC',
+                  changeDescription: keyFieldsChanged.join('. '),
+                },
+              });
+            } catch (emailErr) {
+              console.error(`Failed to notify ${crew.email} of job change:`, emailErr);
+            }
+          }
+        } catch (err) {
+          console.error('Failed to send job change notifications:', err);
+        }
+      })();
+    }
+
+    res.json(updatedQuote);
   } catch (error) {
     console.error('Edit quote error:', error);
     res.status(500).json({ error: 'Failed to update quote' });
@@ -804,5 +886,331 @@ async function loadSettings(): Promise<CalculatorSettings> {
     expense_variance_threshold: map.expense_variance_threshold ?? 20,
   };
 }
+
+// ── GET /api/quotes/crew-history — previously assigned crew for a client/venue ──
+
+router.get('/crew-history', async (req: AuthRequest, res: Response) => {
+  try {
+    const { job_id, venue_id, client_name } = req.query;
+
+    if (!job_id && !venue_id && !client_name) {
+      res.status(400).json({ error: 'Provide job_id, venue_id, or client_name' });
+      return;
+    }
+
+    // Find people who've been assigned to crewed jobs for the same client or venue
+    const conditions: string[] = [`q.job_type = 'crewed'`, `q.is_deleted = false`];
+    const params: unknown[] = [];
+
+    if (venue_id) {
+      params.push(venue_id);
+      conditions.push(`q.venue_id = $${params.length}`);
+    }
+
+    if (client_name) {
+      params.push(`%${client_name}%`);
+      conditions.push(`(q.client_name ILIKE $${params.length} OR j.client_name ILIKE $${params.length})`);
+    }
+
+    if (job_id) {
+      // Look up the job's client_name and venue to match against
+      const jobResult = await query(
+        `SELECT j.client_name, j.venue_id FROM jobs j WHERE j.id = $1`,
+        [job_id]
+      );
+      if (jobResult.rows.length > 0) {
+        const job = jobResult.rows[0];
+        const orParts: string[] = [];
+        if (job.client_name) {
+          params.push(job.client_name);
+          orParts.push(`(q.client_name = $${params.length} OR j.client_name = $${params.length})`);
+        }
+        if (job.venue_id) {
+          params.push(job.venue_id);
+          orParts.push(`q.venue_id = $${params.length}`);
+        }
+        if (orParts.length > 0) {
+          conditions.push(`(${orParts.join(' OR ')})`);
+        }
+      }
+    }
+
+    const result = await query(
+      `SELECT
+        p.id as person_id, p.first_name, p.last_name,
+        qa.role,
+        COUNT(DISTINCT q.id) as job_count,
+        MAX(q.job_date) as last_job_date,
+        ROUND(AVG(qa.agreed_rate)::numeric, 2) as avg_rate
+       FROM quote_assignments qa
+       JOIN people p ON p.id = qa.person_id
+       JOIN quotes q ON q.id = qa.quote_id
+       LEFT JOIN jobs j ON j.id = q.job_id
+       WHERE ${conditions.join(' AND ')}
+         AND p.is_freelancer = true AND p.is_approved = true
+       GROUP BY p.id, p.first_name, p.last_name, qa.role
+       ORDER BY job_count DESC, last_job_date DESC
+       LIMIT 10`,
+      params
+    );
+
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('Crew history error:', error);
+    res.status(500).json({ error: 'Failed to load crew history' });
+  }
+});
+
+// ── POST /api/quotes/:id/push-hirehop — add quote as line item to HireHop job ──
+
+const LABOUR_ITEM_IDS: Record<string, number> = {
+  delivery: 5,
+  collection: 6,
+  crew: 86,
+};
+
+// Local D/C pre-priced items by type and time window
+const LOCAL_DC_ITEMS: Record<string, { id: number; price: number }[]> = {
+  delivery: [
+    { id: 11, price: 40 },   // 10am-5pm
+    { id: 13, price: 85 },   // 5pm-10pm
+    { id: 82, price: 125 },  // 10pm-10am
+  ],
+  collection: [
+    { id: 79, price: 40 },   // 10am-5pm
+    { id: 80, price: 85 },   // 5pm-10pm
+    { id: 81, price: 125 },  // 10pm-10am
+  ],
+};
+
+function getLocalItemId(jobType: string, arrivalTime: string | null): number {
+  // Determine time window from arrival time
+  const items = LOCAL_DC_ITEMS[jobType] || LOCAL_DC_ITEMS['delivery'];
+  if (!arrivalTime) return items[0].id; // Default to daytime
+
+  const [h] = arrivalTime.split(':').map(Number);
+  if (h >= 10 && h < 17) return items[0].id;     // 10am-5pm
+  if (h >= 17 && h < 22) return items[1].id;      // 5pm-10pm
+  return items[2].id;                               // 10pm-10am (22-10)
+}
+
+function buildItemNote(date?: string | null, endDate?: string | null, time?: string | null, venue?: string | null, workType?: string | null, isMultiDay?: boolean): string {
+  const parts: string[] = [];
+  if (workType) parts.push(workType);
+
+  const ordinal = (n: number): string => {
+    const s = ['th', 'st', 'nd', 'rd'];
+    const v = n % 100;
+    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+  };
+
+  if (date) {
+    const d = new Date(date + 'T12:00:00');
+    const day = d.getDate();
+    const month = d.toLocaleDateString('en-GB', { month: 'long' });
+
+    if (endDate && endDate !== date) {
+      const ed = new Date(endDate + 'T12:00:00');
+      const endDay = ed.getDate();
+      const endMonth = ed.toLocaleDateString('en-GB', { month: 'long' });
+      parts.push(month === endMonth
+        ? `${ordinal(day)} - ${ordinal(endDay)} ${month}`
+        : `${ordinal(day)} ${month} - ${ordinal(endDay)} ${endMonth}`
+      );
+    } else {
+      parts.push(`${ordinal(day)} ${month}`);
+    }
+  }
+
+  // For multi-day crewed jobs, skip time and venue in the note
+  if (!isMultiDay) {
+    if (time) parts.push(time);
+    if (venue) parts.push(venue);
+  }
+
+  return parts.join(' - ');
+}
+
+const HEADER_KEYWORDS = ['crew', 'transport', 'delivery', 'collection'];
+
+async function findOrCreateHeader(hhJobId: string): Promise<string> {
+  const domain = process.env.HIREHOP_DOMAIN || 'myhirehop.com';
+  const token = process.env.HIREHOP_API_TOKEN!;
+
+  // Fetch existing items to find a header
+  const itemsRes = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 10 }) as any;
+  const items = Array.isArray(itemsRes) ? itemsRes : (itemsRes?.items || []);
+
+  const headers = items.filter((i: any) => i.kind === '0' && (!i.parent || i.parent === '0'));
+  for (const header of headers) {
+    const name = (header.NAME || header.title || '').toLowerCase();
+    if (HEADER_KEYWORDS.some(kw => name.includes(kw))) {
+      return header.ID;
+    }
+  }
+
+  // Create header
+  const params = new URLSearchParams({
+    job: hhJobId, kind: '0', id: '0', name: 'Crew & transport', qty: '0', parent: '0', token,
+  });
+  const res = await fetch(`https://${domain}/php_functions/items_save.php`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  });
+  const result = await res.json() as any;
+  if (result.items?.[0]?.ID) return result.items[0].ID;
+  throw new Error('Failed to create header in HireHop');
+}
+
+async function addItemToHireHop(
+  hhJobId: string,
+  listId: number,
+  qty: number,
+  price: number,
+  note: string,
+  headerId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const domain = process.env.HIREHOP_DOMAIN || 'myhirehop.com';
+  const token = process.env.HIREHOP_API_TOKEN!;
+
+  try {
+    // Step 1: Get items before
+    const itemsBefore = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 0 }) as any;
+    const beforeItems = Array.isArray(itemsBefore) ? itemsBefore : (itemsBefore?.items || []);
+    const existingIds = new Set(beforeItems.map((i: any) => i.ID));
+
+    // Step 2: Add the item
+    const itemsToAdd = { [`c${listId}`]: qty };
+    await hhBroker.post('/api/save_job.php', {
+      job: hhJobId,
+      items: JSON.stringify(itemsToAdd),
+    }, { priority: 'high' });
+
+    // Step 3: Find the new item
+    await new Promise(r => setTimeout(r, 1000));
+    const itemsAfter = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 0 }) as any;
+    const afterItems = Array.isArray(itemsAfter) ? itemsAfter : (itemsAfter?.items || []);
+    const newItem = afterItems.find((i: any) => !existingIds.has(i.ID) && i.LIST_ID === String(listId) && i.kind === '4');
+
+    if (!newItem) {
+      return { success: false, error: 'Item added but could not find its ID' };
+    }
+
+    // Step 4: Edit item to set price, note, parent
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const editParams = new URLSearchParams({
+      job: hhJobId, kind: '4', id: newItem.ID, list_id: String(listId),
+      qty: String(qty), unit_price: String(price), price: String(price * qty),
+      price_type: '0', add: note, cust_add: '', memo: '', name: '',
+      parent: headerId, acc_nominal: '29', acc_nominal_po: '30',
+      vat_rate: '0', value: '0', cost_price: '0', weight: '0',
+      start: '', end: '', duration: '0', country_origin: '', hs_code: '',
+      flag: '0', priority_confirm: '0', no_shortfall: '1', no_availability: '0',
+      ignore: '0', local: now, token,
+    });
+
+    const editRes = await fetch(`https://${domain}/php_functions/items_save.php`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: editParams.toString(),
+    });
+
+    if (!editRes.ok) {
+      return { success: false, error: `Edit step failed: HTTP ${editRes.status}` };
+    }
+
+    const editResult = await editRes.json() as any;
+    if (editResult.error) {
+      return { success: false, error: `Edit error: ${editResult.error}` };
+    }
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+const pushHirehopSchema = z.object({
+  quoteId: z.string().uuid().optional(), // Can also use URL param
+});
+
+router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
+  try {
+    const quoteId = req.params.id;
+
+    // Look up quote + job HH number
+    const quoteRes = await query(
+      `SELECT q.*, j.hh_job_number, j.job_name
+       FROM quotes q
+       LEFT JOIN jobs j ON j.id = q.job_id
+       WHERE q.id = $1 AND q.is_deleted = false`,
+      [quoteId]
+    );
+
+    if (quoteRes.rows.length === 0) {
+      res.status(404).json({ error: 'Quote not found' });
+      return;
+    }
+
+    const quote = quoteRes.rows[0];
+
+    if (!quote.hh_job_number) {
+      res.status(400).json({ error: 'Job has no HireHop number — cannot push' });
+      return;
+    }
+
+    const hhJobId = String(quote.hh_job_number);
+    const isLocal = quote.is_local;
+    const isCrewed = quote.job_type === 'crewed';
+
+    // Determine which HH stock item to add
+    let listId: number;
+    let qty: number;
+    let price: number;
+    let note: string;
+
+    if (isLocal) {
+      // Local D/C: use pre-priced item based on time window
+      listId = getLocalItemId(quote.job_type, quote.arrival_time);
+      qty = 1;
+      price = 0; // HireHop has the price already
+      note = buildItemNote(quote.job_date, null, quote.arrival_time, quote.venue_name || quote.linked_venue_name);
+    } else if (isCrewed) {
+      listId = LABOUR_ITEM_IDS['crew'];
+      qty = quote.crew_count || 1;
+      price = Math.round((quote.client_charge_rounded || 0) / (quote.crew_count || 1));
+      const isMultiDay = quote.is_multi_day && quote.job_finish_date;
+      const workTypeLabel = quote.work_type
+        ? (quote.work_type === 'other' ? (quote.work_type_other || 'Crew') : quote.work_type.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase()))
+        : 'Crew';
+      note = buildItemNote(quote.job_date, quote.job_finish_date, quote.arrival_time, quote.venue_name, workTypeLabel, !!isMultiDay);
+    } else {
+      // D&C from calculator
+      listId = LABOUR_ITEM_IDS[quote.job_type] || LABOUR_ITEM_IDS['delivery'];
+      qty = 1;
+      price = quote.client_charge_rounded || 0;
+      note = buildItemNote(quote.job_date, quote.job_finish_date, quote.arrival_time, quote.venue_name);
+    }
+
+    // Find or create header
+    const headerId = await findOrCreateHeader(hhJobId);
+
+    // Add the item
+    const result = await addItemToHireHop(hhJobId, listId, qty, price, note, headerId);
+
+    if (!result.success) {
+      console.error(`HireHop push failed for quote ${quoteId}:`, result.error);
+      res.status(500).json({ error: result.error || 'Failed to push to HireHop' });
+      return;
+    }
+
+    console.log(`[HH Push] Quote ${quoteId} → HH job ${hhJobId}: ${quote.job_type} item added (list=${listId}, qty=${qty}, price=${price})`);
+    res.json({ success: true, hhJobId });
+  } catch (error) {
+    console.error('Push to HireHop error:', error);
+    res.status(500).json({ error: 'Failed to push to HireHop' });
+  }
+});
 
 export default router;

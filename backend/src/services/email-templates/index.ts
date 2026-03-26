@@ -203,6 +203,41 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  job_change_notification: {
+    variant: 'internal',
+    subject: 'Job Update — {{jobName}} ({{jobDate}})',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job Details Updated</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        There's been an update to <strong>{{jobName}}</strong> that you're assigned to:
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef3c7;border-radius:8px;border:1px solid #fde68a;">
+            <p style="margin:0 0 8px;font-size:13px;color:#92400e;font-weight:600;">What changed</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;">{{changeDescription}}</p>
+          </td>
+        </tr>
+      </table>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Date</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{jobDate}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Venue</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;font-weight:600;">{{venueName}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        Please check the freelancer portal for the latest details.
+      </p>
+    `,
+  },
+
   referral_alert: {
     variant: 'internal',
     subject: 'Insurer Referral Required — {{driverName}}',
@@ -226,6 +261,36 @@ const templates: Record<string, EmailTemplate> = {
       </table>
       <p style="margin:0;font-size:14px;color:#334155;">
         <a href="{{driverUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View driver in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
+  // ── Mid-tour driver notification ───────────────────────────────────────
+
+  mid_tour_driver: {
+    variant: 'internal',
+    preheader: 'A driver has submitted a hire form for a job that is already out',
+    subject: 'Mid-tour driver — {{driverName}} on job #{{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#dc2626;">Driver Added Mid-Tour</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{driverName}}</strong> ({{driverEmail}}) has completed their hire form for a job that is <strong>already dispatched / on-hire</strong>.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:13px;color:#991b1b;">Job</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">#{{jobNumber}} {{jobName}}</p>
+            <p style="margin:8px 0 0;font-size:13px;color:#991b1b;">Vehicle</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{vehicleReg}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;background:#fff7ed;padding:12px;border-radius:6px;border-left:4px solid #f97316;">
+        <strong>Action required:</strong> This driver needs processing — their hire form has been linked to the job but they haven't been booked out yet.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{jobUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
       </p>
     `,
   },

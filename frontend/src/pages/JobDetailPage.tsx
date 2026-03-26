@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
 import ExcessGateBanner from '../components/ExcessGateBanner';
+import DatePicker from '../components/DatePicker';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
 
@@ -132,9 +133,14 @@ interface SavedQuote {
   arrival_time: string | null;
   job_date: string | null;
   job_finish_date: string | null;
+  is_multi_day: boolean;
+  num_days: number | null;
   collection_date: string | null;
   add_collection: boolean;
   what_is_it: string | null;
+  work_type: string | null;
+  work_description: string | null;
+  crew_count: number | null;
   client_charge_labour: number | null;
   client_charge_fuel: number | null;
   client_charge_expenses: number | null;
@@ -200,6 +206,9 @@ interface VehicleAssignment {
   booked_out_at: string | null;
   checked_in_at: string | null;
   has_damage: boolean;
+  notes: string | null;
+  swap_reason: string | null;
+  swapped_to_assignment_id: string | null;
   hire_form_pdf_key?: string | null;
   hire_form_generated_at?: string | null;
   excess?: {
@@ -221,6 +230,100 @@ interface DispatchCheckResult {
     vehicleReg: string | null;
     amountRequired: number | null;
   }>;
+}
+
+// ── Swap Vehicle Button ─────────────────────────────────────────────────────
+function SwapVehicleButton({ assignmentId, currentVehicleReg, onSwapped }: {
+  assignmentId: string;
+  currentVehicleReg: string;
+  onSwapped: () => void;
+}) {
+  const [showForm, setShowForm] = useState(false);
+  const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string }[]>([]);
+  const [selectedVehicle, setSelectedVehicle] = useState('');
+  const [reason, setReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (showForm && vehicles.length === 0) {
+      api.get<{ data: { id: string; reg: string; simple_type: string }[] }>('/vehicles/fleet')
+        .then(r => setVehicles((r.data || []).map(v => ({ id: v.id, reg: v.reg, simpleType: v.simple_type }))))
+        .catch(() => {});
+    }
+  }, [showForm]);
+
+  const handleSwap = async () => {
+    if (!selectedVehicle || !reason.trim()) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      await api.post(`/assignments/${assignmentId}/swap-vehicle`, {
+        new_vehicle_id: selectedVehicle,
+        swap_reason: reason,
+      });
+      setShowForm(false);
+      onSwapped();
+    } catch (err: any) {
+      setError(err.message || 'Swap failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!showForm) {
+    return (
+      <button
+        onClick={() => setShowForm(true)}
+        className="text-xs text-orange-600 hover:text-orange-800 font-medium"
+      >
+        Swap Vehicle
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-2 border border-orange-200 rounded-lg p-3 bg-orange-50 space-y-2">
+      <p className="text-xs font-medium text-orange-800">
+        Swap <strong>{currentVehicleReg}</strong> to:
+      </p>
+      <select
+        value={selectedVehicle}
+        onChange={e => setSelectedVehicle(e.target.value)}
+        className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+      >
+        <option value="">Select replacement vehicle...</option>
+        {vehicles
+          .filter(v => v.reg !== currentVehicleReg)
+          .map(v => (
+            <option key={v.id} value={v.id}>{v.reg} ({v.simpleType})</option>
+          ))}
+      </select>
+      <input
+        type="text"
+        value={reason}
+        onChange={e => setReason(e.target.value)}
+        placeholder="Reason for swap (e.g. breakdown)"
+        className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+      />
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          onClick={handleSwap}
+          disabled={!selectedVehicle || !reason.trim() || submitting}
+          className="bg-orange-600 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-orange-700 disabled:opacity-50"
+        >
+          {submitting ? 'Swapping...' : 'Confirm Swap'}
+        </button>
+        <button
+          onClick={() => { setShowForm(false); setError(''); }}
+          className="text-xs text-gray-500 hover:text-gray-700"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // ── Hire Form PDF Actions (per assignment, in Drivers & Vehicles tab) ────────
@@ -410,13 +513,11 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Hire Start</label>
-                  <input type="date" value={hireStart} onChange={e => setHireStart(e.target.value)}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+                  <DatePicker value={hireStart} onChange={(val) => setHireStart(val)} />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Hire End</label>
-                  <input type="date" value={hireEnd} onChange={e => setHireEnd(e.target.value)}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
+                  <DatePicker value={hireEnd} onChange={(val) => setHireEnd(val)} />
                 </div>
               </div>
             </div>
@@ -465,6 +566,7 @@ export default function JobDetailPage() {
     jobDate: '',
     arrivalTime: '',
     notes: '',
+    pushToHirehop: true,
   });
   const [localSubmitting, setLocalSubmitting] = useState(false);
   const [venueSearch, setVenueSearch] = useState('');
@@ -523,6 +625,12 @@ export default function JobDetailPage() {
     if (!dateStr) return '';
     if (typeof dateStr === 'string' && dateStr.includes('T')) return dateStr.split('T')[0];
     return dateStr;
+  }
+
+  function addDays(dateStr: string, days: number): string {
+    const d = new Date(dateStr);
+    d.setDate(d.getDate() + days);
+    return d.toISOString().split('T')[0];
   }
 
   async function saveInlineField(patch: Record<string, unknown>) {
@@ -590,13 +698,14 @@ export default function JobDetailPage() {
 
   // Date linking handlers (mirrored from PipelinePage New Enquiry form)
   const handleEditOutDate = (val: string) => {
-    if (editJobDate && val > editJobDate) return;
+    if (val && editJobDate && val > editJobDate) return;
     setEditOutDate(val);
-    if (dateOutLinked) {
+    if (dateOutLinked && val) {
       setEditJobDate(val);
-      if (editJobEnd && val > editJobEnd) {
-        setEditJobEnd(val);
-        if (dateReturnLinked) setEditReturnDate(val);
+      if (!editJobEnd || editJobEnd <= val) {
+        const nextDay = addDays(val, 1);
+        setEditJobEnd(nextDay);
+        if (dateReturnLinked) setEditReturnDate(nextDay);
       }
     }
   };
@@ -608,14 +717,17 @@ export default function JobDetailPage() {
     } else {
       if (editOutDate && editOutDate > val) setEditOutDate(val);
     }
-    if (!editJobEnd || editJobEnd < val) {
-      setEditJobEnd(val);
-      if (dateReturnLinked) setEditReturnDate(val);
+    if (val) {
+      if (!editJobEnd || editJobEnd < val) {
+        const nextDay = addDays(val, 1);
+        setEditJobEnd(nextDay);
+        if (dateReturnLinked) setEditReturnDate(nextDay);
+      }
     }
   };
 
   const handleEditJobEnd = (val: string) => {
-    if (editJobDate && val < editJobDate) return;
+    if (val && editJobDate && val < editJobDate) return;
     setEditJobEnd(val);
     if (dateReturnLinked) {
       setEditReturnDate(val);
@@ -625,7 +737,7 @@ export default function JobDetailPage() {
   };
 
   const handleEditReturnDate = (val: string) => {
-    if (editJobEnd && val < editJobEnd) return;
+    if (val && editJobEnd && val < editJobEnd) return;
     setEditReturnDate(val);
     if (dateReturnLinked) {
       setEditJobEnd(val);
@@ -678,11 +790,6 @@ export default function JobDetailPage() {
     if (!job) return;
     setEditChaseDate(toDateInputValue(job.next_chase_date));
     setEditingChaseDate(true);
-  }
-
-  async function saveEditChaseDate() {
-    setEditingChaseDate(false);
-    await saveInlineField({ next_chase_date: editChaseDate || null });
   }
 
   async function pushToHireHop() {
@@ -879,13 +986,22 @@ export default function JobDetailPage() {
     const dateStr = q.job_date
       ? (typeof q.job_date === 'string' && q.job_date.includes('T') ? q.job_date.split('T')[0] : String(q.job_date))
       : '';
+    const finishDateStr = q.job_finish_date
+      ? (typeof q.job_finish_date === 'string' && q.job_finish_date.includes('T') ? q.job_finish_date.split('T')[0] : String(q.job_finish_date))
+      : '';
     setEditForm({
       job_type: q.job_type,
       venue_name: q.venue_name || '',
       venue_id: q.venue_id || null,
       job_date: dateStr,
+      job_finish_date: finishDateStr,
+      is_multi_day: q.is_multi_day || false,
+      num_days: q.num_days || 1,
       arrival_time: q.arrival_time || '',
       what_is_it: q.what_is_it || '',
+      work_type: q.work_type || '',
+      work_description: q.work_description || '',
+      crew_count: q.crew_count || 1,
       internal_notes: q.internal_notes || '',
       freelancer_notes: q.freelancer_notes || '',
       client_charge_rounded: Number(q.client_charge_rounded ?? 0),
@@ -939,6 +1055,7 @@ export default function JobDetailPage() {
       jobDate: defaultDate,
       arrivalTime: '',
       notes: '',
+      pushToHirehop: true,
     });
     setVenueSearch(job.venue_name || '');
     setVenueOptions([]);
@@ -1380,22 +1497,18 @@ export default function JobDetailPage() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">Outgoing</label>
-                    <input
-                      type="date"
+                    <DatePicker
                       value={editOutDate}
                       min={new Date().toISOString().split('T')[0]}
-                      onChange={(e) => handleEditOutDate(e.target.value)}
-                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                      onChange={(val) => handleEditOutDate(val)}
                     />
                   </div>
                   <div className="relative">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Job Start</label>
-                    <input
-                      type="date"
+                    <DatePicker
                       value={editJobDate}
                       min={new Date().toISOString().split('T')[0]}
-                      onChange={(e) => handleEditJobDate(e.target.value)}
-                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                      onChange={(val) => handleEditJobDate(val)}
                     />
                     <button
                       onClick={() => { if (!dateOutLinked) setEditOutDate(editJobDate); setDateOutLinked(!dateOutLinked); }}
@@ -1411,22 +1524,18 @@ export default function JobDetailPage() {
                   </div>
                   <div className="relative">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Job End</label>
-                    <input
-                      type="date"
+                    <DatePicker
                       value={editJobEnd}
                       min={editJobDate || new Date().toISOString().split('T')[0]}
-                      onChange={(e) => handleEditJobEnd(e.target.value)}
-                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                      onChange={(val) => handleEditJobEnd(val)}
                     />
                   </div>
                   <div className="relative">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Returning</label>
-                    <input
-                      type="date"
+                    <DatePicker
                       value={editReturnDate}
                       min={editJobEnd || new Date().toISOString().split('T')[0]}
-                      onChange={(e) => handleEditReturnDate(e.target.value)}
-                      className="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                      onChange={(val) => handleEditReturnDate(val)}
                     />
                     <button
                       onClick={() => { if (!dateReturnLinked) setEditReturnDate(editJobEnd); setDateReturnLinked(!dateReturnLinked); }}
@@ -1441,6 +1550,12 @@ export default function JobDetailPage() {
                     </button>
                   </div>
                 </div>
+                {editJobDate && editJobEnd && (() => {
+                  const start = new Date(editJobDate);
+                  const end = new Date(editJobEnd);
+                  const days = Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
+                  return days > 0 ? <p className="text-xs text-gray-500 font-medium mt-1">{days} day{days !== 1 ? 's' : ''}</p> : null;
+                })()}
                 <div className="flex items-center gap-2 mt-3">
                   <button
                     onClick={saveDates}
@@ -1488,14 +1603,9 @@ export default function JobDetailPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   {editingChaseDate ? (
-                    <input
-                      type="date"
+                    <DatePicker
                       value={editChaseDate}
-                      onChange={(e) => setEditChaseDate(e.target.value)}
-                      onBlur={saveEditChaseDate}
-                      onKeyDown={(e) => { if (e.key === 'Enter') saveEditChaseDate(); if (e.key === 'Escape') setEditingChaseDate(false); }}
-                      className="border border-gray-300 rounded px-1.5 py-0.5 text-xs focus:ring-ooosh-500 focus:border-ooosh-500"
-                      autoFocus
+                      onChange={(val) => { setEditChaseDate(val); setEditingChaseDate(false); saveInlineField({ next_chase_date: val || null }); }}
                     />
                   ) : (
                     <button
@@ -1798,6 +1908,7 @@ export default function JobDetailPage() {
                   active: { label: 'On Hire', bg: 'bg-green-100', text: 'text-green-700' },
                   returned: { label: 'Returned', bg: 'bg-teal-100', text: 'text-teal-700' },
                   cancelled: { label: 'Cancelled', bg: 'bg-red-100', text: 'text-red-700' },
+                  swapped: { label: 'Swapped', bg: 'bg-orange-100', text: 'text-orange-700' },
                 };
                 const sc = statusConfig[a.status] || statusConfig.soft;
 
@@ -1912,10 +2023,32 @@ export default function JobDetailPage() {
                       {a.has_damage && <span className="text-red-600 font-medium">Damage reported</span>}
                     </div>
 
-                    {/* Hire Form PDF actions */}
-                    {a.assignment_type === 'self_drive' && (
-                      <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} />
+                    {/* Swap info for swapped assignments */}
+                    {a.status === 'swapped' && a.notes && (
+                      <div className="mt-2 text-xs text-orange-600 italic">{a.notes}</div>
                     )}
+
+                    {/* Actions row */}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {/* Hire Form PDF actions */}
+                      {a.assignment_type === 'self_drive' && (
+                        <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} />
+                      )}
+
+                      {/* Swap Vehicle button — only for active/confirmed assignments */}
+                      {!['cancelled', 'swapped'].includes(a.status) && (
+                        <SwapVehicleButton
+                          assignmentId={a.id}
+                          currentVehicleReg={a.vehicle_reg}
+                          onSwapped={() => {
+                            // Refresh assignments
+                            api.get<{ data: VehicleAssignment[] }>(`/assignments?job_id=${job.id}`)
+                              .then(r => setVehicleAssignments(r.data || []))
+                              .catch(() => {});
+                          }}
+                        />
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -2130,6 +2263,11 @@ export default function JobDetailPage() {
                       <div className="mt-3 pt-3 border-t border-gray-100">
                         <div className="flex items-center gap-2 mb-1.5">
                           <span className="text-xs font-medium text-gray-500">Crew</span>
+                          {(q.crew_count || 1) > 1 && (
+                            <span className={`text-xs font-medium ${assignments.length >= (q.crew_count || 1) ? 'text-green-600' : 'text-amber-600'}`}>
+                              {assignments.length}/{q.crew_count} assigned
+                            </span>
+                          )}
                           {!isCancelled && (
                             <button
                               onClick={() => { setAssignModalQuoteId(q.id); setPeopleSearch(''); setPeopleOptions([]); }}
@@ -2140,7 +2278,9 @@ export default function JobDetailPage() {
                           )}
                         </div>
                         {assignments.length === 0 ? (
-                          <p className="text-xs text-gray-400 italic">No crew assigned</p>
+                          <p className="text-xs text-gray-400 italic">
+                            No crew assigned{(q.crew_count || 1) > 1 ? ` (${q.crew_count} needed)` : ''}
+                          </p>
                         ) : (
                           <div className="flex flex-wrap gap-2">
                             {assignments.map((a) => (
@@ -2311,12 +2451,10 @@ export default function JobDetailPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                      <input
-                        type="date"
+                      <label className="block text-sm font-medium text-gray-700 mb-1">{editForm.is_multi_day ? 'Start Date' : 'Date'}</label>
+                      <DatePicker
                         value={String(editForm.job_date || '')}
-                        onChange={(e) => setEditForm((p) => ({ ...p, job_date: e.target.value }))}
-                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                        onChange={(val) => setEditForm((p) => ({ ...p, job_date: val }))}
                       />
                     </div>
                     <div>
@@ -2329,6 +2467,67 @@ export default function JobDetailPage() {
                       />
                     </div>
                   </div>
+                  {/* Multi-day toggle */}
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={!!editForm.is_multi_day}
+                        onChange={(e) => setEditForm((p) => ({ ...p, is_multi_day: e.target.checked, num_days: e.target.checked ? Math.max(Number(p.num_days) || 1, 2) : 1 }))}
+                        className="w-4 h-4 text-ooosh-600 rounded"
+                      />
+                      Multi-day
+                    </label>
+                    {!!editForm.is_multi_day && (
+                      <>
+                        <DatePicker
+                          value={String(editForm.job_finish_date || '')}
+                          min={String(editForm.job_date || '')}
+                          onChange={(val) => {
+                            const end = val;
+                            const start = String(editForm.job_date || '');
+                            const days = start && end
+                              ? Math.max(1, Math.ceil((new Date(end + 'T00:00:00').getTime() - new Date(start + 'T00:00:00').getTime()) / 86400000) + 1)
+                              : Number(editForm.num_days) || 1;
+                            setEditForm((p) => ({ ...p, job_finish_date: end, num_days: days }));
+                          }}
+                        />
+                        <span className="text-xs text-purple-600 font-medium">{Number(editForm.num_days) || 1} days</span>
+                      </>
+                    )}
+                  </div>
+                  {/* Crewed-specific fields */}
+                  {editForm.job_type === 'crewed' && (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Work Type</label>
+                        <select
+                          value={String(editForm.work_type || '')}
+                          onChange={(e) => setEditForm((p) => ({ ...p, work_type: e.target.value }))}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                        >
+                          <option value="">--</option>
+                          <option value="backline_tech">Backline Tech</option>
+                          <option value="general_assist">General Assist</option>
+                          <option value="engineer_foh">Engineer - FOH</option>
+                          <option value="engineer_mons">Engineer - mons</option>
+                          <option value="driving_only">Driving Only</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Crew Needed</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={Number(editForm.crew_count) || 1}
+                          onChange={(e) => setEditForm((p) => ({ ...p, crew_count: Math.max(1, parseInt(e.target.value) || 1) }))}
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                        />
+                      </div>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge</label>
@@ -2539,13 +2738,10 @@ export default function JobDetailPage() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                    <input
-                      type="date"
+                    <DatePicker
                       value={localFormData.jobDate}
-                      onChange={(e) => setLocalFormData({ ...localFormData, jobDate: e.target.value })}
-                      className={`w-full border rounded-lg px-3 py-2 text-sm ${
-                        dateChanged ? 'border-amber-400 bg-amber-50' : 'border-gray-300'
-                      }`}
+                      onChange={(val) => setLocalFormData({ ...localFormData, jobDate: val })}
+                      className={dateChanged ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
                     />
                     {dateChanged && (
                       <p className="text-xs text-amber-600 mt-1">
@@ -2575,6 +2771,19 @@ export default function JobDetailPage() {
                     placeholder="Optional notes..."
                   />
                 </div>
+
+                {/* Push to HireHop toggle */}
+                {job.hh_job_number && (
+                  <label className="flex items-center gap-2 text-sm text-gray-700 pt-1">
+                    <input
+                      type="checkbox"
+                      checked={localFormData.pushToHirehop}
+                      onChange={(e) => setLocalFormData({ ...localFormData, pushToHirehop: e.target.checked })}
+                      className="w-4 h-4 text-ooosh-600 rounded"
+                    />
+                    Add to HireHop job #{job.hh_job_number}
+                  </label>
+                )}
               </div>
 
               <div className="flex justify-end gap-2 mt-4">
@@ -2596,7 +2805,7 @@ export default function JobDetailPage() {
                           ? (job.out_date.includes('T') ? job.out_date.split('T')[0] : job.out_date)
                           : undefined;
                       }
-                      await api.post('/quotes/local', {
+                      const localResult = await api.post<{ id: string }>('/quotes/local', {
                         jobId: job.id,
                         jobType: localFormData.jobType,
                         venueId: localFormData.venueId || job.venue_id || undefined,
@@ -2605,8 +2814,16 @@ export default function JobDetailPage() {
                         arrivalTime: localFormData.arrivalTime || undefined,
                         notes: localFormData.notes || undefined,
                       });
+                      // Push to HireHop if toggled on
+                      if (localFormData.pushToHirehop && job.hh_job_number && localResult?.id) {
+                        try {
+                          await api.post(`/quotes/${localResult.id}/push-hirehop`, {});
+                        } catch (hhErr) {
+                          console.warn('HireHop push failed for local D/C:', hhErr);
+                        }
+                      }
                       setShowLocalForm(false);
-                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '' });
+                      setLocalFormData({ jobType: 'delivery', venueId: '', venueName: '', jobDate: '', arrivalTime: '', notes: '', pushToHirehop: true });
                       loadQuotes();
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Failed to create');
