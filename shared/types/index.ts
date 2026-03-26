@@ -690,10 +690,35 @@ export interface JobExcess {
   reimbursement_amount: number | null;
   reimbursement_date: string | null;
   reimbursement_method: string | null;
+  dispatch_override: boolean;
+  dispatch_override_reason: string | null;
+  dispatch_override_by: string | null;
+  dispatch_override_at: string | null;
+  suggested_collection_method: 'payment' | 'pre_auth';
+  person_id: string | null;
+  notes: string | null;
   created_at: string;
   updated_at: string;
   created_by: string | null;
+  // Joined fields (from queries)
+  vehicle_reg?: string;
+  driver_name?: string;
+  hirehop_job_name?: string;
+  hire_start?: string;
+  hire_end?: string;
+  job_name?: string;
 }
+
+export interface ExcessPersonSummary {
+  total_hires: number;
+  total_taken: number;
+  total_claimed: number;
+  total_reimbursed: number;
+  balance_held: number;
+  pending_count: number;
+}
+
+export type OverrideReason = 'client_on_credit' | 'pre_auth_to_follow' | 'ooosh_staff_vehicle' | 'balance_on_account' | 'other';
 
 export interface ExcessRule {
   id: string;
@@ -722,6 +747,19 @@ export interface ClientExcessLedgerEntry {
   pending_count: number;
   held_count: number;
   rolled_over_count: number;
+  override_count?: number;
+}
+
+export interface ClientBalanceCheck {
+  balance_held: number;
+  rolled_over_count: number;
+  has_balance: boolean;
+  xero_contact_id?: string;
+  xero_contact_name?: string;
+  client_name?: string;
+  total_hires?: number;
+  total_taken?: number;
+  pending_count?: number;
 }
 
 export interface DispatchCheck {

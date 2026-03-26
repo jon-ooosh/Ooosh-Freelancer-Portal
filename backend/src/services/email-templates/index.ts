@@ -294,6 +294,143 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  // ── Excess lifecycle templates ────────────────────────────────────────
+
+  excess_payment_confirmed: {
+    variant: 'client',
+    preheader: 'Your insurance excess payment has been received',
+    subject: 'Insurance Excess Received — {{jobName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Excess Payment Received</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've received your insurance excess payment of <strong>{{amount}}</strong> for your booking <strong>{{jobName}}</strong>.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Amount</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{amount}}</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;margin-top:8px;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Vehicle</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{vehicleReg}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        This excess is fully refundable after your hire, provided the vehicle is returned in good condition. If you have any questions, just reply to this email.
+      </p>
+    `,
+  },
+
+  excess_preauth_confirmed: {
+    variant: 'client',
+    preheader: 'Your insurance excess pre-authorisation is confirmed',
+    subject: 'Insurance Excess Pre-Authorisation — {{jobName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Pre-Authorisation Confirmed</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        A pre-authorisation of <strong>{{amount}}</strong> has been placed on your card for your booking <strong>{{jobName}}</strong>.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        This is <strong>not a payment</strong> — no money has been taken from your account. The hold will be automatically released after your hire is completed and the vehicle returned in good condition.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If you have any questions, just reply to this email.
+      </p>
+    `,
+  },
+
+  excess_reimbursed: {
+    variant: 'client',
+    preheader: 'Your insurance excess has been refunded',
+    subject: 'Insurance Excess Refund — {{jobName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Excess Refund</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Your insurance excess of <strong>{{amount}}</strong> for <strong>{{jobName}}</strong> has been refunded via {{method}}.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Please allow 3-5 working days for the refund to appear in your account. If you have any questions, just reply to this email.
+      </p>
+    `,
+  },
+
+  excess_partial_reimbursed: {
+    variant: 'client',
+    preheader: 'Partial refund of your insurance excess',
+    subject: 'Insurance Excess — Partial Refund — {{jobName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Partial Excess Refund</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{refundAmount}}</strong> of your <strong>{{originalAmount}}</strong> insurance excess for <strong>{{jobName}}</strong> has been refunded via {{method}}.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{retainedAmount}}</strong> has been retained due to: {{reason}}.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Please allow 3-5 working days for the refund to appear in your account. If you have any questions, just reply to this email.
+      </p>
+    `,
+  },
+
+  excess_claimed: {
+    variant: 'client',
+    preheader: 'Insurance excess claim notification',
+    subject: 'Insurance Excess Claim — {{jobName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Excess Claim</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We need to let you know that <strong>{{claimAmount}}</strong> of your insurance excess for <strong>{{jobName}}</strong> has been retained due to:
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0;font-size:15px;color:#991b1b;">{{reason}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If you'd like to discuss this, please reply to this email or call us.
+      </p>
+    `,
+  },
+
+  excess_preauth_released: {
+    variant: 'client',
+    preheader: 'Your pre-authorisation has been released',
+    subject: 'Pre-Authorisation Released — {{jobName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Pre-Authorisation Released</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        The pre-authorisation of <strong>{{amount}}</strong> on your card for <strong>{{jobName}}</strong> has been released. No money was taken from your account.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Thanks for hiring with Ooosh Tours — we look forward to seeing you again!
+      </p>
+    `,
+  },
 };
 
 export default templates;

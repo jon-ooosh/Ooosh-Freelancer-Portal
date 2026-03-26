@@ -18,6 +18,7 @@ import DataCleanupPage from './pages/DataCleanupPage';
 import DriversPage from './pages/DriversPage';
 import DriverDetailPage from './pages/DriverDetailPage';
 import TransportOpsPage from './pages/TransportOpsPage';
+import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 import { sharedRefreshToken } from './services/api';
@@ -64,6 +65,7 @@ export default function App() {
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
                 <Route path="/data-cleanup" element={<DataCleanupPage />} />
+                <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/profile" element={<ProfilePage />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />

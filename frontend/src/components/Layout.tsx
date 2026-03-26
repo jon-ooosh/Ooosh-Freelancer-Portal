@@ -51,6 +51,13 @@ const navItems: NavItem[] = [
       { path: '/vehicles/settings', label: 'Settings' },
     ],
   },
+  {
+    path: '/money-menu',
+    label: 'Money',
+    children: [
+      { path: '/money/excess', label: 'Excess', roles: ['admin', 'manager'] },
+    ],
+  },
 ];
 
 function NavDropdown({ item, isActive, userRole }: { item: NavItem; isActive: boolean; userRole?: string }) {
