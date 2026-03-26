@@ -992,9 +992,10 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     await logAudit(req.user!.id, 'jobs', jobId, 'update', job, { ...job, hh_job_number: hhJobNumber });
 
     res.json({ hh_job_number: hhJobNumber });
-  } catch (error) {
-    console.error('Push to HireHop error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+  } catch (error: any) {
+    const msg = error?.message || String(error);
+    console.error('Push to HireHop error:', msg, error);
+    res.status(500).json({ error: `Failed to push to HireHop: ${msg}` });
   }
 });
 
