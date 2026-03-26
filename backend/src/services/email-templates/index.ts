@@ -264,6 +264,36 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  // ── Mid-tour driver notification ───────────────────────────────────────
+
+  mid_tour_driver: {
+    variant: 'internal',
+    preheader: 'A driver has submitted a hire form for a job that is already out',
+    subject: 'Mid-tour driver — {{driverName}} on job #{{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#dc2626;">Driver Added Mid-Tour</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        <strong>{{driverName}}</strong> ({{driverEmail}}) has completed their hire form for a job that is <strong>already dispatched / on-hire</strong>.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:13px;color:#991b1b;">Job</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">#{{jobNumber}} {{jobName}}</p>
+            <p style="margin:8px 0 0;font-size:13px;color:#991b1b;">Vehicle</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{vehicleReg}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;background:#fff7ed;padding:12px;border-radius:6px;border-left:4px solid #f97316;">
+        <strong>Action required:</strong> This driver needs processing — their hire form has been linked to the job but they haven't been booked out yet.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{jobUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
 };
 
 export default templates;
