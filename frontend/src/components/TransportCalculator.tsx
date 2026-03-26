@@ -664,7 +664,7 @@ export default function TransportCalculator({
           includedInCharge: e.included,
         }));
 
-      await api.post('/quotes', {
+      const saveResult = await api.post<{ id: string }>('/quotes', {
         jobId: jobId || null,
         jobType: formData.jobType,
         calculationMode: formData.calculationMode === 'hourly' ? 'hourly' : 'dayrate',
@@ -720,7 +720,18 @@ export default function TransportCalculator({
         }
       }
 
-      setSuccess('Quote saved successfully');
+      // Auto-push to HireHop if job has an HH number
+      if (saveResult?.id && hhJobNumber) {
+        try {
+          await api.post(`/quotes/${saveResult.id}/push-hirehop`, {});
+          setSuccess('Quote saved + pushed to HireHop');
+        } catch (hhErr) {
+          console.warn('HireHop push failed (quote saved OK):', hhErr);
+          setSuccess('Quote saved (HireHop push failed — push manually later)');
+        }
+      } else {
+        setSuccess('Quote saved successfully');
+      }
       onSaved?.();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to save quote';
