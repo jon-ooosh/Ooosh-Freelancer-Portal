@@ -42,7 +42,7 @@ const updateOrgSchema = createOrgSchema.partial();
 // GET /api/organisations
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, type, page = '1', limit = '50', tag, has_email, has_people, location, sort } = req.query;
+    const { search, type, page = '1', limit = '50', tag, has_email, has_people, missing_email, missing_phone, location, sort } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
@@ -82,6 +82,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     if (has_people === 'true') {
       sql += ` AND (SELECT COUNT(*) FROM person_organisation_roles por WHERE por.organisation_id = o.id AND por.status = 'active') > 0`;
+    }
+
+    if (missing_email === 'true') {
+      sql += ` AND (o.email IS NULL OR o.email = '')`;
+    }
+
+    if (missing_phone === 'true') {
+      sql += ` AND (o.phone IS NULL OR o.phone = '')`;
     }
 
     if (location) {

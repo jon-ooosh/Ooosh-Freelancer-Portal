@@ -46,6 +46,8 @@ export default function OrganisationsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [filterHasEmail, setFilterHasEmail] = useState(false);
   const [filterHasPeople, setFilterHasPeople] = useState(false);
+  const [filterMissingEmail, setFilterMissingEmail] = useState(false);
+  const [filterMissingPhone, setFilterMissingPhone] = useState(false);
   const [sortBy, setSortBy] = useState('name');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
@@ -54,7 +56,7 @@ export default function OrganisationsPage() {
 
   useEffect(() => {
     loadOrgs();
-  }, [search, typeFilter, filterHasEmail, filterHasPeople, sortBy]);
+  }, [search, typeFilter, filterHasEmail, filterHasPeople, filterMissingEmail, filterMissingPhone, sortBy]);
 
   async function loadOrgs(page = 1) {
     setLoading(true);
@@ -64,6 +66,8 @@ export default function OrganisationsPage() {
       if (typeFilter) params.set('type', typeFilter);
       if (filterHasEmail) params.set('has_email', 'true');
       if (filterHasPeople) params.set('has_people', 'true');
+      if (filterMissingEmail) params.set('missing_email', 'true');
+      if (filterMissingPhone) params.set('missing_phone', 'true');
       if (sortBy !== 'name') params.set('sort', sortBy);
 
       const data = await api.get<OrgsResponse>(`/organisations?${params}`);
@@ -122,10 +126,28 @@ export default function OrganisationsPage() {
           <input
             type="checkbox"
             checked={filterHasEmail}
-            onChange={(e) => setFilterHasEmail(e.target.checked)}
+            onChange={(e) => { setFilterHasEmail(e.target.checked); if (e.target.checked) setFilterMissingEmail(false); }}
             className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
           />
           Has email
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-amber-600">
+          <input
+            type="checkbox"
+            checked={filterMissingEmail}
+            onChange={(e) => { setFilterMissingEmail(e.target.checked); if (e.target.checked) setFilterHasEmail(false); }}
+            className="rounded border-gray-300 text-amber-500 focus:ring-amber-500"
+          />
+          Missing email
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-amber-600">
+          <input
+            type="checkbox"
+            checked={filterMissingPhone}
+            onChange={(e) => setFilterMissingPhone(e.target.checked)}
+            className="rounded border-gray-300 text-amber-500 focus:ring-amber-500"
+          />
+          Missing phone
         </label>
         <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
           <input
@@ -167,7 +189,22 @@ export default function OrganisationsPage() {
             ) : (
               orgs.map((org) => (
                 <tr key={org.id} onClick={() => navigate(`/organisations/${org.id}`)} className="hover:bg-gray-50 cursor-pointer transition-colors">
-                  <td className="px-6 py-4 text-sm font-medium text-gray-900">{org.name}</td>
+                  <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                    <div className="flex items-center gap-1.5">
+                      {org.name}
+                      {(!org.email || !org.phone) && (
+                        <span
+                          className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-100 text-amber-600 text-[10px] leading-none flex-shrink-0 cursor-help"
+                          title={[
+                            !org.email && 'Missing email',
+                            !org.phone && 'Missing phone',
+                          ].filter(Boolean).join(' & ')}
+                        >
+                          !
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-6 py-4">
                     <span className={`inline-flex px-2 py-0.5 rounded-full text-xs ${typeColors[org.type] || 'bg-gray-100 text-gray-700'}`}>
                       {org.type}

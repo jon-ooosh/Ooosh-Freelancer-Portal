@@ -118,14 +118,17 @@ function ClientPicker({
   value,
   onChange,
   onSelect,
+  onCreateNew,
 }: {
   value: string;
   onChange: (name: string) => void;
   onSelect: (result: SearchResult) => void;
+  onCreateNew?: (name: string) => void;
 }) {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [showDropdown, setShowDropdown] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
   const wrapperRef = useRef<HTMLDivElement>(null);
 
@@ -140,20 +143,25 @@ function ClientPicker({
   }, []);
 
   const doSearch = useCallback(async (term: string) => {
-    if (term.length < 2) { setResults([]); setShowDropdown(false); return; }
+    if (term.length < 2) { setResults([]); setShowDropdown(false); setHasSearched(false); return; }
     setSearching(true);
     try {
       const data = await api.get<{ results: SearchResult[] }>(`/search?q=${encodeURIComponent(term)}&limit=10`);
       // Only show people and organisations (not venues)
       const filtered = data.results.filter(r => r.type === 'person' || r.type === 'organisation');
       setResults(filtered);
-      setShowDropdown(filtered.length > 0);
+      setHasSearched(true);
+      // Show dropdown if there are results OR if we can offer "create new"
+      const hasExactOrgMatch = filtered.some(r => r.type === 'organisation' && r.name.toLowerCase() === term.toLowerCase());
+      setShowDropdown(filtered.length > 0 || (!hasExactOrgMatch && onCreateNew != null));
     } catch {
       setResults([]);
+      setHasSearched(true);
+      if (term.length >= 2 && onCreateNew) setShowDropdown(true);
     } finally {
       setSearching(false);
     }
-  }, []);
+  }, [onCreateNew]);
 
   const handleChange = (text: string) => {
     onChange(text);
@@ -167,13 +175,18 @@ function ClientPicker({
     setShowDropdown(false);
   };
 
+  // Determine whether to show "Create new" option
+  const trimmedValue = value.trim();
+  const hasExactOrgMatch = results.some(r => r.type === 'organisation' && r.name.toLowerCase() === trimmedValue.toLowerCase());
+  const showCreateNew = onCreateNew && hasSearched && trimmedValue.length >= 2 && !hasExactOrgMatch && !searching;
+
   return (
     <div ref={wrapperRef} className="relative">
       <input
         type="text"
         value={value}
         onChange={(e) => handleChange(e.target.value)}
-        onFocus={() => { if (results.length > 0) setShowDropdown(true); }}
+        onFocus={() => { if (results.length > 0 || showCreateNew) setShowDropdown(true); }}
         placeholder="Search people or organisations..."
         className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
       />
@@ -201,6 +214,27 @@ function ClientPicker({
               </div>
             </button>
           ))}
+          {showCreateNew && showDropdown && (
+            <>
+              {results.length > 0 && <div className="border-t border-gray-100" />}
+              <button
+                onClick={() => {
+                  onCreateNew!(trimmedValue);
+                  setShowDropdown(false);
+                }}
+                className="w-full text-left px-3 py-2 hover:bg-green-50 flex items-center gap-2"
+              >
+                <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-green-100 text-green-700">
+                  + New
+                </span>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-gray-900 truncate">
+                    Create &ldquo;{trimmedValue}&rdquo; as new client
+                  </div>
+                </div>
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -744,6 +778,9 @@ function NewEnquiryModal({
 }) {
   const [clientName, setClientName] = useState('');
   const [clientId, setClientId] = useState<string | null>(null);
+  const [isNewClient, setIsNewClient] = useState(false);
+  const [newClientEmail, setNewClientEmail] = useState('');
+  const [newClientPhone, setNewClientPhone] = useState('');
   const [details, setDetails] = useState('');
   const [outDate, setOutDate] = useState('');
   const [jobDate, setJobDate] = useState('');
@@ -850,6 +887,10 @@ function NewEnquiryModal({
 
   const handleClientSelect = (result: SearchResult) => {
     setClientName(result.name);
+    // Reset new client state when selecting an existing result
+    setIsNewClient(false);
+    setNewClientEmail('');
+    setNewClientPhone('');
     if (result.type === 'organisation') {
       setClientId(result.id);
       fetchClientHistory(result.id, result.name);
@@ -857,6 +898,16 @@ function NewEnquiryModal({
       setClientId(null);
       fetchClientHistory(null, result.name);
     }
+  };
+
+  const handleCreateNewClient = (name: string) => {
+    setClientName(name);
+    setClientId(null);
+    setIsNewClient(true);
+    setNewClientEmail('');
+    setNewClientPhone('');
+    // Fetch history by name in case there are jobs under this name already
+    fetchClientHistory(null, name);
   };
 
   // Today's date for min constraint (no past dates)
@@ -962,10 +1013,28 @@ function NewEnquiryModal({
     setSaving(true);
     setError('');
     try {
+      // Create new client organisation if needed
+      let resolvedClientId = clientId;
+      if (isNewClient && clientName.trim()) {
+        try {
+          const newOrg = await api.post<{ id: string }>('/organisations', {
+            name: clientName.trim(),
+            type: 'client',
+            email: newClientEmail.trim() || undefined,
+            phone: newClientPhone.trim() || undefined,
+          });
+          resolvedClientId = newOrg.id;
+        } catch (orgErr) {
+          setError(orgErr instanceof Error ? orgErr.message : 'Failed to create client organisation');
+          setSaving(false);
+          return;
+        }
+      }
+
       // Create the enquiry
       const created = await api.post<{ id: string }>('/pipeline/enquiry', {
         client_name: clientName,
-        client_id: clientId || undefined,
+        client_id: resolvedClientId || undefined,
         details,
         out_date: outDate || undefined,
         job_date: jobDate || undefined,
@@ -1020,7 +1089,7 @@ function NewEnquiryModal({
       }
 
       // Reset form
-      setClientName(''); setClientId(null); setDetails('');
+      setClientName(''); setClientId(null); setIsNewClient(false); setNewClientEmail(''); setNewClientPhone(''); setDetails('');
       setOutDate(''); setJobDate(''); setJobEnd(''); setReturnDate('');
       setOutLinked(true); setReturnLinked(true);
       setJobName(''); setJobValue(''); setLikelihood('warm');
@@ -1058,11 +1127,44 @@ function NewEnquiryModal({
             <label className="block text-sm font-medium text-gray-700 mb-1">Client *</label>
             <ClientPicker
               value={clientName}
-              onChange={(name) => { setClientName(name); setClientId(null); }}
+              onChange={(name) => { setClientName(name); setClientId(null); setIsNewClient(false); }}
               onSelect={handleClientSelect}
+              onCreateNew={handleCreateNewClient}
             />
             {clientId && (
               <p className="text-xs text-green-600 mt-1">Linked to organisation</p>
+            )}
+            {isNewClient && (
+              <div className="mt-2 p-3 bg-green-50 border border-green-200 rounded-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-sm font-medium text-green-800">
+                    New client: <span className="font-semibold">{clientName}</span>
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => { setIsNewClient(false); setNewClientEmail(''); setNewClientPhone(''); }}
+                    className="text-xs text-green-500 hover:text-green-700"
+                  >
+                    &times; Cancel
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  <input
+                    type="email"
+                    value={newClientEmail}
+                    onChange={(e) => setNewClientEmail(e.target.value)}
+                    placeholder="Email (optional)"
+                    className="w-full border border-green-200 rounded px-3 py-1.5 text-sm focus:border-green-400 focus:outline-none focus:ring-1 focus:ring-green-400 bg-white"
+                  />
+                  <input
+                    type="tel"
+                    value={newClientPhone}
+                    onChange={(e) => setNewClientPhone(e.target.value)}
+                    placeholder="Phone (optional)"
+                    className="w-full border border-green-200 rounded px-3 py-1.5 text-sm focus:border-green-400 focus:outline-none focus:ring-1 focus:ring-green-400 bg-white"
+                  />
+                </div>
+              </div>
             )}
           </div>
 
