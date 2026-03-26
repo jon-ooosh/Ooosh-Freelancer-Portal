@@ -7,7 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import ExcessPaymentModal, { statusLabel, statusColor } from '../components/ExcessPaymentModal';
-import type { ClientExcessLedgerEntry, JobExcess, ExcessStatus } from '../../../shared/types';
+import type { ClientExcessLedgerEntry, JobExcess } from '../../../shared/types';
 
 type ViewMode = 'ledger' | 'all' | 'client-detail';
 
