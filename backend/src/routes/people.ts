@@ -65,7 +65,7 @@ const personOrgRoleSchema = z.object({
 // GET /api/people — list with search and pagination
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, page = '1', limit = '50', tag, is_freelancer, is_approved, has_email, has_phone, location, sort } = req.query;
+    const { search, page = '1', limit = '50', tag, is_freelancer, is_approved, has_email, has_phone, missing_email, missing_phone, location, sort } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
@@ -119,6 +119,14 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 
     if (has_phone === 'true') {
       sql += ` AND (p.mobile IS NOT NULL AND p.mobile != '' OR p.phone IS NOT NULL AND p.phone != '')`;
+    }
+
+    if (missing_email === 'true') {
+      sql += ` AND (p.email IS NULL OR p.email = '')`;
+    }
+
+    if (missing_phone === 'true') {
+      sql += ` AND (p.mobile IS NULL OR p.mobile = '') AND (p.phone IS NULL OR p.phone = '')`;
     }
 
     if (location) {

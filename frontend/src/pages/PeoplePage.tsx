@@ -49,12 +49,14 @@ export default function PeoplePage() {
   const [filterApproved, setFilterApproved] = useState(false);
   const [filterHasEmail, setFilterHasEmail] = useState(false);
   const [filterHasPhone, setFilterHasPhone] = useState(false);
+  const [filterMissingEmail, setFilterMissingEmail] = useState(false);
+  const [filterMissingPhone, setFilterMissingPhone] = useState(false);
   const [sortBy, setSortBy] = useState('name');
   const navigate = useNavigate();
 
   useEffect(() => {
     loadPeople();
-  }, [search, filterFreelancer, filterApproved, filterHasEmail, filterHasPhone, sortBy]);
+  }, [search, filterFreelancer, filterApproved, filterHasEmail, filterHasPhone, filterMissingEmail, filterMissingPhone, sortBy]);
 
   async function loadPeople(page = 1) {
     setLoading(true);
@@ -65,6 +67,8 @@ export default function PeoplePage() {
       if (filterApproved) params.set('is_approved', 'true');
       if (filterHasEmail) params.set('has_email', 'true');
       if (filterHasPhone) params.set('has_phone', 'true');
+      if (filterMissingEmail) params.set('missing_email', 'true');
+      if (filterMissingPhone) params.set('missing_phone', 'true');
       if (sortBy !== 'name') params.set('sort', sortBy);
 
       const data = await api.get<PeopleResponse>(`/people?${params}`);
@@ -133,19 +137,37 @@ export default function PeoplePage() {
           <input
             type="checkbox"
             checked={filterHasEmail}
-            onChange={(e) => setFilterHasEmail(e.target.checked)}
+            onChange={(e) => { setFilterHasEmail(e.target.checked); if (e.target.checked) setFilterMissingEmail(false); }}
             className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
           />
           Has email
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-amber-600">
+          <input
+            type="checkbox"
+            checked={filterMissingEmail}
+            onChange={(e) => { setFilterMissingEmail(e.target.checked); if (e.target.checked) setFilterHasEmail(false); }}
+            className="rounded border-gray-300 text-amber-500 focus:ring-amber-500"
+          />
+          Missing email
         </label>
         <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-600">
           <input
             type="checkbox"
             checked={filterHasPhone}
-            onChange={(e) => setFilterHasPhone(e.target.checked)}
+            onChange={(e) => { setFilterHasPhone(e.target.checked); if (e.target.checked) setFilterMissingPhone(false); }}
             className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
           />
           Has phone
+        </label>
+        <label className="flex items-center gap-1.5 cursor-pointer text-sm text-amber-600">
+          <input
+            type="checkbox"
+            checked={filterMissingPhone}
+            onChange={(e) => { setFilterMissingPhone(e.target.checked); if (e.target.checked) setFilterHasPhone(false); }}
+            className="rounded border-gray-300 text-amber-500 focus:ring-amber-500"
+          />
+          Missing phone
         </label>
         <select
           value={sortBy}
@@ -198,8 +220,21 @@ export default function PeoplePage() {
               people.map((person) => (
                 <tr key={person.id} onClick={() => navigate(`/people/${person.id}`)} className="hover:bg-gray-50 cursor-pointer transition-colors">
                   <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm font-medium text-gray-900">
-                      {person.first_name} {person.last_name}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-sm font-medium text-gray-900">
+                        {person.first_name} {person.last_name}
+                      </span>
+                      {(!person.email || !person.mobile) && (
+                        <span
+                          className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-amber-100 text-amber-600 text-[10px] leading-none flex-shrink-0 cursor-help"
+                          title={[
+                            !person.email && 'Missing email',
+                            !person.mobile && 'Missing phone',
+                          ].filter(Boolean).join(' & ')}
+                        >
+                          !
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
