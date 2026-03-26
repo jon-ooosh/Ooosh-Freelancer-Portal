@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
 import ExcessGateBanner from '../components/ExcessGateBanner';
+import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
@@ -546,7 +547,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'details'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'money' | 'details'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -1812,7 +1813,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['overview', 'timeline', 'transport', 'drivers', 'files', 'details'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files', 'details'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -1826,6 +1827,7 @@ export default function JobDetailPage() {
                tab === 'timeline' ? 'Activity Timeline' :
                tab === 'transport' ? `Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
                tab === 'drivers' ? `Drivers & Vehicles${vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}` :
+               tab === 'money' ? 'Money' :
                tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
                'Full Details'}
             </button>
@@ -2592,6 +2594,11 @@ export default function JobDetailPage() {
 
           {/* Hire Forms Section (testing) */}
         </div>
+      )}
+
+      {/* Money Tab */}
+      {activeTab === 'money' && id && (
+        <MoneyTab jobId={id} job={job} />
       )}
 
       {/* Full Details Tab */}

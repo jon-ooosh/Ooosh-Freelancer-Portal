@@ -68,6 +68,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '034_vehicle_swap.sql',
         '034_crewed_jobs_enhancements.sql',
         '034_excess_enhancements.sql',
+        '035_job_payments.sql',
       ];
 
       for (const migration of migrations) {

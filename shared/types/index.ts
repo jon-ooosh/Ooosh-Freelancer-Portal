@@ -775,6 +775,60 @@ export interface DispatchBlocker {
   amountRequired: number | null;
 }
 
+// ── Money System types ──
+
+export type PaymentType = 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'other';
+export type PaymentMethod = 'stripe' | 'stripe_preauth' | 'bank_transfer' | 'card_in_office' | 'cash' | 'paypal' | 'rolled_over';
+export type PaymentStatus = 'completed' | 'pending' | 'pre_auth' | 'captured' | 'released' | 'refunded' | 'failed';
+export type PaymentSource = 'op' | 'payment_portal' | 'hirehop' | 'manual';
+
+export interface JobPayment {
+  id: string;
+  job_id: string | null;
+  hirehop_job_id: number | null;
+  payment_type: PaymentType;
+  amount: number;
+  currency: string;
+  payment_method: PaymentMethod;
+  payment_reference: string | null;
+  stripe_payment_intent: string | null;
+  hirehop_deposit_id: number | null;
+  payment_status: PaymentStatus;
+  source: PaymentSource;
+  excess_id: string | null;
+  xero_contact_id: string | null;
+  client_name: string | null;
+  payment_date: string;
+  recorded_by: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JobFinancialSummary {
+  hire_value_ex_vat: number;
+  hire_value_inc_vat: number;
+  vat_amount: number;
+  total_deposits: number;
+  balance_outstanding: number;
+  excess_required: number;
+  excess_collected: number;
+  excess_status: string | null;
+  payment_count: number;
+  client_balance_on_account: number;
+  deposits: HireHopDeposit[];
+}
+
+export interface HireHopDeposit {
+  id: number;
+  amount: number;
+  date: string;
+  memo: string | null;
+  method: string | null;
+}
+
+export type PaymentTerms = 'standard' | 'credit_7' | 'credit_14' | 'credit_30' | 'credit_60' | 'no_deposit' | 'custom';
+
 // API response wrappers
 export interface PaginatedResponse<T> {
   data: T[];
