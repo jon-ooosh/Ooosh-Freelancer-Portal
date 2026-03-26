@@ -1038,7 +1038,7 @@ async function findOrCreateHeader(hhJobId: string): Promise<string> {
   const token = process.env.HIREHOP_API_TOKEN!;
 
   // Fetch existing items to find a header
-  const itemsRes = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 10 });
+  const itemsRes = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 10 }) as any;
   const items = Array.isArray(itemsRes) ? itemsRes : (itemsRes?.items || []);
 
   const headers = items.filter((i: any) => i.kind === '0' && (!i.parent || i.parent === '0'));
@@ -1058,7 +1058,7 @@ async function findOrCreateHeader(hhJobId: string): Promise<string> {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.toString(),
   });
-  const result = await res.json();
+  const result = await res.json() as any;
   if (result.items?.[0]?.ID) return result.items[0].ID;
   throw new Error('Failed to create header in HireHop');
 }
@@ -1076,7 +1076,7 @@ async function addItemToHireHop(
 
   try {
     // Step 1: Get items before
-    const itemsBefore = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 0 });
+    const itemsBefore = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 0 }) as any;
     const beforeItems = Array.isArray(itemsBefore) ? itemsBefore : (itemsBefore?.items || []);
     const existingIds = new Set(beforeItems.map((i: any) => i.ID));
 
@@ -1089,7 +1089,7 @@ async function addItemToHireHop(
 
     // Step 3: Find the new item
     await new Promise(r => setTimeout(r, 1000));
-    const itemsAfter = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 0 });
+    const itemsAfter = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 0 }) as any;
     const afterItems = Array.isArray(itemsAfter) ? itemsAfter : (itemsAfter?.items || []);
     const newItem = afterItems.find((i: any) => !existingIds.has(i.ID) && i.LIST_ID === String(listId) && i.kind === '4');
 
@@ -1120,7 +1120,7 @@ async function addItemToHireHop(
       return { success: false, error: `Edit step failed: HTTP ${editRes.status}` };
     }
 
-    const editResult = await editRes.json();
+    const editResult = await editRes.json() as any;
     if (editResult.error) {
       return { success: false, error: `Edit error: ${editResult.error}` };
     }

@@ -1054,6 +1054,7 @@ export default function JobDetailPage() {
       jobDate: defaultDate,
       arrivalTime: '',
       notes: '',
+      pushToHirehop: true,
     });
     setVenueSearch(job.venue_name || '');
     setVenueOptions([]);
