@@ -80,24 +80,27 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
     if (bl?.rows && Array.isArray(bl.rows)) {
       for (const row of bl.rows) {
+        // Row structure: { id, kind, date, credit, owing, job, data: { TYPE, ID, DESCRIPTION, MEMO, ... } }
         const kind = parseInt(row.kind ?? '0');
-        const data = row.data || row;
+        const data = row.data || {};
 
         if (kind === 0) {
-          // Job total row — accrued field is the ex-VAT hire value
-          hireValueExVat = parseFloat(data.accrued || data.ACCRUED || row.accrued || '0');
+          // Job total row — accrued field has the ex-VAT hire value
+          // Try both row-level and data-level fields
+          hireValueExVat = parseFloat(row.accrued || data.accrued || data.ACCRUED || '0');
         } else if (kind === 6) {
-          // Deposit row — credit field is the amount
-          const creditAmount = Math.abs(parseFloat(data.credit || data.CREDIT || row.credit || '0'));
+          // Deposit row — credit at row level, details in data
+          const creditAmount = Math.abs(parseFloat(row.credit || data.credit || '0'));
           if (creditAmount > 0) {
-            const description = String(data.DESCRIPTION || data.description || row.DESCRIPTION || '');
-            const memo = String(data.MEMO || data.memo || row.MEMO || '');
+            const description = String(data.DESCRIPTION || row.desc || '');
+            const memo = String(data.MEMO || '');
             const isExcess = isExcessPayment(description + ' ' + memo);
+            const depositId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
 
             deposits.push({
-              id: parseInt(data.ID || data.id || row.id || '0'),
+              id: depositId,
               amount: creditAmount,
-              date: data.DATE || data.date || row.date || '',
+              date: data.DATE || row.date || '',
               memo: description || memo || null,
               is_excess: isExcess,
             });
@@ -304,13 +307,14 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         const memo = buildHHDepositMemo(payment_type, payment_method, payment_reference, notes);
 
         // STEP 1: Create the deposit with full HireHop params
+        const hhBankId = getHHBankId(payment_method);
         const depositParams: Record<string, unknown> = {
           ID: 0, // 0 = create new
           DATE: currentDate,
           DESCRIPTION: description,
           AMOUNT: amount,
           MEMO: memo,
-          ACC_ACCOUNT_ID: 267, // Bank account ID (card payments account)
+          ACC_ACCOUNT_ID: hhBankId,
           ACC_PACKAGE_ID: 3,   // 3 = Xero integration
           'CURRENCY[CODE]': 'GBP',
           'CURRENCY[NAME]': 'United Kingdom Pound',
@@ -467,6 +471,30 @@ function buildHHDepositMemo(
   if (notes) parts.push(notes);
   parts.push('(recorded via Ooosh OP)');
   return parts.join(' — ');
+}
+
+/**
+ * Map OP payment method to HireHop bank account ID.
+ * These IDs correspond to the bank accounts configured in HireHop:
+ *   165 = Amex
+ *   168 = Till (Cash)
+ *   169 = Worldpay (all cards EXCEPT AMEX) — default for card in office
+ *   170 = Lloyds Bank
+ *   173 = Paypal
+ *   265 = Wise - Current Account (BACS) — bank transfers
+ *   267 = Stripe GBP — online card payments via Payment Portal
+ */
+function getHHBankId(paymentMethod: string): number {
+  const mapping: Record<string, number> = {
+    stripe: 267,
+    stripe_preauth: 267,
+    card_in_office: 169,  // Worldpay terminal
+    bank_transfer: 265,   // Wise BACS
+    cash: 168,            // Till
+    paypal: 173,
+    rolled_over: 265,     // Default to Wise for rollovers
+  };
+  return mapping[paymentMethod] || 169; // Default to Worldpay
 }
 
 /**
