@@ -854,9 +854,9 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     let hhClientId: number | null = null;
     if (job.client_id) {
       const extMap = await query(
-        `SELECT external_id FROM external_id_map WHERE entity_type = 'person' AND entity_id = $1 AND source = 'hirehop'
+        `SELECT external_id FROM external_id_map WHERE entity_type = 'person' AND entity_id = $1 AND external_system = 'hirehop'
          UNION
-         SELECT external_id FROM external_id_map WHERE entity_type = 'organisation' AND entity_id = $1 AND source = 'hirehop'`,
+         SELECT external_id FROM external_id_map WHERE entity_type = 'organisation' AND entity_id = $1 AND external_system = 'hirehop'`,
         [job.client_id]
       );
       if (extMap.rows.length > 0) {
@@ -992,9 +992,10 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     await logAudit(req.user!.id, 'jobs', jobId, 'update', job, { ...job, hh_job_number: hhJobNumber });
 
     res.json({ hh_job_number: hhJobNumber });
-  } catch (error) {
-    console.error('Push to HireHop error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+  } catch (error: any) {
+    const msg = error?.message || String(error);
+    console.error('Push to HireHop error:', msg, error);
+    res.status(500).json({ error: `Failed to push to HireHop: ${msg}` });
   }
 });
 
