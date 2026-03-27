@@ -38,7 +38,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // Get the job from OP database (need hh_job_number for HH API calls)
     const jobResult = await query(
       `SELECT id, hh_job_number, client_id, client_name, company_name
-       FROM jobs WHERE id = $1 OR hh_job_number::text = $1`,
+       FROM jobs WHERE id = $1`,
       [jobId]
     );
 
@@ -55,13 +55,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     let hhJobData: any = null;
 
     if (hhJobId) {
-      const [billingRes, jobDataRes] = await Promise.all([
-        hhBroker.get('/php_functions/billing_list.php', { job_id: hhJobId }, { priority: 'high', cacheTTL: 60 }),
-        hhBroker.get('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 }),
-      ]);
-
-      if (billingRes.success) hhBilling = billingRes.data;
-      if (jobDataRes.success) hhJobData = jobDataRes.data;
+      try {
+        const [billingRes, jobDataRes] = await Promise.all([
+          hhBroker.get('/php_functions/billing_list.php', { job_id: hhJobId }, { priority: 'high', cacheTTL: 60 }),
+          hhBroker.get('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 }),
+        ]);
+        if (billingRes.success) hhBilling = billingRes.data;
+        if (jobDataRes.success) hhJobData = jobDataRes.data;
+      } catch (hhError) {
+        console.error('[money] HireHop fetch failed (non-fatal):', hhError);
+      }
     }
 
     // Parse HireHop financial data
@@ -165,8 +168,9 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       },
     });
   } catch (error) {
-    console.error('[money] Summary error:', error);
-    res.status(500).json({ error: 'Failed to load financial summary' });
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[money] Summary error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to load financial summary', detail: errMsg });
   }
 });
 
@@ -304,7 +308,7 @@ router.post('/:jobId/payment-event', async (req: AuthRequest, res: Response) => 
     const { payment_type, amount, payment_method, payment_reference, stripe_payment_intent, source, excess_id, notes } = req.body;
 
     const jobResult = await query(
-      `SELECT id, hh_job_number, client_name FROM jobs WHERE id = $1 OR hh_job_number::text = $1`,
+      `SELECT id, hh_job_number, client_name FROM jobs WHERE id = $1`,
       [jobId]
     );
 
