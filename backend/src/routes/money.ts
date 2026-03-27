@@ -64,13 +64,19 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         if (jobDataRes.success) hhJobData = jobDataRes.data;
         // Debug: log what HH actually returns so we can see field names
         if (hhJobData) {
-          console.log('[money] HH job_data fields:', Object.keys(hhJobData as Record<string, unknown>).filter(k =>
-            /total|value|price|amount|vat|billing|cost/i.test(k)
-          ));
+          const allKeys = Object.keys(hhJobData as Record<string, unknown>);
+          console.log('[money] HH job_data ALL keys:', allKeys.join(', '));
         }
         if (hhBilling) {
           const bd = hhBilling as any;
-          console.log('[money] HH billing_list type:', typeof bd, Array.isArray(bd) ? `array[${bd.length}]` : Object.keys(bd).slice(0, 10));
+          console.log('[money] HH billing_list keys:', Object.keys(bd));
+          if (bd.rows && Array.isArray(bd.rows) && bd.rows.length > 0) {
+            console.log('[money] HH billing_list first row keys:', Object.keys(bd.rows[0]));
+            console.log('[money] HH billing_list first row sample:', JSON.stringify(bd.rows[0]).substring(0, 300));
+          }
+          if (bd.subs) {
+            console.log('[money] HH billing_list subs:', JSON.stringify(bd.subs).substring(0, 300));
+          }
         }
       } catch (hhError) {
         console.error('[money] HireHop fetch failed (non-fatal):', hhError);
@@ -78,33 +84,51 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     }
 
     // Parse HireHop financial data
-    // job_data.php returns fields like JOB_TOTAL, TOTAL, job_value, etc. — try multiple
+    // billing_list.php returns { rows, subs, page, total, records }
+    // - rows: array of billing entries (invoices, deposits, etc.)
+    // - subs: likely subtotals/summary
+    // job_data.php returns job metadata but hire value may be in billing or needs calculation
     const jd = hhJobData as Record<string, any> | null;
-    const hireValueExVat = parseFloat(
-      jd?.JOB_TOTAL || jd?.TOTAL || jd?.job_total || jd?.job_value ||
-      jd?.HIRE_CHARGE || jd?.hire_charge || jd?.PRICE || '0'
-    );
+    const bl = hhBilling as Record<string, any> | null;
+
+    // Try to get hire value from job_data first, then from billing subs
+    let hireValueExVat = 0;
+    if (jd) {
+      hireValueExVat = parseFloat(
+        jd.JOB_TOTAL || jd.TOTAL || jd.job_total || jd.job_value ||
+        jd.HIRE_CHARGE || jd.hire_charge || jd.PRICE || jd.ACC_TOTAL ||
+        jd.INVOICE_TOTAL || jd.total_value || '0'
+      );
+    }
+    // If job_data didn't have it, try billing subs or calculate from rows
+    if (hireValueExVat === 0 && bl?.subs) {
+      // subs might contain totals
+      const subs = bl.subs;
+      hireValueExVat = parseFloat(subs.total || subs.net || subs.subtotal || subs.hire_total || '0');
+    }
+
     const vatRate = 0.20; // Standard UK VAT
     const vatAmount = hireValueExVat * vatRate;
     const hireValueIncVat = hireValueExVat + vatAmount;
 
-    // Parse deposits from billing list
+    // Parse deposits from billing list rows
     const deposits: Array<{ id: number; amount: number; date: string; memo: string | null }> = [];
     let totalDeposits = 0;
 
-    if (hhBilling) {
-      const billingItems = Array.isArray(hhBilling) ? hhBilling : (hhBilling.rows || hhBilling.items || []);
-      for (const item of billingItems) {
+    if (bl?.rows && Array.isArray(bl.rows)) {
+      for (const item of bl.rows) {
+        // Billing rows have various kinds: invoices, credit notes, deposits, etc.
+        // kind=6 = deposits in HireHop, but let's also check the structure
         const kind = parseInt(item.kind || item.KIND || '0');
-        if (kind === 6) { // kind=6 = deposits in HireHop
-          const amount = Math.abs(parseFloat(item.total || item.TOTAL || '0'));
+        const rowAmount = Math.abs(parseFloat(item.total || item.TOTAL || item.amount || item.AMOUNT || '0'));
+        if (kind === 6 && rowAmount > 0) {
           deposits.push({
             id: parseInt(item.id || item.ID || '0'),
-            amount,
+            amount: rowAmount,
             date: item.date || item.DATE || '',
-            memo: item.memo || item.MEMO || null,
+            memo: item.memo || item.MEMO || item.description || item.DESCRIPTION || null,
           });
-          totalDeposits += amount;
+          totalDeposits += rowAmount;
         }
       }
     }
