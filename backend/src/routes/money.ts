@@ -31,6 +31,60 @@ const recordPaymentSchema = z.object({
   push_to_hirehop: z.boolean().default(true),
 });
 
+// ── POST /api/money/sync-values — Bulk-update job_value for jobs missing values ──
+// Called on jobs/pipeline page load to populate cached hire values from HH billing
+
+router.post('/sync-values', async (req: AuthRequest, res: Response) => {
+  try {
+    // Find HH-linked jobs with no job_value (or job_value = 0)
+    const jobsResult = await query(
+      `SELECT id, hh_job_number FROM jobs
+       WHERE hh_job_number IS NOT NULL
+         AND (job_value IS NULL OR job_value = 0)
+         AND status NOT IN (9, 10, 11)
+       ORDER BY updated_at DESC
+       LIMIT 20`
+    );
+
+    if (jobsResult.rows.length === 0) {
+      res.json({ data: { updated: 0 } });
+      return;
+    }
+
+    let updated = 0;
+    // Process sequentially to avoid rate limiting (billing_list is per-job)
+    for (const job of jobsResult.rows) {
+      try {
+        const billingRes = await hhBroker.get('/php_functions/billing_list.php',
+          { main_id: job.hh_job_number, type: 1 },
+          { priority: 'low', cacheTTL: 300 }
+        );
+
+        if (billingRes.success && billingRes.data) {
+          const bl = billingRes.data as Record<string, any>;
+          if (bl.rows && Array.isArray(bl.rows)) {
+            for (const row of bl.rows) {
+              if (parseInt(row.kind ?? '0') === 0) {
+                const accrued = parseFloat(row.accrued || row.data?.accrued || '0');
+                if (accrued > 0) {
+                  await query(`UPDATE jobs SET job_value = $1 WHERE id = $2`, [accrued, job.id]);
+                  updated++;
+                }
+                break;
+              }
+            }
+          }
+        }
+      } catch { /* skip individual failures */ }
+    }
+
+    res.json({ data: { updated, checked: jobsResult.rows.length } });
+  } catch (error) {
+    console.error('[money] Sync values error:', error);
+    res.status(500).json({ error: 'Failed to sync job values' });
+  }
+});
+
 // ── GET /api/money/:jobId/summary — Full financial summary for a job ──
 
 router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
@@ -153,6 +207,21 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // Balance = hire value inc VAT minus hire deposits only (excess deposits are separate)
     const balanceOutstanding = hireValueIncVat - totalHireDeposits;
 
+    // Calculate deposit requirements (same logic as Payment Portal)
+    let requiredDeposit = Math.max(hireValueIncVat * 0.25, 100);
+    if (hireValueIncVat < 400) requiredDeposit = hireValueIncVat;
+    if (hireValueIncVat === 0) requiredDeposit = 0;
+    const depositPaid = totalHireDeposits >= (requiredDeposit - 5); // £5 tolerance (matches portal)
+    const depositPercent = hireValueIncVat > 0 ? Math.min(100, (totalHireDeposits / hireValueIncVat) * 100) : 0;
+
+    // Side-effect: update cached job_value on jobs table so pipeline/jobs pages show correct value
+    if (hireValueExVat > 0 && job.id) {
+      query(
+        `UPDATE jobs SET job_value = $1 WHERE id = $2 AND (job_value IS NULL OR job_value != $1)`,
+        [hireValueExVat, job.id]
+      ).catch(() => {}); // Fire-and-forget, non-blocking
+    }
+
     // Get OP excess data for this job
     const excessResult = await query(
       `SELECT je.*, d.full_name AS driver_name, fv.reg AS vehicle_reg
@@ -208,6 +277,9 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           total_hire_deposits: totalHireDeposits,
           total_excess_deposits: totalExcessDeposits,
           balance_outstanding: balanceOutstanding,
+          required_deposit: requiredDeposit,
+          deposit_paid: depositPaid,
+          deposit_percent: depositPercent,
           deposits,
         },
         excess: {

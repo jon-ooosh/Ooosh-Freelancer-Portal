@@ -1886,7 +1886,7 @@ export default function JobDetailPage() {
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              {tab === 'overview' ? 'Job Requirements' :
+              {tab === 'overview' ? 'Overview' :
                tab === 'timeline' ? 'Activity Timeline' :
                tab === 'transport' ? `Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
                tab === 'drivers' ? `Drivers & Vehicles${vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}` :
@@ -1898,9 +1898,13 @@ export default function JobDetailPage() {
         </nav>
       </div>
 
-      {/* Overview Tab (Prep Checklist) */}
+      {/* Overview Tab (Prep Checklist + Financial Strip) */}
       {activeTab === 'overview' && (
-        <JobPrepChecklist jobId={id || ''} />
+        <div className="space-y-4">
+          {/* Compact financial progress strip */}
+          {id && <OverviewFinancialStrip jobId={id} />}
+          <JobPrepChecklist jobId={id || ''} />
+        </div>
       )}
 
       {/* Timeline Tab */}
@@ -3318,6 +3322,60 @@ const PREP_STATUS_CONFIG: Record<string, { label: string; colour: string; bg: st
 };
 
 const PREP_STATUS_ORDER: JobRequirement['status'][] = ['not_started', 'in_progress', 'done', 'blocked'];
+
+function OverviewFinancialStrip({ jobId }: { jobId: string }) {
+  const [data, setData] = useState<{
+    hire_value_inc_vat: number; total_hire_deposits: number;
+    balance_outstanding: number; deposit_percent: number; deposit_paid: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    api.get<{ data: { financial: any } }>(`/money/${jobId}/summary`)
+      .then(res => {
+        const f = res.data.financial;
+        if (f.hire_value_inc_vat > 0) {
+          setData({
+            hire_value_inc_vat: f.hire_value_inc_vat,
+            total_hire_deposits: f.total_hire_deposits,
+            balance_outstanding: f.balance_outstanding,
+            deposit_percent: f.deposit_percent,
+            deposit_paid: f.deposit_paid,
+          });
+        }
+      })
+      .catch(() => {});
+  }, [jobId]);
+
+  if (!data) return null;
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3">
+      <div className="flex items-center gap-4">
+        <div className="flex-1">
+          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+            <span>Payment: £{data.total_hire_deposits.toFixed(0)} of £{data.hire_value_inc_vat.toFixed(0)}</span>
+            <span className={data.deposit_paid ? 'text-green-600 font-medium' : 'text-amber-600'}>
+              {data.deposit_percent >= 100 ? 'Paid in full' : data.deposit_paid ? 'Deposit secured' : `${data.deposit_percent.toFixed(0)}% paid`}
+            </span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2">
+            <div
+              className={`h-2 rounded-full transition-all ${
+                data.deposit_percent >= 100 ? 'bg-green-500' : data.deposit_paid ? 'bg-ooosh-500' : 'bg-amber-500'
+              }`}
+              style={{ width: `${Math.min(100, data.deposit_percent)}%` }}
+            />
+          </div>
+        </div>
+        {data.balance_outstanding > 0 && (
+          <span className="text-xs font-semibold text-red-600 whitespace-nowrap">
+            £{data.balance_outstanding.toFixed(2)} outstanding
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function JobPrepChecklist({ jobId }: { jobId: string }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);

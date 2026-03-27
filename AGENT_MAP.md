@@ -158,12 +158,16 @@ backend/src/routes/quotes.ts
 - [x] `/money/excess` global ledger page
 - [x] Excess actions (payment/claim/reimburse/waive/rollover/move)
 - [x] Address book integration (Excess History on person + org pages)
-- [ ] "Money" tab on Job Detail with financial summary from HireHop
-- [ ] Insurance excess embedded in Money tab
-- [ ] `job_payments` table + unified payment history
-- [ ] Record Payment → creates HH deposit + OP record
-- [ ] Email triggers on excess status transitions
-- [ ] Client balance auto-suggest on new assignments
+- [x] "Money" tab on Job Detail with financial summary from HireHop
+- [x] Insurance excess embedded in Money tab
+- [x] `job_payments` table + payment history reads from HH billing_list (source of truth)
+- [x] Record Payment → creates HH deposit (two-step Xero sync) + OP audit record
+- [x] Deposit calculator (25% / £100 floor / full if <£400) on Money tab
+- [x] Job values populate from HH billing_list (bulk sync endpoint + per-job side-effect)
+- [x] "Overview" tab (renamed from Job Requirements) with payment progress bar
+- [x] Client balance auto-suggest on Money tab
+- [ ] Email triggers on excess/payment status transitions (NEXT)
+- [ ] Wire email triggers into record-payment and excess status changes
 
 ---
 

@@ -24,6 +24,9 @@ interface FinancialData {
     total_hire_deposits: number;
     total_excess_deposits: number;
     balance_outstanding: number;
+    required_deposit: number;
+    deposit_paid: boolean;
+    deposit_percent: number;
     deposits: Array<{
       id: number; amount: number; date: string;
       description: string | null; memo: string | null;
@@ -191,6 +194,30 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                 Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}
               </p>
             </div>
+
+            {/* Deposit to Secure info */}
+            {financial.hire_value_inc_vat > 0 && !financial.deposit_paid && (
+              <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                <p className="text-xs font-semibold text-blue-800 uppercase tracking-wider mb-1">Deposit to Secure</p>
+                <p className="text-sm text-blue-700">
+                  {financial.hire_value_inc_vat < 400
+                    ? `Full payment required: £${financial.hire_value_inc_vat.toFixed(2)} (jobs under £400)`
+                    : <>
+                        Minimum deposit (25%): <span className="font-bold">£{financial.required_deposit.toFixed(2)}</span>
+                        {' · '}Half: £{(financial.hire_value_inc_vat * 0.5).toFixed(2)}
+                        {' · '}Full: £{financial.hire_value_inc_vat.toFixed(2)}
+                      </>
+                  }
+                </p>
+              </div>
+            )}
+            {financial.deposit_paid && financial.balance_outstanding > 0 && (
+              <div className="mt-3 p-3 bg-green-50 border border-green-200 rounded-lg">
+                <p className="text-xs text-green-700">
+                  Deposit secured. Remaining balance: <span className="font-semibold">£{financial.balance_outstanding.toFixed(2)}</span>
+                </p>
+              </div>
+            )}
           </>
         ) : (
           <p className="text-sm text-gray-500">
