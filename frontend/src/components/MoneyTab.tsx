@@ -21,8 +21,10 @@ interface FinancialData {
     hire_value_inc_vat: number;
     vat_amount: number;
     total_deposits: number;
+    total_hire_deposits: number;
+    total_excess_deposits: number;
     balance_outstanding: number;
-    deposits: Array<{ id: number; amount: number; date: string; memo: string | null }>;
+    deposits: Array<{ id: number; amount: number; date: string; memo: string | null; is_excess: boolean }>;
   };
   excess: {
     records: (JobExcess & { driver_name?: string; vehicle_reg?: string })[];
@@ -281,7 +283,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                 id: `hh-${dep.id}`,
                 date: dep.date,
                 amount: dep.amount,
-                type: dep.memo?.toLowerCase().includes('excess') || dep.memo?.toLowerCase().includes('xs') ? 'excess' : 'deposit',
+                type: dep.is_excess ? 'excess' : 'deposit',
                 method: 'hirehop',
                 reference: dep.memo,
                 source: 'hirehop',
