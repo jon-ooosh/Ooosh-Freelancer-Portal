@@ -552,36 +552,43 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [ ] Wire email triggers to status transition actions
 - [ ] Auto-suggest "client has £X on account" on new hire assignments (endpoint exists, UI wiring pending)
 
-##### Phase C — Money Tab on Job Detail (NEXT UP)
-Add a "Money" tab to Job Detail showing the unified financial picture for the job. Excess components slot into this tab.
+##### Phase C — Money Tab on Job Detail ✅ COMPLETE (27 Mar 2026)
+"Money" tab on Job Detail showing the unified financial picture. HireHop is the **source of truth** for all financial data — the OP reads from HH and displays, never maintains a separate copy for display purposes.
 
-*Financial Summary section (read from HireHop via broker):*
-- [ ] Read hire value (ex/inc VAT) from HH `billing_list.php`
-- [ ] Read deposits/payments made from HH billing list (kind=6 = deposits)
-- [ ] Calculate balance outstanding
-- [ ] Show payment progress bar (deposit → balance → paid in full)
+**Key architecture decision:** Payment history reads directly from HH `billing_list.php` on every page load. The OP does NOT maintain its own payment history table for display — this prevents sync drift. The `job_payments` table exists only as a write-path audit log (recording what the OP pushed to HH), not as a read-path data source.
 
-*Insurance Excess section (from OP data, already built):*
-- [ ] Show excess required, status, driver, suggested collection method
-- [ ] Embed `ExcessPaymentModal` for actions (record payment, reimburse, claim etc.)
-- [ ] Show dispatch override status if applicable
-- [ ] Auto-suggest if client has balance on account
+**How billing_list.php works:**
+- Endpoint: `GET /php_functions/billing_list.php?main_id={jobId}&type=1`
+- Returns: `{ rows, subs, banks, page, total, records }`
+- Row kinds: `0` = Job total (accrued = ex-VAT hire value), `1` = Invoice, `2` = Credit note, `3` = Payment application, `6` = Deposit/payment
+- Hire value comes from `kind=0` row's `accrued` field
+- Deposits from `kind=6` rows' `credit` field
+- Bank names resolved via `banks[]` array in response (maps `ACC_ACCOUNT_ID` → bank name)
+- Excess vs hire classification via keyword detection on description ("excess", "insurance", "xs", "top up")
 
-*Payment History section (merged from HH + OP):*
-- [ ] `job_payments` table — unified payment recording (job_id, type, amount, method, status, date, reference, source)
-- [ ] Merge HH deposits with OP-recorded payments into single timeline
-- [ ] Each entry shows: date, amount, type (deposit/balance/excess/refund), method, reference
+**HireHop bank account IDs:**
+| ID | Name | Used for |
+|---|---|---|
+| 165 | Amex | Amex card payments |
+| 168 | Till (Cash) | Cash payments |
+| 169 | Worldpay (all cards EXCEPT AMEX) | Card terminal payments |
+| 170 | Lloyds Bank | Bank transfers (legacy) |
+| 173 | Paypal | PayPal payments |
+| 265 | Wise - Current Account (BACS) | Bank transfers (primary) |
+| 267 | Stripe GBP | Payment Portal / online card |
 
-*Record Payment form:*
-- [ ] "Record Manual Payment" — amount, method (bank/card/cash/PayPal), type (deposit/balance/excess), reference
-- [ ] On submit: create HH deposit via write-back + record in OP `job_payments`
-- [ ] If type = excess: also update `job_excess` status
-- [ ] One entry point → both systems updated
-
-*Client Account section:*
-- [ ] Show rolled-over balance from previous hires
-- [ ] Link to client's full excess history (address book)
-- [ ] Client payment terms (from organisations table)
+**What's built:**
+- [x] `money.ts` route: `GET /:jobId/summary` reads HH billing + OP excess + client balance
+- [x] `POST /:jobId/record-payment` creates HH deposit (two-step: `billing_deposit_save.php` + `accounting/tasks.php` Xero sync) + records in OP `job_payments`
+- [x] `POST /:jobId/payment-event` receives external payment events (for Payment Portal repointing)
+- [x] `job_payments` table (migration 035) — write-path audit log, not display source
+- [x] `payment_terms` + `payment_terms_notes` columns on organisations table
+- [x] MoneyTab.tsx: financial summary (hire value, VAT, deposits, balance, progress bar)
+- [x] MoneyTab.tsx: insurance excess section with manage actions
+- [x] MoneyTab.tsx: payment history from HH billing_list (split hire/excess, bank names, refunds)
+- [x] MoneyTab.tsx: record payment form (type, amount, HH bank, reference, notes, push-to-HH checkbox)
+- [x] MoneyTab.tsx: client balance on account auto-suggest
+- [x] Payment methods match HireHop bank accounts exactly (same names, same IDs)
 
 ##### Phase D — VAT Adjustment Display
 Port the international VAT calculation from the Payment Portal into the OP. Currently staff access this via the client-facing payment portal URL — after this phase, they see it directly on the Money tab.
