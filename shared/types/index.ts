@@ -778,7 +778,7 @@ export interface DispatchBlocker {
 // ── Money System types ──
 
 export type PaymentType = 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'other';
-export type PaymentMethod = 'stripe' | 'stripe_preauth' | 'bank_transfer' | 'card_in_office' | 'cash' | 'paypal' | 'rolled_over';
+export type PaymentMethod = 'stripe_gbp' | 'worldpay' | 'amex' | 'wise_bacs' | 'till_cash' | 'paypal' | 'lloyds_bank' | 'rolled_over';
 export type PaymentStatus = 'completed' | 'pending' | 'pre_auth' | 'captured' | 'released' | 'refunded' | 'failed';
 export type PaymentSource = 'op' | 'payment_portal' | 'hirehop' | 'manual';
 

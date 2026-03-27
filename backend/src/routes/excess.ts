@@ -33,7 +33,7 @@ const updateExcessSchema = z.object({
 
 const paymentSchema = z.object({
   amount: z.number().min(0),
-  method: z.enum(['payment_portal', 'bank_transfer', 'card_in_office', 'cash', 'rolled_over']),
+  method: z.enum(['stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank', 'rolled_over']),
   reference: z.string().max(200).nullable().optional(),
 });
 
@@ -44,7 +44,7 @@ const claimSchema = z.object({
 
 const reimburseSchema = z.object({
   amount: z.number().min(0),
-  method: z.enum(['bank_transfer', 'card_refund', 'cash']),
+  method: z.enum(['stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank']),
 });
 
 const waiveSchema = z.object({

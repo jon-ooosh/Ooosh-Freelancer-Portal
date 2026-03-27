@@ -22,7 +22,9 @@ router.use(authenticate);
 const recordPaymentSchema = z.object({
   payment_type: z.enum(['deposit', 'balance', 'excess', 'refund', 'excess_refund', 'other']),
   amount: z.number().min(0.01),
-  payment_method: z.enum(['stripe', 'stripe_preauth', 'bank_transfer', 'card_in_office', 'cash', 'paypal', 'rolled_over']),
+  payment_method: z.enum([
+    'stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank', 'rolled_over',
+  ]),
   payment_reference: z.string().max(255).optional(),
   notes: z.string().max(1000).optional(),
   excess_id: z.string().uuid().optional(),
@@ -486,13 +488,14 @@ function buildHHDepositMemo(
  */
 function getHHBankId(paymentMethod: string): number {
   const mapping: Record<string, number> = {
-    stripe: 267,
-    stripe_preauth: 267,
-    card_in_office: 169,  // Worldpay terminal
-    bank_transfer: 265,   // Wise BACS
-    cash: 168,            // Till
-    paypal: 173,
-    rolled_over: 265,     // Default to Wise for rollovers
+    stripe_gbp: 267,       // Stripe GBP
+    worldpay: 169,         // Worldpay (all cards EXCEPT AMEX)
+    amex: 165,             // Amex
+    wise_bacs: 265,        // Wise - Current Account (BACS)
+    till_cash: 168,        // Till (Cash)
+    paypal: 173,           // Paypal
+    lloyds_bank: 170,      // Lloyds Bank
+    rolled_over: 265,      // Default to Wise for rollovers
   };
   return mapping[paymentMethod] || 169; // Default to Worldpay
 }

@@ -37,11 +37,13 @@ interface FinancialData {
 }
 
 const PAYMENT_METHODS = [
-  { value: 'bank_transfer', label: 'Bank Transfer' },
-  { value: 'card_in_office', label: 'Card in Office' },
-  { value: 'cash', label: 'Cash' },
-  { value: 'paypal', label: 'PayPal' },
-  { value: 'stripe', label: 'Stripe (Payment Portal)' },
+  { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
+  { value: 'amex', label: 'Amex' },
+  { value: 'stripe_gbp', label: 'Stripe GBP' },
+  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
+  { value: 'till_cash', label: 'Till (Cash)' },
+  { value: 'paypal', label: 'Paypal' },
+  { value: 'lloyds_bank', label: 'Lloyds Bank' },
   { value: 'rolled_over', label: 'Applied from Account Balance' },
 ];
 
@@ -61,7 +63,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
   const [showPaymentForm, setShowPaymentForm] = useState(false);
   const [payType, setPayType] = useState('deposit');
   const [payAmount, setPayAmount] = useState('');
-  const [payMethod, setPayMethod] = useState('bank_transfer');
+  const [payMethod, setPayMethod] = useState('worldpay');
   const [payRef, setPayRef] = useState('');
   const [payNotes, setPayNotes] = useState('');
   const [payExcessId, setPayExcessId] = useState('');
