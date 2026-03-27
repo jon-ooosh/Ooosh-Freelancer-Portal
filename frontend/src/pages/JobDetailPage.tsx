@@ -616,6 +616,10 @@ export default function JobDetailPage() {
   const [editChaseDate, setEditChaseDate] = useState('');
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
+  const [hhClientOutOfSync, setHhClientOutOfSync] = useState(false);
+  const [hhClientSyncName, setHhClientSyncName] = useState('');
+  const [syncingClientToHH, setSyncingClientToHH] = useState(false);
+  const [hhClientSyncSuccess, setHhClientSyncSuccess] = useState(false);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const editValueRef = useRef<HTMLInputElement>(null);
@@ -764,6 +768,28 @@ export default function JobDetailPage() {
   async function selectClient(org: { id: string; name: string }) {
     setEditingClient(false);
     await saveInlineField({ client_id: org.id, client_name: org.name });
+    // Show sync banner if job is linked to HireHop
+    if (job?.hh_job_number) {
+      setHhClientSyncName(org.name);
+      setHhClientOutOfSync(true);
+      setHhClientSyncSuccess(false);
+    }
+  }
+
+  async function syncClientToHH() {
+    if (!job) return;
+    setSyncingClientToHH(true);
+    try {
+      await api.post(`/pipeline/${job.id}/sync-client-to-hh`, {});
+      setHhClientOutOfSync(false);
+      setHhClientSyncSuccess(true);
+      setTimeout(() => setHhClientSyncSuccess(false), 3000);
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to sync client to HireHop';
+      alert(msg);
+    } finally {
+      setSyncingClientToHH(false);
+    }
   }
 
   function startEditValue() {
@@ -1495,6 +1521,39 @@ export default function JobDetailPage() {
                 </button>
               )}
             </div>
+
+            {/* HireHop client sync banner */}
+            {hhClientOutOfSync && (
+              <div className="mt-2 flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm">
+                <svg className="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+                <span className="text-amber-800">
+                  Client changed to <strong>{hhClientSyncName}</strong> — HireHop still shows the old client. Sync now?
+                </span>
+                <button
+                  onClick={syncClientToHH}
+                  disabled={syncingClientToHH}
+                  className="ml-auto px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+                >
+                  {syncingClientToHH ? 'Syncing...' : 'Sync to HireHop'}
+                </button>
+                <button
+                  onClick={() => setHhClientOutOfSync(false)}
+                  className="text-amber-600 hover:text-amber-800 text-xs underline"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            {hhClientSyncSuccess && (
+              <div className="mt-2 flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-sm text-green-700">
+                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Client synced to HireHop successfully.
+              </div>
+            )}
 
             {/* Dates editor panel */}
             {editingDates && (

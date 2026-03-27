@@ -999,4 +999,89 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Sync client change to HireHop ─────────────────────────────────────────
+
+router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+
+    // Get job
+    const jobResult = await query(
+      `SELECT id, hh_job_number, client_id, client_name, company_name, pipeline_status FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+
+    if (!job.hh_job_number) {
+      res.status(400).json({ error: 'Job is not linked to HireHop' });
+      return;
+    }
+
+    // Look up HireHop client_id from external_id_map
+    let hhClientId: number | null = null;
+    if (job.client_id) {
+      const extMap = await query(
+        `SELECT external_id FROM external_id_map WHERE entity_type = 'organisation' AND entity_id = $1 AND external_system = 'hirehop'
+         UNION
+         SELECT external_id FROM external_id_map WHERE entity_type = 'person' AND entity_id = $1 AND external_system = 'hirehop'`,
+        [job.client_id]
+      );
+      if (extMap.rows.length > 0) {
+        hhClientId = parseInt(extMap.rows[0].external_id, 10);
+      }
+    }
+
+    // Build HireHop update payload
+    const hhBody: Record<string, unknown> = {
+      job: job.hh_job_number,
+      name: job.client_name || '',
+      company: job.company_name || job.client_name || '',
+      no_webhook: 1,
+    };
+
+    if (hhClientId) hhBody.client_id = hhClientId;
+
+    // POST to HireHop via broker
+    const { hhBroker } = await import('../services/hirehop-broker');
+    const hhResponse = await hhBroker.post(
+      '/api/save_job.php',
+      hhBody,
+      { priority: 'high' }
+    );
+
+    if (!hhResponse.success) {
+      console.error('[Pipeline] HireHop client sync failed:', hhResponse.error);
+      res.status(502).json({ error: `HireHop API error: ${hhResponse.error || 'Unknown error'}` });
+      return;
+    }
+
+    console.log('[Pipeline] Client synced to HireHop job #' + job.hh_job_number + ':', job.client_name);
+
+    // Log as interaction on the job
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+       VALUES ('note', $1, $2, $3, $4)`,
+      [
+        `Synced client "${job.client_name || job.company_name}" to HireHop job #${job.hh_job_number}`,
+        jobId,
+        req.user!.id,
+        job.pipeline_status,
+      ]
+    );
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', { client_synced: false }, { client_synced: true, hh_job_number: job.hh_job_number });
+
+    res.json({ success: true, message: `Client synced to HireHop job #${job.hh_job_number}` });
+  } catch (error: any) {
+    const msg = error?.message || String(error);
+    console.error('Sync client to HireHop error:', msg, error);
+    res.status(500).json({ error: `Failed to sync client to HireHop: ${msg}` });
+  }
+});
+
 export default router;
