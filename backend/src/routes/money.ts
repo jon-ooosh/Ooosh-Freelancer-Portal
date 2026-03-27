@@ -383,6 +383,49 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
       );
     }
 
+    // Status transition: deposit payment on enquiry/provisional → Booked
+    // A deposit (or full payment) means the job is confirmed
+    if ((payment_type === 'deposit' || payment_type === 'balance') && amount > 0) {
+      try {
+        const statusResult = await query(
+          `SELECT pipeline_status, hh_job_number FROM jobs WHERE id = $1`,
+          [job.id]
+        );
+        const currentStatus = statusResult.rows[0]?.pipeline_status;
+        const hhNum = statusResult.rows[0]?.hh_job_number;
+
+        if (currentStatus && ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(currentStatus)) {
+          // Move to confirmed in OP
+          await query(
+            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+            [job.id]
+          );
+          console.log(`[money] Job ${job.id} moved to confirmed (deposit received)`);
+
+          // Push status to HireHop (status 2 = Booked)
+          if (hhNum) {
+            try {
+              await hhBroker.post('/frames/status_save.php', {
+                job: hhNum,
+                status: 2, // Booked
+                no_webhook: 1,
+              }, { priority: 'high' });
+              // Update local HH status
+              await query(
+                `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
+                [job.id]
+              );
+              console.log(`[money] HH job ${hhNum} status updated to Booked`);
+            } catch {
+              console.error('[money] HH status update to Booked failed (non-fatal)');
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[money] Status transition failed (non-fatal):', err);
+      }
+    }
+
     // Push to HireHop as deposit (if requested and job has HH number)
     // Uses the two-step process: 1) Create deposit, 2) Trigger Xero sync
     let hhDepositId: number | null = null;
