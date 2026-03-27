@@ -1036,47 +1036,120 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
       }
     }
 
-    // Build HireHop update payload
-    const hhBody: Record<string, unknown> = {
+    // Fetch organisation details for full contact sync
+    let orgDetails: { name: string; email: string | null; phone: string | null; address: string | null; location: string | null } | null = null;
+    if (job.client_id) {
+      const orgResult = await query(
+        `SELECT name, email, phone, address, location FROM organisations WHERE id = $1`,
+        [job.client_id]
+      );
+      if (orgResult.rows.length > 0) {
+        orgDetails = orgResult.rows[0];
+      }
+    }
+
+    const { hhBroker } = await import('../services/hirehop-broker');
+
+    // Step 1: Create/update contact in HireHop address book via job_save_contact.php
+    const contactName = orgDetails?.name || job.client_name || job.company_name || '';
+    const contactPayload: Record<string, unknown> = {
+      JOB_ID: job.hh_job_number,
+      NAME: contactName,
+      COMPANY: contactName,
+      CLIENT: 1,
+      no_webhook: 1,
+    };
+
+    // Include existing HH client ID to update rather than create a duplicate
+    if (hhClientId) {
+      contactPayload.CLIENT_ID = hhClientId;
+    }
+
+    // Add address, email, phone from org details if available
+    if (orgDetails) {
+      // Build full address from address + location fields
+      const addressParts = [orgDetails.address, orgDetails.location].filter(Boolean);
+      if (addressParts.length > 0) {
+        contactPayload.ADDRESS = addressParts.join(', ');
+      }
+      if (orgDetails.email) {
+        contactPayload.EMAIL = orgDetails.email;
+      }
+      if (orgDetails.phone) {
+        contactPayload.TELEPHONE = orgDetails.phone;
+      }
+    }
+
+    const contactResponse = await hhBroker.post(
+      '/php_functions/job_save_contact.php',
+      contactPayload,
+      { priority: 'high' }
+    );
+
+    if (!contactResponse.success) {
+      console.error('[Pipeline] HireHop contact sync failed:', contactResponse.error);
+      res.status(502).json({ error: `HireHop contact API error: ${contactResponse.error || 'Unknown error'}` });
+      return;
+    }
+
+    // Extract the returned HH contact ID and store in external_id_map
+    const returnedHhClientId = contactResponse.data?.id;
+    if (returnedHhClientId && job.client_id) {
+      await query(
+        `INSERT INTO external_id_map (entity_type, entity_id, external_system, external_id)
+         VALUES ('organisation', $1, 'hirehop', $2)
+         ON CONFLICT (entity_type, entity_id, external_system) DO UPDATE SET external_id = $2, synced_at = NOW()`,
+        [job.client_id, String(returnedHhClientId)]
+      );
+      hhClientId = returnedHhClientId;
+      console.log('[Pipeline] HireHop contact created/updated, ID:', returnedHhClientId);
+    }
+
+    // Step 2: Update the job's client link via save_job.php
+    const jobBody: Record<string, unknown> = {
       job: job.hh_job_number,
       name: job.client_name || '',
       company: job.company_name || job.client_name || '',
       no_webhook: 1,
     };
 
-    if (hhClientId) hhBody.client_id = hhClientId;
+    if (hhClientId) jobBody.client_id = hhClientId;
 
-    // POST to HireHop via broker
-    const { hhBroker } = await import('../services/hirehop-broker');
     const hhResponse = await hhBroker.post(
       '/api/save_job.php',
-      hhBody,
+      jobBody,
       { priority: 'high' }
     );
 
     if (!hhResponse.success) {
-      console.error('[Pipeline] HireHop client sync failed:', hhResponse.error);
-      res.status(502).json({ error: `HireHop API error: ${hhResponse.error || 'Unknown error'}` });
-      return;
+      console.error('[Pipeline] HireHop job client link failed:', hhResponse.error);
+      // Contact was already synced, so we warn but don't fully fail
+      console.warn('[Pipeline] Contact was synced but job client link failed for HH job #' + job.hh_job_number);
     }
 
-    console.log('[Pipeline] Client synced to HireHop job #' + job.hh_job_number + ':', job.client_name);
+    // Build a summary of what was synced
+    const syncedFields: string[] = ['name'];
+    if (orgDetails?.email) syncedFields.push('email');
+    if (orgDetails?.phone) syncedFields.push('phone');
+    if (orgDetails?.address || orgDetails?.location) syncedFields.push('address');
+
+    console.log('[Pipeline] Client synced to HireHop job #' + job.hh_job_number + ':', contactName, '(fields:', syncedFields.join(', ') + ')');
 
     // Log as interaction on the job
     await query(
       `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
        VALUES ('note', $1, $2, $3, $4)`,
       [
-        `Synced client "${job.client_name || job.company_name}" to HireHop job #${job.hh_job_number}`,
+        `Synced client "${contactName}" to HireHop job #${job.hh_job_number} (contact details: ${syncedFields.join(', ')})`,
         jobId,
         req.user!.id,
         job.pipeline_status,
       ]
     );
 
-    await logAudit(req.user!.id, 'jobs', jobId, 'update', { client_synced: false }, { client_synced: true, hh_job_number: job.hh_job_number });
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', { client_synced: false }, { client_synced: true, hh_job_number: job.hh_job_number, synced_fields: syncedFields });
 
-    res.json({ success: true, message: `Client synced to HireHop job #${job.hh_job_number}` });
+    res.json({ success: true, message: `Client synced to HireHop job #${job.hh_job_number} (${syncedFields.join(', ')})` });
   } catch (error: any) {
     const msg = error?.message || String(error);
     console.error('Sync client to HireHop error:', msg, error);

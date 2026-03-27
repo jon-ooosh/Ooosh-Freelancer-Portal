@@ -57,8 +57,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const jobParams: unknown[] = [searchTerm];
     let jobNumClause = '';
     if (isNumeric) {
-      jobParams.push(parseInt(searchTermRaw, 10));
-      jobNumClause = `OR hh_job_number = $${jobParams.length}`;
+      jobParams.push(`${searchTermRaw}%`);
+      jobNumClause = `OR CAST(hh_job_number AS TEXT) LIKE $${jobParams.length}`;
     }
     jobParams.push(perType);
     const jobResults = await query(
