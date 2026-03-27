@@ -7,7 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
-import type { JobExcess, JobPayment } from '../../../shared/types';
+import type { JobExcess } from '../../../shared/types';
 
 interface MoneyTabProps {
   jobId: string;
@@ -24,7 +24,12 @@ interface FinancialData {
     total_hire_deposits: number;
     total_excess_deposits: number;
     balance_outstanding: number;
-    deposits: Array<{ id: number; amount: number; date: string; memo: string | null; is_excess: boolean }>;
+    deposits: Array<{
+      id: number; amount: number; date: string;
+      description: string | null; memo: string | null;
+      is_excess: boolean; is_refund: boolean;
+      bank_name: string | null; entered_by: string | null;
+    }>;
   };
   excess: {
     records: (JobExcess & { driver_name?: string; vehicle_reg?: string })[];
@@ -32,7 +37,6 @@ interface FinancialData {
     total_collected: number;
     status: string | null;
   };
-  payments: JobPayment[];
   client_balance_on_account: number;
 }
 
@@ -134,7 +138,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
     );
   }
 
-  const { financial, excess, payments, client_balance_on_account } = data;
+  const { financial, excess, client_balance_on_account } = data;
   const depositPercent = financial.hire_value_inc_vat > 0
     ? Math.min(100, (financial.total_deposits / financial.hire_value_inc_vat) * 100)
     : 0;
@@ -263,93 +267,51 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
           </button>
         </div>
 
-        {/* Merged timeline: HH deposits + OP payments */}
+        {/* Payment history — read from HireHop (source of truth) */}
         {(() => {
-          const allEntries: Array<{
-            id: string;
-            date: string;
-            amount: number;
-            type: string;
-            method: string;
-            reference: string | null;
-            source: string;
-            notes: string | null;
-          }> = [];
+          // Separate hire and excess deposits
+          const hireDeposits = financial.deposits.filter(d => !d.is_excess);
+          const excessDeposits = financial.deposits.filter(d => d.is_excess);
 
-          // Add HH deposits
-          for (const dep of financial.deposits) {
-            // Skip if we already have this as an OP payment (by HH deposit ID)
-            const alreadyRecorded = payments.some((p: any) => p.hirehop_deposit_id === dep.id);
-            if (!alreadyRecorded) {
-              allEntries.push({
-                id: `hh-${dep.id}`,
-                date: dep.date,
-                amount: dep.amount,
-                type: dep.is_excess ? 'excess' : 'deposit',
-                method: 'hirehop',
-                reference: dep.memo,
-                source: 'hirehop',
-                notes: dep.memo,
-              });
-            }
-          }
-
-          // Add OP payments
-          for (const pay of payments) {
-            allEntries.push({
-              id: pay.id,
-              date: pay.payment_date,
-              amount: Number(pay.amount),
-              type: pay.payment_type,
-              method: pay.payment_method,
-              reference: pay.payment_reference,
-              source: pay.source,
-              notes: pay.notes,
-            });
-          }
-
-          // Sort by date descending
-          allEntries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-          if (allEntries.length === 0) {
+          if (financial.deposits.length === 0) {
             return <p className="text-sm text-gray-500">No payments recorded yet.</p>;
           }
 
+          const renderDeposit = (dep: typeof financial.deposits[0]) => (
+            <div key={dep.id} className="py-2.5 flex items-center justify-between">
+              <div className="flex-1">
+                <p className="text-sm text-gray-700">
+                  {dep.date ? new Date(dep.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : '—'}
+                  {dep.bank_name && <span className="text-gray-500"> — {dep.bank_name}</span>}
+                </p>
+                {dep.description && (
+                  <p className="text-xs text-gray-400 mt-0.5">{dep.description}</p>
+                )}
+              </div>
+              <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
+                {dep.is_refund ? '-' : ''}£{dep.amount.toFixed(2)}
+              </p>
+            </div>
+          );
+
           return (
-            <div className="divide-y divide-gray-100">
-              {allEntries.map((entry) => (
-                <div key={entry.id} className="py-3 flex items-center justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-medium uppercase ${
-                        entry.type === 'excess' ? 'bg-amber-100 text-amber-800' :
-                        entry.type === 'refund' || entry.type === 'excess_refund' ? 'bg-red-100 text-red-800' :
-                        'bg-green-100 text-green-800'
-                      }`}>
-                        {entry.type.replace(/_/g, ' ')}
-                      </span>
-                      <span className="text-xs text-gray-500">
-                        {entry.method.replace(/_/g, ' ')}
-                      </span>
-                      {entry.source === 'hirehop' && (
-                        <span className="text-[10px] text-gray-400">from HireHop</span>
-                      )}
-                    </div>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      {new Date(entry.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                      {entry.reference && ` · ${entry.reference}`}
-                    </p>
-                    {entry.notes && entry.source !== 'hirehop' && (
-                      <p className="text-xs text-gray-400 mt-0.5">{entry.notes}</p>
-                    )}
+            <div className="space-y-4">
+              {hireDeposits.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Hire Payments</p>
+                  <div className="divide-y divide-gray-100">
+                    {hireDeposits.map(renderDeposit)}
                   </div>
-                  <p className={`text-sm font-semibold ${
-                    entry.type === 'refund' || entry.type === 'excess_refund' ? 'text-red-600' : 'text-gray-900'
-                  }`}>
-                    {entry.type === 'refund' || entry.type === 'excess_refund' ? '-' : ''}£{entry.amount.toFixed(2)}
-                  </p>
                 </div>
-              ))}
+              )}
+              {excessDeposits.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Excess Payments</p>
+                  <div className="divide-y divide-gray-100">
+                    {excessDeposits.map(renderDeposit)}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })()}

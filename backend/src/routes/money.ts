@@ -76,42 +76,71 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     const bl = hhBilling as Record<string, any> | null;
 
     let hireValueExVat = 0;
-    const deposits: Array<{ id: number; amount: number; date: string; memo: string | null; is_excess: boolean }> = [];
+    const deposits: Array<{
+      id: number; amount: number; date: string; description: string | null;
+      memo: string | null; is_excess: boolean; is_refund: boolean;
+      bank_name: string | null; entered_by: string | null;
+    }> = [];
     let totalHireDeposits = 0;
     let totalExcessDeposits = 0;
 
+    // Extract banks array for resolving bank IDs to names
+    const banks: Array<{ ID: number; NAME: string }> = bl?.banks || bl?.rows?.[0]?.data?.banks || [];
+    function getBankName(accAccountId: number | null): string | null {
+      if (!accAccountId) return null;
+      const bank = banks.find(b => b.ID === accAccountId);
+      return bank?.NAME || null;
+    }
+
     if (bl?.rows && Array.isArray(bl.rows)) {
       for (const row of bl.rows) {
-        // Row structure: { id, kind, date, credit, owing, job, data: { TYPE, ID, DESCRIPTION, MEMO, ... } }
         const kind = parseInt(row.kind ?? '0');
         const data = row.data || {};
 
         if (kind === 0) {
           // Job total row — accrued field has the ex-VAT hire value
-          // Try both row-level and data-level fields
           hireValueExVat = parseFloat(row.accrued || data.accrued || data.ACCRUED || '0');
         } else if (kind === 6) {
           // Deposit row — credit at row level, details in data
-          const creditAmount = Math.abs(parseFloat(row.credit || data.credit || '0'));
-          if (creditAmount > 0) {
-            const description = String(data.DESCRIPTION || row.desc || '');
-            const memo = String(data.MEMO || '');
-            const isExcess = isExcessPayment(description + ' ' + memo);
-            const depositId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
+          const creditAmount = parseFloat(row.credit || data.credit || '0');
+          const description = String(data.DESCRIPTION || row.desc || '');
+          const memo = String(data.MEMO || '');
+          const isExcess = isExcessPayment(description + ' ' + memo);
+          const depositId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
+          const isRefund = creditAmount < 0;
+          const absAmount = Math.abs(creditAmount);
 
+          if (absAmount > 0) {
             deposits.push({
               id: depositId,
-              amount: creditAmount,
+              amount: absAmount,
               date: data.DATE || row.date || '',
-              memo: description || memo || null,
+              description: description || null,
+              memo: memo || null,
               is_excess: isExcess,
+              is_refund: isRefund,
+              bank_name: getBankName(data.ACC_ACCOUNT_ID),
+              entered_by: data.CREATE_USER_NAME || null,
             });
 
-            if (isExcess) {
-              totalExcessDeposits += creditAmount;
+            if (!isRefund) {
+              if (isExcess) { totalExcessDeposits += absAmount; }
+              else { totalHireDeposits += absAmount; }
             } else {
-              totalHireDeposits += creditAmount;
+              // Refunds reduce the totals
+              if (isExcess) { totalExcessDeposits -= absAmount; }
+              else { totalHireDeposits -= absAmount; }
             }
+          }
+        } else if (kind === 2) {
+          // Credit note — negative debit, classified same as deposits
+          const creditAmount = -(parseFloat(row.debit || data.debit || '0'));
+          const description = String(data.DESCRIPTION || row.desc || '');
+          const isExcess = isExcessPayment(description);
+
+          if (Math.abs(creditAmount) > 0) {
+            if (isExcess) { totalExcessDeposits += creditAmount; }
+            else { totalHireDeposits += creditAmount; }
           }
         }
       }
@@ -147,12 +176,6 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         : excessRecords.every((r: any) => ['taken', 'waived', 'not_required'].includes(r.excess_status)) ? 'collected'
         : excessRecords[0].excess_status
       : null;
-
-    // Get OP-recorded payments
-    const paymentsResult = await query(
-      `SELECT * FROM job_payments WHERE job_id = $1 ORDER BY payment_date DESC`,
-      [job.id]
-    );
 
     // Check client balance on account
     let clientBalance = 0;
@@ -193,7 +216,6 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           total_collected: excessCollected,
           status: excessStatus,
         },
-        payments: paymentsResult.rows,
         client_balance_on_account: clientBalance,
       },
     });
