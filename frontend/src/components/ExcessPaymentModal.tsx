@@ -17,17 +17,20 @@ interface ExcessPaymentModalProps {
 }
 
 const PAYMENT_METHODS = [
-  { value: 'payment_portal', label: 'Payment Portal (Stripe)' },
-  { value: 'bank_transfer', label: 'Bank Transfer' },
-  { value: 'card_in_office', label: 'Card in Office' },
-  { value: 'cash', label: 'Cash' },
+  { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
+  { value: 'amex', label: 'Amex' },
+  { value: 'stripe_gbp', label: 'Stripe GBP' },
+  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
+  { value: 'till_cash', label: 'Till (Cash)' },
+  { value: 'paypal', label: 'Paypal' },
+  { value: 'lloyds_bank', label: 'Lloyds Bank' },
   { value: 'rolled_over', label: 'Rolled Over from Previous Hire' },
 ];
 
 const REIMBURSE_METHODS = [
-  { value: 'bank_transfer', label: 'Bank Transfer' },
-  { value: 'card_refund', label: 'Card Refund' },
-  { value: 'cash', label: 'Cash' },
+  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
+  { value: 'worldpay', label: 'Worldpay (Card Refund)' },
+  { value: 'till_cash', label: 'Till (Cash)' },
 ];
 
 function statusLabel(status: ExcessStatus): string {

@@ -22,7 +22,9 @@ router.use(authenticate);
 const recordPaymentSchema = z.object({
   payment_type: z.enum(['deposit', 'balance', 'excess', 'refund', 'excess_refund', 'other']),
   amount: z.number().min(0.01),
-  payment_method: z.enum(['stripe', 'stripe_preauth', 'bank_transfer', 'card_in_office', 'cash', 'paypal', 'rolled_over']),
+  payment_method: z.enum([
+    'stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank', 'rolled_over',
+  ]),
   payment_reference: z.string().max(255).optional(),
   notes: z.string().max(1000).optional(),
   excess_id: z.string().uuid().optional(),
@@ -57,83 +59,70 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     if (hhJobId) {
       try {
         const [billingRes, jobDataRes] = await Promise.all([
-          hhBroker.get('/php_functions/billing_list.php', { job_id: hhJobId }, { priority: 'high', cacheTTL: 60 }),
+          // billing_list.php needs main_id and type=1 for job billing
+          hhBroker.get('/php_functions/billing_list.php', { main_id: hhJobId, type: 1 }, { priority: 'high', cacheTTL: 60 }),
           hhBroker.get('/api/job_data.php', { job: hhJobId }, { priority: 'high', cacheTTL: 60 }),
         ]);
         if (billingRes.success) hhBilling = billingRes.data;
         if (jobDataRes.success) hhJobData = jobDataRes.data;
-        // Debug: log what HH actually returns so we can see field names
-        if (hhJobData) {
-          const allKeys = Object.keys(hhJobData as Record<string, unknown>);
-          console.log('[money] HH job_data ALL keys:', allKeys.join(', '));
-        }
-        if (hhBilling) {
-          const bd = hhBilling as any;
-          console.log('[money] HH billing_list keys:', Object.keys(bd));
-          if (bd.rows && Array.isArray(bd.rows) && bd.rows.length > 0) {
-            console.log('[money] HH billing_list first row keys:', Object.keys(bd.rows[0]));
-            console.log('[money] HH billing_list first row sample:', JSON.stringify(bd.rows[0]).substring(0, 300));
-          }
-          if (bd.subs) {
-            console.log('[money] HH billing_list subs:', JSON.stringify(bd.subs).substring(0, 300));
-          }
-        }
       } catch (hhError) {
         console.error('[money] HireHop fetch failed (non-fatal):', hhError);
       }
     }
 
-    // Parse HireHop financial data
-    // billing_list.php returns { rows, subs, page, total, records }
-    // - rows: array of billing entries (invoices, deposits, etc.)
-    // - subs: likely subtotals/summary
-    // job_data.php returns job metadata but hire value may be in billing or needs calculation
-    const jd = hhJobData as Record<string, any> | null;
+    // Parse HireHop financial data from billing_list.php
+    // Returns { rows, subs, banks, page, total, records }
+    // Row kinds: 0=Job total (accrued), 1=Invoice, 2=Credit note, 3=Payment application, 6=Deposit
     const bl = hhBilling as Record<string, any> | null;
 
-    // Try to get hire value from job_data first, then from billing subs
     let hireValueExVat = 0;
-    if (jd) {
-      hireValueExVat = parseFloat(
-        jd.JOB_TOTAL || jd.TOTAL || jd.job_total || jd.job_value ||
-        jd.HIRE_CHARGE || jd.hire_charge || jd.PRICE || jd.ACC_TOTAL ||
-        jd.INVOICE_TOTAL || jd.total_value || '0'
-      );
-    }
-    // If job_data didn't have it, try billing subs or calculate from rows
-    if (hireValueExVat === 0 && bl?.subs) {
-      // subs might contain totals
-      const subs = bl.subs;
-      hireValueExVat = parseFloat(subs.total || subs.net || subs.subtotal || subs.hire_total || '0');
-    }
-
-    const vatRate = 0.20; // Standard UK VAT
-    const vatAmount = hireValueExVat * vatRate;
-    const hireValueIncVat = hireValueExVat + vatAmount;
-
-    // Parse deposits from billing list rows
-    const deposits: Array<{ id: number; amount: number; date: string; memo: string | null }> = [];
-    let totalDeposits = 0;
+    const deposits: Array<{ id: number; amount: number; date: string; memo: string | null; is_excess: boolean }> = [];
+    let totalHireDeposits = 0;
+    let totalExcessDeposits = 0;
 
     if (bl?.rows && Array.isArray(bl.rows)) {
-      for (const item of bl.rows) {
-        // Billing rows have various kinds: invoices, credit notes, deposits, etc.
-        // kind=6 = deposits in HireHop, but let's also check the structure
-        const kind = parseInt(item.kind || item.KIND || '0');
-        const rowAmount = Math.abs(parseFloat(item.total || item.TOTAL || item.amount || item.AMOUNT || '0'));
-        if (kind === 6 && rowAmount > 0) {
-          deposits.push({
-            id: parseInt(item.id || item.ID || '0'),
-            amount: rowAmount,
-            date: item.date || item.DATE || '',
-            memo: item.memo || item.MEMO || item.description || item.DESCRIPTION || null,
-          });
-          totalDeposits += rowAmount;
+      for (const row of bl.rows) {
+        // Row structure: { id, kind, date, credit, owing, job, data: { TYPE, ID, DESCRIPTION, MEMO, ... } }
+        const kind = parseInt(row.kind ?? '0');
+        const data = row.data || {};
+
+        if (kind === 0) {
+          // Job total row — accrued field has the ex-VAT hire value
+          // Try both row-level and data-level fields
+          hireValueExVat = parseFloat(row.accrued || data.accrued || data.ACCRUED || '0');
+        } else if (kind === 6) {
+          // Deposit row — credit at row level, details in data
+          const creditAmount = Math.abs(parseFloat(row.credit || data.credit || '0'));
+          if (creditAmount > 0) {
+            const description = String(data.DESCRIPTION || row.desc || '');
+            const memo = String(data.MEMO || '');
+            const isExcess = isExcessPayment(description + ' ' + memo);
+            const depositId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
+
+            deposits.push({
+              id: depositId,
+              amount: creditAmount,
+              date: data.DATE || row.date || '',
+              memo: description || memo || null,
+              is_excess: isExcess,
+            });
+
+            if (isExcess) {
+              totalExcessDeposits += creditAmount;
+            } else {
+              totalHireDeposits += creditAmount;
+            }
+          }
         }
       }
     }
 
-    const balanceOutstanding = hireValueIncVat - totalDeposits;
+    const vatRate = 0.20;
+    const vatAmount = hireValueExVat * vatRate;
+    const hireValueIncVat = hireValueExVat + vatAmount;
+    const totalDeposits = totalHireDeposits + totalExcessDeposits;
+    // Balance = hire value inc VAT minus hire deposits only (excess deposits are separate)
+    const balanceOutstanding = hireValueIncVat - totalHireDeposits;
 
     // Get OP excess data for this job
     const excessResult = await query(
@@ -193,6 +182,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           hire_value_inc_vat: hireValueIncVat,
           vat_amount: vatAmount,
           total_deposits: totalDeposits,
+          total_hire_deposits: totalHireDeposits,
+          total_excess_deposits: totalExcessDeposits,
           balance_outstanding: balanceOutstanding,
           deposits,
         },
@@ -318,13 +309,14 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         const memo = buildHHDepositMemo(payment_type, payment_method, payment_reference, notes);
 
         // STEP 1: Create the deposit with full HireHop params
+        const hhBankId = getHHBankId(payment_method);
         const depositParams: Record<string, unknown> = {
           ID: 0, // 0 = create new
           DATE: currentDate,
           DESCRIPTION: description,
           AMOUNT: amount,
           MEMO: memo,
-          ACC_ACCOUNT_ID: 267, // Bank account ID (card payments account)
+          ACC_ACCOUNT_ID: hhBankId,
           ACC_PACKAGE_ID: 3,   // 3 = Xero integration
           'CURRENCY[CODE]': 'GBP',
           'CURRENCY[NAME]': 'United Kingdom Pound',
@@ -481,6 +473,40 @@ function buildHHDepositMemo(
   if (notes) parts.push(notes);
   parts.push('(recorded via Ooosh OP)');
   return parts.join(' — ');
+}
+
+/**
+ * Map OP payment method to HireHop bank account ID.
+ * These IDs correspond to the bank accounts configured in HireHop:
+ *   165 = Amex
+ *   168 = Till (Cash)
+ *   169 = Worldpay (all cards EXCEPT AMEX) — default for card in office
+ *   170 = Lloyds Bank
+ *   173 = Paypal
+ *   265 = Wise - Current Account (BACS) — bank transfers
+ *   267 = Stripe GBP — online card payments via Payment Portal
+ */
+function getHHBankId(paymentMethod: string): number {
+  const mapping: Record<string, number> = {
+    stripe_gbp: 267,       // Stripe GBP
+    worldpay: 169,         // Worldpay (all cards EXCEPT AMEX)
+    amex: 165,             // Amex
+    wise_bacs: 265,        // Wise - Current Account (BACS)
+    till_cash: 168,        // Till (Cash)
+    paypal: 173,           // Paypal
+    lloyds_bank: 170,      // Lloyds Bank
+    rolled_over: 265,      // Default to Wise for rollovers
+  };
+  return mapping[paymentMethod] || 169; // Default to Worldpay
+}
+
+/**
+ * Detect if a deposit description/memo indicates an excess payment.
+ * Matches the same keywords as the Payment Portal's isExcessPayment().
+ */
+function isExcessPayment(text: string): boolean {
+  const lower = text.toLowerCase();
+  return /excess|insurance|xs|top.?up/.test(lower);
 }
 
 export default router;
