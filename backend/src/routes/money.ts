@@ -62,13 +62,28 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         ]);
         if (billingRes.success) hhBilling = billingRes.data;
         if (jobDataRes.success) hhJobData = jobDataRes.data;
+        // Debug: log what HH actually returns so we can see field names
+        if (hhJobData) {
+          console.log('[money] HH job_data fields:', Object.keys(hhJobData as Record<string, unknown>).filter(k =>
+            /total|value|price|amount|vat|billing|cost/i.test(k)
+          ));
+        }
+        if (hhBilling) {
+          const bd = hhBilling as any;
+          console.log('[money] HH billing_list type:', typeof bd, Array.isArray(bd) ? `array[${bd.length}]` : Object.keys(bd).slice(0, 10));
+        }
       } catch (hhError) {
         console.error('[money] HireHop fetch failed (non-fatal):', hhError);
       }
     }
 
     // Parse HireHop financial data
-    const hireValueExVat = parseFloat(hhJobData?.JOB_TOTAL || hhJobData?.job_total || '0');
+    // job_data.php returns fields like JOB_TOTAL, TOTAL, job_value, etc. — try multiple
+    const jd = hhJobData as Record<string, any> | null;
+    const hireValueExVat = parseFloat(
+      jd?.JOB_TOTAL || jd?.TOTAL || jd?.job_total || jd?.job_value ||
+      jd?.HIRE_CHARGE || jd?.hire_charge || jd?.PRICE || '0'
+    );
     const vatRate = 0.20; // Standard UK VAT
     const vatAmount = hireValueExVat * vatRate;
     const hireValueIncVat = hireValueExVat + vatAmount;
@@ -260,30 +275,84 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
     }
 
     // Push to HireHop as deposit (if requested and job has HH number)
+    // Uses the two-step process: 1) Create deposit, 2) Trigger Xero sync
     let hhDepositId: number | null = null;
+    let xeroSynced = false;
     if (push_to_hirehop && job.hh_job_number && payment_type !== 'refund') {
       try {
+        // Get CLIENT_ID from HireHop job data for the deposit
+        let hhClientId: number | null = null;
+        try {
+          const jobDataRes = await hhBroker.get<Record<string, any>>('/api/job_data.php', { job: job.hh_job_number }, { priority: 'high', cacheTTL: 60 });
+          if (jobDataRes.success && jobDataRes.data) {
+            hhClientId = jobDataRes.data.CLIENT_ID || jobDataRes.data.client_id || null;
+          }
+        } catch { /* non-fatal */ }
+
+        const currentDate = new Date().toISOString().split('T')[0];
+        const description = `${job.hh_job_number} - ${payment_type}`;
         const memo = buildHHDepositMemo(payment_type, payment_method, payment_reference, notes);
-        const hhResult = await hhBroker.post('/php_functions/billing_deposit_save.php', {
-          job: job.hh_job_number,
-          amount: amount,
-          memo: memo,
+
+        // STEP 1: Create the deposit with full HireHop params
+        const depositParams: Record<string, unknown> = {
+          ID: 0, // 0 = create new
+          DATE: currentDate,
+          DESCRIPTION: description,
+          AMOUNT: amount,
+          MEMO: memo,
+          ACC_ACCOUNT_ID: 267, // Bank account ID (card payments account)
+          ACC_PACKAGE_ID: 3,   // 3 = Xero integration
+          'CURRENCY[CODE]': 'GBP',
+          'CURRENCY[NAME]': 'United Kingdom Pound',
+          'CURRENCY[SYMBOL]': '£',
+          'CURRENCY[DECIMALS]': 2,
+          'CURRENCY[MULTIPLIER]': 1,
+          'CURRENCY[NEGATIVE_FORMAT]': 1,
+          'CURRENCY[SYMBOL_POSITION]': 0,
+          'CURRENCY[DECIMAL_SEPARATOR]': '.',
+          'CURRENCY[THOUSAND_SEPARATOR]': ',',
+          JOB_ID: job.hh_job_number,
+          CLIENT_ID: hhClientId || '',
+          local: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          tz: 'Europe/London',
           no_webhook: 1,
-        }, { priority: 'high' });
+        };
+
+        console.log('[money] Creating HH deposit for job', job.hh_job_number, '£' + amount);
+        const hhResult = await hhBroker.post('/php_functions/billing_deposit_save.php', depositParams, { priority: 'high' });
 
         if (hhResult.success && hhResult.data) {
-          hhDepositId = (hhResult.data as any).id || null;
+          hhDepositId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
+          console.log('[money] HH deposit created:', hhDepositId);
+
           // Update OP record with HH deposit ID
           if (hhDepositId) {
             await query(
               `UPDATE job_payments SET hirehop_deposit_id = $1 WHERE id = $2`,
               [hhDepositId, payment.id]
             );
+
+            // STEP 2: Trigger Xero sync
+            try {
+              const syncResult = await hhBroker.post('/php_functions/accounting/tasks.php', {
+                hh_package_type: 1,
+                hh_acc_package_id: 3,  // Xero
+                hh_task: 'post_deposit',
+                hh_id: hhDepositId,
+                hh_acc_id: '',
+              }, { priority: 'high' });
+
+              xeroSynced = syncResult.success;
+              console.log('[money] Xero sync triggered:', xeroSynced ? 'success' : 'failed');
+            } catch (syncError) {
+              console.error('[money] Xero sync trigger failed (non-fatal):', syncError);
+            }
           }
+        } else {
+          console.error('[money] HH deposit creation failed:', hhResult.error, hhResult.data);
         }
       } catch (hhError) {
         console.error('[money] HH deposit write-back failed (non-fatal):', hhError);
-        // Non-fatal — OP record exists, HH push failed. Staff can retry or create manually.
       }
     }
 
@@ -291,6 +360,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
       data: {
         ...payment,
         hirehop_deposit_id: hhDepositId,
+        xero_synced: xeroSynced,
       },
     });
   } catch (error) {
