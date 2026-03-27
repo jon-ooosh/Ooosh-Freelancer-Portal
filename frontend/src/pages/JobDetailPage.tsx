@@ -3353,7 +3353,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
       <div className="flex items-center gap-4">
         <div className="flex-1">
           <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-            <span>Payment: £{data.total_hire_deposits.toFixed(0)} of £{data.hire_value_inc_vat.toFixed(0)}</span>
+            <span>Payment: £{data.total_hire_deposits.toFixed(2)} of £{data.hire_value_inc_vat.toFixed(2)}</span>
             <span className={data.deposit_paid ? 'text-green-600 font-medium' : 'text-amber-600'}>
               {data.deposit_percent >= 100 ? 'Paid in full' : data.deposit_paid ? 'Deposit secured' : `${data.deposit_percent.toFixed(0)}% paid`}
             </span>

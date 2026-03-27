@@ -372,7 +372,7 @@ export default function JobsPage() {
 
   function formatCurrency(value: number | null) {
     if (value == null) return '';
-    return `\u00A3${value.toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+    return `\u00A3${value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   }
 
   function happeningLabel(categories: HappeningCategory[]): { text: string; colour: string } {
