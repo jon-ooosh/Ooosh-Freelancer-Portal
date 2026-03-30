@@ -87,7 +87,11 @@ export default function NotificationBell() {
   function handleNotificationClick(notif: Notification) {
     // Navigate to the entity if available
     if (notif.entity_type && notif.entity_id) {
-      navigate(`/${notif.entity_type}/${notif.entity_id}`);
+      const pathMap: Record<string, string> = {
+        fleet_vehicles: '/vehicles/fleet',
+      };
+      const basePath = pathMap[notif.entity_type] || `/${notif.entity_type}`;
+      navigate(`${basePath}/${notif.entity_id}`);
     }
     setOpen(false);
 
