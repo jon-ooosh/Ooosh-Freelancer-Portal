@@ -13,9 +13,22 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
+import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
 
 const router = Router();
 router.use(authenticate);
+
+// ── HireHop bank account labels (for emails) ──
+const PAYMENT_METHODS_LABELS: Record<string, string> = {
+  stripe_gbp: 'Stripe GBP',
+  worldpay: 'Worldpay',
+  amex: 'Amex',
+  wise_bacs: 'bank transfer',
+  till_cash: 'cash',
+  paypal: 'PayPal',
+  lloyds_bank: 'bank transfer',
+  rolled_over: 'account balance',
+};
 
 // ── Schemas ──
 
@@ -507,6 +520,46 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
       } catch (hhError) {
         console.error('[money] HH deposit write-back failed (non-fatal):', hhError);
       }
+    }
+
+    // ── Email triggers (fire-and-forget) ──
+    try {
+      const bankLabel = PAYMENT_METHODS_LABELS[payment_method] || payment_method;
+
+      if (payment_type === 'excess' && excess_id) {
+        // Excess payment email
+        sendExcessEmail({
+          templateId: 'excess_payment_confirmed',
+          excessId: excess_id,
+          jobId: job.id,
+          amount,
+          paymentMethod: payment_method,
+        }).catch(e => console.error('[money] Excess email failed:', e));
+      } else {
+        // Hire payment email
+        // Check if this was a confirming payment (moved to Booked)
+        const wasConfirming = ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(
+          (await query(`SELECT pipeline_status FROM jobs WHERE id = $1`, [job.id])).rows[0]?.pipeline_status || ''
+        );
+        // Actually: status already changed above, so check if pipeline_status is now 'confirmed'
+        const currentStatus = (await query(`SELECT pipeline_status FROM jobs WHERE id = $1`, [job.id])).rows[0]?.pipeline_status;
+        const isConfirming = currentStatus === 'confirmed';
+
+        sendPaymentEmail({
+          jobId: job.id,
+          amount,
+          bankName: bankLabel,
+          paymentType: payment_type,
+          isConfirmingBooking: isConfirming,
+        }).catch(e => console.error('[money] Payment email failed:', e));
+
+        // Last-minute alert if job starts within 3 days
+        if (isConfirming) {
+          sendLastMinuteAlert(job.id).catch(e => console.error('[money] Last-minute alert failed:', e));
+        }
+      }
+    } catch (emailErr) {
+      console.error('[money] Email trigger error (non-fatal):', emailErr);
     }
 
     res.json({

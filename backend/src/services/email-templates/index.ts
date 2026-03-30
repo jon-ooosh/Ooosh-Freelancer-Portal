@@ -295,36 +295,81 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Payment lifecycle templates ────────────────────────────────────────
+
+  booking_confirmed_deposit: {
+    variant: 'client',
+    preheader: 'Your booking with Ooosh Tours is confirmed',
+    subject: 'Booking Confirmed - {{jobName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Booking Confirmed</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{firstName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Thank you for your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong>. Your booking is now confirmed.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f0fdf4;border-radius:8px;border:1px solid #bbf7d0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#166534;">Dates</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{hireDates}}</p>
+            {{balanceSection}}
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
+      </p>
+    `,
+  },
+
+  payment_received: {
+    variant: 'client',
+    preheader: 'Payment received for your booking',
+    subject: 'Payment Received - {{jobName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Payment Received</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{firstName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We have received your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong>.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        {{statusMessage}}
+      </p>
+      <p style="margin:16px 0 0;font-size:15px;color:#334155;line-height:1.6;">
+        If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
+      </p>
+    `,
+  },
+
   // ── Excess lifecycle templates ────────────────────────────────────────
 
   excess_payment_confirmed: {
     variant: 'client',
     preheader: 'Your insurance excess payment has been received',
-    subject: 'Insurance Excess Received — {{jobName}}',
+    subject: 'Insurance Excess Received - {{jobName}}',
     body: `
-      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Excess Payment Received</h2>
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Insurance Excess Received</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
-        Hi {{clientName}},
+        Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We've received your insurance excess payment of <strong>{{amount}}</strong> for your booking <strong>{{jobName}}</strong>.
+        We have received your insurance excess payment of <strong>{{amount}}</strong> for job <strong>#{{jobNumber}}</strong> that starts {{hireStart}}.
       </p>
-      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
-        <tr>
-          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
-            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Amount</p>
-            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{amount}}</p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;margin-top:8px;">
-            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Vehicle</p>
-            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{vehicleReg}}</p>
-          </td>
-        </tr>
-      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        All being well on return, we aim to reimburse your excess within ten days of the end of your hire, which ends {{hireEnd}}.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        {{reimbursementMethod}}
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Full details of our vehicle hire terms can be found <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#f97316;text-decoration:none;font-weight:600;">here</a>.
+      </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
-        This excess is fully refundable after your hire, provided the vehicle is returned in good condition. If you have any questions, just reply to this email.
+        We hope you have a great hire!
       </p>
     `,
   },
@@ -332,20 +377,20 @@ const templates: Record<string, EmailTemplate> = {
   excess_preauth_confirmed: {
     variant: 'client',
     preheader: 'Your insurance excess pre-authorisation is confirmed',
-    subject: 'Insurance Excess Pre-Authorisation — {{jobName}}',
+    subject: 'Insurance Excess Pre-Authorisation - {{jobName}}',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Pre-Authorisation Confirmed</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
-        Hi {{clientName}},
+        Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        A pre-authorisation of <strong>{{amount}}</strong> has been placed on your card for your booking <strong>{{jobName}}</strong>.
+        A pre-authorisation of <strong>{{amount}}</strong> has been placed on your card for job <strong>#{{jobNumber}}</strong>.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        This is <strong>not a payment</strong> — no money has been taken from your account. The hold will be automatically released after your hire is completed and the vehicle returned in good condition.
+        This is <strong>not a payment</strong>. No money has been taken from your account. The hold will be automatically released after your hire is completed and the vehicle returned according to our <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#f97316;text-decoration:none;font-weight:600;">T&amp;Cs</a>.
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
-        If you have any questions, just reply to this email.
+        If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
       </p>
     `,
   },
@@ -353,38 +398,50 @@ const templates: Record<string, EmailTemplate> = {
   excess_reimbursed: {
     variant: 'client',
     preheader: 'Your insurance excess has been refunded',
-    subject: 'Insurance Excess Refund — {{jobName}}',
+    subject: 'Insurance Excess Refund - {{jobName}}',
     body: `
-      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Excess Refund</h2>
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Insurance Excess Refund</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
-        Hi {{clientName}},
+        Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        Your insurance excess of <strong>{{amount}}</strong> for <strong>{{jobName}}</strong> has been refunded via {{method}}.
+        We have reimbursed your insurance excess of <strong>{{amount}}</strong> for job <strong>#{{jobNumber}}</strong> that finished {{hireEnd}}.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        {{refundTimescale}}
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Please note that these timescales are approximate and may vary by bank and financial institution.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Your VAT invoice for the hire will follow shortly if not already sent. We hope you had a great hire and we look forward to seeing you again soon!
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
-        Please allow 3-5 working days for the refund to appear in your account. If you have any questions, just reply to this email.
+        Best,<br/>Jon Wood
       </p>
     `,
   },
 
   excess_partial_reimbursed: {
     variant: 'client',
-    preheader: 'Partial refund of your insurance excess',
-    subject: 'Insurance Excess — Partial Refund — {{jobName}}',
+    preheader: 'Your insurance excess has been partially refunded',
+    subject: 'Insurance Excess - Partial Refund - {{jobName}}',
     body: `
-      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Partial Excess Refund</h2>
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Insurance Excess - Partial Refund</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
-        Hi {{clientName}},
+        Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        <strong>{{refundAmount}}</strong> of your <strong>{{originalAmount}}</strong> insurance excess for <strong>{{jobName}}</strong> has been refunded via {{method}}.
+        We have reimbursed <strong>{{refundAmount}}</strong> of your <strong>{{originalAmount}}</strong> insurance excess for job <strong>#{{jobNumber}}</strong>.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        <strong>{{retainedAmount}}</strong> has been retained due to: {{reason}}.
+        <strong>{{retainedAmount}}</strong> has been retained. {{reason}}
       </p>
-      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
-        Please allow 3-5 working days for the refund to appear in your account. If you have any questions, just reply to this email.
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        {{refundTimescale}}
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you would like to discuss this, please reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
       </p>
     `,
   },
@@ -392,24 +449,18 @@ const templates: Record<string, EmailTemplate> = {
   excess_claimed: {
     variant: 'client',
     preheader: 'Insurance excess claim notification',
-    subject: 'Insurance Excess Claim — {{jobName}}',
+    subject: 'Insurance Excess Claim - {{jobName}}',
     body: `
-      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Excess Claim</h2>
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Insurance Excess Claim</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
-        Hi {{clientName}},
+        Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We need to let you know that <strong>{{claimAmount}}</strong> of your insurance excess for <strong>{{jobName}}</strong> has been retained due to:
+        We need to let you know that <strong>{{claimAmount}}</strong> of your insurance excess for job <strong>#{{jobNumber}}</strong> has been retained.
       </p>
-      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
-        <tr>
-          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
-            <p style="margin:0;font-size:15px;color:#991b1b;">{{reason}}</p>
-          </td>
-        </tr>
-      </table>
+      {{reasonSection}}
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
-        If you'd like to discuss this, please reply to this email or call us.
+        If you would like to discuss this, please reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
       </p>
     `,
   },
@@ -417,18 +468,55 @@ const templates: Record<string, EmailTemplate> = {
   excess_preauth_released: {
     variant: 'client',
     preheader: 'Your pre-authorisation has been released',
-    subject: 'Pre-Authorisation Released — {{jobName}}',
+    subject: 'Pre-Authorisation Released - {{jobName}}',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Pre-Authorisation Released</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
-        Hi {{clientName}},
+        Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        The pre-authorisation of <strong>{{amount}}</strong> on your card for <strong>{{jobName}}</strong> has been released. No money was taken from your account.
+        The pre-authorisation of <strong>{{amount}}</strong> on your card for job <strong>#{{jobNumber}}</strong> has been released. No money was taken from your account.
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
-        Thanks for hiring with Ooosh Tours — we look forward to seeing you again!
+        Thanks for hiring with Ooosh Tours. We look forward to seeing you again!
       </p>
+    `,
+  },
+
+  // ── Internal alerts ──────────────────────────────────────────────────
+
+  last_minute_booking: {
+    variant: 'internal',
+    preheader: 'A booking has been confirmed at short notice',
+    subject: '{{urgencyEmoji}} {{urgencyLabel}}: Job {{jobNumber}} for {{clientName}} - starts {{startDate}}',
+    body: `
+      <div style="background-color:#f97316;border-radius:12px 12px 0 0;padding:24px 20px;text-align:center;">
+        <h2 style="margin:0 0 4px;font-size:22px;color:#ffffff;font-weight:800;">Last-Minute Booking</h2>
+        <p style="margin:0;font-size:15px;color:#ffffff;opacity:0.9;">{{urgencyBadge}}</p>
+      </div>
+      <div style="padding:20px;">
+        <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+          Heads up! Job <strong>{{jobNumber}}</strong> for <strong>{{clientName}}</strong> has just been confirmed, starting on <strong>{{startDate}}</strong>.
+        </p>
+        <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+          <tr>
+            <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+              <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Job</p>
+              <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}}</p>
+              <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Job Number</p>
+              <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{jobNumber}}</p>
+              <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Client</p>
+              <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{clientName}}</p>
+              <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Hire Date</p>
+              <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{startDate}}</p>
+            </td>
+          </tr>
+        </table>
+        <p style="margin:0;font-size:14px;color:#334155;text-align:center;">
+          <a href="{{jobUrl}}" style="display:inline-block;padding:10px 24px;background-color:#4f46e5;color:#ffffff;border-radius:6px;text-decoration:none;font-weight:600;">View in Ooosh</a>
+        </p>
+        <p style="margin:16px 0 0;font-size:12px;color:#94a3b8;text-align:center;">(This is an automated alert.)</p>
+      </div>
     `,
   },
 };
