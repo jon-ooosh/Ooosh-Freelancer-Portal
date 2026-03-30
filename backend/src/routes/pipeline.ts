@@ -5,6 +5,7 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { sendLastMinuteAlert } from '../services/money-emails';
 
 const router = Router();
 router.use(authenticate);
@@ -441,6 +442,11 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     );
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
+
+    // Last-minute booking alert (any route to confirmed, job starts within 3 days)
+    if (pipeline_status === 'confirmed') {
+      sendLastMinuteAlert(jobId).catch(e => console.error('[Pipeline] Last-minute alert failed:', e));
+    }
 
     // Write back to HireHop (async, non-blocking — don't fail the response if HH is down)
     writeBackStatusToHireHop(jobId, pipeline_status, req.user!.email || req.user!.id)

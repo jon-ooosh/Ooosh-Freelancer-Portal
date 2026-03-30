@@ -10,6 +10,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
+import { sendExcessEmail } from '../services/money-emails';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { emailService } from '../services/email-service';
@@ -335,6 +336,16 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       return;
     }
 
+    // Send claim email
+    const excess = result.rows[0];
+    sendExcessEmail({
+      templateId: 'excess_claimed',
+      excessId: id,
+      jobId: excess.job_id,
+      amount,
+      reason: notes || undefined,
+    }).catch(e => console.error('[excess] Claim email failed:', e));
+
     res.json({ data: result.rows[0] });
   } catch (error) {
     console.error('[excess] Claim error:', error);
@@ -365,6 +376,21 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
       res.status(404).json({ error: 'Excess record not found' });
       return;
     }
+
+    // Send reimbursement email
+    const excess = result.rows[0];
+    const originalAmount = parseFloat(excess.excess_amount_taken || '0');
+    const isPartial = amount < originalAmount;
+    sendExcessEmail({
+      templateId: isPartial ? 'excess_partial_reimbursed' : 'excess_reimbursed',
+      excessId: id,
+      jobId: excess.job_id,
+      amount,
+      paymentMethod: method,
+      refundAmount: amount,
+      originalAmount,
+      retainedAmount: isPartial ? originalAmount - amount : 0,
+    }).catch(e => console.error('[excess] Reimburse email failed:', e));
 
     res.json({ data: result.rows[0] });
   } catch (error) {
