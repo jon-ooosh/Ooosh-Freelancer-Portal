@@ -117,9 +117,22 @@ export async function sendPaymentEmail(opts: {
   if (!recipients.primaryEmail) return;
 
   const templateId = isConfirmingBooking ? 'booking_confirmed_deposit' : 'payment_received';
-  const jobResult = await query(`SELECT job_name, hh_job_number FROM jobs WHERE id = $1`, [jobId]);
+  const jobResult = await query(
+    `SELECT job_name, hh_job_number, job_date, job_end, out_date, return_date FROM jobs WHERE id = $1`,
+    [jobId]
+  );
   const job = jobResult.rows[0];
   const jobName = job?.job_name || `Job #${job?.hh_job_number || ''}`;
+
+  // Build hire dates string
+  let hireDatesStr = hireDates || '';
+  if (!hireDatesStr && job) {
+    const start = job.job_date || job.out_date;
+    const end = job.job_end || job.return_date;
+    const fmt = (d: string) => new Date(d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
+    if (start && end) hireDatesStr = `${fmt(start)} to ${fmt(end)}`;
+    else if (start) hireDatesStr = fmt(start);
+  }
 
   const balanceSection = balanceOutstanding && balanceOutstanding > 0
     ? `<p style="margin:8px 0 0;font-size:13px;color:#166534;">Remaining balance</p><p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">&pound;${balanceOutstanding.toFixed(2)}</p>`
@@ -137,7 +150,7 @@ export async function sendPaymentEmail(opts: {
       amount: `\u00A3${amount.toFixed(2)}`,
       bankName: bankName || 'card',
       jobName,
-      hireDates: hireDates || '',
+      hireDates: hireDatesStr,
       balanceSection,
       statusMessage,
     },

@@ -6,8 +6,10 @@
  * - 'internal': Simpler but consistent styling for operational emails
  */
 
-const OOOSH_ORANGE = '#f97316';
+const OOOSH_PURPLE = '#7B5EA7';
 const OOOSH_DARK = '#1e293b';
+// Logo: stored in R2 at assets/ooosh-logo.png but no public URL yet.
+// TODO: Add logo to emails once a public-accessible URL is available.
 
 /**
  * Wrap email body content in the branded base layout.
@@ -38,7 +40,7 @@ export function wrapInBaseLayout(
         <table role="presentation" cellpadding="0" cellspacing="0" width="600" style="max-width:600px;width:100%;">
           <!-- Header -->
           <tr>
-            <td style="background-color:${OOOSH_ORANGE};padding:24px 32px;border-radius:12px 12px 0 0;text-align:center;">
+            <td style="background-color:${OOOSH_PURPLE};padding:24px 32px;border-radius:12px 12px 0 0;text-align:center;">
               <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;letter-spacing:-0.5px;">
                 Ooosh Tours Ltd
               </h1>
@@ -54,8 +56,8 @@ export function wrapInBaseLayout(
           <tr>
             <td style="background-color:#fafafa;padding:20px 32px;border-radius:0 0 12px 12px;border:1px solid #e4e4e7;border-top:none;">
               <p style="margin:0;font-size:12px;color:#71717a;text-align:center;line-height:1.5;">
-                Ooosh Tours Ltd &bull; Event Production &amp; Logistics<br>
-                <a href="https://oooshtours.co.uk" style="color:${OOOSH_ORANGE};text-decoration:none;">oooshtours.co.uk</a>
+                Ooosh Tours Ltd &bull; Transport - Backline - Rehearsals<br>
+                <a href="https://oooshtours.co.uk" style="color:${OOOSH_PURPLE};text-decoration:none;">oooshtours.co.uk</a>
               </p>
             </td>
           </tr>
@@ -83,7 +85,7 @@ export function wrapInBaseLayout(
         <table role="presentation" cellpadding="0" cellspacing="0" width="600" style="max-width:600px;width:100%;">
           <!-- Header -->
           <tr>
-            <td style="padding:16px 24px;border-bottom:2px solid ${OOOSH_ORANGE};">
+            <td style="padding:16px 24px;border-bottom:2px solid ${OOOSH_PURPLE};">
               <span style="font-size:14px;font-weight:700;color:${OOOSH_DARK};letter-spacing:-0.3px;">OOOSH OPS</span>
             </td>
           </tr>

@@ -96,7 +96,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  async function handleRecordPayment() {
+  async function handleRecordPayment(typeOverride?: string) {
     if (!payAmount || parseFloat(payAmount) <= 0) {
       setPayError('Enter a valid amount');
       return;
@@ -105,7 +105,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
     setPayError('');
     try {
       await api.post(`/money/${jobId}/record-payment`, {
-        payment_type: payType,
+        payment_type: typeOverride || payType,
         amount: parseFloat(payAmount),
         payment_method: payMethod,
         payment_reference: payRef || undefined,
@@ -345,124 +345,204 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
       </div>
 
       {/* Record Payment Form */}
-      {showPaymentForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowPaymentForm(false)}>
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Record Payment</h3>
+      {showPaymentForm && (() => {
+        // Smart payment options
+        const total = financial.hire_value_inc_vat;
+        const paid = financial.total_hire_deposits;
+        const remaining = financial.balance_outstanding;
+        const minDeposit = total < 400 ? total : Math.max(total * 0.25, 100);
+        const halfPayment = Math.round(total * 0.5);
+        const isExcessMode = payType === 'excess';
 
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Payment Type</label>
-                <select
-                  value={payType}
-                  onChange={(e) => setPayType(e.target.value)}
-                  className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
-                >
-                  {PAYMENT_TYPES.map((t) => (
-                    <option key={t.value} value={t.value}>{t.label}</option>
-                  ))}
-                </select>
-              </div>
+        // Quick amounts (only for hire payments, not excess)
+        const quickAmounts: { label: string; amount: number }[] = [];
+        if (!isExcessMode && total > 0) {
+          if (!financial.deposit_paid && total >= 400) {
+            quickAmounts.push({ label: `Min. Deposit (25%) - £${minDeposit.toFixed(2)}`, amount: minDeposit });
+            if (halfPayment > minDeposit && halfPayment < remaining) {
+              quickAmounts.push({ label: `Half (50%) - £${halfPayment.toFixed(2)}`, amount: halfPayment });
+            }
+          }
+          if (remaining > 0) {
+            quickAmounts.push({
+              label: remaining === total ? `Full Payment - £${total.toFixed(2)}` : `Remaining Balance - £${remaining.toFixed(2)}`,
+              amount: remaining,
+            });
+          }
+        }
 
-              {payType === 'excess' && excess.records.length > 0 && (
+        // Auto-detect type: if deposit not yet paid, it's a deposit; otherwise balance
+        const autoType = isExcessMode ? 'excess' : (!financial.deposit_paid ? 'deposit' : 'balance');
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowPaymentForm(false)}>
+            <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6 max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Record Payment</h3>
+
+              <div className="space-y-3">
+                {/* Toggle: Hire Payment vs Insurance Excess */}
+                <div className="flex bg-gray-100 rounded-lg p-0.5 mb-1">
+                  <button
+                    onClick={() => { setPayType('deposit'); setPayAmount(''); }}
+                    className={`flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                      !isExcessMode ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+                    }`}
+                  >
+                    Hire Payment
+                  </button>
+                  {excess.records.some(r => r.excess_status === 'pending' || r.excess_status === 'partial') && (
+                    <button
+                      onClick={() => { setPayType('excess'); setPayAmount(''); }}
+                      className={`flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                        isExcessMode ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+                      }`}
+                    >
+                      Insurance Excess
+                    </button>
+                  )}
+                </div>
+
+                {/* Excess: link to record */}
+                {isExcessMode && excess.records.length > 0 && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Excess Record</label>
+                    <select
+                      value={payExcessId}
+                      onChange={(e) => {
+                        setPayExcessId(e.target.value);
+                        const rec = excess.records.find(r => r.id === e.target.value);
+                        if (rec) setPayAmount(String(Number(rec.excess_amount_required || 0) - Number(rec.excess_amount_taken || 0)));
+                      }}
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                    >
+                      <option value="">Select...</option>
+                      {excess.records.filter(r => r.excess_status === 'pending' || r.excess_status === 'partial').map(r => (
+                        <option key={r.id} value={r.id}>
+                          {r.driver_name || 'Unknown'} - £{Number(r.excess_amount_required || 0).toFixed(2)} ({statusLabel(r.excess_status)})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Quick amount buttons */}
+                {quickAmounts.length > 0 && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1.5">Amount</label>
+                    <div className="space-y-1.5">
+                      {quickAmounts.map((qa) => (
+                        <button
+                          key={qa.label}
+                          onClick={() => setPayAmount(qa.amount.toFixed(2))}
+                          className={`w-full text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
+                            payAmount === qa.amount.toFixed(2)
+                              ? 'border-ooosh-400 bg-ooosh-50 text-ooosh-700 font-medium'
+                              : 'border-gray-200 hover:border-ooosh-200 hover:bg-ooosh-50/50 text-gray-700'
+                          }`}
+                        >
+                          {qa.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-2 relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">£</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={payAmount}
+                        onChange={(e) => setPayAmount(e.target.value)}
+                        className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
+                        placeholder="Or enter custom amount"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Fallback: plain amount input when no quick options */}
+                {quickAmounts.length === 0 && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Amount</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={payAmount}
+                        onChange={(e) => setPayAmount(e.target.value)}
+                        className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
+                        placeholder="0.00"
+                      />
+                    </div>
+                  </div>
+                )}
+
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Link to Excess Record</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Method</label>
                   <select
-                    value={payExcessId}
-                    onChange={(e) => setPayExcessId(e.target.value)}
+                    value={payMethod}
+                    onChange={(e) => setPayMethod(e.target.value)}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   >
-                    <option value="">Select excess record...</option>
-                    {excess.records.filter((r) => r.excess_status === 'pending' || r.excess_status === 'partial').map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.driver_name || 'Unknown'} — £{Number(r.excess_amount_required || 0).toFixed(2)} ({statusLabel(r.excess_status)})
-                      </option>
+                    {PAYMENT_METHODS.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
                   </select>
                 </div>
-              )}
 
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Amount</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Reference (optional)</label>
                   <input
-                    type="number"
-                    step="0.01"
-                    value={payAmount}
-                    onChange={(e) => setPayAmount(e.target.value)}
-                    className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
-                    placeholder="0.00"
+                    type="text"
+                    value={payRef}
+                    onChange={(e) => setPayRef(e.target.value)}
+                    placeholder="Bank ref, Stripe ID, etc."
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
-              </div>
 
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Method</label>
-                <select
-                  value={payMethod}
-                  onChange={(e) => setPayMethod(e.target.value)}
-                  className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
-                >
-                  {PAYMENT_METHODS.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+                  <input
+                    type="text"
+                    value={payNotes}
+                    onChange={(e) => setPayNotes(e.target.value)}
+                    placeholder="Any additional details"
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  />
+                </div>
 
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Reference (optional)</label>
-                <input
-                  type="text"
-                  value={payRef}
-                  onChange={(e) => setPayRef(e.target.value)}
-                  placeholder="Bank ref, Stripe ID, etc."
-                  className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
-                />
-              </div>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={payPushToHH}
+                    onChange={(e) => setPayPushToHH(e.target.checked)}
+                    className="rounded border-gray-300"
+                  />
+                  <span className="text-xs text-gray-600">Also create deposit in HireHop</span>
+                </label>
 
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
-                <input
-                  type="text"
-                  value={payNotes}
-                  onChange={(e) => setPayNotes(e.target.value)}
-                  placeholder="Any additional details"
-                  className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
-                />
-              </div>
+                {payError && <p className="text-xs text-red-600">{payError}</p>}
 
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={payPushToHH}
-                  onChange={(e) => setPayPushToHH(e.target.checked)}
-                  className="rounded border-gray-300"
-                />
-                <span className="text-xs text-gray-600">Also create deposit in HireHop</span>
-              </label>
-
-              {payError && <p className="text-xs text-red-600">{payError}</p>}
-
-              <div className="flex gap-2 pt-2">
-                <button
-                  onClick={handleRecordPayment}
-                  disabled={payLoading}
-                  className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50"
-                >
-                  {payLoading ? 'Recording...' : 'Record Payment'}
-                </button>
-                <button
-                  onClick={() => { setShowPaymentForm(false); setPayError(''); }}
-                  className="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md"
-                >
-                  Cancel
-                </button>
+                <div className="flex gap-2 pt-2">
+                  <button
+                    onClick={() => handleRecordPayment(isExcessMode ? 'excess' : autoType)}
+                    disabled={payLoading}
+                    className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50"
+                  >
+                    {payLoading ? 'Recording...' : `Record ${isExcessMode ? 'Excess' : 'Payment'}`}
+                  </button>
+                  <button
+                    onClick={() => { setShowPaymentForm(false); setPayError(''); }}
+                    className="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Excess action modal */}
       {actionExcess && (
