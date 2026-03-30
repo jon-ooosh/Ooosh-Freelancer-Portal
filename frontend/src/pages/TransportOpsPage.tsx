@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import DatePicker from '../components/DatePicker';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -1498,12 +1499,16 @@ function EditQuoteModal({
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">{form.is_multi_day ? 'Start Date' : 'Date'}</label>
-              <input
-                type="date"
+              <DatePicker
                 value={form.job_date}
-                onChange={(e) => setForm((p) => ({ ...p, job_date: e.target.value }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                onChange={(val) => setForm((p) => ({ ...p, job_date: val }))}
+                className={quote.out_date && form.job_date && form.job_date !== parseDateField(quote.out_date) ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
               />
+              {quote.out_date && form.job_date && form.job_date !== parseDateField(quote.out_date) && (
+                <p className="text-xs text-amber-600 mt-1">
+                  HH start: {parseDateField(quote.out_date)}
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Arrival Time</label>
@@ -1517,7 +1522,7 @@ function EditQuoteModal({
           </div>
 
           {/* Multi-day toggle + finish date */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input
                 type="checkbox"
@@ -1530,23 +1535,27 @@ function EditQuoteModal({
             {form.is_multi_day && (
               <>
                 <div>
-                  <input
-                    type="date"
+                  <DatePicker
                     value={form.job_finish_date}
-                    onChange={(e) => {
-                      const end = e.target.value;
-                      const days = form.job_date && end
-                        ? Math.max(1, Math.ceil((new Date(end + 'T00:00:00').getTime() - new Date(form.job_date + 'T00:00:00').getTime()) / 86400000) + 1)
+                    onChange={(val) => {
+                      const days = form.job_date && val
+                        ? Math.max(1, Math.ceil((new Date(val + 'T00:00:00').getTime() - new Date(form.job_date + 'T00:00:00').getTime()) / 86400000) + 1)
                         : form.num_days;
-                      setForm((p) => ({ ...p, job_finish_date: end, num_days: days }));
+                      setForm((p) => ({ ...p, job_finish_date: val, num_days: days }));
                     }}
-                    className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm"
+                    min={form.job_date || undefined}
+                    className={quote.return_date && form.job_finish_date && form.job_finish_date !== parseDateField(quote.return_date) ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
                   />
                 </div>
                 <span className="text-xs text-purple-600 font-medium">{form.num_days} days</span>
               </>
             )}
           </div>
+          {form.is_multi_day && quote.return_date && form.job_finish_date && form.job_finish_date !== parseDateField(quote.return_date) && (
+            <p className="text-xs text-amber-600 -mt-2">
+              HH return: {parseDateField(quote.return_date)}
+            </p>
+          )}
 
           {/* Crewed-specific fields */}
           {form.job_type === 'crewed' && (
