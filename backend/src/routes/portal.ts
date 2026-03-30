@@ -441,6 +441,7 @@ const completionSchema = z.object({
   customerPresent: z.preprocess((v) => v === 'true' || v === true, z.boolean()).default(true),
   equipmentChecklist: z.string().optional(), // JSON string of {itemId: boolean}
   clientEmails: z.string().optional(), // comma-separated
+  staffName: z.string().optional(), // For Ooosh staff completing on behalf of system account
 });
 
 router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next: NextFunction) => {
@@ -477,7 +478,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       return;
     }
 
-    const { notes, customerPresent, equipmentChecklist } = parsed.data;
+    const { notes, customerPresent, equipmentChecklist, staffName } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
     // Build completion data
@@ -512,6 +513,11 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       }
     }
 
+    // Build completed_by: use staffName if provided (Ooosh staff completing via system account)
+    const completedBy = staffName
+      ? `${staffName} (${req.portalUser!.email})`
+      : req.portalUser!.email;
+
     // Update the quote
     await query(
       `UPDATE quotes SET
@@ -525,7 +531,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         updated_at = NOW()
        WHERE id = $6`,
       [
-        req.portalUser!.email,
+        completedBy,
         fullNotes,
         signatureValue,
         JSON.stringify(completionPhotos),
@@ -542,12 +548,13 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     );
 
     // Store checklist in an interaction if provided
+    const completionName = staffName || req.portalUser!.name;
     if (checklistData) {
       await query(
         `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata)
          VALUES ('completion', $1, 'quote', $2, $3, $4)`,
         [
-          `Job completed by ${req.portalUser!.name}`,
+          `Job completed by ${completionName}`,
           quoteId,
           personId,
           JSON.stringify({ equipmentChecklist: checklistData }),
