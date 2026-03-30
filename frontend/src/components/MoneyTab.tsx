@@ -143,7 +143,15 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
     <div className="space-y-6">
       {/* Financial Summary */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Financial Summary</h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-gray-900">Financial Summary</h3>
+          <button
+            onClick={() => setShowPaymentForm(true)}
+            className="px-3 py-1.5 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md"
+          >
+            Record Payment
+          </button>
+        </div>
 
         {financial.hire_value_ex_vat > 0 ? (
           <>
@@ -277,15 +285,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
 
       {/* Payment History */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-900">Payment History</h3>
-          <button
-            onClick={() => setShowPaymentForm(true)}
-            className="px-3 py-1.5 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md"
-          >
-            Record Payment
-          </button>
-        </div>
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Payment History</h3>
 
         {/* Payment history — read from HireHop (source of truth) */}
         {(() => {
@@ -382,16 +382,14 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                   >
                     Hire Payment
                   </button>
-                  {excess.records.some(r => r.excess_status === 'pending' || r.excess_status === 'partial') && (
-                    <button
-                      onClick={() => { setPayType('excess'); setPayAmount(''); }}
-                      className={`flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                        isExcessMode ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
-                      }`}
-                    >
-                      Insurance Excess
-                    </button>
-                  )}
+                  <button
+                    onClick={() => { setPayType('excess'); setPayAmount(''); }}
+                    className={`flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                      isExcessMode ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500'
+                    }`}
+                  >
+                    Insurance Excess
+                  </button>
                 </div>
 
                 {/* Excess: link to record */}
