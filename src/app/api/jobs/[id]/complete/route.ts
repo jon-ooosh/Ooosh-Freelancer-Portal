@@ -45,6 +45,7 @@ interface CompleteJobRequest {
   clientEmails?: string[]   // Array of client email addresses to send delivery note/confirmation
   sendClientEmail?: boolean // Whether to send client email
   vanOnly?: boolean         // True for van-only book-out (no signature/photos required)
+  staffName?: string        // Name of Ooosh staff member completing (for @oooshtours.co.uk users)
 }
 
 // =============================================================================
@@ -86,7 +87,7 @@ export async function POST(
       )
     }
 
-    const { notes, signature, photos, customerPresent, clientEmails, sendClientEmail, vanOnly } = body
+    const { notes, signature, photos, customerPresent, clientEmails, sendClientEmail, vanOnly, staffName } = body
 
     // Van-only completions skip signature/photo validation
     if (!vanOnly) {
@@ -132,6 +133,7 @@ export async function POST(
         const formData = new FormData()
         formData.append('notes', notes || '')
         formData.append('customerPresent', String(customerPresent))
+        if (staffName) formData.append('staffName', staffName)
 
         // Convert base64 photos to blobs
         if (photos) {

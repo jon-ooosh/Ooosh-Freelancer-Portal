@@ -160,6 +160,7 @@ export async function GET(
       venue: venueDetails,
       contactsVisible,
       boardType,
+      userEmail: session.email,
     })
 
   } catch (error) {
