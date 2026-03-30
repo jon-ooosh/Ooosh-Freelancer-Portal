@@ -1099,7 +1099,7 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
     }
 
     // Extract the returned HH contact ID and store in external_id_map
-    const returnedHhClientId = contactResponse.data?.id;
+    const returnedHhClientId = (contactResponse.data as any)?.id;
     if (returnedHhClientId && job.client_id) {
       await query(
         `INSERT INTO external_id_map (entity_type, entity_id, external_system, external_id)

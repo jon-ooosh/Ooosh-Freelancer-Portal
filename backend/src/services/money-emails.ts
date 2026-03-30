@@ -131,7 +131,7 @@ export async function sendPaymentEmail(opts: {
 
   await emailService.send(templateId, {
     to: recipients.primaryEmail,
-    cc: recipients.ccEmails.length > 0 ? recipients.ccEmails.join(', ') : undefined,
+    cc: recipients.ccEmails.length > 0 ? recipients.ccEmails : undefined,
     variables: {
       firstName: recipients.primaryFirstName || 'there',
       amount: `\u00A3${amount.toFixed(2)}`,
@@ -202,7 +202,7 @@ export async function sendExcessEmail(opts: {
 
   await emailService.send(templateId, {
     to: driverEmail,
-    cc: ccList.length > 0 ? ccList.join(', ') : undefined,
+    cc: ccList.length > 0 ? ccList : undefined,
     variables: {
       firstName: driverFirstName || 'there',
       amount: `\u00A3${amount.toFixed(2)}`,
