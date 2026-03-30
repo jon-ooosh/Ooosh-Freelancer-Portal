@@ -440,7 +440,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
     // Fetch existing quote + assignments for change detection
     const existing = await query(
       `SELECT q.id, q.calculation_mode, q.is_local, q.job_date, q.arrival_time,
-              q.venue_name, q.venue_id, q.job_name, q.status,
+              q.venue_name, q.venue_id, q.status,
               j.job_name as linked_job_name
        FROM quotes q
        LEFT JOIN jobs j ON j.id = q.job_id
