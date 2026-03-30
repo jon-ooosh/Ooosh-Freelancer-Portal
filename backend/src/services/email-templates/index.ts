@@ -92,7 +92,7 @@ const templates: Record<string, EmailTemplate> = {
         </tr>
       </table>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{vehicleUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View vehicle in Ooosh &rarr;</a>
+        <a href="{{vehicleUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View vehicle in Ooosh &rarr;</a>
       </p>
     `,
   },
@@ -112,7 +112,7 @@ const templates: Record<string, EmailTemplate> = {
         <strong>Last chase:</strong> {{lastChaseDate}}
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{jobUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
+        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
       </p>
     `,
   },
@@ -136,7 +136,7 @@ const templates: Record<string, EmailTemplate> = {
         </tr>
       </table>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{jobUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View in pipeline &rarr;</a>
+        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View in pipeline &rarr;</a>
       </p>
     `,
   },
@@ -198,7 +198,7 @@ const templates: Record<string, EmailTemplate> = {
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         If you have any questions, please call us on <strong>+44 (0) 1273 911382</strong>
-        or email <a href="mailto:info@oooshtours.co.uk" style="color:#f97316;">info@oooshtours.co.uk</a>.
+        or email <a href="mailto:info@oooshtours.co.uk" style="color:#7B5EA7;">info@oooshtours.co.uk</a>.
       </p>
     `,
   },
@@ -260,7 +260,7 @@ const templates: Record<string, EmailTemplate> = {
         </tr>
       </table>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{driverUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View driver in Ooosh &rarr;</a>
+        <a href="{{driverUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View driver in Ooosh &rarr;</a>
       </p>
     `,
   },
@@ -290,7 +290,7 @@ const templates: Record<string, EmailTemplate> = {
         <strong>Action required:</strong> This driver needs processing — their hire form has been linked to the job but they haven't been booked out yet.
       </p>
       <p style="margin:0;font-size:14px;color:#334155;">
-        <a href="{{jobUrl}}" style="color:#f97316;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
+        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
       </p>
     `,
   },
@@ -366,7 +366,7 @@ const templates: Record<string, EmailTemplate> = {
         {{reimbursementMethod}}
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        Full details of our vehicle hire terms can be found <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#f97316;text-decoration:none;font-weight:600;">here</a>.
+        Full details of our vehicle hire terms can be found <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#7B5EA7;text-decoration:none;font-weight:600;">here</a>.
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         We hope you have a great hire!
@@ -387,7 +387,7 @@ const templates: Record<string, EmailTemplate> = {
         A pre-authorisation of <strong>{{amount}}</strong> has been placed on your card for job <strong>#{{jobNumber}}</strong>.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        This is <strong>not a payment</strong>. No money has been taken from your account. The hold will be automatically released after your hire is completed and the vehicle returned according to our <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#f97316;text-decoration:none;font-weight:600;">T&amp;Cs</a>.
+        This is <strong>not a payment</strong>. No money has been taken from your account. The hold will be automatically released after your hire is completed and the vehicle returned according to our <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#7B5EA7;text-decoration:none;font-weight:600;">T&amp;Cs</a>.
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
@@ -490,7 +490,7 @@ const templates: Record<string, EmailTemplate> = {
     preheader: 'A booking has been confirmed at short notice',
     subject: '{{urgencyEmoji}} {{urgencyLabel}}: Job {{jobNumber}} for {{clientName}} - starts {{startDate}}',
     body: `
-      <div style="background-color:#f97316;border-radius:12px 12px 0 0;padding:24px 20px;text-align:center;">
+      <div style="background-color:#7B5EA7;border-radius:12px 12px 0 0;padding:24px 20px;text-align:center;">
         <h2 style="margin:0 0 4px;font-size:22px;color:#ffffff;font-weight:800;">Last-Minute Booking</h2>
         <p style="margin:0;font-size:15px;color:#ffffff;opacity:0.9;">{{urgencyBadge}}</p>
       </div>
