@@ -8,7 +8,8 @@
 
 const OOOSH_PURPLE = '#7B5EA7';
 const OOOSH_DARK = '#1e293b';
-const OOOSH_LOGO_URL = 'https://staff.oooshtours.co.uk/ooosh-logo.svg';
+// Logo: stored in R2 at assets/ooosh-logo.png but no public URL yet.
+// TODO: Add logo to emails once a public-accessible URL is available.
 
 /**
  * Wrap email body content in the branded base layout.
@@ -40,8 +41,7 @@ export function wrapInBaseLayout(
           <!-- Header -->
           <tr>
             <td style="background-color:${OOOSH_PURPLE};padding:24px 32px;border-radius:12px 12px 0 0;text-align:center;">
-              <img src="${OOOSH_LOGO_URL}" alt="Ooosh" width="40" height="40" style="display:inline-block;vertical-align:middle;margin-right:12px;border-radius:8px;" />
-              <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;letter-spacing:-0.5px;display:inline-block;vertical-align:middle;">
+              <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;letter-spacing:-0.5px;">
                 Ooosh Tours Ltd
               </h1>
             </td>
