@@ -589,6 +589,18 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] MoneyTab.tsx: record payment form (type, amount, HH bank, reference, notes, push-to-HH checkbox)
 - [x] MoneyTab.tsx: client balance on account auto-suggest
 - [x] Payment methods match HireHop bank accounts exactly (same names, same IDs)
+- [x] Smart payment form: quick-click amounts (25% deposit, 50%, full/remaining), auto-detect deposit vs balance
+- [x] Deposit calculator: min 25% (floor £100), full payment if <£400
+- [x] Job values populated from HH billing_list accrued (side-effect on Money tab view + bulk sync endpoint)
+- [x] "Overview" tab (renamed from Job Requirements) with payment progress bar at top
+- [x] Email templates: booking confirmed, payment received, excess received/reimbursed/claimed, last-minute alert
+- [x] Email branding: purple header (#7B5EA7), footer "Transport - Backline - Rehearsals"
+- [x] Method-specific refund timescales (Worldpay 2-3d, Stripe 5-10d, bank transfer hours, PayPal instant)
+- [x] Last-minute booking alert: fires on any route to Confirmed when job starts within 3 days (same-day variant)
+- [x] Email triggers wired into: money.ts record-payment, excess.ts reimburse/claim, pipeline.ts status change
+- [x] Deposit payment auto-confirms booking (OP→Confirmed, HH→Booked status 2)
+- [ ] Email logo: real Ooosh logo in email header (logo in R2 at assets/ooosh-logo.png, needs public URL)
+- [ ] Wire email triggers into Payment Portal events (when portal repointed)
 
 ##### Phase D — VAT Adjustment Display
 Port the international VAT calculation from the Payment Portal into the OP. Currently staff access this via the client-facing payment portal URL — after this phase, they see it directly on the Money tab.

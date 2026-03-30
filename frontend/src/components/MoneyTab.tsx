@@ -54,13 +54,6 @@ const PAYMENT_METHODS = [
   { value: 'rolled_over', label: 'Applied from Account Balance' },
 ];
 
-const PAYMENT_TYPES = [
-  { value: 'deposit', label: 'Deposit' },
-  { value: 'balance', label: 'Balance Payment' },
-  { value: 'excess', label: 'Insurance Excess' },
-  { value: 'other', label: 'Other' },
-];
-
 export default function MoneyTab({ jobId, job }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -348,7 +341,6 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
       {showPaymentForm && (() => {
         // Smart payment options
         const total = financial.hire_value_inc_vat;
-        const paid = financial.total_hire_deposits;
         const remaining = financial.balance_outstanding;
         const minDeposit = total < 400 ? total : Math.max(total * 0.25, 100);
         const halfPayment = Math.round(total * 0.5);
