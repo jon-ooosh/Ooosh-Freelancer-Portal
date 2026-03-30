@@ -340,7 +340,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
     const excess = result.rows[0];
     sendExcessEmail({
       templateId: 'excess_claimed',
-      excessId: id,
+      excessId: id as string,
       jobId: excess.job_id,
       amount,
       reason: notes || undefined,
@@ -383,7 +383,7 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
     const isPartial = amount < originalAmount;
     sendExcessEmail({
       templateId: isPartial ? 'excess_partial_reimbursed' : 'excess_reimbursed',
-      excessId: id,
+      excessId: id as string,
       jobId: excess.job_id,
       amount,
       paymentMethod: method,
