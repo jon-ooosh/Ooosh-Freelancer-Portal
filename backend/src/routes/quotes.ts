@@ -550,9 +550,9 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
     }
 
     res.json(updatedQuote);
-  } catch (error) {
-    console.error('Edit quote error:', error);
-    res.status(500).json({ error: 'Failed to update quote' });
+  } catch (error: any) {
+    console.error('Edit quote error:', error?.message || error, error?.detail || '', 'Body:', JSON.stringify(req.body).substring(0, 500));
+    res.status(500).json({ error: `Failed to update quote: ${error?.message || 'Unknown error'}` });
   }
 });
 
