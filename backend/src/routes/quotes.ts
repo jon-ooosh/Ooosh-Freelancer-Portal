@@ -440,7 +440,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
     // Fetch existing quote + assignments for change detection
     const existing = await query(
       `SELECT q.id, q.calculation_mode, q.is_local, q.job_date, q.arrival_time,
-              q.venue_name, q.venue_id, q.job_name, q.status,
+              q.venue_name, q.venue_id, q.status,
               j.job_name as linked_job_name
        FROM quotes q
        LEFT JOIN jobs j ON j.id = q.job_id
@@ -550,9 +550,9 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
     }
 
     res.json(updatedQuote);
-  } catch (error) {
-    console.error('Edit quote error:', error);
-    res.status(500).json({ error: 'Failed to update quote' });
+  } catch (error: any) {
+    console.error('Edit quote error:', error?.message || error, error?.detail || '', 'Body:', JSON.stringify(req.body).substring(0, 500));
+    res.status(500).json({ error: `Failed to update quote: ${error?.message || 'Unknown error'}` });
   }
 });
 
