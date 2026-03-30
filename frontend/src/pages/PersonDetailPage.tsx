@@ -6,6 +6,7 @@ import SlidePanel from '../components/SlidePanel';
 import PersonForm from '../components/PersonForm';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
+import ExcessHistorySection from '../components/ExcessHistorySection';
 
 interface FileAttachment {
   name: string;
@@ -86,7 +87,7 @@ export default function PersonDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'timeline' | 'details' | 'relationships'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'details' | 'relationships' | 'excess'>('timeline');
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
@@ -417,10 +418,11 @@ export default function PersonDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['timeline', 'details', 'relationships'] as const).map((tab) => {
+          {(['timeline', 'details', 'relationships', 'excess'] as const).map((tab) => {
             const totalOrgs = (person.organisations || []).length;
             const label = tab === 'timeline' ? 'Activity Timeline'
               : tab === 'details' ? 'Details'
+              : tab === 'excess' ? 'Excess History'
               : `Relationships${totalOrgs ? ` (${totalOrgs})` : ''}`;
             return (
               <button
@@ -835,6 +837,11 @@ export default function PersonDetailPage() {
           </div>
         );
       })()}
+
+      {/* Excess History Tab */}
+      {activeTab === 'excess' && id && (
+        <ExcessHistorySection entityType="person" entityId={id} />
+      )}
 
       {/* Edit Panel */}
       <SlidePanel open={showEdit} onClose={() => setShowEdit(false)} title="Edit Person">

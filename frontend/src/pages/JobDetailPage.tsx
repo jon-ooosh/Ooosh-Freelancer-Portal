@@ -3,6 +3,8 @@ import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
+import ExcessGateBanner from '../components/ExcessGateBanner';
+import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
@@ -545,7 +547,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'details'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'money' | 'details'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -614,6 +616,10 @@ export default function JobDetailPage() {
   const [editChaseDate, setEditChaseDate] = useState('');
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
+  const [hhClientOutOfSync, setHhClientOutOfSync] = useState(false);
+  const [hhClientSyncName, setHhClientSyncName] = useState('');
+  const [syncingClientToHH, setSyncingClientToHH] = useState(false);
+  const [hhClientSyncSuccess, setHhClientSyncSuccess] = useState(false);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const editValueRef = useRef<HTMLInputElement>(null);
@@ -762,6 +768,28 @@ export default function JobDetailPage() {
   async function selectClient(org: { id: string; name: string }) {
     setEditingClient(false);
     await saveInlineField({ client_id: org.id, client_name: org.name });
+    // Show sync banner if job is linked to HireHop
+    if (job?.hh_job_number) {
+      setHhClientSyncName(org.name);
+      setHhClientOutOfSync(true);
+      setHhClientSyncSuccess(false);
+    }
+  }
+
+  async function syncClientToHH() {
+    if (!job) return;
+    setSyncingClientToHH(true);
+    try {
+      await api.post(`/pipeline/${job.id}/sync-client-to-hh`, {});
+      setHhClientOutOfSync(false);
+      setHhClientSyncSuccess(true);
+      setTimeout(() => setHhClientSyncSuccess(false), 3000);
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to sync client to HireHop';
+      alert(msg);
+    } finally {
+      setSyncingClientToHH(false);
+    }
   }
 
   function startEditValue() {
@@ -793,6 +821,10 @@ export default function JobDetailPage() {
 
   async function pushToHireHop() {
     if (!job) return;
+    if (!job.job_date || !job.job_end) {
+      alert('Start date and end date are required before creating a job in HireHop. Please set both dates first.');
+      return;
+    }
     setPushingToHH(true);
     try {
       await api.post(`/pipeline/${job.id}/push-hirehop`, {});
@@ -1490,6 +1522,39 @@ export default function JobDetailPage() {
               )}
             </div>
 
+            {/* HireHop client sync banner */}
+            {hhClientOutOfSync && (
+              <div className="mt-2 flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm">
+                <svg className="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+                <span className="text-amber-800">
+                  Client changed to <strong>{hhClientSyncName}</strong> — HireHop still shows the old client. Sync now?
+                </span>
+                <button
+                  onClick={syncClientToHH}
+                  disabled={syncingClientToHH}
+                  className="ml-auto px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+                >
+                  {syncingClientToHH ? 'Syncing...' : 'Sync to HireHop'}
+                </button>
+                <button
+                  onClick={() => setHhClientOutOfSync(false)}
+                  className="text-amber-600 hover:text-amber-800 text-xs underline"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            {hhClientSyncSuccess && (
+              <div className="mt-2 flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-sm text-green-700">
+                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Client synced to HireHop successfully.
+              </div>
+            )}
+
             {/* Dates editor panel */}
             {editingDates && (
               <div className="mt-3 p-4 bg-gray-50 rounded-lg border border-gray-200">
@@ -1811,7 +1876,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['overview', 'timeline', 'transport', 'drivers', 'files', 'details'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files', 'details'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -1821,10 +1886,11 @@ export default function JobDetailPage() {
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              {tab === 'overview' ? 'Job Requirements' :
+              {tab === 'overview' ? 'Overview' :
                tab === 'timeline' ? 'Activity Timeline' :
                tab === 'transport' ? `Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
                tab === 'drivers' ? `Drivers & Vehicles${vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}` :
+               tab === 'money' ? 'Money' :
                tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
                'Full Details'}
             </button>
@@ -1832,9 +1898,13 @@ export default function JobDetailPage() {
         </nav>
       </div>
 
-      {/* Overview Tab (Prep Checklist) */}
+      {/* Overview Tab (Prep Checklist + Financial Strip) */}
       {activeTab === 'overview' && (
-        <JobPrepChecklist jobId={id || ''} />
+        <div className="space-y-4">
+          {/* Compact financial progress strip */}
+          {id && <OverviewFinancialStrip jobId={id} />}
+          <JobPrepChecklist jobId={id || ''} />
+        </div>
       )}
 
       {/* Timeline Tab */}
@@ -1855,25 +1925,32 @@ export default function JobDetailPage() {
             {id && <QuickAssignButton jobId={id} jobDate={job.job_date || undefined} returnDate={job.return_date || undefined} onCreated={loadVehicleAssignments} />}
           </div>
 
-          {/* Referral/excess warnings */}
-          {dispatchCheck && dispatchCheck.blockers.length > 0 && (
+          {/* Referral warnings */}
+          {dispatchCheck && dispatchCheck.blockers.filter(b => b.type === 'referral_pending').length > 0 && (
             <div className="space-y-2">
-              {dispatchCheck.blockers.map((b, i) => (
-                <div key={i} className={`flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium ${
-                  b.type === 'referral_pending'
-                    ? 'bg-orange-50 border border-orange-200 text-orange-800'
-                    : 'bg-amber-50 border border-amber-200 text-amber-800'
-                }`}>
-                  <span>{b.type === 'referral_pending' ? '!' : '$'}</span>
+              {dispatchCheck.blockers.filter(b => b.type === 'referral_pending').map((b, i) => (
+                <div key={i} className="flex items-center gap-2 px-4 py-3 rounded-lg text-sm font-medium bg-orange-50 border border-orange-200 text-orange-800">
+                  <span>!</span>
                   <span>
-                    {b.type === 'referral_pending'
-                      ? `Referral pending for ${b.driverName || 'Unknown driver'} (${b.vehicleReg || '?'}) — cannot book out until approved`
-                      : `Excess pending for ${b.driverName || 'Unknown driver'} (${b.vehicleReg || '?'})${b.amountRequired ? ` — £${b.amountRequired.toFixed(2)} required` : ''}`
-                    }
+                    Referral pending for {b.driverName || 'Unknown driver'} ({b.vehicleReg || '?'}) — cannot book out until approved
                   </span>
                 </div>
               ))}
             </div>
+          )}
+
+          {/* Excess gate banner */}
+          {dispatchCheck && dispatchCheck.blockers.filter(b => b.type === 'excess_pending').length > 0 && (
+            <ExcessGateBanner
+              blockers={dispatchCheck.blockers.filter(b => b.type === 'excess_pending').map(b => ({
+                ...b,
+                excessId: vehicleAssignments.find(a => a.id === b.assignmentId)?.excess?.id,
+                excessStatus: vehicleAssignments.find(a => a.id === b.assignmentId)?.excess?.excess_status,
+                dispatchOverride: false,
+              }))}
+              onOverrideComplete={loadVehicleAssignments}
+              onNavigateToRequirements={() => setActiveTab('overview')}
+            />
           )}
 
           {vehicleAssignmentsLoading ? (
@@ -2586,6 +2663,11 @@ export default function JobDetailPage() {
         </div>
       )}
 
+      {/* Money Tab */}
+      {activeTab === 'money' && id && (
+        <MoneyTab jobId={id} job={job} />
+      )}
+
       {/* Full Details Tab */}
       {activeTab === 'details' && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
@@ -3240,6 +3322,60 @@ const PREP_STATUS_CONFIG: Record<string, { label: string; colour: string; bg: st
 };
 
 const PREP_STATUS_ORDER: JobRequirement['status'][] = ['not_started', 'in_progress', 'done', 'blocked'];
+
+function OverviewFinancialStrip({ jobId }: { jobId: string }) {
+  const [data, setData] = useState<{
+    hire_value_inc_vat: number; total_hire_deposits: number;
+    balance_outstanding: number; deposit_percent: number; deposit_paid: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    api.get<{ data: { financial: any } }>(`/money/${jobId}/summary`)
+      .then(res => {
+        const f = res.data.financial;
+        if (f.hire_value_inc_vat > 0) {
+          setData({
+            hire_value_inc_vat: f.hire_value_inc_vat,
+            total_hire_deposits: f.total_hire_deposits,
+            balance_outstanding: f.balance_outstanding,
+            deposit_percent: f.deposit_percent,
+            deposit_paid: f.deposit_paid,
+          });
+        }
+      })
+      .catch(() => {});
+  }, [jobId]);
+
+  if (!data) return null;
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3">
+      <div className="flex items-center gap-4">
+        <div className="flex-1">
+          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+            <span>Payment: £{data.total_hire_deposits.toFixed(2)} of £{data.hire_value_inc_vat.toFixed(2)}</span>
+            <span className={data.deposit_paid ? 'text-green-600 font-medium' : 'text-amber-600'}>
+              {data.deposit_percent >= 100 ? 'Paid in full' : data.deposit_paid ? 'Deposit secured' : `${data.deposit_percent.toFixed(0)}% paid`}
+            </span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2">
+            <div
+              className={`h-2 rounded-full transition-all ${
+                data.deposit_percent >= 100 ? 'bg-green-500' : data.deposit_paid ? 'bg-ooosh-500' : 'bg-amber-500'
+              }`}
+              style={{ width: `${Math.min(100, data.deposit_percent)}%` }}
+            />
+          </div>
+        </div>
+        {data.balance_outstanding > 0 && (
+          <span className="text-xs font-semibold text-red-600 whitespace-nowrap">
+            £{data.balance_outstanding.toFixed(2)} outstanding
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function JobPrepChecklist({ jobId }: { jobId: string }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);

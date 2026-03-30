@@ -89,68 +89,85 @@ frontend/src/components/Layout.tsx
 
 ---
 
-## Agent 2 — Excess Gate UI & Ledger
+## Agent 2 — Money System (Unified Financial View)
 
-**Branch:** `feature/excess-gate-ledger`  
-**Priority:** 🔴 HIGH — gates job dispatch, needed before busy period  
-**Estimated scope:** Step 3 Phase E from CLAUDE.md
+**Branch:** `claude/review-system-architecture-XClBY`
+**Priority:** 🔴 HIGH — gates job dispatch, replaces Monday.com for excess tracking, foundation for payment portal repointing
+**Estimated scope:** Step 3 (all phases) from CLAUDE.md
 
-### What to build
-1. **Excess gate warning UI** on Job Detail page:
-   - Warning banner when any `vehicle_hire_assignment` for the job has `job_excess.excess_status = 'pending'`
-   - Shows: driver name, vehicle reg, amount required, action button
-   - Admin override button (with reason capture) — calls `PATCH /api/excess/:id` with override flag
-   - Wire into status transition check (prevent moving to "dispatched" without excess)
+### What's been built (Phase A + B)
+1. ✅ **Insurance excess backend** — `job_excess` table, CRUD, override, move, by-person/by-org, client balance endpoints, migration 034
+2. ✅ **Excess gate warning** — `ExcessGateBanner.tsx` on Job Detail Drivers & Vehicles tab, manager override with reason picklist
+3. ✅ **Excess ledger** — `ExcessLedgerPage.tsx` at `/money/excess` (client ledger + all-records views)
+4. ✅ **Excess actions** — `ExcessPaymentModal.tsx` (payment, claim, reimburse, waive, rollover, move)
+5. ✅ **Address book integration** — `ExcessHistorySection.tsx` on Person + Org detail pages
+6. ✅ **Email templates** — 6 templates for excess lifecycle events
+7. ✅ **Nav** — "Money > Excess" in Layout.tsx
 
-2. **Excess ledger page** at `/excess`:
-   - Admin/manager only (RBAC)
-   - Summary cards: Total held, Total pending, Clients with balance
-   - Table from `client_excess_ledger` view
-   - Click-through to individual client history
-   - Per-record actions: Record payment, Mark claimed, Mark reimbursed, Waive (admin only)
+### What to build next (Phase C — Money Tab)
+1. **"Money" tab on Job Detail** — unified financial view per job:
+   - Financial Summary section: read hire value, deposits, balance from HireHop via broker
+   - Insurance Excess section: embed existing excess components
+   - Payment History section: merge HH deposits + OP payments into single timeline
+   - Record Payment form: one entry point → creates HH deposit + records in OP
+   - Client Account section: rolled-over balance, payment terms
+2. **`job_payments` table** — unified payment recording (type: deposit/balance/excess/refund, method, reference)
+3. **Migration** for `job_payments` + `payment_terms` on organisations table
+4. **Backend routes** — `money.ts` with HH financial read endpoints, payment recording with HH write-back
+5. **Wire email triggers** to excess status transitions
+6. **Auto-suggest client balance** on new hire assignments
 
-3. **Payment recording UI**:
-   - Modal/slide panel for recording payment against an excess record
-   - Fields: amount, method (payment_portal/bank_transfer/card_in_office/cash/rolled_over), reference, date
-   - Updates `job_excess` status accordingly
-
-4. **Nav addition**: Add "Excess" to Vehicles nav submenu
+### Future phases (spec'd, not yet building)
+- **Phase D** — VAT adjustment display (port `vat-adjustment.js` from Payment Portal)
+- **Phase E** — Payment Portal repointing (non-destructive, `DATA_BACKEND` env var toggle)
+- **Phase F** — Staff card payments via Stripe (take payment directly from Money tab)
 
 ### Files owned by Agent 2
 ```
-frontend/src/pages/ExcessLedgerPage.tsx           (new)
-frontend/src/components/ExcessGateBanner.tsx       (new)
-frontend/src/components/ExcessPaymentModal.tsx     (new)
-frontend/src/components/Layout.tsx                 ← COORDINATE with other agents before editing
+frontend/src/pages/ExcessLedgerPage.tsx           (built)
+frontend/src/components/ExcessGateBanner.tsx       (built)
+frontend/src/components/ExcessPaymentModal.tsx     (built)
+frontend/src/components/ExcessHistorySection.tsx   (built)
+frontend/src/pages/MoneyPage.tsx                   (new — Money tab component, or integrated into JobDetailPage)
+backend/src/routes/money.ts                        (new — unified money endpoints)
+backend/src/routes/excess.ts                       (extended)
+backend/src/services/vat-adjustment.ts             (new — Phase D)
+backend/src/migrations/035_job_payments.sql        (new)
+frontend/src/components/Layout.tsx                 ← COORDINATE with other agents
 ```
-
-### ⚠️ Layout.tsx conflict warning
-Layout.tsx may also need changes from Agent 3 (new nav items). 
-**Rule:** Agent 2 adds only the "Excess" nav item under Vehicles. Agent 3 adds only the Operations nav items.  
-Whichever agent finishes first merges their Layout change. The second agent must then pull main and add their item to the already-updated file.
 
 ### Files to READ but NOT edit
 ```
-backend/src/routes/excess.ts
-backend/src/routes/assignments.ts
-shared/types/index.ts
-frontend/src/pages/JobDetailPage.tsx  (read to understand where to inject banner)
+backend/src/config/hirehop.ts             (HH broker patterns)
+backend/src/services/hirehop-broker.ts    (how to read HH data)
+backend/src/services/hirehop-writeback.ts (how to push to HH)
+frontend/src/pages/JobDetailPage.tsx      (tab injection points)
+shared/types/index.ts                     (add new types only)
 ```
 
 ### Do NOT touch
 ```
-backend/ (all files — backend is complete for excess)
 frontend/src/modules/vehicles/  (Agent 1's domain)
-frontend/src/pages/ (except new ExcessLedgerPage.tsx)
+backend/src/routes/pipeline.ts
+backend/src/routes/quotes.ts
 ```
 
-### Definition of done
-- [ ] Warning banner appears on Job Detail when excess is pending
-- [ ] Dispatch action blocked with clear message when excess pending
-- [ ] Admin can override with reason (logged)
-- [ ] `/excess` page shows client ledger with correct balances
-- [ ] Payment/claim/reimburse/waive actions work correctly
-- [ ] "Excess" link in Vehicles nav submenu
+### Definition of done (Phase C)
+- [x] Excess gate banner on Job Detail Drivers & Vehicles tab
+- [x] Manager override with reason capture
+- [x] `/money/excess` global ledger page
+- [x] Excess actions (payment/claim/reimburse/waive/rollover/move)
+- [x] Address book integration (Excess History on person + org pages)
+- [x] "Money" tab on Job Detail with financial summary from HireHop
+- [x] Insurance excess embedded in Money tab
+- [x] `job_payments` table + payment history reads from HH billing_list (source of truth)
+- [x] Record Payment → creates HH deposit (two-step Xero sync) + OP audit record
+- [x] Deposit calculator (25% / £100 floor / full if <£400) on Money tab
+- [x] Job values populate from HH billing_list (bulk sync endpoint + per-job side-effect)
+- [x] "Overview" tab (renamed from Job Requirements) with payment progress bar
+- [x] Client balance auto-suggest on Money tab
+- [ ] Email triggers on excess/payment status transitions (NEXT)
+- [ ] Wire email triggers into record-payment and excess status changes
 
 ---
 
@@ -416,12 +433,19 @@ Update this section as work completes:
 - [ ] Branch ready for PR
 
 ### Agent 2 — Excess Gate & Ledger
-- [ ] Excess gate banner on Job Detail
-- [ ] Dispatch blocking logic wired in
-- [ ] Admin override with reason capture
-- [ ] /excess ledger page built
-- [ ] Payment/claim/reimburse/waive actions
-- [ ] Branch ready for PR
+- [x] Excess gate banner on Job Detail (ExcessGateBanner.tsx with manager override)
+- [x] Dispatch warning with override (not hard block — amber warning, manager can override with reason)
+- [x] Manager override with reason capture (picklist + notes, logged to audit trail)
+- [x] /money/excess ledger page built (client ledger + all-records views, status filters)
+- [x] Payment/claim/reimburse/waive/rollover/move actions (ExcessPaymentModal.tsx)
+- [x] Excess History tabs on PersonDetailPage + OrganisationDetailPage
+- [x] Migration 034 (dispatch_override, suggested_collection_method, person_id, notes)
+- [x] Backend: override, move, by-person, by-org, client-balance endpoints
+- [x] 6 email templates for excess lifecycle events
+- [x] Branch merged to main (26 Mar 2026)
+- [ ] Wire email triggers to status transitions
+- [ ] Auto-suggest client balance on new assignments
+- [ ] Payment Portal repointing (Phase F — see CLAUDE.md)
 
 ### Agent 3 — Ops Dashboard & Backline
 - [ ] Dashboard transport widget

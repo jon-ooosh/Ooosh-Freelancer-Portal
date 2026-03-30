@@ -690,10 +690,35 @@ export interface JobExcess {
   reimbursement_amount: number | null;
   reimbursement_date: string | null;
   reimbursement_method: string | null;
+  dispatch_override: boolean;
+  dispatch_override_reason: string | null;
+  dispatch_override_by: string | null;
+  dispatch_override_at: string | null;
+  suggested_collection_method: 'payment' | 'pre_auth';
+  person_id: string | null;
+  notes: string | null;
   created_at: string;
   updated_at: string;
   created_by: string | null;
+  // Joined fields (from queries)
+  vehicle_reg?: string;
+  driver_name?: string;
+  hirehop_job_name?: string;
+  hire_start?: string;
+  hire_end?: string;
+  job_name?: string;
 }
+
+export interface ExcessPersonSummary {
+  total_hires: number;
+  total_taken: number;
+  total_claimed: number;
+  total_reimbursed: number;
+  balance_held: number;
+  pending_count: number;
+}
+
+export type OverrideReason = 'client_on_credit' | 'pre_auth_to_follow' | 'ooosh_staff_vehicle' | 'balance_on_account' | 'other';
 
 export interface ExcessRule {
   id: string;
@@ -722,6 +747,19 @@ export interface ClientExcessLedgerEntry {
   pending_count: number;
   held_count: number;
   rolled_over_count: number;
+  override_count?: number;
+}
+
+export interface ClientBalanceCheck {
+  balance_held: number;
+  rolled_over_count: number;
+  has_balance: boolean;
+  xero_contact_id?: string;
+  xero_contact_name?: string;
+  client_name?: string;
+  total_hires?: number;
+  total_taken?: number;
+  pending_count?: number;
 }
 
 export interface DispatchCheck {
@@ -736,6 +774,60 @@ export interface DispatchBlocker {
   vehicleReg: string | null;
   amountRequired: number | null;
 }
+
+// ── Money System types ──
+
+export type PaymentType = 'deposit' | 'balance' | 'excess' | 'refund' | 'excess_refund' | 'other';
+export type PaymentMethod = 'stripe_gbp' | 'worldpay' | 'amex' | 'wise_bacs' | 'till_cash' | 'paypal' | 'lloyds_bank' | 'rolled_over';
+export type PaymentStatus = 'completed' | 'pending' | 'pre_auth' | 'captured' | 'released' | 'refunded' | 'failed';
+export type PaymentSource = 'op' | 'payment_portal' | 'hirehop' | 'manual';
+
+export interface JobPayment {
+  id: string;
+  job_id: string | null;
+  hirehop_job_id: number | null;
+  payment_type: PaymentType;
+  amount: number;
+  currency: string;
+  payment_method: PaymentMethod;
+  payment_reference: string | null;
+  stripe_payment_intent: string | null;
+  hirehop_deposit_id: number | null;
+  payment_status: PaymentStatus;
+  source: PaymentSource;
+  excess_id: string | null;
+  xero_contact_id: string | null;
+  client_name: string | null;
+  payment_date: string;
+  recorded_by: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JobFinancialSummary {
+  hire_value_ex_vat: number;
+  hire_value_inc_vat: number;
+  vat_amount: number;
+  total_deposits: number;
+  balance_outstanding: number;
+  excess_required: number;
+  excess_collected: number;
+  excess_status: string | null;
+  payment_count: number;
+  client_balance_on_account: number;
+  deposits: HireHopDeposit[];
+}
+
+export interface HireHopDeposit {
+  id: number;
+  amount: number;
+  date: string;
+  memo: string | null;
+  method: string | null;
+}
+
+export type PaymentTerms = 'standard' | 'credit_7' | 'credit_14' | 'credit_30' | 'credit_60' | 'no_deposit' | 'custom';
 
 // API response wrappers
 export interface PaginatedResponse<T> {
