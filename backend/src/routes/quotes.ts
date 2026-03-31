@@ -1018,15 +1018,17 @@ function getLocalItemId(jobType: string, arrivalTime: string | null): number {
   return items[2].id;                               // 10pm-10am (22-10)
 }
 
-function buildItemNote(date?: string | null, endDate?: string | null, time?: string | null, venue?: string | null, workType?: string | null, isMultiDay?: boolean): string {
+function buildItemNote(date?: string | Date | null, endDate?: string | Date | null, time?: string | null, venue?: string | null, workType?: string | null, isMultiDay?: boolean): string {
   const parts: string[] = [];
   if (workType) parts.push(workType);
 
-  const formatDate = (isoDate: string): string => {
-    // Normalise: if already has time info, strip it to get just the date part
-    const dateOnly = isoDate.includes('T') ? isoDate.split('T')[0] : isoDate;
+  const formatDate = (raw: string | Date): string => {
+    // Coerce to string — PG may return Date objects
+    const str = raw instanceof Date ? raw.toISOString() : String(raw || '');
+    if (!str) return '';
+    const dateOnly = str.includes('T') ? str.split('T')[0] : str;
     const d = new Date(dateOnly + 'T12:00:00');
-    if (isNaN(d.getTime())) return isoDate; // Return raw string if date is invalid
+    if (isNaN(d.getTime())) return str;
     const day = d.getDate();
     const month = d.toLocaleDateString('en-GB', { month: 'short' });
     const year = d.getFullYear();
