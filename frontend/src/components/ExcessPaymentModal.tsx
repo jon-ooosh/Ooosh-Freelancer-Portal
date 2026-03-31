@@ -3,7 +3,7 @@
  *
  * Supports: Record Payment, Record Claim, Reimburse, Waive, Roll Over, Move to different entity.
  */
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { api } from '../services/api';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
