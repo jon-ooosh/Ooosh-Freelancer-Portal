@@ -711,7 +711,7 @@ export default function TransportCalculator({
           try {
             await api.put(`/venues/${formData.selectedVenueId}`, {
               default_miles_from_base: formData.distanceMiles,
-              default_drive_time_mins: formData.driveTimeMinutes,
+              default_drive_time_mins: Math.round(formData.driveTimeMinutes),
             });
           } catch {
             // Non-critical — don't block the save
