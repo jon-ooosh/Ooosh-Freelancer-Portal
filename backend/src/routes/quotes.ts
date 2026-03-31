@@ -807,7 +807,23 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
       ]
     );
 
-    res.status(201).json({ id: result.rows[0].id });
+    const quoteId = result.rows[0].id;
+
+    // Auto-assign "Ooosh Staff" person to local D&C quotes
+    const OOOSH_STAFF_ID = '00000000-0000-0000-0000-000000000001';
+    try {
+      await query(
+        `INSERT INTO quote_assignments (quote_id, person_id, role, is_ooosh_crew, created_by)
+         VALUES ($1, $2, 'driver', true, $3)
+         ON CONFLICT (quote_id, person_id) DO NOTHING`,
+        [quoteId, OOOSH_STAFF_ID, req.user!.id]
+      );
+    } catch (assignErr) {
+      // Non-fatal: quote was created, just log the auto-assign failure
+      console.warn('Failed to auto-assign Ooosh Staff to local quote:', assignErr);
+    }
+
+    res.status(201).json({ id: quoteId });
   } catch (error) {
     console.error('Create local quote error:', error);
     res.status(500).json({ error: 'Failed to create local delivery/collection' });
@@ -1037,14 +1053,23 @@ async function findOrCreateHeader(hhJobId: string): Promise<string> {
   const domain = process.env.HIREHOP_DOMAIN || 'myhirehop.com';
   const token = process.env.HIREHOP_API_TOKEN!;
 
-  // Fetch existing items to find a header
-  const itemsRes = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 10 }) as any;
-  const items = Array.isArray(itemsRes) ? itemsRes : (itemsRes?.items || []);
+  // Fetch existing items to find a header — skip cache to avoid stale data causing duplicate headers
+  const itemsRes = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: -1 }) as any;
+  const rawData = itemsRes?.data;
+  // HH may return a plain array, or { items: [...] }, or { rows: [...] }
+  const items = Array.isArray(rawData)
+    ? rawData
+    : (rawData?.items || rawData?.rows || []);
 
-  const headers = items.filter((i: any) => i.kind === '0' && (!i.parent || i.parent === '0'));
+  console.log(`[HH findOrCreateHeader] Job ${hhJobId}: broker success=${itemsRes?.success}, rawData type=${typeof rawData}, isArray=${Array.isArray(rawData)}, items count=${items.length}, rawData keys=${rawData && typeof rawData === 'object' ? Object.keys(rawData).join(',') : 'N/A'}`);
+
+  // Headers have kind 0 (may be string '0' or number 0) and no parent (top-level)
+  const headers = items.filter((i: any) => String(i.kind) === '0' && (!i.parent || String(i.parent) === '0'));
+  console.log(`[HH findOrCreateHeader] Job ${hhJobId}: found ${headers.length} top-level headers: ${headers.map((h: any) => `"${h.NAME || h.title || h.name || '?'}" (ID=${h.ID})`).join(', ')}`);
   for (const header of headers) {
-    const name = (header.NAME || header.title || '').toLowerCase();
+    const name = (header.NAME || header.title || header.name || '').toLowerCase();
     if (HEADER_KEYWORDS.some(kw => name.includes(kw))) {
+      console.log(`[HH findOrCreateHeader] Job ${hhJobId}: reusing existing header ID=${header.ID} name="${header.NAME || header.title || header.name}"`);
       return header.ID;
     }
   }
@@ -1076,8 +1101,9 @@ async function addItemToHireHop(
 
   try {
     // Step 1: Get items before
-    const itemsBefore = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 0 }) as any;
-    const beforeItems = Array.isArray(itemsBefore) ? itemsBefore : (itemsBefore?.items || []);
+    const itemsBefore = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: -1 }) as any;
+    const beforeData = itemsBefore?.data;
+    const beforeItems = Array.isArray(beforeData) ? beforeData : (beforeData?.items || beforeData?.rows || []);
     const existingIds = new Set(beforeItems.map((i: any) => i.ID));
 
     // Step 2: Add the item
@@ -1089,8 +1115,9 @@ async function addItemToHireHop(
 
     // Step 3: Find the new item
     await new Promise(r => setTimeout(r, 1000));
-    const itemsAfter = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: 0 }) as any;
-    const afterItems = Array.isArray(itemsAfter) ? itemsAfter : (itemsAfter?.items || []);
+    const itemsAfter = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: -1 }) as any;
+    const afterData = itemsAfter?.data;
+    const afterItems = Array.isArray(afterData) ? afterData : (afterData?.items || afterData?.rows || []);
     const newItem = afterItems.find((i: any) => !existingIds.has(i.ID) && i.LIST_ID === String(listId) && i.kind === '4');
 
     if (!newItem) {

@@ -555,7 +555,7 @@ export default function JobDetailPage() {
   const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
   const [peopleSearch, setPeopleSearch] = useState('');
   const [assignRole, setAssignRole] = useState('driver');
-  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+
   const [editingQuoteId, setEditingQuoteId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Record<string, unknown>>({});
   const [editSaving, setEditSaving] = useState(false);
@@ -1003,15 +1003,6 @@ export default function JobDetailPage() {
     }
   }
 
-  async function deleteQuote(quoteId: string) {
-    try {
-      await api.delete(`/quotes/${quoteId}`);
-      setQuotes(prev => prev.filter(q => q.id !== quoteId));
-      setConfirmingDelete(null);
-    } catch {
-      console.error('Failed to delete quote');
-    }
-  }
 
   function startEditQuote(q: SavedQuote) {
     const dateStr = q.job_date
@@ -2463,31 +2454,6 @@ export default function JobDetailPage() {
                         </button>
                       )}
 
-                      {/* Delete button */}
-                      {confirmingDelete === q.id ? (
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => deleteQuote(q.id)}
-                            className="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700"
-                          >
-                            Delete
-                          </button>
-                          <button
-                            onClick={() => setConfirmingDelete(null)}
-                            className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200"
-                          >
-                            No
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setConfirmingDelete(q.id)}
-                          className="text-gray-300 hover:text-red-500 text-xs"
-                          title="Delete quote"
-                        >
-                          🗑
-                        </button>
-                      )}
                     </div>
                   </div>
                 </div>

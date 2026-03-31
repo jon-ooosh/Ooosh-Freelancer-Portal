@@ -1110,6 +1110,11 @@ export default function CompletePage() {
   const [clientEmails, setClientEmails] = useState<string[]>([''])
   const [dontSendClientEmail, setDontSendClientEmail] = useState(false)
 
+  // Ooosh staff name (shown when logged in as @oooshtours.co.uk)
+  const [userEmail, setUserEmail] = useState<string | null>(null)
+  const [staffName, setStaffName] = useState('')
+  const isOooshStaff = userEmail?.endsWith('@oooshtours.co.uk') ?? false
+
   // Fetch job data
   useEffect(() => {
     async function fetchJob() {
@@ -1127,6 +1132,11 @@ export default function CompletePage() {
 
         const fetchedJob = data.job || null
         setJob(fetchedJob)
+
+        // Capture user email for Ooosh staff detection
+        if (data.userEmail) {
+          setUserEmail(data.userEmail)
+        }
 
         // Pre-fill client email if available
         if (fetchedJob?.clientEmail) {
@@ -1180,6 +1190,8 @@ export default function CompletePage() {
           // Client email data (for next phase - API will use these)
           clientEmails: validEmails,
           sendClientEmail: !dontSendClientEmail && validEmails.length > 0,
+          // Ooosh staff name (for @oooshtours.co.uk users)
+          ...(isOooshStaff && staffName.trim() ? { staffName: staffName.trim() } : {}),
         }),
       })
 
@@ -1330,6 +1342,23 @@ export default function CompletePage() {
             whatIsIt={job.whatIsIt}
             isDelivery={isDelivery}
           />
+        )}
+
+        {/* Ooosh Staff Name (only for @oooshtours.co.uk users) */}
+        {isOooshStaff && (
+          <div className="bg-white rounded-xl shadow-sm p-4">
+            <h3 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
+              <span>👤</span> Your Name
+            </h3>
+            <input
+              type="text"
+              value={staffName}
+              onChange={(e) => setStaffName(e.target.value)}
+              placeholder="Enter your name"
+              className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500"
+            />
+            <p className="text-xs text-gray-400 mt-1">So we know who completed this job</p>
+          </div>
         )}
 
         {/* Notes */}
