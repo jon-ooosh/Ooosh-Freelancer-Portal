@@ -2781,6 +2781,7 @@ export default function JobDetailPage() {
                     <DatePicker
                       value={localFormData.jobDate}
                       onChange={(val) => setLocalFormData({ ...localFormData, jobDate: val })}
+                      min={new Date().toISOString().split('T')[0]}
                       className={dateChanged ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
                     />
                     {dateChanged && (

@@ -1014,27 +1014,19 @@ function buildItemNote(date?: string | null, endDate?: string | null, time?: str
   const parts: string[] = [];
   if (workType) parts.push(workType);
 
-  const ordinal = (n: number): string => {
-    const s = ['th', 'st', 'nd', 'rd'];
-    const v = n % 100;
-    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+  const formatDate = (isoDate: string): string => {
+    const d = new Date(isoDate + 'T12:00:00');
+    const day = d.getDate();
+    const month = d.toLocaleDateString('en-GB', { month: 'short' });
+    const year = d.getFullYear();
+    return `${day} ${month} ${year}`;
   };
 
   if (date) {
-    const d = new Date(date + 'T12:00:00');
-    const day = d.getDate();
-    const month = d.toLocaleDateString('en-GB', { month: 'long' });
-
     if (endDate && endDate !== date) {
-      const ed = new Date(endDate + 'T12:00:00');
-      const endDay = ed.getDate();
-      const endMonth = ed.toLocaleDateString('en-GB', { month: 'long' });
-      parts.push(month === endMonth
-        ? `${ordinal(day)} - ${ordinal(endDay)} ${month}`
-        : `${ordinal(day)} ${month} - ${ordinal(endDay)} ${endMonth}`
-      );
+      parts.push(`${formatDate(date)} - ${formatDate(endDate)}`);
     } else {
-      parts.push(`${ordinal(day)} ${month}`);
+      parts.push(formatDate(date));
     }
   }
 
