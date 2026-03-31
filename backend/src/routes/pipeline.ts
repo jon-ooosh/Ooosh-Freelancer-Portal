@@ -225,7 +225,7 @@ router.get('/chase-due', async (_req: AuthRequest, res: Response) => {
 const createEnquirySchema = z.object({
   // Required
   client_name: z.string().min(1),
-  details: z.string().min(1),              // "What they want"
+  details: z.string().optional().nullable(),  // "What they want" — optional if service_types selected
   // Dates (all optional — enquiry may not have dates yet)
   out_date: z.string().optional().nullable(),      // Outgoing / equipment leaves
   job_date: z.string().optional().nullable(),      // Job start
@@ -252,25 +252,38 @@ const createEnquirySchema = z.object({
 router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
-      client_name, details, out_date, job_date, job_end, return_date, job_name,
+      client_name, out_date, job_date, job_end, return_date, job_name,
       client_id, venue_id, venue_name, enquiry_source,
       job_value, likelihood, notes, manager1_person_id,
       next_chase_date, chase_interval_days, chase_alert_user_id,
       service_types, band_name,
     } = req.body;
+    let { details } = req.body;
+
+    // Service type labels
+    const serviceLabels: Record<string, string> = {
+      self_drive_van: 'Self-drive van',
+      backline: 'Backline',
+      rehearsal: 'Rehearsal',
+    };
+    const selectionPart = service_types && service_types.length > 0
+      ? service_types.map((t: string) => serviceLabels[t] || t).join(' + ')
+      : null;
+
+    // Require either details or service_types
+    if (!details && !selectionPart) {
+      res.status(400).json({ error: 'Please provide a description or select a service type' });
+      return;
+    }
+
+    // If no details text, use service type labels
+    if (!details && selectionPart) {
+      details = selectionPart;
+    }
 
     // Auto-generate job name: "Band - Client - Selection" (with regular dashes)
     let finalJobName = job_name;
     if (!finalJobName) {
-      const serviceLabels: Record<string, string> = {
-        self_drive_van: 'Self-drive van',
-        backline: 'Backline',
-        rehearsal: 'Rehearsal',
-      };
-      const selectionPart = service_types && service_types.length > 0
-        ? service_types.map((t: string) => serviceLabels[t] || t).join(' + ')
-        : null;
-
       const parts: string[] = [];
       if (band_name) parts.push(band_name);
       parts.push(client_name);
@@ -368,12 +381,18 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       }
       for (const reqType of reqTypes) {
         try {
-          await query(
-            `INSERT INTO job_requirements (job_id, requirement_type, status, created_by)
-             VALUES ($1, $2, 'not_started', $3)
-             ON CONFLICT DO NOTHING`,
-            [jobId, reqType, req.user!.id]
+          // Check if already exists (unique constraint is deferred so ON CONFLICT won't work)
+          const exists = await query(
+            `SELECT 1 FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 LIMIT 1`,
+            [jobId, reqType]
           );
+          if (exists.rows.length === 0) {
+            await query(
+              `INSERT INTO job_requirements (job_id, requirement_type, status, created_by, source)
+               VALUES ($1, $2, 'not_started', $3, 'enquiry_form')`,
+              [jobId, reqType, req.user!.id]
+            );
+          }
         } catch (reqErr) {
           console.error(`Failed to create requirement ${reqType} for job ${jobId}:`, reqErr);
         }
@@ -916,17 +935,21 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Format dates as YYYY-MM-DD hh:mm (HireHop expects this)
+    // Format dates as YYYY-MM-DD hh:mm (HireHop expects this, use UTC to avoid timezone drift)
+    // Default to 09:00 if time is midnight (dates from DatePicker have no time component)
     const formatHHDate = (d: string | null): string | undefined => {
       if (!d) return undefined;
       try {
         const date = new Date(d);
-        const yyyy = date.getFullYear();
-        const mm = String(date.getMonth() + 1).padStart(2, '0');
-        const dd = String(date.getDate()).padStart(2, '0');
-        const hh = String(date.getHours()).padStart(2, '0');
-        const min = String(date.getMinutes()).padStart(2, '0');
-        return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
+        const yyyy = date.getUTCFullYear();
+        const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(date.getUTCDate()).padStart(2, '0');
+        const hh = date.getUTCHours();
+        const min = date.getUTCMinutes();
+        // Default midnight to 09:00 (typical business start time)
+        const effectiveHH = (hh === 0 && min === 0) ? '09' : String(hh).padStart(2, '0');
+        const effectiveMin = (hh === 0 && min === 0) ? '00' : String(min).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd} ${effectiveHH}:${effectiveMin}`;
       } catch {
         return undefined;
       }
@@ -975,28 +998,29 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     const effectiveOut = outDate || startDate;
     const effectiveReturn = toDate || endDate;
 
-    // HireHop save_job.php date fields:
-    // out = goods out, job_date = job start, job_end = job end, in = goods return
+    // HireHop job_save.php date fields (per API docs):
+    // out = equipment reserved from (compulsory), start = charging from (compulsory),
+    // end = job ends, to = equipment available again
     if (effectiveOut) hhBody.out = effectiveOut;
-    if (startDate) hhBody.job_date = startDate;
-    if (endDate) hhBody.job_end = endDate;
-    if (effectiveReturn) hhBody.in = effectiveReturn;
+    if (startDate) hhBody.start = startDate;
+    if (endDate) hhBody.end = endDate;
+    if (effectiveReturn) hhBody.to = effectiveReturn;
 
-    // Calculate charge period explicitly (out → return, in whole days + hours)
-    const chargeOutDate = new Date(job.out_date || job.job_date);
-    const chargeInDate = new Date(job.return_date || job.job_end);
-    if (!isNaN(chargeOutDate.getTime()) && !isNaN(chargeInDate.getTime())) {
-      const diffMs = chargeInDate.getTime() - chargeOutDate.getTime();
+    // duration_days / duration_hrs = chargeable period from JOB_DATE (per API docs)
+    // duration_locked = 0 so it recalculates if dates are edited in HH later
+    const dStart = new Date(job.job_date);
+    const dEnd = new Date(job.job_end);
+    if (!isNaN(dStart.getTime()) && !isNaN(dEnd.getTime())) {
+      const diffMs = dEnd.getTime() - dStart.getTime();
       const totalHours = Math.max(0, diffMs / (1000 * 60 * 60));
-      const chargeDays = Math.floor(totalHours / 24);
-      const chargeHours = Math.round(totalHours % 24);
-      hhBody.charge_days = chargeDays;
-      hhBody.charge_hrs = chargeHours;
+      hhBody.duration_days = Math.floor(totalHours / 24);
+      hhBody.duration_hrs = Math.round(totalHours % 24);
+      hhBody.duration_locked = 0;
     }
 
-    console.log('[Pipeline] Pushing dates to HireHop:', {
-      out: hhBody.out, job_date: hhBody.job_date, job_end: hhBody.job_end,
-      in: hhBody.in, charge_days: hhBody.charge_days, charge_hrs: hhBody.charge_hrs,
+    console.log('[Pipeline] Creating job in HireHop:', {
+      out: hhBody.out, start: hhBody.start, end: hhBody.end, to: hhBody.to,
+      duration_days: hhBody.duration_days, duration_hrs: hhBody.duration_hrs,
     });
 
     // POST to HireHop via broker
