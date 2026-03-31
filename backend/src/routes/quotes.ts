@@ -1058,6 +1058,10 @@ async function findOrCreateHeader(hhJobId: string): Promise<string> {
 
   // Fetch existing items to find a header — skip cache to avoid stale data causing duplicate headers
   const itemsRes = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: -1 }) as any;
+  if (!itemsRes?.success) {
+    console.error(`[HH findOrCreateHeader] Broker failed for job ${hhJobId}:`, itemsRes?.error);
+    // If we can't read items, still try to create a header rather than failing entirely
+  }
   const rawData = itemsRes?.data;
   // HH may return a plain array, or { items: [...] }, or { rows: [...] }
   const items = Array.isArray(rawData)
@@ -1111,10 +1115,13 @@ async function addItemToHireHop(
 
     // Step 2: Add the item
     const itemsToAdd = { [`c${listId}`]: qty };
-    await hhBroker.post('/api/save_job.php', {
+    const addResult = await hhBroker.post('/api/save_job.php', {
       job: hhJobId,
       items: JSON.stringify(itemsToAdd),
     }, { priority: 'high' });
+    if (!addResult.success) {
+      return { success: false, error: `Failed to add item to HH job: ${addResult.error}` };
+    }
 
     // Step 3: Find the new item
     await new Promise(r => setTimeout(r, 1000));
@@ -1237,9 +1244,10 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
 
     console.log(`[HH Push] Quote ${quoteId} → HH job ${hhJobId}: ${quote.job_type} item added (list=${listId}, qty=${qty}, price=${price})`);
     res.json({ success: true, hhJobId });
-  } catch (error) {
-    console.error('Push to HireHop error:', error);
-    res.status(500).json({ error: 'Failed to push to HireHop' });
+  } catch (error: any) {
+    const msg = error?.message || String(error);
+    console.error('Push to HireHop error:', msg, error);
+    res.status(500).json({ error: `Failed to push to HireHop: ${msg}` });
   }
 });
 
