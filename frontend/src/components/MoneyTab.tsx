@@ -486,27 +486,47 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                 </div>
 
                 {/* Excess: link to record */}
-                {isExcessMode && excess.records.length > 0 && (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Excess Record</label>
-                    <select
-                      value={payExcessId}
-                      onChange={(e) => {
-                        setPayExcessId(e.target.value);
-                        const rec = excess.records.find(r => r.id === e.target.value);
-                        if (rec) setPayAmount(String(Number(rec.excess_amount_required || 0) - Number(rec.excess_amount_taken || 0)));
-                      }}
-                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
-                    >
-                      <option value="">Select...</option>
-                      {excess.records.filter(r => r.excess_status === 'pending' || r.excess_status === 'partial').map(r => (
-                        <option key={r.id} value={r.id}>
-                          {r.driver_name || 'Unknown'} - £{Number(r.excess_amount_required || 0).toFixed(2)} ({statusLabel(r.excess_status)})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
+                {isExcessMode && excess.records.length > 0 && (() => {
+                  const pendingRecords = excess.records.filter(r => r.excess_status === 'pending' || r.excess_status === 'partial');
+
+                  // Auto-select if only one pending record and nothing selected yet
+                  if (pendingRecords.length === 1 && !payExcessId) {
+                    const rec = pendingRecords[0];
+                    // Use setTimeout to avoid setState during render
+                    setTimeout(() => {
+                      setPayExcessId(rec.id);
+                      setPayAmount(String(Math.max(0, Number(rec.excess_amount_required || 0) - Number(rec.excess_amount_taken || 0)).toFixed(2)));
+                    }, 0);
+                  }
+
+                  return (
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Excess Record</label>
+                      {pendingRecords.length === 1 ? (
+                        <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-700">
+                          {pendingRecords[0].driver_name || 'Unknown'} — £{Number(pendingRecords[0].excess_amount_required || 0).toFixed(2)}
+                        </div>
+                      ) : (
+                        <select
+                          value={payExcessId}
+                          onChange={(e) => {
+                            setPayExcessId(e.target.value);
+                            const rec = excess.records.find(r => r.id === e.target.value);
+                            if (rec) setPayAmount(String(Math.max(0, Number(rec.excess_amount_required || 0) - Number(rec.excess_amount_taken || 0)).toFixed(2)));
+                          }}
+                          className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                        >
+                          <option value="">Select excess record...</option>
+                          {pendingRecords.map(r => (
+                            <option key={r.id} value={r.id}>
+                              {r.driver_name || 'Unknown'} — £{Number(r.excess_amount_required || 0).toFixed(2)} ({statusLabel(r.excess_status)})
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Quick amount buttons */}
                 {quickAmounts.length > 0 && (

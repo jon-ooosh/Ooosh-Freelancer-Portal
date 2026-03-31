@@ -3,7 +3,7 @@
  *
  * Supports: Record Payment, Record Claim, Reimburse, Waive, Roll Over, Move to different entity.
  */
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
@@ -74,7 +74,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
       ? (Number(excess.excess_amount_required) - Number(excess.excess_amount_taken || 0)).toFixed(2)
       : ''
   );
-  const [payMethod, setPayMethod] = useState('payment_portal');
+  const [payMethod, setPayMethod] = useState('worldpay');
   const [payReference, setPayReference] = useState('');
 
   // Claim form
@@ -84,7 +84,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   // Reimburse form
   const amountHeld = Number(excess.excess_amount_taken || 0) - Number(excess.claim_amount || 0) - Number(excess.reimbursement_amount || 0);
   const [reimburseAmount, setReimburseAmount] = useState(amountHeld > 0 ? amountHeld.toFixed(2) : '');
-  const [reimburseMethod, setReimburseMethod] = useState('bank_transfer');
+  const [reimburseMethod, setReimburseMethod] = useState('wise_bacs');
 
   // Waive form
   const [waiveReason, setWaiveReason] = useState('');
@@ -93,6 +93,10 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [moveXeroId, setMoveXeroId] = useState('');
   const [moveXeroName, setMoveXeroName] = useState('');
   const [moveReason, setMoveReason] = useState('');
+  const [moveSearch, setMoveSearch] = useState('');
+  const [moveResults, setMoveResults] = useState<Array<{ id: string; name: string; subtitle: string; type: string }>>([]);
+  const [moveSearching, setMoveSearching] = useState(false);
+  const moveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function handleSubmit() {
     setLoading(true);
@@ -401,27 +405,74 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               <div className="space-y-3">
                 <h3 className="text-sm font-semibold text-gray-900">Move to Different Entity</h3>
                 <p className="text-xs text-gray-500">
-                  Reassign this excess record to a different Xero contact (e.g. if the paying entity changed).
+                  Reassign this excess to a different client (e.g. management company paying instead of band).
                 </p>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Xero Contact ID</label>
-                  <input
-                    type="text"
-                    value={moveXeroId}
-                    onChange={(e) => setMoveXeroId(e.target.value)}
-                    placeholder="Xero contact ID"
-                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Contact Name</label>
-                  <input
-                    type="text"
-                    value={moveXeroName}
-                    onChange={(e) => setMoveXeroName(e.target.value)}
-                    placeholder="Company / person name"
-                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
-                  />
+                <div className="relative">
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Search Organisation or Person</label>
+                  {moveXeroName ? (
+                    <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border border-gray-200 rounded-md">
+                      <span className="text-sm text-gray-900 flex-1">{moveXeroName}</span>
+                      <button
+                        type="button"
+                        onClick={() => { setMoveXeroName(''); setMoveXeroId(''); setMoveSearch(''); }}
+                        className="text-gray-400 hover:text-gray-600"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <input
+                        type="text"
+                        value={moveSearch}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setMoveSearch(val);
+                          if (moveTimerRef.current) clearTimeout(moveTimerRef.current);
+                          if (val.length >= 2) {
+                            setMoveSearching(true);
+                            moveTimerRef.current = setTimeout(async () => {
+                              try {
+                                const data = await api.get<{ results: Array<{ id: string; name: string; subtitle: string; type: string }> }>(`/search?q=${encodeURIComponent(val)}&limit=8`);
+                                setMoveResults(data.results.filter(r => r.type === 'organisation' || r.type === 'person'));
+                              } catch { setMoveResults([]); }
+                              setMoveSearching(false);
+                            }, 300);
+                          } else {
+                            setMoveResults([]);
+                          }
+                        }}
+                        placeholder="Type to search..."
+                        className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                      />
+                      {(moveResults.length > 0 || moveSearching) && (
+                        <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-48 overflow-y-auto">
+                          {moveSearching && <p className="px-3 py-2 text-xs text-gray-400">Searching...</p>}
+                          {moveResults.map(r => (
+                            <button
+                              key={`${r.type}-${r.id}`}
+                              type="button"
+                              onClick={() => {
+                                setMoveXeroName(r.name);
+                                setMoveXeroId(r.id);
+                                setMoveSearch('');
+                                setMoveResults([]);
+                              }}
+                              className="w-full text-left px-3 py-2 hover:bg-gray-50 border-b border-gray-100 last:border-0"
+                            >
+                              <span className="text-sm text-gray-900">{r.name}</span>
+                              <span className="text-xs text-gray-400 ml-2">
+                                {r.type === 'organisation' ? 'Org' : 'Person'}
+                                {r.subtitle && ` · ${r.subtitle}`}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Reason (optional)</label>

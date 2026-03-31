@@ -64,7 +64,7 @@ const overrideSchema = z.object({
 });
 
 const moveExcessSchema = z.object({
-  xero_contact_id: z.string().max(100),
+  xero_contact_id: z.string().max(100).optional().default(''),
   xero_contact_name: z.string().max(200),
   client_name: z.string().max(200).optional(),
   person_id: z.string().uuid().nullable().optional().or(z.literal('')),
@@ -121,11 +121,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         vha.hire_end,
         vha.assignment_type,
         fv.reg AS vehicle_reg,
-        d.full_name AS driver_name
+        d.full_name AS driver_name,
+        j.job_name
       FROM job_excess je
-      JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+      LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
+      LEFT JOIN jobs j ON j.id = je.job_id
       ${where}
       ORDER BY je.created_at DESC
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
@@ -183,11 +185,13 @@ router.get('/ledger/:xeroContactId', authorize('admin', 'manager'), async (req: 
         vha.hire_start,
         vha.hire_end,
         fv.reg AS vehicle_reg,
-        d.full_name AS driver_name
+        d.full_name AS driver_name,
+        j.job_name
       FROM job_excess je
-      JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+      LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
+      LEFT JOIN jobs j ON j.id = je.job_id
       WHERE je.xero_contact_id = $1
       ORDER BY je.created_at DESC`,
       [xeroContactId]
@@ -216,11 +220,13 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
         vha.hire_start,
         vha.hire_end,
         fv.reg AS vehicle_reg,
-        d.full_name AS driver_name
+        d.full_name AS driver_name,
+        j.job_name
       FROM job_excess je
-      JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+      LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
+      LEFT JOIN jobs j ON j.id = je.job_id
       WHERE je.id = $1`,
       [id]
     );
@@ -304,6 +310,16 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
       res.status(404).json({ error: 'Excess record not found' });
       return;
     }
+
+    // Send excess payment confirmation email
+    const excess = result.rows[0];
+    sendExcessEmail({
+      templateId: 'excess_payment_confirmed',
+      excessId: id as string,
+      jobId: excess.job_id,
+      amount,
+      paymentMethod: method,
+    }).catch(e => console.error('[excess] Payment email failed:', e));
 
     res.json({ data: result.rows[0] });
   } catch (error) {
@@ -516,7 +532,7 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
         d.full_name AS driver_name,
         j.job_name
       FROM job_excess je
-      JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+      LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN jobs j ON j.id = je.job_id
@@ -566,7 +582,7 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
         d.full_name AS driver_name,
         j.job_name
       FROM job_excess je
-      JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+      LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN jobs j ON j.id = je.job_id
