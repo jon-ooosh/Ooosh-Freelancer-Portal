@@ -807,7 +807,23 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
       ]
     );
 
-    res.status(201).json({ id: result.rows[0].id });
+    const quoteId = result.rows[0].id;
+
+    // Auto-assign "Ooosh Staff" person to local D&C quotes
+    const OOOSH_STAFF_ID = '00000000-0000-0000-0000-000000000001';
+    try {
+      await query(
+        `INSERT INTO quote_assignments (quote_id, person_id, role, is_ooosh_crew, created_by)
+         VALUES ($1, $2, 'driver', true, $3)
+         ON CONFLICT (quote_id, person_id) DO NOTHING`,
+        [quoteId, OOOSH_STAFF_ID, req.user!.id]
+      );
+    } catch (assignErr) {
+      // Non-fatal: quote was created, just log the auto-assign failure
+      console.warn('Failed to auto-assign Ooosh Staff to local quote:', assignErr);
+    }
+
+    res.status(201).json({ id: quoteId });
   } catch (error) {
     console.error('Create local quote error:', error);
     res.status(500).json({ error: 'Failed to create local delivery/collection' });
