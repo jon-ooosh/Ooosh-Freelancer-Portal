@@ -1694,6 +1694,12 @@ export default function JobDetailPage() {
                         min="0"
                       />
                     </div>
+                  ) : job.hh_job_number ? (
+                    <span className="font-semibold text-gray-900">
+                      {job.job_value != null && job.job_value > 0
+                        ? `£${job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                        : <span className="text-gray-400 font-normal">View Money tab</span>}
+                    </span>
                   ) : (
                     <button
                       onClick={startEditValue}
@@ -1701,7 +1707,7 @@ export default function JobDetailPage() {
                       title="Click to edit job value"
                     >
                       {job.job_value != null
-                        ? `£${job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+                        ? `£${job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
                         : <span className="text-gray-400 font-normal">Set value</span>}
                     </button>
                   )}
