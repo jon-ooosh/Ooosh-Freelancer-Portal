@@ -989,6 +989,15 @@ export default function JobDetailPage() {
       working_terms_type: string | null; working_terms_credit_days: number | null;
       working_terms_notes: string | null; internal_notes: string | null;
     } | null;
+    band_history?: {
+      jobs: Array<{
+        id: string; hh_job_number: number | null; job_name: string | null;
+        status: number; pipeline_status: string | null; job_date: string | null;
+        job_end: string | null; job_value: number | null;
+      }>;
+      stats: { total_jobs: string; confirmed_jobs: string; lost_jobs: string; total_confirmed_value: string; total_value: string };
+      band_info?: { id: string; name: string; do_not_hire: boolean; do_not_hire_reason: string | null; internal_notes: string | null } | null;
+    } | null;
   } | null>(null);
 
   useEffect(() => {
@@ -1017,17 +1026,19 @@ export default function JobDetailPage() {
     return () => clearTimeout(timeout);
   }, [jobOrgSearch]);
 
-  // Load client history when job loads
+  // Load client history when job loads (include band if linked)
   useEffect(() => {
     if (job && (job.client_id || job.client_name)) {
-      const params = job.client_id
+      let params = job.client_id
         ? `client_id=${encodeURIComponent(job.client_id)}&exclude_job_id=${job.id}`
         : `client_name=${encodeURIComponent(job.client_name!)}&exclude_job_id=${job.id}`;
+      const bandOrg = jobOrgs.find(jo => jo.role === 'band');
+      if (bandOrg) params += `&band_id=${encodeURIComponent(bandOrg.organisation_id)}`;
       api.get<typeof clientHistoryData>(`/pipeline/client-history?${params}`)
         .then(data => setClientHistoryData(data))
         .catch(() => setClientHistoryData(null));
     }
-  }, [job?.id, job?.client_id, job?.client_name]);
+  }, [job?.id, job?.client_id, job?.client_name, jobOrgs]);
 
   async function loadQuotes() {
     if (!id) return;
@@ -3199,7 +3210,41 @@ export default function JobDetailPage() {
               </div>
             </div>
 
-            <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">Other Jobs</h4>
+            {/* Band History */}
+            {clientHistoryData!.band_history && parseInt(clientHistoryData!.band_history.stats.total_jobs) > 0 && (
+              <div className="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                <h5 className="text-xs font-semibold text-purple-700 uppercase mb-2">
+                  Band - {clientHistoryData!.band_history.band_info?.name || 'Unknown'}
+                </h5>
+                {clientHistoryData!.band_history.band_info?.do_not_hire && (
+                  <div className="mb-2 p-2 bg-red-50 border border-red-200 rounded text-xs font-bold text-red-700">DO NOT HIRE</div>
+                )}
+                <div className="grid grid-cols-3 gap-1.5 mb-2">
+                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
+                    <div className="text-sm font-bold text-gray-900">{clientHistoryData!.band_history.stats.total_jobs}</div>
+                    <div className="text-[10px] text-gray-500">Jobs</div>
+                  </div>
+                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
+                    <div className="text-sm font-bold text-green-600">{clientHistoryData!.band_history.stats.confirmed_jobs}</div>
+                    <div className="text-[10px] text-gray-500">Confirmed</div>
+                  </div>
+                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
+                    <div className="text-sm font-bold text-gray-900">
+                      {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 0 }).format(parseFloat(clientHistoryData!.band_history.stats.total_confirmed_value))}
+                    </div>
+                    <div className="text-[10px] text-gray-500">Value</div>
+                  </div>
+                </div>
+                {clientHistoryData!.band_history.jobs.slice(0, 5).map((bj) => (
+                  <Link key={bj.id} to={`/jobs/${bj.id}`} className="block text-xs text-gray-700 py-1 border-t border-purple-100 hover:text-ooosh-600 flex justify-between">
+                    <span className="truncate flex-1">{bj.job_name || 'Untitled'}</span>
+                    {bj.job_date && <span className="text-gray-400 ml-2 shrink-0">{new Date(bj.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' })}</span>}
+                  </Link>
+                ))}
+              </div>
+            )}
+
+            <h4 className="text-xs font-semibold text-gray-500 uppercase mb-2">{clientHistoryData!.band_history ? 'Client Jobs' : 'Other Jobs'}</h4>
             <div className="space-y-2 max-h-[60vh] overflow-y-auto">
               {clientHistoryData!.jobs.map((j) => {
                 const pStatus = j.pipeline_status;

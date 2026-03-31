@@ -834,16 +834,29 @@ function NewEnquiryModal({
       working_terms_type: string | null; working_terms_credit_days: number | null;
       working_terms_notes: string | null; internal_notes: string | null;
     } | null;
+    band_history?: {
+      jobs: Array<{
+        id: string; hh_job_number: number | null; job_name: string | null;
+        status: number; pipeline_status: string | null; job_date: string | null;
+        job_end: string | null; job_value: number | null;
+      }>;
+      stats: {
+        total_jobs: string; confirmed_jobs: string; lost_jobs: string;
+        total_confirmed_value: string; total_value: string;
+      };
+      band_info?: { id: string; name: string; do_not_hire: boolean; do_not_hire_reason: string | null; internal_notes: string | null } | null;
+    } | null;
   } | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
-  const fetchClientHistory = useCallback(async (orgId: string | null, name: string) => {
+  const fetchClientHistory = useCallback(async (orgId: string | null, name: string, currentBandId?: string | null) => {
     if (!name || name.length < 2) { setClientHistory(null); return; }
     setHistoryLoading(true);
     try {
-      const params = orgId
+      let params = orgId
         ? `client_id=${encodeURIComponent(orgId)}`
         : `client_name=${encodeURIComponent(name)}`;
+      if (currentBandId) params += `&band_id=${encodeURIComponent(currentBandId)}`;
       const data = await api.get<typeof clientHistory>(`/pipeline/client-history?${params}`);
       setClientHistory(data);
     } catch {
@@ -894,10 +907,10 @@ function NewEnquiryModal({
     setNewClientPhone('');
     if (result.type === 'organisation') {
       setClientId(result.id);
-      fetchClientHistory(result.id, result.name);
+      fetchClientHistory(result.id, result.name, bandId);
     } else {
       setClientId(null);
-      fetchClientHistory(null, result.name);
+      fetchClientHistory(null, result.name, bandId);
     }
   };
 
@@ -908,7 +921,7 @@ function NewEnquiryModal({
     setNewClientEmail('');
     setNewClientPhone('');
     // Fetch history by name in case there are jobs under this name already
-    fetchClientHistory(null, name);
+    fetchClientHistory(null, name, bandId);
   };
 
   // Today's date for min constraint (no past dates)
@@ -1120,7 +1133,7 @@ function NewEnquiryModal({
     }
   };
 
-  const hasHistory = clientHistory && (parseInt(clientHistory.stats.total_jobs) > 0 || clientHistory.client_info);
+  const hasHistory = clientHistory && (parseInt(clientHistory.stats.total_jobs) > 0 || clientHistory.client_info || clientHistory.band_history);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -1193,7 +1206,7 @@ function NewEnquiryModal({
               <div className="flex items-center gap-2 bg-purple-50 border border-purple-200 rounded px-3 py-2">
                 <span className="text-sm font-medium text-purple-700">{bandName}</span>
                 <button
-                  onClick={() => { setBandId(null); setBandName(''); setBandSearch(''); }}
+                  onClick={() => { setBandId(null); setBandName(''); setBandSearch(''); if (clientName) fetchClientHistory(clientId, clientName, null); }}
                   className="ml-auto text-xs text-purple-400 hover:text-purple-600"
                 >
                   &times; Remove
@@ -1215,6 +1228,8 @@ function NewEnquiryModal({
                         key={o.id}
                         onClick={async () => {
                           setBandId(o.id); setBandName(o.name); setBandResults([]); setBandSearch('');
+                          // Refresh history with band context
+                          if (clientName) fetchClientHistory(clientId, clientName, o.id);
                           // Auto-suggest client from org graph if client is empty
                           if (!clientName && !clientId) {
                             try {
@@ -1634,8 +1649,40 @@ function NewEnquiryModal({
               </div>
             </div>
 
+            {/* Band History Section */}
+            {clientHistory!.band_history && parseInt(clientHistory!.band_history.stats.total_jobs) > 0 && (
+              <div className="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+                <h5 className="text-xs font-semibold text-purple-700 uppercase mb-2">
+                  Band History - {clientHistory!.band_history.band_info?.name || bandName}
+                </h5>
+                {clientHistory!.band_history.band_info?.do_not_hire && (
+                  <div className="mb-2 p-2 bg-red-50 border border-red-200 rounded text-xs font-bold text-red-700">DO NOT HIRE</div>
+                )}
+                <div className="grid grid-cols-3 gap-1.5 mb-2">
+                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
+                    <div className="text-sm font-bold text-gray-900">{clientHistory!.band_history.stats.total_jobs}</div>
+                    <div className="text-[10px] text-gray-500">Jobs</div>
+                  </div>
+                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
+                    <div className="text-sm font-bold text-green-600">{clientHistory!.band_history.stats.confirmed_jobs}</div>
+                    <div className="text-[10px] text-gray-500">Confirmed</div>
+                  </div>
+                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
+                    <div className="text-sm font-bold text-gray-900">{formatCurrency(parseFloat(clientHistory!.band_history.stats.total_confirmed_value))}</div>
+                    <div className="text-[10px] text-gray-500">Value</div>
+                  </div>
+                </div>
+                {clientHistory!.band_history.jobs.slice(0, 5).map((j) => (
+                  <div key={j.id} className="text-xs text-gray-700 py-1 border-t border-purple-100 flex justify-between">
+                    <span className="truncate flex-1">{j.job_name || 'Untitled'}</span>
+                    {j.job_date && <span className="text-gray-400 ml-2 shrink-0">{new Date(j.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' })}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Recent jobs list */}
-            <h5 className="text-xs font-semibold text-gray-500 uppercase mb-2">Recent Jobs</h5>
+            <h5 className="text-xs font-semibold text-gray-500 uppercase mb-2">{clientHistory!.band_history ? 'Client Jobs' : 'Recent Jobs'}</h5>
             <div className="space-y-2">
               {clientHistory!.jobs.map((j) => {
                 const pStatus = j.pipeline_status;
