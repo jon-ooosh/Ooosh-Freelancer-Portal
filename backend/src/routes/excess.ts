@@ -71,6 +71,68 @@ const moveExcessSchema = z.object({
   reason: z.string().max(500).optional(),
 });
 
+const createExcessSchema = z.object({
+  job_id: z.string().uuid(),
+  hirehop_job_id: z.number().int().nullable().optional(),
+  excess_amount_required: z.number().min(0).nullable().optional(),
+  excess_calculation_basis: z.string().nullable().optional(),
+  client_name: z.string().max(200).optional(),
+  assignment_id: z.string().uuid().nullable().optional(),
+  notes: z.string().max(1000).optional(),
+});
+
+// ── POST /api/excess/create — Manually create an excess record from the Money tab ──
+// Allows tracking excess at the job level without requiring a hire form first.
+
+router.post('/create', validate(createExcessSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const {
+      job_id, hirehop_job_id, excess_amount_required,
+      excess_calculation_basis, client_name,
+      assignment_id, notes,
+    } = req.body;
+
+    // Look up job to populate client info if not provided
+    const jobResult = await query(
+      `SELECT id, hh_job_number, client_name, company_name, client_id FROM jobs WHERE id = $1`,
+      [job_id]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const job = jobResult.rows[0];
+
+    const effectiveClientName = client_name || job.client_name || job.company_name || null;
+    const effectiveHHJobId = hirehop_job_id || job.hh_job_number || null;
+
+    const result = await query(
+      `INSERT INTO job_excess (
+        job_id, hirehop_job_id, assignment_id,
+        excess_amount_required, excess_calculation_basis,
+        excess_status, client_name, notes, created_by
+      ) VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8)
+      RETURNING *`,
+      [
+        job_id,
+        effectiveHHJobId,
+        assignment_id || null,
+        excess_amount_required ?? null,
+        excess_calculation_basis || null,
+        effectiveClientName,
+        notes || null,
+        req.user!.id,
+      ]
+    );
+
+    console.log(`[excess] Manual excess record created: job=${job_id}, amount=${excess_amount_required || 'TBD'}, client=${effectiveClientName}`);
+    res.status(201).json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[excess] Create error:', error);
+    res.status(500).json({ error: 'Failed to create excess record' });
+  }
+});
+
 // ── GET /api/excess — List excess records ──
 
 router.get('/', async (req: AuthRequest, res: Response) => {
