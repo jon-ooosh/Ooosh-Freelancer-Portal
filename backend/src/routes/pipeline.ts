@@ -935,16 +935,16 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Format dates as YYYY-MM-DD hh:mm (HireHop expects this)
+    // Format dates as YYYY-MM-DD hh:mm (HireHop expects this, use UTC to avoid timezone drift)
     const formatHHDate = (d: string | null): string | undefined => {
       if (!d) return undefined;
       try {
         const date = new Date(d);
-        const yyyy = date.getFullYear();
-        const mm = String(date.getMonth() + 1).padStart(2, '0');
-        const dd = String(date.getDate()).padStart(2, '0');
-        const hh = String(date.getHours()).padStart(2, '0');
-        const min = String(date.getMinutes()).padStart(2, '0');
+        const yyyy = date.getUTCFullYear();
+        const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(date.getUTCDate()).padStart(2, '0');
+        const hh = String(date.getUTCHours()).padStart(2, '0');
+        const min = String(date.getUTCMinutes()).padStart(2, '0');
         return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
       } catch {
         return undefined;
@@ -1004,8 +1004,21 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       hhBody.to = effectiveReturn;
     }
 
-    console.log('[Pipeline] Pushing dates to HireHop:', {
+    // Explicitly calculate charge period (HH doesn't auto-calculate from dates via API)
+    const chargeOutDate = new Date(job.out_date || job.job_date);
+    const chargeInDate = new Date(job.return_date || job.job_end);
+    if (!isNaN(chargeOutDate.getTime()) && !isNaN(chargeInDate.getTime())) {
+      const diffMs = chargeInDate.getTime() - chargeOutDate.getTime();
+      const totalHours = Math.max(0, diffMs / (1000 * 60 * 60));
+      const chargeDays = Math.floor(totalHours / 24);
+      const chargeHours = Math.round(totalHours % 24);
+      hhBody.charge_days = chargeDays;
+      hhBody.charge_hrs = chargeHours;
+    }
+
+    console.log('[Pipeline] Pushing to HireHop:', {
       out: hhBody.out, start: hhBody.start, end: hhBody.end, to: hhBody.to,
+      charge_days: hhBody.charge_days, charge_hrs: hhBody.charge_hrs,
     });
 
     // POST to HireHop via broker
