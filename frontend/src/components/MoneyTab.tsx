@@ -122,7 +122,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
         payment_method: payMethod,
         payment_reference: payRef || undefined,
         notes: payNotes || undefined,
-        excess_id: payType === 'excess' && payExcessId ? payExcessId : undefined,
+        excess_id: (typeOverride === 'excess' || payType === 'excess') && payExcessId ? payExcessId : undefined,
         push_to_hirehop: payPushToHH,
       });
       setShowPaymentForm(false);
@@ -155,7 +155,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
 
   const { financial, excess, client_balance_on_account } = data;
   const depositPercent = financial.hire_value_inc_vat > 0
-    ? Math.min(100, (financial.total_deposits / financial.hire_value_inc_vat) * 100)
+    ? Math.min(100, (financial.total_hire_deposits / financial.hire_value_inc_vat) * 100)
     : 0;
 
   return (
@@ -200,8 +200,8 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                 </p>
               </div>
               <div>
-                <p className="text-xs text-gray-500">Deposits Received</p>
-                <p className="text-lg font-bold text-green-700">£{financial.total_deposits.toFixed(2)}</p>
+                <p className="text-xs text-gray-500">Hire Deposits</p>
+                <p className="text-lg font-bold text-green-700">£{financial.total_hire_deposits.toFixed(2)}</p>
               </div>
             </div>
 

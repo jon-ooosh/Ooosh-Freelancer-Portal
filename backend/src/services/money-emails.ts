@@ -138,9 +138,9 @@ export async function sendPaymentEmail(opts: {
     ? `<p style="margin:8px 0 0;font-size:13px;color:#166534;">Remaining balance</p><p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">&pound;${balanceOutstanding.toFixed(2)}</p>`
     : '';
 
-  const statusMessage = balanceOutstanding && balanceOutstanding <= 0
+  const statusMessage = balanceOutstanding != null && balanceOutstanding <= 0
     ? 'Your hire is now fully paid. Thank you!'
-    : `Remaining balance: <strong>&pound;${(balanceOutstanding || 0).toFixed(2)}</strong>.`;
+    : `Remaining balance: \u00A3${(balanceOutstanding || 0).toFixed(2)}.`;
 
   await emailService.send(templateId, {
     to: recipients.primaryEmail,
