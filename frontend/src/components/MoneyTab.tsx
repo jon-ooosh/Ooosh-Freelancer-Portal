@@ -100,6 +100,14 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Escape key closes payment modal
+  useEffect(() => {
+    if (!showPaymentForm) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowPaymentForm(false); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [showPaymentForm]);
+
   async function handleRecordPayment(typeOverride?: string) {
     if (!payAmount || parseFloat(payAmount) <= 0) {
       setPayError('Enter a valid amount');

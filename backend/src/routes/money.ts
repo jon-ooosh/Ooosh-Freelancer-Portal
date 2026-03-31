@@ -261,13 +261,6 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // Balance = hire value inc VAT minus hire deposits only (excess deposits are separate)
     const balanceOutstanding = hireValueIncVat - totalHireDeposits;
 
-    // Calculate deposit requirements (same logic as Payment Portal)
-    let requiredDeposit = Math.max(hireValueIncVat * 0.25, 100);
-    if (hireValueIncVat < 400) requiredDeposit = hireValueIncVat;
-    if (hireValueIncVat === 0) requiredDeposit = 0;
-    const depositPaid = totalHireDeposits >= (requiredDeposit - 5); // £5 tolerance (matches portal)
-    const depositPercent = hireValueIncVat > 0 ? Math.min(100, (totalHireDeposits / hireValueIncVat) * 100) : 0;
-
     // Side-effect: update cached job_value on jobs table so pipeline/jobs pages show correct value
     if (hireValueExVat > 0 && job.id) {
       query(
@@ -336,6 +329,13 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     const effectiveVatAmount = vatAdjustment ? vatAdjustment.adjustedVat : vatAmount;
     const effectiveHireValueIncVat = hireValueExVat + effectiveVatAmount;
     const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits;
+
+    // Calculate deposit requirements using effective (VAT-adjusted) total
+    let requiredDeposit = Math.max(effectiveHireValueIncVat * 0.25, 100);
+    if (effectiveHireValueIncVat < 400) requiredDeposit = effectiveHireValueIncVat;
+    if (effectiveHireValueIncVat === 0) requiredDeposit = 0;
+    const depositPaid = totalHireDeposits >= (requiredDeposit - 5); // £5 tolerance
+    const depositPercent = effectiveHireValueIncVat > 0 ? Math.min(100, (totalHireDeposits / effectiveHireValueIncVat) * 100) : 0;
 
     res.json({
       data: {
