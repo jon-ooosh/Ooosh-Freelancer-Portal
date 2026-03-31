@@ -593,22 +593,20 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
     try {
       const bankLabel = PAYMENT_METHODS_LABELS[payment_method] || payment_method;
 
-      if (payment_type === 'excess' && excess_id) {
-        // Excess payment email
-        sendExcessEmail({
-          templateId: 'excess_payment_confirmed',
-          excessId: excess_id,
-          jobId: job.id,
-          amount,
-          paymentMethod: payment_method,
-        }).catch(e => console.error('[money] Excess email failed:', e));
+      if (payment_type === 'excess') {
+        // Excess payment email — only if linked to an excess record
+        if (excess_id) {
+          sendExcessEmail({
+            templateId: 'excess_payment_confirmed',
+            excessId: excess_id,
+            jobId: job.id,
+            amount,
+            paymentMethod: payment_method,
+          }).catch(e => console.error('[money] Excess email failed:', e));
+        }
+        // Excess payments never trigger booking confirmation or last-minute alerts
       } else {
         // Hire payment email
-        // Check if this was a confirming payment (moved to Booked)
-        const wasConfirming = ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(
-          (await query(`SELECT pipeline_status FROM jobs WHERE id = $1`, [job.id])).rows[0]?.pipeline_status || ''
-        );
-        // Actually: status already changed above, so check if pipeline_status is now 'confirmed'
         const currentStatus = (await query(`SELECT pipeline_status FROM jobs WHERE id = $1`, [job.id])).rows[0]?.pipeline_status;
         const isConfirming = currentStatus === 'confirmed';
 
