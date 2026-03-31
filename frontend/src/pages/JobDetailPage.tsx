@@ -1886,7 +1886,7 @@ export default function JobDetailPage() {
             >
               {tab === 'overview' ? 'Overview' :
                tab === 'timeline' ? 'Activity Timeline' :
-               tab === 'transport' ? `Crew & Transport${quotes.length > 0 ? ` (${quotes.length})` : ''}` :
+               tab === 'transport' ? `Crew & Transport${(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}` :
                tab === 'drivers' ? `Drivers & Vehicles${vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}` :
                tab === 'money' ? 'Money' :
                tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
@@ -2884,6 +2884,16 @@ export default function JobDetailPage() {
                       type="time"
                       value={localFormData.arrivalTime}
                       onChange={(e) => setLocalFormData({ ...localFormData, arrivalTime: e.target.value })}
+                      onBlur={(e) => {
+                        // Smart-complete partial times: "11" → "11:00", "9" → "09:00"
+                        const v = e.target.value.trim();
+                        if (v && !v.includes(':')) {
+                          const h = parseInt(v, 10);
+                          if (!isNaN(h) && h >= 0 && h <= 23) {
+                            setLocalFormData({ ...localFormData, arrivalTime: `${String(h).padStart(2, '0')}:00` });
+                          }
+                        }
+                      }}
                       className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                     />
                   </div>
