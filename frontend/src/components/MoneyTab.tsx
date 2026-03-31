@@ -116,19 +116,34 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
     setPayLoading(true);
     setPayError('');
     try {
+      const isExcess = (typeOverride === 'excess' || payType === 'excess');
+      let excessId = isExcess ? payExcessId : undefined;
+
+      // If recording excess but no excess record selected, create one first
+      if (isExcess && !excessId) {
+        const createResult = await api.post<{ data: { id: string } }>('/excess/create', {
+          job_id: jobId,
+          excess_amount_required: parseFloat(payAmount),
+          excess_calculation_basis: 'Manual entry from Money tab',
+          client_name: job.client_name || job.company_name || undefined,
+        });
+        excessId = createResult.data.id;
+      }
+
       await api.post(`/money/${jobId}/record-payment`, {
         payment_type: typeOverride || payType,
         amount: parseFloat(payAmount),
         payment_method: payMethod,
         payment_reference: payRef || undefined,
         notes: payNotes || undefined,
-        excess_id: (typeOverride === 'excess' || payType === 'excess') && payExcessId ? payExcessId : undefined,
+        excess_id: excessId || undefined,
         push_to_hirehop: payPushToHH,
       });
       setShowPaymentForm(false);
       setPayAmount('');
       setPayRef('');
       setPayNotes('');
+      setPayExcessId('');
       loadData();
     } catch (err: any) {
       setPayError(err.message || 'Failed to record payment');
@@ -323,9 +338,9 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
       )}
 
       {/* Insurance Excess */}
-      {excess.records.length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Insurance Excess</h3>
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Insurance Excess</h3>
+        {excess.records.length > 0 ? (
           <div className="space-y-3">
             {excess.records.map((record) => (
               <div
@@ -345,11 +360,11 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                     )}
                   </div>
                   <p className="text-sm text-gray-900 mt-1">
-                    {record.driver_name || 'Unknown driver'}
+                    {record.driver_name || record.client_name || 'Job-level excess'}
                     {record.vehicle_reg && ` — ${record.vehicle_reg}`}
                   </p>
                   <p className="text-xs text-gray-500">
-                    Required: £{Number(record.excess_amount_required || 0).toFixed(2)}
+                    Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
                     {' · '}
                     Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
                   </p>
@@ -363,8 +378,12 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
               </div>
             ))}
           </div>
-        </div>
-      )}
+        ) : (
+          <p className="text-sm text-gray-500">
+            No excess tracked yet. Use "Record Payment" above and toggle to "Insurance Excess" to log excess against this job.
+          </p>
+        )}
+      </div>
 
       {/* Client Account Balance */}
       {client_balance_on_account > 0 && (
@@ -485,14 +504,23 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                   </button>
                 </div>
 
-                {/* Excess: link to record */}
-                {isExcessMode && excess.records.length > 0 && (() => {
+                {/* Excess: link to existing record or create new */}
+                {isExcessMode && (() => {
                   const pendingRecords = excess.records.filter(r => r.excess_status === 'pending' || r.excess_status === 'partial');
+
+                  if (pendingRecords.length === 0) {
+                    // No existing excess records — will auto-create on submit
+                    return (
+                      <div className="px-3 py-2 text-xs bg-blue-50 border border-blue-200 rounded-md text-blue-700">
+                        No excess record exists for this job yet. One will be created automatically when you record this payment.
+                        It will be logged against: <strong>{job.client_name || job.company_name || 'this job'}</strong>
+                      </div>
+                    );
+                  }
 
                   // Auto-select if only one pending record and nothing selected yet
                   if (pendingRecords.length === 1 && !payExcessId) {
                     const rec = pendingRecords[0];
-                    // Use setTimeout to avoid setState during render
                     setTimeout(() => {
                       setPayExcessId(rec.id);
                       setPayAmount(String(Math.max(0, Number(rec.excess_amount_required || 0) - Number(rec.excess_amount_taken || 0)).toFixed(2)));
@@ -504,7 +532,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                       <label className="block text-xs font-medium text-gray-600 mb-1">Excess Record</label>
                       {pendingRecords.length === 1 ? (
                         <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-700">
-                          {pendingRecords[0].driver_name || 'Unknown'} — £{Number(pendingRecords[0].excess_amount_required || 0).toFixed(2)}
+                          {pendingRecords[0].driver_name || pendingRecords[0].client_name || 'Unknown'} — £{Number(pendingRecords[0].excess_amount_required || 0).toFixed(2)}
                         </div>
                       ) : (
                         <select
@@ -519,7 +547,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                           <option value="">Select excess record...</option>
                           {pendingRecords.map(r => (
                             <option key={r.id} value={r.id}>
-                              {r.driver_name || 'Unknown'} — £{Number(r.excess_amount_required || 0).toFixed(2)} ({statusLabel(r.excess_status)})
+                              {r.driver_name || r.client_name || 'Unknown'} — £{Number(r.excess_amount_required || 0).toFixed(2)} ({statusLabel(r.excess_status)})
                             </option>
                           ))}
                         </select>

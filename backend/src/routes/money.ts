@@ -271,7 +271,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
     // Get OP excess data for this job
     const excessResult = await query(
-      `SELECT je.*, d.full_name AS driver_name, fv.reg AS vehicle_reg
+      `SELECT je.*, d.full_name AS driver_name, fv.reg AS vehicle_reg,
+              COALESCE(d.full_name, je.client_name, 'Job-level excess') AS display_name
        FROM job_excess je
        LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
        LEFT JOIN drivers d ON d.id = vha.driver_id
