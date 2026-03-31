@@ -62,27 +62,27 @@ export default function ExcessHistorySection({ entityType, entityId }: ExcessHis
         </div>
         <div className="rounded-lg border border-green-200 bg-green-50 p-3">
           <p className="text-xs text-green-700">Total Collected</p>
-          <p className="text-lg font-bold text-green-800">£{summary.total_taken.toFixed(2)}</p>
+          <p className="text-lg font-bold text-green-800">£{Number(summary.total_taken || 0).toFixed(2)}</p>
         </div>
         <div className="rounded-lg border border-gray-200 p-3">
           <p className="text-xs text-gray-500">Claimed / Reimbursed</p>
           <p className="text-lg font-bold text-gray-900">
-            £{summary.total_claimed.toFixed(2)} / £{summary.total_reimbursed.toFixed(2)}
+            £{Number(summary.total_claimed || 0).toFixed(2)} / £{Number(summary.total_reimbursed || 0).toFixed(2)}
           </p>
         </div>
-        <div className={`rounded-lg border p-3 ${summary.balance_held > 0 ? 'border-green-200 bg-green-50' : 'border-gray-200'}`}>
+        <div className={`rounded-lg border p-3 ${Number(summary.balance_held || 0) > 0 ? 'border-green-200 bg-green-50' : 'border-gray-200'}`}>
           <p className="text-xs text-gray-500">Balance Held</p>
-          <p className={`text-lg font-bold ${summary.balance_held > 0 ? 'text-green-800' : 'text-gray-900'}`}>
-            £{summary.balance_held.toFixed(2)}
+          <p className={`text-lg font-bold ${Number(summary.balance_held || 0) > 0 ? 'text-green-800' : 'text-gray-900'}`}>
+            £{Number(summary.balance_held || 0).toFixed(2)}
           </p>
         </div>
       </div>
 
       {/* Balance on account banner */}
-      {summary.balance_held > 0 && (
+      {Number(summary.balance_held || 0) > 0 && (
         <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-4 py-3">
           <p className="text-sm text-green-800">
-            <span className="font-semibold">£{summary.balance_held.toFixed(2)}</span> currently held on account.
+            <span className="font-semibold">£{Number(summary.balance_held || 0).toFixed(2)}</span> currently held on account.
             {summary.pending_count > 0 && (
               <span className="ml-1 text-amber-700 font-medium">
                 {summary.pending_count} excess{summary.pending_count > 1 ? 'es' : ''} still pending.
@@ -123,7 +123,7 @@ export default function ExcessHistorySection({ entityType, entityId }: ExcessHis
                     £{Number(record.excess_amount_taken || 0).toFixed(2)}
                   </span>
                   {record.excess_amount_required && (
-                    <span className="text-gray-500"> / £{Number(record.excess_amount_required).toFixed(2)}</span>
+                    <span className="text-gray-500"> / £{Number(record.excess_amount_required || 0).toFixed(2)}</span>
                   )}
                 </td>
                 <td className="px-4 py-2.5 text-center">

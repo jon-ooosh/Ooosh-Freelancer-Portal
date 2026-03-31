@@ -602,6 +602,14 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [ ] Email logo: real Ooosh logo in email header (logo in R2 at assets/ooosh-logo.png, needs public URL)
 - [ ] Wire email triggers into Payment Portal events (when portal repointed)
 
+**Known bugs / remaining polish (31 Mar 2026):**
+- [ ] Job header status doesn't refresh after payment without page reload (need to refresh job data after money tab actions)
+- [ ] "Move to Different Entity" UX needs org/person search picker instead of raw Xero ID input
+- [ ] Excess auto-select: when only one pending excess record, auto-select it in the payment form
+- [ ] Excess status not always updating to "Taken" when recorded via Money tab — ensure excess_id is always passed correctly
+- [ ] Excess payment should not count toward "Deposits Received" in financial summary (FIXED 31 Mar)
+- [ ] Excess payments sent generic "Payment Received" email instead of excess-specific template (FIXED 31 Mar — excess_id linkage)
+
 ##### Phase D — VAT Adjustment Display ✅ COMPLETE (30 Mar 2026)
 Port the international VAT calculation from the Payment Portal into the OP. Staff now see VAT breakdowns directly on the Money tab instead of visiting the client payment portal.
 

@@ -67,7 +67,7 @@ const moveExcessSchema = z.object({
   xero_contact_id: z.string().max(100),
   xero_contact_name: z.string().max(200),
   client_name: z.string().max(200).optional(),
-  person_id: z.string().uuid().nullable().optional(),
+  person_id: z.string().uuid().nullable().optional().or(z.literal('')),
   reason: z.string().max(500).optional(),
 });
 
@@ -570,7 +570,7 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN jobs j ON j.id = je.job_id
-      WHERE j.client_org_id = $1
+      WHERE j.client_id = $1
          OR je.xero_contact_id IN (
            SELECT external_id FROM external_id_map
            WHERE entity_type = 'organisation' AND entity_id = $1 AND source = 'xero'
