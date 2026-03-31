@@ -2881,16 +2881,39 @@ export default function JobDetailPage() {
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Time</label>
                     <input
-                      type="time"
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="e.g. 11:00"
                       value={localFormData.arrivalTime}
-                      onChange={(e) => setLocalFormData({ ...localFormData, arrivalTime: e.target.value })}
+                      onChange={(e) => {
+                        let v = e.target.value.replace(/[^0-9:]/g, '');
+                        setLocalFormData({ ...localFormData, arrivalTime: v });
+                      }}
                       onBlur={(e) => {
-                        // Smart-complete partial times: "11" → "11:00", "9" → "09:00"
+                        // Smart-complete partial times: "11" → "11:00", "9" → "09:00", "1130" → "11:30"
                         const v = e.target.value.trim();
-                        if (v && !v.includes(':')) {
+                        if (!v) return;
+                        if (v.includes(':')) {
+                          // Already has colon — pad hours if needed (e.g. "9:30" → "09:30")
+                          const [hStr, mStr] = v.split(':');
+                          const h = parseInt(hStr, 10);
+                          const m = parseInt(mStr || '0', 10);
+                          if (!isNaN(h) && h >= 0 && h <= 23 && !isNaN(m) && m >= 0 && m <= 59) {
+                            setLocalFormData({ ...localFormData, arrivalTime: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}` });
+                          }
+                        } else if (v.length <= 2) {
+                          // Just hours: "11" → "11:00", "9" → "09:00"
                           const h = parseInt(v, 10);
                           if (!isNaN(h) && h >= 0 && h <= 23) {
                             setLocalFormData({ ...localFormData, arrivalTime: `${String(h).padStart(2, '0')}:00` });
+                          }
+                        } else if (v.length === 3 || v.length === 4) {
+                          // "930" → "09:30", "1130" → "11:30"
+                          const hLen = v.length === 3 ? 1 : 2;
+                          const h = parseInt(v.slice(0, hLen), 10);
+                          const m = parseInt(v.slice(hLen), 10);
+                          if (!isNaN(h) && h >= 0 && h <= 23 && !isNaN(m) && m >= 0 && m <= 59) {
+                            setLocalFormData({ ...localFormData, arrivalTime: `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}` });
                           }
                         }
                       }}

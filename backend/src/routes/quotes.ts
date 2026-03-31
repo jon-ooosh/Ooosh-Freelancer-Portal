@@ -1229,7 +1229,9 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       listId = LABOUR_ITEM_IDS[quote.job_type] || LABOUR_ITEM_IDS['delivery'];
       qty = 1;
       price = quote.client_charge_rounded || 0;
-      note = buildItemNote(quote.job_date, quote.job_finish_date, quote.arrival_time, quote.venue_name);
+      // Only show end date for multi-day quotes; single-day D&C should not display a date range
+      const dcEndDate = quote.is_multi_day ? quote.job_finish_date : null;
+      note = buildItemNote(quote.job_date, dcEndDate, quote.arrival_time, quote.venue_name);
     }
 
     // Find or create header
