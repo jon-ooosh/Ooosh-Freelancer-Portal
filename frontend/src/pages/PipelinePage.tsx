@@ -1009,7 +1009,7 @@ function NewEnquiryModal({
   const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   const handleSave = async (alsoCreateInHH = false) => {
-    if (!clientName || !details) {
+    if (!clientName || (!details && serviceTypes.length === 0)) {
       setError('Client and description are required');
       return;
     }
@@ -1240,7 +1240,7 @@ function NewEnquiryModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">What do they want / what is it? *</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">What do they want / what is it? {serviceTypes.length === 0 && '*'}</label>
             <div className="flex gap-2 mb-2">
               {([
                 { key: 'self_drive_van', label: 'Self-drive van', icon: '🚐' },
