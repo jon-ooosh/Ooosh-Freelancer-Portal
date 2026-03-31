@@ -602,24 +602,26 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [ ] Email logo: real Ooosh logo in email header (logo in R2 at assets/ooosh-logo.png, needs public URL)
 - [ ] Wire email triggers into Payment Portal events (when portal repointed)
 
-##### Phase D — VAT Adjustment Display
-Port the international VAT calculation from the Payment Portal into the OP. Currently staff access this via the client-facing payment portal URL — after this phase, they see it directly on the Money tab.
+##### Phase D — VAT Adjustment Display ✅ COMPLETE (30 Mar 2026)
+Port the international VAT calculation from the Payment Portal into the OP. Staff now see VAT breakdowns directly on the Money tab instead of visiting the client payment portal.
 
-*Backend service (port from `vat-adjustment.js`):*
-- [ ] `services/vat-adjustment.ts` — port calculation logic from Payment Portal
-- [ ] Read job items from HH `items_to_supply_list.php` via broker
-- [ ] Read revenue by nominal from HH `job_margins.php` via broker
-- [ ] Detect trigger item ("Non-standard VAT rules..." with non-UK days as quantity)
-- [ ] Apply HMRC rules: vehicles (proportional or 0% if 31+ days), equipment (proportional), services (always 20%)
-- [ ] Return breakdown with penny-perfect figures per category
-- [ ] Endpoint: `GET /api/money/:jobId/vat-adjustment`
+*Backend service (ported from `vat-adjustment.js`):*
+- [x] `services/vat-adjustment.ts` — full port of Payment Portal logic (v4, nominals-based, penny-perfect)
+- [x] Read job items from HH `items_to_supply_list.php` via broker
+- [x] Read revenue by nominal from HH `job_margins.php` via broker
+- [x] Detect trigger item ("Non-standard VAT rules..." with non-UK days as quantity)
+- [x] Apply HMRC rules: vehicles (proportional or 0% if 31+ days), equipment (proportional), services (always 20%)
+- [x] Return breakdown with penny-perfect figures per category
+- [x] Endpoint: `GET /api/money/:jobId/vat-adjustment`
+- [x] Summary endpoint includes VAT adjustment — adjusted totals used for balance calculation
 
 *Frontend display:*
-- [ ] VAT adjustment section on Money tab (only shown when trigger item detected)
-- [ ] Category breakdown: Vehicles / Equipment & Backline / Services
-- [ ] Per-category: net amount, VAT amount, rule applied
-- [ ] Original vs adjusted total, VAT saved
-- [ ] Explanation text for client-facing context
+- [x] VAT adjustment section on Money tab (only shown when trigger item detected)
+- [x] Category breakdown: Vehicles / Equipment & Backline / Services with net/VAT/gross
+- [x] Per-category: rule applied shown inline
+- [x] Original vs adjusted total with strikethrough, VAT saved in green banner
+- [x] Financial summary shows "(adjusted)" label with strikethrough original figures
+- [x] Explanation text for context
 
 ##### Phase E — Payment Portal Repointing (non-destructive, env var toggle)
 The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from Monday.com and writes to both Monday.com and HireHop. Repointing to OP, protected by `DATA_BACKEND` env var (default: `monday`, flip to `op` when ready).

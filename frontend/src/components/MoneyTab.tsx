@@ -20,6 +20,10 @@ interface FinancialData {
     hire_value_ex_vat: number;
     hire_value_inc_vat: number;
     vat_amount: number;
+    original_vat_amount?: number;
+    original_hire_value_inc_vat?: number;
+    vat_adjusted: boolean;
+    vat_saved: number;
     total_deposits: number;
     total_hire_deposits: number;
     total_excess_deposits: number;
@@ -34,6 +38,13 @@ interface FinancialData {
       bank_name: string | null; entered_by: string | null;
     }>;
   };
+  vat_adjustment: {
+    applies: boolean;
+    hireDays: number; ukDays: number; nonUkDays: number;
+    vatSaved: number; adjustedVat: number; adjustedTotal: number; originalTotalIncVat: number;
+    breakdown: Array<{ category: string; subtotalNet: number; subtotalVat: number; subtotalGross: number; vatSaved: number; rule: string }>;
+    explanationText: string;
+  } | null;
   excess: {
     records: (JobExcess & { driver_name?: string; vehicle_reg?: string })[];
     total_required: number;
@@ -161,12 +172,24 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                 <p className="text-lg font-bold text-gray-900">£{financial.hire_value_ex_vat.toFixed(2)}</p>
               </div>
               <div>
-                <p className="text-xs text-gray-500">VAT</p>
-                <p className="text-lg font-bold text-gray-900">£{financial.vat_amount.toFixed(2)}</p>
+                <p className="text-xs text-gray-500">
+                  VAT{financial.vat_adjusted && <span className="text-amber-600"> (adjusted)</span>}
+                </p>
+                <p className="text-lg font-bold text-gray-900">
+                  £{financial.vat_amount.toFixed(2)}
+                  {financial.vat_adjusted && financial.original_vat_amount != null && (
+                    <span className="text-xs font-normal text-gray-400 line-through ml-1">£{financial.original_vat_amount.toFixed(2)}</span>
+                  )}
+                </p>
               </div>
               <div>
                 <p className="text-xs text-gray-500">Total (inc VAT)</p>
-                <p className="text-lg font-bold text-gray-900">£{financial.hire_value_inc_vat.toFixed(2)}</p>
+                <p className="text-lg font-bold text-gray-900">
+                  £{financial.hire_value_inc_vat.toFixed(2)}
+                  {financial.vat_adjusted && financial.original_hire_value_inc_vat != null && (
+                    <span className="text-xs font-normal text-gray-400 line-through ml-1">£{financial.original_hire_value_inc_vat.toFixed(2)}</span>
+                  )}
+                </p>
               </div>
               <div>
                 <p className="text-xs text-gray-500">Deposits Received</p>
@@ -228,6 +251,68 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
           </p>
         )}
       </div>
+
+      {/* VAT Adjustment (international hires) */}
+      {data.vat_adjustment && (
+        <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-6">
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">International VAT Adjustment</h3>
+          <p className="text-xs text-gray-500 mb-4">{data.vat_adjustment.explanationText}</p>
+
+          <div className="grid grid-cols-3 gap-2 text-sm mb-4">
+            <div className="text-center p-2 bg-gray-50 rounded">
+              <p className="text-xs text-gray-500">Total days</p>
+              <p className="font-bold">{data.vat_adjustment.hireDays}</p>
+            </div>
+            <div className="text-center p-2 bg-gray-50 rounded">
+              <p className="text-xs text-gray-500">UK days</p>
+              <p className="font-bold">{data.vat_adjustment.ukDays}</p>
+            </div>
+            <div className="text-center p-2 bg-gray-50 rounded">
+              <p className="text-xs text-gray-500">Non-UK days</p>
+              <p className="font-bold">{data.vat_adjustment.nonUkDays}</p>
+            </div>
+          </div>
+
+          <table className="w-full text-sm mb-4">
+            <thead>
+              <tr className="border-b border-gray-200">
+                <th className="text-left py-1.5 text-xs font-medium text-gray-500">Category</th>
+                <th className="text-right py-1.5 text-xs font-medium text-gray-500">Net</th>
+                <th className="text-right py-1.5 text-xs font-medium text-gray-500">VAT</th>
+                <th className="text-right py-1.5 text-xs font-medium text-gray-500">Gross</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.vat_adjustment.breakdown.map((cat) => (
+                <tr key={cat.category} className="border-b border-gray-100">
+                  <td className="py-1.5 text-gray-700">
+                    {cat.category}
+                    <p className="text-[10px] text-gray-400">{cat.rule}</p>
+                  </td>
+                  <td className="py-1.5 text-right text-gray-600">{'\u00A3'}{cat.subtotalNet.toFixed(2)}</td>
+                  <td className="py-1.5 text-right text-gray-600">{'\u00A3'}{cat.subtotalVat.toFixed(2)}</td>
+                  <td className="py-1.5 text-right font-medium">{'\u00A3'}{cat.subtotalGross.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <div className="flex items-center justify-between p-3 bg-green-50 border border-green-200 rounded-lg">
+            <div>
+              <p className="text-sm text-green-800">
+                Adjusted total: <strong>{'\u00A3'}{data.vat_adjustment.adjustedTotal.toFixed(2)}</strong>
+              </p>
+              <p className="text-xs text-green-600">
+                Standard total: {'\u00A3'}{data.vat_adjustment.originalTotalIncVat.toFixed(2)}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-lg font-bold text-green-700">{'\u00A3'}{data.vat_adjustment.vatSaved.toFixed(2)}</p>
+              <p className="text-xs text-green-600">VAT saved</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Insurance Excess */}
       {excess.records.length > 0 && (
