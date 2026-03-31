@@ -160,12 +160,20 @@ export default function TransportOpsPage() {
     return () => document.removeEventListener('keydown', handleEscape);
   }, [assignModalQuoteId]);
 
+  // Map effective_ops_status from backend (handles lifecycle-cancelled quotes)
+  function mapEffectiveOpsStatus(data: OpsQuote[]): OpsQuote[] {
+    return data.map((q) => ({
+      ...q,
+      ops_status: (q as any).effective_ops_status || q.ops_status || 'todo',
+    }));
+  }
+
   async function loadOps() {
     try {
       setLoading(true);
       const params = filter !== 'all' ? `?job_type=${filter}` : '';
       const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${params}`);
-      setQuotes(res.data);
+      setQuotes(mapEffectiveOpsStatus(res.data));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load');
     } finally {
@@ -264,7 +272,7 @@ export default function TransportOpsPage() {
       // Full reload to ensure all quotes see the updated run groups
       const params = filter !== 'all' ? `?job_type=${filter}` : '';
       const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${params}`);
-      setQuotes(res.data);
+      setQuotes(mapEffectiveOpsStatus(res.data));
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update run group');
     }

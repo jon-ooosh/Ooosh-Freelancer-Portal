@@ -20,7 +20,7 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
   try {
     const { job_type, ops_status, date_from, date_to } = req.query;
 
-    let whereClause = 'WHERE q.is_deleted = false AND q.status != \'cancelled\'';
+    let whereClause = 'WHERE q.is_deleted = false';
     const params: unknown[] = [];
 
     if (job_type) {
@@ -46,8 +46,11 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
       whereClause += ` AND q.job_date <= $${params.length}`;
     }
 
+    // Use effective_ops_status: if quote lifecycle status is cancelled, treat ops_status as cancelled too
+    // This handles legacy data where status was set to cancelled without updating ops_status
     const result = await query(
       `SELECT q.*,
+        CASE WHEN q.status = 'cancelled' THEN 'cancelled' ELSE COALESCE(q.ops_status, 'todo') END as effective_ops_status,
         j.job_name, j.hh_job_number, j.client_name, j.out_date, j.return_date,
         v.name as linked_venue_name, v.address as venue_address, v.city as venue_city,
         COALESCE(
@@ -75,14 +78,14 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
        LEFT JOIN venues v ON v.id = q.venue_id
        ${whereClause}
        ORDER BY
-         CASE q.ops_status
-           WHEN 'todo' THEN 1
-           WHEN 'arranging' THEN 2
-           WHEN 'arranged' THEN 3
-           WHEN 'dispatched' THEN 4
-           WHEN 'arrived' THEN 5
-           WHEN 'completed' THEN 6
-           WHEN 'cancelled' THEN 7
+         CASE WHEN q.status = 'cancelled' THEN 7
+           WHEN q.ops_status = 'todo' THEN 1
+           WHEN q.ops_status = 'arranging' THEN 2
+           WHEN q.ops_status = 'arranged' THEN 3
+           WHEN q.ops_status = 'dispatched' THEN 4
+           WHEN q.ops_status = 'arrived' THEN 5
+           WHEN q.ops_status = 'completed' THEN 6
+           WHEN q.ops_status = 'cancelled' THEN 7
            ELSE 8
          END,
          q.job_date ASC NULLS LAST,
@@ -425,7 +428,7 @@ const editQuoteSchema = z.object({
   is_multi_day: z.boolean().optional().nullable(),
   num_days: z.number().int().min(1).optional().nullable(),
   arrival_time: z.string().optional().nullable(),
-  what_is_it: z.enum(['vehicle', 'equipment', 'people']).optional().nullable(),
+  what_is_it: z.union([z.enum(['vehicle', 'equipment', 'people']), z.literal('')]).optional().nullable().transform(v => v === '' ? null : v),
   work_type: z.string().optional().nullable(),
   work_description: z.string().optional().nullable(),
   crew_count: z.number().int().min(1).optional().nullable(),
@@ -469,7 +472,8 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
     for (const field of allowedFields) {
       if (fields[field] !== undefined) {
         updates.push(`${field} = $${idx}`);
-        params.push(fields[field]);
+        // Store empty strings as null for nullable fields
+        params.push(fields[field] === '' ? null : fields[field]);
         idx++;
       }
     }
@@ -566,12 +570,16 @@ const statusSchema = z.object({
 router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { status, cancelledReason } = req.body;
+    // When cancelling a quote, also set ops_status to cancelled so it appears in the cancelled group on Transport Ops
+    const opsStatusClause = status === 'cancelled' ? ', ops_status = \'cancelled\'' : '';
+    // When restoring from cancelled (back to draft), reset ops_status to todo
+    const restoreOpsClause = status === 'draft' ? ', ops_status = \'todo\'' : '';
     const result = await query(
       `UPDATE quotes
        SET status = $1, status_changed_at = NOW(), status_changed_by = $2,
-           cancelled_reason = $3, updated_at = NOW()
+           cancelled_reason = $3, updated_at = NOW()${opsStatusClause}${restoreOpsClause}
        WHERE id = $4 AND is_deleted = false
-       RETURNING id, status`,
+       RETURNING id, status, ops_status`,
       [status, req.user!.id, status === 'cancelled' ? (cancelledReason || null) : null, req.params.id]
     );
     if (result.rows.length === 0) {
@@ -1015,7 +1023,10 @@ function buildItemNote(date?: string | null, endDate?: string | null, time?: str
   if (workType) parts.push(workType);
 
   const formatDate = (isoDate: string): string => {
-    const d = new Date(isoDate + 'T12:00:00');
+    // Normalise: if already has time info, strip it to get just the date part
+    const dateOnly = isoDate.includes('T') ? isoDate.split('T')[0] : isoDate;
+    const d = new Date(dateOnly + 'T12:00:00');
+    if (isNaN(d.getTime())) return isoDate; // Return raw string if date is invalid
     const day = d.getDate();
     const month = d.toLocaleDateString('en-GB', { month: 'short' });
     const year = d.getFullYear();

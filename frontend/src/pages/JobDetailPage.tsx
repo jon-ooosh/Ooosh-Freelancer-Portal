@@ -559,6 +559,7 @@ export default function JobDetailPage() {
   const [editingQuoteId, setEditingQuoteId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Record<string, unknown>>({});
   const [editSaving, setEditSaving] = useState(false);
+  const [cancelledQuotesExpanded, setCancelledQuotesExpanded] = useState(false);
   const [showLocalForm, setShowLocalForm] = useState(false);
   const [localFormData, setLocalFormData] = useState({
     jobType: 'delivery' as 'delivery' | 'collection',
@@ -2213,6 +2214,7 @@ export default function JobDetailPage() {
                   const timeB = b.arrival_time || '';
                   return timeA.localeCompare(timeB);
                 })
+                .filter((q) => q.status !== 'cancelled')
                 .map((q) => {
                 const clientCharge = Number(q.client_charge_rounded ?? q.client_charge_total ?? 0);
                 const freelancerFee = Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0);
@@ -2229,7 +2231,7 @@ export default function JobDetailPage() {
                 const isCancelled = quoteStatus === 'cancelled';
 
                 const statusConfig: Record<string, { label: string; bg: string; text: string }> = {
-                  draft: { label: 'Draft', bg: 'bg-gray-100', text: 'text-gray-600' },
+                  draft: { label: 'To be arranged', bg: 'bg-gray-100', text: 'text-gray-600' },
                   confirmed: { label: 'Confirmed', bg: 'bg-green-100', text: 'text-green-700' },
                   cancelled: { label: 'Cancelled', bg: 'bg-red-100', text: 'text-red-700' },
                   completed: { label: 'Completed', bg: 'bg-emerald-100', text: 'text-emerald-700' },
@@ -2241,7 +2243,7 @@ export default function JobDetailPage() {
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       {/* Header row with type, mode badge, status badge */}
-                      <div className="flex items-center gap-2 mb-2 flex-wrap">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
                         <span className="text-lg">
                           {q.job_type === 'delivery' ? '📦' : q.job_type === 'collection' ? '📥' : '👷'}
                         </span>
@@ -2259,6 +2261,28 @@ export default function JobDetailPage() {
                           {sc.label}
                         </span>
                       </div>
+
+                      {/* Date, time, venue — top line */}
+                      {(q.venue_name || q.job_date || q.arrival_time) && (
+                        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mb-2 text-sm text-gray-700">
+                          {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
+                          {q.arrival_time && <span>🕐 {q.arrival_time}</span>}
+                          {q.venue_name && (
+                            q.venue_id ? (
+                              <Link to={`/venues/${q.venue_id}`} className="text-ooosh-600 hover:text-ooosh-700 hover:underline">📍 {q.venue_name}</Link>
+                            ) : (
+                              <span>📍 {q.venue_name}</span>
+                            )
+                          )}
+                          {q.distance_miles && <span className="text-gray-500 text-xs self-center">{q.distance_miles}mi · {q.drive_time_mins}min</span>}
+                          {q.add_collection && q.collection_date && (
+                            <span>📥 Collection: {new Date(q.collection_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                          )}
+                          {q.travel_method === 'public_transport' && (
+                            <span className="text-gray-500 text-xs self-center">🚆 Public transport{q.travel_time_mins ? ` ${q.travel_time_mins}min` : ''}{q.travel_cost ? ` £${Number(q.travel_cost).toFixed(2)}` : ''}</span>
+                          )}
+                        </div>
+                      )}
 
                       {/* Price summary row */}
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
@@ -2306,24 +2330,6 @@ export default function JobDetailPage() {
                         </div>
                       </div>
 
-                      <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs text-gray-500">
-                        {q.venue_name && (
-                          q.venue_id ? (
-                            <Link to={`/venues/${q.venue_id}`} className="text-ooosh-600 hover:text-ooosh-700 hover:underline">📍 {q.venue_name}</Link>
-                          ) : (
-                            <span>📍 {q.venue_name}</span>
-                          )
-                        )}
-                        {q.distance_miles && <span>{q.distance_miles}mi · {q.drive_time_mins}min</span>}
-                        {q.arrival_time && <span>🕐 Arrive by {q.arrival_time}</span>}
-                        {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
-                        {q.add_collection && q.collection_date && (
-                          <span>📥 Collection: {new Date(q.collection_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
-                        )}
-                        {q.travel_method === 'public_transport' && (
-                          <span>🚆 Public transport{q.travel_time_mins ? ` ${q.travel_time_mins}min` : ''}{q.travel_cost ? ` £${Number(q.travel_cost).toFixed(2)}` : ''}</span>
-                        )}
-                      </div>
 
                       {/* Crew assignments */}
                       <div className="mt-3 pt-3 border-t border-gray-100">
@@ -2396,13 +2402,8 @@ export default function JobDetailPage() {
                       )}
                     </div>
 
-                    {/* Right side: meta + actions */}
+                    {/* Right side: actions */}
                     <div className="text-right text-xs ml-4 shrink-0 flex flex-col items-end gap-2">
-                      <div className="text-gray-400">
-                        <p>{new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</p>
-                        {q.created_by_name && <p>{q.created_by_name}</p>}
-                      </div>
-
                       {/* Edit button */}
                       {!isCancelled && (
                         <button
@@ -2456,9 +2457,89 @@ export default function JobDetailPage() {
 
                     </div>
                   </div>
+                  {/* Created by — bottom right */}
+                  <div className="flex justify-end mt-2">
+                    <span className="text-[11px] text-gray-400">
+                      Created: {new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                      {q.created_by_name && ` / ${q.created_by_name}`}
+                    </span>
+                  </div>
                 </div>
                 );
               })}
+
+              {/* Cancelled quotes collapsible section */}
+              {(() => {
+                const cancelledList = quotes.filter((q) => q.status === 'cancelled');
+                if (cancelledList.length === 0) return null;
+                return (
+                  <div className="mt-4 border border-gray-200 rounded-xl overflow-hidden">
+                    <button
+                      onClick={() => setCancelledQuotesExpanded((p) => !p)}
+                      className="w-full flex items-center justify-between px-4 py-2.5 bg-gray-50 hover:bg-gray-100 text-sm text-gray-500 font-medium"
+                    >
+                      <span>Cancelled ({cancelledList.length})</span>
+                      <span className="text-xs">{cancelledQuotesExpanded ? '▲ Hide' : '▼ Show'}</span>
+                    </button>
+                    {cancelledQuotesExpanded && (
+                      <div className="space-y-3 p-3 bg-gray-50/50">
+                        {cancelledList
+                          .sort((a, b) => (a.job_date || '').localeCompare(b.job_date || ''))
+                          .map((q) => {
+                          const clientCharge = Number(q.client_charge_rounded ?? q.client_charge_total ?? 0);
+                          const freelancerFee = Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0);
+                          const sc = { label: 'Cancelled', bg: 'bg-red-100', text: 'text-red-700' };
+                          return (
+                            <div key={q.id} className="bg-white rounded-xl shadow-sm border border-red-200 opacity-60 p-5">
+                              <div className="flex items-start justify-between">
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                    <span className="text-lg">
+                                      {q.job_type === 'delivery' ? '📦' : q.job_type === 'collection' ? '📥' : '👷'}
+                                    </span>
+                                    <span className="font-semibold text-gray-900 capitalize">
+                                      {q.job_type}{q.what_is_it ? ` (${q.what_is_it})` : ''}{q.add_collection ? ' + Collection' : ''}
+                                    </span>
+                                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>{sc.label}</span>
+                                  </div>
+                                  {(q.venue_name || q.job_date || q.arrival_time) && (
+                                    <div className="flex flex-wrap gap-x-3 text-sm text-gray-600 mb-2">
+                                      {q.venue_name && <span>📍 {q.venue_name}</span>}
+                                      {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
+                                      {q.arrival_time && <span>🕐 {q.arrival_time}</span>}
+                                    </div>
+                                  )}
+                                  <div className="text-sm text-gray-500">
+                                    Client: £{clientCharge.toFixed(2)} · Freelancer: £{freelancerFee.toFixed(2)}
+                                  </div>
+                                  {q.cancelled_reason && (
+                                    <div className="mt-2 text-xs bg-red-50 border border-red-200 rounded p-2">
+                                      <span className="font-medium text-red-700">Reason:</span>
+                                      <span className="ml-1 text-red-600">{q.cancelled_reason}</span>
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="text-right text-xs ml-4 shrink-0 flex flex-col items-end gap-2">
+                                  <button
+                                    onClick={() => updateQuoteStatus(q.id, 'draft')}
+                                    className="px-2.5 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200 font-medium"
+                                  >
+                                    Restore
+                                  </button>
+                                  <div className="text-gray-400 text-[11px]">
+                                    Created: {new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                                    {q.created_by_name && ` / ${q.created_by_name}`}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -2496,6 +2577,7 @@ export default function JobDetailPage() {
                       <DatePicker
                         value={String(editForm.job_date || '')}
                         onChange={(val) => setEditForm((p) => ({ ...p, job_date: val }))}
+                        min={new Date().toISOString().split('T')[0]}
                       />
                     </div>
                     <div>
