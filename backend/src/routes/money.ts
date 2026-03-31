@@ -14,6 +14,7 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
+import { calculateVatAdjustment } from '../services/vat-adjustment';
 
 const router = Router();
 router.use(authenticate);
@@ -98,6 +99,46 @@ router.post('/sync-values', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/money/:jobId/vat-adjustment — International VAT adjustment calculation ──
+
+router.get('/:jobId/vat-adjustment', async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId } = req.params;
+
+    const jobResult = await query(
+      `SELECT id, hh_job_number, job_date, job_end, out_date, return_date FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+    if (!job.hh_job_number) {
+      res.json({ data: null }); // No HH link, no VAT adjustment possible
+      return;
+    }
+
+    // Calculate hire days from job dates
+    const startDate = job.job_date || job.out_date;
+    const endDate = job.job_end || job.return_date;
+    let hireDays = 1;
+    if (startDate && endDate) {
+      hireDays = Math.max(1, Math.ceil(
+        (new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)
+      ));
+    }
+
+    const result = await calculateVatAdjustment(job.hh_job_number, hireDays);
+    res.json({ data: result });
+  } catch (error) {
+    console.error('[money] VAT adjustment error:', error);
+    res.status(500).json({ error: 'Failed to calculate VAT adjustment' });
+  }
+});
+
 // ── GET /api/money/:jobId/summary — Full financial summary for a job ──
 
 router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
@@ -106,7 +147,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
     // Get the job from OP database (need hh_job_number for HH API calls)
     const jobResult = await query(
-      `SELECT id, hh_job_number, client_id, client_name, company_name
+      `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date
        FROM jobs WHERE id = $1`,
       [jobId]
     );
@@ -275,6 +316,27 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       clientBalance = parseFloat(balanceResult.rows[0]?.balance || '0');
     }
 
+    // Check for international VAT adjustment
+    let vatAdjustment: any = null;
+    if (hhJobId && hireValueExVat > 0) {
+      try {
+        const startDate = job.job_date || job.out_date;
+        const endDate = job.job_end || job.return_date;
+        let hireDays = 1;
+        if (startDate && endDate) {
+          hireDays = Math.max(1, Math.ceil(
+            (new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)
+          ));
+        }
+        vatAdjustment = await calculateVatAdjustment(hhJobId, hireDays);
+      } catch { /* non-fatal */ }
+    }
+
+    // If VAT adjustment applies, override the VAT figures
+    const effectiveVatAmount = vatAdjustment ? vatAdjustment.adjustedVat : vatAmount;
+    const effectiveHireValueIncVat = hireValueExVat + effectiveVatAmount;
+    const effectiveBalanceOutstanding = effectiveHireValueIncVat - totalHireDeposits;
+
     res.json({
       data: {
         job: {
@@ -284,12 +346,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         },
         financial: {
           hire_value_ex_vat: hireValueExVat,
-          hire_value_inc_vat: hireValueIncVat,
-          vat_amount: vatAmount,
+          hire_value_inc_vat: effectiveHireValueIncVat,
+          vat_amount: effectiveVatAmount,
+          original_vat_amount: vatAdjustment ? vatAmount : undefined,
+          original_hire_value_inc_vat: vatAdjustment ? hireValueIncVat : undefined,
+          vat_adjusted: !!vatAdjustment,
+          vat_saved: vatAdjustment ? vatAdjustment.vatSaved : 0,
           total_deposits: totalDeposits,
           total_hire_deposits: totalHireDeposits,
           total_excess_deposits: totalExcessDeposits,
-          balance_outstanding: balanceOutstanding,
+          balance_outstanding: effectiveBalanceOutstanding,
           required_deposit: requiredDeposit,
           deposit_paid: depositPaid,
           deposit_percent: depositPercent,
@@ -301,6 +367,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           total_collected: excessCollected,
           status: excessStatus,
         },
+        vat_adjustment: vatAdjustment,
         client_balance_on_account: clientBalance,
       },
     });
