@@ -537,6 +537,53 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
   );
 }
 
+function EditableTextArea({ value, placeholder, onSave }: { value: string; placeholder: string; onSave: (val: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => { setDraft(value); }, [value]);
+
+  function startEdit() {
+    setDraft(value);
+    setEditing(true);
+    setTimeout(() => ref.current?.focus(), 50);
+  }
+
+  function save() {
+    setEditing(false);
+    if (draft !== value) onSave(draft);
+  }
+
+  if (editing) {
+    return (
+      <textarea
+        ref={ref}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={save}
+        onKeyDown={(e) => { if (e.key === 'Escape') { setDraft(value); setEditing(false); } }}
+        rows={3}
+        className="w-full border border-ooosh-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        placeholder={placeholder}
+      />
+    );
+  }
+
+  return (
+    <div
+      onClick={startEdit}
+      className="min-h-[60px] cursor-pointer rounded px-3 py-2 text-sm text-gray-600 whitespace-pre-wrap hover:bg-gray-50 border border-transparent hover:border-gray-200 transition-colors group"
+      title="Click to edit"
+    >
+      {value || <span className="text-gray-400 italic">{placeholder}</span>}
+      <svg className="w-3.5 h-3.5 inline-block ml-1 text-gray-300 group-hover:text-gray-500 transition-colors align-text-top" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+      </svg>
+    </div>
+  );
+}
+
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -547,7 +594,7 @@ export default function JobDetailPage() {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'money' | 'details'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'money'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -1235,14 +1282,6 @@ export default function JobDetailPage() {
     });
   }
 
-  function formatDateTime(dateStr: string | null) {
-    if (!dateStr) return '—';
-    return new Date(dateStr).toLocaleDateString('en-GB', {
-      day: 'numeric', month: 'short', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    });
-  }
-
   if (loading) {
     return <div className="text-center py-12 text-gray-500">Loading...</div>;
   }
@@ -1874,7 +1913,7 @@ export default function JobDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files', 'details'] as const).map((tab) => (
+          {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -1889,18 +1928,42 @@ export default function JobDetailPage() {
                tab === 'transport' ? `Crew & Transport${(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}` :
                tab === 'drivers' ? `Drivers & Vehicles${vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}` :
                tab === 'money' ? 'Money' :
-               tab === 'files' ? `Files${fileCount > 0 ? ` (${fileCount})` : ''}` :
-               'Full Details'}
+               `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
           ))}
         </nav>
       </div>
 
-      {/* Overview Tab (Prep Checklist + Financial Strip) */}
+      {/* Overview Tab (Prep Checklist + Financial Strip + Notes) */}
       {activeTab === 'overview' && (
         <div className="space-y-4">
           {/* Compact financial progress strip */}
           {id && <OverviewFinancialStrip jobId={id} />}
+
+          {/* Editable Details & Notes */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Details (What do they want?) */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Details</label>
+                <EditableTextArea
+                  value={job.details || ''}
+                  placeholder="What do they want / what is it?"
+                  onSave={(val) => saveInlineField({ details: val || null })}
+                />
+              </div>
+              {/* Notes */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Notes</label>
+                <EditableTextArea
+                  value={job.notes || ''}
+                  placeholder="Internal notes..."
+                  onSave={(val) => saveInlineField({ notes: val || null })}
+                />
+              </div>
+            </div>
+          </div>
+
           <JobPrepChecklist jobId={id || ''} />
         </div>
       )}
@@ -2720,51 +2783,6 @@ export default function JobDetailPage() {
       {/* Money Tab */}
       {activeTab === 'money' && id && (
         <MoneyTab jobId={id} job={job} />
-      )}
-
-      {/* Full Details Tab */}
-      {activeTab === 'details' && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <DetailField label="HireHop Job #" value={job.hh_job_number ? String(job.hh_job_number) : 'N/A (Ooosh-native)'} />
-            <DetailField label="Job Name" value={job.job_name} />
-            <DetailField label="Job Type" value={job.job_type} />
-            <DetailField label="Status" value={statusLabel} />
-            <DetailField label="Client" value={job.client_name || job.company_name} />
-            <DetailField label="Client Ref" value={job.client_ref} />
-            <DetailField label="Venue" value={job.venue_name} />
-            <DetailField label="Address" value={job.address} />
-            <DetailField label="Out Date" value={formatDate(job.out_date)} />
-            <DetailField label="Job Start" value={formatDate(job.job_date)} />
-            <DetailField label="Job End" value={formatDate(job.job_end)} />
-            <DetailField label="Return Date" value={formatDate(job.return_date)} />
-            <DetailField label="Duration" value={
-              job.duration_days || job.duration_hrs
-                ? `${job.duration_days || 0} days, ${job.duration_hrs || 0} hrs`
-                : null
-            } />
-            <DetailField label="Manager 1" value={job.manager1_name} />
-            <DetailField label="Manager 2" value={job.manager2_name} />
-            <DetailField label="Project" value={job.project_name} />
-            <DetailField label="Depot" value={job.depot_name} />
-            <DetailField label="Custom Index" value={job.custom_index} />
-            <DetailField label="Internal" value={job.is_internal ? 'Yes' : 'No'} />
-            <DetailField label="Created in HireHop" value={formatDateTime(job.created_date)} />
-            <DetailField label="Synced" value={formatDateTime(job.created_at)} />
-          </div>
-          {job.details && (
-            <div className="mt-6 pt-4 border-t">
-              <h3 className="text-sm font-semibold text-gray-700 mb-2">Details</h3>
-              <p className="text-sm text-gray-600 whitespace-pre-wrap">{job.details}</p>
-            </div>
-          )}
-          {job.notes && (
-            <div className="mt-6 pt-4 border-t">
-              <h3 className="text-sm font-semibold text-gray-700 mb-2">Notes</h3>
-              <p className="text-sm text-gray-600 whitespace-pre-wrap">{job.notes}</p>
-            </div>
-          )}
-        </div>
       )}
 
       {/* Transport Calculator Modal */}
@@ -4028,15 +4046,6 @@ function JobFilesSection({
 }
 
 // ── Helper Components ─────────────────────────────────────────────────────
-
-function DetailField({ label, value }: { label: string; value: string | null | undefined }) {
-  return (
-    <div>
-      <dt className="text-xs font-medium text-gray-500 uppercase tracking-wider">{label}</dt>
-      <dd className="mt-1 text-sm text-gray-900">{value || '—'}</dd>
-    </div>
-  );
-}
 
 function StatusTransitionModal({
   targetStatus,
