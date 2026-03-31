@@ -782,6 +782,7 @@ function NewEnquiryModal({
   const [newClientEmail, setNewClientEmail] = useState('');
   const [newClientPhone, setNewClientPhone] = useState('');
   const [details, setDetails] = useState('');
+  const [serviceTypes, setServiceTypes] = useState<string[]>([]);
   const [outDate, setOutDate] = useState('');
   const [jobDate, setJobDate] = useState('');
   const [jobEnd, setJobEnd] = useState('');
@@ -1042,6 +1043,7 @@ function NewEnquiryModal({
         client_name: clientName,
         client_id: resolvedClientId || undefined,
         details,
+        service_types: serviceTypes.length > 0 ? serviceTypes : undefined,
         out_date: outDate || undefined,
         job_date: jobDate || undefined,
         job_end: jobEnd || undefined,
@@ -1053,6 +1055,7 @@ function NewEnquiryModal({
         notes: notes || undefined,
         next_chase_date: nextChaseDate || undefined,
         chase_alert_user_id: chaseAlertUserId || undefined,
+        band_name: bandName || undefined,
       });
 
       // Link band if selected
@@ -1238,6 +1241,31 @@ function NewEnquiryModal({
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">What do they want / what is it? *</label>
+            <div className="flex gap-2 mb-2">
+              {([
+                { key: 'self_drive_van', label: 'Self-drive van', icon: '🚐' },
+                { key: 'backline', label: 'Backline', icon: '🎸' },
+                { key: 'rehearsal', label: 'Rehearsal', icon: '🎵' },
+              ] as const).map(({ key, label, icon }) => {
+                const selected = serviceTypes.includes(key);
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setServiceTypes(prev =>
+                      prev.includes(key) ? prev.filter(t => t !== key) : [...prev, key]
+                    )}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                      selected
+                        ? 'bg-ooosh-100 border-ooosh-400 text-ooosh-700'
+                        : 'bg-white border-gray-300 text-gray-600 hover:border-gray-400'
+                    }`}
+                  >
+                    {icon} {label}
+                  </button>
+                );
+              })}
+            </div>
             <textarea
               value={details}
               onChange={(e) => setDetails(e.target.value)}
