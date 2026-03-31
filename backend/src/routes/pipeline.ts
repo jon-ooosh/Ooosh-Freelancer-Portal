@@ -936,6 +936,7 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     }
 
     // Format dates as YYYY-MM-DD hh:mm (HireHop expects this, use UTC to avoid timezone drift)
+    // Default to 09:00 if time is midnight (dates from DatePicker have no time component)
     const formatHHDate = (d: string | null): string | undefined => {
       if (!d) return undefined;
       try {
@@ -943,9 +944,12 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
         const yyyy = date.getUTCFullYear();
         const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
         const dd = String(date.getUTCDate()).padStart(2, '0');
-        const hh = String(date.getUTCHours()).padStart(2, '0');
-        const min = String(date.getUTCMinutes()).padStart(2, '0');
-        return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
+        const hh = date.getUTCHours();
+        const min = date.getUTCMinutes();
+        // Default midnight to 09:00 (typical business start time)
+        const effectiveHH = (hh === 0 && min === 0) ? '09' : String(hh).padStart(2, '0');
+        const effectiveMin = (hh === 0 && min === 0) ? '00' : String(min).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd} ${effectiveHH}:${effectiveMin}`;
       } catch {
         return undefined;
       }
@@ -994,17 +998,32 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     const effectiveOut = outDate || startDate;
     const effectiveReturn = toDate || endDate;
 
-    // Include dates on create call
+    // HireHop job_save.php date fields (per API docs):
+    // out = equipment reserved from (compulsory), start = charging from (compulsory),
+    // end = job ends, to = equipment available again
     if (effectiveOut) hhBody.out = effectiveOut;
     if (startDate) hhBody.start = startDate;
     if (endDate) hhBody.end = endDate;
     if (effectiveReturn) hhBody.to = effectiveReturn;
 
-    console.log('[Pipeline] Creating job in HireHop with dates:', {
+    // duration_days / duration_hrs = chargeable period from JOB_DATE (per API docs)
+    // duration_locked = 0 so it recalculates if dates are edited in HH later
+    const dStart = new Date(job.job_date);
+    const dEnd = new Date(job.job_end);
+    if (!isNaN(dStart.getTime()) && !isNaN(dEnd.getTime())) {
+      const diffMs = dEnd.getTime() - dStart.getTime();
+      const totalHours = Math.max(0, diffMs / (1000 * 60 * 60));
+      hhBody.duration_days = Math.floor(totalHours / 24);
+      hhBody.duration_hrs = Math.round(totalHours % 24);
+      hhBody.duration_locked = 0;
+    }
+
+    console.log('[Pipeline] Creating job in HireHop:', {
       out: hhBody.out, start: hhBody.start, end: hhBody.end, to: hhBody.to,
+      duration_days: hhBody.duration_days, duration_hrs: hhBody.duration_hrs,
     });
 
-    // Step 1: Create the job in HireHop
+    // POST to HireHop via broker
     const { hhBroker } = await import('../services/hirehop-broker');
     const hhResponse = await hhBroker.post<{ job?: number; JOB_ID?: number }>(
       '/api/save_job.php',
@@ -1033,26 +1052,6 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       console.error('[Pipeline] HireHop response missing job ID. Full response:', JSON.stringify(data));
       res.status(502).json({ error: 'HireHop did not return a job ID' });
       return;
-    }
-
-    // Step 2: Update the job dates in a second call to trigger HH charge period auto-calculation
-    // HH calculates charge period on edit (like the UI) but not on create
-    if (effectiveOut || effectiveReturn) {
-      const dateUpdate: Record<string, unknown> = {
-        job: hhJobNumber,
-        no_webhook: 1,
-      };
-      if (effectiveOut) dateUpdate.out = effectiveOut;
-      if (startDate) dateUpdate.start = startDate;
-      if (endDate) dateUpdate.end = endDate;
-      if (effectiveReturn) dateUpdate.to = effectiveReturn;
-
-      console.log('[Pipeline] Updating HH job dates (step 2) to trigger charge period calc:', dateUpdate);
-
-      const updateResp = await hhBroker.post('/api/save_job.php', dateUpdate, { priority: 'high' });
-      if (!updateResp.success) {
-        console.warn('[Pipeline] Date update call failed (non-critical):', updateResp.error);
-      }
     }
 
     // Write back the HH job number to OP
