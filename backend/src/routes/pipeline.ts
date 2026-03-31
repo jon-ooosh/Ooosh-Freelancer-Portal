@@ -994,34 +994,17 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     const effectiveOut = outDate || startDate;
     const effectiveReturn = toDate || endDate;
 
-    // HireHop save_job.php date fields
+    // Include dates on create call
     if (effectiveOut) hhBody.out = effectiveOut;
     if (startDate) hhBody.start = startDate;
-    if (endDate) {
-      hhBody.end = endDate;
-    }
-    if (effectiveReturn) {
-      hhBody.to = effectiveReturn;
-    }
+    if (endDate) hhBody.end = endDate;
+    if (effectiveReturn) hhBody.to = effectiveReturn;
 
-    // Explicitly calculate charge period (HH doesn't auto-calculate from dates via API)
-    const chargeOutDate = new Date(job.out_date || job.job_date);
-    const chargeInDate = new Date(job.return_date || job.job_end);
-    if (!isNaN(chargeOutDate.getTime()) && !isNaN(chargeInDate.getTime())) {
-      const diffMs = chargeInDate.getTime() - chargeOutDate.getTime();
-      const totalHours = Math.max(0, diffMs / (1000 * 60 * 60));
-      const chargeDays = Math.floor(totalHours / 24);
-      const chargeHours = Math.round(totalHours % 24);
-      hhBody.charge_days = chargeDays;
-      hhBody.charge_hrs = chargeHours;
-    }
-
-    console.log('[Pipeline] Pushing to HireHop:', {
+    console.log('[Pipeline] Creating job in HireHop with dates:', {
       out: hhBody.out, start: hhBody.start, end: hhBody.end, to: hhBody.to,
-      charge_days: hhBody.charge_days, charge_hrs: hhBody.charge_hrs,
     });
 
-    // POST to HireHop via broker
+    // Step 1: Create the job in HireHop
     const { hhBroker } = await import('../services/hirehop-broker');
     const hhResponse = await hhBroker.post<{ job?: number; JOB_ID?: number }>(
       '/api/save_job.php',
@@ -1050,6 +1033,26 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       console.error('[Pipeline] HireHop response missing job ID. Full response:', JSON.stringify(data));
       res.status(502).json({ error: 'HireHop did not return a job ID' });
       return;
+    }
+
+    // Step 2: Update the job dates in a second call to trigger HH charge period auto-calculation
+    // HH calculates charge period on edit (like the UI) but not on create
+    if (effectiveOut || effectiveReturn) {
+      const dateUpdate: Record<string, unknown> = {
+        job: hhJobNumber,
+        no_webhook: 1,
+      };
+      if (effectiveOut) dateUpdate.out = effectiveOut;
+      if (startDate) dateUpdate.start = startDate;
+      if (endDate) dateUpdate.end = endDate;
+      if (effectiveReturn) dateUpdate.to = effectiveReturn;
+
+      console.log('[Pipeline] Updating HH job dates (step 2) to trigger charge period calc:', dateUpdate);
+
+      const updateResp = await hhBroker.post('/api/save_job.php', dateUpdate, { priority: 'high' });
+      if (!updateResp.success) {
+        console.warn('[Pipeline] Date update call failed (non-critical):', updateResp.error);
+      }
     }
 
     // Write back the HH job number to OP
