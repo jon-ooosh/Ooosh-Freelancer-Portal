@@ -541,7 +541,7 @@ Staff records manual payment (bank transfer, card in office, cash)
 **Excess calculation — "Top N Drivers" algorithm:**
 The hire form process calculates excess. The principle: charge the excess of the highest-risk drivers, one per van. Sort all drivers by excess descending, take top N (N = van count), sum. If fewer drivers than vans, fill remaining slots with standard £1,200/van. The OP stores the calculated total via `job_excess.excess_amount_required`.
 
-##### Phase B — Excess Gate + Ledger UI ✅ MOSTLY COMPLETE (26 Mar 2026)
+##### Phase B — Excess Gate + Ledger UI ✅ COMPLETE (1 Apr 2026)
 - [x] `ExcessGateBanner.tsx` — amber warning on Job Detail Drivers & Vehicles tab with manager override flow
 - [x] `ExcessPaymentModal.tsx` — record payment, claim, reimburse, waive, rollover, move to different entity
 - [x] `ExcessLedgerPage.tsx` at `/money/excess` — global view with client ledger + all-records views
@@ -549,8 +549,32 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] "Excess History" tab on PersonDetailPage and OrganisationDetailPage
 - [x] "Money > Excess" nav group in Layout.tsx (admin/manager only)
 - [x] 6 email templates for excess lifecycle (payment confirmed, pre-auth confirmed, reimbursed, partial, claimed, pre-auth released)
-- [ ] Wire email triggers to status transition actions
+- [x] Email triggers wired to payment, claim, reimburse actions (excess.ts endpoints)
+- [x] Auto-select single pending excess record in MoneyTab payment form
+- [x] Move entity UX: org/person search picker instead of raw Xero ID
+- [x] Client balance "Applied from Account Balance" option only shows when balance > 0
+- [x] Reimburse methods: full list matching payment methods, defaults to original payment method
+- [x] `assignment_id` nullable on `job_excess` (migration 037) — excess can be tracked without hire form
+- [x] `POST /api/excess/create` — manual excess creation from Money tab
+- [x] Insurance Excess section always visible on Money tab (guidance when empty)
+- [x] Dispatch check includes job-level excess records (not just hire-form-linked)
 - [ ] Auto-suggest "client has £X on account" on new hire assignments (endpoint exists, UI wiring pending)
+- [ ] Smarter HH ↔ OP deduplication: read HH deposit IDs back into OP excess records for matching (currently excess deposits are hidden from Payment History but not reconciled)
+
+**Excess status values (migration 038, 1 Apr 2026):**
+| Status | Label | When set |
+|---|---|---|
+| `needed` | Needed | Auto on excess record creation |
+| `partially_paid` | Partially Paid | Payment < required amount |
+| `taken` | Taken | Payment >= required amount |
+| `pre_auth` | Pre-auth Taken | Card hold without charge |
+| `waived` | Waived | Admin decision to skip |
+| `fully_claimed` | Fully Claimed | Damage — keeping full amount |
+| `partially_reimbursed` | Partially Reimbursed | Returning some, claiming rest |
+| `reimbursed` | Reimbursed | Full excess returned |
+| `rolled_over` | Rolled Over | Held on account for next hire |
+
+**HH reimbursement write-back (1 Apr 2026):** Uses `billing_payments_save.php` (payment application against specific deposit), NOT negative deposits. Finds original HH deposit ID from `job_payments` table or by searching HH billing for excess-classified deposits. Xero sync via `hh_task: 'post_payment'`.
 
 ##### Phase C — Money Tab on Job Detail ✅ COMPLETE (27 Mar 2026)
 "Money" tab on Job Detail showing the unified financial picture. HireHop is the **source of truth** for all financial data — the OP reads from HH and displays, never maintains a separate copy for display purposes.
@@ -602,13 +626,16 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [ ] Email logo: real Ooosh logo in email header (logo in R2 at assets/ooosh-logo.png, needs public URL)
 - [ ] Wire email triggers into Payment Portal events (when portal repointed)
 
-**Known bugs / remaining polish (31 Mar 2026):**
+**Known bugs / remaining polish (1 Apr 2026):**
 - [ ] Job header status doesn't refresh after payment without page reload (need to refresh job data after money tab actions)
-- [ ] "Move to Different Entity" UX needs org/person search picker instead of raw Xero ID input
-- [ ] Excess auto-select: when only one pending excess record, auto-select it in the payment form
-- [ ] Excess status not always updating to "Taken" when recorded via Money tab — ensure excess_id is always passed correctly
-- [ ] Excess payment should not count toward "Deposits Received" in financial summary (FIXED 31 Mar)
-- [ ] Excess payments sent generic "Payment Received" email instead of excess-specific template (FIXED 31 Mar — excess_id linkage)
+- [x] "Move to Different Entity" UX — now uses org/person search picker (FIXED 1 Apr)
+- [x] Excess auto-select — single pending record auto-selected in payment form (FIXED 1 Apr)
+- [x] Excess payment method default — was 'payment_portal' (invalid), now defaults to 'worldpay' (FIXED 1 Apr)
+- [x] Excess payment should not count toward "Deposits Received" in financial summary (FIXED 31 Mar)
+- [x] Excess payments sent generic "Payment Received" email instead of excess-specific template (FIXED 31 Mar)
+- [ ] HH ↔ OP excess deduplication: need to read HH deposit IDs back into OP records so same payment isn't shown twice when staff record in HH directly. Currently excess deposits are hidden from Payment History section (shown in Insurance Excess section only)
+- [ ] Email recipient: excess emails should go to client contact, not OP staff. Currently falls back to `getJobEmailRecipients` which may return staff. Need client entity → contact linkage
+- [ ] Excess email: "finishes" vs "finished" tense depends on context (payment received = future, reimbursement = past) — FIXED 1 Apr
 
 ##### Phase D — VAT Adjustment Display ✅ COMPLETE (30 Mar 2026)
 Port the international VAT calculation from the Payment Portal into the OP. Staff now see VAT breakdowns directly on the Money tab instead of visiting the client payment portal.
