@@ -6,6 +6,7 @@ import TransportCalculator from '../components/TransportCalculator';
 import ExcessGateBanner from '../components/ExcessGateBanner';
 import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
+import ChaseModal from '../components/ChaseModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
 
@@ -596,6 +597,7 @@ export default function JobDetailPage() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'money'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
+  const [showChaseModal, setShowChaseModal] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
@@ -660,8 +662,6 @@ export default function JobDetailPage() {
   const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
   const [editingValue, setEditingValue] = useState(false);
   const [editValueAmount, setEditValueAmount] = useState('');
-  const [editingChaseDate, setEditingChaseDate] = useState(false);
-  const [editChaseDate, setEditChaseDate] = useState('');
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
   const [hhClientOutOfSync, setHhClientOutOfSync] = useState(false);
@@ -861,11 +861,6 @@ export default function JobDetailPage() {
     await saveInlineField({ likelihood: cycle[nextIdx] });
   }
 
-  function startEditChaseDate() {
-    if (!job) return;
-    setEditChaseDate(toDateInputValue(job.next_chase_date));
-    setEditingChaseDate(true);
-  }
 
   async function pushToHireHop() {
     if (!job) return;
@@ -1730,30 +1725,25 @@ export default function JobDetailPage() {
                   {job.likelihood ? (job.likelihood.charAt(0).toUpperCase() + job.likelihood.slice(1)) : 'Set likelihood'}
                 </button>
 
-                {/* Next Chase Date */}
+                {/* Next Chase Date — opens full chase modal */}
+                {!isOperational && (
                 <div className="inline-flex items-center gap-1.5 text-xs text-gray-500">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
-                  {editingChaseDate ? (
-                    <DatePicker
-                      value={editChaseDate}
-                      onChange={(val) => { setEditChaseDate(val); setEditingChaseDate(false); saveInlineField({ next_chase_date: val || null }); }}
-                    />
-                  ) : (
-                    <button
-                      onClick={startEditChaseDate}
-                      className={`hover:text-ooosh-600 transition-colors ${
-                        job.next_chase_date && new Date(job.next_chase_date) < new Date() ? 'text-red-600 font-semibold' : ''
-                      }`}
-                      title="Click to set next chase date"
-                    >
-                      {job.next_chase_date
-                        ? `Chase: ${formatDate(job.next_chase_date)}`
-                        : 'Set chase date'}
-                    </button>
-                  )}
+                  <button
+                    onClick={() => setShowChaseModal(true)}
+                    className={`hover:text-ooosh-600 transition-colors ${
+                      job.next_chase_date && new Date(job.next_chase_date) < new Date() ? 'text-red-600 font-semibold' : ''
+                    }`}
+                    title="Log chase"
+                  >
+                    {job.next_chase_date
+                      ? `Chase: ${formatDate(job.next_chase_date)}`
+                      : 'Log chase'}
+                  </button>
                 </div>
+                )}
 
                 {/* Job Value */}
                 <div className="inline-flex items-center text-xs">
@@ -2832,6 +2822,14 @@ export default function JobDetailPage() {
       {activeTab === 'money' && id && (
         <MoneyTab jobId={id} job={job} />
       )}
+
+      {/* Chase Modal */}
+      <ChaseModal
+        isOpen={showChaseModal}
+        job={job ? { id: job.id, job_name: job.job_name, client_name: job.client_name, company_name: job.company_name, chase_count: (job as unknown as { chase_count?: number }).chase_count || 0 } : null}
+        onClose={() => setShowChaseModal(false)}
+        onChaseLogged={() => { loadJob(); loadInteractions(); }}
+      />
 
       {/* Transport Calculator Modal */}
       <TransportCalculator
