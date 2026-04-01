@@ -589,7 +589,7 @@ export default function JobDetailPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const backTo = (location.state as { from?: string })?.from || '/jobs';
-  const backLabel = backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
+  const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
@@ -1708,7 +1708,7 @@ export default function JobDetailPage() {
             )}
 
             {/* Pipeline fields row: Likelihood, Next Chase, Value */}
-            {hasPipelineStatus && (
+            {hasPipelineStatus && !isConfirmed && !isOperational && (
               <div className="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-gray-100">
                 {/* Likelihood */}
                 <button
