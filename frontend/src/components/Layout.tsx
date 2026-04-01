@@ -27,7 +27,8 @@ const navItems: NavItem[] = [
     children: [
       { path: '/pipeline?newEnquiry=1', label: 'New Enquiry' },
       { path: '/pipeline', label: 'Enquiries' },
-      { path: '/jobs', label: 'Upcoming & Out Now' },
+      { path: '/jobs', label: 'Upcoming & Out' },
+      { path: '/jobs/returns', label: 'Returns' },
     ],
   },
   {
