@@ -54,7 +54,7 @@ interface FinancialData {
   client_balance_on_account: number;
 }
 
-const PAYMENT_METHODS = [
+const PAYMENT_METHODS_BASE = [
   { value: 'worldpay', label: 'Worldpay (all cards EXCEPT AMEX)' },
   { value: 'amex', label: 'Amex' },
   { value: 'stripe_gbp', label: 'Stripe GBP' },
@@ -62,7 +62,6 @@ const PAYMENT_METHODS = [
   { value: 'till_cash', label: 'Till (Cash)' },
   { value: 'paypal', label: 'Paypal' },
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
-  { value: 'rolled_over', label: 'Applied from Account Balance' },
 ];
 
 export default function MoneyTab({ jobId, job }: MoneyTabProps) {
@@ -399,51 +398,30 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4">Payment History</h3>
 
-        {/* Payment history — read from HireHop (source of truth) */}
+        {/* Payment history — hire payments from HireHop (excess payments tracked in Insurance Excess section above) */}
         {(() => {
-          // Separate hire and excess deposits
-          const hireDeposits = financial.deposits.filter(d => !d.is_excess);
-          const excessDeposits = financial.deposits.filter(d => d.is_excess);
-
           if (financial.deposits.length === 0) {
-            return <p className="text-sm text-gray-500">No payments recorded yet.</p>;
+            return <p className="text-sm text-gray-500">No hire payments recorded yet. Excess payments are tracked in the Insurance Excess section above.</p>;
           }
 
-          const renderDeposit = (dep: typeof financial.deposits[0]) => (
-            <div key={dep.id} className="py-2.5 flex items-center justify-between">
-              <div className="flex-1">
-                <p className="text-sm text-gray-700">
-                  {dep.date ? new Date(dep.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : '—'}
-                  {dep.bank_name && <span className="text-gray-500"> — {dep.bank_name}</span>}
-                </p>
-                {dep.description && (
-                  <p className="text-xs text-gray-400 mt-0.5">{dep.description}</p>
-                )}
-              </div>
-              <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
-                {dep.is_refund ? '-' : ''}£{dep.amount.toFixed(2)}
-              </p>
-            </div>
-          );
-
           return (
-            <div className="space-y-4">
-              {hireDeposits.length > 0 && (
-                <div>
-                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Hire Payments</p>
-                  <div className="divide-y divide-gray-100">
-                    {hireDeposits.map(renderDeposit)}
+            <div className="divide-y divide-gray-100">
+              {financial.deposits.map((dep) => (
+                <div key={dep.id} className="py-2.5 flex items-center justify-between">
+                  <div className="flex-1">
+                    <p className="text-sm text-gray-700">
+                      {dep.date ? new Date(dep.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : '—'}
+                      {dep.bank_name && <span className="text-gray-500"> — {dep.bank_name}</span>}
+                    </p>
+                    {dep.description && (
+                      <p className="text-xs text-gray-400 mt-0.5">{dep.description}</p>
+                    )}
                   </div>
+                  <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
+                    {dep.is_refund ? '-' : ''}£{dep.amount.toFixed(2)}
+                  </p>
                 </div>
-              )}
-              {excessDeposits.length > 0 && (
-                <div>
-                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Excess Payments</p>
-                  <div className="divide-y divide-gray-100">
-                    {excessDeposits.map(renderDeposit)}
-                  </div>
-                </div>
-              )}
+              ))}
             </div>
           );
         })()}
@@ -614,9 +592,12 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                     onChange={(e) => setPayMethod(e.target.value)}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   >
-                    {PAYMENT_METHODS.map((m) => (
+                    {PAYMENT_METHODS_BASE.map((m) => (
                       <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
+                    {client_balance_on_account > 0 && isExcessMode && (
+                      <option value="rolled_over">Applied from Account Balance (£{client_balance_on_account.toFixed(2)} available)</option>
+                    )}
                   </select>
                 </div>
 
