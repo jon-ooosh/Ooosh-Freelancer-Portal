@@ -1649,38 +1649,6 @@ function NewEnquiryModal({
               </div>
             </div>
 
-            {/* Band History Section */}
-            {clientHistory!.band_history && parseInt(clientHistory!.band_history.stats.total_jobs) > 0 && (
-              <div className="mb-4 p-3 bg-purple-50 border border-purple-200 rounded-lg">
-                <h5 className="text-xs font-semibold text-purple-700 uppercase mb-2">
-                  Band History - {clientHistory!.band_history.band_info?.name || bandName}
-                </h5>
-                {clientHistory!.band_history.band_info?.do_not_hire && (
-                  <div className="mb-2 p-2 bg-red-50 border border-red-200 rounded text-xs font-bold text-red-700">DO NOT HIRE</div>
-                )}
-                <div className="grid grid-cols-3 gap-1.5 mb-2">
-                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
-                    <div className="text-sm font-bold text-gray-900">{clientHistory!.band_history.stats.total_jobs}</div>
-                    <div className="text-[10px] text-gray-500">Jobs</div>
-                  </div>
-                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
-                    <div className="text-sm font-bold text-green-600">{clientHistory!.band_history.stats.confirmed_jobs}</div>
-                    <div className="text-[10px] text-gray-500">Confirmed</div>
-                  </div>
-                  <div className="bg-white rounded p-1.5 text-center border border-purple-100">
-                    <div className="text-sm font-bold text-gray-900">{formatCurrency(parseFloat(clientHistory!.band_history.stats.total_confirmed_value))}</div>
-                    <div className="text-[10px] text-gray-500">Value</div>
-                  </div>
-                </div>
-                {clientHistory!.band_history.jobs.slice(0, 5).map((j) => (
-                  <div key={j.id} className="text-xs text-gray-700 py-1 border-t border-purple-100 flex justify-between">
-                    <span className="truncate flex-1">{j.job_name || 'Untitled'}</span>
-                    {j.job_date && <span className="text-gray-400 ml-2 shrink-0">{new Date(j.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' })}</span>}
-                  </div>
-                ))}
-              </div>
-            )}
-
             {/* Recent jobs list */}
             <h5 className="text-xs font-semibold text-gray-500 uppercase mb-2">{clientHistory!.band_history ? 'Client Jobs' : 'Recent Jobs'}</h5>
             <div className="space-y-2">
@@ -1742,6 +1710,109 @@ function NewEnquiryModal({
                 );
               })}
             </div>
+
+            {/* Band History Section */}
+            {clientHistory!.band_history && parseInt(clientHistory!.band_history.stats.total_jobs) > 0 && (
+              <>
+                <div className="border-t border-purple-200 my-4" />
+                <h4 className="text-sm font-semibold text-purple-700 mb-3">
+                  Band History — {clientHistory!.band_history.band_info?.name || bandName}
+                </h4>
+
+                {clientHistory!.band_history.band_info?.do_not_hire && (
+                  <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg">
+                    <div className="flex items-center gap-2 mb-1">
+                      <svg className="w-4 h-4 text-red-600 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                      <span className="text-sm font-bold text-red-700">DO NOT HIRE</span>
+                    </div>
+                    {clientHistory!.band_history.band_info.do_not_hire_reason && (
+                      <p className="text-xs text-red-600 mt-1">{clientHistory!.band_history.band_info.do_not_hire_reason}</p>
+                    )}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-2 mb-4">
+                  <div className="bg-purple-50 rounded-lg p-2 text-center border border-purple-200">
+                    <div className="text-lg font-bold text-gray-900">{clientHistory!.band_history.stats.total_jobs}</div>
+                    <div className="text-xs text-gray-500">Total Jobs</div>
+                  </div>
+                  <div className="bg-purple-50 rounded-lg p-2 text-center border border-purple-200">
+                    <div className="text-lg font-bold text-green-600">{clientHistory!.band_history.stats.confirmed_jobs}</div>
+                    <div className="text-xs text-gray-500">Confirmed</div>
+                  </div>
+                  <div className="bg-purple-50 rounded-lg p-2 text-center border border-purple-200">
+                    <div className="text-lg font-bold text-gray-900">
+                      {formatCurrency(parseFloat(clientHistory!.band_history.stats.total_confirmed_value))}
+                    </div>
+                    <div className="text-xs text-gray-500">Confirmed Value</div>
+                  </div>
+                  <div className="bg-purple-50 rounded-lg p-2 text-center border border-purple-200">
+                    <div className="text-lg font-bold text-red-500">{clientHistory!.band_history.stats.lost_jobs}</div>
+                    <div className="text-xs text-gray-500">Lost</div>
+                  </div>
+                </div>
+
+                <h5 className="text-xs font-semibold text-purple-500 uppercase mb-2">Band Jobs</h5>
+                <div className="space-y-2">
+                  {clientHistory!.band_history.jobs.map((j) => {
+                    const pStatus = j.pipeline_status;
+                    const pConfig = pStatus
+                      ? PIPELINE_STATUS_CONFIG[pStatus as PipelineStatus]
+                      : null;
+                    const hhStatusBadge = !pConfig && j.status != null ? (() => {
+                      const HH_STATUS_MAP: Record<number, { label: string; colour: string }> = {
+                        3: { label: 'Prepped', colour: '#8B5CF6' },
+                        4: { label: 'Part Dispatched', colour: '#F97316' },
+                        5: { label: 'On Hire', colour: '#0EA5E9' },
+                        6: { label: 'Returned (Incomplete)', colour: '#F59E0B' },
+                        7: { label: 'Returned', colour: '#6366F1' },
+                        8: { label: 'Needs Attention', colour: '#EF4444' },
+                        9: { label: 'Cancelled', colour: '#9CA3AF' },
+                        10: { label: 'Not Interested', colour: '#6B7280' },
+                        11: { label: 'Completed', colour: '#059669' },
+                      };
+                      return HH_STATUS_MAP[j.status] || null;
+                    })() : null;
+                    const statusBadge = pConfig || hhStatusBadge;
+                    return (
+                      <div key={j.id} className="bg-white rounded-lg p-2.5 border border-purple-200 text-xs">
+                        <div className="flex items-center justify-between mb-1">
+                          {j.hh_job_number ? (
+                            <a
+                              href={`https://myhirehop.com/job.php?id=${j.hh_job_number}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-purple-600 hover:text-purple-700 hover:underline"
+                            >
+                              J-{j.hh_job_number}
+                            </a>
+                          ) : (
+                            <span className="text-gray-400">NEW</span>
+                          )}
+                          {statusBadge && (
+                            <span
+                              className="px-1.5 py-0.5 rounded-full text-[10px] font-medium"
+                              style={{ backgroundColor: statusBadge.colour + '20', color: statusBadge.colour }}
+                            >
+                              {statusBadge.label}
+                            </span>
+                          )}
+                        </div>
+                        <div className="font-medium text-gray-900 truncate">{j.job_name || 'Untitled'}</div>
+                        {j.job_date && (
+                          <div className="text-gray-400 mt-0.5">
+                            {formatDateRange(j.job_date, j.job_end)}
+                          </div>
+                        )}
+                        {j.job_value != null && (
+                          <div className="text-gray-600 font-medium mt-0.5">{formatCurrency(j.job_value)}</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
         )}
         {historyLoading && (

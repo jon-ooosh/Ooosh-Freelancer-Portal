@@ -10,6 +10,7 @@ import VenuesPage from './pages/VenuesPage';
 import VenueDetailPage from './pages/VenueDetailPage';
 import JobsPage from './pages/JobsPage';
 import JobDetailPage from './pages/JobDetailPage';
+import ReturnsPage from './pages/ReturnsPage';
 import PipelinePage from './pages/PipelinePage';
 import SettingsPage from './pages/SettingsPage';
 import ProfilePage from './pages/ProfilePage';
@@ -58,6 +59,7 @@ export default function App() {
                 <Route path="/venues" element={<VenuesPage />} />
                 <Route path="/venues/:id" element={<VenueDetailPage />} />
                 <Route path="/jobs" element={<JobsPage />} />
+                <Route path="/jobs/returns" element={<ReturnsPage />} />
                 <Route path="/jobs/:id" element={<JobDetailPage />} />
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />
