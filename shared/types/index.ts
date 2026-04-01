@@ -194,7 +194,7 @@ export const HH_ACTIVE_STATUSES = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
 // Pipeline status values
 export type PipelineStatus = 'new_enquiry' | 'quoting' | 'chasing' | 'paused' | 'provisional' | 'confirmed' | 'lost';
-export type OperationalStatus = 'dispatched' | 'returned_incomplete' | 'returned' | 'completed';
+export type OperationalStatus = 'prepped' | 'dispatched' | 'returned_incomplete' | 'returned' | 'completed';
 export type JobLifecycleStatus = PipelineStatus | OperationalStatus;
 export type QuoteStatus = 'not_quoted' | 'quoted' | 'revised' | 'accepted';
 export type Likelihood = 'hot' | 'warm' | 'cold';
@@ -216,7 +216,8 @@ export const PIPELINE_STATUS_CONFIG: Record<PipelineStatus, { label: string; col
 
 // Operational status display config (post-confirmation lifecycle)
 export const OPERATIONAL_STATUS_CONFIG: Record<OperationalStatus, { label: string; colour: string; hhStatus: number }> = {
-  dispatched:          { label: 'Dispatched',          colour: '#6366F1', hhStatus: 5 },  // Indigo
+  prepped:             { label: 'Prepped',             colour: '#8B5CF6', hhStatus: 3 },  // Purple
+  dispatched:          { label: 'On Hire',             colour: '#6366F1', hhStatus: 5 },  // Indigo
   returned_incomplete: { label: 'Checking In',         colour: '#F59E0B', hhStatus: 6 },  // Amber
   returned:            { label: 'Returned',            colour: '#8B5CF6', hhStatus: 7 },  // Purple
   completed:           { label: 'Completed',           colour: '#059669', hhStatus: 11 }, // Emerald

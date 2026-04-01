@@ -24,6 +24,7 @@ const PIPELINE_TO_HH: Record<string, number> = {
   confirmed: 2,
   lost: 10,
   // Operational statuses
+  prepped: 3,
   dispatched: 5,
   returned_incomplete: 6,
   returned: 7,
@@ -35,6 +36,7 @@ export const HH_TO_PIPELINE: Record<number, string> = {
   0: 'new_enquiry',
   1: 'provisional',
   2: 'confirmed',
+  3: 'prepped',
   5: 'dispatched',
   6: 'returned_incomplete',
   7: 'returned',
@@ -83,10 +85,9 @@ export async function writeBackStatusToHireHop(
     return { success: true, message: `HireHop already at status ${targetHHStatus} — skipped` };
   }
 
-  // Block writing back to HH for statuses 3 (Prepped) and 4 (Part Dispatched) — those are HH-internal
-  // But allow 5 (Dispatched), 6-7 (Returned), 8 (Requires Attention), 11 (Completed) since OP now manages the full lifecycle
-  if (current_hh_status === 3 || current_hh_status === 4) {
-    return { success: false, message: `Job is in HH-managed status ${current_hh_status} (Prepped/Part Dispatched) — write-back blocked` };
+  // Block writing back to HH for status 4 (Part Dispatched) — that's HH-internal
+  if (current_hh_status === 4) {
+    return { success: false, message: `Job is in HH-managed status ${current_hh_status} (Part Dispatched) — write-back blocked` };
   }
 
   try {

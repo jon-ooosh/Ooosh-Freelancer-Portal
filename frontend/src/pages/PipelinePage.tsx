@@ -561,7 +561,7 @@ function ChaseModal({
       setContent('');
       setChaseResponse('');
       setChaseMethod('phone');
-      setSelectedChasePreset(null);
+      setSelectedChasePreset(days === 2 ? '2 days' : days === 14 ? '14 days' : '5 days');
       setChaseAlertUserId('');
       setError('');
     }
