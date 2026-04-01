@@ -355,7 +355,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                     {record.dispatch_override && (
                       <span className="text-[10px] text-amber-600 font-medium">overridden</span>
                     )}
-                    {record.suggested_collection_method === 'pre_auth' && record.excess_status === 'pending' && (
+                    {record.suggested_collection_method === 'pre_auth' && (record.excess_status === 'needed' || record.excess_status === 'pending') && (
                       <span className="text-[10px] text-blue-600 font-medium">pre-auth suggested</span>
                     )}
                   </div>
@@ -506,7 +506,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
 
                 {/* Excess: link to existing record or create new */}
                 {isExcessMode && (() => {
-                  const pendingRecords = excess.records.filter(r => r.excess_status === 'pending' || r.excess_status === 'partial');
+                  const pendingRecords = excess.records.filter(r => ['needed', 'pending', 'partially_paid', 'partial'].includes(r.excess_status));
 
                   if (pendingRecords.length === 0) {
                     // No existing excess records — will auto-create on submit

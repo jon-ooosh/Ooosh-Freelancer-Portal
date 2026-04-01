@@ -343,7 +343,7 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
         if (row.requires_referral && row.referral_status !== 'approved') {
           gateBlockers.push('Driver referral pending — must be approved before book-out');
         }
-        if (row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required'].includes(row.excess_status)) {
+        if (row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status)) {
           gateBlockers.push('Insurance excess not resolved — must be taken or waived before book-out');
         }
       }
@@ -537,7 +537,7 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
 
     for (const row of result.rows) {
       // Check excess status
-      if (row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required'].includes(row.excess_status)) {
+      if (row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status)) {
         blockers.push({
           type: 'excess_pending',
           assignmentId: row.assignment_id,
@@ -568,7 +568,7 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
        FROM job_excess je
        WHERE je.job_id = $1
          AND je.assignment_id IS NULL
-         AND je.excess_status NOT IN ('taken', 'waived', 'rolled_over', 'not_required')`,
+         AND je.excess_status NOT IN ('taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth')`,
       [jobId]
     );
     for (const row of jobExcessResult.rows) {

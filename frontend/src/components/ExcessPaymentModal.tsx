@@ -34,13 +34,18 @@ const REIMBURSE_METHODS = [
 ];
 
 function statusLabel(status: ExcessStatus): string {
-  const labels: Record<ExcessStatus, string> = {
+  const labels: Record<string, string> = {
     not_required: 'Not Required',
-    pending: 'Pending',
-    taken: 'Collected',
-    partial: 'Partial',
+    needed: 'Needed',
+    pending: 'Needed',   // legacy compat
+    taken: 'Taken',
+    partially_paid: 'Partially Paid',
+    partial: 'Partially Paid', // legacy compat
+    pre_auth: 'Pre-auth Taken',
     waived: 'Waived',
-    claimed: 'Claimed',
+    fully_claimed: 'Fully Claimed',
+    claimed: 'Fully Claimed', // legacy compat
+    partially_reimbursed: 'Partially Reimbursed',
     reimbursed: 'Reimbursed',
     rolled_over: 'Rolled Over',
   };
@@ -48,13 +53,18 @@ function statusLabel(status: ExcessStatus): string {
 }
 
 function statusColor(status: ExcessStatus): string {
-  const colors: Record<ExcessStatus, string> = {
+  const colors: Record<string, string> = {
     not_required: 'bg-gray-100 text-gray-700',
+    needed: 'bg-amber-100 text-amber-800',
     pending: 'bg-amber-100 text-amber-800',
     taken: 'bg-green-100 text-green-800',
+    partially_paid: 'bg-yellow-100 text-yellow-800',
     partial: 'bg-yellow-100 text-yellow-800',
+    pre_auth: 'bg-sky-100 text-sky-800',
     waived: 'bg-blue-100 text-blue-800',
+    fully_claimed: 'bg-red-100 text-red-800',
     claimed: 'bg-red-100 text-red-800',
+    partially_reimbursed: 'bg-orange-100 text-orange-800',
     reimbursed: 'bg-emerald-100 text-emerald-800',
     rolled_over: 'bg-purple-100 text-purple-800',
   };
@@ -153,18 +163,18 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const availableActions: { action: ModalAction; label: string; icon: string }[] = [];
   const s = excess.excess_status;
 
-  if (s === 'pending' || s === 'partial') {
+  if (s === 'needed' || s === 'pending' || s === 'partially_paid' || s === 'partial') {
     availableActions.push({ action: 'payment', label: 'Record Payment', icon: '£' });
   }
-  if (s === 'taken' || s === 'partial') {
-    availableActions.push({ action: 'claim', label: 'Record Claim (Damage)', icon: '!' });
+  if (s === 'taken' || s === 'partially_paid' || s === 'partial' || s === 'pre_auth') {
+    availableActions.push({ action: 'claim', label: 'Claim (Damage)', icon: '!' });
     availableActions.push({ action: 'reimburse', label: 'Reimburse', icon: '<' });
     availableActions.push({ action: 'rollover', label: 'Roll Over to Next Hire', icon: '>' });
   }
-  if (s === 'claimed' && amountHeld > 0) {
+  if ((s === 'fully_claimed' || s === 'claimed' || s === 'partially_reimbursed') && amountHeld > 0) {
     availableActions.push({ action: 'reimburse', label: 'Reimburse Remainder', icon: '<' });
   }
-  if (s === 'pending') {
+  if (s === 'needed' || s === 'pending') {
     availableActions.push({ action: 'waive', label: 'Waive Excess', icon: '~' });
   }
   availableActions.push({ action: 'move', label: 'Move to Different Entity', icon: '>' });

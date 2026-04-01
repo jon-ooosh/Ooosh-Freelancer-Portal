@@ -2,7 +2,7 @@
  * Excess Routes — Insurance excess financial lifecycle tracking.
  *
  * Manages the excess amount required for self-drive hires:
- * pending → taken → (claimed | reimbursed | rolled_over)
+ * needed → taken → (fully_claimed | partially_reimbursed | reimbursed | rolled_over)
  *
  * Also handles excess rules (points-based tiers, referral triggers)
  * and the client excess ledger (running balance per client).
@@ -14,6 +14,7 @@ import { sendExcessEmail } from '../services/money-emails';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { emailService } from '../services/email-service';
+import { hhBroker } from '../services/hirehop-broker';
 
 const router = Router();
 router.use(authenticate);
@@ -24,7 +25,7 @@ const updateExcessSchema = z.object({
   excess_amount_required: z.number().min(0).nullable().optional(),
   excess_amount_taken: z.number().min(0).optional(),
   excess_calculation_basis: z.string().nullable().optional(),
-  excess_status: z.enum(['not_required', 'pending', 'taken', 'partial', 'waived', 'claimed', 'reimbursed', 'rolled_over']).optional(),
+  excess_status: z.enum(['not_required', 'needed', 'taken', 'partially_paid', 'pre_auth', 'waived', 'fully_claimed', 'partially_reimbursed', 'reimbursed', 'rolled_over']).optional(),
   payment_method: z.string().max(30).nullable().optional(),
   payment_reference: z.string().max(200).nullable().optional(),
   xero_contact_id: z.string().max(100).nullable().optional(),
@@ -111,7 +112,7 @@ router.post('/create', validate(createExcessSchema), async (req: AuthRequest, re
         job_id, hirehop_job_id, assignment_id,
         excess_amount_required, excess_calculation_basis,
         excess_status, client_name, notes, created_by
-      ) VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8)
+      ) VALUES ($1, $2, $3, $4, $5, 'needed', $6, $7, $8)
       RETURNING *`,
       [
         job_id,
@@ -357,7 +358,7 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
         excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
         excess_status = CASE
           WHEN COALESCE(excess_amount_taken, 0) + $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
-          ELSE 'partial'
+          ELSE 'partially_paid'
         END,
         payment_method = $2,
         payment_reference = $3,
@@ -399,7 +400,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
 
     const result = await query(
       `UPDATE job_excess SET
-        excess_status = 'claimed',
+        excess_status = 'fully_claimed',
         claim_amount = $1,
         claim_date = NOW(),
         claim_notes = $2,
@@ -432,33 +433,104 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
 });
 
 // ── POST /api/excess/:id/reimburse — Record reimbursement ──
+// Also pushes a negative deposit (refund) to HireHop so it appears on the HH billing tab.
 
 router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { amount, method } = req.body;
 
-    const result = await query(
-      `UPDATE job_excess SET
-        excess_status = 'reimbursed',
-        reimbursement_amount = $1,
-        reimbursement_date = NOW(),
-        reimbursement_method = $2,
-        updated_at = NOW()
-      WHERE id = $3
-      RETURNING *`,
-      [amount, method, id]
-    );
-
-    if (result.rows.length === 0) {
+    // Get the current excess record to determine partial vs full
+    const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
+    if (currentResult.rows.length === 0) {
       res.status(404).json({ error: 'Excess record not found' });
       return;
     }
+    const current = currentResult.rows[0];
+    const amountTaken = parseFloat(current.excess_amount_taken || '0');
+    const isPartial = amount < amountTaken;
+
+    const result = await query(
+      `UPDATE job_excess SET
+        excess_status = $1,
+        reimbursement_amount = COALESCE(reimbursement_amount, 0) + $2,
+        reimbursement_date = NOW(),
+        reimbursement_method = $3,
+        updated_at = NOW()
+      WHERE id = $4
+      RETURNING *`,
+      [isPartial ? 'partially_reimbursed' : 'reimbursed', amount, method, id]
+    );
+
+    const excess = result.rows[0];
+
+    // Push refund to HireHop as a negative deposit
+    let hhRefundId: number | null = null;
+    if (excess.hirehop_job_id) {
+      try {
+        let hhClientId: number | null = null;
+        try {
+          const jobDataRes = await hhBroker.get<Record<string, any>>(
+            '/api/job_data.php', { job: excess.hirehop_job_id }, { priority: 'high', cacheTTL: 60 }
+          );
+          if (jobDataRes.success && jobDataRes.data) {
+            hhClientId = jobDataRes.data.CLIENT_ID || jobDataRes.data.client_id || null;
+          }
+        } catch { /* non-fatal */ }
+
+        const currentDate = new Date().toISOString().split('T')[0];
+        const hhBankId = HH_BANK_IDS[method] || 265;
+        const description = `${excess.hirehop_job_id} - excess refund`;
+        const memo = `Insurance excess ${isPartial ? 'partial ' : ''}reimbursement — via ${method.replace(/_/g, ' ')} (recorded via Ooosh OP)`;
+
+        console.log(`[excess] Creating HH refund deposit for job ${excess.hirehop_job_id} -£${amount}`);
+        const hhResult = await hhBroker.post('/php_functions/billing_deposit_save.php', {
+          ID: 0,
+          DATE: currentDate,
+          DESCRIPTION: description,
+          AMOUNT: -amount, // Negative = refund
+          MEMO: memo,
+          ACC_ACCOUNT_ID: hhBankId,
+          ACC_PACKAGE_ID: 3,
+          'CURRENCY[CODE]': 'GBP',
+          'CURRENCY[NAME]': 'United Kingdom Pound',
+          'CURRENCY[SYMBOL]': '£',
+          'CURRENCY[DECIMALS]': 2,
+          'CURRENCY[MULTIPLIER]': 1,
+          'CURRENCY[NEGATIVE_FORMAT]': 1,
+          'CURRENCY[SYMBOL_POSITION]': 0,
+          'CURRENCY[DECIMAL_SEPARATOR]': '.',
+          'CURRENCY[THOUSAND_SEPARATOR]': ',',
+          JOB_ID: excess.hirehop_job_id,
+          CLIENT_ID: hhClientId || '',
+          local: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          tz: 'Europe/London',
+          no_webhook: 1,
+        }, { priority: 'high' });
+
+        if (hhResult.success && hhResult.data) {
+          hhRefundId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
+          console.log(`[excess] HH refund deposit created: ${hhRefundId}`);
+
+          // Trigger Xero sync
+          if (hhRefundId) {
+            try {
+              await hhBroker.post('/php_functions/accounting/tasks.php', {
+                hh_package_type: 1, hh_acc_package_id: 3,
+                hh_task: 'post_deposit', hh_id: hhRefundId, hh_acc_id: '',
+              }, { priority: 'high' });
+              console.log('[excess] Xero sync triggered for refund');
+            } catch { console.error('[excess] Xero sync for refund failed (non-fatal)'); }
+          }
+        } else {
+          console.error('[excess] HH refund creation failed:', hhResult.error);
+        }
+      } catch (hhErr) {
+        console.error('[excess] HH refund write-back failed (non-fatal):', hhErr);
+      }
+    }
 
     // Send reimbursement email
-    const excess = result.rows[0];
-    const originalAmount = parseFloat(excess.excess_amount_taken || '0');
-    const isPartial = amount < originalAmount;
     sendExcessEmail({
       templateId: isPartial ? 'excess_partial_reimbursed' : 'excess_reimbursed',
       excessId: id as string,
@@ -466,16 +538,23 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
       amount,
       paymentMethod: method,
       refundAmount: amount,
-      originalAmount,
-      retainedAmount: isPartial ? originalAmount - amount : 0,
+      originalAmount: amountTaken,
+      retainedAmount: isPartial ? amountTaken - amount : 0,
     }).catch(e => console.error('[excess] Reimburse email failed:', e));
 
-    res.json({ data: result.rows[0] });
+    res.json({ data: { ...excess, hh_refund_id: hhRefundId } });
   } catch (error) {
-    console.error('[excess] Reimburse error:', error);
-    res.status(500).json({ error: 'Failed to record reimbursement' });
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Reimburse error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to record reimbursement', detail: errMsg });
   }
 });
+
+// HireHop bank account IDs (shared with money.ts)
+const HH_BANK_IDS: Record<string, number> = {
+  stripe_gbp: 267, worldpay: 169, amex: 165, wise_bacs: 265,
+  till_cash: 168, paypal: 173, lloyds_bank: 170, rolled_over: 265,
+};
 
 // ── POST /api/excess/:id/waive — Waive excess (admin only) ──
 
@@ -614,7 +693,7 @@ router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
     const totalTaken = records.reduce((sum: number, r: any) => sum + parseFloat(r.excess_amount_taken || 0), 0);
     const totalClaimed = records.reduce((sum: number, r: any) => sum + parseFloat(r.claim_amount || 0), 0);
     const totalReimbursed = records.reduce((sum: number, r: any) => sum + parseFloat(r.reimbursement_amount || 0), 0);
-    const pendingCount = records.filter((r: any) => r.excess_status === 'pending').length;
+    const pendingCount = records.filter((r: any) => r.excess_status === 'needed' || r.excess_status === 'pending').length;
 
     res.json({
       summary: {
@@ -666,7 +745,7 @@ router.get('/by-org/:orgId', async (req: AuthRequest, res: Response) => {
     const totalTaken = records.reduce((sum: number, r: any) => sum + parseFloat(r.excess_amount_taken || 0), 0);
     const totalClaimed = records.reduce((sum: number, r: any) => sum + parseFloat(r.claim_amount || 0), 0);
     const totalReimbursed = records.reduce((sum: number, r: any) => sum + parseFloat(r.reimbursement_amount || 0), 0);
-    const pendingCount = records.filter((r: any) => r.excess_status === 'pending').length;
+    const pendingCount = records.filter((r: any) => r.excess_status === 'needed' || r.excess_status === 'pending').length;
 
     res.json({
       summary: {

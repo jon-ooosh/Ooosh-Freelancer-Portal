@@ -158,10 +158,12 @@ export default function ExcessLedgerPage() {
               className="text-sm border border-gray-300 rounded-md px-3 py-1.5"
             >
               <option value="">All statuses</option>
-              <option value="pending">Pending</option>
-              <option value="taken">Collected</option>
-              <option value="partial">Partial</option>
-              <option value="claimed">Claimed</option>
+              <option value="needed">Needed</option>
+              <option value="taken">Taken</option>
+              <option value="partially_paid">Partially Paid</option>
+              <option value="pre_auth">Pre-auth Taken</option>
+              <option value="fully_claimed">Fully Claimed</option>
+              <option value="partially_reimbursed">Partially Reimbursed</option>
               <option value="reimbursed">Reimbursed</option>
               <option value="rolled_over">Rolled Over</option>
               <option value="waived">Waived</option>

@@ -289,8 +289,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       (sum: number, r: any) => sum + parseFloat(r.excess_amount_taken || 0), 0
     );
     const excessStatus = excessRecords.length > 0
-      ? excessRecords.some((r: any) => r.excess_status === 'pending') ? 'pending'
-        : excessRecords.every((r: any) => ['taken', 'waived', 'not_required'].includes(r.excess_status)) ? 'collected'
+      ? excessRecords.some((r: any) => r.excess_status === 'needed') ? 'needed'
+        : excessRecords.every((r: any) => ['taken', 'waived', 'not_required', 'pre_auth', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'rolled_over'].includes(r.excess_status)) ? 'collected'
         : excessRecords[0].excess_status
       : null;
 
@@ -453,7 +453,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
           excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
           excess_status = CASE
             WHEN COALESCE(excess_amount_taken, 0) + $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
-            ELSE 'partial'
+            ELSE 'partially_paid'
           END,
           payment_method = $2,
           payment_reference = $3,
@@ -690,7 +690,7 @@ router.post('/:jobId/payment-event', async (req: AuthRequest, res: Response) => 
           excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
           excess_status = CASE
             WHEN COALESCE(excess_amount_taken, 0) + $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
-            ELSE 'partial'
+            ELSE 'partially_paid'
           END,
           payment_method = $2,
           payment_reference = $3,
