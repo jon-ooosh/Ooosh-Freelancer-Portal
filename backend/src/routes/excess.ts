@@ -134,6 +134,71 @@ router.post('/create', validate(createExcessSchema), async (req: AuthRequest, re
   }
 });
 
+// ── POST /api/excess/create-from-hh — Create excess record pre-linked to an HH deposit ──
+// Used when an excess deposit exists in HireHop but has no OP record.
+// Creates the OP record with the HH deposit already linked (no push back to HH).
+
+const createFromHHSchema = z.object({
+  job_id: z.string().uuid(),
+  hh_deposit_id: z.number().int().min(1),
+  amount: z.number().min(0.01),
+  client_name: z.string().max(200).optional(),
+});
+
+router.post('/create-from-hh', validate(createFromHHSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { job_id, hh_deposit_id, amount, client_name } = req.body;
+
+    // Look up job
+    const jobResult = await query(
+      `SELECT id, hh_job_number, client_name, company_name FROM jobs WHERE id = $1`,
+      [job_id]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const job = jobResult.rows[0];
+
+    // Check this HH deposit isn't already linked
+    const dupeCheck = await query(
+      `SELECT id FROM job_excess WHERE hh_deposit_id = $1`,
+      [hh_deposit_id]
+    );
+    if (dupeCheck.rows.length > 0) {
+      res.status(409).json({ error: 'This HireHop deposit is already linked to an excess record' });
+      return;
+    }
+
+    const effectiveClientName = client_name || job.client_name || job.company_name || null;
+
+    const result = await query(
+      `INSERT INTO job_excess (
+        job_id, hirehop_job_id,
+        excess_amount_required, excess_amount_taken,
+        excess_calculation_basis, excess_status,
+        client_name, hh_deposit_id, hh_reconciled_at, hh_reconcile_source,
+        payment_date, created_by
+      ) VALUES ($1, $2, $3, $3, 'Imported from HireHop deposit', 'taken', $4, $5, NOW(), 'manual_link', NOW(), $6)
+      RETURNING *`,
+      [
+        job_id,
+        job.hh_job_number || null,
+        amount,
+        effectiveClientName,
+        hh_deposit_id,
+        req.user!.id,
+      ]
+    );
+
+    console.log(`[excess] Created from HH deposit: job=${job_id}, hh_deposit=${hh_deposit_id}, £${amount}`);
+    res.status(201).json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[excess] Create from HH error:', error);
+    res.status(500).json({ error: 'Failed to create excess record from HH deposit' });
+  }
+});
+
 // ── GET /api/excess — List excess records ──
 
 router.get('/', async (req: AuthRequest, res: Response) => {
