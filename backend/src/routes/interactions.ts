@@ -116,6 +116,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     );
 
     // Chase side-effects: auto-increment chase_count, set next_chase_date
+    // When chase is logged with a future date, move job back to Enquiries (from Chasing)
+    // The auto-mover will bring it back to Chasing when the chase date arrives
     if (type === 'chase' && job_id) {
       const chaseDate = next_chase_date || null;
       await query(
@@ -125,6 +127,14 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
           next_chase_date = CASE
             WHEN $1::date IS NOT NULL THEN $1::date
             ELSE (CURRENT_DATE + (COALESCE(chase_interval_days, 3) || ' days')::interval)::date
+          END,
+          pipeline_status = CASE
+            WHEN pipeline_status = 'chasing' THEN 'new_enquiry'
+            ELSE pipeline_status
+          END,
+          pipeline_status_changed_at = CASE
+            WHEN pipeline_status = 'chasing' THEN NOW()
+            ELSE pipeline_status_changed_at
           END,
           updated_at = NOW()
         WHERE id = $2`,

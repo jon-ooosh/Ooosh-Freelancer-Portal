@@ -145,6 +145,7 @@ export default function ReturnsPage() {
     return (
       <Link
         to={`/jobs/${job.id}`}
+        state={{ from: '/jobs/returns' }}
         className="block bg-white rounded-lg border border-gray-200 p-4 hover:border-ooosh-300 hover:shadow-sm transition-all"
       >
         <div className="flex items-start justify-between gap-4">
