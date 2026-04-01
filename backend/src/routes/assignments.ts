@@ -509,8 +509,10 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
         vha.status AS assignment_status,
         d.full_name AS driver_name,
         fv.reg AS vehicle_reg,
+        je.id AS excess_id,
         je.excess_amount_required,
         je.excess_status,
+        je.dispatch_override,
         d.requires_referral,
         d.referral_status
       FROM vehicle_hire_assignments vha
@@ -526,9 +528,11 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
     const blockers: Array<{
       type: string;
       assignmentId: string;
+      excessId?: string;
       driverName: string | null;
       vehicleReg: string | null;
       amountRequired: number | null;
+      dispatchOverride?: boolean;
     }> = [];
 
     for (const row of result.rows) {
@@ -537,9 +541,11 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
         blockers.push({
           type: 'excess_pending',
           assignmentId: row.assignment_id,
+          excessId: row.excess_id,
           driverName: row.driver_name,
           vehicleReg: row.vehicle_reg,
           amountRequired: row.excess_amount_required ? parseFloat(row.excess_amount_required) : null,
+          dispatchOverride: row.dispatch_override,
         });
       }
 
@@ -553,6 +559,28 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
           amountRequired: null,
         });
       }
+    }
+
+    // Also check for job-level excess (not tied to a specific assignment)
+    const jobExcessResult = await query(
+      `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_status,
+              je.client_name, je.dispatch_override
+       FROM job_excess je
+       WHERE je.job_id = $1
+         AND je.assignment_id IS NULL
+         AND je.excess_status NOT IN ('taken', 'waived', 'rolled_over', 'not_required')`,
+      [jobId]
+    );
+    for (const row of jobExcessResult.rows) {
+      blockers.push({
+        type: 'excess_pending',
+        assignmentId: 'job-level',
+        excessId: row.excess_id,
+        driverName: row.client_name || null,
+        vehicleReg: null,
+        amountRequired: row.excess_amount_required ? parseFloat(row.excess_amount_required) : null,
+        dispatchOverride: row.dispatch_override,
+      });
     }
 
     res.json({

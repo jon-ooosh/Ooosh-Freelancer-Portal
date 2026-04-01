@@ -547,6 +547,8 @@ router.post('/:id/move', authorize('admin', 'manager'), validate(moveExcessSchem
     const { id } = req.params;
     const { xero_contact_id, xero_contact_name, client_name, person_id, reason } = req.body;
 
+    console.log('[excess] Move attempt:', { id, xero_contact_id, xero_contact_name, client_name, person_id, reason });
+
     const result = await query(
       `UPDATE job_excess SET
         xero_contact_id = $1,
@@ -558,7 +560,7 @@ router.post('/:id/move', authorize('admin', 'manager'), validate(moveExcessSchem
       WHERE id = $6
       RETURNING *`,
       [
-        xero_contact_id,
+        xero_contact_id || null,
         xero_contact_name,
         client_name || null,
         person_id || null,
@@ -574,8 +576,9 @@ router.post('/:id/move', authorize('admin', 'manager'), validate(moveExcessSchem
 
     res.json({ data: result.rows[0] });
   } catch (error) {
-    console.error('[excess] Move error:', error);
-    res.status(500).json({ error: 'Failed to move excess record' });
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Move error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to move excess record', detail: errMsg });
   }
 });
 
