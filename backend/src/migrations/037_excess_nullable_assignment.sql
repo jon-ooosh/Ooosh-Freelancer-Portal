@@ -6,12 +6,14 @@
 -- Drop the NOT NULL constraint on assignment_id
 ALTER TABLE job_excess ALTER COLUMN assignment_id DROP NOT NULL;
 
--- Update client_excess_ledger view to include records without xero_contact_id
--- (shows as "Unlinked" in the ledger — these are manual excess records or
---  records from hire forms that didn't include Xero contact info)
-CREATE OR REPLACE VIEW client_excess_ledger AS
+-- Must DROP first because COALESCE changes the column type width
+-- (varchar(100) → varchar), and CREATE OR REPLACE doesn't allow type changes
+DROP VIEW IF EXISTS client_excess_ledger;
+
+-- Recreate view to include records without xero_contact_id
+CREATE VIEW client_excess_ledger AS
 SELECT
-  COALESCE(xero_contact_id, 'UNLINKED') AS xero_contact_id,
+  COALESCE(xero_contact_id, 'UNLINKED')::VARCHAR(100) AS xero_contact_id,
   COALESCE(MAX(xero_contact_name), MAX(client_name), 'Unlinked Records') AS xero_contact_name,
   MAX(client_name) AS client_name,
   COUNT(*) AS total_hires,
@@ -27,4 +29,4 @@ SELECT
   COUNT(*) FILTER (WHERE dispatch_override = true) AS override_count
 FROM job_excess
 WHERE excess_status != 'not_required'
-GROUP BY COALESCE(xero_contact_id, 'UNLINKED');
+GROUP BY COALESCE(xero_contact_id, 'UNLINKED')::VARCHAR(100);
