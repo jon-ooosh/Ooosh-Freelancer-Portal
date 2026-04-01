@@ -549,11 +549,13 @@ router.post('/:id/move', authorize('admin', 'manager'), validate(moveExcessSchem
 
     console.log('[excess] Move attempt:', { id, xero_contact_id, xero_contact_name, client_name, person_id, reason });
 
+    const effectiveClientName = client_name || xero_contact_name;
+
     const result = await query(
       `UPDATE job_excess SET
         xero_contact_id = $1,
         xero_contact_name = $2,
-        client_name = COALESCE($3, $2),
+        client_name = $3,
         person_id = $4,
         notes = CASE WHEN notes IS NULL THEN $5 ELSE notes || E'\n' || $5 END,
         updated_at = NOW()
@@ -562,7 +564,7 @@ router.post('/:id/move', authorize('admin', 'manager'), validate(moveExcessSchem
       [
         xero_contact_id || null,
         xero_contact_name,
-        client_name || null,
+        effectiveClientName,
         person_id || null,
         `Moved to ${xero_contact_name}${reason ? ': ' + reason : ''}`,
         id,
