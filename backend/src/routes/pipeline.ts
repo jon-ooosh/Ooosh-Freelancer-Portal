@@ -410,7 +410,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
 
 const updateStatusSchema = z.object({
   pipeline_status: z.enum(['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional', 'confirmed', 'lost',
-    'dispatched', 'returned_incomplete', 'returned', 'completed']),
+    'prepped', 'dispatched', 'returned_incomplete', 'returned', 'completed']),
   // Context fields depending on status
   hold_reason: z.string().optional().nullable(),
   hold_reason_detail: z.string().optional().nullable(),

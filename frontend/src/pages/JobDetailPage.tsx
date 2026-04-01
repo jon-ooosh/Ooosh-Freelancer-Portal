@@ -964,9 +964,14 @@ export default function JobDetailPage() {
   function initiateStatusChange(targetStatus: PipelineStatus) {
     setShowStatusDropdown(false);
     const needsPrompt = ['paused', 'confirmed', 'lost'].includes(targetStatus);
+    const needsDispatchConfirm = ['dispatched'].includes(targetStatus);
     if (needsPrompt) {
       setTransitionTarget(targetStatus);
       setShowTransitionModal(true);
+    } else if (needsDispatchConfirm) {
+      if (window.confirm('Mark as On Hire? This will update HireHop to Dispatched status.')) {
+        handleStatusTransition(targetStatus);
+      }
     } else {
       handleStatusTransition(targetStatus);
     }
@@ -1303,7 +1308,8 @@ export default function JobDetailPage() {
 
   // Pipeline or operational status for display
   const OPS_DISPLAY: Record<string, { label: string; colour: string }> = {
-    dispatched: { label: 'Dispatched', colour: '#6366F1' },
+    prepped: { label: 'Prepped', colour: '#8B5CF6' },
+    dispatched: { label: 'On Hire', colour: '#6366F1' },
     returned_incomplete: { label: 'Checking In', colour: '#F59E0B' },
     returned: { label: 'Returned', colour: '#8B5CF6' },
     completed: { label: 'Completed', colour: '#059669' },
@@ -1320,7 +1326,7 @@ export default function JobDetailPage() {
   // Available pipeline statuses for the dropdown (excluding current)
   // Contextual status transitions based on current status
   const PIPELINE_STATUSES: PipelineStatus[] = ['new_enquiry', 'chasing', 'provisional', 'paused', 'confirmed', 'lost'];
-  const OPERATIONAL_STATUSES: string[] = ['dispatched', 'returned_incomplete', 'returned', 'completed'];
+  const OPERATIONAL_STATUSES: string[] = ['prepped', 'dispatched', 'returned_incomplete', 'returned', 'completed'];
   const isOperational = OPERATIONAL_STATUSES.includes(job.pipeline_status || '');
   const isConfirmed = job.pipeline_status === 'confirmed';
   // After confirmation: show operational progression + ability to go back

@@ -674,8 +674,16 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [x] Ooosh → HireHop: write-back on pipeline status changes (with loop prevention)
 - [x] Pipeline ↔ HireHop status mapping (see Status Mapping section)
 - [x] Webhook logging (`webhook_log` table, migration 018)
+- [x] Full lifecycle statuses: prepped, dispatched (on hire), returned_incomplete (checking in), returned, completed
+- [x] Bidirectional sync for operational statuses (prepped=3, dispatched=5, returned=6/7, completed=11)
+- [x] Dispatch confirmation prompt from OP ("Mark as On Hire?")
+- [x] HH webhook bypass for status changes (no prompt, direct update)
+- [x] Returns page at /jobs/returns — checking-in queue + completed archive
 - [ ] Status mismatch detection in existing sync (backup)
+- [ ] Soft gate: warn on dispatch if prep checklist incomplete (non-blocking)
 - [ ] Gate conditions: check excess collected before allowing dispatch
+- [ ] HH item check-in/out counts for prep progress indicator (needs API research)
+- [ ] Job Issues tracker (duplicate vehicle issues pattern — track problems throughout hire lifecycle: prep issues, on-hire breakdowns, return damage, missing items)
 
 #### Step 5: Payment Portal Repointing
 *Merged into Step 3 Phase E (Money System).* See above for full repointing plan with `DATA_BACKEND` env var toggle.
