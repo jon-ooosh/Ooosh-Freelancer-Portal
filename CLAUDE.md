@@ -93,7 +93,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │       │   ├── PeoplePage.tsx / PersonDetailPage.tsx
 │       │   ├── OrganisationsPage.tsx / OrganisationDetailPage.tsx
 │       │   ├── VenuesPage.tsx / VenueDetailPage.tsx
-│       │   ├── JobsPage.tsx / JobDetailPage.tsx    # Job detail has tabs: Details, Activity, Crew & Transport
+│       │   ├── JobsPage.tsx / JobDetailPage.tsx    # Job detail has tabs: Overview, Activity Timeline, Crew & Transport, Drivers & Vehicles, Money, Files
 │       │   ├── PipelinePage.tsx                    # Kanban board
 │       │   ├── TeamPage.tsx
 │       │   ├── SettingsPage.tsx
@@ -256,7 +256,7 @@ If you need to change Nginx behaviour (new location blocks, proxy rules, headers
   - [x] Phase A: Data layer (migrations 003-006, pipeline fields, chase interaction type)
   - [x] Phase B: Backend API (pipeline endpoints, status transitions, chase logic, chase alerts)
   - [x] Phase C: Kanban board UI (6 columns, cards, drag-and-drop, filters)
-  - [x] Phase D: Supporting UI (new enquiry form with file staging, chase logging with quick-select & alerts, HireHop links, inline file viewer)
+  - [x] Phase D: Supporting UI (new enquiry form with file staging + service type quick-select, chase logging with quick-select & alerts, HireHop links, inline file viewer)
   - [x] Phase E: HireHop write-back (push status changes to HH via webhooks + write-back service)
   - [ ] Phase E.2: Create HH jobs from Ooosh (deferred)
 - [x] **File management** — authenticated upload/download, inline viewer (images + PDFs), file tags & comments
@@ -799,7 +799,7 @@ The Job Detail page has inline editing for all key fields.
 - [x] **Client** — Editable with org search picker
 - [x] **Job name** — Inline editable
 - [x] **Pipeline fields** — Likelihood, next chase date, job value — all inline editable on Job Detail
-- [x] **Create in HireHop** button — Push Ooosh-native enquiry to create HH job, write back the number. HH user/manager mapping via `hh_user_id` on users table (migration 028).
+- [x] **Create in HireHop** button — Push Ooosh-native enquiry to create HH job, write back the number. HH user/manager mapping via `hh_user_id` on users table (migration 028). Uses `/api/save_job.php` with confirmed field names: `out`/`start`/`end`/`to` for dates, `duration_days`/`duration_hrs` for charge period, `duration_locked: 0`. Default times 09:00 when DatePicker sends date-only. Details field is NOT pushed to HH job memo.
 
 **Stream B: Band-Centric Data Model** ✅ COMPLETE
 Organisation-to-organisation relationships and multi-org job links. Makes "bands" a first-class concept.
@@ -810,6 +810,7 @@ Organisation-to-organisation relationships and multi-org job links. Makes "bands
 - [x] Frontend: "Relationships" section on Organisation Detail page (add/remove/view linked orgs with bidirectional display)
 - [x] Frontend: Band/org links on Job Detail page (add band, client, promoter etc.)
 - [x] Frontend: Band picker on New Enquiry form with org search
+- [x] Frontend: Service type quick-select buttons on New Enquiry form (Self-drive van, Backline, Rehearsal) — auto-creates matching job requirements (vehicle+hire_forms+excess, backline, rehearsal), description optional when service types selected, job name auto-generates as "Band - Client - Selection" format
 - [x] Person-to-org role picker (dropdown instead of free text) with standard roles
 - [x] End role confirmation dialog with optional reason and repoint flow
 - [x] Frontend: Person context surfacing in pickers (show org connections when selecting a person — crew picker shows "role at Org Name")
@@ -822,8 +823,9 @@ HireHop sync imported contacts literally — bands became people, management com
 The cleanup strategy is: OP becomes master for relationship data, HH gets what it needs via push.
 
 *Step 1: OP→HH job creation* ✅ COMPLETE (part of Stream A)
-- [x] `POST /api/pipeline/:id/push-hirehop` — create job in HH via `save_job.php` API
-- [x] Map OP fields → HH: contact person → `name`, client org → `company`, dates → `out`/`start`/`end`/`to`, job name → `job_name`, details → `details`
+- [x] `POST /api/pipeline/:id/push-hirehop` — create job in HH via `/api/save_job.php`
+- [x] Map OP fields → HH: contact person → `name`, client org → `company`, dates → `out`/`start`/`end`/`to`, job name → `job_name`, charge period → `duration_days`/`duration_hrs` with `duration_locked: 0`
+- [x] Date-only values default to 09:00 time; details field NOT pushed to HH memo
 - [x] Write back HH job number to OP `jobs.hh_job_number`
 - [x] Include `no_webhook=1` to prevent sync loops
 - [x] Band stays in OP only (HH has no band field)
@@ -1303,6 +1305,11 @@ HIREHOP_EXPORT_KEY=your_export_key  # Export key for webhook verification (from 
 - **Search jobs:** `https://{domain}/php_functions/search_list.php?token={token}&jobs=1&status=0,1,2,...&page=1&rows=100`
 - **GET single job:** `https://{domain}/api/job_data.php?token={token}&job={id}`
 - **POST status update:** `https://{domain}/frames/status_save.php` (POST, form-encoded) — always include `no_webhook=1` to prevent loops
+- **POST create/update job:** `https://{domain}/api/save_job.php` (POST, form-encoded) — confirmed field names from HH API docs:
+  - Dates: `out` (compulsory new), `start` (compulsory new), `end`, `to` — format `YYYY-MM-DD HH:MM`
+  - Charge period: `duration_days` ("How many chargeable days from JOB_DATE"), `duration_hrs`, `duration_locked` (0=unlocked)
+  - Identity: `job_name`, `name` (contact), `company` (client org)
+  - Also aliased as `/php_functions/job_save.php` in some docs
 - **Add note:** `https://{domain}/api/job_note.php?job={id}&note={text}&token={token}` (GET)
 
 ## Pipeline ↔ HireHop Status Mapping
@@ -1357,7 +1364,7 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 - **Database:** All IDs are UUIDs. `created_by` on most tables is VARCHAR (seed value), but `interactions.created_by` is a UUID FK to `users(id)`
 - **Migrations:** Sequential numbered SQL files, **hardcoded list in `run.ts`** — new migrations must be added to the array manually!
 - **Navigation:** Two-level nav with "Address Book" (People, Organisations, Venues) and "Jobs" (Enquiries/Pipeline, Upcoming & Out) submenus
-- **Job Detail tabs:** Details | Activity | Crew & Transport
+- **Job Detail tabs:** Overview (details + notes with inline editing) | Activity Timeline | Crew & Transport | Drivers & Vehicles | Money | Files
 
 ## Important Conventions
 

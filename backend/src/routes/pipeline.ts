@@ -595,7 +595,7 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
 
 router.get('/client-history', async (req: AuthRequest, res: Response) => {
   try {
-    const { client_id, client_name, exclude_job_id } = req.query;
+    const { client_id, client_name, exclude_job_id, band_id } = req.query;
 
     if (!client_id && !client_name) {
       res.status(400).json({ error: 'client_id or client_name required' });
@@ -676,10 +676,59 @@ router.get('/client-history', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Band history — if band_id provided, fetch jobs linked to this band via job_organisations
+    let band_history = null;
+    if (band_id) {
+      const bandJobs = await query(
+        `SELECT
+          j.id, j.hh_job_number, j.job_name, j.status, j.status_name,
+          j.pipeline_status, j.job_date, j.job_end, j.job_value,
+          j.client_name, j.company_name, j.likelihood,
+          j.created_at
+        FROM jobs j
+        JOIN job_organisations jo ON jo.job_id = j.id
+        WHERE jo.organisation_id = $1
+          AND jo.role = 'band'
+          AND j.is_deleted = false
+          ${exclude_job_id ? `AND j.id != $2` : ''}
+        ORDER BY j.job_date DESC NULLS LAST, j.created_at DESC
+        LIMIT 20`,
+        exclude_job_id ? [band_id, exclude_job_id] : [band_id]
+      );
+
+      const bandStats = await query(
+        `SELECT
+          COUNT(*) as total_jobs,
+          COUNT(*) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2) as confirmed_jobs,
+          COUNT(*) FILTER (WHERE j.pipeline_status = 'lost' OR j.status IN (9, 10)) as lost_jobs,
+          COALESCE(SUM(j.job_value) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2), 0) as total_confirmed_value,
+          COALESCE(SUM(j.job_value), 0) as total_value
+        FROM jobs j
+        JOIN job_organisations jo ON jo.job_id = j.id
+        WHERE jo.organisation_id = $1
+          AND jo.role = 'band'
+          AND j.is_deleted = false`,
+        [band_id]
+      );
+
+      const bandOrg = await query(
+        `SELECT id, name, do_not_hire, do_not_hire_reason, notes as internal_notes
+         FROM organisations WHERE id = $1`,
+        [band_id]
+      );
+
+      band_history = {
+        jobs: bandJobs.rows,
+        stats: bandStats.rows[0],
+        band_info: bandOrg.rows[0] || null,
+      };
+    }
+
     res.json({
       jobs: result.rows,
       stats: statsResult.rows[0],
       client_info,
+      band_history,
     });
   } catch (error) {
     console.error('Client history error:', error);
