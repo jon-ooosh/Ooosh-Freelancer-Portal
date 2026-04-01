@@ -262,10 +262,11 @@ If you need to change Nginx behaviour (new location blocks, proxy rules, headers
 - [x] **File management** — authenticated upload/download, inline viewer (images + PDFs), file tags & comments
 - [x] **Enquiry/Quoting merge** — New Enquiry + Quoting merged into single "Enquiries" column
 - [x] **Chase auto-mover** — runs every 15 minutes via `config/scheduler.ts`, moves jobs with `next_chase_date <= NOW()` to "chasing" pipeline status, logs status_transition interactions
+- [x] **Chase modal improvements** — shared `ChaseModal.tsx` component used on Pipeline + Job Detail, chase logging moves job from Chasing → Enquiries (auto-mover brings back when due), preset defaults to 5 days (aligned with `chase_interval_days`)
 - [x] **Delivery/collection calculator** — full transport quoting tool (see Crew & Transport section below)
 - [x] **Crew assignments** — assign people to quotes with role, rate, status tracking (migration 008)
 - [x] **Quote status workflow** — draft → confirmed → completed/cancelled with audit trail (migration 008)
-- [x] **Navigation restructure** — "Address Book" submenu (People, Organisations, Venues) + "Jobs" submenu (Enquiries, Upcoming & Out)
+- [x] **Navigation restructure** — "Address Book" submenu (People, Organisations, Venues) + "Jobs" submenu (New Enquiry, Enquiries, Upcoming & Out, Returns)
 
 ### Phase 2 — Active / Next Up (WORK ORDER)
 
@@ -675,10 +676,13 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [x] Pipeline ↔ HireHop status mapping (see Status Mapping section)
 - [x] Webhook logging (`webhook_log` table, migration 018)
 - [x] Full lifecycle statuses: prepped, dispatched (on hire), returned_incomplete (checking in), returned, completed
-- [x] Bidirectional sync for operational statuses (prepped=3, dispatched=5, returned=6/7, completed=11)
+- [x] Bidirectional sync for operational statuses (prepped=3, dispatched/on_hire=5, returned=6/7, completed=11)
+- [x] HH status 5 (Dispatched) inbound maps to OP `prepped` (HH skips to 5 on checkout, no prep-scan distinction). "On Hire" is OP-only — doesn't push back to HH (already at 5).
 - [x] Dispatch confirmation prompt from OP ("Mark as On Hire?")
 - [x] HH webhook bypass for status changes (no prompt, direct update)
-- [x] Returns page at /jobs/returns — checking-in queue + completed archive
+- [x] Returns page at /jobs/returns — "Checking In" and "Completed" sections
+- [x] "Returns" added to Jobs nav submenu
+- [x] "Back to Returns" navigation link from Job Detail when navigated from Returns page
 - [ ] Status mismatch detection in existing sync (backup)
 - [ ] Soft gate: warn on dispatch if prep checklist incomplete (non-blocking)
 - [ ] Gate conditions: check excess collected before allowing dispatch
@@ -707,6 +711,8 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [x] Replace Overview tab with Prep Checklist as default job tab (now called "Job Requirements")
 - [x] Non-linear status badges (styled like pipeline status dropdowns)
 - [x] Progress indicators on Jobs list page + Pipeline kanban cards (real data via bulk endpoint)
+- [x] Likelihood badge hidden for confirmed+ jobs (no longer relevant post-booking)
+- [x] Full Details tab removed — details/notes now editable inline on Overview tab
 - [ ] Deposit/payment progress bar on Prep Checklist (visual: deposit taken vs full fee)
 - [ ] "Compare" function: what we've said we need vs what HH tells us (flag discrepancies)
 
@@ -818,7 +824,8 @@ Organisation-to-organisation relationships and multi-org job links. Makes "bands
 - [x] Frontend: "Relationships" section on Organisation Detail page (add/remove/view linked orgs with bidirectional display)
 - [x] Frontend: Band/org links on Job Detail page (add band, client, promoter etc.)
 - [x] Frontend: Band picker on New Enquiry form with org search
-- [x] Frontend: Service type quick-select buttons on New Enquiry form (Self-drive van, Backline, Rehearsal) — auto-creates matching job requirements (vehicle+hire_forms+excess, backline, rehearsal), description optional when service types selected, job name auto-generates as "Band - Client - Selection" format
+- [x] Frontend: Service type quick-select buttons on New Enquiry form (Self-drive van, Backline, Rehearsal) — auto-creates matching job requirements (vehicle+hire_forms+excess, backline, rehearsal), description optional when service types selected
+- [x] Auto-generated job names in "Band - Client - Selection" format (e.g. "Arctic Monkeys - ATC Live - Van, Backline")
 - [x] Person-to-org role picker (dropdown instead of free text) with standard roles
 - [x] End role confirmation dialog with optional reason and repoint flow
 - [x] Frontend: Person context surfacing in pickers (show org connections when selecting a person — crew picker shows "role at Org Name")
@@ -877,6 +884,9 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - [x] Smart suggestions on Org Detail (suggest band retype for misclassified clients)
   - [x] Data Cleanup page restricted to admin/manager roles in nav
   - [x] Client info surfacing on New Enquiry form + Job Detail sidebar: Do Not Hire warning (red banner), Working Terms, Internal Notes — via enhanced `/pipeline/client-history` endpoint returning `client_info` from organisations table
+  - [x] Band trading history on New Enquiry form sidebar (shows band's job history alongside client history)
+  - [x] Band trading history on Job Detail sidebar (when band linked via job_organisations)
+  - [x] Separate stacked sections: client history above, band history below, each with 4-square stats grid
 - [ ] **Crew & Transport refinements**
   - [x] `is_freelancer` flag + freelancer filtering in crew assignment
   - [x] Tab badge count fix (show quote count on initial load)
@@ -1222,8 +1232,10 @@ const navItems: NavItem[] = [
     path: '/jobs-menu',
     label: 'Jobs',
     children: [
+      { path: '/pipeline/new', label: 'New Enquiry' },
       { path: '/pipeline', label: 'Enquiries' },
       { path: '/jobs', label: 'Upcoming & Out' },
+      { path: '/jobs/returns', label: 'Returns' },
     ],
   },
   // Add: { path: '/vehicles-menu', label: 'Vehicles', children: [...] }
@@ -1330,8 +1342,15 @@ HIREHOP_EXPORT_KEY=your_export_key  # Export key for webhook verification (from 
 | `paused` | 0 | Enquiry | Paused enquiry (HH stays Enquiry) |
 | `provisional` | 1 | Provisional | Awaiting deposit / held pending |
 | `confirmed` | 2 | Booked | Deposit/full payment received |
+| `prepped` | 5* | Dispatched | HH status 5 inbound → OP `prepped` (HH skips to 5 on checkout) |
+| `dispatched` (on hire) | 5 | Dispatched | OP-only distinction — doesn't push to HH (already at 5) |
+| `returned_incomplete` | 6 | Returned Incomplete | Partial return / checking in |
+| `returned` | 7 | Returned | All equipment back |
+| `completed` | 11 | Completed | Job fully completed |
 | `lost` | 10 | Not Interested | Client declined |
 | _(cancelled)_ | 9 | Cancelled | Job cancelled after booking |
+
+*\*Note: HH has no "prepped" status (code 3 exists but HH skips it). HH jumps to 5 (Dispatched) on item checkout. The OP treats inbound HH status 5 as `prepped`, and the separate `dispatched` (on hire) status is OP-only.*
 
 **Status change API for external systems:**
 ```
@@ -1371,7 +1390,7 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 - **Auth flow:** Login → JWT access token (short-lived) + refresh token → stored in Zustand store (`useAuthStore`), sent as `Authorization: Bearer` header
 - **Database:** All IDs are UUIDs. `created_by` on most tables is VARCHAR (seed value), but `interactions.created_by` is a UUID FK to `users(id)`
 - **Migrations:** Sequential numbered SQL files, **hardcoded list in `run.ts`** — new migrations must be added to the array manually!
-- **Navigation:** Two-level nav with "Address Book" (People, Organisations, Venues) and "Jobs" (Enquiries/Pipeline, Upcoming & Out) submenus
+- **Navigation:** Two-level nav with "Address Book" (People, Organisations, Venues) and "Jobs" (New Enquiry, Enquiries, Upcoming & Out, Returns) submenus
 - **Job Detail tabs:** Overview (details + notes with inline editing) | Activity Timeline | Crew & Transport | Drivers & Vehicles | Money | Files
 
 ## Important Conventions
