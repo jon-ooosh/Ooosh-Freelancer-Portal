@@ -189,6 +189,12 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       memo: string | null; is_excess: boolean; is_refund: boolean;
       bank_name: string | null; entered_by: string | null;
     }> = [];
+    // Track HH excess deposits separately for reconciliation
+    const hhExcessDeposits: Array<{
+      hh_deposit_id: number; amount: number; date: string;
+      description: string | null; memo: string | null;
+      bank_name: string | null;
+    }> = [];
     let totalHireDeposits = 0;
     let totalExcessDeposits = 0;
 
@@ -219,9 +225,8 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           const absAmount = Math.abs(creditAmount);
 
           if (absAmount > 0) {
-            // Only add hire deposits to the Payment History display
-            // Excess deposits are shown in the Insurance Excess section instead (from OP job_excess records)
             if (!isExcess) {
+              // Hire deposit — show in Payment History
               deposits.push({
                 id: depositId,
                 amount: absAmount,
@@ -233,9 +238,19 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
                 bank_name: getBankName(data.ACC_ACCOUNT_ID),
                 entered_by: data.CREATE_USER_NAME || null,
               });
+            } else if (!isRefund) {
+              // Excess deposit — collect for reconciliation (skip refunds, they're payment apps)
+              hhExcessDeposits.push({
+                hh_deposit_id: depositId,
+                amount: absAmount,
+                date: data.DATE || row.date || '',
+                description: description || null,
+                memo: memo || null,
+                bank_name: getBankName(data.ACC_ACCOUNT_ID),
+              });
             }
 
-            // But still count ALL deposits in financial totals
+            // Count ALL deposits in financial totals
             if (!isRefund) {
               if (isExcess) { totalExcessDeposits += absAmount; }
               else { totalHireDeposits += absAmount; }
@@ -284,6 +299,18 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
             else { totalHireDeposits += creditAmount; }
           }
         }
+      }
+    }
+
+    // ── Passive Reconciliation: match HH excess deposits → OP excess records ──
+    // Fire-and-forget: doesn't block the response, but links HH deposits to OP records
+    // so they stay in sync for future loads and reimbursement lookups.
+    let reconciliationResults: Array<{ hh_deposit_id: number; excess_id: string; action: string }> = [];
+    if (hhExcessDeposits.length > 0 && job.id) {
+      try {
+        reconciliationResults = await reconcileExcessDeposits(job.id, hhExcessDeposits);
+      } catch (reconcileErr) {
+        console.error('[money] Reconciliation failed (non-fatal):', reconcileErr);
       }
     }
 
@@ -371,6 +398,26 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     const depositPaid = totalHireDeposits >= (requiredDeposit - 5); // £5 tolerance
     const depositPercent = effectiveHireValueIncVat > 0 ? Math.min(100, (totalHireDeposits / effectiveHireValueIncVat) * 100) : 0;
 
+    // Build list of unmatched HH excess deposits (not linked to any OP record)
+    // These can be manually linked by staff via the UI
+    const linkedHHDepositIds = new Set<number>();
+    for (const rec of excessRecords) {
+      if (rec.hh_deposit_id) linkedHHDepositIds.add(rec.hh_deposit_id);
+    }
+    // Also check job_payments for any HH deposit IDs linked to excess payments
+    const jpLinkedResult = await query(
+      `SELECT DISTINCT hirehop_deposit_id FROM job_payments
+       WHERE job_id = $1 AND hirehop_deposit_id IS NOT NULL AND payment_type = 'excess'`,
+      [job.id]
+    );
+    for (const row of jpLinkedResult.rows) {
+      linkedHHDepositIds.add(row.hirehop_deposit_id);
+    }
+
+    const unmatchedHHExcessDeposits = hhExcessDeposits.filter(
+      d => !linkedHHDepositIds.has(d.hh_deposit_id)
+    );
+
     res.json({
       data: {
         job: {
@@ -403,6 +450,11 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         },
         vat_adjustment: vatAdjustment,
         client_balance_on_account: clientBalance,
+        // Reconciliation info for the frontend
+        reconciliation: {
+          actions: reconciliationResults,
+          unmatched_hh_deposits: unmatchedHHExcessDeposits,
+        },
       },
     });
   } catch (error) {
@@ -602,6 +654,14 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
               [hhDepositId, payment.id]
             );
 
+            // Also link HH deposit to job_excess record (for reconciliation)
+            if (payment_type === 'excess' && excess_id) {
+              query(
+                `UPDATE job_excess SET hh_deposit_id = $1, hh_reconciled_at = NOW(), hh_reconcile_source = 'op_push' WHERE id = $2`,
+                [hhDepositId, excess_id]
+              ).catch(() => {}); // non-fatal, fire-and-forget
+            }
+
             // STEP 2: Trigger Xero sync
             try {
               const syncResult = await hhBroker.post('/php_functions/accounting/tasks.php', {
@@ -799,6 +859,114 @@ function getHHBankId(paymentMethod: string): number {
 function isExcessPayment(text: string): boolean {
   const lower = text.toLowerCase();
   return /excess|insurance|xs|top.?up/.test(lower);
+}
+
+/**
+ * Passive reconciliation: match HH excess deposits to OP excess records.
+ *
+ * For each HH excess deposit found in billing_list:
+ * 1. Skip if already linked (hh_deposit_id on job_excess, or hirehop_deposit_id on job_payments)
+ * 2. Find a matching OP excess record (same job, status 'needed' or 'partially_paid')
+ * 3. Update the OP record: set hh_deposit_id, update excess_amount_taken + status
+ *
+ * Matching strategy:
+ * - First try exact amount match (HH deposit amount == excess_amount_required - excess_amount_taken)
+ * - Then try any record with status 'needed' or 'partially_paid' (first one)
+ * - If no match, the deposit stays unmatched (shown as "unmatched" in the UI for manual linking)
+ */
+async function reconcileExcessDeposits(
+  jobId: string,
+  hhExcessDeposits: Array<{ hh_deposit_id: number; amount: number; date: string; description: string | null; memo: string | null; bank_name: string | null }>,
+): Promise<Array<{ hh_deposit_id: number; excess_id: string; action: string }>> {
+  const results: Array<{ hh_deposit_id: number; excess_id: string; action: string }> = [];
+
+  // Get all HH deposit IDs already linked in OP (either on job_excess or job_payments)
+  const [linkedExcess, linkedPayments] = await Promise.all([
+    query(
+      `SELECT hh_deposit_id FROM job_excess WHERE job_id = $1 AND hh_deposit_id IS NOT NULL`,
+      [jobId]
+    ),
+    query(
+      `SELECT hirehop_deposit_id FROM job_payments WHERE job_id = $1 AND hirehop_deposit_id IS NOT NULL AND payment_type = 'excess'`,
+      [jobId]
+    ),
+  ]);
+
+  const alreadyLinked = new Set<number>([
+    ...linkedExcess.rows.map((r: any) => r.hh_deposit_id),
+    ...linkedPayments.rows.map((r: any) => r.hirehop_deposit_id),
+  ]);
+
+  // Get excess records for this job that could be matched
+  const excessRecords = await query(
+    `SELECT id, excess_amount_required, excess_amount_taken, excess_status, hh_deposit_id
+     FROM job_excess WHERE job_id = $1
+     ORDER BY created_at ASC`,
+    [jobId]
+  );
+
+  // Build a mutable list of available records (not yet linked to an HH deposit)
+  const availableRecords = excessRecords.rows.filter(
+    (r: any) => !r.hh_deposit_id && ['needed', 'partially_paid'].includes(r.excess_status)
+  );
+
+  for (const hhDep of hhExcessDeposits) {
+    if (alreadyLinked.has(hhDep.hh_deposit_id)) continue;
+
+    // Try to find a matching OP excess record
+    // Strategy 1: exact remaining-amount match
+    let matchIdx = availableRecords.findIndex((r: any) => {
+      const remaining = Math.max(0, parseFloat(r.excess_amount_required || 0) - parseFloat(r.excess_amount_taken || 0));
+      return Math.abs(remaining - hhDep.amount) < 0.01; // penny tolerance
+    });
+
+    // Strategy 2: if no exact match, try amount-required match (fresh record, nothing taken yet)
+    if (matchIdx === -1) {
+      matchIdx = availableRecords.findIndex((r: any) => {
+        const required = parseFloat(r.excess_amount_required || 0);
+        return Math.abs(required - hhDep.amount) < 0.01 && parseFloat(r.excess_amount_taken || 0) === 0;
+      });
+    }
+
+    // Strategy 3: just take the first available 'needed' record
+    if (matchIdx === -1 && availableRecords.length > 0) {
+      matchIdx = 0;
+    }
+
+    if (matchIdx === -1) continue; // No record to match — will show as unmatched in UI
+
+    const record = availableRecords[matchIdx];
+    const currentTaken = parseFloat(record.excess_amount_taken || 0);
+    const newTaken = currentTaken + hhDep.amount;
+    const required = parseFloat(record.excess_amount_required || 0);
+    const newStatus = required > 0 && newTaken >= required ? 'taken' : 'partially_paid';
+
+    try {
+      await query(
+        `UPDATE job_excess SET
+          hh_deposit_id = $1,
+          hh_reconciled_at = NOW(),
+          hh_reconcile_source = 'auto_match',
+          excess_amount_taken = $2,
+          excess_status = $3,
+          payment_date = COALESCE(payment_date, $4::timestamptz),
+          updated_at = NOW()
+        WHERE id = $5`,
+        [hhDep.hh_deposit_id, newTaken, newStatus, hhDep.date || new Date().toISOString(), record.id]
+      );
+
+      results.push({ hh_deposit_id: hhDep.hh_deposit_id, excess_id: record.id, action: 'auto_matched' });
+      console.log(`[money] Reconciled: HH deposit ${hhDep.hh_deposit_id} (£${hhDep.amount}) → excess ${record.id} (status: ${newStatus})`);
+
+      // Remove from available list so it can't be double-matched
+      availableRecords.splice(matchIdx, 1);
+      alreadyLinked.add(hhDep.hh_deposit_id);
+    } catch (err) {
+      console.error(`[money] Failed to reconcile HH deposit ${hhDep.hh_deposit_id}:`, err);
+    }
+  }
+
+  return results;
 }
 
 export default router;

@@ -72,6 +72,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '036_ooosh_staff_person.sql',
         '037_excess_nullable_assignment.sql',
         '038_excess_status_revisions.sql',
+        '039_excess_hh_deposit_reconciliation.sql',
       ];
 
       for (const migration of migrations) {
