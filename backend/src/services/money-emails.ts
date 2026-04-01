@@ -8,13 +8,13 @@ import { emailService } from './email-service';
 /** Refund timescale based on payment method */
 export function getRefundTimescale(paymentMethod: string): string {
   const timescales: Record<string, string> = {
-    worldpay: 'As you paid by card in person, this should take 2 to 3 days to come back.',
-    amex: 'As you paid by Amex, this should take 2 to 3 days to come back.',
-    stripe_gbp: 'As you paid by card through our online link, this should take 5 to 10 days to come back.',
-    wise_bacs: 'As you paid by UK bank transfer, this should be with you within a couple of hours.',
+    worldpay: 'As you paid by card in person, this should take 2 to 3 working days to come back.',
+    amex: 'As you paid by Amex, this should take 2 to 3 working days to come back.',
+    stripe_gbp: 'As you paid by card through our online link, this should take 5 to 10 working days to come back.',
+    wise_bacs: 'For UK bank transfers this should be with you within an hour. For international transfers, please allow 1 to 2 working days.',
     till_cash: 'As you paid by cash, please contact us to arrange collection of your refund.',
     paypal: 'As you paid by PayPal, this should be instant.',
-    lloyds_bank: 'As you paid by bank transfer, this should be with you within 1 to 2 days.',
+    lloyds_bank: 'For UK bank transfers this should be with you within an hour. For international transfers, please allow 1 to 2 working days.',
   };
   return timescales[paymentMethod] || 'Please allow 3 to 5 working days for the refund to appear in your account.';
 }
@@ -96,9 +96,21 @@ export async function getDriverEmail(driverId: string): Promise<{
   if (result.rows.length === 0) return { email: null, firstName: null };
 
   const row = result.rows[0];
+  // Extract first name, skipping common title prefixes (MR, MRS, MS, MISS, DR, etc.)
+  let firstName = row.first_name;
+  if (!firstName && row.full_name) {
+    const titles = new Set(['mr', 'mrs', 'ms', 'miss', 'dr', 'prof', 'sir', 'lady', 'lord']);
+    const parts = row.full_name.trim().split(/\s+/);
+    const firstNonTitle = parts.find((p: string) => !titles.has(p.toLowerCase()));
+    firstName = firstNonTitle || parts[0];
+    // Title-case it (JONATHAN → Jonathan)
+    if (firstName && firstName === firstName.toUpperCase()) {
+      firstName = firstName.charAt(0) + firstName.slice(1).toLowerCase();
+    }
+  }
   return {
     email: row.person_email || row.email || null,
-    firstName: row.first_name || row.full_name?.split(' ')[0] || null,
+    firstName: firstName || null,
   };
 }
 
@@ -206,8 +218,10 @@ export async function sendExcessEmail(opts: {
     ? [recipients.primaryEmail, ...recipients.ccEmails]
     : recipients.ccEmails;
 
-  const hireStart = excess.hire_start ? new Date(excess.hire_start).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '';
-  const hireEnd = excess.hire_end ? new Date(excess.hire_end).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '';
+  // Format dates with contextual prefix — reads as " that starts on Monday 5 April 2026" or "" if missing
+  const fmtDate = (d: any) => d ? new Date(d).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '';
+  const hireStart = excess.hire_start ? ` that starts on ${fmtDate(excess.hire_start)}` : '';
+  const hireEnd = excess.hire_end ? ` that finished on ${fmtDate(excess.hire_end)}` : '';
 
   const reasonSection = reason
     ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;"><tr><td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;"><p style="margin:0;font-size:15px;color:#991b1b;">${reason}</p></td></tr></table>`

@@ -28,9 +28,13 @@ const PAYMENT_METHODS = [
 ];
 
 const REIMBURSE_METHODS = [
-  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
   { value: 'worldpay', label: 'Worldpay (Card Refund)' },
+  { value: 'amex', label: 'Amex (Card Refund)' },
+  { value: 'stripe_gbp', label: 'Stripe GBP (Online Card Refund)' },
+  { value: 'wise_bacs', label: 'Wise - Current Account (BACS)' },
   { value: 'till_cash', label: 'Till (Cash)' },
+  { value: 'paypal', label: 'PayPal' },
+  { value: 'lloyds_bank', label: 'Lloyds Bank' },
 ];
 
 function statusLabel(status: ExcessStatus): string {
@@ -94,7 +98,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   // Reimburse form
   const amountHeld = Number(excess.excess_amount_taken || 0) - Number(excess.claim_amount || 0) - Number(excess.reimbursement_amount || 0);
   const [reimburseAmount, setReimburseAmount] = useState(amountHeld > 0 ? amountHeld.toFixed(2) : '');
-  const [reimburseMethod, setReimburseMethod] = useState('wise_bacs');
+  const [reimburseMethod, setReimburseMethod] = useState(excess.payment_method || 'wise_bacs');
 
   // Waive form
   const [waiveReason, setWaiveReason] = useState('');
