@@ -357,10 +357,10 @@ const templates: Record<string, EmailTemplate> = {
         Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We have received your insurance excess payment of <strong>{{amount}}</strong> for job <strong>#{{jobNumber}}</strong> that starts {{hireStart}}.
+        We have received your insurance excess payment of <strong>{{amount}}</strong> for job <strong>#{{jobNumber}}</strong>{{hireStart}}.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        All being well on return, we aim to reimburse your excess within ten days of the end of your hire, which ends {{hireEnd}}.
+        All being well on return, we aim to reimburse your excess within ten days of the end of your hire{{hireEnd}}.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         {{reimbursementMethod}}
@@ -405,7 +405,7 @@ const templates: Record<string, EmailTemplate> = {
         Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We have reimbursed your insurance excess of <strong>{{amount}}</strong> for job <strong>#{{jobNumber}}</strong> that finished {{hireEnd}}.
+        We have reimbursed your insurance excess of <strong>{{amount}}</strong> for job <strong>#{{jobNumber}}</strong>{{hireEnd}}.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         {{refundTimescale}}
