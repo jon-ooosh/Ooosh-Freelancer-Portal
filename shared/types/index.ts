@@ -708,6 +708,10 @@ export interface JobExcess {
   suggested_collection_method: 'payment' | 'pre_auth';
   person_id: string | null;
   notes: string | null;
+  // HH deposit reconciliation (migration 039)
+  hh_deposit_id: number | null;
+  hh_reconciled_at: string | null;
+  hh_reconcile_source: 'op_push' | 'auto_match' | 'manual_link' | null;
   created_at: string;
   updated_at: string;
   created_by: string | null;

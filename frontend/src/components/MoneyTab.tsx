@@ -52,6 +52,14 @@ interface FinancialData {
     status: string | null;
   };
   client_balance_on_account: number;
+  reconciliation?: {
+    actions: Array<{ hh_deposit_id: number; excess_id: string; action: string }>;
+    unmatched_hh_deposits: Array<{
+      hh_deposit_id: number; amount: number; date: string;
+      description: string | null; memo: string | null;
+      bank_name: string | null;
+    }>;
+  };
 }
 
 const PAYMENT_METHODS_BASE = [
@@ -83,6 +91,10 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
 
   // Excess action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
+
+  // Link deposit state
+  const [linkingDeposit, setLinkingDeposit] = useState<{ hh_deposit_id: number; amount: number } | null>(null);
+  const [linkLoading, setLinkLoading] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -148,6 +160,23 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
       setPayError(err.message || 'Failed to record payment');
     } finally {
       setPayLoading(false);
+    }
+  }
+
+  async function handleLinkDeposit(excessId: string) {
+    if (!linkingDeposit) return;
+    setLinkLoading(true);
+    try {
+      await api.post(`/excess/${excessId}/link-deposit`, {
+        hh_deposit_id: linkingDeposit.hh_deposit_id,
+        amount: linkingDeposit.amount,
+      });
+      setLinkingDeposit(null);
+      loadData();
+    } catch (err: any) {
+      alert(err.message || 'Failed to link deposit');
+    } finally {
+      setLinkLoading(false);
     }
   }
 
@@ -351,6 +380,11 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                     <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status)}`}>
                       {statusLabel(record.excess_status)}
                     </span>
+                    {record.hh_deposit_id && (
+                      <span className="text-[10px] text-green-600 font-medium" title={`HH Deposit #${record.hh_deposit_id} (${record.hh_reconcile_source || 'linked'})`}>
+                        HH linked
+                      </span>
+                    )}
                     {record.dispatch_override && (
                       <span className="text-[10px] text-amber-600 font-medium">overridden</span>
                     )}
@@ -382,7 +416,90 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
             No excess tracked yet. Use "Record Payment" above and toggle to "Insurance Excess" to log excess against this job.
           </p>
         )}
+
+        {/* Unmatched HH excess deposits — need manual linking */}
+        {data.reconciliation && data.reconciliation.unmatched_hh_deposits.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-gray-200">
+            <p className="text-xs font-medium text-amber-700 mb-2">
+              Excess deposits found in HireHop not yet linked to an OP record:
+            </p>
+            <div className="space-y-2">
+              {data.reconciliation.unmatched_hh_deposits.map((dep) => (
+                <div key={dep.hh_deposit_id} className="flex items-center justify-between p-2 bg-amber-50 border border-amber-200 rounded-lg">
+                  <div>
+                    <p className="text-sm text-gray-800">
+                      £{dep.amount.toFixed(2)}
+                      {dep.bank_name && <span className="text-gray-500"> via {dep.bank_name}</span>}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {dep.date ? new Date(dep.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : ''}
+                      {dep.description && ` — ${dep.description}`}
+                    </p>
+                  </div>
+                  {excess.records.length > 0 ? (
+                    <button
+                      onClick={() => setLinkingDeposit({ hh_deposit_id: dep.hh_deposit_id, amount: dep.amount })}
+                      className="px-2.5 py-1 text-xs font-medium text-amber-700 hover:text-amber-900 border border-amber-300 rounded-md hover:bg-amber-100"
+                    >
+                      Link to Excess
+                    </button>
+                  ) : (
+                    <span className="text-xs text-gray-400">No excess record to link to</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Auto-reconciliation results */}
+        {data.reconciliation && data.reconciliation.actions.length > 0 && (
+          <div className="mt-3 p-2 bg-green-50 border border-green-200 rounded-lg">
+            <p className="text-xs text-green-700">
+              {data.reconciliation.actions.length} HireHop deposit{data.reconciliation.actions.length > 1 ? 's' : ''} automatically linked to excess record{data.reconciliation.actions.length > 1 ? 's' : ''}.
+            </p>
+          </div>
+        )}
       </div>
+
+      {/* Link Deposit to Excess modal */}
+      {linkingDeposit && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setLinkingDeposit(null)}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Link HH Deposit to Excess Record</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              HireHop deposit <strong>#{linkingDeposit.hh_deposit_id}</strong> for <strong>£{linkingDeposit.amount.toFixed(2)}</strong>.
+              Select which excess record to link it to:
+            </p>
+            <div className="space-y-2 mb-4">
+              {excess.records.map((record) => (
+                <button
+                  key={record.id}
+                  onClick={() => handleLinkDeposit(record.id)}
+                  disabled={linkLoading}
+                  className="w-full text-left p-3 border border-gray-200 rounded-lg hover:border-ooosh-300 hover:bg-ooosh-50/50 transition-colors disabled:opacity-50"
+                >
+                  <p className="text-sm font-medium text-gray-900">
+                    {record.driver_name || record.client_name || 'Job-level excess'}
+                    {record.vehicle_reg && ` — ${record.vehicle_reg}`}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
+                    {' · '}Status: {statusLabel(record.excess_status)}
+                    {record.hh_deposit_id && ' · Already linked'}
+                  </p>
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setLinkingDeposit(null)}
+              className="w-full px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Client Account Balance */}
       {client_balance_on_account > 0 && (

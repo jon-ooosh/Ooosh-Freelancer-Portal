@@ -693,6 +693,103 @@ router.post('/:id/move', authorize('admin', 'manager'), validate(moveExcessSchem
   }
 });
 
+// ── POST /api/excess/:id/link-deposit — Manually link an HH deposit to this excess record ──
+// Used when auto-reconciliation can't match (e.g. deposit description doesn't contain excess keywords)
+
+const linkDepositSchema = z.object({
+  hh_deposit_id: z.number().int().min(1),
+  amount: z.number().min(0.01).optional(), // If provided, also updates excess_amount_taken
+});
+
+router.post('/:id/link-deposit', authorize('admin', 'manager'), validate(linkDepositSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { hh_deposit_id, amount } = req.body;
+
+    // Check the excess record exists
+    const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
+    if (currentResult.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+
+    const current = currentResult.rows[0];
+
+    // Check this HH deposit isn't already linked to another excess record
+    const dupeCheck = await query(
+      `SELECT id FROM job_excess WHERE hh_deposit_id = $1 AND id != $2`,
+      [hh_deposit_id, id]
+    );
+    if (dupeCheck.rows.length > 0) {
+      res.status(409).json({ error: 'This HireHop deposit is already linked to another excess record' });
+      return;
+    }
+
+    // Build the update
+    const updateParts = [
+      'hh_deposit_id = $1',
+      'hh_reconciled_at = NOW()',
+      `hh_reconcile_source = 'manual_link'`,
+      'updated_at = NOW()',
+    ];
+    const params: unknown[] = [hh_deposit_id];
+
+    // If amount provided, update the excess amount taken and status
+    if (amount) {
+      const currentTaken = parseFloat(current.excess_amount_taken || 0);
+      const newTaken = currentTaken + amount;
+      const required = parseFloat(current.excess_amount_required || 0);
+      const newStatus = required > 0 && newTaken >= required ? 'taken' : 'partially_paid';
+
+      params.push(newTaken, newStatus);
+      updateParts.push(`excess_amount_taken = $${params.length - 1}`);
+      updateParts.push(`excess_status = $${params.length}`);
+      updateParts.push(`payment_date = COALESCE(payment_date, NOW())`);
+    }
+
+    params.push(id);
+    const result = await query(
+      `UPDATE job_excess SET ${updateParts.join(', ')} WHERE id = $${params.length} RETURNING *`,
+      params
+    );
+
+    console.log(`[excess] Manual link: HH deposit ${hh_deposit_id} → excess ${id} (by user ${req.user!.id})`);
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[excess] Link deposit error:', error);
+    res.status(500).json({ error: 'Failed to link deposit' });
+  }
+});
+
+// ── POST /api/excess/:id/unlink-deposit — Remove the HH deposit link ──
+
+router.post('/:id/unlink-deposit', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `UPDATE job_excess SET
+        hh_deposit_id = NULL,
+        hh_reconciled_at = NULL,
+        hh_reconcile_source = NULL,
+        updated_at = NOW()
+      WHERE id = $1 RETURNING *`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+
+    console.log(`[excess] Unlinked HH deposit from excess ${id} (by user ${req.user!.id})`);
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[excess] Unlink deposit error:', error);
+    res.status(500).json({ error: 'Failed to unlink deposit' });
+  }
+});
+
 // ── GET /api/excess/by-person/:personId — Excess history for a person (address book) ──
 
 router.get('/by-person/:personId', async (req: AuthRequest, res: Response) => {
