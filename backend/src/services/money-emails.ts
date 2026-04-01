@@ -211,15 +211,17 @@ export async function sendExcessEmail(opts: {
     recipientFirstName = driver.firstName;
   }
 
-  // Fall back to job contacts if no driver email
+  // Fall back to job contacts if no driver email — but never send to @oooshtours.co.uk (staff) as if they're the client
   const jobRecipients = await getJobEmailRecipients(jobId);
   if (!recipientEmail) {
-    recipientEmail = jobRecipients.primaryEmail;
-    recipientFirstName = jobRecipients.primaryFirstName;
+    if (jobRecipients.primaryEmail && !jobRecipients.primaryEmail.endsWith('@oooshtours.co.uk')) {
+      recipientEmail = jobRecipients.primaryEmail;
+      recipientFirstName = jobRecipients.primaryFirstName;
+    }
   }
 
   if (!recipientEmail) {
-    console.log(`[excess-email] No recipient found for excess ${excessId} on job ${jobId} — skipping email`);
+    console.log(`[excess-email] No client recipient found for excess ${excessId} on job ${jobId} — skipping email (no client contact linked)`);
     return;
   }
 
@@ -229,12 +231,13 @@ export async function sendExcessEmail(opts: {
     ...jobRecipients.ccEmails,
   ].filter(e => e !== recipientEmail);
 
-  // Format dates with contextual prefix — fall back to job dates if hire dates not set
+  // Format dates — use future tense for payment receipt, past tense for reimbursement
   const fmtDate = (d: any) => d ? new Date(d).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '';
   const startDate = excess.hire_start || job?.job_date || job?.out_date;
   const endDate = excess.hire_end || job?.job_end || job?.return_date;
+  const isReimbursement = templateId.includes('reimburs');
   const hireStart = startDate ? ` that starts on ${fmtDate(startDate)}` : '';
-  const hireEnd = endDate ? ` that finished on ${fmtDate(endDate)}` : '';
+  const hireEnd = endDate ? (isReimbursement ? ` that finished on ${fmtDate(endDate)}` : `, which finishes on ${fmtDate(endDate)}`) : '';
 
   const reasonSection = reason
     ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;"><tr><td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;"><p style="margin:0;font-size:15px;color:#991b1b;">${reason}</p></td></tr></table>`

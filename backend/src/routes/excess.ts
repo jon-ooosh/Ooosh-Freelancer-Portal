@@ -242,6 +242,8 @@ router.get('/ledger/:xeroContactId', authorize('admin', 'manager'), async (req: 
       [xeroContactId]
     );
 
+    // Handle 'UNLINKED' — records with NULL xero_contact_id
+    const isUnlinked = xeroContactId === 'UNLINKED';
     const historyResult = await query(
       `SELECT je.*,
         vha.hirehop_job_name,
@@ -255,9 +257,9 @@ router.get('/ledger/:xeroContactId', authorize('admin', 'manager'), async (req: 
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN jobs j ON j.id = je.job_id
-      WHERE je.xero_contact_id = $1
+      WHERE ${isUnlinked ? 'je.xero_contact_id IS NULL' : 'je.xero_contact_id = $1'}
       ORDER BY je.created_at DESC`,
-      [xeroContactId]
+      isUnlinked ? [] : [xeroContactId]
     );
 
     res.json({
