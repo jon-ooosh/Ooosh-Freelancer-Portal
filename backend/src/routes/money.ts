@@ -219,26 +219,59 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           const absAmount = Math.abs(creditAmount);
 
           if (absAmount > 0) {
-            deposits.push({
-              id: depositId,
-              amount: absAmount,
-              date: data.DATE || row.date || '',
-              description: description || null,
-              memo: memo || null,
-              is_excess: isExcess,
-              is_refund: isRefund,
-              bank_name: getBankName(data.ACC_ACCOUNT_ID),
-              entered_by: data.CREATE_USER_NAME || null,
-            });
+            // Only add hire deposits to the Payment History display
+            // Excess deposits are shown in the Insurance Excess section instead (from OP job_excess records)
+            if (!isExcess) {
+              deposits.push({
+                id: depositId,
+                amount: absAmount,
+                date: data.DATE || row.date || '',
+                description: description || null,
+                memo: memo || null,
+                is_excess: false,
+                is_refund: isRefund,
+                bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                entered_by: data.CREATE_USER_NAME || null,
+              });
+            }
 
+            // But still count ALL deposits in financial totals
             if (!isRefund) {
               if (isExcess) { totalExcessDeposits += absAmount; }
               else { totalHireDeposits += absAmount; }
             } else {
-              // Refunds reduce the totals
               if (isExcess) { totalExcessDeposits -= absAmount; }
               else { totalHireDeposits -= absAmount; }
             }
+          }
+        } else if (kind === 3) {
+          // Payment application (refund against a specific deposit)
+          const creditAmount = parseFloat(row.credit || data.credit || '0');
+          const description = String(data.DESCRIPTION || row.desc || '');
+          const memo = String(data.MEMO || '');
+          const isExcess = isExcessPayment(description + ' ' + memo);
+          const appId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
+          const absAmount = Math.abs(creditAmount);
+
+          // Only show payment applications with a description (skip auto-applications)
+          if (absAmount > 0 && description) {
+            if (!isExcess) {
+              deposits.push({
+                id: appId,
+                amount: absAmount,
+                date: data.DATE || row.date || '',
+                description: description || null,
+                memo: memo || null,
+                is_excess: false,
+                is_refund: true, // Payment applications are refunds
+                bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                entered_by: data.CREATE_USER_NAME || null,
+              });
+            }
+
+            // Count refunds in totals
+            if (isExcess) { totalExcessDeposits -= absAmount; }
+            else { totalHireDeposits -= absAmount; }
           }
         } else if (kind === 2) {
           // Credit note — negative debit, classified same as deposits
@@ -511,7 +544,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
     // Uses the two-step process: 1) Create deposit, 2) Trigger Xero sync
     let hhDepositId: number | null = null;
     let xeroSynced = false;
-    if (push_to_hirehop && job.hh_job_number && payment_type !== 'refund') {
+    if (push_to_hirehop && job.hh_job_number && payment_type !== 'refund' && payment_method !== 'rolled_over') {
       try {
         // Get CLIENT_ID from HireHop job data for the deposit
         let hhClientId: number | null = null;
@@ -523,8 +556,11 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         } catch { /* non-fatal */ }
 
         const currentDate = new Date().toISOString().split('T')[0];
-        const description = `${job.hh_job_number} - ${payment_type}`;
-        const memo = buildHHDepositMemo(payment_type, payment_method, payment_reference, notes);
+        const formattedDate = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const methodLabel = PAYMENT_METHODS_LABELS[payment_method] || payment_method.replace(/_/g, ' ');
+        const typeLabel = payment_type === 'excess' ? 'excess' : payment_type === 'deposit' ? 'deposit' : payment_type;
+        const description = `${job.hh_job_number} - ${typeLabel}`;
+        const memo = `${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)} ${formattedDate} via ${methodLabel}${payment_reference ? ` (Ref: ${payment_reference})` : ''}${notes ? ` — ${notes}` : ''} (recorded via Ooosh OP)`;
 
         // STEP 1: Create the deposit with full HireHop params
         const hhBankId = getHHBankId(payment_method);

@@ -183,11 +183,11 @@ export async function sendExcessEmail(opts: {
 }) {
   const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount } = opts;
 
-  // Get driver info
+  // Get excess record + optional driver info (LEFT JOIN — assignment may be NULL for Money tab records)
   const excessResult = await query(
     `SELECT je.*, vha.driver_id, vha.hire_start, vha.hire_end, d.full_name AS driver_name
      FROM job_excess je
-     JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+     LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
      LEFT JOIN drivers d ON d.id = vha.driver_id
      WHERE je.id = $1`,
     [excessId]
@@ -196,42 +196,55 @@ export async function sendExcessEmail(opts: {
   const excess = excessResult.rows[0];
 
   // Get job info
-  const jobResult = await query(`SELECT job_name, hh_job_number FROM jobs WHERE id = $1`, [jobId]);
+  const jobResult = await query(`SELECT job_name, hh_job_number, job_date, job_end, out_date, return_date FROM jobs WHERE id = $1`, [jobId]);
   const job = jobResult.rows[0];
   const jobName = job?.job_name || `Job #${job?.hh_job_number || ''}`;
   const jobNumber = job?.hh_job_number || '';
 
-  // Get driver email from address book
-  let driverEmail: string | null = null;
-  let driverFirstName: string | null = null;
+  // Determine recipient: driver email if available, otherwise job contacts
+  let recipientEmail: string | null = null;
+  let recipientFirstName: string | null = null;
+
   if (excess.driver_id) {
     const driver = await getDriverEmail(excess.driver_id);
-    driverEmail = driver.email;
-    driverFirstName = driver.firstName;
+    recipientEmail = driver.email;
+    recipientFirstName = driver.firstName;
   }
 
-  if (!driverEmail) return;
+  // Fall back to job contacts if no driver email
+  const jobRecipients = await getJobEmailRecipients(jobId);
+  if (!recipientEmail) {
+    recipientEmail = jobRecipients.primaryEmail;
+    recipientFirstName = jobRecipients.primaryFirstName;
+  }
 
-  // CC the client contact
-  const recipients = await getJobEmailRecipients(jobId);
-  const ccList = recipients.primaryEmail && recipients.primaryEmail !== driverEmail
-    ? [recipients.primaryEmail, ...recipients.ccEmails]
-    : recipients.ccEmails;
+  if (!recipientEmail) {
+    console.log(`[excess-email] No recipient found for excess ${excessId} on job ${jobId} — skipping email`);
+    return;
+  }
 
-  // Format dates with contextual prefix — reads as " that starts on Monday 5 April 2026" or "" if missing
+  // CC list: include job contacts that aren't the primary recipient
+  const ccList = [
+    ...(jobRecipients.primaryEmail && jobRecipients.primaryEmail !== recipientEmail ? [jobRecipients.primaryEmail] : []),
+    ...jobRecipients.ccEmails,
+  ].filter(e => e !== recipientEmail);
+
+  // Format dates with contextual prefix — fall back to job dates if hire dates not set
   const fmtDate = (d: any) => d ? new Date(d).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '';
-  const hireStart = excess.hire_start ? ` that starts on ${fmtDate(excess.hire_start)}` : '';
-  const hireEnd = excess.hire_end ? ` that finished on ${fmtDate(excess.hire_end)}` : '';
+  const startDate = excess.hire_start || job?.job_date || job?.out_date;
+  const endDate = excess.hire_end || job?.job_end || job?.return_date;
+  const hireStart = startDate ? ` that starts on ${fmtDate(startDate)}` : '';
+  const hireEnd = endDate ? ` that finished on ${fmtDate(endDate)}` : '';
 
   const reasonSection = reason
     ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;"><tr><td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;"><p style="margin:0;font-size:15px;color:#991b1b;">${reason}</p></td></tr></table>`
     : '';
 
   await emailService.send(templateId, {
-    to: driverEmail,
+    to: recipientEmail,
     cc: ccList.length > 0 ? ccList : undefined,
     variables: {
-      firstName: driverFirstName || 'there',
+      firstName: recipientFirstName || 'there',
       amount: `\u00A3${amount.toFixed(2)}`,
       jobName,
       jobNumber: String(jobNumber),
