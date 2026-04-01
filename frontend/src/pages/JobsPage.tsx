@@ -511,7 +511,13 @@ export default function JobsPage() {
         </select>
         <select
           value={timeFilter}
-          onChange={(e) => setTimeFilter(e.target.value as TimeFilter)}
+          onChange={(e) => {
+            setTimeFilter(e.target.value as TimeFilter);
+            // Scroll to top of job list when filter changes
+            setTimeout(() => {
+              document.getElementById('jobs-list-top')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }, 50);
+          }}
           className="rounded border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
         >
           {TIME_FILTER_OPTIONS.map((opt) => (
@@ -532,9 +538,9 @@ export default function JobsPage() {
       ) : jobs.length === 0 ? (
         <div className="mt-8 text-center text-sm text-gray-500">No jobs found.</div>
       ) : (
-        <div className="mt-6 space-y-6">
+        <div id="jobs-list-top" className="mt-6 space-y-6">
           {/* ═══════ TODAY'S ACTIVITY (Going Out + Returning) ═══════ */}
-          {(goingOut.length > 0 || returning.length > 0) && (
+          {(goingOut.length > 0 || returning.length > 0) && (timeFilter === 'all' || timeFilter === 'out_now') && (
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
@@ -588,7 +594,7 @@ export default function JobsPage() {
           )}
 
           {/* ═══════ OUT NOW (separate group) ═══════ */}
-          {currentlyOut.length > 0 && (
+          {currentlyOut.length > 0 && (timeFilter === 'all' || timeFilter === 'out_now') && (
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <div className="w-2 h-2 rounded-full bg-indigo-500" />
