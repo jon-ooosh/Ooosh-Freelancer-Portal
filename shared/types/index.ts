@@ -678,7 +678,7 @@ export interface VehicleHireAssignment {
   freelancer_name?: string;
 }
 
-export type ExcessStatus = 'not_required' | 'pending' | 'taken' | 'partial' | 'waived' | 'claimed' | 'reimbursed' | 'rolled_over';
+export type ExcessStatus = 'not_required' | 'needed' | 'pending' | 'taken' | 'partially_paid' | 'partial' | 'pre_auth' | 'waived' | 'fully_claimed' | 'claimed' | 'partially_reimbursed' | 'reimbursed' | 'rolled_over';
 
 export interface JobExcess {
   id: string;
