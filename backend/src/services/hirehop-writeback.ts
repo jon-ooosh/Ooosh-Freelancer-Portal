@@ -23,6 +23,11 @@ const PIPELINE_TO_HH: Record<string, number> = {
   provisional: 1,
   confirmed: 2,
   lost: 10,
+  // Operational statuses
+  dispatched: 5,
+  returned_incomplete: 6,
+  returned: 7,
+  completed: 11,
 };
 
 // HireHop → Pipeline status mapping (for inbound webhooks)
@@ -30,12 +35,13 @@ export const HH_TO_PIPELINE: Record<number, string> = {
   0: 'new_enquiry',
   1: 'provisional',
   2: 'confirmed',
+  5: 'dispatched',
+  6: 'returned_incomplete',
+  7: 'returned',
   9: 'lost',       // Cancelled → lost
   10: 'lost',      // Not Interested → lost
+  11: 'completed',
 };
-
-// Statuses 3-8, 11 are operational (prepped, dispatched, returned, completed)
-// These don't have pipeline equivalents — they're beyond the pipeline scope
 
 /**
  * Push a pipeline status change to HireHop.
@@ -77,12 +83,10 @@ export async function writeBackStatusToHireHop(
     return { success: true, message: `HireHop already at status ${targetHHStatus} — skipped` };
   }
 
-  // Don't write back to operational statuses (3-8, 11) — those are HH-managed
-  if (current_hh_status >= 3 && current_hh_status <= 8) {
-    return { success: false, message: `Job is in operational status ${current_hh_status} — write-back blocked` };
-  }
-  if (current_hh_status === 11) {
-    return { success: false, message: 'Job is completed in HireHop — write-back blocked' };
+  // Block writing back to HH for statuses 3 (Prepped) and 4 (Part Dispatched) — those are HH-internal
+  // But allow 5 (Dispatched), 6-7 (Returned), 8 (Requires Attention), 11 (Completed) since OP now manages the full lifecycle
+  if (current_hh_status === 3 || current_hh_status === 4) {
+    return { success: false, message: `Job is in HH-managed status ${current_hh_status} (Prepped/Part Dispatched) — write-back blocked` };
   }
 
   try {

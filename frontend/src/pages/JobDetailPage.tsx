@@ -1301,9 +1301,15 @@ export default function JobDetailPage() {
     return <div className="text-center py-12 text-gray-500">Job not found.</div>;
   }
 
-  // Pipeline status takes precedence for display if available
+  // Pipeline or operational status for display
+  const OPS_DISPLAY: Record<string, { label: string; colour: string }> = {
+    dispatched: { label: 'Dispatched', colour: '#6366F1' },
+    returned_incomplete: { label: 'Checking In', colour: '#F59E0B' },
+    returned: { label: 'Returned', colour: '#8B5CF6' },
+    completed: { label: 'Completed', colour: '#059669' },
+  };
   const pipelineConfig = job.pipeline_status
-    ? PIPELINE_STATUS_CONFIG[job.pipeline_status as PipelineStatus]
+    ? (PIPELINE_STATUS_CONFIG[job.pipeline_status as PipelineStatus] || OPS_DISPLAY[job.pipeline_status] || null)
     : null;
   const statusLabel = pipelineConfig?.label || STATUS_MAP[job.status] || job.status_name || `Status ${job.status}`;
   const statusColour = pipelineConfig
@@ -1312,8 +1318,16 @@ export default function JobDetailPage() {
   const hasPipelineStatus = !!job.pipeline_status;
 
   // Available pipeline statuses for the dropdown (excluding current)
-  const PIPELINE_TRANSITIONS: PipelineStatus[] = ['new_enquiry', 'chasing', 'provisional', 'paused', 'confirmed', 'lost'];
-  const availableStatuses = PIPELINE_TRANSITIONS.filter(s => s !== job.pipeline_status);
+  // Contextual status transitions based on current status
+  const PIPELINE_STATUSES: PipelineStatus[] = ['new_enquiry', 'chasing', 'provisional', 'paused', 'confirmed', 'lost'];
+  const OPERATIONAL_STATUSES: string[] = ['dispatched', 'returned_incomplete', 'returned', 'completed'];
+  const isOperational = OPERATIONAL_STATUSES.includes(job.pipeline_status || '');
+  const isConfirmed = job.pipeline_status === 'confirmed';
+  // After confirmation: show operational progression + ability to go back
+  // Before confirmation: show pipeline statuses only
+  const availableStatuses = isConfirmed || isOperational
+    ? [...OPERATIONAL_STATUSES, 'confirmed', 'lost'].filter(s => s !== job.pipeline_status)
+    : PIPELINE_STATUSES.filter(s => s !== job.pipeline_status);
   const fileCount = (job.files || []).length;
   const hhJobUrl = job.hh_job_number
     ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
@@ -1406,11 +1420,18 @@ export default function JobDetailPage() {
                   {showStatusDropdown && (
                     <div className="absolute left-0 top-full mt-1 z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px]">
                       {availableStatuses.map((s) => {
-                        const cfg = PIPELINE_STATUS_CONFIG[s];
+                        const OPS_CONFIG: Record<string, { label: string; colour: string }> = {
+                          dispatched: { label: 'Dispatched', colour: '#6366F1' },
+                          returned_incomplete: { label: 'Checking In', colour: '#F59E0B' },
+                          returned: { label: 'Returned', colour: '#8B5CF6' },
+                          completed: { label: 'Completed', colour: '#059669' },
+                        };
+                        const cfg = PIPELINE_STATUS_CONFIG[s as PipelineStatus] || OPS_CONFIG[s];
+                        if (!cfg) return null;
                         return (
                           <button
                             key={s}
-                            onClick={() => initiateStatusChange(s)}
+                            onClick={() => initiateStatusChange(s as PipelineStatus)}
                             className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 flex items-center gap-2"
                           >
                             <span
