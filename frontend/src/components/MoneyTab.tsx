@@ -180,6 +180,26 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
     }
   }
 
+  async function handleCreateAndLinkExcess() {
+    if (!linkingDeposit) return;
+    setLinkLoading(true);
+    try {
+      // Create a new excess record pre-linked to the HH deposit (no push back to HH)
+      const createResult = await api.post<{ data: { id: string } }>('/excess/create-from-hh', {
+        job_id: jobId,
+        hh_deposit_id: linkingDeposit.hh_deposit_id,
+        amount: linkingDeposit.amount,
+        client_name: job.client_name || job.company_name || undefined,
+      });
+      setLinkingDeposit(null);
+      loadData();
+    } catch (err: any) {
+      alert(err.message || 'Failed to create excess record');
+    } finally {
+      setLinkLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex justify-center py-12">
@@ -490,6 +510,18 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
                   </p>
                 </button>
               ))}
+
+              {/* Create new excess record from HH deposit */}
+              <button
+                onClick={handleCreateAndLinkExcess}
+                disabled={linkLoading}
+                className="w-full text-left p-3 border-2 border-dashed border-ooosh-300 rounded-lg hover:border-ooosh-400 hover:bg-ooosh-50/50 transition-colors disabled:opacity-50"
+              >
+                <p className="text-sm font-medium text-ooosh-700">+ Create new excess record</p>
+                <p className="text-xs text-gray-500">
+                  Creates an OP record for £{linkingDeposit.amount.toFixed(2)} linked to this HireHop deposit
+                </p>
+              </button>
             </div>
             <button
               onClick={() => setLinkingDeposit(null)}
