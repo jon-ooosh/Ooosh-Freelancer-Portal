@@ -185,7 +185,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
     setLinkLoading(true);
     try {
       // Create a new excess record pre-linked to the HH deposit (no push back to HH)
-      const createResult = await api.post<{ data: { id: string } }>('/excess/create-from-hh', {
+      await api.post<{ data: { id: string } }>('/excess/create-from-hh', {
         job_id: jobId,
         hh_deposit_id: linkingDeposit.hh_deposit_id,
         amount: linkingDeposit.amount,
