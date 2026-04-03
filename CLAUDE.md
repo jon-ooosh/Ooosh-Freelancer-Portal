@@ -558,7 +558,7 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] `POST /api/excess/create` — manual excess creation from Money tab
 - [x] Insurance Excess section always visible on Money tab (guidance when empty)
 - [x] Dispatch check includes job-level excess records (not just hire-form-linked)
-- [ ] Auto-suggest "client has £X on account" on new hire assignments (endpoint exists, UI wiring pending)
+- [x] Auto-suggest "client has £X on account" — shown on ExcessGateBanner when client has rolled-over balance (FIXED 3 Apr)
 - [x] HH ↔ OP excess reconciliation (migration 039): `hh_deposit_id` on `job_excess`, passive reconciliation on Money tab load, manual link/unlink, create-from-HH endpoint
 - [x] Excess ledger filtering: search, status, payment method, sort (date, amount, client), date columns
 
@@ -628,14 +628,14 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [ ] Wire email triggers into Payment Portal events (when portal repointed)
 
 **Known bugs / remaining polish (1 Apr 2026):**
-- [ ] Job header status doesn't refresh after payment without page reload (need to refresh job data after money tab actions)
+- [x] Job header status doesn't refresh after payment without page reload — FIXED 3 Apr (onJobChanged callback from MoneyTab → loadJob)
 - [x] "Move to Different Entity" UX — now uses org/person search picker (FIXED 1 Apr)
 - [x] Excess auto-select — single pending record auto-selected in payment form (FIXED 1 Apr)
 - [x] Excess payment method default — was 'payment_portal' (invalid), now defaults to 'worldpay' (FIXED 1 Apr)
 - [x] Excess payment should not count toward "Deposits Received" in financial summary (FIXED 31 Mar)
 - [x] Excess payments sent generic "Payment Received" email instead of excess-specific template (FIXED 31 Mar)
 - [x] HH ↔ OP excess deduplication: migration 039 adds `hh_deposit_id` to `job_excess`, passive reconciliation on Money tab load matches HH excess deposits to OP records, manual link/unlink + create-from-HH for edge cases (FIXED 3 Apr)
-- [ ] Email recipient: excess emails should go to client contact, not OP staff. Currently falls back to `getJobEmailRecipients` which may return staff. Need client entity → contact linkage
+- [x] Email recipient: excess emails now fall back to client organisation email when no people contacts found (FIXED 3 Apr)
 - [ ] Excess email: "finishes" vs "finished" tense depends on context (payment received = future, reimbursement = past) — FIXED 1 Apr
 
 ##### Phase D — VAT Adjustment Display ✅ COMPLETE (30 Mar 2026)

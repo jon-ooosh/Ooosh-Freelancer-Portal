@@ -12,6 +12,7 @@ import type { JobExcess } from '../../../shared/types';
 interface MoneyTabProps {
   jobId: string;
   job: any; // Job object from parent
+  onJobChanged?: () => void; // Notify parent to refresh job data (e.g. after status change)
 }
 
 interface FinancialData {
@@ -72,7 +73,7 @@ const PAYMENT_METHODS_BASE = [
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
 ];
 
-export default function MoneyTab({ jobId, job }: MoneyTabProps) {
+export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -156,6 +157,7 @@ export default function MoneyTab({ jobId, job }: MoneyTabProps) {
       setPayNotes('');
       setPayExcessId('');
       loadData();
+      onJobChanged?.(); // Refresh parent job data (status may have changed)
     } catch (err: any) {
       setPayError(err.message || 'Failed to record payment');
     } finally {
