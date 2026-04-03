@@ -1143,7 +1143,7 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
           console.log(`[Pipeline] No hhClientId from save_job response — reading HH job #${hhJobNumber} to get client_id`);
           const jobDataResp = await hhBroker.get<Record<string, unknown>>(
             '/api/job_data.php',
-            { job: hhJobNumber },
+            { job: Number(hhJobNumber) },
             { priority: 'high', cacheTTL: 0 }
           );
           if (jobDataResp.success && jobDataResp.data) {
