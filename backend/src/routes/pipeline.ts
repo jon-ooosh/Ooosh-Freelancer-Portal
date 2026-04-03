@@ -1023,6 +1023,18 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Fetch organisation details early so we can include contact info in job creation
+    let orgDetails: { name: string; email: string | null; phone: string | null; address: string | null; location: string | null } | null = null;
+    if (job.client_id) {
+      const orgResult = await query(
+        `SELECT name, email, phone, address, location FROM organisations WHERE id = $1`,
+        [job.client_id]
+      );
+      if (orgResult.rows.length > 0) {
+        orgDetails = orgResult.rows[0];
+      }
+    }
+
     // Build HireHop job payload
     // HH API: `name` is required for new jobs, `job_name` is the job title
     const hhBody: Record<string, unknown> = {
@@ -1038,6 +1050,10 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     if (hhClientId) hhBody.client_id = hhClientId;
     if (job.company_name) hhBody.company = job.company_name;
     if (venueName) hhBody.venue = venueName;
+
+    // Include contact fields in job creation — save_job.php may populate the auto-created contact
+    if (orgDetails?.email) hhBody.email = orgDetails.email;
+    if (orgDetails?.phone) hhBody.telephone = orgDetails.phone;
 
     const outDate = formatHHDate(job.out_date);
     const startDate = formatHHDate(job.job_date);
@@ -1098,6 +1114,13 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     // Also check data.job but only if it's non-zero (we sent 0 for create)
     if (data.job && Number(data.job) > 0) candidates.unshift(data.job);
     const hhJobNumber = candidates.find(v => v !== undefined && v !== null && v !== '' && Number(v) > 0);
+
+    // Extract the HH client_id that save_job.php auto-creates — needed to update (not duplicate) the contact
+    const hhAutoClientId = (data.client_id ?? data.CLIENT_ID ?? data.clientId) as number | undefined;
+    if (hhAutoClientId) {
+      console.log(`[Pipeline] save_job.php returned client_id=${hhAutoClientId}`);
+      if (!hhClientId) hhClientId = Number(hhAutoClientId);
+    }
     if (!hhJobNumber) {
       console.error('[Pipeline] HireHop response missing job ID. Full response:', JSON.stringify(data));
       res.status(502).json({ error: 'HireHop did not return a job ID' });
@@ -1114,19 +1137,25 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     const syncedFields: string[] = ['name'];
     let contactSyncNote = '';
     try {
-      // Fetch organisation details for full contact sync
-      let orgDetails: { name: string; email: string | null; phone: string | null; address: string | null; location: string | null } | null = null;
-      if (job.client_id) {
-        const orgResult = await query(
-          `SELECT name, email, phone, address, location FROM organisations WHERE id = $1`,
-          [job.client_id]
-        );
-        if (orgResult.rows.length > 0) {
-          orgDetails = orgResult.rows[0];
+      if (orgDetails && (orgDetails.email || orgDetails.phone || orgDetails.address)) {
+        // If save_job didn't return a client_id, read the HH job to get it
+        if (!hhClientId) {
+          console.log(`[Pipeline] No hhClientId from save_job response — reading HH job #${hhJobNumber} to get client_id`);
+          const jobDataResp = await hhBroker.get<Record<string, unknown>>(
+            '/api/job_data.php',
+            { job: hhJobNumber },
+            { priority: 'high', cacheTTL: 0 }
+          );
+          if (jobDataResp.success && jobDataResp.data) {
+            const jd = jobDataResp.data;
+            const fetchedClientId = jd.CLIENT_ID ?? jd.client_id ?? jd.clientId;
+            if (fetchedClientId && Number(fetchedClientId) > 0) {
+              hhClientId = Number(fetchedClientId);
+              console.log(`[Pipeline] Got hhClientId=${hhClientId} from job_data.php`);
+            }
+          }
         }
-      }
 
-      if (orgDetails) {
         const contactName = orgDetails.name || job.client_name || job.company_name || '';
         const contactPayload: Record<string, unknown> = {
           JOB_ID: hhJobNumber,
@@ -1136,7 +1165,13 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
           no_webhook: 1,
         };
 
-        if (hhClientId) contactPayload.CLIENT_ID = hhClientId;
+        // CLIENT_ID is critical — without it, HH creates a new unlinked contact instead of updating
+        if (hhClientId) {
+          contactPayload.CLIENT_ID = hhClientId;
+          console.log(`[Pipeline] Updating existing HH contact ${hhClientId} with email/phone`);
+        } else {
+          console.warn(`[Pipeline] No hhClientId available — job_save_contact may create a duplicate contact`);
+        }
 
         const addressParts = [orgDetails.address, orgDetails.location].filter(Boolean);
         if (addressParts.length > 0) {
@@ -1152,15 +1187,19 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
           syncedFields.push('phone');
         }
 
+        console.log(`[Pipeline] Sending contact payload to HH:`, JSON.stringify(contactPayload));
+
         const contactResponse = await hhBroker.post(
           '/php_functions/job_save_contact.php',
           contactPayload,
           { priority: 'high' }
         );
 
+        console.log(`[Pipeline] job_save_contact response:`, JSON.stringify(contactResponse.data));
+
         if (contactResponse.success) {
           // Store HH contact ID mapping
-          const returnedHhClientId = (contactResponse.data as any)?.id;
+          const returnedHhClientId = (contactResponse.data as any)?.id || (contactResponse.data as any)?.ID || (contactResponse.data as any)?.CLIENT_ID;
           if (returnedHhClientId && job.client_id) {
             await query(
               `INSERT INTO external_id_map (entity_type, entity_id, external_system, external_id)
@@ -1173,6 +1212,7 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
           console.log(`[Pipeline] Client contact synced to HH job #${hhJobNumber}:`, syncedFields.join(', '));
         } else {
           console.warn(`[Pipeline] Client contact sync failed for HH job #${hhJobNumber}:`, contactResponse.error);
+          console.warn(`[Pipeline] Contact response data:`, JSON.stringify(contactResponse));
         }
       }
     } catch (contactErr) {
