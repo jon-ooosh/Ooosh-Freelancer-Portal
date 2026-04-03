@@ -2039,6 +2039,7 @@ export default function JobDetailPage() {
               }))}
               onOverrideComplete={loadVehicleAssignments}
               onNavigateToRequirements={() => setActiveTab('overview')}
+              clientId={job?.client_id || undefined}
             />
           )}
 
@@ -2820,7 +2821,7 @@ export default function JobDetailPage() {
 
       {/* Money Tab */}
       {activeTab === 'money' && id && (
-        <MoneyTab jobId={id} job={job} />
+        <MoneyTab jobId={id} job={job} onJobChanged={loadJob} />
       )}
 
       {/* Chase Modal */}

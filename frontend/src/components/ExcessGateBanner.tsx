@@ -4,7 +4,7 @@
  *
  * Not a hard block — shows a prominent warning with option for manager override.
  */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { OverrideReason } from '../../../shared/types';
@@ -24,6 +24,7 @@ interface ExcessGateBannerProps {
   blockers: ExcessBlocker[];
   onOverrideComplete?: () => void;
   onNavigateToRequirements?: () => void;
+  clientId?: string; // Organisation UUID — used to look up client balance on account
 }
 
 const OVERRIDE_REASONS: { value: OverrideReason; label: string }[] = [
@@ -34,7 +35,7 @@ const OVERRIDE_REASONS: { value: OverrideReason; label: string }[] = [
   { value: 'other', label: 'Other (specify)' },
 ];
 
-export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavigateToRequirements }: ExcessGateBannerProps) {
+export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavigateToRequirements, clientId }: ExcessGateBannerProps) {
   const user = useAuthStore((s) => s.user);
   const canOverride = user?.role === 'admin' || user?.role === 'manager';
 
@@ -43,6 +44,24 @@ export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavig
   const [overrideNotes, setOverrideNotes] = useState('');
   const [overrideLoading, setOverrideLoading] = useState(false);
   const [overrideError, setOverrideError] = useState('');
+
+  // Client balance on account
+  const [clientBalance, setClientBalance] = useState<number>(0);
+
+  useEffect(() => {
+    if (!clientId) return;
+    // Look up client balance using the org's xero_contact_id (via external_id_map)
+    api.get<{ data: any[] }>(`/excess?xero_contact_id=${clientId}&status=rolled_over&limit=1`)
+      .catch(() => null); // Non-essential, fail silently
+
+    // Try the by-org endpoint which sums across all excess records for this org
+    api.get<{ summary: { balance_held: number } }>(`/excess/by-org/${clientId}`)
+      .then((res) => {
+        const balance = res.summary?.balance_held || 0;
+        if (balance > 0) setClientBalance(balance);
+      })
+      .catch(() => {}); // Non-essential
+  }, [clientId]);
 
   // Filter to only excess-related blockers that haven't been overridden
   const excessBlockers = blockers.filter(
@@ -109,6 +128,14 @@ export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavig
               </div>
             ))}
           </div>
+
+          {clientBalance > 0 && (
+            <div className="mt-2 px-3 py-2 bg-green-50 border border-green-200 rounded-md">
+              <p className="text-xs text-green-800">
+                <span className="font-semibold">Client has £{clientBalance.toFixed(2)} on account</span> from previous hires — this can be applied against excess.
+              </p>
+            </div>
+          )}
 
           {onNavigateToRequirements && (
             <button

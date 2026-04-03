@@ -62,7 +62,30 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   );
 
   if (result.rows.length === 0) {
-    // Fallback: get client name/email from job itself
+    // Fallback: try the client organisation's email directly
+    const orgResult = await query(
+      `SELECT o.email, o.name FROM organisations o
+       WHERE o.id = (SELECT client_id FROM jobs WHERE id = $1)
+         AND o.email IS NOT NULL AND o.email != ''
+       UNION ALL
+       SELECT o.email, o.name FROM organisations o
+       JOIN job_organisations jo ON jo.organisation_id = o.id
+       WHERE jo.job_id = $1 AND jo.role = 'client'
+         AND o.email IS NOT NULL AND o.email != ''
+       LIMIT 1`,
+      [jobId]
+    );
+
+    if (orgResult.rows.length > 0 && !orgResult.rows[0].email.endsWith('@oooshtours.co.uk')) {
+      const org = orgResult.rows[0];
+      return {
+        primaryEmail: org.email,
+        primaryFirstName: org.name?.split(' ')[0] || null,
+        ccEmails: [],
+      };
+    }
+
+    // Last fallback: no email available
     const jobResult = await query(
       `SELECT client_name, company_name FROM jobs WHERE id = $1`,
       [jobId]
