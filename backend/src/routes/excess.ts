@@ -205,6 +205,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const {
       status, hirehop_job_id, xero_contact_id, person_id, job_id,
+      payment_method, search, sort,
       page = '1', limit = '50',
     } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
@@ -233,12 +234,44 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       params.push(job_id);
       where += ` AND je.job_id = $${params.length}`;
     }
+    if (payment_method) {
+      params.push(payment_method);
+      where += ` AND je.payment_method = $${params.length}`;
+    }
+    if (search) {
+      params.push(`%${(search as string).toLowerCase()}%`);
+      where += ` AND (LOWER(je.client_name) LIKE $${params.length} OR LOWER(d.full_name) LIKE $${params.length} OR LOWER(j.job_name) LIKE $${params.length})`;
+    }
+
+    // Joins needed for search/sort (shared between count and data queries)
+    const joins = `
+      LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN drivers d ON d.id = vha.driver_id
+      LEFT JOIN jobs j ON j.id = je.job_id`;
 
     const countResult = await query(
-      `SELECT COUNT(*) FROM job_excess je ${where}`,
+      `SELECT COUNT(*) FROM job_excess je ${joins} ${where}`,
       params
     );
     const total = parseInt(countResult.rows[0].count);
+
+    // Sort options
+    const sortOptions: Record<string, string> = {
+      newest: 'je.created_at DESC',
+      oldest: 'je.created_at ASC',
+      payment_date_desc: 'je.payment_date DESC NULLS LAST',
+      payment_date_asc: 'je.payment_date ASC NULLS LAST',
+      reimbursed_date_desc: 'je.reimbursement_date DESC NULLS LAST',
+      reimbursed_date_asc: 'je.reimbursement_date ASC NULLS LAST',
+      amount_high: 'je.excess_amount_required DESC NULLS LAST',
+      amount_low: 'je.excess_amount_required ASC NULLS LAST',
+      collected_high: 'je.excess_amount_taken DESC',
+      collected_low: 'je.excess_amount_taken ASC',
+      client_az: 'je.client_name ASC NULLS LAST',
+      client_za: 'je.client_name DESC NULLS LAST',
+    };
+    const orderBy = sortOptions[sort as string] || 'je.created_at DESC';
 
     const dataParams = [...params, pageLimit, offset];
     const result = await query(
@@ -252,12 +285,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         d.full_name AS driver_name,
         j.job_name
       FROM job_excess je
-      LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-      LEFT JOIN drivers d ON d.id = vha.driver_id
-      LEFT JOIN jobs j ON j.id = je.job_id
+      ${joins}
       ${where}
-      ORDER BY je.created_at DESC
+      ORDER BY ${orderBy}
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
       dataParams
     );
