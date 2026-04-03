@@ -664,8 +664,8 @@ Port the international VAT calculation from the Payment Portal into the OP. Staf
 The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from Monday.com and writes to both Monday.com and HireHop. Repointing to OP, protected by `DATA_BACKEND` env var (default: `monday`, flip to `op` when ready).
 
 *OP endpoints needed for portal:*
-- [ ] `GET /api/money/:jobId/summary` — hire value, deposits, balance, excess status (replaces portal's `get-job-details-v2.js` Monday.com calls)
-- [ ] `POST /api/money/:jobId/payment-event` — receive payment events from portal (replaces Monday.com status updates)
+- [x] `GET /api/money/:jobId/summary` — hire value, deposits, balance, excess status (built, replaces portal's `get-job-details-v2.js` Monday.com calls)
+- [x] `POST /api/money/:jobId/payment-event` — receive payment events from portal (built, replaces Monday.com status updates)
 - [ ] `GET /api/money/:jobId/excess-info` — excess amount, driver breakdown, pre-auth eligibility (replaces `monday-driver-excess.js`)
 
 *Portal-side changes (in payment portal repo):*
