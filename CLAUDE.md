@@ -666,7 +666,7 @@ The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from M
 *OP endpoints needed for portal:*
 - [x] `GET /api/money/:jobId/summary` — hire value, deposits, balance, excess status (built, replaces portal's `get-job-details-v2.js` Monday.com calls)
 - [x] `POST /api/money/:jobId/payment-event` — receive payment events from portal (built, replaces Monday.com status updates)
-- [ ] `GET /api/money/:jobId/excess-info` — excess amount, driver breakdown, pre-auth eligibility (replaces `monday-driver-excess.js`)
+- [x] `GET /api/money/:jobId/excess-info` — excess amount, driver breakdown, pre-auth eligibility (built, replaces `monday-driver-excess.js`)
 
 *Portal-side changes (in payment portal repo):*
 - [ ] Add `DATA_BACKEND` env var to Netlify config (default: `monday`)

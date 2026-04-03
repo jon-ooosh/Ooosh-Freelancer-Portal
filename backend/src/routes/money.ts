@@ -7,7 +7,7 @@
  *
  * Also handles recording payments (pushes to HH as deposits).
  */
-import { Router, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
@@ -17,7 +17,44 @@ import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../servi
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 
 const router = Router();
-router.use(authenticate);
+
+/**
+ * Flexible auth: accepts either JWT Bearer token OR X-API-Key header.
+ * JWT auth populates req.user as normal. API key auth verifies against
+ * api_keys table and sets req.user to a minimal service user object.
+ */
+async function authenticateFlexible(req: Request, res: Response, next: NextFunction) {
+  const apiKey = req.headers['x-api-key'] as string | undefined;
+
+  if (apiKey) {
+    // API key auth — for Payment Portal and external services
+    try {
+      const keyPrefix = apiKey.substring(0, 8);
+      const keyResult = await query(
+        `SELECT id, name, service, permissions FROM api_keys WHERE key_prefix = $1 AND is_active = true`,
+        [keyPrefix]
+      );
+      if (keyResult.rows.length === 0) {
+        res.status(403).json({ error: 'Invalid API key' });
+        return;
+      }
+      // Update last_used_at (fire and forget)
+      query(`UPDATE api_keys SET last_used_at = NOW() WHERE id = $1`, [keyResult.rows[0].id]).catch(() => {});
+      // Set a minimal service user so downstream code works
+      (req as any).user = { id: keyResult.rows[0].id, role: 'service', name: keyResult.rows[0].service };
+      next();
+    } catch (err) {
+      res.status(500).json({ error: 'API key verification failed' });
+    }
+    return;
+  }
+
+  // Fall back to JWT auth
+  authenticate(req as AuthRequest, res, next);
+}
+
+// Apply flexible auth to all money routes
+router.use(authenticateFlexible as any);
 
 // ── HireHop bank account labels (for emails) ──
 const PAYMENT_METHODS_LABELS: Record<string, string> = {
@@ -96,6 +133,157 @@ router.post('/sync-values', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[money] Sync values error:', error);
     res.status(500).json({ error: 'Failed to sync job values' });
+  }
+});
+
+// ── GET /api/money/:jobId/excess-info — Excess details for Payment Portal ──
+// Replaces monday-driver-excess.js — provides per-driver excess breakdown,
+// van count, total required, pre-auth eligibility, and payment status.
+// Callable with API key auth (for portal) or JWT auth (for OP staff).
+
+router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId } = req.params;
+
+    // Look up job (accept UUID or HH job number)
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
+    const jobResult = await query(
+      isUuid
+        ? `SELECT id, hh_job_number, job_name, job_date, job_end, out_date, return_date, duration_days FROM jobs WHERE id = $1`
+        : `SELECT id, hh_job_number, job_name, job_date, job_end, out_date, return_date, duration_days FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId)]
+    );
+
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+
+    // Calculate hire duration
+    const startDate = job.job_date || job.out_date;
+    const endDate = job.job_end || job.return_date;
+    let hireDays = job.duration_days || 1;
+    if (startDate && endDate) {
+      hireDays = Math.max(1, Math.ceil(
+        (new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)
+      ));
+    }
+
+    // Pre-auth eligibility: hire ≤ 4 days AND hire end within 5 days from now
+    const hireEndDate = endDate ? new Date(endDate) : null;
+    const daysUntilEnd = hireEndDate
+      ? Math.ceil((hireEndDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+      : null;
+    let preAuthMethod: 'pre-auth' | 'payment' | 'too_early' = 'payment';
+    if (hireDays <= 4) {
+      if (daysUntilEnd !== null && daysUntilEnd <= 5) {
+        preAuthMethod = 'pre-auth';
+      } else {
+        preAuthMethod = 'too_early';
+      }
+    }
+
+    // Get per-driver excess records with vehicle and driver info
+    const excessResult = await query(
+      `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_amount_taken,
+              je.excess_status, je.excess_calculation_basis, je.payment_method,
+              je.payment_reference, je.payment_date, je.hh_deposit_id,
+              je.suggested_collection_method, je.client_name,
+              d.id AS driver_id, d.full_name AS driver_name,
+              d.licence_points, d.requires_referral,
+              fv.id AS vehicle_id, fv.reg AS vehicle_reg, fv.simple_type AS vehicle_type,
+              vha.assignment_type, vha.status AS assignment_status
+       FROM job_excess je
+       LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+       LEFT JOIN drivers d ON d.id = vha.driver_id
+       WHERE je.job_id = $1
+         AND je.excess_status != 'not_required'
+       ORDER BY je.excess_amount_required DESC NULLS LAST`,
+      [job.id]
+    );
+
+    // Count self-drive vehicles (van count)
+    const vanCountResult = await query(
+      `SELECT COUNT(DISTINCT vehicle_id) AS van_count
+       FROM vehicle_hire_assignments
+       WHERE job_id = $1
+         AND assignment_type = 'self_drive'
+         AND status != 'cancelled'`,
+      [job.id]
+    );
+    const vanCount = parseInt(vanCountResult.rows[0]?.van_count || '0');
+
+    // Build per-driver breakdown
+    const drivers = excessResult.rows.map((r: any) => ({
+      excess_id: r.excess_id,
+      driver_id: r.driver_id,
+      driver_name: r.driver_name,
+      vehicle_id: r.vehicle_id,
+      vehicle_reg: r.vehicle_reg,
+      vehicle_type: r.vehicle_type,
+      excess_amount_required: parseFloat(r.excess_amount_required || 0),
+      excess_amount_taken: parseFloat(r.excess_amount_taken || 0),
+      excess_outstanding: Math.max(0, parseFloat(r.excess_amount_required || 0) - parseFloat(r.excess_amount_taken || 0)),
+      excess_status: r.excess_status,
+      excess_calculation_basis: r.excess_calculation_basis,
+      payment_method: r.payment_method,
+      payment_reference: r.payment_reference,
+      payment_date: r.payment_date,
+      licence_points: r.licence_points,
+      requires_referral: r.requires_referral,
+      suggested_collection_method: r.suggested_collection_method,
+    }));
+
+    // Totals
+    const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
+    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken, 0);
+    const totalOutstanding = Math.max(0, totalRequired - totalCollected);
+    const resolvedStatuses = ['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'];
+    const driversCleared = drivers.filter((d: any) => resolvedStatuses.includes(d.excess_status)).length;
+    const driversPending = drivers.filter((d: any) => !resolvedStatuses.includes(d.excess_status)).length;
+
+    res.json({
+      data: {
+        job_id: job.id,
+        hirehop_job_id: job.hh_job_number,
+        job_name: job.job_name,
+        job_date: job.job_date || job.out_date,
+        job_end: job.job_end || job.return_date,
+        hire_duration_days: hireDays,
+        van_count: vanCount,
+        // Pre-auth eligibility
+        pre_auth: {
+          method: preAuthMethod,  // 'pre-auth' | 'payment' | 'too_early'
+          eligible: preAuthMethod === 'pre-auth',
+          days_until_end: daysUntilEnd,
+          reason: preAuthMethod === 'payment'
+            ? `Hire is ${hireDays} days (>4), regular payment required`
+            : preAuthMethod === 'too_early'
+              ? `Hire is ≤4 days but ends in ${daysUntilEnd} days (>5 days away)`
+              : `Hire is ≤4 days and ends within 5 days`,
+        },
+        // Per-driver breakdown (sorted by excess amount descending)
+        drivers,
+        // Aggregates
+        totals: {
+          total_excess_required: totalRequired,
+          total_excess_collected: totalCollected,
+          total_excess_outstanding: totalOutstanding,
+          drivers_total: drivers.length,
+          drivers_cleared: driversCleared,
+          drivers_pending: driversPending,
+          // Standard per-van fallback (£1,200) — used by portal when no driver-specific data
+          standard_per_van: 1200,
+          standard_total: vanCount * 1200,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('[money] Excess info error:', error);
+    res.status(500).json({ error: 'Failed to load excess info' });
   }
 });
 
