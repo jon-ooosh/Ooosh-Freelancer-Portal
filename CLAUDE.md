@@ -559,7 +559,8 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] Insurance Excess section always visible on Money tab (guidance when empty)
 - [x] Dispatch check includes job-level excess records (not just hire-form-linked)
 - [ ] Auto-suggest "client has £X on account" on new hire assignments (endpoint exists, UI wiring pending)
-- [ ] Smarter HH ↔ OP deduplication: read HH deposit IDs back into OP excess records for matching (currently excess deposits are hidden from Payment History but not reconciled)
+- [x] HH ↔ OP excess reconciliation (migration 039): `hh_deposit_id` on `job_excess`, passive reconciliation on Money tab load, manual link/unlink, create-from-HH endpoint
+- [x] Excess ledger filtering: search, status, payment method, sort (date, amount, client), date columns
 
 **Excess status values (migration 038, 1 Apr 2026):**
 | Status | Label | When set |
@@ -633,7 +634,7 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] Excess payment method default — was 'payment_portal' (invalid), now defaults to 'worldpay' (FIXED 1 Apr)
 - [x] Excess payment should not count toward "Deposits Received" in financial summary (FIXED 31 Mar)
 - [x] Excess payments sent generic "Payment Received" email instead of excess-specific template (FIXED 31 Mar)
-- [ ] HH ↔ OP excess deduplication: need to read HH deposit IDs back into OP records so same payment isn't shown twice when staff record in HH directly. Currently excess deposits are hidden from Payment History section (shown in Insurance Excess section only)
+- [x] HH ↔ OP excess deduplication: migration 039 adds `hh_deposit_id` to `job_excess`, passive reconciliation on Money tab load matches HH excess deposits to OP records, manual link/unlink + create-from-HH for edge cases (FIXED 3 Apr)
 - [ ] Email recipient: excess emails should go to client contact, not OP staff. Currently falls back to `getJobEmailRecipients` which may return staff. Need client entity → contact linkage
 - [ ] Excess email: "finishes" vs "finished" tense depends on context (payment received = future, reimbursement = past) — FIXED 1 Apr
 
