@@ -17,6 +17,10 @@ export default function ExcessLedgerPage() {
   const [allRecords, setAllRecords] = useState<JobExcess[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>('');
+  const [sortBy, setSortBy] = useState<string>('newest');
+  const [methodFilter, setMethodFilter] = useState<string>('');
+  const [searchText, setSearchText] = useState<string>('');
+  const [searchDebounced, setSearchDebounced] = useState<string>('');
 
   // Client detail state
   const [selectedClient, setSelectedClient] = useState<ClientExcessLedgerEntry | null>(null);
@@ -41,15 +45,25 @@ export default function ExcessLedgerPage() {
   const loadAllRecords = useCallback(async () => {
     setLoading(true);
     try {
-      const params = statusFilter ? `?status=${statusFilter}&limit=200` : '?limit=200';
-      const data = await api.get<{ data: JobExcess[] }>(`/excess${params}`);
+      const qp = new URLSearchParams({ limit: '200' });
+      if (statusFilter) qp.set('status', statusFilter);
+      if (methodFilter) qp.set('payment_method', methodFilter);
+      if (searchDebounced) qp.set('search', searchDebounced);
+      if (sortBy) qp.set('sort', sortBy);
+      const data = await api.get<{ data: JobExcess[] }>(`/excess?${qp.toString()}`);
       setAllRecords(data.data);
     } catch (err) {
       console.error('Failed to load excess records:', err);
     } finally {
       setLoading(false);
     }
-  }, [statusFilter]);
+  }, [statusFilter, methodFilter, searchDebounced, sortBy]);
+
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchDebounced(searchText), 300);
+    return () => clearTimeout(timer);
+  }, [searchText]);
 
   useEffect(() => {
     if (viewMode === 'ledger') loadLedger();
@@ -131,43 +145,115 @@ export default function ExcessLedgerPage() {
 
       {/* View toggle (ledger vs client detail) */}
       {viewMode !== 'client-detail' && (
-        <div className="flex items-center gap-4 mb-4">
-          <div className="flex bg-gray-100 rounded-lg p-0.5">
-            <button
-              onClick={() => setViewMode('ledger')}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                viewMode === 'ledger' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              Client Ledger
-            </button>
-            <button
-              onClick={() => setViewMode('all')}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
-                viewMode === 'all' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              All Records
-            </button>
+        <div className="space-y-3 mb-4">
+          <div className="flex items-center gap-4">
+            <div className="flex bg-gray-100 rounded-lg p-0.5">
+              <button
+                onClick={() => setViewMode('ledger')}
+                className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                  viewMode === 'ledger' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Client Ledger
+              </button>
+              <button
+                onClick={() => setViewMode('all')}
+                className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                  viewMode === 'all' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                All Records
+              </button>
+            </div>
           </div>
 
           {viewMode === 'all' && (
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="text-sm border border-gray-300 rounded-md px-3 py-1.5"
-            >
-              <option value="">All statuses</option>
-              <option value="needed">Needed</option>
-              <option value="taken">Taken</option>
-              <option value="partially_paid">Partially Paid</option>
-              <option value="pre_auth">Pre-auth Taken</option>
-              <option value="fully_claimed">Fully Claimed</option>
-              <option value="partially_reimbursed">Partially Reimbursed</option>
-              <option value="reimbursed">Reimbursed</option>
-              <option value="rolled_over">Rolled Over</option>
-              <option value="waived">Waived</option>
-            </select>
+            <div className="flex flex-wrap items-center gap-3">
+              {/* Search */}
+              <div className="relative flex-1 min-w-[180px] max-w-xs">
+                <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Search client, driver, job..."
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  className="w-full text-sm border border-gray-300 rounded-md pl-8 pr-3 py-1.5"
+                />
+              </div>
+
+              {/* Status filter */}
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="text-sm border border-gray-300 rounded-md px-3 py-1.5"
+              >
+                <option value="">All statuses</option>
+                <option value="needed">Needed</option>
+                <option value="taken">Taken</option>
+                <option value="partially_paid">Partially Paid</option>
+                <option value="pre_auth">Pre-auth Taken</option>
+                <option value="fully_claimed">Fully Claimed</option>
+                <option value="partially_reimbursed">Partially Reimbursed</option>
+                <option value="reimbursed">Reimbursed</option>
+                <option value="rolled_over">Rolled Over</option>
+                <option value="waived">Waived</option>
+              </select>
+
+              {/* Payment method filter */}
+              <select
+                value={methodFilter}
+                onChange={(e) => setMethodFilter(e.target.value)}
+                className="text-sm border border-gray-300 rounded-md px-3 py-1.5"
+              >
+                <option value="">All methods</option>
+                <option value="worldpay">Worldpay</option>
+                <option value="amex">Amex</option>
+                <option value="stripe_gbp">Stripe GBP</option>
+                <option value="wise_bacs">Wise (BACS)</option>
+                <option value="till_cash">Cash</option>
+                <option value="paypal">PayPal</option>
+                <option value="lloyds_bank">Lloyds Bank</option>
+                <option value="rolled_over">Account Balance</option>
+              </select>
+
+              {/* Sort */}
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="text-sm border border-gray-300 rounded-md px-3 py-1.5"
+              >
+                <optgroup label="Date">
+                  <option value="newest">Newest first</option>
+                  <option value="oldest">Oldest first</option>
+                  <option value="payment_date_desc">Payment date (newest)</option>
+                  <option value="payment_date_asc">Payment date (oldest)</option>
+                  <option value="reimbursed_date_desc">Reimbursed date (newest)</option>
+                  <option value="reimbursed_date_asc">Reimbursed date (oldest)</option>
+                </optgroup>
+                <optgroup label="Amount">
+                  <option value="amount_high">Required (highest)</option>
+                  <option value="amount_low">Required (lowest)</option>
+                  <option value="collected_high">Collected (highest)</option>
+                  <option value="collected_low">Collected (lowest)</option>
+                </optgroup>
+                <optgroup label="Client">
+                  <option value="client_az">Client A-Z</option>
+                  <option value="client_za">Client Z-A</option>
+                </optgroup>
+              </select>
+
+              {/* Active filter count + clear */}
+              {(statusFilter || methodFilter || searchText || sortBy !== 'newest') && (
+                <button
+                  onClick={() => { setStatusFilter(''); setMethodFilter(''); setSearchText(''); setSortBy('newest'); }}
+                  className="text-xs text-gray-500 hover:text-gray-700 underline"
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -305,43 +391,42 @@ function RecordsTable({
   }
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden overflow-x-auto">
       <table className="min-w-full divide-y divide-gray-200">
         <thead className="bg-gray-50">
           <tr>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Job</th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Driver</th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vehicle</th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Dates</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Required</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Collected</th>
-            <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
-            <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+            <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Job / Client</th>
+            <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Driver</th>
+            <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Vehicle</th>
+            <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">Required</th>
+            <th className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase">Collected</th>
+            <th className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
+            <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
+            <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Paid</th>
+            <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reimbursed</th>
+            <th className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase">HH</th>
+            <th className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase"></th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">
           {records.map((record) => (
             <tr key={record.id} className="hover:bg-gray-50">
-              <td className="px-4 py-3">
+              <td className="px-3 py-3">
                 <p className="text-sm font-medium text-gray-900">{record.hirehop_job_name || record.job_name || '—'}</p>
-                {record.hirehop_job_id && (
-                  <p className="text-xs text-gray-500">HH #{record.hirehop_job_id}</p>
-                )}
+                <p className="text-xs text-gray-500">
+                  {record.client_name || '—'}
+                  {record.hirehop_job_id ? ` · HH #${record.hirehop_job_id}` : ''}
+                </p>
               </td>
-              <td className="px-4 py-3 text-sm text-gray-600">{record.driver_name || '—'}</td>
-              <td className="px-4 py-3 text-sm text-gray-600">{record.vehicle_reg || '—'}</td>
-              <td className="px-4 py-3 text-xs text-gray-500">
-                {record.hire_start ? new Date(record.hire_start).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '—'}
-                {record.hire_end && ` — ${new Date(record.hire_end).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`}
-              </td>
-              <td className="px-4 py-3 text-right text-sm text-gray-600">
+              <td className="px-3 py-3 text-sm text-gray-600">{record.driver_name || '—'}</td>
+              <td className="px-3 py-3 text-sm text-gray-600">{record.vehicle_reg || '—'}</td>
+              <td className="px-3 py-3 text-right text-sm text-gray-600">
                 {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
               </td>
-              <td className="px-4 py-3 text-right text-sm font-medium text-gray-900">
+              <td className="px-3 py-3 text-right text-sm font-medium text-gray-900">
                 £{Number(record.excess_amount_taken || 0).toFixed(2)}
               </td>
-              <td className="px-4 py-3 text-center">
+              <td className="px-3 py-3 text-center">
                 <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status)}`}>
                   {statusLabel(record.excess_status)}
                 </span>
@@ -349,10 +434,27 @@ function RecordsTable({
                   <span className="block mt-1 text-[10px] text-amber-600">overridden</span>
                 )}
               </td>
-              <td className="px-4 py-3 text-xs text-gray-500">
+              <td className="px-3 py-3 text-xs text-gray-500 whitespace-nowrap">
                 {record.payment_method ? record.payment_method.replace(/_/g, ' ') : '—'}
               </td>
-              <td className="px-4 py-3 text-center">
+              <td className="px-3 py-3 text-xs text-gray-500 whitespace-nowrap">
+                {record.payment_date
+                  ? new Date(record.payment_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' })
+                  : '—'}
+              </td>
+              <td className="px-3 py-3 text-xs text-gray-500 whitespace-nowrap">
+                {record.reimbursement_date
+                  ? new Date(record.reimbursement_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' })
+                  : '—'}
+              </td>
+              <td className="px-3 py-3 text-center">
+                {record.hh_deposit_id ? (
+                  <span className="text-[10px] text-green-600 font-medium" title={`HH #${record.hh_deposit_id}`}>linked</span>
+                ) : (
+                  <span className="text-[10px] text-gray-400">—</span>
+                )}
+              </td>
+              <td className="px-3 py-3 text-center">
                 <button
                   onClick={() => onSelectRecord(record)}
                   className="text-xs font-medium text-ooosh-600 hover:text-ooosh-800"
