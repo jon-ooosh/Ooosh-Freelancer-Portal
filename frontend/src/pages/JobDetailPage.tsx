@@ -211,6 +211,7 @@ interface VehicleAssignment {
   notes: string | null;
   swap_reason: string | null;
   swapped_to_assignment_id: string | null;
+  ve103b_ref: string | null;
   hire_form_pdf_key?: string | null;
   hire_form_generated_at?: string | null;
   excess?: {
@@ -2190,6 +2191,11 @@ export default function JobDetailPage() {
                       {a.mileage_out != null && <span>Out: {a.mileage_out.toLocaleString()} mi</span>}
                       {a.mileage_in != null && <span>In: {a.mileage_in.toLocaleString()} mi</span>}
                       {a.has_damage && <span className="text-red-600 font-medium">Damage reported</span>}
+                      {a.ve103b_ref && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-medium">
+                          VE103B: {a.ve103b_ref}
+                        </span>
+                      )}
                     </div>
 
                     {/* Swap info for swapped assignments */}
