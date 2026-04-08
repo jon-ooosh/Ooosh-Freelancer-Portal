@@ -61,6 +61,13 @@ export default function VE103BCertificatesPage() {
   const [genCertNumber, setGenCertNumber] = useState('');
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState('');
+  const [genSuccess, setGenSuccess] = useState('');
+  const [assignments, setAssignments] = useState<Array<{
+    id: string; vehicle_reg: string; driver_name: string | null;
+    hire_start: string | null; hire_end: string | null;
+    hirehop_job_id: number | null; status: string; ve103b_ref: string | null;
+  }>>([]);
+  const [assignmentsLoading, setAssignmentsLoading] = useState(false);
 
   // Debounce search
   useEffect(() => {
@@ -121,16 +128,40 @@ export default function VE103BCertificatesPage() {
     window.open(`/api/ve103b/bvrla-report?month=${reportMonth}&token=${token}`, '_blank');
   }
 
+  async function loadAssignments() {
+    setAssignmentsLoading(true);
+    try {
+      // Fetch recent assignments that have both a vehicle and driver
+      const data = await api.get<{ data: Array<{
+        id: string; vehicle_reg: string; driver_name: string | null;
+        hire_start: string | null; hire_end: string | null;
+        hirehop_job_id: number | null; status: string; ve103b_ref: string | null;
+      }> }>('/assignments?limit=100');
+      // Only show assignments with a driver
+      setAssignments(data.data.filter(a => a.driver_name));
+    } catch (err) {
+      console.error('Failed to load assignments:', err);
+    } finally {
+      setAssignmentsLoading(false);
+    }
+  }
+
   async function handleGenerate() {
     if (!genAssignmentId.trim() || !genCertNumber.trim()) return;
     setGenerating(true);
     setGenError('');
+    setGenSuccess('');
     try {
-      await api.post('/ve103b/generate', {
+      const result = await api.post<{
+        certificate_number: string; vehicle_reg: string; driver_name: string;
+        pdf_filename: string; emailed: boolean;
+      }>('/ve103b/generate', {
         assignment_id: genAssignmentId.trim(),
         certificate_number: genCertNumber.trim(),
       });
-      setShowGenerate(false);
+      setGenSuccess(
+        `Generated ${result.pdf_filename}${result.emailed ? ' — emailed to info@oooshtours.co.uk' : ' — email failed, check logs'}`
+      );
       setGenAssignmentId('');
       setGenCertNumber('');
       loadCerts(1);
@@ -160,7 +191,7 @@ export default function VE103BCertificatesPage() {
           </p>
         </div>
         <button
-          onClick={() => setShowGenerate(true)}
+          onClick={() => { setShowGenerate(true); setGenSuccess(''); setGenError(''); loadAssignments(); }}
           className="rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-medium text-white hover:bg-ooosh-800 transition-colors"
         >
           Generate VE103B
@@ -373,50 +404,71 @@ export default function VE103BCertificatesPage() {
       {/* Generate modal */}
       {showGenerate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+          <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
             <h3 className="text-lg font-semibold text-gray-900">Generate VE103B Certificate</h3>
             <p className="mt-2 text-sm text-gray-600">
-              Generate a VE103B for an existing hire assignment. The PDF will be emailed to the office for printing.
+              Select a hire assignment and enter the certificate number from the physical VE103B form.
+              The PDF will be generated and emailed to the office for printing.
             </p>
             <div className="mt-4 space-y-3">
               <div>
-                <label className="block text-sm font-medium text-gray-700">Assignment ID</label>
-                <input
-                  type="text"
-                  value={genAssignmentId}
-                  onChange={e => setGenAssignmentId(e.target.value)}
-                  placeholder="UUID of the hire assignment"
-                  className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-                />
+                <label className="block text-sm font-medium text-gray-700 mb-1">Hire Assignment</label>
+                {assignmentsLoading ? (
+                  <div className="flex items-center gap-2 text-sm text-gray-500 py-2">
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-ooosh-navy" />
+                    Loading assignments...
+                  </div>
+                ) : assignments.length === 0 ? (
+                  <p className="text-sm text-gray-500 py-2">No assignments with drivers found</p>
+                ) : (
+                  <select
+                    value={genAssignmentId}
+                    onChange={e => setGenAssignmentId(e.target.value)}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                  >
+                    <option value="">Select an assignment...</option>
+                    {assignments.map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.vehicle_reg} — {a.driver_name}
+                        {a.hirehop_job_id ? ` (Job ${a.hirehop_job_id})` : ''}
+                        {a.hire_start ? ` — ${new Date(a.hire_start).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
+                        {a.ve103b_ref ? ` [VE103B: ${a.ve103b_ref}]` : ''}
+                        {' '}[{a.status}]
+                      </option>
+                    ))}
+                  </select>
+                )}
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700">Certificate Number</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Certificate Number</label>
                 <input
                   type="text"
                   value={genCertNumber}
                   onChange={e => setGenCertNumber(e.target.value)}
-                  placeholder="e.g. 1455063"
-                  className="mt-1 w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-                  autoFocus
+                  placeholder="Number from the physical VE103B form, e.g. 1455063"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
                 />
               </div>
               {genError && (
                 <p className="text-sm text-red-600">{genError}</p>
               )}
+              {genSuccess && (
+                <p className="text-sm text-green-700 bg-green-50 rounded-lg px-3 py-2">{genSuccess}</p>
+              )}
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <button
-                onClick={() => { setShowGenerate(false); setGenError(''); }}
+                onClick={() => { setShowGenerate(false); setGenError(''); setGenSuccess(''); }}
                 className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
               >
-                Cancel
+                {genSuccess ? 'Close' : 'Cancel'}
               </button>
               <button
                 onClick={handleGenerate}
                 disabled={!genAssignmentId.trim() || !genCertNumber.trim() || generating}
                 className="rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-medium text-white hover:bg-ooosh-800 disabled:opacity-50"
               >
-                {generating ? 'Generating...' : 'Generate'}
+                {generating ? 'Generating...' : 'Generate & Email'}
               </button>
             </div>
           </div>
