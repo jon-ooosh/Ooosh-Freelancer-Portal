@@ -5,6 +5,8 @@ import { isHireHopConfigured } from './hirehop';
 import { syncJobsFromHireHop } from '../services/hirehop-job-sync';
 import { runComplianceCheck } from '../services/compliance-checker';
 import { query } from './database';
+import { generateBVRLACSV } from '../routes/ve103b';
+import emailService from '../services/email-service';
 
 /**
  * Starts the backup and sync schedulers.
@@ -119,4 +121,54 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Vehicle compliance check scheduled daily at 08:00');
+
+  // ── BVRLA Monthly VE103B Report ────────────────────────────────────
+  // 1st of every month at 08:00 — email previous month's VE103B certificates
+  cron.schedule('0 8 1 * *', async () => {
+    console.log('Scheduler: Generating BVRLA monthly VE103B report...');
+    try {
+      const now = new Date();
+      const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const lastDay = new Date(prevMonth.getFullYear(), prevMonth.getMonth() + 1, 0).getDate();
+      const startDate = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}-01`;
+      const endDate = `${prevMonth.getFullYear()}-${String(prevMonth.getMonth() + 1).padStart(2, '0')}-${lastDay}`;
+
+      const result = await query(
+        `SELECT * FROM ve103b_certificates
+         WHERE date_certificate_supplied >= $1 AND date_certificate_supplied <= $2
+         ORDER BY date_certificate_supplied ASC, created_at ASC`,
+        [startDate, endDate],
+      );
+
+      const months = ['January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'];
+      const monthName = months[prevMonth.getMonth()];
+      const year = prevMonth.getFullYear();
+
+      const issuedCount = result.rows.filter((r: Record<string, unknown>) => r.status === 'issued').length;
+      const voidCount = result.rows.filter((r: Record<string, unknown>) => r.status === 'void').length;
+      const totalCount = result.rows.length;
+
+      const csv = generateBVRLACSV(result.rows);
+
+      await emailService.sendRaw({
+        to: 'will@oooshtours.co.uk',
+        cc: 'jon@oooshtours.co.uk',
+        subject: `BVRLA Monthly VE103B Report — ${monthName} ${year}`,
+        html: `<p>BVRLA Monthly VE103B Report for <strong>${monthName} ${year}</strong></p>
+               <p>${totalCount} certificate${totalCount !== 1 ? 's' : ''} total: ${issuedCount} issued, ${voidCount} voided.</p>
+               <p>CSV report attached.</p>`,
+        attachments: [{
+          filename: `BVRLA-VE103B-${monthName}-${year}.csv`,
+          content: Buffer.from(csv, 'utf-8'),
+          contentType: 'text/csv',
+        }],
+      });
+
+      console.log(`Scheduler: BVRLA report sent — ${totalCount} certs (${issuedCount} issued, ${voidCount} voided)`);
+    } catch (err) {
+      console.error('Scheduler: BVRLA monthly report failed:', err);
+    }
+  });
+  console.log('Scheduler: BVRLA monthly VE103B report scheduled for 1st of each month at 08:00');
 }

@@ -27,6 +27,7 @@ import requirementsRouter from './requirements';
 import portalRouter from './portal';
 import dataCleanupRouter from './data-cleanup';
 import moneyRouter from './money';
+import ve103bRouter from './ve103b';
 
 const router = Router();
 
@@ -52,6 +53,7 @@ router.use('/drivers', driversRouter);
 router.use('/assignments', assignmentsRouter);
 router.use('/excess', excessRouter);
 router.use('/money', moneyRouter);
+router.use('/ve103b', ve103bRouter);
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
