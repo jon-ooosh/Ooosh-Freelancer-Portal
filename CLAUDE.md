@@ -417,9 +417,9 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [ ] **`SignaturePage.js` OP mode repointing** (hire form app side) — In OP mode, after signature:
   1. Call `POST /api/hire-forms` (already working — creates assignment)
   2. Call `POST /api/hire-forms/:id/generate-pdf` (OP endpoint exists, needs triggering from SignaturePage)
-  3. Call new `POST /api/hire-forms/:id/post-signature` endpoint (see below) for additional driver charges + mid-tour detection
+  3. Call `POST /api/hire-forms/:id/post-signature` (OP endpoint exists, needs triggering from SignaturePage)
   4. Confirmation email already handled by hire form app (no OP duplication needed)
-- [ ] **Post-signature automations (OP backend)** — new endpoint `POST /api/hire-forms/:id/post-signature`:
+- [x] **Post-signature automations (OP backend)** — `POST /api/hire-forms/:id/post-signature` BUILT:
   - Count `vehicle_hire_assignments` for job → count vehicles in HH → add additional driver charge (item 1324, £20+VAT per extra driver beyond 2 per vehicle)
   - Check if job is dispatched (HH status 5/6) → mid-tour driver flow:
     - Set hire_start to NOW (not original job start — driver shouldn't have been driving before form submission)
@@ -432,8 +432,8 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 *Phase C4: Go-live cutover:*
 - [x] Set env vars on OP server (`HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`) — confirmed present
 - [x] Run migration 020 on production (`npm run db:migrate`) — done
-- [ ] Repoint `SignaturePage.js` to OP endpoints (see Phase C3 above)
-- [ ] Build `POST /api/hire-forms/:id/post-signature` (additional driver charge + mid-tour notification)
+- [ ] Repoint `SignaturePage.js` to OP endpoints (see Phase C3 above — hire form app side)
+- [x] `POST /api/hire-forms/:id/post-signature` built (additional driver charge + mid-tour notification)
 - [ ] Add "Generate Snapshot PDF" button on Insurance Referral panel (DriverDetailPage)
 - [ ] Mid-tour driver surfacing: badge on Fleet on-hire cards + status on Job Detail Drivers tab
 - [ ] Vehicle swap flow (see Phase D3 below)
