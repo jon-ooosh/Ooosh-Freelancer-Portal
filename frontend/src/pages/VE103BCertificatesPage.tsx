@@ -103,8 +103,8 @@ export default function VE103BCertificatesPage() {
 
   async function handleDownloadPdf(cert: VE103BCert) {
     try {
-      const blob = await api.blob(`/ve103b/${cert.id}/download`);
-      const url = URL.createObjectURL(blob);
+      const result = await api.blob(`/ve103b/${cert.id}/download`);
+      const url = URL.createObjectURL(result.blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = cert.pdf_filename || `VE103B-${cert.certificate_number}.pdf`;

@@ -153,7 +153,7 @@ export function startScheduler() {
 
       await emailService.sendRaw({
         to: 'will@oooshtours.co.uk',
-        cc: 'jon@oooshtours.co.uk',
+        cc: ['jon@oooshtours.co.uk'],
         subject: `BVRLA Monthly VE103B Report — ${monthName} ${year}`,
         html: `<p>BVRLA Monthly VE103B Report for <strong>${monthName} ${year}</strong></p>
                <p>${totalCount} certificate${totalCount !== 1 ? 's' : ''} total: ${issuedCount} issued, ${voidCount} voided.</p>

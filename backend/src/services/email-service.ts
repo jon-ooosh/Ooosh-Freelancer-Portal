@@ -216,6 +216,7 @@ class EmailService {
     html: string;
     cc?: string[];
     variant?: 'client' | 'internal';
+    attachments?: Array<{ filename: string; content: Buffer; contentType: string }>;
   }): Promise<SendEmailResult> {
     const config = getEmailConfig();
     const isTestMode = config.mode === 'test';
@@ -238,6 +239,11 @@ class EmailService {
         cc: isTestMode ? undefined : options.cc,
         subject: isTestMode ? `[TEST] ${options.subject}` : options.subject,
         html,
+        attachments: options.attachments?.map(a => ({
+          filename: a.filename,
+          content: a.content,
+          contentType: a.contentType,
+        })),
       });
 
       await this.logEmail({
