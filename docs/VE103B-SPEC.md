@@ -299,14 +299,20 @@ Uses `emailService.sendRaw()` with attachment (no template needed — internal o
 
 Current state: free-text `ve103b` input field at line 1600-1607.
 
-**Change:** After the existing text input, add a "Generate VE103B" button that appears when the field has a value. On book-out submission, if `ve103b` is populated:
+**Multi-driver handling:** A single van book-out can have multiple drivers (via `hireFormEntries`), but the VE103B is issued to **one named driver** — the **lead driver** selected on the form (`form.driverName`). The cert number field is single-valued per book-out.
 
-1. The existing write-back flow saves `ve103b_ref` to the assignment (already working)
-2. **New:** Call `POST /api/ve103b/generate` with `{ assignment_id, certificate_number: form.ve103b }`
+If additional drivers on the same vehicle also need VE103B certs (rare — e.g. separate international trips), those would be generated individually from the VE103B Certificate Browser page (Component 5c), not automatically during book-out.
+
+**Change:** On book-out submission, if `ve103b` is populated:
+
+1. The existing write-back flow saves `ve103b_ref` to the **lead driver's** assignment only (not all `hireFormEntries`)
+2. **New:** Identify the lead driver's assignment (match `form.driverName` against `hireFormEntries` to find the correct `assignment_id`). Call `POST /api/ve103b/generate` with `{ assignment_id, certificate_number: form.ve103b }`
 3. Show result in the book-out results panel (success/fail alongside other tracks)
 4. If the cert number is already taken (409), show error and let staff correct
 
 This runs as a **new parallel track** in the `handleSubmit` function (alongside PDF/email, HireHop, allocation, and write-back tracks).
+
+**Important:** The `ve103b_ref` write-back in the existing hire form loop (lines 684-717) currently writes the same `ve103b` value to ALL hire form entries. This needs changing so it only writes to the lead driver's entry. The other drivers' assignments should NOT get the cert number — it's not their cert.
 
 ### 5b: Vehicle Swap support
 
@@ -325,6 +331,7 @@ When a vehicle swap creates a new assignment (Phase D3, `swapped_to_assignment_i
 - "Void" quick-action button per row (opens confirm dialog with reason field)
 - "Download PDF" button per row
 - "Download BVRLA Report" button (month picker, calls `/api/ve103b/bvrla-report`)
+- **"Generate VE103B" button** — opens a form to generate a cert outside the book-out flow. Picker for assignment (filters to active assignments), cert number input. This covers: generating for a non-lead driver, re-issuing after a vehicle swap, or any case where book-out has already happened without a cert
 
 ### 5d: Job Detail — Drivers & Vehicles tab
 
