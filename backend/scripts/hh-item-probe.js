@@ -47,13 +47,15 @@ loadEnv();
 
 const DOMAIN = process.env.HIREHOP_DOMAIN || 'myhirehop.com';
 const TOKEN = process.env.HIREHOP_API_TOKEN;
-const JOB = process.argv[2];
+const ARG = process.argv[2];
 
-if (!JOB) {
-  console.error('Usage: node hh-item-probe.js <JOB_NUMBER>');
-  console.error('  Give me a job number that has a Premium Van with "Rear seats:" on it.');
+if (!ARG) {
+  console.error('Usage:');
+  console.error('  node hh-item-probe.js <JOB_NUMBER>     — probe items on a specific job');
+  console.error('  node hh-item-probe.js --categories      — list all HH stock categories');
   process.exit(1);
 }
+const JOB = ARG === '--categories' ? null : ARG;
 if (!TOKEN) {
   console.error('HIREHOP_API_TOKEN not found in .env');
   process.exit(1);
@@ -77,8 +79,46 @@ function hhGet(endpoint, params) {
   });
 }
 
+// ── Categories mode ────────────────────────────────────────────────────
+async function listCategories() {
+  console.log(`\n${'='.repeat(70)}`);
+  console.log(`  HireHop Categories List`);
+  console.log(`  Domain: ${DOMAIN}`);
+  console.log(`${'='.repeat(70)}\n`);
+
+  const data = await hhGet('/php_functions/categories_list.php', { doc_type: 0 });
+  const rows = data.rows || data;
+
+  function printCategory(cat, depth = 0) {
+    const indent = '  '.repeat(depth);
+    const flags = [];
+    if (cat.IS_STOCK === '1' || cat.IS_STOCK === 1) flags.push('RENTAL');
+    if (cat.IS_CONSUMABLE === '1' || cat.IS_CONSUMABLE === 1) flags.push('SALES');
+    if (cat.IS_LABOUR === '1' || cat.IS_LABOUR === 1) flags.push('LABOUR');
+    const flagStr = flags.length > 0 ? ` [${flags.join(', ')}]` : '';
+    console.log(`${indent}${cat.ID}: ${cat.NAME}${flagStr}`);
+    if (cat.children && cat.children.length > 0) {
+      for (const child of cat.children) {
+        printCategory(child, depth + 1);
+      }
+    }
+  }
+
+  if (Array.isArray(rows)) {
+    for (const cat of rows) {
+      printCategory(cat);
+    }
+  } else {
+    console.log('Unexpected response format:', JSON.stringify(data).substring(0, 500));
+  }
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 async function main() {
+  if (ARG === '--categories') {
+    return listCategories();
+  }
+
   console.log(`\n${'='.repeat(70)}`);
   console.log(`  HireHop Item Probe — Job #${JOB}`);
   console.log(`  Domain: ${DOMAIN}`);
