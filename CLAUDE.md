@@ -61,7 +61,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   └── scheduler.ts   # Cron jobs: backups, HH sync, chase auto-mover
 │   │   ├── services/
 │   │   │   ├── hirehop-sync.ts             # HireHop contact sync (read-only)
-│   │   │   ├── hirehop-job-sync.ts         # HireHop job sync (read-only)
+│   │   │   ├── hirehop-job-sync.ts         # HireHop job sync (read-only) + line items + requirement derivation
 │   │   │   ├── hirehop-writeback.ts        # Push pipeline changes to HireHop
 │   │   │   ├── crew-transport-calculator.ts # Delivery/collection/crewed cost engine
 │   │   │   ├── hirehop-broker.ts          # Centralised HireHop API gateway (rate limit, cache, queue)
@@ -720,19 +720,21 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 #### Step 5: Payment Portal Repointing
 *Merged into Step 3 Phase E (Money System).* See above for full repointing plan with `DATA_BACKEND` env var toggle.
 
-#### Step 6: Operations Modules (Hire Readiness) ← STREAM 1 FOUNDATION MOSTLY COMPLETE
+#### Step 6: Operations Modules (Hire Readiness) ← ARCHITECTURAL REVISION (Apr 2026)
 
-**Architecture:** Each confirmed job gets a **Prep Checklist** (the new default tab on Job Detail, replacing the old Overview). Each checklist item is a *requirement* — things that need doing before a job can go out. Requirements link into deeper per-job tabs, global overview pages, or expand inline for simple items.
+**Paradigm shift (Apr 2026):** The Prep Checklist is now **primarily HH-derived**, not manually created. HireHop line items are the source of truth for *what's on a job*; the OP adds the *operational intelligence* on top — who needs to do what, when, and whether it's done.
+
+**Architecture:** Each confirmed job gets a **Prep Checklist** (the new default tab on Job Detail). Requirements are automatically generated from HireHop line items via the **HH-Derived Requirements Engine** (see section below). Manual requirements still exist for OP-only activities (incoming deliveries, lost property, etc.).
 
 **Key design decisions:**
 - Prep Checklist = the job-level dashboard. Always the first tab you see.
 - Status system is **non-linear** (any status → any status), styled like pipeline badges (rectangular, coloured).
-- Each requirement type has its **own status flow** (not a global linear flow). E.g. Merch: "Request sent → Some received → All received → Notified client → Given to client".
-- **Templates** for common job types (one click adds multiple requirements).
-- **Dashboard** (`/dashboard`) is the global overview — aggregates all outstanding items across all jobs.
+- **HH-derived requirements auto-update** when HH line items change — no manual re-entry needed.
+- **Mismatch flagging:** If HH changes after staff has acted (e.g. marked "done"), surface a warning rather than silently overwriting.
+- **Dashboard** (`/dashboard`) is the global overview — aggregates all outstanding items across all jobs, including prep time estimates.
 - **Freelancer portal integration** — crew assignments, delivery jobs, studio sitter assignments all need to be readable/writable from the freelancer portal (currently reads from Monday.com, needs repointing to OP).
 
-##### Stream 1: Core Requirements System (FOUNDATION — do first)
+##### Stream 1: Core Requirements System (FOUNDATION — MOSTLY COMPLETE)
 - [x] `job_requirements` table + migration (migration 021)
 - [x] Requirements API: CRUD, non-linear status changes, templates
 - [x] Wire Prep Checklist to real data (replace dummy prototype)
@@ -742,13 +744,16 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [x] Likelihood badge hidden for confirmed+ jobs (no longer relevant post-booking)
 - [x] Full Details tab removed — details/notes now editable inline on Overview tab
 - [ ] Deposit/payment progress bar on Prep Checklist (visual: deposit taken vs full fee)
-- [ ] "Compare" function: what we've said we need vs what HH tells us (flag discrepancies)
+- [ ] **HH-Derived Requirements Engine** (see dedicated section below) — auto-create/update requirements from HH line items
+- [ ] On-demand job sync ("Sync now" button + auto-sync on Job Detail page open)
+- [ ] Mismatch flagging (HH changed since requirement was last updated/marked done)
 
 ##### Stream 2: Global Operations Dashboard
 Aggregate views on the Dashboard page — click through to individual jobs from each widget.
 - [ ] Transport overview widget: all jobs with transport needs, who's driving, when, where
 - [ ] Crew overview widget: who's assigned where this week, availability gaps
 - [ ] Backline overview widget: jobs with backline, prep status
+- [ ] **Prep time estimates:** "4 vehicles need prepping today, est. 5 hours" (from `preptimemins` custom field on HH items, split by category)
 - [ ] Incoming deliveries widget: what's arriving today across all jobs
 - [ ] Carnet overview widget: outstanding carnets, return tracking
 - [ ] Lost property widget: uncollected items with age
@@ -756,29 +761,37 @@ Aggregate views on the Dashboard page — click through to individual jobs from 
 - [ ] Payment summary widget: deposits pending, balances outstanding
 - [ ] Hook into freelancer portal (repoint from Monday.com read/write to OP API)
 
-##### Stream 3: Backline + Sub-hires Module
-- [ ] `job_backline` table (job_id, status, notes, item_count, checked_out_count)
-- [ ] `job_subhires` table (what, supplier, status, cost, po_ref, due_date, received)
-- [ ] Backline status flags: not started / in progress / prepped / checked out / returned / issues
+##### Stream 3: Backline Module
+Backline detection is HH-derived (items in backline categories auto-create the requirement). Backline *management* (prep status, issues, de-prep) lives in OP.
+- [ ] Backline requirement auto-detected from HH line items (backline category)
+- [ ] Backline detail section on job (item list from HH, prep status per item in OP)
+- [ ] Backline prep/de-prep time estimates from `preptimemins` custom field
 - [ ] Backline issues tracking (missing items, damage — similar pattern to vehicle issues)
-- [ ] Sub-hire tracking: need → sourcing → ordered → received → returned
 - [ ] Per-job sections + global backline board view
-- [ ] Optional HH integration: pull item counts from `job_data.php` to auto-populate (if API supports checked-out counts)
 
-##### Stream 4: Incoming Deliveries + Lost Property
+##### Stream 3b: Sub-Hires Module (OP-Only)
+Sub-hire tracking lives entirely in OP. HH's PO/shortage method is too clumsy (custom items always show short).
+- [ ] `job_subhires` table (what, supplier, status, cost, po_ref, due_date, received)
+- [ ] Sub-hire tracking: need → sourcing → ordered → received → returned
+- [ ] Per-job section + global sub-hire view
+
+##### Stream 4: Incoming Deliveries + Lost Property (OP-Only)
+These originate outside HH entirely — client sends stuff to us, or items found post-hire.
 - [ ] `incoming_deliveries` table (job_id, description, expected_date, box_count, received_count, status, sender_name)
 - [ ] Support for "mystery boxes" — record arrival with unknown association, link to job/client later
-- [ ] Status flow: expected → some received → all received → notified client → given to client
+- [ ] Merch receiving: request sent → some received → all received → notified client → given to client
 - [ ] `lost_property` table (job_id, description, found_date, found_location, photo, client_notified, collected, dispose_after)
 - [ ] Auto-reminder: chase client to collect, flag for disposal after X weeks
 - [ ] Global pages for both: `/operations/deliveries`, `/operations/lost-property`
 
 ##### Stream 5: Rehearsals Module
+Rehearsal detection is HH-derived (items in rehearsal category 450 auto-create the requirement). Rehearsal *management* (studio sitter, room prep, handover) lives in OP.
+- [ ] Rehearsal requirement auto-detected from HH line items (category 450)
+- [ ] Rehearsal prep time from `preptimemins` custom field
 - [ ] `rehearsals` table (job_id, venue, date_start, date_end, studio_sitter_id, setup_specs, sound_files, status)
 - [ ] Studio sitter assignment (links to people table, freelancer portal integration)
 - [ ] Room prep method (similar to vehicle prep checklist)
 - [ ] Handover tracking: evening studio sitters → daytime staff
-- [ ] Issues tracking (similar to vehicle issues)
 - [ ] Band setup specs + sound file uploads
 - [ ] Studio schedule global view (`/operations/rehearsals`) — calendar/timeline format
 - [ ] Freelancer portal integration: push rehearsal assignments to studio sitters
@@ -828,7 +841,97 @@ Global operational view for what's currently happening / about to happen with tr
 - [ ] Global carnet overview page (`/operations/carnets`) — outstanding carnets, post-hire returns pending
 - [ ] Reminder automation: chase for return after hire ends
 
-**Parallelisation notes:** Streams 2-7 can all run simultaneously — they touch different tables, routes, and pages. Stream 1 is the foundation and should complete first (or at least the migration + API), as Streams 2-7 plug requirements into it. Streams 3-5 are fully independent of each other. Stream 6 has a dependency on the organisations table (payment terms) but is otherwise standalone.
+**Parallelisation notes:** Streams 2-7 can all run simultaneously — they touch different tables, routes, and pages. Stream 1 + the HH-Derived Requirements Engine are the foundation and should complete first, as all other streams plug into it.
+
+##### HH-Derived Requirements Engine ← NEW (Apr 2026)
+
+**Core concept:** HireHop is the source of truth for *what's on a job*. The OP reads HH line items and automatically derives operational requirements — what prep is needed, what configuration changes are required, what workflows to trigger. This eliminates the "same thing twice in two places" problem and ensures OP stays in sync when HH changes.
+
+**Proven via API testing (9 Apr 2026):** The `items_to_supply_list.php` endpoint returns all items on a job including:
+- Standard items (`kind: 2`) with category, stock ID, quantity
+- **Selected prompt items (`kind: 3`)** — only the chosen option appears (e.g. if "forward-facing" is selected, only that prompt shows; "round a table" is absent)
+- **Custom fields** including `TYPE_CUSTOM_FIELDS.preptimemins` — prep time in minutes per item (same figure for de-prep)
+- Parent-child relationships via `LFT`/`RGT` nested set values and `▶` prefix on parent items
+- `AUTOPULL` as stable identifier for prompt options (e.g. 2822 = round-a-table, 2823 = forward-facing for rear seats)
+
+**Three-tier detection model:**
+
+| Tier | Detection Method | Examples |
+|---|---|---|
+| **Category check** | Items in specific HH categories | Backline (backline cat), Rehearsal (cat 450), Vehicle (cat 370), Vehicle accessories (cat 371) |
+| **Category + keyword** | Category match + item name parsing | "Premium LWB" → Premium van, "manual gearbox" / "auto gearbox" → transmission type |
+| **Prompt parsing** | `kind:3` selected prompts under parent items | Seat configuration (AUTOPULL 2822/2823), other accessory options |
+
+**HH-derived requirement types:**
+
+| Requirement | HH Signal | Detection | OP Action |
+|---|---|---|---|
+| **Vehicle (Self-Drive)** | Item in category 370 (Vehicles) | Category check | Auto-create vehicle requirement. Default is self-drive; "Van & Driver" button overrides (flips off hire-forms/excess chain) |
+| **Seat configuration** | `kind:3` child of "Rear seats:" parent (LIST_ID 1645) | Prompt parse + AUTOPULL ID | Flag on prep checklist. Cross-ref `fleet_vehicles.seat_layout` to show which vans need turning |
+| **Backline** | Items in backline category | Category check | Auto-create backline requirement with item list + prep time |
+| **Rehearsal** | Items in category 450 | Category check | Auto-create rehearsal requirement |
+| **Hire forms** | Derived: self-drive vehicle detected (no "van & driver" override) | Chained from vehicle | Auto-create hire forms requirement |
+| **Insurance excess** | Derived: hire forms requirement exists | Chained from hire forms | Auto-create excess requirement |
+| **Carnet** | International venue + equipment on job | Venue location + items exist | Auto-create carnet requirement (multi-step workflow in OP) |
+| **Prep time totals** | `TYPE_CUSTOM_FIELDS.preptimemins` summed across all items | Custom field read | Dashboard: "4 vehicles need prepping today, est. 5 hours". Split by category (vehicles, backline, rehearsals). Same figure for de-prep |
+
+**Sanity-check flags (OP is source of truth, HH used for cross-check):**
+
+| Check | Logic | Surface |
+|---|---|---|
+| **Crew mismatch** | `kind:4` crew items on HH but no crew quote in OP (or vice versa) | Amber warning on prep checklist |
+| **Transport mismatch** | Delivery quote in OP but no corresponding HH item (or vice versa) | Amber warning: "delivery quote exists but not on HH" / "delivery on HH but no OP quote" |
+| **Van & driver vs self-drive** | Van + crew detected but marked as self-drive (or vice versa) | Edge case flag |
+| **HH changed after action** | HH line items changed since staff marked requirement as "done" | Warning: "HH has changed since you marked this done" — does NOT overwrite status |
+
+**OP-only requirement types (no HH equivalent):**
+
+| Type | Notes |
+|---|---|
+| Incoming deliveries / merch receiving | Client sends stuff — nothing in HH |
+| Lost property | Post-hire discovery |
+| Sub-hire | Migrated fully to OP (HH PO/shortage method too clumsy for custom items) |
+| On-road issues | Real-time operational — breakdowns, delays |
+| Post-hire problems | Damage, missing items — after HH lifecycle |
+| General tasks / reminders | Not job-specific |
+| Custom requirements | Free-text, user-defined |
+
+**Removed requirement types (were speculative, not needed):**
+- ~~Stage Plot / Tech Spec~~ — lives in job files if needed
+- ~~Special Permits~~ — not part of day-to-day process
+
+**Sync triggers:**
+1. **Background sync** (every 30 min) — existing job sync, now also processes line items for requirement derivation
+2. **Webhook** — `job.updated` webhook from HH triggers immediate line item re-fetch for that job
+3. **On-demand** — "Sync now" button on Job Detail page, fetches fresh items from HH
+4. **Auto on page load** — navigating to Job Detail triggers background item refresh (non-blocking, updates reactively when data arrives)
+
+**Requirement lifecycle with HH sync:**
+1. HH item detected → OP auto-creates requirement with `is_auto: true`, `source: 'hirehop_sync'`
+2. Staff works the requirement (changes status, adds notes, marks done)
+3. Next sync: if HH items unchanged, requirement untouched. If HH items changed, flag mismatch for staff review
+4. If HH item removed: requirement flagged "HH item removed — review needed" (not silently deleted, in case staff already did prep work)
+
+**Vehicle seat configuration — end-to-end example:**
+1. Sales adds Premium Van to job in HH, selects "Rear seats all forward-facing" prompt
+2. Sync detects: category 370 item + `kind:3` "forward-facing" prompt (AUTOPULL 2823)
+3. OP auto-creates vehicle requirement + sets `seat_config: 'forward_facing'`
+4. OP cross-refs `fleet_vehicles` WHERE `simple_type = 'Premium'` AND `is_active = true`: checks `seat_layout` field on each
+5. Prep checklist shows: "Seats: Forward-facing. GX17DHN already forward-facing, others need turning"
+6. Client changes mind → sales updates HH prompt to "round a table"
+7. Next sync: OP detects change, updates requirement, flags if staff already prepped
+
+**Fleet vehicle seat tracking:**
+- New field `seat_layout` on `fleet_vehicles` table: `'round_table'` | `'forward_facing'`
+- Populated via vehicle prep forms — by the time each van has been prepped once in OP, we'll have the data
+- Displayed on vehicle detail page (quick reference for van team)
+- Cross-referenced during job prep to identify which vans need seat changes
+
+**Van & Driver toggle:**
+- Default assumption: self-drive (most common case)
+- "Van & Driver" button on Job Detail / Drivers & Vehicles tab — overrides self-drive assumption
+- When toggled: hire forms + excess requirements are NOT auto-created
+- Persisted on job or quote level
 
 #### Pipeline & Enquiry Cleanup ← IN PROGRESS
 
@@ -1294,8 +1397,9 @@ Self-drive hires require an insurance excess. The amount is calculated by the dr
 | Task | Schedule | Description |
 |------|----------|-------------|
 | Database backup | Daily at 02:00 | pg_dump → gzip → upload to R2 |
-| HireHop job sync | Every 30 minutes | Pull active jobs from HireHop |
+| HireHop job sync | Every 30 minutes | Pull active jobs from HireHop + sync line items + derive requirements |
 | Chase auto-mover | Every 15 minutes | Move overdue-chase jobs to "chasing" column |
+| On-demand job sync | On page load / button | Per-job: fresh line item fetch from HH, re-derive requirements (non-blocking) |
 
 ## HireHop Integration
 
@@ -1311,16 +1415,40 @@ HIREHOP_EXPORT_KEY=your_export_key  # Export key for webhook verification (from 
 
 - **Contacts (Phase 1):** Read-only pull from HireHop into `people` table, matched by email
 - **Jobs (Phase 2):** Read-only pull of active jobs (statuses 0-8) into `jobs` table, every 30 min
+- **Line items (Phase 2):** Stored in `jobs.line_items` JSONB column via `items_to_supply_list.php`. **IMPORTANT:** Must preserve `kind:3` items (selected prompts) — these are the source for HH-derived requirements (seat config, accessory options, etc.). Current sync filters them out — needs fixing.
 - **Webhooks (Phase 2):** Real-time bidirectional sync via HireHop webhooks (live 16 Mar 2026)
   - Inbound: `POST /api/webhooks/hirehop` — receives `job.status.updated`, `job.updated`, `job.created`, `contact.*`
   - Outbound: `hirehop-writeback.ts` — pushes pipeline status changes back to HireHop
   - Polling sync still runs as fallback every 30 min
+- **On-demand sync:** Job Detail page triggers fresh item fetch on load (non-blocking). "Sync now" button for immediate refresh.
 - Config: `backend/src/config/hirehop.ts`
 - Contact sync: `backend/src/services/hirehop-sync.ts`
 - Job sync: `backend/src/services/hirehop-job-sync.ts`
 - Write-back: `backend/src/services/hirehop-writeback.ts`
 - Webhooks: `backend/src/routes/webhooks.ts`
 - Routes: `backend/src/routes/hirehop.ts`
+
+### HireHop Line Item Fields (items_to_supply_list.php)
+
+Key fields returned per item on a job:
+
+| Field | Example | Use |
+|---|---|---|
+| `kind` | 0=header, 2=item, 3=**selected prompt**, 4=service/crew | Item classification. `kind:3` = the selected option from a prompt set |
+| `title` | "Premium LWB Splitter Van - manual gearbox" | Item name. `▶` prefix = has child prompts |
+| `LIST_ID` | "1645" | HH stock item ID (stable across jobs) |
+| `AUTOPULL` | "2823" | Prompt option ID (stable identifier for specific prompt selections) |
+| `CATEGORY_ID` | "370" | Category: 370=Vehicles, 371=Vehicle accessories, 450=Rehearsal |
+| `VIRTUAL` | "1" | Virtual item (prompt parent, no physical stock) |
+| `TYPE_CUSTOM_FIELDS` | `{"preptimemins":{"type":"integer","value":"75"}}` | Custom fields per stock type — includes prep time in minutes |
+| `LFT`/`RGT` | "2"/"5" | Nested set tree position — child items sit inside parent's LFT-RGT range |
+| `qty` | "1.00" | Quantity on job |
+
+**Prompt detection pattern:**
+1. Parent item: `kind:2`, `VIRTUAL:1`, title starts with `▶` (e.g. "▶ Rear seats:")
+2. Selected child: `kind:3`, positioned inside parent's LFT/RGT range
+3. Only the selected prompt appears — unselected options are absent from the response
+4. `AUTOPULL` on the child is the stable ID for the specific option chosen
 
 ### HireHop Job Status Codes
 
