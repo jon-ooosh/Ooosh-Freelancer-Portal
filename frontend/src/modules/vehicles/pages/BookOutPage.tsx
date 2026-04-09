@@ -26,6 +26,7 @@ import { useGoingOutJobs, useHireHopJob } from '../hooks/useHireHopJobs'
 import { useAllocations } from '../hooks/useAllocations'
 import { useDriverHireForms, useActiveHireForms } from '../hooks/useDriverHireForms'
 import { updateDriverHireForm } from '../lib/driver-hire-api'
+import { apiFetch } from '../config/api-config'
 import { extractVanRequirements } from '../lib/hirehop-api'
 import { fetchLastEventForVehicle } from '../lib/events-query'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
@@ -681,19 +682,21 @@ export function BookOutPage() {
     })()
 
     // Track: Hire form write-back (independent)
+    // VE103B ref is only written to the LEAD driver's entry (the one being booked out)
     const writeBackTrack = (async () => {
       const hireFormEntries = form.hireFormEntries || []
       if (hireFormEntries.length === 0) return []
       let writeBackOk = 0
       let writeBackFail = 0
       for (const entry of hireFormEntries) {
+        const isLeadDriver = entry.driverName === form.driverName
         const wbResult = await updateDriverHireForm({
           hireFormItemId: entry.id,
           vehicleReg: form.vehicleReg,
           mileageOut: isNaN(mileageNum) ? undefined : mileageNum,
           startTime: form.hireStartTime || undefined,
           endTime: form.hireEndTime || undefined,
-          ve103b: form.ve103b || undefined,
+          ve103b: isLeadDriver ? (form.ve103b || undefined) : undefined,
           returnOvernight: form.returnOvernight || undefined,
         })
         if (wbResult.success) {
@@ -717,14 +720,53 @@ export function BookOutPage() {
       }]
     })()
 
+    // Track: VE103B certificate generation (independent, only if cert number entered)
+    const ve103bTrack = (async () => {
+      if (!form.ve103b || !form.hireFormEntries || form.hireFormEntries.length === 0) return []
+      // Find the lead driver's assignment ID
+      const leadEntry = form.hireFormEntries.find(e => e.driverName === form.driverName)
+      if (!leadEntry) return []
+      try {
+        const response = await apiFetch('/api/ve103b/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            assignment_id: leadEntry.id,
+            certificate_number: form.ve103b,
+          }),
+        })
+        if (response.ok) {
+          const data = await response.json()
+          return [{
+            label: 'VE103B certificate',
+            success: true,
+            detail: `${data.pdf_filename} — ${data.emailed ? 'emailed to office' : 'email failed'}`,
+          }]
+        }
+        const err = await response.json().catch(() => ({ error: 'Unknown error' }))
+        return [{
+          label: 'VE103B certificate',
+          success: false,
+          detail: err.message || err.error || `Failed (${response.status})`,
+        }]
+      } catch (e) {
+        return [{
+          label: 'VE103B certificate',
+          success: false,
+          detail: e instanceof Error ? e.message : 'Generation failed',
+        }]
+      }
+    })()
+
     // Wait for all parallel tracks to complete
-    const [pdfEmailResults, hhResults, allocResults, wbResults] = await Promise.all([
+    const [pdfEmailResults, hhResults, allocResults, wbResults, ve103bResults] = await Promise.all([
       pdfEmailTrack,
       hirehopTrack,
       allocationTrack,
       writeBackTrack,
+      ve103bTrack,
     ])
-    results.push(...pdfEmailResults, ...hhResults, ...allocResults, ...wbResults)
+    results.push(...pdfEmailResults, ...hhResults, ...allocResults, ...wbResults, ...ve103bResults)
 
     setOpResults(results)
     setUploadProgress(null)
