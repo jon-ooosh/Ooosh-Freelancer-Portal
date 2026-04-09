@@ -327,13 +327,28 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
 
 // ── Line Items Sync ──────────────────────────────────────────────────────
 
+/** Rich line item shape — includes fields needed for HH-derived requirements */
+export interface HHLineItem {
+  ITEM_ID: number;      // Unique row ID on this job
+  LIST_ID: number;      // HH stock item ID (stable across jobs)
+  ITEM_NAME: string;    // Display name (includes ▶ prefix for prompt parents)
+  QUANTITY: number;
+  CATEGORY_ID: number;  // 370=Vehicles, 371=Vehicle accessories, 450=Rehearsal, etc.
+  kind: number;         // 0=header, 2=item, 3=selected prompt, 4=service/crew
+  AUTOPULL: number;     // Stable prompt option ID (e.g. 2822=round-a-table, 2823=forward-facing)
+  VIRTUAL: boolean;     // True = prompt parent or grouping item, no physical stock
+  LFT: number;          // Nested set left boundary (parent-child tree)
+  RGT: number;          // Nested set right boundary
+  TYPE_CUSTOM_FIELDS: Record<string, any> | null;  // Includes preptimemins etc.
+}
+
 /**
  * Fetch line items for a single job from HireHop.
- * Returns array of { ITEM_ID, ITEM_NAME, QUANTITY, CATEGORY_ID }.
+ * Returns full item data including kind:3 selected prompts (needed for
+ * HH-derived requirements like seat configuration, accessory options).
+ * Only skips kind:0 headers (section dividers with no data value).
  */
-async function fetchLineItemsForJob(jobNumber: number): Promise<Array<{
-  ITEM_ID: number; ITEM_NAME: string; QUANTITY: number; CATEGORY_ID: number;
-}>> {
+async function fetchLineItemsForJob(jobNumber: number): Promise<HHLineItem[]> {
   const result = await hhBroker.get<unknown>('/frames/items_to_supply_list.php', {
     job: jobNumber,
   }, { priority: 'low', cacheTTL: 600 });
@@ -349,35 +364,53 @@ async function fetchLineItemsForJob(jobNumber: number): Promise<Array<{
   return rawItems
     .filter((item: any) => {
       const kind = Number(item.kind ?? 2);
-      if (kind === 0 || kind === 3) return false; // Skip headers and notes
-      return true;
+      // Keep kind:2 (items), kind:3 (selected prompts), kind:4 (service/crew)
+      // Skip kind:0 (headers — section dividers with no useful data)
+      return kind !== 0;
     })
-    .map((item: any) => ({
-      ITEM_ID: Number(item.ITEM_ID ?? item.item_id ?? item.LIST_ID ?? item.ID ?? 0),
-      ITEM_NAME: String(item.NAME ?? item.title ?? item.ITEM_NAME ?? ''),
-      QUANTITY: Number(item.QTY ?? item.qty ?? item.quantity ?? item.QUANTITY ?? 1),
-      CATEGORY_ID: Number(item.CATEGORY_ID ?? 0),
-    }))
-    .filter((item: any) => item.ITEM_ID > 0);
+    .map((item: any) => {
+      // Parse TYPE_CUSTOM_FIELDS (comes as object or null)
+      let customFields: Record<string, any> | null = null;
+      if (item.TYPE_CUSTOM_FIELDS && typeof item.TYPE_CUSTOM_FIELDS === 'object') {
+        customFields = item.TYPE_CUSTOM_FIELDS;
+      } else if (typeof item.TYPE_CUSTOM_FIELDS === 'string') {
+        try { customFields = JSON.parse(item.TYPE_CUSTOM_FIELDS); } catch { /* ignore */ }
+      }
+
+      return {
+        ITEM_ID: Number(item.ID ?? item.ITEM_ID ?? 0),
+        LIST_ID: Number(item.LIST_ID ?? 0),
+        ITEM_NAME: String(item.title ?? item.NAME ?? item.ITEM_NAME ?? ''),
+        QUANTITY: Number(item.QTY ?? item.qty ?? item.QUANTITY ?? item.quantity ?? 1),
+        CATEGORY_ID: Number(item.CATEGORY_ID ?? 0),
+        kind: Number(item.kind ?? 2),
+        AUTOPULL: Number(item.AUTOPULL ?? 0),
+        VIRTUAL: item.VIRTUAL === '1' || item.VIRTUAL === 1 || item.VIRTUAL === true,
+        LFT: Number(item.LFT ?? 0),
+        RGT: Number(item.RGT ?? 0),
+        TYPE_CUSTOM_FIELDS: customFields,
+      };
+    });
 }
 
 /**
  * Sync line items for active jobs (statuses 1-6).
- * Only fetches for jobs that have empty line_items or haven't been
- * updated in the last hour.
+ * Only fetches for jobs that have empty line_items or line_items_synced_at
+ * is older than 1 hour.
  */
 async function syncLineItemsForActiveJobs(): Promise<void> {
   try {
     // Get active jobs that need line items refreshed
     const jobsResult = await query(
-      `SELECT hh_job_number FROM jobs
+      `SELECT hh_job_number, id FROM jobs
        WHERE is_deleted = false
          AND status = ANY($1)
          AND hh_job_number IS NOT NULL
          AND (
            line_items IS NULL
            OR line_items = '[]'::jsonb
-           OR updated_at < NOW() - INTERVAL '1 hour'
+           OR line_items_synced_at IS NULL
+           OR line_items_synced_at < NOW() - INTERVAL '1 hour'
          )
        ORDER BY out_date ASC NULLS LAST
        LIMIT 80`,
@@ -396,7 +429,7 @@ async function syncLineItemsForActiveJobs(): Promise<void> {
       try {
         const items = await fetchLineItemsForJob(row.hh_job_number);
         await query(
-          `UPDATE jobs SET line_items = $1, updated_at = NOW()
+          `UPDATE jobs SET line_items = $1, line_items_synced_at = NOW(), updated_at = NOW()
            WHERE hh_job_number = $2`,
           [JSON.stringify(items), row.hh_job_number]
         );
@@ -416,20 +449,24 @@ async function syncLineItemsForActiveJobs(): Promise<void> {
 
 /**
  * On-demand sync: fetch line items for specific jobs.
- * Called by the "Refresh from HireHop" button on the Allocations page.
+ * Called by the "Refresh from HireHop" button on the Allocations page,
+ * and by the on-demand sync on Job Detail page.
+ * Returns the fetched items so callers can run derivation immediately.
  */
-export async function syncLineItemsForJobs(jobNumbers: number[]): Promise<{ updated: number; errors: number }> {
+export async function syncLineItemsForJobs(jobNumbers: number[]): Promise<{ updated: number; errors: number; itemsByJob: Record<number, HHLineItem[]> }> {
   let updated = 0;
   let errors = 0;
+  const itemsByJob: Record<number, HHLineItem[]> = {};
 
   for (const jobNumber of jobNumbers) {
     try {
       const items = await fetchLineItemsForJob(jobNumber);
       await query(
-        `UPDATE jobs SET line_items = $1, updated_at = NOW()
+        `UPDATE jobs SET line_items = $1, line_items_synced_at = NOW(), updated_at = NOW()
          WHERE hh_job_number = $2`,
         [JSON.stringify(items), jobNumber]
       );
+      itemsByJob[jobNumber] = items;
       updated++;
     } catch (err) {
       console.warn(`[HH Job Sync] On-demand items fetch failed for job ${jobNumber}:`, err);
@@ -438,7 +475,48 @@ export async function syncLineItemsForJobs(jobNumbers: number[]): Promise<{ upda
     await new Promise(resolve => setTimeout(resolve, 300));
   }
 
-  return { updated, errors };
+  return { updated, errors, itemsByJob };
+}
+
+/**
+ * Fetch line items for a single job on-demand (high priority, short cache).
+ * Used by Job Detail page auto-sync on load.
+ */
+export async function fetchLineItemsOnDemand(jobNumber: number): Promise<HHLineItem[]> {
+  const result = await hhBroker.get<unknown>('/frames/items_to_supply_list.php', {
+    job: jobNumber,
+  }, { priority: 'high', cacheTTL: 30 });
+
+  if (!result.success || !result.data) return [];
+
+  const data = result.data as any;
+  if (data && typeof data === 'object' && !Array.isArray(data) && data.error) return [];
+
+  const rawItems: any[] = Array.isArray(data) ? data : (data.items || []);
+
+  return rawItems
+    .filter((item: any) => Number(item.kind ?? 2) !== 0)
+    .map((item: any) => {
+      let customFields: Record<string, any> | null = null;
+      if (item.TYPE_CUSTOM_FIELDS && typeof item.TYPE_CUSTOM_FIELDS === 'object') {
+        customFields = item.TYPE_CUSTOM_FIELDS;
+      } else if (typeof item.TYPE_CUSTOM_FIELDS === 'string') {
+        try { customFields = JSON.parse(item.TYPE_CUSTOM_FIELDS); } catch { /* ignore */ }
+      }
+      return {
+        ITEM_ID: Number(item.ID ?? item.ITEM_ID ?? 0),
+        LIST_ID: Number(item.LIST_ID ?? 0),
+        ITEM_NAME: String(item.title ?? item.NAME ?? item.ITEM_NAME ?? ''),
+        QUANTITY: Number(item.QTY ?? item.qty ?? item.QUANTITY ?? item.quantity ?? 1),
+        CATEGORY_ID: Number(item.CATEGORY_ID ?? 0),
+        kind: Number(item.kind ?? 2),
+        AUTOPULL: Number(item.AUTOPULL ?? 0),
+        VIRTUAL: item.VIRTUAL === '1' || item.VIRTUAL === 1 || item.VIRTUAL === true,
+        LFT: Number(item.LFT ?? 0),
+        RGT: Number(item.RGT ?? 0),
+        TYPE_CUSTOM_FIELDS: customFields,
+      };
+    });
 }
 
 /**
