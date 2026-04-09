@@ -2062,7 +2062,12 @@ export default function JobDetailPage() {
             </div>
           </div>
 
-          <JobPrepChecklist key={prepChecklistKey} jobId={id || ''} />
+          <JobPrepChecklist
+            key={prepChecklistKey}
+            jobId={id || ''}
+            derivedFlags={hhSyncResult?.derivation?.flags || null}
+            seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
+          />
 
           {/* HH-Derived Flags (auto-detected from HireHop line items) */}
           {hhSyncResult?.derivation?.flags && (() => {
@@ -3741,6 +3746,9 @@ interface JobRequirement {
   due_date: string | null;
   is_auto: boolean;
   source: string;
+  hh_mismatch: boolean;
+  hh_mismatch_detail: string | null;
+  hh_item_snapshot: unknown[] | null;
   type_label: string;
   type_icon: string;
   type_steps: string[] | null;
@@ -3810,7 +3818,24 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   );
 }
 
-function JobPrepChecklist({ jobId }: { jobId: string }) {
+function JobPrepChecklist({ jobId, derivedFlags, seatAvailability, onSendHireForm }: {
+  jobId: string;
+  derivedFlags?: {
+    has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
+    seat_config: 'round_table' | 'forward_facing' | null;
+    has_backline: boolean; backline_item_count: number;
+    has_rehearsal: boolean; has_crew_items: boolean; crew_item_count: number;
+    total_prep_time_mins: number;
+    prep_time_by_category: { vehicles: number; backline: number; rehearsals: number; other: number };
+  } | null;
+  seatAvailability?: {
+    required: string;
+    matchingVans: Array<{ reg: string; seat_layout: string | null }>;
+    nonMatchingVans: Array<{ reg: string; seat_layout: string | null }>;
+    unknownVans: Array<{ reg: string }>;
+  } | null;
+  onSendHireForm?: (jobId: string) => void;
+}) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
   const [types, setTypes] = useState<RequirementTypeDef[]>([]);
   const [templates, setTemplates] = useState<RequirementTemplate[]>([]);
@@ -4002,23 +4027,73 @@ function JobPrepChecklist({ jobId }: { jobId: string }) {
             return (
               <div
                 key={req.id}
-                className={`group bg-white rounded-xl border ${statusConfig.border} p-4 transition-all hover:shadow-sm`}
+                className={`group bg-white rounded-xl border ${req.hh_mismatch ? 'border-amber-300 bg-amber-50/30' : statusConfig.border} p-4 transition-all hover:shadow-sm`}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <span className="text-lg">{req.type_icon}</span>
                     <div>
-                      <span className={`font-medium ${req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
-                        {label}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className={`font-medium ${req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
+                          {label}
+                        </span>
+                        {req.is_auto && req.source === 'hirehop_sync' && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-500 border border-blue-200 font-medium">HH</span>
+                        )}
+                        {req.assigned_to_name && (
+                          <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">{req.assigned_to_name}</span>
+                        )}
+                        {req.due_date && (
+                          <span className="text-xs text-gray-400">Due: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>
+                        )}
+                      </div>
+                      {/* HH context for vehicle requirements */}
+                      {req.requirement_type === 'vehicle' && derivedFlags?.has_vehicle && (
+                        <div className="mt-1 text-xs text-gray-500 space-y-0.5">
+                          <div>{derivedFlags.vehicle_count} vehicle{derivedFlags.vehicle_count !== 1 ? 's' : ''}: {derivedFlags.vehicle_types.join(', ')}</div>
+                          {derivedFlags.seat_config && (
+                            <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
+                              {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
+                              {seatAvailability && seatAvailability.matchingVans.length > 0 && (
+                                <span className="text-green-600 ml-1">
+                                  — {seatAvailability.matchingVans.map(v => v.reg).join(', ')} already set
+                                </span>
+                              )}
+                              {seatAvailability && seatAvailability.nonMatchingVans.length > 0 && (
+                                <span className="text-gray-400 ml-1">
+                                  — {seatAvailability.nonMatchingVans.map(v => v.reg).join(', ')} need turning
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {derivedFlags.prep_time_by_category.vehicles > 0 && (
+                            <div>Est. prep: {derivedFlags.prep_time_by_category.vehicles >= 60
+                              ? `${Math.floor(derivedFlags.prep_time_by_category.vehicles / 60)}h${derivedFlags.prep_time_by_category.vehicles % 60 > 0 ? ` ${derivedFlags.prep_time_by_category.vehicles % 60}m` : ''}`
+                              : `${derivedFlags.prep_time_by_category.vehicles}m`}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {/* HH context for backline requirements */}
+                      {req.requirement_type === 'backline' && derivedFlags?.has_backline && (
+                        <div className="mt-1 text-xs text-gray-500">
+                          {derivedFlags.backline_item_count} item{derivedFlags.backline_item_count !== 1 ? 's' : ''} detected
+                          {derivedFlags.prep_time_by_category.backline > 0 && (
+                            <span> — est. {derivedFlags.prep_time_by_category.backline >= 60
+                              ? `${Math.floor(derivedFlags.prep_time_by_category.backline / 60)}h${derivedFlags.prep_time_by_category.backline % 60 > 0 ? ` ${derivedFlags.prep_time_by_category.backline % 60}m` : ''}`
+                              : `${derivedFlags.prep_time_by_category.backline}m`} prep/de-prep</span>
+                          )}
+                        </div>
+                      )}
+                      {/* Notes (truncated) */}
                       {req.notes && (
-                        <span className="text-xs text-gray-400 ml-2">{req.notes}</span>
+                        <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
                       )}
-                      {req.assigned_to_name && (
-                        <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded ml-2">{req.assigned_to_name}</span>
-                      )}
-                      {req.due_date && (
-                        <span className="text-xs text-gray-400 ml-2">Due: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>
+                      {/* Mismatch warning */}
+                      {req.hh_mismatch && req.hh_mismatch_detail && (
+                        <div className="mt-1 text-xs text-amber-600 font-medium">
+                          ⚠ {req.hh_mismatch_detail}
+                        </div>
                       )}
                     </div>
                   </div>

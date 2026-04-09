@@ -1361,4 +1361,171 @@ async function processAdditionalDriverCharge(hhJobId: number, jobId: string | nu
   return { driverCount, vehicleCount, freeDrivers, existingCharges, chargesAdded: newChargesNeeded };
 }
 
+// ── Hire Form Email Sending ──────────────────────────────────────────────
+
+/**
+ * GET /api/hire-forms/email-contacts/:jobId — get available contacts for a job
+ * Returns client org contacts + linked people with emails, for the contact picker.
+ */
+router.get('/email-contacts/:jobId', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+
+    // Get job with client org
+    const jobResult = await query(
+      `SELECT j.id, j.hh_job_number, j.client_id, j.client_name, j.company_name,
+              j.job_date, j.job_name, o.email AS org_email, o.name AS org_name
+       FROM jobs j
+       LEFT JOIN organisations o ON o.id = j.client_id
+       WHERE j.id = $1 AND j.is_deleted = false`,
+      [jobId]
+    );
+
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+    const contacts: Array<{ email: string; name: string; source: string }> = [];
+
+    // Client org email
+    if (job.org_email) {
+      contacts.push({ email: job.org_email, name: job.org_name || job.company_name || 'Client', source: 'client_org' });
+    }
+
+    // People linked to the client org
+    if (job.client_id) {
+      const peopleResult = await query(
+        `SELECT p.email, p.first_name, p.last_name
+         FROM person_organisation_roles por
+         JOIN people p ON p.id = por.person_id
+         WHERE por.organisation_id = $1 AND p.email IS NOT NULL AND p.email != '' AND p.is_deleted = false
+         ORDER BY p.first_name`,
+        [job.client_id]
+      );
+      for (const p of peopleResult.rows) {
+        if (!contacts.some(c => c.email === p.email)) {
+          contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim(), source: 'client_person' });
+        }
+      }
+    }
+
+    // People linked to the job via job_organisations (band contacts, etc.)
+    const joResult = await query(
+      `SELECT DISTINCT p.email, p.first_name, p.last_name, jo.role AS org_role
+       FROM job_organisations jo
+       JOIN person_organisation_roles por ON por.organisation_id = jo.organisation_id
+       JOIN people p ON p.id = por.person_id
+       WHERE jo.job_id = $1 AND p.email IS NOT NULL AND p.email != '' AND p.is_deleted = false
+       ORDER BY p.first_name`,
+      [jobId]
+    );
+    for (const p of joResult.rows) {
+      if (!contacts.some(c => c.email === p.email)) {
+        contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim(), source: p.org_role || 'linked_org' });
+      }
+    }
+
+    res.json({
+      contacts,
+      job: {
+        id: job.id,
+        hh_job_number: job.hh_job_number,
+        job_name: job.job_name,
+        job_date: job.job_date,
+        client_name: job.company_name || job.client_name,
+      },
+    });
+  } catch (error) {
+    console.error('Hire form email contacts error:', error);
+    res.status(500).json({ error: 'Failed to load contacts' });
+  }
+});
+
+/**
+ * POST /api/hire-forms/send-email — send hire form email to selected contacts
+ */
+const sendHireFormEmailSchema = z.object({
+  jobId: z.string().uuid(),
+  recipients: z.array(z.object({
+    email: z.string().email(),
+    name: z.string(),
+  })).min(1),
+  isChase: z.boolean().optional().default(false),
+});
+
+router.post('/send-email', authenticate, validate(sendHireFormEmailSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId, recipients, isChase } = req.body;
+
+    // Get job details
+    const jobResult = await query(
+      `SELECT id, hh_job_number, job_name, job_date, company_name, client_name
+       FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+
+    if (!job.hh_job_number) {
+      res.status(400).json({ error: 'Job has no HireHop number — cannot construct hire form URL' });
+      return;
+    }
+
+    const hireFormUrl = `https://hireforms.oooshtours.co.uk/?job=${job.hh_job_number}`;
+    const jobDate = job.job_date ? new Date(job.job_date) : null;
+    const startDay = jobDate ? jobDate.toLocaleDateString('en-GB', { weekday: 'long' }) : '';
+    const startDate = jobDate ? jobDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
+    const templateId = isChase ? 'hire_form_chase' : 'hire_form_request';
+
+    const emailService = (await import('../services/email-service')).default;
+    const results: Array<{ email: string; success: boolean; error?: string }> = [];
+
+    for (const recipient of recipients) {
+      try {
+        const result = await emailService.send(templateId, {
+          to: recipient.email,
+          variables: {
+            clientName: recipient.name || 'there',
+            jobNumber: String(job.hh_job_number),
+            jobName: job.job_name || '',
+            startDay,
+            startDate,
+            hireFormUrl,
+          },
+        });
+        results.push({ email: recipient.email, success: result.success, error: result.error });
+      } catch (err) {
+        results.push({ email: recipient.email, success: false, error: err instanceof Error ? err.message : 'Send failed' });
+      }
+    }
+
+    // Update the hire_forms requirement status + record when last sent
+    await query(
+      `UPDATE job_requirements SET
+         notes = COALESCE(notes, '') || E'\n' || $1,
+         updated_at = NOW()
+       WHERE job_id = $2 AND requirement_type = 'hire_forms'`,
+      [
+        `Hire form ${isChase ? 'reminder' : 'email'} sent to ${results.filter(r => r.success).map(r => r.email).join(', ')} on ${new Date().toLocaleDateString('en-GB')}`,
+        jobId,
+      ]
+    );
+
+    const sent = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success).length;
+
+    res.json({ success: true, sent, failed, results });
+  } catch (error) {
+    console.error('Send hire form email error:', error);
+    res.status(500).json({ error: 'Failed to send emails' });
+  }
+});
+
 export default router;
