@@ -65,6 +65,7 @@ This is the **Ooosh Operations Platform** — a unified business operations hub 
 │   │   │   ├── hirehop-writeback.ts        # Push pipeline changes to HireHop
 │   │   │   ├── crew-transport-calculator.ts # Delivery/collection/crewed cost engine
 │   │   │   ├── hirehop-broker.ts          # Centralised HireHop API gateway (rate limit, cache, queue)
+│   │   │   ├── hh-requirement-derivation.ts # HH-derived requirements engine (auto-detect vehicles, seats, backline, etc.)
 │   │   │   ├── email-service.ts           # Email sending with SMTP, templates, test mode, audit
 │   │   │   ├── email-templates/           # HTML email templates (base layout + per-template)
 │   │   │   └── hire-form-pdf.ts           # PDF generation for driver hire forms (pdf-lib)
@@ -744,7 +745,18 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [x] Likelihood badge hidden for confirmed+ jobs (no longer relevant post-booking)
 - [x] Full Details tab removed — details/notes now editable inline on Overview tab
 - [ ] Deposit/payment progress bar on Prep Checklist (visual: deposit taken vs full fee)
-- [ ] **HH-Derived Requirements Engine** (see dedicated section below) — auto-create/update requirements from HH line items
+- [x] **HH-Derived Requirements Engine** (see dedicated section below) — auto-create/update requirements from HH line items
+  - [x] Migration 041: seat_layout on fleet_vehicles, hh_derived_flags/line_items_synced_at on jobs, mismatch tracking on job_requirements, is_van_and_driver override
+  - [x] Line items sync fixed: kind:3 selected prompts preserved (were being filtered out), richer field set stored (kind, AUTOPULL, VIRTUAL, LFT/RGT, TYPE_CUSTOM_FIELDS)
+  - [x] Derivation service (`hh-requirement-derivation.ts`): detects vehicles, seats, backline, rehearsals, crew; extracts prep time; auto-creates requirements; respects manual status; flags mismatches
+  - [x] On-demand sync endpoint: `POST /api/hirehop/jobs/:jobId/sync` (fresh item fetch + derivation)
+  - [x] Derived flags endpoint: `GET /api/hirehop/jobs/:jobId/derived-flags`
+  - [x] Van & Driver toggle: `PATCH /api/hirehop/jobs/:jobId/van-and-driver`
+  - [x] Wired into 30-min scheduled sync + HH webhook handler (job.updated)
+  - [ ] Frontend: "Sync now" button on Job Detail + auto-sync on page load
+  - [ ] Frontend: Seat config display on Prep Checklist + Drivers & Vehicles tab
+  - [ ] Frontend: `seat_layout` field on vehicle detail page (Premium vans)
+  - [ ] Frontend: Van & Driver toggle button on Job Detail
 - [ ] On-demand job sync ("Sync now" button + auto-sync on Job Detail page open)
 - [ ] Mismatch flagging (HH changed since requirement was last updated/marked done)
 
