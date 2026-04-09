@@ -69,6 +69,16 @@ export default function VE103BCertificatesPage() {
   }>>([]);
   const [assignmentsLoading, setAssignmentsLoading] = useState(false);
 
+  // Manual / test generation state
+  const [genMode, setGenMode] = useState<'assignment' | 'manual'>('assignment');
+  const [vehicles, setVehicles] = useState<Array<{ id: string; reg: string; make: string | null; model: string | null }>>([]);
+  const [vehiclesLoading, setVehiclesLoading] = useState(false);
+  const [genVehicleId, setGenVehicleId] = useState('');
+  const [genDriverName, setGenDriverName] = useState('');
+  const [genDriverAddress, setGenDriverAddress] = useState('');
+  const [genHireStart, setGenHireStart] = useState('');
+  const [genHireEnd, setGenHireEnd] = useState('');
+
   // Debounce search
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounced(search), 300);
@@ -122,14 +132,23 @@ export default function VE103BCertificatesPage() {
     }
   }
 
-  function handleDownloadBVRLA() {
-    // Direct download via window — the API sets Content-Disposition
-    const token = localStorage.getItem('accessToken') || '';
-    window.open(`/api/ve103b/bvrla-report?month=${reportMonth}&token=${token}`, '_blank');
+  async function handleDownloadBVRLA() {
+    try {
+      const result = await api.blob(`/ve103b/bvrla-report?month=${reportMonth}`);
+      const url = URL.createObjectURL(result.blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `BVRLA-VE103B-${reportMonth}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to download BVRLA report:', err);
+    }
   }
 
   async function loadAssignments() {
     setAssignmentsLoading(true);
+    setVehiclesLoading(true);
     try {
       // Fetch recent assignments that have both a vehicle and driver
       const data = await api.get<{ data: Array<{
@@ -137,32 +156,56 @@ export default function VE103BCertificatesPage() {
         hire_start: string | null; hire_end: string | null;
         hirehop_job_id: number | null; status: string; ve103b_ref: string | null;
       }> }>('/assignments?limit=100');
-      // Only show assignments with a driver
-      setAssignments(data.data.filter(a => a.driver_name));
+      const withDrivers = data.data.filter(a => a.driver_name);
+      setAssignments(withDrivers);
+      // Auto-switch to manual mode if no assignments with drivers
+      if (withDrivers.length === 0) setGenMode('manual');
     } catch (err) {
       console.error('Failed to load assignments:', err);
+      setGenMode('manual');
     } finally {
       setAssignmentsLoading(false);
+    }
+    // Also load vehicles for manual mode
+    try {
+      const vData = await api.get<{ data: Array<{ id: string; reg: string; make: string | null; model: string | null }> }>('/vehicles/fleet?limit=200&is_active=true');
+      setVehicles(vData.data);
+    } catch (err) {
+      console.error('Failed to load vehicles:', err);
+    } finally {
+      setVehiclesLoading(false);
     }
   }
 
   async function handleGenerate() {
-    if (!genAssignmentId.trim() || !genCertNumber.trim()) return;
+    if (!genCertNumber.trim()) return;
     setGenerating(true);
     setGenError('');
     setGenSuccess('');
     try {
-      const result = await api.post<{
-        certificate_number: string; vehicle_reg: string; driver_name: string;
-        pdf_filename: string; emailed: boolean;
-      }>('/ve103b/generate', {
-        assignment_id: genAssignmentId.trim(),
-        certificate_number: genCertNumber.trim(),
-      });
+      let result: { pdf_filename: string; emailed: boolean; vehicle_reg: string };
+
+      if (genMode === 'assignment') {
+        if (!genAssignmentId.trim()) return;
+        result = await api.post<typeof result>('/ve103b/generate', {
+          assignment_id: genAssignmentId.trim(),
+          certificate_number: genCertNumber.trim(),
+        });
+      } else {
+        if (!genVehicleId || !genDriverName.trim()) return;
+        result = await api.post<typeof result>('/ve103b/test-generate', {
+          vehicle_id: genVehicleId,
+          driver_name: genDriverName.trim(),
+          driver_address: genDriverAddress.trim(),
+          certificate_number: genCertNumber.trim(),
+          hire_start: genHireStart || undefined,
+          hire_end: genHireEnd || undefined,
+        });
+      }
+
       setGenSuccess(
         `Generated ${result.pdf_filename}${result.emailed ? ' — emailed to info@oooshtours.co.uk' : ' — email failed, check logs'}`
       );
-      setGenAssignmentId('');
       setGenCertNumber('');
       loadCerts(1);
     } catch (err: unknown) {
@@ -407,38 +450,126 @@ export default function VE103BCertificatesPage() {
           <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl">
             <h3 className="text-lg font-semibold text-gray-900">Generate VE103B Certificate</h3>
             <p className="mt-2 text-sm text-gray-600">
-              Select a hire assignment and enter the certificate number from the physical VE103B form.
               The PDF will be generated and emailed to the office for printing.
             </p>
+
+            {/* Mode toggle */}
+            <div className="mt-4 flex rounded-lg border border-gray-200 overflow-hidden">
+              <button
+                onClick={() => setGenMode('assignment')}
+                className={`flex-1 px-3 py-1.5 text-sm font-medium transition-colors ${
+                  genMode === 'assignment' ? 'bg-ooosh-navy text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                From Assignment
+              </button>
+              <button
+                onClick={() => setGenMode('manual')}
+                className={`flex-1 px-3 py-1.5 text-sm font-medium transition-colors ${
+                  genMode === 'manual' ? 'bg-ooosh-navy text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Manual Entry
+              </button>
+            </div>
+
             <div className="mt-4 space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Hire Assignment</label>
-                {assignmentsLoading ? (
-                  <div className="flex items-center gap-2 text-sm text-gray-500 py-2">
-                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-ooosh-navy" />
-                    Loading assignments...
+              {genMode === 'assignment' ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Hire Assignment</label>
+                  {assignmentsLoading ? (
+                    <div className="flex items-center gap-2 text-sm text-gray-500 py-2">
+                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-ooosh-navy" />
+                      Loading assignments...
+                    </div>
+                  ) : assignments.length === 0 ? (
+                    <p className="text-sm text-gray-500 py-2">No assignments with drivers found — use Manual Entry mode</p>
+                  ) : (
+                    <select
+                      value={genAssignmentId}
+                      onChange={e => setGenAssignmentId(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                    >
+                      <option value="">Select an assignment...</option>
+                      {assignments.map(a => (
+                        <option key={a.id} value={a.id}>
+                          {a.vehicle_reg} — {a.driver_name}
+                          {a.hirehop_job_id ? ` (Job ${a.hirehop_job_id})` : ''}
+                          {a.hire_start ? ` — ${new Date(a.hire_start).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
+                          {a.ve103b_ref ? ` [VE103B: ${a.ve103b_ref}]` : ''}
+                          {' '}[{a.status}]
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Vehicle</label>
+                    {vehiclesLoading ? (
+                      <div className="flex items-center gap-2 text-sm text-gray-500 py-2">
+                        <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-ooosh-navy" />
+                        Loading vehicles...
+                      </div>
+                    ) : (
+                      <select
+                        value={genVehicleId}
+                        onChange={e => setGenVehicleId(e.target.value)}
+                        className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                      >
+                        <option value="">Select a vehicle...</option>
+                        {vehicles.map(v => (
+                          <option key={v.id} value={v.id}>
+                            {v.reg}{v.make ? ` — ${v.make}` : ''}{v.model ? ` ${v.model}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
-                ) : assignments.length === 0 ? (
-                  <p className="text-sm text-gray-500 py-2">No assignments with drivers found</p>
-                ) : (
-                  <select
-                    value={genAssignmentId}
-                    onChange={e => setGenAssignmentId(e.target.value)}
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-                  >
-                    <option value="">Select an assignment...</option>
-                    {assignments.map(a => (
-                      <option key={a.id} value={a.id}>
-                        {a.vehicle_reg} — {a.driver_name}
-                        {a.hirehop_job_id ? ` (Job ${a.hirehop_job_id})` : ''}
-                        {a.hire_start ? ` — ${new Date(a.hire_start).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}
-                        {a.ve103b_ref ? ` [VE103B: ${a.ve103b_ref}]` : ''}
-                        {' '}[{a.status}]
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Driver Name</label>
+                    <input
+                      type="text"
+                      value={genDriverName}
+                      onChange={e => setGenDriverName(e.target.value)}
+                      placeholder="e.g. John Smith"
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Driver Address (one line per row)</label>
+                    <textarea
+                      value={genDriverAddress}
+                      onChange={e => setGenDriverAddress(e.target.value)}
+                      placeholder={"123 Example Street\nFlat 2\nLondon\nSW1A 1AA"}
+                      rows={3}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+                      <input
+                        type="date"
+                        value={genHireStart}
+                        onChange={e => setGenHireStart(e.target.value)}
+                        className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+                      <input
+                        type="date"
+                        value={genHireEnd}
+                        onChange={e => setGenHireEnd(e.target.value)}
+                        className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Certificate Number</label>
                 <input
@@ -449,6 +580,7 @@ export default function VE103BCertificatesPage() {
                   className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
                 />
               </div>
+
               {genError && (
                 <p className="text-sm text-red-600">{genError}</p>
               )}
@@ -465,7 +597,11 @@ export default function VE103BCertificatesPage() {
               </button>
               <button
                 onClick={handleGenerate}
-                disabled={!genAssignmentId.trim() || !genCertNumber.trim() || generating}
+                disabled={
+                  !genCertNumber.trim() || generating ||
+                  (genMode === 'assignment' && !genAssignmentId.trim()) ||
+                  (genMode === 'manual' && (!genVehicleId || !genDriverName.trim()))
+                }
                 className="rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-medium text-white hover:bg-ooosh-800 disabled:opacity-50"
               >
                 {generating ? 'Generating...' : 'Generate & Email'}

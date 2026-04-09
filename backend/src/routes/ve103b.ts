@@ -207,6 +207,133 @@ router.post('/generate', async (req: AuthRequest, res) => {
   }
 });
 
+// ── POST /test-generate — Test generation from vehicle + manual driver info ──
+// Temporary endpoint for testing PDF output without needing a hire assignment.
+
+const testGenerateSchema = z.object({
+  vehicle_id: z.string().uuid(),
+  driver_name: z.string().min(1).max(200),
+  driver_address: z.string().max(500).optional().default(''),
+  certificate_number: z.string().min(1).max(20),
+  hire_start: z.string().optional(),
+  hire_end: z.string().optional(),
+});
+
+router.post('/test-generate', async (req: AuthRequest, res) => {
+  try {
+    const body = testGenerateSchema.parse(req.body);
+
+    // Check certificate number uniqueness
+    const existing = await query(
+      `SELECT id FROM ve103b_certificates WHERE certificate_number = $1`,
+      [body.certificate_number],
+    );
+    if (existing.rows.length > 0) {
+      res.status(409).json({
+        error: 'Certificate number already exists',
+        message: `Certificate number ${body.certificate_number} has already been used`,
+      });
+      return;
+    }
+
+    // Fetch vehicle V5 data
+    const vehicleResult = await query(
+      `SELECT id, reg, date_first_reg, make, v5_type, model, body_type, vin,
+              max_mass_kg, vehicle_category, cylinder_capacity_cc, colour, seats
+       FROM fleet_vehicles WHERE id = $1`,
+      [body.vehicle_id],
+    );
+
+    if (vehicleResult.rows.length === 0) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+
+    const v = vehicleResult.rows[0];
+
+    const pdfData = {
+      vehicleReg: v.reg || '',
+      dateFirstReg: formatDateForVE103B(v.date_first_reg),
+      make: v.make || '',
+      type: v.v5_type || '',
+      model: v.model || '',
+      bodyType: v.body_type || '',
+      vinChassis: v.vin || '',
+      f1Weight: v.max_mass_kg ? String(v.max_mass_kg) : '',
+      jCategory: v.vehicle_category || '',
+      p1Cc: v.cylinder_capacity_cc ? String(v.cylinder_capacity_cc) : '',
+      rColour: v.colour || '',
+      s1Seats: v.seats ? String(v.seats) : '',
+      driverName: body.driver_name,
+      driverAddress: body.driver_address || '',
+      startDate: formatDateForVE103B(body.hire_start),
+      returnDate: formatDateForVE103B(body.hire_end),
+    };
+
+    // Generate PDF
+    const { pdfBytes, filename } = await generateVE103BPDF(pdfData, body.certificate_number);
+
+    // Upload to R2
+    let pdfR2Key: string | null = null;
+    if (isR2Configured()) {
+      const safeReg = (v.reg || 'UNKNOWN').replace(/[^a-zA-Z0-9]/g, '');
+      pdfR2Key = `ve103b/${safeReg}/${filename}`;
+      await uploadToR2(pdfR2Key, Buffer.from(pdfBytes), 'application/pdf');
+    }
+
+    // Insert certificate record (no assignment/driver/job links)
+    const insertResult = await query(
+      `INSERT INTO ve103b_certificates (
+        certificate_number, vehicle_id, vehicle_reg, driver_name, driver_address,
+        hire_start, hire_end, pdf_r2_key, pdf_filename, generated_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id, created_at, date_certificate_supplied`,
+      [
+        body.certificate_number, body.vehicle_id, v.reg, body.driver_name,
+        body.driver_address || null, body.hire_start || null, body.hire_end || null,
+        pdfR2Key, filename, req.user!.id,
+      ],
+    );
+
+    const cert = insertResult.rows[0];
+
+    // Email PDF to office
+    let emailed = false;
+    try {
+      await emailService.sendRaw({
+        to: 'info@oooshtours.co.uk',
+        subject: `VE103B - ${v.reg} - TEST`,
+        html: `<p>VE103B - ${v.reg} - TEST GENERATION</p><p>Please print on VE103B form paper.</p>`,
+        attachments: [{
+          filename,
+          content: Buffer.from(pdfBytes),
+          contentType: 'application/pdf',
+        }],
+      });
+      emailed = true;
+    } catch (emailErr) {
+      console.error('[VE103B] Test email send failed:', emailErr);
+    }
+
+    res.json({
+      id: cert.id,
+      certificate_number: body.certificate_number,
+      vehicle_reg: v.reg,
+      driver_name: body.driver_name,
+      pdf_filename: filename,
+      status: 'issued',
+      emailed,
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      return;
+    }
+    console.error('[VE103B] Test generate error:', err);
+    res.status(500).json({ error: 'Failed to generate test VE103B' });
+  }
+});
+
 // ── POST /:id/void — Void a certificate ───────────────────────────────
 
 const voidSchema = z.object({
