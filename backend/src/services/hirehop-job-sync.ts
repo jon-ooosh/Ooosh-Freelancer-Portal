@@ -479,13 +479,14 @@ export async function syncLineItemsForJobs(jobNumbers: number[]): Promise<{ upda
 }
 
 /**
- * Fetch line items for a single job on-demand (high priority, short cache).
- * Used by Job Detail page auto-sync on load.
+ * Fetch line items for a single job on-demand (high priority, NO cache).
+ * Used by Job Detail page sync button and auto-sync on load.
+ * Always fetches fresh from HireHop to catch recent changes.
  */
 export async function fetchLineItemsOnDemand(jobNumber: number): Promise<HHLineItem[]> {
   const result = await hhBroker.get<unknown>('/frames/items_to_supply_list.php', {
     job: jobNumber,
-  }, { priority: 'high', cacheTTL: 30 });
+  }, { priority: 'high', cacheTTL: -1 });
 
   if (!result.success || !result.data) return [];
 
