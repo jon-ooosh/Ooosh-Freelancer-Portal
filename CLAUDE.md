@@ -959,6 +959,47 @@ Global operational view for what's currently happening / about to happen with tr
 - When toggled: hire forms + excess requirements are NOT auto-created
 - Persisted on job or quote level
 
+**Requirement type redesign (Apr 2026):**
+
+The Prep Checklist merges HH-derived detection with OP workflow tracking. Each requirement card shows HH context inline — no separate "Detected from HireHop" panel needed long-term.
+
+| Type | Source | Steps | Card content |
+|---|---|---|---|
+| **vehicle** | HH-derived (cat 370) | Not started → Prepping → Prepped → De-prepped | Van type, count, prep time (from `preptimemins`), seat config + fleet availability. Nested: hire_forms + excess chain for self-drive |
+| **hire_forms** | Derived from vehicle (self-drive) | Not started → Sent → Signed → Complete | Auto-email 10 days before hire start (or on confirmation if <10 days). Reminder at 5 days if no response. On-demand email to choosable contacts. Hire form URL construction. Shows which drivers have submitted |
+| **excess** | Derived from hire_forms | Needed → Taken → Held → Resolved | Links to Money tab. Shows if excess already held for client/driver. Top-N-drivers calculation |
+| **transport** | OP-only (from quotes) | Mirrors ops_status from Crew & Transport tab | Overview card shows quote summary + progress. No duplicate steps — reads from quotes.ops_status |
+| **crew** | Sanity flag (HH kind:4 vs OP) | N/A — flag only | Amber warning if crew on HH but no OP quote, or vice versa |
+| **backline** | HH-derived (cats 372-410) | Not started → Working on → Finished | Item count + prep/de-prep time from `preptimemins` |
+| **rehearsal** | HH-derived (cat 450) | Detected → Booked → Sitter assigned → Setup complete | Prep time from `preptimemins` |
+| **carnet** | HH-derived (international + equipment) | Applied → Received → Items listed → Stamped out → Returned → Closed | Multi-step workflow, OP-managed |
+| **merch** | OP-only | Request sent → Some received → All received → Notified → Given to client | Incoming deliveries from bands/clients |
+| **sub_hire** | OP-only | Need identified → Sourcing → Ordered → Received → Returned | OP-only, HH PO method too clumsy |
+| **custom** | Manual | N/A | Free-text one-offs |
+
+**Removed types:** accommodation (→ arranging details pills), permits, stage_plot (→ files)
+
+**Hire form auto-email logic:**
+- 10 days before `job_date`: send hire form email to client contacts (self-drive jobs only)
+- If confirmed with <10 days to go: send on confirmation
+- 5 days before `job_date` (or 4 days if last sent <24h ago): reminder email if no forms received
+- On-demand: "Send hire form" button on requirement card with contact picker
+- Hire form URL constructed from job data + driver verification flow
+
+**Vehicle requirement card layout (target):**
+```
+🚐 Vehicle (Self-Drive)                    [Status: Not started ▾]
+   1x Premium LWB (M) — manual gearbox
+   ⬆️ Forward-facing seats
+   Est. prep: 1h 15m
+   Fleet: 3 Premium available (GX17DHN forward-facing, 2 others need turning)
+   ────────────────────
+   ↳ 📋 Hire forms: Not started    [Send ✉]
+   ↳ 💰 Excess: Needed
+```
+
+**Fleet availability:** Mirrors existing vehicle module allocation logic (what's available vs what's on the job). Read from same source to avoid duplicate API calls.
+
 #### Pipeline & Enquiry Cleanup ← IN PROGRESS
 
 Two streams of work to improve the pipeline/enquiry/jobs experience:
