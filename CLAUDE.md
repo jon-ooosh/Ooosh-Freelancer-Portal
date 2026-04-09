@@ -442,13 +442,27 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
 - [ ] Flip `DATA_BACKEND=op` on Netlify production
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
 
-**Phase C5 — VE103b Certificate Generation** (TODO — not yet specced)
-VE103b is a letter/certificate authorising a named driver to drive a specific vehicle on behalf of the company. Currently produced manually. Needs:
-- [ ] VE103b PDF generation (driver name, vehicle reg, dates, company details)
-- [ ] Trigger from book-out flow or hire form assignment
-- [ ] `ve103b_ref` field already exists on `vehicle_hire_assignments` — link generated PDF ref here
-- [ ] Email to driver and/or store in R2
-- *Awaiting full requirements from user — what fields, what template, when triggered*
+**Phase C5 — VE103B Certificate Generation** ✅ COMPLETE (9 Apr 2026)
+VE103B is a UK document authorising a named driver to take a hired vehicle abroad. Printed as text-only overlay onto pre-printed official forms. Replaces manual process + Google Sheets log.
+**Full spec:** `docs/VE103B-SPEC.md`
+
+- [x] Migration 040: `ve103b_certificates` table (cert number, vehicle/driver/job links, status lifecycle, PDF storage, BVRLA fields)
+- [x] PDF overlay generation (`services/ve103b-pdf.ts`) — pdf-lib, calibrated coordinates matching existing Netlify function exactly
+- [x] Calibration mode via `VE103B_CALIBRATION_MODE=true` env var (guide lines for alignment testing on plain paper)
+- [x] API route (`routes/ve103b.ts`): generate, test-generate (manual entry), void, list, get, download PDF, BVRLA CSV export
+- [x] Trigger from book-out flow — VE103B track fires in parallel when cert number entered, generates for lead driver only (not all drivers)
+- [x] `ve103b_ref` write-back scoped to lead driver's assignment only (other drivers don't get the cert number)
+- [x] Manual/standalone generation from VE103B Certificates page (vehicle picker + driver name/address entry)
+- [x] Email PDF to `info@oooshtours.co.uk` on generation
+- [x] PDF stored in R2 (`ve103b/{reg}/{filename}`)
+- [x] Certificate tracking replaces Google Sheets log — unique cert numbers, issued/void lifecycle
+- [x] BVRLA monthly report: auto-emailed CSV on 1st of each month at 08:00 to `will@` CC `jon@`
+- [x] BVRLA report includes voided certs with "VOID" in REG. NO. column
+- [x] Certificate browser page at `/vehicles/ve103b` — table, search, filter pills, void action, PDF download, BVRLA report download
+- [x] VE103B badge on Job Detail > Drivers & Vehicles assignment cards
+- [x] Escape key closes modals
+- [x] BVRLA Member Number hardcoded as `10864`
+- [ ] IRL end-to-end testing via actual book-out flow (when hire form system is live)
 
 **Phase D — Allocations Migration** ✅ MOSTLY COMPLETE
 - [x] Switch AllocationsPage to read from `vehicle_hire_assignments` (compat layer)
@@ -493,7 +507,7 @@ When a vehicle breaks down mid-hire and needs swapping to a replacement:
 - [ ] Both assignments visible in driver Hire History (audit trail: "was in GX17DHN → swapped to RX22SWN on 25 Mar")
 - [ ] Original vehicle's book-out event gets "swapped" note; new vehicle gets fresh book-out
 - [ ] New hire form PDF can be generated for replacement vehicle
-- [ ] VE103b regenerated for new vehicle (when VE103b generation is built)
+- [ ] VE103B regenerated for new vehicle (VE103B generation built — just needs triggering from swap flow)
 - [ ] Migration: add `swap_reason`, `swapped_at`, `swapped_to_assignment_id` to `vehicle_hire_assignments`
 - [ ] Future: tie into vehicle Issues module (breakdown creates issue) + job activity timeline notes
 - [ ] Future: client notification of vehicle change
