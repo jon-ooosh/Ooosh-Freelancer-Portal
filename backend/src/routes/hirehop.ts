@@ -187,7 +187,7 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
 // Called by "Sync now" button and auto-sync on Job Detail page load.
 router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = req.params.jobId as string;
 
     // Look up the job
     const jobResult = await query(
@@ -237,7 +237,7 @@ router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Res
 // Lightweight read (no HH call) — reads from cached hh_derived_flags on the job.
 router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = req.params.jobId as string;
     const jobResult = await query(
       `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver FROM jobs WHERE id = $1`,
       [jobId]
@@ -274,7 +274,7 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
 // PATCH /api/hirehop/jobs/:jobId/van-and-driver — toggle van & driver override
 router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = req.params.jobId as string;
     const { isVanAndDriver } = req.body;
 
     await query(
