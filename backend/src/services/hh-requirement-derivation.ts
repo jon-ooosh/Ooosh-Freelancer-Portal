@@ -286,11 +286,10 @@ async function upsertAutoRequirement(
   );
 
   if (existing.rows.length === 0) {
-    // Create new auto requirement
+    // Create new auto requirement (existence already checked above)
     const insertResult = await client.query(
       `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, hh_item_snapshot)
        VALUES ($1, $2, 'not_started', $3, true, 'hirehop_sync', $4)
-       ON CONFLICT (job_id, requirement_type) DO NOTHING
        RETURNING id`,
       [jobId, requirementType, data.notes, data.snapshot ? JSON.stringify(data.snapshot) : null]
     );

@@ -669,6 +669,32 @@ export default function JobDetailPage() {
   const [hhClientSyncName, setHhClientSyncName] = useState('');
   const [syncingClientToHH, setSyncingClientToHH] = useState(false);
   const [hhClientSyncSuccess, setHhClientSyncSuccess] = useState(false);
+
+  // ── HH Sync & Derived Requirements ──────────────────────────────────────
+  const [hhSyncing, setHhSyncing] = useState(false);
+  const [hhSyncResult, setHhSyncResult] = useState<{
+    itemCount: number;
+    derivation: {
+      flags: {
+        has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
+        seat_config: 'round_table' | 'forward_facing' | null;
+        has_backline: boolean; backline_item_count: number;
+        has_rehearsal: boolean; has_crew_items: boolean; crew_item_count: number;
+        total_prep_time_mins: number;
+        prep_time_by_category: { vehicles: number; backline: number; rehearsals: number; other: number };
+      };
+      requirementsCreated: string[];
+      requirementsUpdated: string[];
+      mismatchesFlagged: string[];
+      seatAvailability?: {
+        required: string;
+        matchingVans: Array<{ reg: string; seat_layout: string | null }>;
+        nonMatchingVans: Array<{ reg: string; seat_layout: string | null }>;
+        unknownVans: Array<{ reg: string }>;
+      };
+    };
+  } | null>(null);
+  const [hhLastSynced, setHhLastSynced] = useState<string | null>(null);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const editValueRef = useRef<HTMLInputElement>(null);
@@ -1187,6 +1213,35 @@ export default function JobDetailPage() {
     }
   }
 
+  /** Sync line items from HireHop + run requirement derivation */
+  async function syncFromHireHop(showIndicator = true) {
+    if (!id || !job?.hh_job_number) return;
+    if (showIndicator) setHhSyncing(true);
+    try {
+      const data = await api.post<{
+        success: boolean; itemCount: number;
+        derivation: typeof hhSyncResult extends null ? never : NonNullable<typeof hhSyncResult>['derivation'];
+      }>(`/hirehop/jobs/${id}/sync`, {});
+      setHhSyncResult({ itemCount: data.itemCount, derivation: data.derivation });
+      setHhLastSynced(new Date().toISOString());
+      // If requirements were created/updated, refresh the job to pick up changes
+      if (data.derivation?.requirementsCreated?.length > 0 || data.derivation?.requirementsUpdated?.length > 0) {
+        loadJob();
+      }
+    } catch (err) {
+      console.warn('HH sync failed:', err);
+    } finally {
+      if (showIndicator) setHhSyncing(false);
+    }
+  }
+
+  // Auto-sync on page load when job has a HH number (non-blocking)
+  useEffect(() => {
+    if (job?.hh_job_number && id) {
+      syncFromHireHop(false);
+    }
+  }, [job?.hh_job_number]);
+
   async function loadJobOrgs() {
     if (!id) return;
     try {
@@ -1352,15 +1407,28 @@ export default function JobDetailPage() {
             <div className="flex items-center gap-3">
               {/* HH Job Number — editable if NEW */}
               {job.hh_job_number ? (
-                <a
-                  href={hhJobUrl!}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
-                  title="Open in HireHop"
-                >
-                  #{job.hh_job_number}
-                </a>
+                <>
+                  <a
+                    href={hhJobUrl!}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                    title="Open in HireHop"
+                  >
+                    #{job.hh_job_number}
+                  </a>
+                  <button
+                    onClick={() => syncFromHireHop(true)}
+                    disabled={hhSyncing}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-xs text-gray-500 hover:text-ooosh-600 hover:bg-ooosh-50 rounded transition-colors disabled:opacity-50"
+                    title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
+                  >
+                    <svg className={`w-3 h-3 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    {hhSyncing ? 'Syncing...' : 'Sync'}
+                  </button>
+                </>
               ) : editingHHNumber ? (
                 <input
                   ref={editHHRef}
@@ -1968,6 +2036,105 @@ export default function JobDetailPage() {
         <div className="space-y-4">
           {/* Compact financial progress strip */}
           {id && <OverviewFinancialStrip jobId={id} />}
+
+          {/* HH-Derived Flags (auto-detected from HireHop line items) */}
+          {hhSyncResult?.derivation?.flags && (() => {
+            const f = hhSyncResult.derivation.flags;
+            const hasSomething = f.has_vehicle || f.has_backline || f.has_rehearsal || f.has_crew_items;
+            if (!hasSomething) return null;
+            const sa = hhSyncResult.derivation.seatAvailability;
+            return (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-semibold text-gray-700">Detected from HireHop</h3>
+                  {hhLastSynced && (
+                    <span className="text-xs text-gray-400">
+                      Synced {new Date(hhLastSynced).toLocaleTimeString()}
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {f.has_vehicle && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
+                      🚐 {f.vehicle_count} vehicle{f.vehicle_count !== 1 ? 's' : ''}
+                      {f.prep_time_by_category.vehicles > 0 && (
+                        <span className="text-blue-500 ml-1">
+                          ({f.prep_time_by_category.vehicles >= 60
+                            ? `${Math.floor(f.prep_time_by_category.vehicles / 60)}h${f.prep_time_by_category.vehicles % 60 > 0 ? ` ${f.prep_time_by_category.vehicles % 60}m` : ''}`
+                            : `${f.prep_time_by_category.vehicles}m`} prep)
+                        </span>
+                      )}
+                    </span>
+                  )}
+                  {f.seat_config && (
+                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
+                      f.seat_config === 'forward_facing'
+                        ? 'bg-amber-50 text-amber-700 border-amber-200'
+                        : 'bg-green-50 text-green-700 border-green-200'
+                    }`}>
+                      {f.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
+                    </span>
+                  )}
+                  {f.has_backline && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-purple-50 text-purple-700 border border-purple-200">
+                      🎸 Backline ({f.backline_item_count} item{f.backline_item_count !== 1 ? 's' : ''})
+                      {f.prep_time_by_category.backline > 0 && (
+                        <span className="text-purple-500 ml-1">
+                          ({f.prep_time_by_category.backline >= 60
+                            ? `${Math.floor(f.prep_time_by_category.backline / 60)}h${f.prep_time_by_category.backline % 60 > 0 ? ` ${f.prep_time_by_category.backline % 60}m` : ''}`
+                            : `${f.prep_time_by_category.backline}m`} prep)
+                        </span>
+                      )}
+                    </span>
+                  )}
+                  {f.has_rehearsal && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-200">
+                      🎵 Rehearsal
+                    </span>
+                  )}
+                  {f.has_crew_items && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-50 text-gray-600 border border-gray-200">
+                      👥 Crew on HH ({f.crew_item_count})
+                    </span>
+                  )}
+                </div>
+                {/* Seat availability detail */}
+                {sa && sa.required && (
+                  <div className="mt-2 pt-2 border-t border-gray-100 text-xs text-gray-600">
+                    <span className="font-medium">Seat availability:</span>{' '}
+                    {sa.matchingVans.length > 0 ? (
+                      <span className="text-green-600">
+                        {sa.matchingVans.map(v => v.reg).join(', ')} already {sa.required === 'forward_facing' ? 'forward-facing' : 'round a table'}
+                      </span>
+                    ) : (
+                      <span className="text-amber-600">No vans currently {sa.required === 'forward_facing' ? 'forward-facing' : 'round a table'}</span>
+                    )}
+                    {sa.nonMatchingVans.length > 0 && (
+                      <span className="text-gray-500"> — {sa.nonMatchingVans.map(v => v.reg).join(', ')} need turning</span>
+                    )}
+                    {sa.unknownVans.length > 0 && (
+                      <span className="text-gray-400"> — {sa.unknownVans.map(v => v.reg).join(', ')} unknown layout</span>
+                    )}
+                  </div>
+                )}
+                {/* Requirements created by this sync */}
+                {(hhSyncResult.derivation.requirementsCreated.length > 0 || hhSyncResult.derivation.mismatchesFlagged.length > 0) && (
+                  <div className="mt-2 pt-2 border-t border-gray-100 flex flex-wrap gap-2">
+                    {hhSyncResult.derivation.requirementsCreated.length > 0 && (
+                      <span className="text-xs text-green-600">
+                        ✓ Auto-created: {hhSyncResult.derivation.requirementsCreated.join(', ')}
+                      </span>
+                    )}
+                    {hhSyncResult.derivation.mismatchesFlagged.length > 0 && (
+                      <span className="text-xs text-amber-600">
+                        ⚠ HH changed: {hhSyncResult.derivation.mismatchesFlagged.join(', ')}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Editable Details & Notes */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">

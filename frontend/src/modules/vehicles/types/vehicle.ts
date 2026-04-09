@@ -66,6 +66,7 @@ export interface Vehicle {
   lastRossettsServiceDate: string | null
   lastRossettsServiceNotes: string | null
   servicePlanStatus: string | null // '0 Remaining'..'6 Remaining', 'WORKINGONIT', 'NO PLAN'
+  seatLayout: 'round_table' | 'forward_facing' | null  // Premium vans only — current seat config
   files: VehicleFile[]
   // Fleet group classification
   isOldSold: boolean              // true = from Monday "Old and sold" group

@@ -38,12 +38,14 @@ function EditableRow({
   value,
   type = 'text',
   options,
+  displayMap,
   onSave,
 }: {
   label: string
   value: string | number | boolean | null
   type?: 'text' | 'date' | 'number' | 'select' | 'toggle'
   options?: string[]
+  displayMap?: Record<string, string>
   onSave: (newValue: string | number | boolean | null) => void
 }) {
   const [editing, setEditing] = useState(false)
@@ -53,7 +55,9 @@ function EditableRow({
     ? (value ? 'Yes' : 'No')
     : type === 'date'
       ? formatDate(value as string | null)
-      : value != null ? String(value) : '—'
+      : value != null
+        ? (displayMap && typeof value === 'string' && displayMap[value]) || String(value)
+        : '—'
 
   const startEdit = () => {
     if (type === 'toggle') {
@@ -89,7 +93,7 @@ function EditableRow({
               className="rounded border border-gray-200 px-2 py-1 text-sm focus:border-blue-300 focus:outline-none"
             >
               <option value="">—</option>
-              {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+              {options.map(opt => <option key={opt} value={opt}>{displayMap?.[opt] || opt}</option>)}
             </select>
           ) : (
             <input
@@ -448,6 +452,12 @@ export function VehicleDetailPage() {
       {/* Vehicle Specs */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Vehicle Specs</h3>
+        {vehicle.simpleType?.toLowerCase().includes('premium') && (
+          <EditableRow label="Seat Layout" value={vehicle.seatLayout} type="select"
+            options={['round_table', 'forward_facing']}
+            displayMap={{ round_table: 'Round a Table', forward_facing: 'Forward Facing' }}
+            onSave={v => saveField('seat_layout', v)} />
+        )}
         <EditableRow label="Oil Type" value={vehicle.oilType} type="text" onSave={v => saveField('oil_type', v)} />
         <EditableRow label="Coolant Type" value={vehicle.coolantType} type="text" onSave={v => saveField('coolant_type', v)} />
         <EditableRow label="Tyre Size" value={vehicle.tyreSize} type="text" onSave={v => saveField('tyre_size', v)} />
