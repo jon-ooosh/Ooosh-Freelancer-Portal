@@ -74,6 +74,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '038_excess_status_revisions.sql',
         '039_excess_hh_deposit_reconciliation.sql',
         '040_ve103b_certificates.sql',
+        '041_hh_derived_requirements.sql',
       ];
 
       for (const migration of migrations) {

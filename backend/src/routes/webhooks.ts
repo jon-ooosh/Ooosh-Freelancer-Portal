@@ -290,10 +290,35 @@ async function handleJobUpdate(
       `UPDATE jobs SET ${updates.join(', ')} WHERE id = $${pIdx}`,
       params,
     );
-    return { success: true, message: `Job ${jobNumber} updated (${params.length - 1} fields) via ${event}` };
   }
 
-  return { success: true, message: `Job ${jobNumber}: ${event} — no updatable fields in payload` };
+  // Trigger line item re-fetch + requirement derivation on any job update
+  // (non-blocking — don't fail the webhook if derivation errors)
+  const jobId = jobResult.rows[0].id;
+  setImmediate(async () => {
+    try {
+      const { fetchLineItemsOnDemand } = await import('../services/hirehop-job-sync');
+      const items = await fetchLineItemsOnDemand(Number(jobNumber));
+      await query(
+        `UPDATE jobs SET line_items = $1, line_items_synced_at = NOW() WHERE id = $2`,
+        [JSON.stringify(items), jobId]
+      );
+      const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+      const result = await deriveRequirementsForJob(jobId);
+      if (result.requirementsCreated.length > 0 || result.mismatchesFlagged.length > 0) {
+        console.log(`[Webhook] Derivation for job ${jobNumber}: created=${result.requirementsCreated.join(',')}, mismatches=${result.mismatchesFlagged.join(',')}`);
+      }
+    } catch (err) {
+      console.warn(`[Webhook] Derivation failed for job ${jobNumber}:`, err);
+    }
+  });
+
+  return {
+    success: true,
+    message: params.length > 0
+      ? `Job ${jobNumber} updated (${params.length - 1} fields) via ${event} + derivation triggered`
+      : `Job ${jobNumber}: ${event} — derivation triggered`,
+  };
 }
 
 // ── Contact Change Handler ───────────────────────────────────────────────

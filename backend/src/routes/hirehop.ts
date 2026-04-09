@@ -180,6 +180,119 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── On-demand Sync + Derivation ─────────────────────────────────────────
+
+// POST /api/hirehop/jobs/:jobId/sync — on-demand sync for a single job
+// Fetches fresh line items from HH and runs requirement derivation.
+// Called by "Sync now" button and auto-sync on Job Detail page load.
+router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId } = req.params;
+
+    // Look up the job
+    const jobResult = await query(
+      `SELECT id, hh_job_number FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+
+    if (!job.hh_job_number) {
+      res.json({ success: true, message: 'No HireHop job linked', items: [], derivation: null });
+      return;
+    }
+
+    // Fetch fresh line items (high priority, bypass cache)
+    const { fetchLineItemsOnDemand } = await import('../services/hirehop-job-sync');
+    const items = await fetchLineItemsOnDemand(job.hh_job_number);
+
+    // Store them
+    await query(
+      `UPDATE jobs SET line_items = $1, line_items_synced_at = NOW(), updated_at = NOW()
+       WHERE id = $2`,
+      [JSON.stringify(items), jobId]
+    );
+
+    // Run requirement derivation
+    const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+    const derivation = await deriveRequirementsForJob(jobId);
+
+    res.json({
+      success: true,
+      itemCount: items.length,
+      derivation,
+    });
+  } catch (error) {
+    console.error('On-demand sync error:', error);
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Sync failed' });
+  }
+});
+
+// GET /api/hirehop/jobs/:jobId/derived-flags — get derived flags + seat availability
+// Lightweight read (no HH call) — reads from cached hh_derived_flags on the job.
+router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const jobResult = await query(
+      `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+    const flags = job.hh_derived_flags;
+
+    // If seat config is set, also fetch seat availability
+    let seatAvailability = null;
+    if (flags?.seat_config && flags?.has_vehicle) {
+      const { checkSeatAvailability } = await import('../services/hh-requirement-derivation');
+      // We don't have items here but can reconstruct from flags
+      seatAvailability = await (checkSeatAvailability as any)(flags, []);
+    }
+
+    res.json({
+      flags,
+      lastSynced: job.line_items_synced_at,
+      isVanAndDriver: job.is_van_and_driver,
+      seatAvailability,
+    });
+  } catch (error) {
+    console.error('Derived flags error:', error);
+    res.status(500).json({ error: 'Failed to load derived flags' });
+  }
+});
+
+// PATCH /api/hirehop/jobs/:jobId/van-and-driver — toggle van & driver override
+router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const { isVanAndDriver } = req.body;
+
+    await query(
+      `UPDATE jobs SET is_van_and_driver = $1, updated_at = NOW() WHERE id = $2`,
+      [!!isVanAndDriver, jobId]
+    );
+
+    // Re-derive requirements after toggling
+    const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+    const derivation = await deriveRequirementsForJob(jobId);
+
+    res.json({ success: true, isVanAndDriver: !!isVanAndDriver, derivation });
+  } catch (error) {
+    console.error('Van & driver toggle error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
 // GET /api/hirehop/mappings — show synced records
 router.get('/mappings', async (_req: AuthRequest, res: Response) => {
   try {
