@@ -3818,7 +3818,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   );
 }
 
-function JobPrepChecklist({ jobId, derivedFlags, seatAvailability, onSendHireForm }: {
+function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
   jobId: string;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
@@ -3834,7 +3834,6 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability, onSendHireFor
     nonMatchingVans: Array<{ reg: string; seat_layout: string | null }>;
     unknownVans: Array<{ reg: string }>;
   } | null;
-  onSendHireForm?: (jobId: string) => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
   const [types, setTypes] = useState<RequirementTypeDef[]>([]);
