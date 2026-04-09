@@ -519,6 +519,104 @@ const templates: Record<string, EmailTemplate> = {
       </div>
     `,
   },
+
+  // ── Hire Form emails ──────────────────────────────────────────────────
+
+  hire_form_request: {
+    variant: 'client',
+    preheader: 'Please complete your driver hire form before your upcoming hire',
+    subject: 'Driver hire form for {{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Driver Hire Form</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        You have an upcoming vehicle hire booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong>.
+      </p>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Each driver must complete and sign a hire agreement, which must be filled out online through the link at the bottom of this email.
+      </p>
+      <p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;">
+        The form is best completed using a smartphone or tablet, and will ask for the following documents to be uploaded:
+      </p>
+      <ul style="margin:0 0 16px;padding-left:24px;font-size:15px;color:#334155;line-height:1.8;">
+        <li>Front and back of your driving licence</li>
+        <li>2 x Proof of addresses dated within past 3 months (Utility/phone bill, bank statement etc) - can be downloaded PDFs or paper copies</li>
+      </ul>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        It will also ask for a DVLA Check Code (UK Drivers only). This is obtainable here:
+        <a href="https://www.gov.uk/view-driving-licence" style="color:#7B5EA7;text-decoration:none;font-weight:600;">gov.uk/view-driving-licence</a>.<br/>
+        Please see our guide on how to use the Gov site here:
+        <a href="https://www.oooshtours.co.uk/how-to-get-a-dvla-check-code" style="color:#7B5EA7;text-decoration:none;font-weight:600;">How to get a DVLA check code</a>.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Non-UK licence holders will need to upload a photo of their passport instead.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center;">
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Your hire form link</p>
+            <a href="{{hireFormUrl}}" style="display:inline-block;padding:12px 28px;background-color:#7B5EA7;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">Complete Hire Form</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you have recently hired through us, you can easily revalidate your documents through the same link.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Any questions or problems, please be in touch.
+      </p>
+    `,
+  },
+
+  hire_form_chase: {
+    variant: 'client',
+    preheader: 'Reminder: Please complete your driver hire form',
+    subject: 'Reminder: Driver hire form for {{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Hire Form Reminder</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        A reminder that you have an upcoming vehicle hire booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong> and we haven't yet received any hire forms for you.
+      </p>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Each driver must complete and sign a hire agreement, which must be filled out online through the link at the bottom of this email.
+      </p>
+      <p style="margin:0 0 8px;font-size:15px;color:#334155;line-height:1.6;">
+        The form is best completed using a smartphone or tablet, and will ask for the following documents to be uploaded:
+      </p>
+      <ul style="margin:0 0 16px;padding-left:24px;font-size:15px;color:#334155;line-height:1.8;">
+        <li>Front and back of your driving licence</li>
+        <li>2 x Proof of addresses dated within past 3 months (Utility/phone bill, bank statement etc) - can be downloaded PDFs or paper copies</li>
+      </ul>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        It will also ask for a DVLA Check Code (UK Drivers only). This is obtainable here:
+        <a href="https://www.gov.uk/view-driving-licence" style="color:#7B5EA7;text-decoration:none;font-weight:600;">gov.uk/view-driving-licence</a>.<br/>
+        Please see our guide on how to use the Gov site here:
+        <a href="https://www.oooshtours.co.uk/how-to-get-a-dvla-check-code" style="color:#7B5EA7;text-decoration:none;font-weight:600;">How to get a DVLA check code</a>.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Non-UK licence holders will need to upload a photo of their passport instead.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center;">
+            <p style="margin:0 0 8px;font-size:13px;color:#64748b;">Your hire form link</p>
+            <a href="{{hireFormUrl}}" style="display:inline-block;padding:12px 28px;background-color:#7B5EA7;color:#ffffff;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px;">Complete Hire Form</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you have recently hired through us, you can easily revalidate your documents through the same link.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Any questions or problems, please be in touch.
+      </p>
+    `,
+  },
 };
 
 export default templates;

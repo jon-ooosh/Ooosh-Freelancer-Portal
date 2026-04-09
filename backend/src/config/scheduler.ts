@@ -180,4 +180,19 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: BVRLA monthly VE103B report scheduled for 1st of each month at 08:00');
+
+  // ── Hire Form Auto-Emails ────────────────────────────────────────────
+  // Daily at 09:00 — send hire form emails for self-drive jobs approaching their start date
+  // Logic: 10 days before job_date → initial email. 5 days before → chase (if no forms received).
+  cron.schedule('0 9 * * *', async () => {
+    console.log('Scheduler: Checking hire form email triggers...');
+    try {
+      const { sendAutoHireFormEmails } = await import('../services/hire-form-auto-email');
+      const result = await sendAutoHireFormEmails();
+      console.log(`Scheduler: Hire form emails — ${result.initialSent} initial, ${result.chaseSent} chase, ${result.skipped} skipped`);
+    } catch (err) {
+      console.error('Scheduler: Hire form auto-email failed:', err);
+    }
+  });
+  console.log('Scheduler: Hire form auto-emails scheduled daily at 09:00');
 }
