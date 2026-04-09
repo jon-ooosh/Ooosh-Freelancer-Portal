@@ -144,14 +144,15 @@ router.post('/sync-values', async (req: AuthRequest, res: Response) => {
 router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
+    const jobIdStr = Array.isArray(jobId) ? jobId[0]! : jobId;
 
     // Look up job (accept UUID or HH job number)
-    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
+    const isUuid = /^[0-9a-f]{8}-/.test(jobIdStr);
     const jobResult = await query(
       isUuid
         ? `SELECT id, hh_job_number, job_name, job_date, job_end, out_date, return_date, duration_days FROM jobs WHERE id = $1`
         : `SELECT id, hh_job_number, job_name, job_date, job_end, out_date, return_date, duration_days FROM jobs WHERE hh_job_number = $1`,
-      [isUuid ? jobId : parseInt(jobId)]
+      [isUuid ? jobIdStr : parseInt(jobIdStr)]
     );
 
     if (jobResult.rows.length === 0) {

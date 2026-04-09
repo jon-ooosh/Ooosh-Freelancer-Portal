@@ -7,6 +7,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 
+/** Close modal on Escape key */
+function useEscapeKey(onEscape: () => void, active: boolean) {
+  useEffect(() => {
+    if (!active) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onEscape(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onEscape, active]);
+}
+
 interface VE103BCert {
   id: string;
   certificate_number: string;
@@ -78,6 +88,12 @@ export default function VE103BCertificatesPage() {
   const [genDriverAddress, setGenDriverAddress] = useState('');
   const [genHireStart, setGenHireStart] = useState('');
   const [genHireEnd, setGenHireEnd] = useState('');
+
+  // Escape key to close modals
+  const closeVoid = useCallback(() => { setVoidTarget(null); setVoidReason(''); }, []);
+  const closeGenerate = useCallback(() => { setShowGenerate(false); setGenError(''); setGenSuccess(''); }, []);
+  useEscapeKey(closeVoid, !!voidTarget);
+  useEscapeKey(closeGenerate, showGenerate);
 
   // Debounce search
   useEffect(() => {
