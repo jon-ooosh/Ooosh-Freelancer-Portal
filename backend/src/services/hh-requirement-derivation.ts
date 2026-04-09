@@ -18,12 +18,48 @@ import { query, getClient } from '../config/database';
 import type { HHLineItem } from './hirehop-job-sync';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
+// Source: HireHop categories_list.php, verified 9 Apr 2026
 
-const VEHICLE_CATEGORY = 370;
-const VEHICLE_ACCESSORIES_CATEGORY = 371;
-const REHEARSAL_CATEGORY = 450;
-// Backline categories — update as needed based on your HH setup
-const BACKLINE_CATEGORIES = [360, 361, 362, 363, 364, 365, 366, 367, 368, 369];
+const VEHICLE_CATEGORY = 370;           // Vehicles (actual vans)
+const VEHICLE_ACCESSORIES_CATEGORY = 371; // Vehicle accessories (rear seats, additional driver, etc.)
+const REHEARSAL_CATEGORY = 450;         // Rehearsal Rooms
+const STORAGE_CATEGORY = 449;           // Storage Space
+
+// Backline = everything a band uses on stage. Multiple parent groups:
+// GUITARS (372): 373-378, BASSES (379): 380-384, DRUMS (385): 386-398,
+// KEYBOARDS (399): 400-404, WOODWIND (405), BACKLINE ACCESSORIES (406): 407-410
+const BACKLINE_CATEGORIES = [
+  // Guitars
+  372, 373, 374, 375, 376, 377, 378,
+  // Basses
+  379, 380, 381, 382, 383, 384,
+  // Drums
+  385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398,
+  // Keyboards
+  399, 400, 401, 402, 403, 404,
+  // Woodwind
+  405,
+  // Backline accessories (stands, cases, fans, valves)
+  406, 407, 408, 409, 410,
+];
+
+// PA / Sound categories (not backline — separate operational area)
+const PA_CATEGORIES = [411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428];
+
+// DJ categories
+const DJ_CATEGORIES = [429, 430, 431];
+
+// Lighting categories
+const LIGHTING_CATEGORIES = [432, 433, 434, 435, 436, 437, 438];
+
+// Power categories
+const POWER_CATEGORIES = [439, 440, 441, 442, 443];
+
+// Staging categories
+const STAGING_CATEGORIES = [444, 445, 446, 447, 448];
+
+// Video categories
+const VIDEO_CATEGORIES = [451, 452, 453];
 
 // ── Known AUTOPULL IDs for prompts ───────────────────────────────────────
 
@@ -41,6 +77,9 @@ export interface DerivedFlags {
   has_backline: boolean;
   backline_item_count: number;
   has_rehearsal: boolean;
+  has_staging: boolean;
+  has_pa: boolean;
+  has_lighting: boolean;
   has_crew_items: boolean;            // kind:4 items on HH (sanity flag)
   crew_item_count: number;
   total_prep_time_mins: number;       // Sum of preptimemins across all items
@@ -63,6 +102,9 @@ export function deriveFlags(items: HHLineItem[]): DerivedFlags {
     has_backline: false,
     backline_item_count: 0,
     has_rehearsal: false,
+    has_staging: false,
+    has_pa: false,
+    has_lighting: false,
     has_crew_items: false,
     crew_item_count: 0,
     total_prep_time_mins: 0,
@@ -100,6 +142,21 @@ export function deriveFlags(items: HHLineItem[]): DerivedFlags {
     if (item.CATEGORY_ID === REHEARSAL_CATEGORY && item.kind === 2) {
       flags.has_rehearsal = true;
       flags.prep_time_by_category.rehearsals += prepMins * Math.max(1, item.QUANTITY);
+    }
+
+    // ── Staging (categories 444-448) ──
+    if (STAGING_CATEGORIES.includes(item.CATEGORY_ID) && item.kind === 2 && !item.VIRTUAL) {
+      flags.has_staging = true;
+    }
+
+    // ── PA / Sound (categories 411-428) ──
+    if (PA_CATEGORIES.includes(item.CATEGORY_ID) && item.kind === 2 && !item.VIRTUAL) {
+      flags.has_pa = true;
+    }
+
+    // ── Lighting (categories 432-438) ──
+    if (LIGHTING_CATEGORIES.includes(item.CATEGORY_ID) && item.kind === 2 && !item.VIRTUAL) {
+      flags.has_lighting = true;
     }
 
     // ── Crew/service items (kind:4) — sanity flag ──
