@@ -695,6 +695,7 @@ export default function JobDetailPage() {
     };
   } | null>(null);
   const [hhLastSynced, setHhLastSynced] = useState<string | null>(null);
+  const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
   const editValueRef = useRef<HTMLInputElement>(null);
@@ -1224,10 +1225,10 @@ export default function JobDetailPage() {
       }>(`/hirehop/jobs/${id}/sync`, {});
       setHhSyncResult({ itemCount: data.itemCount, derivation: data.derivation });
       setHhLastSynced(new Date().toISOString());
-      // If requirements were created/updated, refresh the job to pick up changes
-      if (data.derivation?.requirementsCreated?.length > 0 || data.derivation?.requirementsUpdated?.length > 0) {
-        loadJob();
-      }
+      // Always reload job after sync to pick up requirement changes
+      loadJob();
+      // Bump prepChecklistKey to force prep checklist to re-fetch
+      setPrepChecklistKey(k => k + 1);
     } catch (err) {
       console.warn('HH sync failed:', err);
     } finally {
@@ -2061,7 +2062,7 @@ export default function JobDetailPage() {
             </div>
           </div>
 
-          <JobPrepChecklist jobId={id || ''} />
+          <JobPrepChecklist key={prepChecklistKey} jobId={id || ''} />
 
           {/* HH-Derived Flags (auto-detected from HireHop line items) */}
           {hhSyncResult?.derivation?.flags && (() => {
