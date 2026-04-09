@@ -52,6 +52,15 @@ export function startScheduler() {
         );
 
         console.log(`Scheduler: Job sync complete — ${result.jobsCreated} created, ${result.jobsUpdated} updated`);
+
+        // Run HH-derived requirement derivation after line items sync
+        try {
+          const { deriveRequirementsForActiveJobs } = await import('../services/hh-requirement-derivation');
+          const deriveResult = await deriveRequirementsForActiveJobs();
+          console.log(`Scheduler: Requirement derivation — ${deriveResult.processed} jobs, ${deriveResult.created} requirements created, ${deriveResult.mismatches} mismatches`);
+        } catch (deriveErr) {
+          console.error('Scheduler: Requirement derivation failed:', deriveErr);
+        }
       } catch (err) {
         console.error('Scheduler: Job sync failed:', err);
         // Try to log failure
