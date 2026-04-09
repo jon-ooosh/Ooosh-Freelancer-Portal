@@ -1407,28 +1407,15 @@ export default function JobDetailPage() {
             <div className="flex items-center gap-3">
               {/* HH Job Number — editable if NEW */}
               {job.hh_job_number ? (
-                <>
-                  <a
-                    href={hhJobUrl!}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
-                    title="Open in HireHop"
-                  >
-                    #{job.hh_job_number}
-                  </a>
-                  <button
-                    onClick={() => syncFromHireHop(true)}
-                    disabled={hhSyncing}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 text-xs text-gray-500 hover:text-ooosh-600 hover:bg-ooosh-50 rounded transition-colors disabled:opacity-50"
-                    title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
-                  >
-                    <svg className={`w-3 h-3 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                    </svg>
-                    {hhSyncing ? 'Syncing...' : 'Sync'}
-                  </button>
-                </>
+                <a
+                  href={hhJobUrl!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                  title="Open in HireHop"
+                >
+                  #{job.hh_job_number}
+                </a>
               ) : editingHHNumber ? (
                 <input
                   ref={editHHRef}
@@ -1857,6 +1844,19 @@ export default function JobDetailPage() {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {job.hh_job_number && (
+              <button
+                onClick={() => syncFromHireHop(true)}
+                disabled={hhSyncing}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
+                title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
+              >
+                <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {hhSyncing ? 'Syncing...' : 'Sync HH'}
+              </button>
+            )}
             {hhJobUrl && (
               <a
                 href={hhJobUrl}
@@ -2037,6 +2037,32 @@ export default function JobDetailPage() {
           {/* Compact financial progress strip */}
           {id && <OverviewFinancialStrip jobId={id} />}
 
+          {/* Editable Details & Notes */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Details (What do they want?) */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Details</label>
+                <EditableTextArea
+                  value={job.details || ''}
+                  placeholder="What do they want / what is it?"
+                  onSave={(val) => saveInlineField({ details: val || null })}
+                />
+              </div>
+              {/* Notes */}
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-1">Notes</label>
+                <EditableTextArea
+                  value={job.notes || ''}
+                  placeholder="Internal notes..."
+                  onSave={(val) => saveInlineField({ notes: val || null })}
+                />
+              </div>
+            </div>
+          </div>
+
+          <JobPrepChecklist jobId={id || ''} />
+
           {/* HH-Derived Flags (auto-detected from HireHop line items) */}
           {hhSyncResult?.derivation?.flags && (() => {
             const f = hhSyncResult.derivation.flags;
@@ -2098,7 +2124,6 @@ export default function JobDetailPage() {
                     </span>
                   )}
                 </div>
-                {/* Seat availability detail */}
                 {sa && sa.required && (
                   <div className="mt-2 pt-2 border-t border-gray-100 text-xs text-gray-600">
                     <span className="font-medium">Seat availability:</span>{' '}
@@ -2117,7 +2142,6 @@ export default function JobDetailPage() {
                     )}
                   </div>
                 )}
-                {/* Requirements created by this sync */}
                 {(hhSyncResult.derivation.requirementsCreated.length > 0 || hhSyncResult.derivation.mismatchesFlagged.length > 0) && (
                   <div className="mt-2 pt-2 border-t border-gray-100 flex flex-wrap gap-2">
                     {hhSyncResult.derivation.requirementsCreated.length > 0 && (
@@ -2135,32 +2159,6 @@ export default function JobDetailPage() {
               </div>
             );
           })()}
-
-          {/* Editable Details & Notes */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Details (What do they want?) */}
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Details</label>
-                <EditableTextArea
-                  value={job.details || ''}
-                  placeholder="What do they want / what is it?"
-                  onSave={(val) => saveInlineField({ details: val || null })}
-                />
-              </div>
-              {/* Notes */}
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Notes</label>
-                <EditableTextArea
-                  value={job.notes || ''}
-                  placeholder="Internal notes..."
-                  onSave={(val) => saveInlineField({ notes: val || null })}
-                />
-              </div>
-            </div>
-          </div>
-
-          <JobPrepChecklist jobId={id || ''} />
         </div>
       )}
 

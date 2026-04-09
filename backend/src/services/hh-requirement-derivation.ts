@@ -294,6 +294,56 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       });
     }
 
+    // ── Clean up stale requirements ──
+    // If HH doesn't have items for a requirement type that was auto-created,
+    // remove it (if not_started) or flag it (if staff has acted on it).
+    const DETECTABLE_TYPES = ['vehicle', 'hire_forms', 'excess', 'backline', 'rehearsal'];
+    const activeTypes = new Set<string>();
+    if (flags.has_vehicle) { activeTypes.add('vehicle'); }
+    if (flags.has_vehicle && !isVanAndDriver) { activeTypes.add('hire_forms'); activeTypes.add('excess'); }
+    if (flags.has_backline) { activeTypes.add('backline'); }
+    if (flags.has_rehearsal) { activeTypes.add('rehearsal'); }
+
+    for (const reqType of DETECTABLE_TYPES) {
+      if (activeTypes.has(reqType)) continue; // Still on HH — skip
+      // Check if an auto requirement exists for this type
+      const existing = await client.query(
+        `SELECT id, is_auto, status FROM job_requirements
+         WHERE job_id = $1 AND requirement_type = $2`,
+        [jobId, reqType]
+      );
+      if (existing.rows.length === 0) continue;
+      const req = existing.rows[0];
+      if (!req.is_auto) {
+        // Manually created — flag as "not on HH" but don't delete
+        await client.query(
+          `UPDATE job_requirements SET hh_mismatch = true,
+             hh_mismatch_detail = 'Not detected on HireHop — may need removing',
+             updated_at = NOW()
+           WHERE id = $1`,
+          [req.id]
+        );
+        result.mismatchesFlagged.push(`${reqType} (not on HH)`);
+      } else if (req.status === 'not_started') {
+        // Auto-created and untouched — safe to remove
+        await client.query(
+          `DELETE FROM job_requirements WHERE id = $1`,
+          [req.id]
+        );
+        result.requirementsUpdated.push(`${reqType} (removed — no longer on HH)`);
+      } else {
+        // Auto-created but staff has acted — flag rather than delete
+        await client.query(
+          `UPDATE job_requirements SET hh_mismatch = true,
+             hh_mismatch_detail = 'Item removed from HireHop since this was marked "${req.status}"',
+             updated_at = NOW()
+           WHERE id = $1`,
+          [req.id]
+        );
+        result.mismatchesFlagged.push(`${reqType} (removed from HH)`);
+      }
+    }
+
     // ── Save derived flags for next comparison ──
     await client.query(
       `UPDATE jobs SET hh_derived_flags = $1 WHERE id = $2`,
