@@ -435,13 +435,28 @@ async function upsertAutoRequirement(
     return;
   }
 
-  // Status is still 'not_started' — safe to update notes + snapshot
-  await client.query(
-    `UPDATE job_requirements SET notes = $1, hh_item_snapshot = $2,
-       hh_mismatch = false, hh_mismatch_detail = NULL, updated_at = NOW()
-     WHERE id = $3`,
-    [data.notes, data.snapshot ? JSON.stringify(data.snapshot) : null, req.id]
+  // Status is still 'not_started' — safe to update snapshot.
+  // Only overwrite notes if they haven't been enriched by user actions (e.g. hire form sends)
+  const hasUserNotes = req.notes && (
+    req.notes.includes('Hire form email sent') ||
+    req.notes.includes('Hire form reminder sent') ||
+    req.notes.includes('[Suspended:')
   );
+  if (hasUserNotes) {
+    await client.query(
+      `UPDATE job_requirements SET hh_item_snapshot = $1,
+         hh_mismatch = false, hh_mismatch_detail = NULL, updated_at = NOW()
+       WHERE id = $2`,
+      [data.snapshot ? JSON.stringify(data.snapshot) : null, req.id]
+    );
+  } else {
+    await client.query(
+      `UPDATE job_requirements SET notes = $1, hh_item_snapshot = $2,
+         hh_mismatch = false, hh_mismatch_detail = NULL, updated_at = NOW()
+       WHERE id = $3`,
+      [data.notes, data.snapshot ? JSON.stringify(data.snapshot) : null, req.id]
+    );
+  }
   result.requirementsUpdated.push(requirementType);
 }
 

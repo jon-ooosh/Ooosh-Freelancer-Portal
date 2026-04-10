@@ -1411,10 +1411,11 @@ router.get('/email-contacts/:jobId', authenticate, async (req: AuthRequest, res:
       }
     }
 
-    // People linked to the job via job_organisations (band contacts, etc.)
+    // People linked to the job via job_organisations (band contacts, promoter contacts, etc.)
     const joResult = await query(
-      `SELECT DISTINCT p.email, p.first_name, p.last_name, jo.role AS org_role
+      `SELECT DISTINCT p.email, p.first_name, p.last_name, jo.role AS org_role, o.name AS org_name
        FROM job_organisations jo
+       JOIN organisations o ON o.id = jo.organisation_id
        JOIN person_organisation_roles por ON por.organisation_id = jo.organisation_id
        JOIN people p ON p.id = por.person_id
        WHERE jo.job_id = $1 AND p.email IS NOT NULL AND p.email != '' AND p.is_deleted = false
@@ -1423,7 +1424,39 @@ router.get('/email-contacts/:jobId', authenticate, async (req: AuthRequest, res:
     );
     for (const p of joResult.rows) {
       if (!contacts.some(c => c.email === p.email)) {
-        contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim(), source: p.org_role || 'linked_org' });
+        const source = p.org_role ? `${p.org_role}${p.org_name ? ` (${p.org_name})` : ''}` : 'linked_org';
+        contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim(), source });
+      }
+    }
+
+    // Organisation emails from job_organisations (band email, promoter email, etc.)
+    const joOrgResult = await query(
+      `SELECT DISTINCT o.email, o.name, jo.role
+       FROM job_organisations jo
+       JOIN organisations o ON o.id = jo.organisation_id
+       WHERE jo.job_id = $1 AND o.email IS NOT NULL AND o.email != ''`,
+      [jobId]
+    );
+    for (const o of joOrgResult.rows) {
+      if (!contacts.some(c => c.email === o.email)) {
+        contacts.push({ email: o.email, name: o.name || 'Organisation', source: o.role || 'linked_org' });
+      }
+    }
+
+    // People directly associated with the job's contact person (HH contact name match)
+    if (job.client_name) {
+      const contactResult = await query(
+        `SELECT p.email, p.first_name, p.last_name
+         FROM people p
+         WHERE p.email IS NOT NULL AND p.email != '' AND p.is_deleted = false
+           AND (p.first_name || ' ' || p.last_name) ILIKE $1
+         LIMIT 5`,
+        [job.client_name]
+      );
+      for (const p of contactResult.rows) {
+        if (!contacts.some(c => c.email === p.email)) {
+          contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim(), source: 'job_contact' });
+        }
       }
     }
 
@@ -1507,16 +1540,21 @@ router.post('/send-email', authenticate, validate(sendHireFormEmailSchema), asyn
     }
 
     // Update the hire_forms requirement status + record when last sent
-    await query(
-      `UPDATE job_requirements SET
-         notes = COALESCE(notes, '') || E'\n' || $1,
-         updated_at = NOW()
-       WHERE job_id = $2 AND requirement_type = 'hire_forms'`,
-      [
-        `Hire form ${isChase ? 'reminder' : 'email'} sent to ${results.filter(r => r.success).map(r => r.email).join(', ')} on ${new Date().toLocaleDateString('en-GB')}`,
-        jobId,
-      ]
-    );
+    const sentEmails = results.filter(r => r.success).map(r => r.email).join(', ');
+    if (sentEmails) {
+      await query(
+        `UPDATE job_requirements SET
+           notes = COALESCE(notes, '') || E'\n' || $1,
+           status = CASE WHEN status = 'not_started' THEN 'in_progress' ELSE status END,
+           current_step = CASE WHEN status = 'not_started' THEN 'Sent' ELSE current_step END,
+           updated_at = NOW()
+         WHERE job_id = $2 AND requirement_type = 'hire_forms'`,
+        [
+          `Hire form ${isChase ? 'reminder' : 'email'} sent to ${sentEmails} on ${new Date().toLocaleDateString('en-GB')}`,
+          jobId,
+        ]
+      );
+    }
 
     const sent = results.filter(r => r.success).length;
     const failed = results.filter(r => !r.success).length;
