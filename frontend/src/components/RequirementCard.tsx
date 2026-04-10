@@ -172,12 +172,15 @@ export default function RequirementCard({
   useEffect(() => {
     if (req.requirement_type === 'hire_forms' && hhJobNumber) {
       api.get<{ data: HireFormDriver[] }>(`/hire-forms/by-job/${hhJobNumber}`)
-        .then(d => setHireFormDrivers(d.data || []))
+        .then(d => setHireFormDrivers(Array.isArray(d?.data) ? d.data : []))
         .catch(() => {});
     }
     if (req.requirement_type === 'excess' && jobId) {
-      api.get<{ data: ExcessInfo }>(`/money/${jobId}/excess-info`)
-        .then(d => { if (d.data) setExcessInfo(d.data); })
+      // Try the excess-info endpoint — gracefully handle if it doesn't exist or returns unexpected shape
+      api.get<{ data?: ExcessInfo }>(`/money/${jobId}/excess-info`)
+        .then(d => {
+          if (d?.data?.totals) setExcessInfo(d.data);
+        })
         .catch(() => {});
     }
   }, [req.requirement_type, hhJobNumber, jobId]);
@@ -326,30 +329,30 @@ export default function RequirementCard({
             {/* Excess — show financial status */}
             {req.requirement_type === 'excess' && (
               <div className="mt-1 text-xs">
-                {excessInfo ? (
+                {excessInfo?.totals ? (
                   <div className="space-y-0.5">
                     <div className="flex items-center gap-2">
                       <span className="text-gray-700 font-medium">
-                        £{excessInfo.totals.total_required.toLocaleString('en-GB', { minimumFractionDigits: 2 })} required
+                        £{(excessInfo.totals.total_required ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 2 })} required
                       </span>
-                      {excessInfo.totals.total_collected > 0 && (
+                      {(excessInfo.totals.total_collected ?? 0) > 0 && (
                         <span className="text-green-600">
-                          £{excessInfo.totals.total_collected.toLocaleString('en-GB', { minimumFractionDigits: 2 })} collected
+                          £{(excessInfo.totals.total_collected ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 2 })} collected
                         </span>
                       )}
-                      {excessInfo.totals.total_outstanding > 0 && (
+                      {(excessInfo.totals.total_outstanding ?? 0) > 0 && (
                         <span className="text-amber-600">
-                          £{excessInfo.totals.total_outstanding.toLocaleString('en-GB', { minimumFractionDigits: 2 })} outstanding
+                          £{(excessInfo.totals.total_outstanding ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 2 })} outstanding
                         </span>
                       )}
                     </div>
-                    {excessInfo.drivers.map((d, i) => (
+                    {(excessInfo.drivers || []).map((d, i) => (
                       <div key={i} className="flex items-center gap-2 text-xs text-gray-500">
-                        <span>{d.driver_name}:</span>
+                        <span>{d.driver_name || 'Unknown'}:</span>
                         <span className={EXCESS_STATUS_LABELS[d.excess_status]?.colour || 'text-gray-500'}>
-                          {EXCESS_STATUS_LABELS[d.excess_status]?.label || d.excess_status}
+                          {EXCESS_STATUS_LABELS[d.excess_status]?.label || d.excess_status || 'Unknown'}
                         </span>
-                        <span>£{d.excess_amount_required?.toLocaleString('en-GB', { minimumFractionDigits: 2 })}</span>
+                        <span>£{(d.excess_amount_required ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 2 })}</span>
                         {d.requires_referral && (
                           <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
                         )}
