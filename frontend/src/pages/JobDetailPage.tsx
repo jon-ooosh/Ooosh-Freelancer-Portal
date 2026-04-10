@@ -3,6 +3,8 @@ import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
+import RequirementCard, { PREP_STATUS_CONFIG, PREP_STATUS_ORDER } from '../components/RequirementCard';
+import type { JobRequirement, DerivedFlags, SeatAvailability } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
 import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
@@ -3733,36 +3735,8 @@ interface RequirementTemplate {
   requirement_types: string[];
 }
 
-interface JobRequirement {
-  id: string;
-  job_id: string;
-  requirement_type: string;
-  status: 'not_started' | 'in_progress' | 'done' | 'blocked';
-  current_step: string | null;
-  custom_label: string | null;
-  notes: string | null;
-  assigned_to: string | null;
-  assigned_to_name: string | null;
-  due_date: string | null;
-  is_auto: boolean;
-  source: string;
-  hh_mismatch: boolean;
-  hh_mismatch_detail: string | null;
-  hh_item_snapshot: unknown[] | null;
-  type_label: string;
-  type_icon: string;
-  type_steps: string[] | null;
-  sort_order: number;
-}
-
-const PREP_STATUS_CONFIG: Record<string, { label: string; colour: string; bg: string; border: string }> = {
-  not_started: { label: 'Not Started', colour: 'text-gray-600', bg: 'bg-gray-100', border: 'border-gray-200' },
-  in_progress: { label: 'In Progress', colour: 'text-amber-700', bg: 'bg-amber-100', border: 'border-amber-200' },
-  done:        { label: 'Done',        colour: 'text-green-700', bg: 'bg-green-100', border: 'border-green-200' },
-  blocked:     { label: 'Blocked',     colour: 'text-red-700',   bg: 'bg-red-100',   border: 'border-red-200' },
-};
-
-const PREP_STATUS_ORDER: JobRequirement['status'][] = ['not_started', 'in_progress', 'done', 'blocked'];
+// JobRequirement, DerivedFlags, SeatAvailability, PREP_STATUS_CONFIG, PREP_STATUS_ORDER
+// now imported from '../components/RequirementCard'
 
 function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   const [data, setData] = useState<{
@@ -3840,10 +3814,14 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
   const [templates, setTemplates] = useState<RequirementTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
-  const [showStatusMenu, setShowStatusMenu] = useState<string | null>(null);
+  const [isVanAndDriver, setIsVanAndDriver] = useState(false);
 
   useEffect(() => {
     loadAll();
+    // Load van & driver flag
+    api.get<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/derived-flags`)
+      .then(d => setIsVanAndDriver(d.isVanAndDriver || false))
+      .catch(() => {});
   }, [jobId]);
 
   async function loadAll() {
@@ -3861,6 +3839,19 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
       console.error('Failed to load requirements:', err);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function toggleVanAndDriver() {
+    try {
+      const data = await api.patch<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/van-and-driver`, {
+        isVanAndDriver: !isVanAndDriver,
+      });
+      setIsVanAndDriver(data.isVanAndDriver);
+      // Reload requirements since derivation re-runs on toggle
+      await loadAll();
+    } catch (err) {
+      console.error('Failed to toggle van & driver:', err);
     }
   }
 
@@ -4016,166 +4007,64 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
       {requirements.length === 0 ? (
         <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
           <p className="text-gray-500 text-sm">No requirements added yet.</p>
-          <p className="text-gray-400 text-xs mt-1">Click "+ Add Job Requirement" to get started.</p>
+          <p className="text-gray-400 text-xs mt-1">Click "+ Add Job Requirement" to get started, or sync from HireHop.</p>
         </div>
       ) : (
         <div className="space-y-2">
-          {requirements.map((req) => {
-            const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
-            const label = req.custom_label || req.type_label;
-            return (
-              <div
-                key={req.id}
-                className={`group bg-white rounded-xl border ${req.hh_mismatch ? 'border-amber-300 bg-amber-50/30' : statusConfig.border} p-4 transition-all hover:shadow-sm`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <span className="text-lg">{req.type_icon}</span>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className={`font-medium ${req.status === 'done' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>
-                          {label}
-                        </span>
-                        {req.is_auto && req.source === 'hirehop_sync' && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-500 border border-blue-200 font-medium">HH</span>
-                        )}
-                        {req.assigned_to_name && (
-                          <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">{req.assigned_to_name}</span>
-                        )}
-                        {req.due_date && (
-                          <span className="text-xs text-gray-400">Due: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span>
-                        )}
-                      </div>
-                      {/* HH context for vehicle requirements */}
-                      {req.requirement_type === 'vehicle' && derivedFlags?.has_vehicle && (
-                        <div className="mt-1 text-xs text-gray-500 space-y-0.5">
-                          <div>{derivedFlags.vehicle_count} vehicle{derivedFlags.vehicle_count !== 1 ? 's' : ''}: {derivedFlags.vehicle_types.join(', ')}</div>
-                          {derivedFlags.seat_config && (
-                            <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
-                              {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
-                              {seatAvailability && seatAvailability.matchingVans.length > 0 && (
-                                <span className="text-green-600 ml-1">
-                                  — {seatAvailability.matchingVans.map(v => v.reg).join(', ')} already set
-                                </span>
-                              )}
-                              {seatAvailability && seatAvailability.nonMatchingVans.length > 0 && (
-                                <span className="text-gray-400 ml-1">
-                                  — {seatAvailability.nonMatchingVans.map(v => v.reg).join(', ')} need turning
-                                </span>
-                              )}
-                            </div>
-                          )}
-                          {derivedFlags.prep_time_by_category.vehicles > 0 && (
-                            <div>Est. prep: {derivedFlags.prep_time_by_category.vehicles >= 60
-                              ? `${Math.floor(derivedFlags.prep_time_by_category.vehicles / 60)}h${derivedFlags.prep_time_by_category.vehicles % 60 > 0 ? ` ${derivedFlags.prep_time_by_category.vehicles % 60}m` : ''}`
-                              : `${derivedFlags.prep_time_by_category.vehicles}m`}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                      {/* HH context for backline requirements */}
-                      {req.requirement_type === 'backline' && derivedFlags?.has_backline && (
-                        <div className="mt-1 text-xs text-gray-500">
-                          {derivedFlags.backline_item_count} item{derivedFlags.backline_item_count !== 1 ? 's' : ''} detected
-                          {derivedFlags.prep_time_by_category.backline > 0 && (
-                            <span> — est. {derivedFlags.prep_time_by_category.backline >= 60
-                              ? `${Math.floor(derivedFlags.prep_time_by_category.backline / 60)}h${derivedFlags.prep_time_by_category.backline % 60 > 0 ? ` ${derivedFlags.prep_time_by_category.backline % 60}m` : ''}`
-                              : `${derivedFlags.prep_time_by_category.backline}m`} prep/de-prep</span>
-                          )}
-                        </div>
-                      )}
-                      {/* Notes (truncated) */}
-                      {req.notes && (
-                        <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
-                      )}
-                      {/* Mismatch warning */}
-                      {req.hh_mismatch && req.hh_mismatch_detail && (
-                        <div className="mt-1 text-xs text-amber-600 font-medium">
-                          ⚠ {req.hh_mismatch_detail}
-                        </div>
-                      )}
-                    </div>
-                  </div>
+          {(() => {
+            // Group: hire_forms and excess nest under vehicle
+            const nestedTypes = new Set(['hire_forms', 'excess']);
+            const hasVehicle = requirements.some(r => r.requirement_type === 'vehicle');
+            const cards: JSX.Element[] = [];
 
-                  <div className="flex items-center gap-2">
-                    {/* Step progress for multi-step requirements */}
-                    {req.type_steps && req.current_step && (
-                      <div className="flex items-center gap-1 mr-2">
-                        <span className="text-xs text-gray-500">{req.current_step}</span>
-                        {req.type_steps.indexOf(req.current_step) < req.type_steps.length - 1 && (
-                          <button
-                            onClick={() => advanceStep(req.id)}
-                            className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium ml-1"
-                            title="Advance to next step"
-                          >
-                            Next &rarr;
-                          </button>
-                        )}
-                      </div>
-                    )}
+            for (const req of requirements) {
+              // Skip nested types — they'll be rendered after the vehicle card
+              if (hasVehicle && nestedTypes.has(req.requirement_type)) continue;
 
-                    {/* Status dropdown — non-linear, any to any */}
-                    <div className="relative">
-                      <button
-                        onClick={() => setShowStatusMenu(showStatusMenu === req.id ? null : req.id)}
-                        className={`inline-flex px-3 py-1 rounded text-xs font-medium ${statusConfig.bg} ${statusConfig.colour} cursor-pointer hover:opacity-80 transition-opacity`}
-                      >
-                        {statusConfig.label}
-                        <svg className="w-3 h-3 ml-1 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </button>
-                      {showStatusMenu === req.id && (
-                        <div className="absolute right-0 mt-1 w-36 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1">
-                          {PREP_STATUS_ORDER.map((s) => {
-                            const sc = PREP_STATUS_CONFIG[s];
-                            return (
-                              <button
-                                key={s}
-                                onClick={() => changeStatus(req.id, s)}
-                                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 ${req.status === s ? 'font-bold' : ''}`}
-                              >
-                                <span className={`w-2 h-2 rounded-full ${sc.bg.replace('100', '500')}`} />
-                                {sc.label}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
+              cards.push(
+                <RequirementCard
+                  key={req.id}
+                  req={req}
+                  derivedFlags={derivedFlags}
+                  seatAvailability={seatAvailability}
+                  jobId={jobId}
+                  isVanAndDriver={isVanAndDriver}
+                  onStatusChange={changeStatus}
+                  onAdvanceStep={advanceStep}
+                  onRemove={removeRequirement}
+                  onVanAndDriverToggle={req.requirement_type === 'vehicle' ? toggleVanAndDriver : undefined}
+                  onReload={loadAll}
+                />
+              );
 
-                    {/* Remove button (visible on hover) */}
-                    <button
-                      onClick={() => removeRequirement(req.id)}
-                      className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all ml-1"
-                      title="Remove requirement"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
+              // After vehicle card, render nested hire_forms + excess
+              if (req.requirement_type === 'vehicle') {
+                const nested = requirements.filter(r => nestedTypes.has(r.requirement_type));
+                for (const nr of nested) {
+                  cards.push(
+                    <RequirementCard
+                      key={nr.id}
+                      req={nr}
+                      derivedFlags={derivedFlags}
+                      isNested
+                      jobId={jobId}
+                      onStatusChange={changeStatus}
+                      onAdvanceStep={advanceStep}
+                      onRemove={removeRequirement}
+                      onReload={loadAll}
+                    />
+                  );
+                }
+              }
+            }
 
-                {/* Multi-step progress bar */}
-                {req.type_steps && (
-                  <div className="mt-3 flex gap-1">
-                    {req.type_steps.map((step: string, i: number) => {
-                      const currentIdx = req.current_step ? req.type_steps!.indexOf(req.current_step) : -1;
-                      const isComplete = i <= currentIdx;
-                      return (
-                        <div
-                          key={step}
-                          className={`flex-1 h-1.5 rounded-full ${isComplete ? 'bg-green-400' : 'bg-gray-200'} transition-colors`}
-                          title={step}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+            // If no vehicle card, still show hire_forms/excess at their normal position
+            if (!hasVehicle) {
+              // They weren't skipped, so they're already in the loop
+            }
+
+            return cards;
+          })()}
         </div>
       )}
     </div>

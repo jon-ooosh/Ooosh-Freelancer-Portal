@@ -112,7 +112,7 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
  * Send hire form email(s) for a specific job to client contacts.
  * Returns the number of emails sent.
  */
-async function sendHireFormEmailForJob(
+export async function sendHireFormEmailForJob(
   job: { id: string; hh_job_number: number; job_name: string; job_date: string; company_name: string; client_name: string; client_id: string | null; req_id: string },
   isChase: boolean
 ): Promise<number> {
