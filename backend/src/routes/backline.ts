@@ -35,7 +35,7 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.job_date >= $1
          AND j.job_date <= $2
-         AND j.pipeline_status IN ('confirmed', 'prepped', 'provisional')
+         AND j.pipeline_status IN ('confirmed', 'prepped', 'provisional', 'dispatched')
        ORDER BY j.job_date ASC`,
       [nowStr, endStr]
     );
@@ -51,7 +51,7 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.return_date >= $1
          AND j.return_date <= $2
-         AND j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned', 'prepped')
+         AND j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned', 'prepped', 'confirmed')
        ORDER BY j.return_date ASC`,
       [nowStr, endStr]
     );
