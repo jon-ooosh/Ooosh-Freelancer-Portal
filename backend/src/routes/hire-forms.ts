@@ -1521,6 +1521,20 @@ router.post('/send-email', authenticate, validate(sendHireFormEmailSchema), asyn
     const sent = results.filter(r => r.success).length;
     const failed = results.filter(r => !r.success).length;
 
+    // Log to activity timeline
+    if (sent > 0) {
+      const recipientList = results.filter(r => r.success).map(r => r.email).join(', ');
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by)
+         VALUES ('email', $1, $2, $3)`,
+        [
+          `Hire form ${isChase ? 'reminder' : 'link'} sent to ${recipientList}`,
+          jobId,
+          req.user!.id,
+        ]
+      );
+    }
+
     res.json({ success: true, sent, failed, results });
   } catch (error) {
     console.error('Send hire form email error:', error);
