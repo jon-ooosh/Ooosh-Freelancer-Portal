@@ -3,8 +3,8 @@ import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
-import RequirementCard, { PREP_STATUS_CONFIG, PREP_STATUS_ORDER } from '../components/RequirementCard';
-import type { JobRequirement, DerivedFlags, SeatAvailability } from '../components/RequirementCard';
+import RequirementCard from '../components/RequirementCard';
+import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
 import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
@@ -681,7 +681,7 @@ export default function JobDetailPage() {
         has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
         seat_config: 'round_table' | 'forward_facing' | null;
         has_backline: boolean; backline_item_count: number;
-        has_rehearsal: boolean; has_crew_items: boolean; crew_item_count: number;
+        has_rehearsal: boolean; has_staging: boolean; has_pa: boolean; has_lighting: boolean; has_crew_items: boolean; crew_item_count: number;
         total_prep_time_mins: number;
         prep_time_by_category: { vehicles: number; backline: number; rehearsals: number; other: number };
       };
@@ -3798,7 +3798,7 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
     seat_config: 'round_table' | 'forward_facing' | null;
     has_backline: boolean; backline_item_count: number;
-    has_rehearsal: boolean; has_crew_items: boolean; crew_item_count: number;
+    has_rehearsal: boolean; has_staging: boolean; has_pa: boolean; has_lighting: boolean; has_crew_items: boolean; crew_item_count: number;
     total_prep_time_mins: number;
     prep_time_by_category: { vehicles: number; backline: number; rehearsals: number; other: number };
   } | null;
@@ -3891,7 +3891,6 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
 
   async function changeStatus(reqId: string, newStatus: JobRequirement['status']) {
     await updateRequirement(reqId, { status: newStatus });
-    setShowStatusMenu(null);
   }
 
   async function advanceStep(reqId: string) {
