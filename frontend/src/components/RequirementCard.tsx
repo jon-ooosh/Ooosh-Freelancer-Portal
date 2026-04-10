@@ -149,7 +149,7 @@ export default function RequirementCard({
   isVanAndDriver?: boolean;
   onStatusChange: (reqId: string, status: JobRequirement['status']) => void;
   onAdvanceStep: (reqId: string) => void;
-  onRemove: (reqId: string) => void;
+  onRemove: (reqId: string, reason?: string) => void;
   onVanAndDriverToggle?: () => void;
   onReload?: () => void;
 }) {
@@ -161,10 +161,16 @@ export default function RequirementCard({
   const [emailResult, setEmailResult] = useState<string | null>(null);
   const [loadingContacts, setLoadingContacts] = useState(false);
 
+  // Deletion confirmation state
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteReason, setDeleteReason] = useState('');
+  const requiresDeleteReason = ['hire_forms', 'excess'].includes(req.requirement_type);
+
   // Hire form submissions + excess data (loaded for nested cards)
   const [hireFormDrivers, setHireFormDrivers] = useState<HireFormDriver[]>([]);
   const [excessInfo, setExcessInfo] = useState<ExcessInfo | null>(null);
 
+  const isSuspendedByVD = req.notes?.includes('[Suspended: Van & Driver]') || false;
   const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
   const label = req.custom_label || req.type_label;
 
@@ -248,7 +254,7 @@ export default function RequirementCard({
 
   return (
     <div
-      className={`group bg-white rounded-xl border ${req.hh_mismatch ? 'border-amber-300 bg-amber-50/30' : statusConfig.border} p-4 transition-all hover:shadow-sm ${isNested ? 'ml-8 border-l-4' : ''}`}
+      className={`group bg-white rounded-xl border ${req.hh_mismatch ? 'border-amber-300 bg-amber-50/30' : statusConfig.border} p-4 transition-all hover:shadow-sm ${isNested ? 'ml-8 border-l-4' : ''} ${isSuspendedByVD ? 'opacity-50' : ''}`}
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -307,9 +313,50 @@ export default function RequirementCard({
               </div>
             )}
 
+            {/* Suspended by Van & Driver banner */}
+            {isSuspendedByVD && (req.requirement_type === 'hire_forms' || req.requirement_type === 'excess') && (
+              <div className="mt-1 text-xs text-gray-400 italic">Not required — Van & Driver mode</div>
+            )}
+
             {/* Hire Forms — show driver submissions + send button */}
-            {req.requirement_type === 'hire_forms' && (
+            {req.requirement_type === 'hire_forms' && !isSuspendedByVD && (
               <div className="mt-1 space-y-1">
+                {/* Summary counts */}
+                {(() => {
+                  const received = hireFormDrivers.filter(d =>
+                    d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active'
+                  ).length;
+                  const referralCount = hireFormDrivers.filter(d => d.requires_referral).length;
+                  const hasSentNote = req.notes?.includes('Hire form email sent') || req.notes?.includes('Hire form reminder sent');
+                  // Extract last sent date from notes
+                  const sentMatch = req.notes?.match(/(?:Hire form (?:email|reminder) sent .+? on )(\d{2}\/\d{2}\/\d{4})/g);
+                  const lastSent = sentMatch ? sentMatch[sentMatch.length - 1].match(/(\d{2}\/\d{2}\/\d{4})/)?.[1] : null;
+
+                  return (
+                    <div className="flex items-center gap-2 flex-wrap text-xs">
+                      {hasSentNote && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                          </svg>
+                          Sent{lastSent ? ` ${lastSent}` : ''}
+                        </span>
+                      )}
+                      {received > 0 && (
+                        <span className="px-1.5 py-0.5 rounded border bg-green-50 text-green-700 border-green-200">
+                          {received} received
+                        </span>
+                      )}
+                      {referralCount > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">
+                          {referralCount} referral{referralCount !== 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Individual driver list */}
                 {hireFormDrivers.length > 0 ? (
                   <div className="space-y-0.5">
                     {hireFormDrivers.map((d, i) => (
@@ -341,7 +388,7 @@ export default function RequirementCard({
             )}
 
             {/* Excess — show financial status */}
-            {req.requirement_type === 'excess' && (
+            {req.requirement_type === 'excess' && !isSuspendedByVD && (
               <div className="mt-1 text-xs">
                 {excessInfo?.totals ? (
                   <div className="space-y-0.5">
@@ -453,7 +500,7 @@ export default function RequirementCard({
 
           {/* Remove button */}
           <button
-            onClick={() => onRemove(req.id)}
+            onClick={() => setShowDeleteConfirm(true)}
             className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-all ml-1"
             title="Remove requirement"
           >
@@ -478,6 +525,61 @@ export default function RequirementCard({
               />
             );
           })}
+        </div>
+      )}
+
+      {/* ── Delete confirmation ── */}
+      {showDeleteConfirm && (
+        <div className="mt-3 pt-3 border-t border-red-100 bg-red-50/50 -mx-4 -mb-4 px-4 pb-4 rounded-b-xl">
+          <div className="flex items-center gap-2 mb-2">
+            <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <span className="text-xs font-semibold text-red-700">
+              Remove {label}?
+            </span>
+          </div>
+          {requiresDeleteReason && (
+            <div className="mb-2">
+              <input
+                type="text"
+                value={deleteReason}
+                onChange={e => setDeleteReason(e.target.value)}
+                placeholder="Reason for removing (required)..."
+                className="w-full px-2 py-1.5 text-xs border border-red-200 rounded focus:ring-red-300 focus:border-red-300"
+                autoFocus
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && deleteReason.trim()) {
+                    onRemove(req.id, deleteReason.trim());
+                    setShowDeleteConfirm(false);
+                    setDeleteReason('');
+                  } else if (e.key === 'Escape') {
+                    setShowDeleteConfirm(false);
+                    setDeleteReason('');
+                  }
+                }}
+              />
+            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                onRemove(req.id, deleteReason.trim() || undefined);
+                setShowDeleteConfirm(false);
+                setDeleteReason('');
+              }}
+              disabled={requiresDeleteReason && !deleteReason.trim()}
+              className="px-3 py-1 text-xs font-medium bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Remove
+            </button>
+            <button
+              onClick={() => { setShowDeleteConfirm(false); setDeleteReason(''); }}
+              className="px-3 py-1 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
 

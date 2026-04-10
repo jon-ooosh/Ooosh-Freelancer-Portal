@@ -3826,9 +3826,12 @@ function JobPrepChecklist({ jobId, hhJobNumber, derivedFlags, seatAvailability }
     }
   }
 
-  async function removeRequirement(reqId: string) {
+  async function removeRequirement(reqId: string, reason?: string) {
     try {
-      await api.delete(`/requirements/${reqId}`);
+      const url = reason
+        ? `/requirements/${reqId}?reason=${encodeURIComponent(reason)}`
+        : `/requirements/${reqId}`;
+      await api.delete(url);
       setRequirements(prev => prev.filter(r => r.id !== reqId));
     } catch (err) {
       console.error('Failed to remove requirement:', err);
