@@ -126,7 +126,7 @@ export default function BacklinePage() {
     }
   }
 
-  function recalcStats(jobs: BacklineJob[], direction: 'out' | 'return'): BacklineStats {
+  function recalcStats(jobs: BacklineJob[]): BacklineStats {
     return {
       jobCount: jobs.length,
       notStarted: jobs.filter(j => j.backlineStatus === 'not_started').length,
