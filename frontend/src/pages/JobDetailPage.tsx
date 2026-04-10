@@ -2067,106 +2067,11 @@ export default function JobDetailPage() {
           <JobPrepChecklist
             key={prepChecklistKey}
             jobId={id || ''}
+            hhJobNumber={job.hh_job_number}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
           />
 
-          {/* HH-Derived Flags (auto-detected from HireHop line items) */}
-          {hhSyncResult?.derivation?.flags && (() => {
-            const f = hhSyncResult.derivation.flags;
-            const hasSomething = f.has_vehicle || f.has_backline || f.has_rehearsal || f.has_crew_items;
-            if (!hasSomething) return null;
-            const sa = hhSyncResult.derivation.seatAvailability;
-            return (
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-semibold text-gray-700">Detected from HireHop</h3>
-                  {hhLastSynced && (
-                    <span className="text-xs text-gray-400">
-                      Synced {new Date(hhLastSynced).toLocaleTimeString()}
-                    </span>
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {f.has_vehicle && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
-                      🚐 {f.vehicle_count} vehicle{f.vehicle_count !== 1 ? 's' : ''}
-                      {f.prep_time_by_category.vehicles > 0 && (
-                        <span className="text-blue-500 ml-1">
-                          ({f.prep_time_by_category.vehicles >= 60
-                            ? `${Math.floor(f.prep_time_by_category.vehicles / 60)}h${f.prep_time_by_category.vehicles % 60 > 0 ? ` ${f.prep_time_by_category.vehicles % 60}m` : ''}`
-                            : `${f.prep_time_by_category.vehicles}m`} prep)
-                        </span>
-                      )}
-                    </span>
-                  )}
-                  {f.seat_config && (
-                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border ${
-                      f.seat_config === 'forward_facing'
-                        ? 'bg-amber-50 text-amber-700 border-amber-200'
-                        : 'bg-green-50 text-green-700 border-green-200'
-                    }`}>
-                      {f.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
-                    </span>
-                  )}
-                  {f.has_backline && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-purple-50 text-purple-700 border border-purple-200">
-                      🎸 Backline ({f.backline_item_count} item{f.backline_item_count !== 1 ? 's' : ''})
-                      {f.prep_time_by_category.backline > 0 && (
-                        <span className="text-purple-500 ml-1">
-                          ({f.prep_time_by_category.backline >= 60
-                            ? `${Math.floor(f.prep_time_by_category.backline / 60)}h${f.prep_time_by_category.backline % 60 > 0 ? ` ${f.prep_time_by_category.backline % 60}m` : ''}`
-                            : `${f.prep_time_by_category.backline}m`} prep)
-                        </span>
-                      )}
-                    </span>
-                  )}
-                  {f.has_rehearsal && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-indigo-50 text-indigo-700 border border-indigo-200">
-                      🎵 Rehearsal
-                    </span>
-                  )}
-                  {f.has_crew_items && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-50 text-gray-600 border border-gray-200">
-                      👥 Crew on HH ({f.crew_item_count})
-                    </span>
-                  )}
-                </div>
-                {sa && sa.required && (
-                  <div className="mt-2 pt-2 border-t border-gray-100 text-xs text-gray-600">
-                    <span className="font-medium">Seat availability:</span>{' '}
-                    {sa.matchingVans.length > 0 ? (
-                      <span className="text-green-600">
-                        {sa.matchingVans.map(v => v.reg).join(', ')} already {sa.required === 'forward_facing' ? 'forward-facing' : 'round a table'}
-                      </span>
-                    ) : (
-                      <span className="text-amber-600">No vans currently {sa.required === 'forward_facing' ? 'forward-facing' : 'round a table'}</span>
-                    )}
-                    {sa.nonMatchingVans.length > 0 && (
-                      <span className="text-gray-500"> — {sa.nonMatchingVans.map(v => v.reg).join(', ')} need turning</span>
-                    )}
-                    {sa.unknownVans.length > 0 && (
-                      <span className="text-gray-400"> — {sa.unknownVans.map(v => v.reg).join(', ')} unknown layout</span>
-                    )}
-                  </div>
-                )}
-                {(hhSyncResult.derivation.requirementsCreated.length > 0 || hhSyncResult.derivation.mismatchesFlagged.length > 0) && (
-                  <div className="mt-2 pt-2 border-t border-gray-100 flex flex-wrap gap-2">
-                    {hhSyncResult.derivation.requirementsCreated.length > 0 && (
-                      <span className="text-xs text-green-600">
-                        ✓ Auto-created: {hhSyncResult.derivation.requirementsCreated.join(', ')}
-                      </span>
-                    )}
-                    {hhSyncResult.derivation.mismatchesFlagged.length > 0 && (
-                      <span className="text-xs text-amber-600">
-                        ⚠ HH changed: {hhSyncResult.derivation.mismatchesFlagged.join(', ')}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
         </div>
       )}
 
@@ -3792,8 +3697,9 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   );
 }
 
-function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
+function JobPrepChecklist({ jobId, hhJobNumber, derivedFlags, seatAvailability }: {
   jobId: string;
+  hhJobNumber?: number | null;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
     seat_config: 'round_table' | 'forward_facing' | null;
@@ -3815,6 +3721,19 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+
+  // Click outside to dismiss Add Requirement menu
+  useEffect(() => {
+    if (!showAddMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
+        setShowAddMenu(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showAddMenu]);
 
   useEffect(() => {
     loadAll();
@@ -3949,7 +3868,7 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
           )}
         </div>
 
-        <div className="relative">
+        <div className="relative" ref={addMenuRef}>
           <button
             onClick={() => setShowAddMenu(!showAddMenu)}
             className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700"
@@ -4027,6 +3946,7 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
                   derivedFlags={derivedFlags}
                   seatAvailability={seatAvailability}
                   jobId={jobId}
+                  hhJobNumber={hhJobNumber}
                   isVanAndDriver={isVanAndDriver}
                   onStatusChange={changeStatus}
                   onAdvanceStep={advanceStep}
@@ -4047,6 +3967,7 @@ function JobPrepChecklist({ jobId, derivedFlags, seatAvailability }: {
                       derivedFlags={derivedFlags}
                       isNested
                       jobId={jobId}
+                      hhJobNumber={hhJobNumber}
                       onStatusChange={changeStatus}
                       onAdvanceStep={advanceStep}
                       onRemove={removeRequirement}
