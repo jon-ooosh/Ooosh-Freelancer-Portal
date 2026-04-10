@@ -123,16 +123,43 @@ function formatDate(dateStr: string) {
   return new Date(dateStr).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
+interface BacklineStats {
+  jobCount: number;
+  notStarted?: number;
+  inProgress?: number;
+  done?: number;
+  problem?: number;
+  totalItems: number;
+  totalPrepMins?: number;
+  totalDeprepMins?: number;
+}
+
+interface BacklineOverview {
+  goingOut: { stats: BacklineStats };
+  returning: { stats: BacklineStats };
+}
+
+function formatPrepTime(mins: number): string {
+  if (mins === 0) return '0m';
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 export default function DashboardPage() {
   const user = useAuthStore((s) => s.user);
   const [data, setData] = useState<DashboardData | null>(null);
+  const [backlineData, setBacklineData] = useState<BacklineOverview | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.get<DashboardData>('/dashboard')
-      .then(setData)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    Promise.all([
+      api.get<DashboardData>('/dashboard').then(setData).catch(console.error),
+      api.get<{ data: BacklineOverview }>('/backline/overview')
+        .then(d => setBacklineData(d.data))
+        .catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, []);
 
   if (loading) return <div className="text-center py-12 text-gray-500">Loading Command Centre...</div>;
@@ -500,6 +527,40 @@ export default function DashboardPage() {
               </div>
             )}
           </div>
+
+          {/* Backline Widget */}
+          {backlineData && (backlineData.goingOut.stats.jobCount > 0 || backlineData.returning.stats.jobCount > 0) && (
+            <Link to="/operations/backline" className="block bg-white rounded-xl shadow-sm border border-gray-200 p-5 hover:border-gray-300 transition-colors">
+              <h2 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                <span>🎸</span> Backline — Next 7 Days
+              </h2>
+              <div className="space-y-2">
+                {backlineData.goingOut.stats.jobCount > 0 && (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-600">
+                      <span className="font-semibold text-gray-900">{backlineData.goingOut.stats.jobCount}</span> job{backlineData.goingOut.stats.jobCount !== 1 ? 's' : ''} going out
+                      {(backlineData.goingOut.stats.notStarted || 0) > 0 && (
+                        <span className="text-amber-600 ml-1">({backlineData.goingOut.stats.notStarted} not started)</span>
+                      )}
+                    </span>
+                    <span className="text-gray-500">
+                      ~{backlineData.goingOut.stats.totalItems} items · {formatPrepTime(backlineData.goingOut.stats.totalPrepMins || 0)} prep
+                    </span>
+                  </div>
+                )}
+                {backlineData.returning.stats.jobCount > 0 && (
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-600">
+                      <span className="font-semibold text-gray-900">{backlineData.returning.stats.jobCount}</span> job{backlineData.returning.stats.jobCount !== 1 ? 's' : ''} coming back
+                    </span>
+                    <span className="text-gray-500">
+                      ~{backlineData.returning.stats.totalItems} items · {formatPrepTime(backlineData.returning.stats.totalDeprepMins || 0)} de-prep
+                    </span>
+                  </div>
+                )}
+              </div>
+            </Link>
+          )}
 
           {/* Quick Actions */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">

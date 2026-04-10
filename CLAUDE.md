@@ -788,7 +788,7 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 Aggregate views on the Dashboard page — click through to individual jobs from each widget.
 - [ ] Transport overview widget: all jobs with transport needs, who's driving, when, where
 - [ ] Crew overview widget: who's assigned where this week, availability gaps
-- [ ] Backline overview widget: jobs with backline, prep status
+- [x] Backline overview widget: jobs with backline, prep status (going out + returning, item counts, prep times)
 - [ ] **Prep time estimates:** "4 vehicles need prepping today, est. 5 hours" (from `preptimemins` custom field on HH items, split by category)
 - [ ] Incoming deliveries widget: what's arriving today across all jobs
 - [ ] Carnet overview widget: outstanding carnets, return tracking
@@ -799,11 +799,14 @@ Aggregate views on the Dashboard page — click through to individual jobs from 
 
 ##### Stream 3: Backline Module
 Backline detection is HH-derived (items in backline categories auto-create the requirement). Backline *management* (prep status, issues, de-prep) lives in OP.
-- [ ] Backline requirement auto-detected from HH line items (backline category)
+- [x] Backline requirement auto-detected from HH line items (backline category)
+- [x] Backline status labels: Not Started / Working On It / Done / Problem
+- [x] Backline prep/de-prep time estimates from `preptimemins` custom field
+- [x] Global backline overview page at `/operations/backline` — going out + returning stats, per-job rows with item counts and prep times
+- [x] Backline overview API (`GET /api/backline/overview`) — 7-day aggregate stats
+- [x] Dashboard backline widget — headline summary with click-through to backline page
 - [ ] Backline detail section on job (item list from HH, prep status per item in OP)
-- [ ] Backline prep/de-prep time estimates from `preptimemins` custom field
 - [ ] Backline issues tracking (missing items, damage — similar pattern to vehicle issues)
-- [ ] Per-job sections + global backline board view
 
 ##### Stream 3b: Sub-Hires Module (OP-Only)
 Sub-hire tracking lives entirely in OP. HH's PO/shortage method is too clumsy (custom items always show short).

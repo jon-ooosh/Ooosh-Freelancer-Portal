@@ -36,6 +36,7 @@ const navItems: NavItem[] = [
     label: 'Operations',
     children: [
       { path: '/operations/transport', label: 'Crew & Transport' },
+      { path: '/operations/backline', label: 'Backline' },
     ],
   },
   {

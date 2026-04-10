@@ -103,6 +103,12 @@ export const PREP_STATUS_CONFIG: Record<string, { label: string; colour: string;
 
 export const PREP_STATUS_ORDER: JobRequirement['status'][] = ['not_started', 'in_progress', 'done', 'blocked'];
 
+// Type-specific status label overrides (same underlying statuses, friendlier names per context)
+const TYPE_STATUS_LABELS: Record<string, Record<string, string>> = {
+  backline: { not_started: 'Not Started', in_progress: 'Working On It', done: 'Done', blocked: 'Problem' },
+  rehearsal: { not_started: 'Not Started', in_progress: 'In Progress', done: 'Done', blocked: 'Problem' },
+};
+
 const EXCESS_STATUS_LABELS: Record<string, { label: string; colour: string }> = {
   needed:                { label: 'Needed',            colour: 'text-amber-600' },
   not_required:          { label: 'Not Required',      colour: 'text-gray-500' },
@@ -154,6 +160,7 @@ export default function RequirementCard({
   onReload?: () => void;
 }) {
   const [showStatusMenu, setShowStatusMenu] = useState(false);
+  const [dropdownAbove, setDropdownAbove] = useState(false);
   const [showEmailPicker, setShowEmailPicker] = useState(false);
   const [emailContacts, setEmailContacts] = useState<EmailContact[]>([]);
   const [selectedEmails, setSelectedEmails] = useState<Set<string>>(new Set());
@@ -172,6 +179,7 @@ export default function RequirementCard({
 
   const isSuspendedByVD = req.notes?.includes('[Suspended: Van & Driver]') || false;
   const statusConfig = PREP_STATUS_CONFIG[req.status] || PREP_STATUS_CONFIG.not_started;
+  const typeLabels = TYPE_STATUS_LABELS[req.requirement_type];
   const label = req.custom_label || req.type_label;
 
   // Load hire form and excess data for nested cards
@@ -333,22 +341,19 @@ export default function RequirementCard({
                   const lastSent = sentMatch ? sentMatch[sentMatch.length - 1].match(/(\d{2}\/\d{2}\/\d{4})/)?.[1] : null;
 
                   return (
-                    <div className="flex items-center gap-2 flex-wrap text-xs">
+                    <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
                       {hasSentNote && (
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-200">
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                          </svg>
-                          Sent{lastSent ? ` ${lastSent}` : ''}
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">
+                          ✓ Sent{lastSent ? ` ${lastSent}` : ''}
                         </span>
                       )}
                       {received > 0 && (
-                        <span className="px-1.5 py-0.5 rounded border bg-green-50 text-green-700 border-green-200">
+                        <span className="px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
                           {received} received
                         </span>
                       )}
                       {referralCount > 0 && (
-                        <span className="px-1.5 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">
+                        <span className="px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">
                           {referralCount} referral{referralCount !== 1 ? 's' : ''}
                         </span>
                       )}
@@ -377,9 +382,9 @@ export default function RequirementCard({
                 )}
                 <button
                   onClick={openEmailPicker}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-ooosh-600 bg-ooosh-50 border border-ooosh-200 rounded hover:bg-ooosh-100 transition-colors"
+                  className="inline-flex items-center gap-1.5 mt-1 px-3 py-1 text-xs font-semibold text-white bg-ooosh-600 rounded-md shadow-sm hover:bg-ooosh-700 active:bg-ooosh-800 transition-colors"
                 >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                   </svg>
                   {req.notes?.includes('Hire form email sent') ? 'Send again / Chase' : 'Send hire form'}
@@ -470,16 +475,22 @@ export default function RequirementCard({
           {!isContextualStatus && (
             <div className="relative" ref={statusMenuRef}>
               <button
-                onClick={() => setShowStatusMenu(!showStatusMenu)}
+                onClick={() => {
+                  if (!showStatusMenu && statusMenuRef.current) {
+                    const rect = statusMenuRef.current.getBoundingClientRect();
+                    setDropdownAbove(rect.bottom + 180 > window.innerHeight);
+                  }
+                  setShowStatusMenu(!showStatusMenu);
+                }}
                 className={`inline-flex px-3 py-1 rounded text-xs font-medium ${statusConfig.bg} ${statusConfig.colour} cursor-pointer hover:opacity-80 transition-opacity`}
               >
-                {statusConfig.label}
+                {typeLabels?.[req.status] || statusConfig.label}
                 <svg className="w-3 h-3 ml-1 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                 </svg>
               </button>
               {showStatusMenu && (
-                <div className="absolute right-0 mt-1 w-36 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1">
+                <div className={`absolute right-0 w-36 bg-white rounded-lg shadow-lg border border-gray-200 z-10 py-1 ${dropdownAbove ? 'bottom-full mb-1' : 'mt-1'}`}>
                   {PREP_STATUS_ORDER.map((s) => {
                     const sc = PREP_STATUS_CONFIG[s];
                     return (
@@ -489,7 +500,7 @@ export default function RequirementCard({
                         className={`w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 ${req.status === s ? 'font-bold' : ''}`}
                       >
                         <span className={`w-2 h-2 rounded-full ${sc.bg.replace('100', '500')}`} />
-                        {sc.label}
+                        {typeLabels?.[s] || sc.label}
                       </button>
                     );
                   })}
