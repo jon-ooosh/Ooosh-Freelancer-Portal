@@ -17,6 +17,10 @@ const VALID_STATUSES = ['not_started', 'in_progress', 'done', 'blocked'] as cons
 router.get('/job/:jobId', async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
+    const phase = req.query.phase as string | undefined;
+    const phaseFilter = phase && ['pre_hire', 'post_hire'].includes(phase)
+      ? `AND jr.phase = '${phase}'`
+      : '';
     const result = await query(
       `SELECT jr.*,
               rtd.label AS type_label,
@@ -27,7 +31,7 @@ router.get('/job/:jobId', async (req: AuthRequest, res: Response) => {
        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
        LEFT JOIN users u ON u.id = jr.assigned_to
        LEFT JOIN people p ON p.id = u.person_id
-       WHERE jr.job_id = $1
+       WHERE jr.job_id = $1 ${phaseFilter}
        ORDER BY jr.sort_order, rtd.sort_order, jr.created_at`,
       [jobId]
     );
@@ -83,12 +87,13 @@ const addRequirementSchema = z.object({
   current_step: z.string().optional(),
   source: z.string().optional(),
   source_id: z.string().uuid().optional(),
+  phase: z.enum(['pre_hire', 'post_hire']).optional(),
 });
 
 router.post('/job/:jobId', validate(addRequirementSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
-    const { requirement_type, custom_label, notes, assigned_to, due_date, status, current_step, source, source_id } = req.body;
+    const { requirement_type, custom_label, notes, assigned_to, due_date, status, current_step, source, source_id, phase } = req.body;
 
     // Verify the requirement type exists
     const typeCheck = await query('SELECT type, steps FROM requirement_type_definitions WHERE type = $1', [requirement_type]);
@@ -96,14 +101,15 @@ router.post('/job/:jobId', validate(addRequirementSchema), async (req: AuthReque
       return res.status(400).json({ error: `Unknown requirement type: ${requirement_type}` });
     }
 
-    // For non-custom types, check uniqueness
+    // For non-custom types, check uniqueness within the same phase
+    const reqPhase = phase || 'pre_hire';
     if (requirement_type !== 'custom') {
       const existing = await query(
-        'SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = $2',
-        [jobId, requirement_type]
+        'SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 AND phase = $3',
+        [jobId, requirement_type, reqPhase]
       );
       if (existing.rows.length > 0) {
-        return res.status(409).json({ error: `Requirement type '${requirement_type}' already exists for this job` });
+        return res.status(409).json({ error: `Requirement type '${requirement_type}' already exists for this job (${reqPhase})` });
       }
     }
 
@@ -122,12 +128,12 @@ router.post('/job/:jobId', validate(addRequirementSchema), async (req: AuthReque
     );
 
     const result = await query(
-      `INSERT INTO job_requirements (job_id, requirement_type, custom_label, notes, assigned_to, due_date, status, current_step, source, source_id, sort_order, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO job_requirements (job_id, requirement_type, custom_label, notes, assigned_to, due_date, status, current_step, source, source_id, sort_order, created_by, phase)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [jobId, requirement_type, custom_label || null, notes || null, assigned_to || null, due_date || null,
        status || 'not_started', initialStep || null, source || 'manual', source_id || null,
-       maxOrder.rows[0].next_order, req.user!.id]
+       maxOrder.rows[0].next_order, req.user!.id, reqPhase]
     );
 
     res.status(201).json({ data: result.rows[0] });

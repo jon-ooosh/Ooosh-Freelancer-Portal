@@ -142,10 +142,11 @@ interface BacklineOverview {
 }
 
 function formatPrepTime(mins: number): string {
-  if (mins === 0) return '0m';
-  if (mins < 60) return `${mins}m`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
+  if (mins === 0) return '—';
+  const rounded = Math.ceil(mins / 15) * 15;
+  if (rounded < 60) return `${rounded}m`;
+  const h = Math.floor(rounded / 60);
+  const m = rounded % 60;
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 

@@ -24,14 +24,14 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
     const nowStr = now.toISOString().slice(0, 10);
     const endStr = endDate.toISOString().slice(0, 10);
 
-    // Jobs going out within the period with backline requirements
+    // Jobs going out within the period with pre_hire backline requirements
     const goingOutResult = await query(
       `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status,
               jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
               j.hh_derived_flags
        FROM jobs j
-       JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline'
+       JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
        WHERE j.is_deleted = false
          AND j.job_date >= $1
          AND j.job_date <= $2
@@ -40,19 +40,19 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
       [nowStr, endStr]
     );
 
-    // Jobs returning within the period (need de-prep)
+    // Jobs returning within the period — prefer post_hire backline if exists, fall back to pre_hire
     const returningResult = await query(
-      `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
+      `SELECT DISTINCT ON (j.id) j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status,
               jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
-              j.hh_derived_flags
+              j.hh_derived_flags, jr.phase
        FROM jobs j
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline'
        WHERE j.is_deleted = false
          AND j.return_date >= $1
          AND j.return_date <= $2
          AND j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned', 'prepped', 'confirmed')
-       ORDER BY j.return_date ASC`,
+       ORDER BY j.id, jr.phase DESC, j.return_date ASC`,
       [nowStr, endStr]
     );
 
