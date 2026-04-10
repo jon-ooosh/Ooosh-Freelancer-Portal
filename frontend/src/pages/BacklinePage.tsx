@@ -117,8 +117,8 @@ export default function BacklinePage() {
         const updatedOut = update(prev.goingOut.jobs);
         const updatedReturn = update(prev.returning.jobs);
         return {
-          goingOut: { stats: recalcStats(updatedOut, 'out'), jobs: updatedOut },
-          returning: { stats: recalcStats(updatedReturn, 'return'), jobs: updatedReturn },
+          goingOut: { stats: recalcStats(updatedOut), jobs: updatedOut },
+          returning: { stats: recalcStats(updatedReturn), jobs: updatedReturn },
         };
       });
     } catch (err) {
