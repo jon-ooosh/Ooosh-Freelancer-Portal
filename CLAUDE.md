@@ -767,12 +767,19 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
   - [x] Derived flags endpoint: `GET /api/hirehop/jobs/:jobId/derived-flags`
   - [x] Van & Driver toggle: `PATCH /api/hirehop/jobs/:jobId/van-and-driver`
   - [x] Wired into 30-min scheduled sync + HH webhook handler (job.updated)
-  - [ ] Frontend: "Sync now" button on Job Detail + auto-sync on page load
-  - [ ] Frontend: Seat config display on Prep Checklist + Drivers & Vehicles tab
-  - [ ] Frontend: `seat_layout` field on vehicle detail page (Premium vans)
-  - [ ] Frontend: Van & Driver toggle button on Job Detail
-- [ ] On-demand job sync ("Sync now" button + auto-sync on Job Detail page open)
-- [ ] Mismatch flagging (HH changed since requirement was last updated/marked done)
+  - [x] Frontend: "Sync now" button on Job Detail + auto-sync on page load
+  - [x] Frontend: Seat config display on Prep Checklist + Drivers & Vehicles tab
+  - [x] Frontend: `seat_layout` field on vehicle detail page (Premium vans)
+  - [x] Frontend: Van & Driver toggle button on Job Detail
+  - [x] Reusable `RequirementCard` component (`frontend/src/components/RequirementCard.tsx`)
+  - [x] Vehicle card with nested hire_forms + excess (indented under vehicle)
+  - [x] Hire form "Send" button with contact picker (email/name checkboxes, send/chase modes)
+  - [x] Hire form email endpoint: `POST /api/hire-forms/send-email` + `GET /api/hire-forms/email-contacts/:jobId`
+  - [x] Hire form auto-email scheduler (daily 09:00): 10-day initial, 5-day chase
+  - [x] Hire form on confirmation: auto-sends when job confirmed with <10 days to start
+  - [x] Stale requirement cleanup: removes auto-requirements not on HH, flags manual ones
+- [x] On-demand job sync ("Sync now" button + auto-sync on Job Detail page open)
+- [x] Mismatch flagging (HH changed since requirement was last updated/marked done)
 
 ##### Stream 2: Global Operations Dashboard
 Aggregate views on the Dashboard page — click through to individual jobs from each widget.
