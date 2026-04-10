@@ -41,6 +41,10 @@ const BACKLINE_CATEGORIES = [
   405,
   // Backline accessories (stands, cases, fans, valves)
   406, 407, 408, 409, 410,
+  // PA / Sound — included because operationally these are prepped alongside backline
+  411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428,
+  // DJ
+  429, 430, 431,
 ];
 
 // PA / Sound categories (not backline — separate operational area)
