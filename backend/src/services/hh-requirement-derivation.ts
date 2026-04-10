@@ -260,9 +260,11 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         notes: `${flags.vehicle_count} vehicle(s) — hire forms required`,
         snapshot: items.filter(i => i.CATEGORY_ID === VEHICLE_CATEGORY && i.kind === 2),
       });
+      // Restore if previously suspended by V&D toggle
+      await restoreSuspendedRequirement(client, jobId, 'hire_forms');
     } else if (isVanAndDriver) {
-      // If van & driver is set, remove auto hire_forms if they exist
-      await removeAutoRequirementIfExists(client, jobId, 'hire_forms');
+      // Soft-suspend hire_forms (preserve data, mark as not required)
+      await suspendRequirementForVanAndDriver(client, jobId, 'hire_forms');
     }
 
     // ── Insurance excess (only if hire forms needed) ──
@@ -271,8 +273,9 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         notes: 'Insurance excess required for self-drive hire',
         snapshot: null,
       });
+      await restoreSuspendedRequirement(client, jobId, 'excess');
     } else if (isVanAndDriver) {
-      await removeAutoRequirementIfExists(client, jobId, 'excess');
+      await suspendRequirementForVanAndDriver(client, jobId, 'excess');
     }
 
     // ── Backline ──
@@ -306,6 +309,8 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
     for (const reqType of DETECTABLE_TYPES) {
       if (activeTypes.has(reqType)) continue; // Still on HH — skip
+      // Skip hire_forms/excess when in V&D mode — they're suspended, not stale
+      if (isVanAndDriver && (reqType === 'hire_forms' || reqType === 'excess')) continue;
       // Check if an auto requirement exists for this type
       const existing = await client.query(
         `SELECT id, is_auto, status FROM job_requirements
@@ -440,12 +445,65 @@ async function upsertAutoRequirement(
   result.requirementsUpdated.push(requirementType);
 }
 
-/** Remove an auto requirement if it exists and hasn't been touched by staff */
-async function removeAutoRequirementIfExists(client: any, jobId: string, requirementType: string): Promise<void> {
-  await client.query(
-    `DELETE FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND status = 'not_started'`,
+/**
+ * Soft-suspend a requirement when switching to Van & Driver.
+ * Instead of deleting, marks it as suspended so data persists
+ * and can be restored if the toggle was accidental.
+ */
+async function suspendRequirementForVanAndDriver(client: any, jobId: string, requirementType: string): Promise<void> {
+  // Only suspend auto-created requirements that aren't already suspended
+  const existing = await client.query(
+    `SELECT id, status, notes FROM job_requirements
+     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true`,
     [jobId, requirementType]
+  );
+  if (existing.rows.length === 0) return;
+  const req = existing.rows[0];
+  // Already suspended — don't overwrite
+  if (req.notes?.includes('[Suspended: Van & Driver]')) return;
+
+  // Preserve the previous status in notes so we can restore it
+  const prevStatusNote = `[Suspended: Van & Driver] Previous status: ${req.status}`;
+  const updatedNotes = req.notes
+    ? `${req.notes}\n${prevStatusNote}`
+    : prevStatusNote;
+
+  await client.query(
+    `UPDATE job_requirements SET status = 'blocked',
+       notes = $1, updated_at = NOW()
+     WHERE id = $2`,
+    [updatedNotes, req.id]
+  );
+}
+
+/**
+ * Restore a requirement that was suspended by Van & Driver toggle.
+ * Puts it back to its previous status.
+ */
+async function restoreSuspendedRequirement(client: any, jobId: string, requirementType: string): Promise<void> {
+  const existing = await client.query(
+    `SELECT id, notes FROM job_requirements
+     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND status = 'blocked'`,
+    [jobId, requirementType]
+  );
+  if (existing.rows.length === 0) return;
+  const req = existing.rows[0];
+  if (!req.notes?.includes('[Suspended: Van & Driver]')) return;
+
+  // Extract previous status from notes
+  const match = req.notes.match(/\[Suspended: Van & Driver\] Previous status: (\w+)/);
+  const restoredStatus = match?.[1] || 'not_started';
+
+  // Remove the suspension note
+  const cleanedNotes = req.notes
+    .replace(/\n?\[Suspended: Van & Driver\] Previous status: \w+/, '')
+    .trim() || null;
+
+  await client.query(
+    `UPDATE job_requirements SET status = $1,
+       notes = $2, updated_at = NOW()
+     WHERE id = $3`,
+    [restoredStatus, cleanedNotes, req.id]
   );
 }
 

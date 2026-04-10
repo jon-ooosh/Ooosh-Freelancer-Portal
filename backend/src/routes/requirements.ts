@@ -240,10 +240,34 @@ router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest,
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const result = await query('DELETE FROM job_requirements WHERE id = $1 RETURNING id', [id]);
-    if (result.rows.length === 0) {
+    const reason = (req.query.reason as string) || null;
+
+    // Fetch the requirement before deleting (for audit trail)
+    const existing = await query(
+      `SELECT jr.*, rtd.label AS type_label
+       FROM job_requirements jr
+       JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
+       WHERE jr.id = $1`,
+      [id]
+    );
+    if (existing.rows.length === 0) {
       return res.status(404).json({ error: 'Requirement not found' });
     }
+    const reqData = existing.rows[0];
+
+    // Delete the requirement
+    await query('DELETE FROM job_requirements WHERE id = $1', [id]);
+
+    // Log to activity timeline (interactions table)
+    const content = reason
+      ? `Removed requirement: ${reqData.type_label || reqData.requirement_type} — Reason: ${reason}`
+      : `Removed requirement: ${reqData.type_label || reqData.requirement_type}`;
+    await query(
+      `INSERT INTO interactions (type, content, job_id, created_by)
+       VALUES ('note', $1, $2, $3)`,
+      [content, reqData.job_id, req.user!.id]
+    );
+
     res.json({ data: { deleted: true } });
   } catch (err) {
     console.error('Error deleting requirement:', err);

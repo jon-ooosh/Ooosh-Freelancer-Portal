@@ -774,9 +774,12 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
   - [x] Reusable `RequirementCard` component (`frontend/src/components/RequirementCard.tsx`)
   - [x] Vehicle card with nested hire_forms + excess (indented under vehicle)
   - [x] Hire form "Send" button with contact picker (email/name checkboxes, send/chase modes)
+  - [x] Hire form card status enrichment: sent date badge, received count, referral count
   - [x] Hire form email endpoint: `POST /api/hire-forms/send-email` + `GET /api/hire-forms/email-contacts/:jobId`
   - [x] Hire form auto-email scheduler (daily 09:00): 10-day initial, 5-day chase
   - [x] Hire form on confirmation: auto-sends when job confirmed with <10 days to start
+  - [x] Van & Driver toggle: soft-suspends hire_forms/excess requirements (preserves data, restores on toggle back)
+  - [x] Requirement deletion: confirmation dialog with required reason for hire_forms/excess, logged to activity timeline
   - [x] Stale requirement cleanup: removes auto-requirements not on HH, flags manual ones
 - [x] On-demand job sync ("Sync now" button + auto-sync on Job Detail page open)
 - [x] Mismatch flagging (HH changed since requirement was last updated/marked done)
