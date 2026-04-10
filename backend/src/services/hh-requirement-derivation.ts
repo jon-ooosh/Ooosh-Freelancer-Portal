@@ -25,44 +25,43 @@ const VEHICLE_ACCESSORIES_CATEGORY = 371; // Vehicle accessories (rear seats, ad
 const REHEARSAL_CATEGORY = 450;         // Rehearsal Rooms
 const STORAGE_CATEGORY = 449;           // Storage Space
 
-// Backline = everything a band uses on stage. Multiple parent groups:
-// GUITARS (372): 373-378, BASSES (379): 380-384, DRUMS (385): 386-398,
-// KEYBOARDS (399): 400-404, WOODWIND (405), BACKLINE ACCESSORIES (406): 407-410
+// "Backline" in Ooosh's operational context = ALL equipment the warehouse preps.
+// This includes instruments, PA/sound, DJ, lighting, staging, power, video, accessories.
+// Essentially everything EXCEPT: vehicles (370-371), rehearsal rooms (450), storage (449).
+// We use an inclusive approach: any category >= 372 that isn't a vehicle/rehearsal/storage.
 const BACKLINE_CATEGORIES = [
-  // Guitars
+  // Guitars (372-378)
   372, 373, 374, 375, 376, 377, 378,
-  // Basses
+  // Basses (379-384)
   379, 380, 381, 382, 383, 384,
-  // Drums
+  // Drums (385-398)
   385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398,
-  // Keyboards
+  // Keyboards (399-404)
   399, 400, 401, 402, 403, 404,
-  // Woodwind
+  // Woodwind (405)
   405,
-  // Backline accessories (stands, cases, fans, valves)
+  // Backline accessories — stands, cases, fans, valves (406-410)
   406, 407, 408, 409, 410,
-  // PA / Sound — included because operationally these are prepped alongside backline
+  // PA / Sound (411-428)
   411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428,
-  // DJ
+  // DJ (429-431)
   429, 430, 431,
+  // Lighting (432-438)
+  432, 433, 434, 435, 436, 437, 438,
+  // Power (439-443)
+  439, 440, 441, 442, 443,
+  // Staging (444-448)
+  444, 445, 446, 447, 448,
+  // Video (451-453)
+  451, 452, 453,
 ];
 
-// PA / Sound categories (not backline — separate operational area)
+// Keep separate arrays for sanity-check flags (has_pa, has_lighting, etc.)
 const PA_CATEGORIES = [411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428];
-
-// DJ categories
 const DJ_CATEGORIES = [429, 430, 431];
-
-// Lighting categories
 const LIGHTING_CATEGORIES = [432, 433, 434, 435, 436, 437, 438];
-
-// Power categories
 const POWER_CATEGORIES = [439, 440, 441, 442, 443];
-
-// Staging categories
 const STAGING_CATEGORIES = [444, 445, 446, 447, 448];
-
-// Video categories
 const VIDEO_CATEGORIES = [451, 452, 453];
 
 // ── Known AUTOPULL IDs for prompts ───────────────────────────────────────
