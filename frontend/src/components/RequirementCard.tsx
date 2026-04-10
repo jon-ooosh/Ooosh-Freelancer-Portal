@@ -11,7 +11,7 @@
  * - Action buttons (send hire form, van & driver toggle)
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -227,8 +227,22 @@ export default function RequirementCard({
     }
   }
 
-  // Determine if this is a hire_forms or excess card that should show contextual status instead of dropdown
-  const isContextualStatus = isNested && (req.requirement_type === 'hire_forms' || req.requirement_type === 'excess');
+  // Hide status dropdown for contextual cards (hire_forms, excess, vehicle with nested children)
+  const isContextualStatus = (isNested && (req.requirement_type === 'hire_forms' || req.requirement_type === 'excess'))
+    || req.requirement_type === 'vehicle';
+
+  // Click outside to dismiss status dropdown
+  const statusMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showStatusMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (statusMenuRef.current && !statusMenuRef.current.contains(e.target as Node)) {
+        setShowStatusMenu(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showStatusMenu]);
 
   // ── Render ─────────────────────────────────────────────────────────
 
@@ -407,7 +421,7 @@ export default function RequirementCard({
 
           {/* Status dropdown — only for non-contextual cards */}
           {!isContextualStatus && (
-            <div className="relative">
+            <div className="relative" ref={statusMenuRef}>
               <button
                 onClick={() => setShowStatusMenu(!showStatusMenu)}
                 className={`inline-flex px-3 py-1 rounded text-xs font-medium ${statusConfig.bg} ${statusConfig.colour} cursor-pointer hover:opacity-80 transition-opacity`}
