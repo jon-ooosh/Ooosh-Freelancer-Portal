@@ -132,6 +132,8 @@ interface BacklineStats {
   totalItems: number;
   totalPrepMins?: number;
   totalDeprepMins?: number;
+  remainingPrepMins?: number;
+  remainingDeprepMins?: number;
 }
 
 interface BacklineOverview {
@@ -534,28 +536,39 @@ export default function DashboardPage() {
               <h2 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
                 <span>🎸</span> Backline — Next 7 Days
               </h2>
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {backlineData.goingOut.stats.jobCount > 0 && (
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-gray-600">
-                      <span className="font-semibold text-gray-900">{backlineData.goingOut.stats.jobCount}</span> job{backlineData.goingOut.stats.jobCount !== 1 ? 's' : ''} going out
-                      {(backlineData.goingOut.stats.notStarted || 0) > 0 && (
-                        <span className="text-amber-600 ml-1">({backlineData.goingOut.stats.notStarted} not started)</span>
-                      )}
-                    </span>
-                    <span className="text-gray-500">
-                      ~{backlineData.goingOut.stats.totalItems} items · {formatPrepTime(backlineData.goingOut.stats.totalPrepMins || 0)} prep
-                    </span>
+                  <div>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-gray-600">
+                        <span className="font-semibold text-gray-900">{backlineData.goingOut.stats.jobCount}</span> going out
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-purple-600 font-medium">{backlineData.goingOut.stats.totalItems} items</span>
+                        <span className="text-blue-600 font-medium">{formatPrepTime(backlineData.goingOut.stats.remainingPrepMins || 0)} remaining</span>
+                      </div>
+                    </div>
+                    {backlineData.goingOut.stats.jobCount > 0 && (
+                      <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden flex">
+                        {(backlineData.goingOut.stats.done || 0) > 0 && (
+                          <div className="bg-green-500" style={{ width: `${((backlineData.goingOut.stats.done || 0) / backlineData.goingOut.stats.jobCount) * 100}%` }} />
+                        )}
+                        {(backlineData.goingOut.stats.inProgress || 0) > 0 && (
+                          <div className="bg-amber-400" style={{ width: `${((backlineData.goingOut.stats.inProgress || 0) / backlineData.goingOut.stats.jobCount) * 100}%` }} />
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
                 {backlineData.returning.stats.jobCount > 0 && (
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-gray-600">
-                      <span className="font-semibold text-gray-900">{backlineData.returning.stats.jobCount}</span> job{backlineData.returning.stats.jobCount !== 1 ? 's' : ''} coming back
+                      <span className="font-semibold text-gray-900">{backlineData.returning.stats.jobCount}</span> coming back
                     </span>
-                    <span className="text-gray-500">
-                      ~{backlineData.returning.stats.totalItems} items · {formatPrepTime(backlineData.returning.stats.totalDeprepMins || 0)} de-prep
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-purple-600 font-medium">{backlineData.returning.stats.totalItems} items</span>
+                      <span className="text-blue-600 font-medium">{formatPrepTime(backlineData.returning.stats.remainingDeprepMins || 0)} de-prep</span>
+                    </div>
                   </div>
                 )}
               </div>

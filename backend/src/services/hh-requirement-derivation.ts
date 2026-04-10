@@ -132,10 +132,19 @@ export function deriveFlags(items: HHLineItem[]): DerivedFlags {
     }
 
     // ── Backline ──
-    if (BACKLINE_CATEGORIES.includes(item.CATEGORY_ID) && item.kind === 2 && !item.VIRTUAL) {
-      flags.has_backline = true;
-      flags.backline_item_count++;
-      flags.prep_time_by_category.backline += prepMins * Math.max(1, item.QUANTITY);
+    // Count physical items (non-virtual) for item count.
+    // But include ALL items (including virtual parents) for prep time,
+    // since preptimemins is often set on the stock type (virtual parent) not individual children.
+    if (BACKLINE_CATEGORIES.includes(item.CATEGORY_ID) && item.kind === 2) {
+      if (!item.VIRTUAL) {
+        flags.has_backline = true;
+        flags.backline_item_count++;
+      }
+      // Prep time from both virtual parents and physical items
+      if (prepMins > 0) {
+        flags.has_backline = true;
+        flags.prep_time_by_category.backline += prepMins * Math.max(1, item.QUANTITY);
+      }
     }
 
     // ── Rehearsal (category 450) ──
@@ -166,7 +175,8 @@ export function deriveFlags(items: HHLineItem[]): DerivedFlags {
     }
 
     // ── Accumulate total prep time ──
-    if (item.kind !== 0 && !item.VIRTUAL && prepMins > 0) {
+    // Include virtual items here — preptimemins is often on the parent stock type
+    if (item.kind !== 0 && prepMins > 0) {
       const qty = Math.max(1, item.QUANTITY);
       flags.total_prep_time_mins += prepMins * qty;
       // Assign to "other" if not already counted above
