@@ -32,6 +32,7 @@ export interface JobRequirement {
   hh_mismatch: boolean;
   hh_mismatch_detail: string | null;
   hh_item_snapshot: unknown[] | null;
+  phase: 'pre_hire' | 'post_hire';
   type_label: string;
   type_icon: string;
   type_steps: string[] | null;

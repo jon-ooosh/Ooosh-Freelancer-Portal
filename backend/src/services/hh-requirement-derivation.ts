@@ -324,10 +324,10 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       if (activeTypes.has(reqType)) continue; // Still on HH — skip
       // Skip hire_forms/excess when in V&D mode — they're suspended, not stale
       if (isVanAndDriver && (reqType === 'hire_forms' || reqType === 'excess')) continue;
-      // Check if an auto requirement exists for this type
+      // Check if an auto pre_hire requirement exists for this type
       const existing = await client.query(
         `SELECT id, is_auto, status FROM job_requirements
-         WHERE job_id = $1 AND requirement_type = $2`,
+         WHERE job_id = $1 AND requirement_type = $2 AND phase = 'pre_hire'`,
         [jobId, reqType]
       );
       if (existing.rows.length === 0) continue;
@@ -368,6 +368,49 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       [JSON.stringify(flags), jobId]
     );
 
+    // ── Auto-generate post-hire requirements ──
+    // When a job is dispatched (or has been dispatched), create post_hire
+    // backline requirement if one doesn't exist yet and there's backline on the job.
+    const jobStatus = await client.query(
+      `SELECT pipeline_status FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+    const status = jobStatus.rows[0]?.pipeline_status;
+    const isPostHirePhase = ['dispatched', 'returned_incomplete', 'returned', 'completed'].includes(status);
+
+    if (isPostHirePhase && flags.has_backline) {
+      const existingPostHire = await client.query(
+        `SELECT id FROM job_requirements
+         WHERE job_id = $1 AND requirement_type = 'backline' AND phase = 'post_hire'`,
+        [jobId]
+      );
+      if (existingPostHire.rows.length === 0) {
+        await client.query(
+          `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+           VALUES ($1, 'backline', 'not_started', $2, true, 'auto_post_hire', 'post_hire')`,
+          [jobId, `${flags.backline_item_count} item(s) — de-prep required`]
+        );
+        result.requirementsCreated.push('backline (post_hire)');
+      }
+    }
+
+    // Similarly for vehicles — post-hire check-in
+    if (isPostHirePhase && flags.has_vehicle && !isVanAndDriver) {
+      const existingPostVehicle = await client.query(
+        `SELECT id FROM job_requirements
+         WHERE job_id = $1 AND requirement_type = 'vehicle' AND phase = 'post_hire'`,
+        [jobId]
+      );
+      if (existingPostVehicle.rows.length === 0) {
+        await client.query(
+          `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+           VALUES ($1, 'vehicle', 'not_started', $2, true, 'auto_post_hire', 'post_hire')`,
+          [jobId, `${flags.vehicle_count} vehicle(s) — check-in required`]
+        );
+        result.requirementsCreated.push('vehicle (post_hire)');
+      }
+    }
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -402,19 +445,19 @@ async function upsertAutoRequirement(
   result: DerivationResult,
   data: { notes: string; snapshot: HHLineItem[] | null },
 ): Promise<void> {
-  // Check if requirement already exists
+  // Check if requirement already exists (pre_hire phase only — derivation creates pre-hire)
   const existing = await client.query(
     `SELECT id, is_auto, status, hh_item_snapshot, notes
      FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2`,
+     WHERE job_id = $1 AND requirement_type = $2 AND phase = 'pre_hire'`,
     [jobId, requirementType]
   );
 
   if (existing.rows.length === 0) {
-    // Create new auto requirement (existence already checked above)
+    // Create new auto requirement (pre_hire phase)
     const insertResult = await client.query(
-      `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, hh_item_snapshot)
-       VALUES ($1, $2, 'not_started', $3, true, 'hirehop_sync', $4)
+      `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, hh_item_snapshot, phase)
+       VALUES ($1, $2, 'not_started', $3, true, 'hirehop_sync', $4, 'pre_hire')
        RETURNING id`,
       [jobId, requirementType, data.notes, data.snapshot ? JSON.stringify(data.snapshot) : null]
     );
@@ -479,10 +522,10 @@ async function upsertAutoRequirement(
  * and can be restored if the toggle was accidental.
  */
 async function suspendRequirementForVanAndDriver(client: any, jobId: string, requirementType: string): Promise<void> {
-  // Only suspend auto-created requirements that aren't already suspended
+  // Only suspend auto-created pre_hire requirements that aren't already suspended
   const existing = await client.query(
     `SELECT id, status, notes FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true`,
+     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND phase = 'pre_hire'`,
     [jobId, requirementType]
   );
   if (existing.rows.length === 0) return;
@@ -511,7 +554,7 @@ async function suspendRequirementForVanAndDriver(client: any, jobId: string, req
 async function restoreSuspendedRequirement(client: any, jobId: string, requirementType: string): Promise<void> {
   const existing = await client.query(
     `SELECT id, notes FROM job_requirements
-     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND status = 'blocked'`,
+     WHERE job_id = $1 AND requirement_type = $2 AND is_auto = true AND status = 'blocked' AND phase = 'pre_hire'`,
     [jobId, requirementType]
   );
   if (existing.rows.length === 0) return;

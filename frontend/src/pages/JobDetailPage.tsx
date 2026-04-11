@@ -3721,6 +3721,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, derivedFlags, seatAvailability }
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
+  const [phase, setPhase] = useState<'pre_hire' | 'post_hire'>('pre_hire');
   const addMenuRef = useRef<HTMLDivElement>(null);
 
   // Click outside to dismiss Add Requirement menu
@@ -3741,13 +3742,13 @@ function JobPrepChecklist({ jobId, hhJobNumber, derivedFlags, seatAvailability }
     api.get<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/derived-flags`)
       .then(d => setIsVanAndDriver(d.isVanAndDriver || false))
       .catch(() => {});
-  }, [jobId]);
+  }, [jobId, phase]);
 
   async function loadAll() {
     setLoading(true);
     try {
       const [reqRes, typesRes, tmplRes] = await Promise.all([
-        api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}`),
+        api.get<{ data: JobRequirement[] }>(`/requirements/job/${jobId}?phase=${phase}`),
         api.get<{ data: RequirementTypeDef[] }>('/requirements/types'),
         api.get<{ data: RequirementTemplate[] }>('/requirements/templates'),
       ]);
@@ -3776,7 +3777,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, derivedFlags, seatAvailability }
 
   async function addRequirement(typeKey: string) {
     try {
-      await api.post(`/requirements/job/${jobId}`, { requirement_type: typeKey });
+      await api.post(`/requirements/job/${jobId}`, { requirement_type: typeKey, phase });
       await loadAll();
       setShowAddMenu(false);
     } catch (err: unknown) {
@@ -3851,10 +3852,29 @@ function JobPrepChecklist({ jobId, hhJobNumber, derivedFlags, seatAvailability }
 
   return (
     <div className="space-y-6">
-      {/* Header with progress */}
-      <div className="flex items-center justify-between">
+      {/* Header with phase toggle + progress */}
+      <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-4">
           <h3 className="text-lg font-semibold text-gray-900">Job Requirements</h3>
+          {/* Phase toggle */}
+          <div className="flex bg-gray-100 rounded-lg p-0.5">
+            <button
+              onClick={() => setPhase('pre_hire')}
+              className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                phase === 'pre_hire' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Pre-Hire
+            </button>
+            <button
+              onClick={() => setPhase('post_hire')}
+              className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${
+                phase === 'post_hire' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              Post-Hire
+            </button>
+          </div>
           {totalCount > 0 && (
             <div className="flex items-center gap-2">
               <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden">

@@ -57,11 +57,23 @@ const PERIOD_OPTIONS = [
   { value: 14, label: 'Next 14 Days' },
 ];
 
-function formatTime(mins: number): string {
+/** Round up to nearest 5 mins — used on per-job rows */
+function formatTimeJob(mins: number): string {
   if (mins === 0) return '—';
-  if (mins < 60) return `${mins}m`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
+  const rounded = Math.ceil(mins / 5) * 5;
+  if (rounded < 60) return `${rounded}m`;
+  const h = Math.floor(rounded / 60);
+  const m = rounded % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+/** Round up to nearest 15 mins — used on overview/summary cards */
+function formatTimeOverview(mins: number): string {
+  if (mins === 0) return '—';
+  const rounded = Math.ceil(mins / 15) * 15;
+  if (rounded < 60) return `${rounded}m`;
+  const h = Math.floor(rounded / 60);
+  const m = rounded % 60;
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
@@ -165,80 +177,81 @@ export default function BacklinePage() {
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-6 space-y-6">
-      {/* ── Header + Filters ── */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Backline</h1>
           <p className="text-sm text-gray-500 mt-0.5">Prep and de-prep overview</p>
         </div>
-        <div className="flex items-center gap-2">
-          {/* Period filter */}
-          <div className="flex bg-gray-100 rounded-lg p-0.5">
-            {PERIOD_OPTIONS.map(opt => (
-              <button
-                key={opt.value}
-                onClick={() => setDays(opt.value)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                  days === opt.value
-                    ? 'bg-white text-gray-900 shadow-sm'
-                    : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-          {/* Status filter */}
-          <div className="flex bg-gray-100 rounded-lg p-0.5">
+        <button
+          onClick={syncNow}
+          disabled={syncing}
+          className="px-3 py-1.5 text-xs font-medium bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50 transition-colors flex items-center gap-1.5 flex-shrink-0"
+        >
+          <svg className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          {syncing ? 'Syncing...' : 'Sync'}
+        </button>
+      </div>
+
+      {/* ── Filters — wrap on small screens ── */}
+      <div className="flex flex-wrap gap-2">
+        {/* Period */}
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          {PERIOD_OPTIONS.map(opt => (
             <button
-              onClick={() => setStatusFilter(null)}
-              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                !statusFilter ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              key={opt.value}
+              onClick={() => setDays(opt.value)}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                days === opt.value
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
               }`}
             >
-              All
+              {opt.label}
             </button>
-            {STATUS_ORDER.map(s => {
-              const sc = STATUS_CONFIG[s];
-              return (
-                <button
-                  key={s}
-                  onClick={() => setStatusFilter(statusFilter === s ? null : s)}
-                  className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${
-                    statusFilter === s ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  <span className={`w-2 h-2 rounded-full ${sc.dot}`} />
-                  {sc.label}
-                </button>
-              );
-            })}
-          </div>
-          {/* Direction filter */}
-          <div className="flex bg-gray-100 rounded-lg p-0.5">
-            {([['both', 'Both'], ['out', 'Going Out'], ['return', 'Coming Back']] as const).map(([val, lbl]) => (
+          ))}
+        </div>
+        {/* Direction */}
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          {([['both', 'Both'], ['out', 'Going Out'], ['return', 'Coming Back']] as const).map(([val, lbl]) => (
+            <button
+              key={val}
+              onClick={() => setDirection(val)}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                direction === val ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {lbl}
+            </button>
+          ))}
+        </div>
+        {/* Status */}
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          <button
+            onClick={() => setStatusFilter(null)}
+            className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              !statusFilter ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            All
+          </button>
+          {STATUS_ORDER.map(s => {
+            const sc = STATUS_CONFIG[s];
+            return (
               <button
-                key={val}
-                onClick={() => setDirection(val)}
-                className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                  direction === val ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                key={s}
+                onClick={() => setStatusFilter(statusFilter === s ? null : s)}
+                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+                  statusFilter === s ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                {lbl}
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sc.dot}`} />
+                {sc.label}
               </button>
-            ))}
-          </div>
-          {/* Sync button */}
-          <button
-            onClick={syncNow}
-            disabled={syncing}
-            className="px-3 py-1.5 text-xs font-medium bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50 transition-colors flex items-center gap-1.5"
-          >
-            <svg className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            {syncing ? 'Syncing...' : 'Sync'}
-          </button>
+            );
+          })}
         </div>
       </div>
 
@@ -273,7 +286,7 @@ export default function BacklinePage() {
                   <div className="text-[10px] text-purple-500 uppercase tracking-wider font-medium">Items</div>
                 </div>
                 <div className="bg-blue-50 rounded-lg p-3 text-center">
-                  <div className="text-2xl font-bold text-blue-700">{formatTime(goingOut.stats.remainingPrepMins || 0)}</div>
+                  <div className="text-2xl font-bold text-blue-700">{formatTimeOverview(goingOut.stats.remainingPrepMins || 0)}</div>
                   <div className="text-[10px] text-blue-500 uppercase tracking-wider font-medium">Remaining</div>
                 </div>
               </div>
@@ -349,7 +362,7 @@ export default function BacklinePage() {
                 <div className="text-[10px] text-purple-500 uppercase tracking-wider font-medium">Items</div>
               </div>
               <div className="bg-blue-50 rounded-lg p-3 text-center">
-                <div className="text-2xl font-bold text-blue-700">{formatTime(returning.stats.remainingDeprepMins || 0)}</div>
+                <div className="text-2xl font-bold text-blue-700">{formatTimeOverview(returning.stats.remainingDeprepMins || 0)}</div>
                 <div className="text-[10px] text-blue-500 uppercase tracking-wider font-medium">Remaining</div>
               </div>
             </div>
@@ -458,7 +471,7 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
               <span className="text-purple-600 font-medium">{job.itemCount} items</span>
             )}
             {timeMins > 0 && (
-              <span className="text-blue-600 font-medium">~{formatTime(timeMins)}</span>
+              <span className="text-blue-600 font-medium">~{formatTimeJob(timeMins)}</span>
             )}
           </div>
         </div>
