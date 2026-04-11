@@ -14,7 +14,7 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 router.use(authenticate);
-router.use(authorize('admin', 'manager', 'staff'));
+router.use(authorize('admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'));
 
 // HH statuses: 0=Enquiry, 1=Provisional, 2=Booked, 3=Prepped, 5=Dispatched,
 //              6=Returned Incomplete, 7=Returned, 11=Completed
@@ -35,6 +35,7 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
       `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
               jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
+              jr.hh_mismatch, jr.hh_mismatch_detail,
               j.hh_derived_flags
        FROM jobs j
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
@@ -47,19 +48,21 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
       [nowStr, endStr]
     );
 
-    // Jobs returning: HH status + date range
+    // Jobs returning: only jobs that have actually gone out (HH status >= 5 Dispatched)
+    // OR OP pipeline confirms they're out/returning. Excludes jobs still being prepped.
     const returningResult = await query(
       `SELECT DISTINCT ON (j.id) j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
               jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
+              jr.hh_mismatch, jr.hh_mismatch_detail,
               j.hh_derived_flags, jr.phase
        FROM jobs j
        JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline'
        WHERE j.is_deleted = false
          AND j.return_date >= $1
          AND j.return_date <= $2
-         AND (j.status IN (2, 3, 5, 6, 7)
-              OR j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned', 'prepped', 'confirmed'))
+         AND (j.status IN (5, 6, 7)
+              OR j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned'))
        ORDER BY j.id, jr.phase DESC`,
       [nowStr, endStr]
     );
@@ -140,6 +143,8 @@ interface BacklineJob {
   prepTimeMins: number;
   deprepTimeMins: number;
   effectivelyDone: boolean; // true if backline_status=done OR HH status >= prepped
+  hasMismatch: boolean;     // true if HH items changed since last action
+  mismatchDetail: string | null;
 }
 
 function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
@@ -163,6 +168,8 @@ function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
     prepTimeMins: flags?.prep_time_by_category?.backline || 0,
     deprepTimeMins: flags?.prep_time_by_category?.backline || 0,
     effectivelyDone,
+    hasMismatch: row.hh_mismatch === true,
+    mismatchDetail: row.hh_mismatch_detail || null,
   };
 }
 
