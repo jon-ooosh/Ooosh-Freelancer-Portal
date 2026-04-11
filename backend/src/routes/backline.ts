@@ -3,6 +3,9 @@
  *
  * Reads from job_requirements (type='backline') + jobs table + hh_derived_flags
  * to produce a warehouse-friendly overview of what needs prepping and de-prepping.
+ *
+ * Uses HireHop status (jobs.status integer) as primary filter since OP pipeline_status
+ * can lag behind HH — many jobs are confirmed in HH but still show as enquiry in OP.
  */
 
 import { Router, Response } from 'express';
@@ -13,7 +16,10 @@ const router = Router();
 router.use(authenticate);
 router.use(authorize('admin', 'manager', 'staff'));
 
-// ── Backline overview — aggregate stats for warehouse team ─────────────
+// HH statuses: 0=Enquiry, 1=Provisional, 2=Booked, 3=Prepped, 5=Dispatched,
+//              6=Returned Incomplete, 7=Returned, 11=Completed
+// For "going out" we want: Provisional(1), Booked(2), Prepped(3), Dispatched(5)
+// For "coming back" we want: Dispatched(5), Returned Incomplete(6), Returned(7), Booked(2), Prepped(3)
 
 router.get('/overview', async (req: AuthRequest, res: Response) => {
   try {
@@ -24,10 +30,10 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
     const nowStr = now.toISOString().slice(0, 10);
     const endStr = endDate.toISOString().slice(0, 10);
 
-    // Jobs going out within the period with pre_hire backline requirements
+    // Jobs going out: use HH status as primary filter (more reliable than OP pipeline_status)
     const goingOutResult = await query(
       `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
-              j.company_name, j.client_name, j.pipeline_status,
+              j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
               jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
               j.hh_derived_flags
        FROM jobs j
@@ -35,15 +41,16 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.job_date >= $1
          AND j.job_date <= $2
-         AND j.pipeline_status IN ('confirmed', 'prepped', 'provisional', 'dispatched')
+         AND (j.status IN (1, 2, 3, 5)
+              OR j.pipeline_status IN ('confirmed', 'prepped', 'provisional', 'dispatched'))
        ORDER BY j.job_date ASC`,
       [nowStr, endStr]
     );
 
-    // Jobs returning within the period — prefer post_hire backline if exists, fall back to pre_hire
+    // Jobs returning: HH status + date range
     const returningResult = await query(
       `SELECT DISTINCT ON (j.id) j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
-              j.company_name, j.client_name, j.pipeline_status,
+              j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
               jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
               j.hh_derived_flags, jr.phase
        FROM jobs j
@@ -51,37 +58,27 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.return_date >= $1
          AND j.return_date <= $2
-         AND j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned', 'prepped', 'confirmed')
-       ORDER BY j.id, jr.phase DESC, j.return_date ASC`,
+         AND (j.status IN (2, 3, 5, 6, 7)
+              OR j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned', 'prepped', 'confirmed'))
+       ORDER BY j.id, jr.phase DESC`,
       [nowStr, endStr]
     );
 
-    // Build job rows
+    // Build job rows — sort returning by return_date (DISTINCT ON breaks ordering)
     const goingOut = goingOutResult.rows.map(row => mapJobRow(row, 'out'));
-    const returning = returningResult.rows.map(row => mapJobRow(row, 'return'));
+    const returning = returningResult.rows
+      .map(row => mapJobRow(row, 'return'))
+      .sort((a, b) => {
+        const da = a.returnDate ? new Date(a.returnDate).getTime() : 0;
+        const db = b.returnDate ? new Date(b.returnDate).getTime() : 0;
+        return da - db;
+      });
 
-    // Aggregate stats — prep time only for NOT-done jobs
-    const goingOutStats = {
-      jobCount: goingOut.length,
-      notStarted: goingOut.filter(j => j.backlineStatus === 'not_started').length,
-      inProgress: goingOut.filter(j => j.backlineStatus === 'in_progress').length,
-      done: goingOut.filter(j => j.backlineStatus === 'done').length,
-      problem: goingOut.filter(j => j.backlineStatus === 'blocked').length,
-      totalItems: goingOut.reduce((sum, j) => sum + j.itemCount, 0),
-      totalPrepMins: goingOut.reduce((sum, j) => sum + j.prepTimeMins, 0),
-      remainingPrepMins: goingOut
-        .filter(j => j.backlineStatus !== 'done')
-        .reduce((sum, j) => sum + j.prepTimeMins, 0),
-    };
-
-    const returningStats = {
-      jobCount: returning.length,
-      totalItems: returning.reduce((sum, j) => sum + j.itemCount, 0),
-      totalDeprepMins: returning.reduce((sum, j) => sum + j.deprepTimeMins, 0),
-      remainingDeprepMins: returning
-        .filter(j => j.backlineStatus !== 'done')
-        .reduce((sum, j) => sum + j.deprepTimeMins, 0),
-    };
+    // Aggregate stats
+    // For remaining prep time: exclude jobs where backline status is 'done'
+    // OR where HH status is prepped(3) or dispatched(5) — work is done even if card wasn't updated
+    const goingOutStats = buildStats(goingOut);
+    const returningStats = buildStats(returning);
 
     res.json({
       data: {
@@ -128,8 +125,29 @@ interface DerivedFlags {
   prep_time_by_category?: { backline?: number };
 }
 
-function mapJobRow(row: any, direction: 'out' | 'return') {
+interface BacklineJob {
+  id: string;
+  reqId: string;
+  jobName: string;
+  hhJobNumber: number | null;
+  jobDate: string | null;
+  returnDate: string | null;
+  client: string;
+  pipelineStatus: string;
+  hhStatus: number;
+  backlineStatus: string;
+  itemCount: number;
+  prepTimeMins: number;
+  deprepTimeMins: number;
+  effectivelyDone: boolean; // true if backline_status=done OR HH status >= prepped
+}
+
+function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
   const flags = row.hh_derived_flags as DerivedFlags | null;
+  const hhStatus = row.hh_status || 0;
+  // Consider effectively done if: explicitly marked done, OR HH shows prepped/dispatched+
+  const effectivelyDone = row.backline_status === 'done' || hhStatus >= 3;
+
   return {
     id: row.id,
     reqId: row.req_id,
@@ -138,11 +156,32 @@ function mapJobRow(row: any, direction: 'out' | 'return') {
     jobDate: row.job_date,
     returnDate: row.return_date,
     client: row.company_name || row.client_name,
-    status: row.pipeline_status,
+    pipelineStatus: row.pipeline_status,
+    hhStatus,
     backlineStatus: row.backline_status,
     itemCount: flags?.backline_item_count || 0,
     prepTimeMins: flags?.prep_time_by_category?.backline || 0,
     deprepTimeMins: flags?.prep_time_by_category?.backline || 0,
+    effectivelyDone,
+  };
+}
+
+function buildStats(jobs: BacklineJob[]) {
+  return {
+    jobCount: jobs.length,
+    notStarted: jobs.filter(j => j.backlineStatus === 'not_started' && !j.effectivelyDone).length,
+    inProgress: jobs.filter(j => j.backlineStatus === 'in_progress').length,
+    done: jobs.filter(j => j.effectivelyDone).length,
+    problem: jobs.filter(j => j.backlineStatus === 'blocked').length,
+    totalItems: jobs.reduce((sum, j) => sum + j.itemCount, 0),
+    totalPrepMins: jobs.reduce((sum, j) => sum + j.prepTimeMins, 0),
+    totalDeprepMins: jobs.reduce((sum, j) => sum + j.deprepTimeMins, 0),
+    remainingPrepMins: jobs
+      .filter(j => !j.effectivelyDone)
+      .reduce((sum, j) => sum + j.prepTimeMins, 0),
+    remainingDeprepMins: jobs
+      .filter(j => !j.effectivelyDone)
+      .reduce((sum, j) => sum + j.deprepTimeMins, 0),
   };
 }
 
