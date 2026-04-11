@@ -17,11 +17,13 @@ interface BacklineJob {
   jobDate?: string;
   returnDate?: string;
   client: string;
-  status: string;
+  pipelineStatus: string;
+  hhStatus: number;
   backlineStatus: string;
   itemCount: number;
   prepTimeMins: number;
   deprepTimeMins: number;
+  effectivelyDone: boolean;
 }
 
 interface BacklineStats {
@@ -128,13 +130,15 @@ export default function BacklinePage() {
 
   const { goingOut, returning } = data;
 
-  // Apply status filter
-  const filteredOut = statusFilter
-    ? goingOut.jobs.filter(j => j.backlineStatus === statusFilter)
-    : goingOut.jobs;
-  const filteredReturn = statusFilter
-    ? returning.jobs.filter(j => j.backlineStatus === statusFilter)
-    : returning.jobs;
+  // Apply status filter — "done" includes effectivelyDone (HH prepped/dispatched)
+  function matchesStatusFilter(j: BacklineJob): boolean {
+    if (!statusFilter) return true;
+    if (statusFilter === 'done') return j.effectivelyDone;
+    if (statusFilter === 'not_started') return j.backlineStatus === 'not_started' && !j.effectivelyDone;
+    return j.backlineStatus === statusFilter;
+  }
+  const filteredOut = goingOut.jobs.filter(matchesStatusFilter);
+  const filteredReturn = returning.jobs.filter(matchesStatusFilter);
 
   async function updateStatus(reqId: string, newStatus: string) {
     try {
@@ -159,15 +163,15 @@ export default function BacklinePage() {
   function recalcStats(jobs: BacklineJob[]): BacklineStats {
     return {
       jobCount: jobs.length,
-      notStarted: jobs.filter(j => j.backlineStatus === 'not_started').length,
+      notStarted: jobs.filter(j => j.backlineStatus === 'not_started' && !j.effectivelyDone).length,
       inProgress: jobs.filter(j => j.backlineStatus === 'in_progress').length,
-      done: jobs.filter(j => j.backlineStatus === 'done').length,
+      done: jobs.filter(j => j.effectivelyDone).length,
       problem: jobs.filter(j => j.backlineStatus === 'blocked').length,
       totalItems: jobs.reduce((s, j) => s + j.itemCount, 0),
       totalPrepMins: jobs.reduce((s, j) => s + j.prepTimeMins, 0),
       totalDeprepMins: jobs.reduce((s, j) => s + j.deprepTimeMins, 0),
-      remainingPrepMins: jobs.filter(j => j.backlineStatus !== 'done').reduce((s, j) => s + j.prepTimeMins, 0),
-      remainingDeprepMins: jobs.filter(j => j.backlineStatus !== 'done').reduce((s, j) => s + j.deprepTimeMins, 0),
+      remainingPrepMins: jobs.filter(j => !j.effectivelyDone).reduce((s, j) => s + j.prepTimeMins, 0),
+      remainingDeprepMins: jobs.filter(j => !j.effectivelyDone).reduce((s, j) => s + j.deprepTimeMins, 0),
     };
   }
 
@@ -419,8 +423,11 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
   onStatusChange: (reqId: string, status: string) => void;
 }) {
   const date = dateField === 'jobDate' ? job.jobDate : job.returnDate;
-  const sl = STATUS_CONFIG[job.backlineStatus] || STATUS_CONFIG.not_started;
+  const sl = job.effectivelyDone && job.backlineStatus !== 'done'
+    ? { ...STATUS_CONFIG.done, label: 'Done (HH)' }  // HH says prepped/dispatched
+    : (STATUS_CONFIG[job.backlineStatus] || STATUS_CONFIG.not_started);
   const timeMins = dateField === 'jobDate' ? job.prepTimeMins : job.deprepTimeMins;
+  const hhPreppedButNotMarked = job.effectivelyDone && job.backlineStatus !== 'done';
 
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [menuAbove, setMenuAbove] = useState(false);
@@ -470,8 +477,11 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
             {job.itemCount > 0 && (
               <span className="text-purple-600 font-medium">{job.itemCount} items</span>
             )}
-            {timeMins > 0 && (
+            {timeMins > 0 && !job.effectivelyDone && (
               <span className="text-blue-600 font-medium">~{formatTimeJob(timeMins)}</span>
+            )}
+            {hhPreppedButNotMarked && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">HH: Prepped</span>
             )}
           </div>
         </div>
