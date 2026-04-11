@@ -775,7 +775,9 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
   - [x] Vehicle card with nested hire_forms + excess (indented under vehicle)
   - [x] Hire form "Send" button with contact picker (email/name checkboxes, send/chase modes)
   - [x] Hire form card status enrichment: sent date badge, received count, referral count
-  - [x] Hire form email endpoint: `POST /api/hire-forms/send-email` + `GET /api/hire-forms/email-contacts/:jobId`
+  - [x] Hire form email endpoint: `POST /api/hire-forms/send-email` + `GET /api/hire-forms/email-contacts/:jobId` (contacts from 5 sources: client org, org people, job_organisations, org emails, HH contact name match)
+  - [x] Hire form sent badge persists on refresh (derivation engine preserves user-appended notes, send sets status to in_progress)
+  - [x] Info badges (Sent, Received, Referral) visually distinct from action buttons (pills vs solid filled buttons)
   - [x] Hire form auto-email scheduler (daily 09:00): 10-day initial, 5-day chase
   - [x] Hire form on confirmation: auto-sends when job confirmed with <10 days to start
   - [x] Van & Driver toggle: soft-suspends hire_forms/excess requirements (preserves data, restores on toggle back)
@@ -799,14 +801,44 @@ Aggregate views on the Dashboard page — click through to individual jobs from 
 
 ##### Stream 3: Backline Module
 Backline detection is HH-derived (items in backline categories auto-create the requirement). Backline *management* (prep status, issues, de-prep) lives in OP.
-- [x] Backline requirement auto-detected from HH line items (backline category)
-- [x] Backline status labels: Not Started / Working On It / Done / Problem
-- [x] Backline prep/de-prep time estimates from `preptimemins` custom field
+
+**"Backline" in Ooosh context = ALL warehouse-prepped equipment** — instruments, PA/sound, DJ, lighting, power, staging, video, accessories. Everything except vehicles (370-371), rehearsal rooms (450), and storage (449).
+
+- [x] Backline requirement auto-detected from HH line items (all equipment categories 372-453 except vehicles/rehearsal/storage)
+- [x] Backline status labels: Not Started / Working On It / Done / Problem (type-specific overrides on shared status values)
+- [x] Backline prep/de-prep time estimates from `preptimemins` custom field (includes virtual parent items)
 - [x] Global backline overview page at `/operations/backline` — going out + returning stats, per-job rows with item counts and prep times
-- [x] Backline overview API (`GET /api/backline/overview`) — 7-day aggregate stats
-- [x] Dashboard backline widget — headline summary with click-through to backline page
+- [x] Backline overview API (`GET /api/backline/overview?days=N`) — configurable period, HH status as primary filter
+- [x] Dashboard backline widget — headline summary with progress bar and click-through to backline page
+- [x] Period filters: Today & Tomorrow / Next 7 Days / Next 14 Days
+- [x] Direction filter: Both / Going Out / Coming Back
+- [x] Status filter pills with colour-coded status breakdown
+- [x] Inline status editing from overview (click status badge → dropdown, viewport-aware positioning)
+- [x] HH job number clickable link to HireHop
+- [x] HH status intelligence: jobs with HH status >= Prepped(3) treated as effectively done even if backline card not updated. "HH: Prepped" badge shown.
+- [x] Last-minute item changes: amber "Items changed" badge + highlight when HH items modified after prep was actioned
+- [x] Prep time rounding: per-job rows round up to 5-minute chunks, overview/dashboard rounds to 15-minute chunks
+- [x] Remaining prep time excludes effectively-done jobs (backline Done OR HH Prepped+)
+- [x] Returning section only shows dispatched+ jobs (no overlap with going-out for jobs whose return date is in the window)
+- [x] RBAC: accessible to all non-freelancer roles (admin, manager, staff, general_assistant, weekend_manager)
+- [x] Responsive filter bar (wraps on small screens)
+- [x] Sync button triggers full HH job sync + re-derive
 - [ ] Backline detail section on job (item list from HH, prep status per item in OP)
 - [ ] Backline issues tracking (missing items, damage — similar pattern to vehicle issues)
+
+**Pre-hire / Post-hire Phase System** ✅ COMPLETE (migration 042)
+- [x] `phase` column on `job_requirements` (`pre_hire` | `post_hire`, defaults to `pre_hire`)
+- [x] Pre-Hire / Post-Hire toggle on Job Detail > Job Requirements section
+- [x] Each phase has independent requirement cards with independent statuses
+- [x] Auto-generation of post_hire requirements when job reaches dispatched/returned status (backline de-prep, vehicle check-in)
+- [x] Derivation engine respects phase — creates/updates pre_hire only, doesn't touch post_hire
+- [x] Backline overview: "Going Out" reads pre_hire cards, "Coming Back" prefers post_hire (falls back to pre_hire)
+
+**Known issue — OP ↔ HH status sync gap:**
+Many jobs confirmed in HH before webhook integration went live (Mar 2026) have stale `pipeline_status` in OP. The backline page works around this by using `jobs.status` (HH integer) as primary filter. Potential fixes for the broader platform:
+1. One-time reconciliation script: update `pipeline_status` based on `jobs.status` for all mismatched jobs
+2. Add status reconciliation to the 30-min job sync (currently only updates `jobs.status` integer, not `pipeline_status`)
+3. HH webhook handler already catches future changes — only historical pre-webhook jobs are affected
 
 ##### Stream 3b: Sub-Hires Module (OP-Only)
 Sub-hire tracking lives entirely in OP. HH's PO/shortage method is too clumsy (custom items always show short).
