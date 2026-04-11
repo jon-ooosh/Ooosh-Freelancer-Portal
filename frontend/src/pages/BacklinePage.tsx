@@ -24,6 +24,8 @@ interface BacklineJob {
   prepTimeMins: number;
   deprepTimeMins: number;
   effectivelyDone: boolean;
+  hasMismatch: boolean;
+  mismatchDetail: string | null;
 }
 
 interface BacklineStats {
@@ -448,13 +450,13 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
   const hhDomain = 'myhirehop.com';
 
   return (
-    <div className="flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors">
+    <div className={`flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors ${job.hasMismatch ? 'bg-amber-50/50' : ''}`}>
       <div
         className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
         onClick={() => navigate(`/jobs/${job.id}`)}
       >
         {/* Coloured side indicator */}
-        <div className={`w-1 h-10 rounded-full flex-shrink-0 ${sl.dot}`} />
+        <div className={`w-1 h-10 rounded-full flex-shrink-0 ${job.hasMismatch ? 'bg-amber-400' : sl.dot}`} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-gray-900 truncate">{job.jobName || 'Untitled'}</span>
@@ -482,6 +484,11 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
             )}
             {hhPreppedButNotMarked && (
               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">HH: Prepped</span>
+            )}
+            {job.hasMismatch && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium" title={job.mismatchDetail || 'Items changed'}>
+                ⚠ Items changed
+              </span>
             )}
           </div>
         </div>
