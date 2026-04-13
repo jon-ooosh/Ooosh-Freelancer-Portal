@@ -81,6 +81,9 @@ interface JobDetail {
   job_date: string | null;
   job_end: string | null;
   return_date: string | null;
+  out_time: string | null;
+  return_time: string | null;
+  end_time: string | null;
   created_date: string | null;
   duration_days: number | null;
   duration_hrs: number | null;
