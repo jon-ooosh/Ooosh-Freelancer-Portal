@@ -65,9 +65,9 @@ export default function TodaySchedule({ goingOut, returning, vehicleAssignments,
                           </div>
                         )}
                       </div>
-                      {job.out_date && (
-                        <span className="text-xs text-blue-600 font-medium flex-shrink-0 ml-2">
-                          {new Date(job.out_date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                      {job.client_name && !job.job_name?.includes(job.client_name) && (
+                        <span className="text-xs text-gray-400 flex-shrink-0 ml-2 truncate max-w-[120px]">
+                          {job.client_name}
                         </span>
                       )}
                     </div>
@@ -106,9 +106,9 @@ export default function TodaySchedule({ goingOut, returning, vehicleAssignments,
                         {job.client_name || job.company_name || '-'}
                       </div>
                     </div>
-                    {job.return_date && (
-                      <span className="text-xs text-teal-600 font-medium flex-shrink-0 ml-2">
-                        Due {new Date(job.return_date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                    {job.venue_name && (
+                      <span className="text-xs text-gray-400 flex-shrink-0 ml-2 truncate max-w-[120px]">
+                        {job.venue_name}
                       </span>
                     )}
                   </div>
