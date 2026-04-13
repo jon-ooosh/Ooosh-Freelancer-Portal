@@ -38,12 +38,13 @@ export default function OperationsWidgets({ transportOps, fleet, backline }: Pro
       <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100">
         {/* Transport Ops */}
         <div className="p-5">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center justify-between mb-1">
             <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Transport Ops</h3>
             <Link to="/operations/transport" className="text-[11px] text-ooosh-600 hover:text-ooosh-700 font-medium">
               Open
             </Link>
           </div>
+          <p className="text-[10px] text-gray-400 mb-2">Next 30 days</p>
           {Object.keys(transportOps.summary).length === 0 ? (
             <p className="text-sm text-gray-400">No active transport jobs</p>
           ) : (
@@ -70,12 +71,13 @@ export default function OperationsWidgets({ transportOps, fleet, backline }: Pro
 
         {/* Fleet Health */}
         <div className="p-5">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center justify-between mb-1">
             <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Fleet Health</h3>
             <Link to="/vehicles/fleet" className="text-[11px] text-ooosh-600 hover:text-ooosh-700 font-medium">
               Open
             </Link>
           </div>
+          <p className="text-[10px] text-gray-400 mb-2">Due within 30 days</p>
           <div className="space-y-1.5">
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-600">Active vehicles</span>
@@ -112,12 +114,13 @@ export default function OperationsWidgets({ transportOps, fleet, backline }: Pro
       <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100 border-t border-gray-100">
         {/* Backline & Prep */}
         <div className="p-5">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center justify-between mb-1">
             <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Backline & Prep</h3>
             <Link to="/operations/backline" className="text-[11px] text-ooosh-600 hover:text-ooosh-700 font-medium">
               Open
             </Link>
           </div>
+          <p className="text-[10px] text-gray-400 mb-2">Next 7 days</p>
           {!backline || (backline.goingOut.stats.jobCount === 0 && backline.returning.stats.jobCount === 0) ? (
             <p className="text-sm text-gray-400">No backline jobs this week</p>
           ) : (
@@ -150,7 +153,11 @@ export default function OperationsWidgets({ transportOps, fleet, backline }: Pro
                   </span>
                   <div className="flex items-center gap-2">
                     <span className="text-purple-600 font-medium">{backline.returning.stats.totalItems} items</span>
-                    <span className="text-blue-600 font-medium">{formatPrepTime(backline.returning.stats.remainingDeprepMins || 0)} de-prep</span>
+                    {(backline.returning.stats.remainingDeprepMins || 0) > 0 ? (
+                      <span className="text-blue-600 font-medium">{formatPrepTime(backline.returning.stats.remainingDeprepMins || 0)} de-prep</span>
+                    ) : (
+                      <span className="text-gray-400">de-prep TBD</span>
+                    )}
                   </div>
                 </div>
               )}
