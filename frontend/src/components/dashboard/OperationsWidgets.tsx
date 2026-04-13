@@ -148,7 +148,10 @@ export default function OperationsWidgets({ transportOps, fleet, backline }: Pro
                   <span className="text-gray-600">
                     <span className="font-semibold text-gray-900">{backline.returning.stats.jobCount}</span> coming back
                   </span>
-                  <span className="text-blue-600 font-medium">{formatPrepTime(backline.returning.stats.remainingDeprepMins || 0)} de-prep</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-purple-600 font-medium">{backline.returning.stats.totalItems} items</span>
+                    <span className="text-blue-600 font-medium">{formatPrepTime(backline.returning.stats.remainingDeprepMins || 0)} de-prep</span>
+                  </div>
                 </div>
               )}
             </div>

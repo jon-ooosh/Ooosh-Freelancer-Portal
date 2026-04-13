@@ -10,6 +10,30 @@ interface Props {
   tomorrowReturning: number;
 }
 
+/** Format a TIME value like "09:00:00" to "09:00" display */
+function formatTime(time: string | null): string | null {
+  if (!time) return null;
+  // TIME comes as "HH:MM:SS" or "HH:MM" — take first 5 chars
+  return time.slice(0, 5);
+}
+
+/** Check if a job is a single-day hire (same out date and job end / return next day) */
+function isSingleDay(job: ScheduleJob): boolean {
+  if (!job.out_date) return false;
+  const outDate = new Date(job.out_date).toDateString();
+  if (job.job_end) {
+    return new Date(job.job_end).toDateString() === outDate;
+  }
+  // If return_date is next day at 9am, it's a single-day hire
+  if (job.return_date) {
+    const retDate = new Date(job.return_date);
+    const dayAfterOut = new Date(job.out_date);
+    dayAfterOut.setDate(dayAfterOut.getDate() + 1);
+    return retDate.toDateString() === dayAfterOut.toDateString();
+  }
+  return false;
+}
+
 export default function TodaySchedule({ goingOut, returning, vehicleAssignments, tomorrowGoingOut, tomorrowReturning }: Props) {
   // Map vehicle assignments by job ID for quick lookup
   const assignmentsByJob = new Map<string, VehicleAssignment[]>();
@@ -37,6 +61,9 @@ export default function TodaySchedule({ goingOut, returning, vehicleAssignments,
             <div className="space-y-3">
               {goingOut.map((job) => {
                 const assignments = assignmentsByJob.get(job.id) || [];
+                const outTime = formatTime(job.out_time);
+                const endTime = formatTime(job.end_time);
+                const singleDay = isSingleDay(job);
                 return (
                   <Link
                     key={job.id}
@@ -65,11 +92,14 @@ export default function TodaySchedule({ goingOut, returning, vehicleAssignments,
                           </div>
                         )}
                       </div>
-                      {job.client_name && !job.job_name?.includes(job.client_name) && (
-                        <span className="text-xs text-gray-400 flex-shrink-0 ml-2 truncate max-w-[120px]">
-                          {job.client_name}
-                        </span>
-                      )}
+                      <div className="flex-shrink-0 ml-2 text-right">
+                        {outTime && (
+                          <span className="text-xs text-blue-600 font-medium">
+                            {outTime}
+                            {singleDay && endTime && ` - ${endTime}`}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </Link>
                 );
@@ -88,32 +118,35 @@ export default function TodaySchedule({ goingOut, returning, vehicleAssignments,
             <p className="text-sm text-gray-400 py-4">No returns expected today</p>
           ) : (
             <div className="space-y-3">
-              {returning.map((job) => (
-                <Link
-                  key={job.id}
-                  to={`/jobs/${job.id}`}
-                  className="block -mx-2 px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-colors border border-transparent hover:border-gray-200"
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium text-gray-900 truncate">
-                        {job.hh_job_number && (
-                          <span className="font-mono text-gray-400 text-xs mr-1.5">#{job.hh_job_number}</span>
-                        )}
-                        {jobDisplayName(job)}
+              {returning.map((job) => {
+                const retTime = formatTime(job.return_time);
+                return (
+                  <Link
+                    key={job.id}
+                    to={`/jobs/${job.id}`}
+                    className="block -mx-2 px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-colors border border-transparent hover:border-gray-200"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-gray-900 truncate">
+                          {job.hh_job_number && (
+                            <span className="font-mono text-gray-400 text-xs mr-1.5">#{job.hh_job_number}</span>
+                          )}
+                          {jobDisplayName(job)}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-0.5">
+                          {job.client_name || job.company_name || '-'}
+                        </div>
                       </div>
-                      <div className="text-xs text-gray-500 mt-0.5">
-                        {job.client_name || job.company_name || '-'}
-                      </div>
+                      {retTime && (
+                        <span className="text-xs text-teal-600 font-medium flex-shrink-0 ml-2">
+                          {retTime}
+                        </span>
+                      )}
                     </div>
-                    {job.venue_name && (
-                      <span className="text-xs text-gray-400 flex-shrink-0 ml-2 truncate max-w-[120px]">
-                        {job.venue_name}
-                      </span>
-                    )}
-                  </div>
-                </Link>
-              ))}
+                  </Link>
+                );
+              })}
             </div>
           )}
         </div>

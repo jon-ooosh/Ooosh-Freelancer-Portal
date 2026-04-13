@@ -10,18 +10,19 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
   try {
     const results = await Promise.all([
       // 1. Today's schedule — going out
-      // Jobs with out_date or job_date = today, confirmed+ status (HH 2-5)
+      // Jobs with out_date or job_date = today, confirmed/prepped only (NOT dispatched — once out, it's on hire)
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.status, j.pipeline_status,
                j.client_name, j.company_name, j.venue_name,
-               j.job_date, j.job_end, j.out_date, j.return_date
+               j.job_date, j.job_end, j.out_date, j.return_date,
+               j.out_time, j.return_time, j.end_time
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (2, 3, 4, 5)
+          AND j.status IN (2, 3)
           AND (
             COALESCE(j.out_date, j.job_date)::date = CURRENT_DATE
           )
-        ORDER BY COALESCE(j.out_date, j.job_date) ASC
+        ORDER BY j.out_time ASC NULLS LAST, COALESCE(j.out_date, j.job_date) ASC
         LIMIT 20
       `),
 
@@ -30,13 +31,14 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.status, j.pipeline_status,
                j.client_name, j.company_name, j.venue_name,
-               j.job_date, j.job_end, j.out_date, j.return_date
+               j.job_date, j.job_end, j.out_date, j.return_date,
+               j.out_time, j.return_time, j.end_time
         FROM jobs j
         WHERE j.is_deleted = false
           AND j.status IN (4, 5)
           AND j.return_date IS NOT NULL
           AND (j.return_date - interval '24 hours')::date = CURRENT_DATE
-        ORDER BY j.return_date ASC
+        ORDER BY j.return_time ASC NULLS LAST, j.return_date ASC
         LIMIT 20
       `),
 
@@ -45,7 +47,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         SELECT COUNT(*) as count
         FROM jobs
         WHERE is_deleted = false
-          AND status IN (2, 3, 4, 5)
+          AND status IN (2, 3)
           AND COALESCE(out_date, job_date)::date = CURRENT_DATE + 1
       `),
 

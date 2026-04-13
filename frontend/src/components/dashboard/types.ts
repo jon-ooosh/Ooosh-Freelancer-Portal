@@ -13,6 +13,9 @@ export interface ScheduleJob {
   job_end: string | null;
   out_date: string | null;
   return_date: string | null;
+  out_time: string | null;
+  return_time: string | null;
+  end_time: string | null;
 }
 
 export interface TransportQuote {

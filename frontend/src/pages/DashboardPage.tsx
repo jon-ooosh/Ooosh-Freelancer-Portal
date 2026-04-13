@@ -104,6 +104,9 @@ export default function DashboardPage() {
         backline={backline}
       />
 
+      {/* Who's In */}
+      <WhosInPlaceholder />
+
       {/* Coming Up */}
       <ComingUpTimeline events={data.upcoming_events} />
 
@@ -112,9 +115,6 @@ export default function DashboardPage() {
         byStatus={data.pipeline.by_status}
         activeValue={data.pipeline.active_value}
       />
-
-      {/* Who's In */}
-      <WhosInPlaceholder />
 
       {/* Quick Actions */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
