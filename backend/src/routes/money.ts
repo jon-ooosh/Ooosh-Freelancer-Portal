@@ -386,6 +386,10 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     }> = [];
     let totalHireDeposits = 0;
     let totalExcessDeposits = 0;
+    // Track deposit money applied to invoices via kind=3 (for invoice reconciliation)
+    let hireDepositAppliedToInvoices = 0;
+    // Collect approved invoices for reconciliation (detect direct invoice payments)
+    const approvedInvoices: Array<{ amount: number; owing: number }> = [];
 
     // Extract banks array for resolving bank IDs to names
     const banks: Array<{ ID: number; NAME: string }> = bl?.banks || bl?.rows?.[0]?.data?.banks || [];
@@ -448,34 +452,78 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
               else { totalHireDeposits -= absAmount; }
             }
           }
+        } else if (kind === 1) {
+          // Invoice row — collect approved invoices for reconciliation.
+          // Approved invoices with owing=0 prove that money was received,
+          // even if that money didn't come through a kind=6 deposit.
+          const invoiceAmount = parseFloat(row.debit || data.debit || row.accrued || data.accrued || data.ACCRUED || '0');
+          const invoiceOwing = parseFloat(row.owing ?? data.owing ?? data.OWING ?? '0');
+          const invoiceStatus = parseInt(row.status ?? data.STATUS ?? data.status ?? '0');
+          const invoiceDesc = String(data.DESCRIPTION || row.desc || '');
+          const isProforma = invoiceStatus === 0 || invoiceDesc.toLowerCase().includes('proforma');
+
+          if (!isProforma && invoiceAmount > 0) {
+            approvedInvoices.push({
+              amount: invoiceAmount,
+              owing: Math.max(invoiceOwing, 0),
+            });
+          }
         } else if (kind === 3) {
-          // Payment application (refund against a specific deposit)
+          // Payment application — can be:
+          // 1. Deposit applied to invoice (OWNER_DEPOSIT present): already counted in kind=6, no total change
+          // 2. Direct invoice payment (no OWNER_DEPOSIT, positive credit): new money, handled by reconciliation
+          // 3. Actual refund (negative credit): subtract from totals
           const creditAmount = parseFloat(row.credit || data.credit || '0');
           const description = String(data.DESCRIPTION || row.desc || '');
           const memo = String(data.MEMO || '');
           const isExcess = isExcessPayment(description + ' ' + memo);
           const appId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
           const absAmount = Math.abs(creditAmount);
+          const ownerDepositId = data.OWNER_DEPOSIT;
 
-          // Only show payment applications with a description (skip auto-applications)
-          if (absAmount > 0 && description) {
-            if (!isExcess) {
-              deposits.push({
-                id: appId,
-                amount: absAmount,
-                date: data.DATE || row.date || '',
-                description: description || null,
-                memo: memo || null,
-                is_excess: false,
-                is_refund: true, // Payment applications are refunds
-                bank_name: getBankName(data.ACC_ACCOUNT_ID),
-                entered_by: data.CREATE_USER_NAME || null,
-              });
+          if (absAmount > 0) {
+            if (ownerDepositId) {
+              // Deposit applied to invoice — deposit already counted in kind=6.
+              // Track for reconciliation so we know how much of the invoice was
+              // paid via deposits vs direct payments.
+              if (!isExcess) {
+                hireDepositAppliedToInvoices += absAmount;
+              }
+            } else if (creditAmount < 0 && description) {
+              // Negative credit = actual refund — subtract from totals
+              if (!isExcess) {
+                deposits.push({
+                  id: appId,
+                  amount: absAmount,
+                  date: data.DATE || row.date || '',
+                  description: description || null,
+                  memo: memo || null,
+                  is_excess: false,
+                  is_refund: true,
+                  bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                  entered_by: data.CREATE_USER_NAME || null,
+                });
+              }
+              if (isExcess) { totalExcessDeposits -= absAmount; }
+              else { totalHireDeposits -= absAmount; }
+            } else if (creditAmount > 0 && description) {
+              // Direct invoice payment (positive credit, no OWNER_DEPOSIT).
+              // Show in payment history as a payment (not a refund).
+              // The financial total is handled by invoice reconciliation below.
+              if (!isExcess) {
+                deposits.push({
+                  id: appId,
+                  amount: absAmount,
+                  date: data.DATE || row.date || '',
+                  description: description || null,
+                  memo: memo || null,
+                  is_excess: false,
+                  is_refund: false,
+                  bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                  entered_by: data.CREATE_USER_NAME || null,
+                });
+              }
             }
-
-            // Count refunds in totals
-            if (isExcess) { totalExcessDeposits -= absAmount; }
-            else { totalHireDeposits -= absAmount; }
           }
         } else if (kind === 2) {
           // Credit note — negative debit, classified same as deposits
@@ -489,6 +537,24 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           }
         }
       }
+    }
+
+    // ── Invoice Reconciliation: detect direct invoice payments ──
+    // Compare what approved invoices show as paid (debit - owing) against how much
+    // deposit money was applied to those invoices (kind=3 rows with OWNER_DEPOSIT).
+    // The gap = direct invoice payments that bypassed the deposit system.
+    // This fixes the bug where payments applied directly to invoices (not via a
+    // kind=6 deposit) were missing from the balance calculation.
+    let totalPaidOnApprovedInvoices = 0;
+    for (const inv of approvedInvoices) {
+      const paidOnInvoice = inv.amount - inv.owing;
+      if (paidOnInvoice > 0.01) {
+        totalPaidOnApprovedInvoices += paidOnInvoice;
+      }
+    }
+    const directInvoicePayments = Math.max(totalPaidOnApprovedInvoices - hireDepositAppliedToInvoices, 0);
+    if (directInvoicePayments > 0.01) {
+      totalHireDeposits += directInvoicePayments;
     }
 
     // ── Passive Reconciliation: match HH excess deposits → OP excess records ──
