@@ -10,7 +10,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
   try {
     const results = await Promise.all([
       // 1. Today's schedule — going out
-      // Jobs with out_date or job_date = today, confirmed/prepped only (NOT dispatched — once out, it's on hire)
+      // Jobs with out_date or job_date = today. Includes dispatched (status 4-5) since
+      // a job dispatched today IS going out today. Matches JobsPage "Going Out" logic.
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.status, j.pipeline_status,
                j.client_name, j.company_name, j.venue_name,
@@ -18,7 +19,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
                j.out_time, j.return_time, j.end_time
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (2, 3)
+          AND j.status IN (2, 3, 4, 5)
           AND (
             COALESCE(j.out_date, j.job_date)::date = CURRENT_DATE
           )
@@ -27,7 +28,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       `),
 
       // 2. Today's schedule — returning (smart: effective_return = return_date - 24h)
-      // Dispatched jobs where the effective return date is today
+      // Dispatched jobs where the effective return date is today, OR
+      // job_end is today/yesterday (matching JobsPage return window logic)
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.status, j.pipeline_status,
                j.client_name, j.company_name, j.venue_name,
@@ -35,9 +37,15 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
                j.out_time, j.return_time, j.end_time
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (4, 5)
-          AND j.return_date IS NOT NULL
-          AND (j.return_date - interval '24 hours')::date = CURRENT_DATE
+          AND j.status IN (2, 3, 4, 5, 6)
+          AND (
+            -- return_date is today
+            (j.return_date IS NOT NULL AND j.return_date::date = CURRENT_DATE)
+            -- OR job_end is today or yesterday (could return today)
+            OR (j.job_end IS NOT NULL AND j.job_end::date IN (CURRENT_DATE, CURRENT_DATE - 1))
+            -- OR return_date is tomorrow (today is final day, could come back from midday)
+            OR (j.return_date IS NOT NULL AND j.return_date::date = CURRENT_DATE + 1)
+          )
         ORDER BY j.return_time ASC NULLS LAST, j.return_date ASC
         LIMIT 20
       `),
@@ -47,18 +55,21 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         SELECT COUNT(*) as count
         FROM jobs
         WHERE is_deleted = false
-          AND status IN (2, 3)
+          AND status IN (2, 3, 4, 5)
           AND COALESCE(out_date, job_date)::date = CURRENT_DATE + 1
       `),
 
-      // 4. Tomorrow's counts — returning
+      // 4. Tomorrow's counts — returning (same return window logic as query 2, shifted +1 day)
       query(`
         SELECT COUNT(*) as count
         FROM jobs
         WHERE is_deleted = false
-          AND status IN (4, 5)
-          AND return_date IS NOT NULL
-          AND (return_date - interval '24 hours')::date = CURRENT_DATE + 1
+          AND status IN (2, 3, 4, 5, 6)
+          AND (
+            (return_date IS NOT NULL AND return_date::date = CURRENT_DATE + 1)
+            OR (job_end IS NOT NULL AND job_end::date IN (CURRENT_DATE, CURRENT_DATE + 1))
+            OR (return_date IS NOT NULL AND return_date::date = CURRENT_DATE + 2)
+          )
       `),
 
       // 5. Coming up — next 14 days, grouped by date (departures + returns)
@@ -89,7 +100,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         ORDER BY event_date ASC
       `),
 
-      // 6. Needs attention — overdue returns
+      // 6. Needs attention — overdue returns (return_date in the past = actually overdue)
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                j.return_date, j.venue_name
@@ -97,7 +108,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         WHERE j.is_deleted = false
           AND j.status IN (4, 5)
           AND j.return_date IS NOT NULL
-          AND (j.return_date - interval '24 hours')::date < CURRENT_DATE
+          AND j.return_date::date < CURRENT_DATE
         ORDER BY j.return_date ASC
         LIMIT 10
       `),
@@ -204,9 +215,13 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       query(`
         SELECT
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (5)) as on_hire_count,
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (2, 3) AND COALESCE(out_date, job_date)::date = CURRENT_DATE) as going_out_count,
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (4, 5) AND return_date IS NOT NULL AND (return_date - interval '24 hours')::date = CURRENT_DATE) as coming_back_count,
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (4, 5) AND return_date IS NOT NULL AND (return_date - interval '24 hours')::date < CURRENT_DATE) as overdue_count,
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (2, 3, 4, 5) AND COALESCE(out_date, job_date)::date = CURRENT_DATE) as going_out_count,
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (2, 3, 4, 5, 6) AND (
+            (return_date IS NOT NULL AND return_date::date = CURRENT_DATE)
+            OR (job_end IS NOT NULL AND job_end::date IN (CURRENT_DATE, CURRENT_DATE - 1))
+            OR (return_date IS NOT NULL AND return_date::date = CURRENT_DATE + 1)
+          )) as coming_back_count,
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (4, 5) AND return_date IS NOT NULL AND return_date::date < CURRENT_DATE) as overdue_count,
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status NOT IN ('confirmed', 'lost') AND next_chase_date IS NOT NULL AND next_chase_date <= CURRENT_DATE) as chases_due_count,
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IS NOT NULL AND pipeline_status NOT IN ('confirmed', 'lost')) as open_enquiries_count
       `),
