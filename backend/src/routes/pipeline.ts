@@ -231,6 +231,9 @@ const createEnquirySchema = z.object({
   job_date: z.string().optional().nullable(),      // Job start
   job_end: z.string().optional().nullable(),       // Job finish
   return_date: z.string().optional().nullable(),   // Returning / equipment back
+  out_time: z.string().optional().nullable(),      // Time departing (HH:MM), default 09:00
+  return_time: z.string().optional().nullable(),   // Time expected back (HH:MM), default 09:00
+  end_time: z.string().optional().nullable(),      // End time for single-day hires
   // Optional
   job_name: z.string().optional().nullable(),
   client_id: z.string().uuid().optional().nullable(),
@@ -257,6 +260,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       job_value, likelihood, notes, manager1_person_id,
       next_chase_date, chase_interval_days, chase_alert_user_id,
       service_types, band_name,
+      out_time, return_time, end_time,
     } = req.body;
     let { details } = req.body;
 
@@ -311,6 +315,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
     const result = await query(
       `INSERT INTO jobs (
         job_name, details, out_date, job_date, job_end, return_date,
+        out_time, return_time, end_time,
         client_id, client_name, company_name,
         venue_id, venue_name,
         enquiry_source, job_value, likelihood, notes,
@@ -321,6 +326,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
         created_by
       ) VALUES (
         $1, $2, $3, $4, $5, $6,
+        $19, $20, $21,
         $7, $8, $8,
         $9, $10,
         $11, $12, $13, $14,
@@ -339,6 +345,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
         req.user!.id,
         chaseDate || String(chaseIntervalDays),
         chaseIntervalDays,
+        out_time || '09:00', return_time || '09:00', end_time || null,
       ]
     );
 
@@ -871,6 +878,9 @@ const editJobSchema = z.object({
   job_date: z.string().optional().nullable(),
   job_end: z.string().optional().nullable(),
   return_date: z.string().optional().nullable(),
+  out_time: z.string().optional().nullable(),
+  return_time: z.string().optional().nullable(),
+  end_time: z.string().optional().nullable(),
   client_id: z.string().uuid().optional().nullable(),
   client_name: z.string().optional().nullable(),
   hh_job_number: z.union([z.string(), z.number()]).optional().nullable(),
@@ -921,6 +931,7 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
 
     const allowedFields = [
       'job_name', 'out_date', 'job_date', 'job_end', 'return_date',
+      'out_time', 'return_time', 'end_time',
       'client_id', 'client_name', 'hh_job_number', 'job_value',
       'likelihood', 'next_chase_date', 'details', 'notes',
     ];
