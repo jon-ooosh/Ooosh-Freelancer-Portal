@@ -181,6 +181,59 @@ export function startScheduler() {
   });
   console.log('Scheduler: BVRLA monthly VE103B report scheduled for 1st of each month at 08:00');
 
+  // ── Stale Enquiry Auto-Lose ──────────────────────────────────────────
+  // Daily at 10:00 — mark unconfirmed enquiries as lost if job_date was yesterday or earlier.
+  // Runs 1 day after start date to avoid losing last-minute confirmations.
+  cron.schedule('0 10 * * *', async () => {
+    console.log('Scheduler: Checking for stale enquiries to auto-lose...');
+    try {
+      // Find jobs where:
+      // - job_date was yesterday or earlier (start date has passed by at least 1 day)
+      // - pipeline_status is still in pre-confirmed stages
+      // - HH status < 2 (not yet booked)
+      const staleResult = await query(
+        `UPDATE jobs
+         SET pipeline_status = 'lost',
+             pipeline_status_changed_at = NOW(),
+             lost_reason = 'auto_expired',
+             updated_at = NOW()
+         WHERE job_date IS NOT NULL
+           AND job_date::date < CURRENT_DATE
+           AND pipeline_status IN ('new_enquiry', 'quoting', 'chasing', 'paused', 'provisional')
+           AND status < 2
+           AND is_deleted = false
+         RETURNING id, job_name, hh_job_number, pipeline_status, job_date`
+      );
+
+      if (staleResult.rows.length > 0) {
+        console.log(`Scheduler: Auto-lost ${staleResult.rows.length} stale enquiry/enquiries`);
+
+        // Write back to HireHop + log interaction for each
+        const { writeBackStatusToHireHop } = await import('../services/hirehop-writeback');
+        for (const job of staleResult.rows) {
+          try {
+            // Log activity timeline entry
+            await query(
+              `INSERT INTO interactions (type, content, job_id)
+               VALUES ('status_transition', $1, $2)`,
+              [
+                `Auto-marked as Lost — start date ${new Date(job.job_date as string).toLocaleDateString('en-GB')} has passed without confirmation`,
+                job.id,
+              ]
+            );
+            // Push to HireHop (status 10 = Not Interested)
+            await writeBackStatusToHireHop(job.id as string, 'lost', 'scheduler:auto_expire');
+          } catch (wbErr) {
+            console.error(`Scheduler: Auto-lose write-back failed for job ${job.hh_job_number}:`, wbErr);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Scheduler: Stale enquiry auto-lose failed:', err);
+    }
+  });
+  console.log('Scheduler: Stale enquiry auto-lose scheduled daily at 10:00');
+
   // ── Hire Form Auto-Emails ────────────────────────────────────────────
   // Daily at 09:00 — send hire form emails for self-drive jobs approaching their start date
   // Logic: 10 days before job_date → initial email. 5 days before → chase (if no forms received).

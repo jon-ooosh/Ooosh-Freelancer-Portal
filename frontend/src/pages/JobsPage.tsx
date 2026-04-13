@@ -124,6 +124,8 @@ function isInReturnWindow(job: Job, todayStr: string): boolean {
 }
 
 function isGoingOutToday(job: Job, todayStr: string): boolean {
+  // Dispatched+ jobs are already out — they belong in "Out Now", not "Going Out"
+  if (job.status >= 4) return false;
   const jobDate = (job.job_date || '').split('T')[0];
   const outDate = (job.out_date || '').split('T')[0];
   return jobDate === todayStr || outDate === todayStr;
@@ -411,11 +413,6 @@ export default function JobsPage() {
           <div className="text-sm font-medium text-gray-900 truncate max-w-[200px]">
             {job.job_name || '\u2014'}
           </div>
-          {showRequirements && progress && (
-            <div className="mt-0.5">
-              <RequirementsProgress progress={progress} />
-            </div>
-          )}
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 truncate max-w-[180px]">
           {job.client_name || job.company_name || '\u2014'}
@@ -434,15 +431,19 @@ export default function JobsPage() {
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
           <span>{formatDateRange(job.job_date, job.job_end)}</span>
-          {job.out_time && job.out_time !== '09:00:00' && (
+          {job.out_time && (
             <span className="text-[11px] text-blue-500 ml-1">{job.out_time.slice(0, 5)}</span>
           )}
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 font-medium">
           {formatCurrency(job.job_value)}
         </td>
-        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500 truncate max-w-[150px]">
-          {job.venue_name || '\u2014'}
+        <td className="px-4 py-3 whitespace-nowrap">
+          {showRequirements && progress ? (
+            <RequirementsProgress progress={progress} />
+          ) : (
+            <span className="text-xs text-gray-300">{'\u2014'}</span>
+          )}
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
           {job.manager1_name || '\u2014'}
@@ -461,7 +462,7 @@ export default function JobsPage() {
           <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
           <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Dates</th>
           <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
-          <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Venue</th>
+          <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Progress</th>
           <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Manager</th>
         </tr>
       </thead>
