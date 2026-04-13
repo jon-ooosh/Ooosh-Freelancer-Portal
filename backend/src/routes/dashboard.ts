@@ -10,8 +10,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
   try {
     const results = await Promise.all([
       // 1. Today's schedule — going out
-      // Jobs with out_date or job_date = today. Includes dispatched (status 4-5) since
-      // a job dispatched today IS going out today. Matches JobsPage "Going Out" logic.
+      // Jobs with out_date or job_date = today, NOT yet dispatched.
+      // Status 2 (Booked) and 3 (Prepped) only — once dispatched (4+), it's "Out Now".
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.status, j.pipeline_status,
                j.client_name, j.company_name, j.venue_name,
@@ -19,7 +19,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
                j.out_time, j.return_time, j.end_time
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (2, 3, 4, 5)
+          AND j.status IN (2, 3)
           AND (
             COALESCE(j.out_date, j.job_date)::date = CURRENT_DATE
           )
@@ -50,12 +50,12 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LIMIT 20
       `),
 
-      // 3. Tomorrow's counts — going out
+      // 3. Tomorrow's counts — going out (not yet dispatched)
       query(`
         SELECT COUNT(*) as count
         FROM jobs
         WHERE is_deleted = false
-          AND status IN (2, 3, 4, 5)
+          AND status IN (2, 3)
           AND COALESCE(out_date, job_date)::date = CURRENT_DATE + 1
       `),
 
@@ -215,7 +215,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       query(`
         SELECT
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (5)) as on_hire_count,
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (2, 3, 4, 5) AND COALESCE(out_date, job_date)::date = CURRENT_DATE) as going_out_count,
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (2, 3) AND COALESCE(out_date, job_date)::date = CURRENT_DATE) as going_out_count,
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (2, 3, 4, 5, 6) AND (
             (return_date IS NOT NULL AND return_date::date = CURRENT_DATE)
             OR (job_end IS NOT NULL AND job_end::date IN (CURRENT_DATE, CURRENT_DATE - 1))
