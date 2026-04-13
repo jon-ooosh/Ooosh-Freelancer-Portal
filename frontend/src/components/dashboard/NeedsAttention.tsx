@@ -8,13 +8,13 @@ interface Props {
   referralCount: number;
   referrals: PendingReferral[];
   excessCount: number;
-  excessTotal: number;
+  excessTotal?: number;
   excessItems: PendingExcess[];
 }
 
 export default function NeedsAttention({
   overdueReturns, chasesDue, referralCount, referrals,
-  excessCount, excessTotal, excessItems,
+  excessCount, excessItems,
 }: Props) {
   const hasAnything = overdueReturns.length > 0 || chasesDue.length > 0 || referralCount > 0 || excessCount > 0;
 
