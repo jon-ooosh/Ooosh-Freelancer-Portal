@@ -81,6 +81,9 @@ interface JobDetail {
   job_date: string | null;
   job_end: string | null;
   return_date: string | null;
+  out_time: string | null;
+  return_time: string | null;
+  end_time: string | null;
   created_date: string | null;
   duration_days: number | null;
   duration_hrs: number | null;
@@ -658,6 +661,9 @@ export default function JobDetailPage() {
   const [editJobDate, setEditJobDate] = useState('');
   const [editJobEnd, setEditJobEnd] = useState('');
   const [editReturnDate, setEditReturnDate] = useState('');
+  const [editOutTime, setEditOutTime] = useState('09:00');
+  const [editReturnTime, setEditReturnTime] = useState('09:00');
+  const [editEndTime, setEditEndTime] = useState('');
   const [dateOutLinked, setDateOutLinked] = useState(true);
   const [dateReturnLinked, setDateReturnLinked] = useState(true);
   const [editingClient, setEditingClient] = useState(false);
@@ -773,6 +779,9 @@ export default function JobDetailPage() {
     setEditJobDate(toDateInputValue(job.job_date));
     setEditJobEnd(toDateInputValue(job.job_end));
     setEditReturnDate(toDateInputValue(job.return_date));
+    setEditOutTime((job.out_time || '09:00:00').slice(0, 5));
+    setEditReturnTime((job.return_time || '09:00:00').slice(0, 5));
+    setEditEndTime(job.end_time ? job.end_time.slice(0, 5) : '');
     // Determine link state from current values
     setDateOutLinked(toDateInputValue(job.out_date) === toDateInputValue(job.job_date));
     setDateReturnLinked(toDateInputValue(job.return_date) === toDateInputValue(job.job_end));
@@ -834,6 +843,9 @@ export default function JobDetailPage() {
       job_date: editJobDate || null,
       job_end: editJobEnd || null,
       return_date: editReturnDate || null,
+      out_time: editOutTime || '09:00',
+      return_time: editReturnTime || '09:00',
+      end_time: editEndTime || null,
     });
   }
 
@@ -1621,13 +1633,23 @@ export default function JobDetailPage() {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                   </svg>
                   {formatDate(job.job_date || job.out_date)}
+                  {job.out_time && job.out_time !== '09:00:00' && (
+                    <span className="text-blue-500 text-xs ml-0.5">{job.out_time.slice(0, 5)}</span>
+                  )}
                   {(job.job_end || job.return_date) && job.job_end !== job.job_date && (
-                    <> &ndash; {formatDate(job.job_end || job.return_date)}</>
+                    <> &ndash; {formatDate(job.job_end || job.return_date)}
+                    {job.return_time && job.return_time !== '09:00:00' && (
+                      <span className="text-teal-500 text-xs ml-0.5">{job.return_time.slice(0, 5)}</span>
+                    )}
+                    </>
+                  )}
+                  {job.end_time && (
+                    <span className="text-purple-500 text-xs ml-1">ends {job.end_time.slice(0, 5)}</span>
                   )}
                   <button
                     onClick={startEditDates}
                     className="text-gray-300 hover:text-gray-500 transition-colors ml-0.5"
-                    title="Edit dates"
+                    title="Edit dates & times"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
@@ -1735,6 +1757,38 @@ export default function JobDetailPage() {
                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.172 13.828a4 4 0 015.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" /></svg>
                       )}
                     </button>
+                  </div>
+                </div>
+                {/* Time inputs row */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Out Time</label>
+                    <input
+                      type="time"
+                      value={editOutTime}
+                      onChange={(e) => setEditOutTime(e.target.value)}
+                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">End Time <span className="font-normal text-gray-400">(single-day)</span></label>
+                    <input
+                      type="time"
+                      value={editEndTime}
+                      onChange={(e) => setEditEndTime(e.target.value)}
+                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
+                      placeholder="Optional"
+                    />
+                  </div>
+                  <div />
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Return Time</label>
+                    <input
+                      type="time"
+                      value={editReturnTime}
+                      onChange={(e) => setEditReturnTime(e.target.value)}
+                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
+                    />
                   </div>
                 </div>
                 {editJobDate && editJobEnd && (() => {

@@ -37,6 +37,9 @@ interface Job {
   job_end: string | null;
   out_date: string | null;
   return_date: string | null;
+  out_time: string | null;
+  return_time: string | null;
+  end_time: string | null;
   manager1_name: string | null;
   job_value: number | null;
   pipeline_status: string | null;
@@ -430,7 +433,10 @@ export default function JobsPage() {
           </div>
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
-          {formatDateRange(job.job_date, job.job_end)}
+          <span>{formatDateRange(job.job_date, job.job_end)}</span>
+          {job.out_time && job.out_time !== '09:00:00' && (
+            <span className="text-[11px] text-blue-500 ml-1">{job.out_time.slice(0, 5)}</span>
+          )}
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 font-medium">
           {formatCurrency(job.job_value)}
