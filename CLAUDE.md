@@ -732,6 +732,131 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [ ] HH item check-in/out counts for prep progress indicator (needs API research)
 - [ ] Job Issues tracker (duplicate vehicle issues pattern — track problems throughout hire lifecycle: prep issues, on-hire breakdowns, return damage, missing items)
 
+#### Step 4b: Returns & Close-Out System ← IN PROGRESS (Apr 2026)
+
+When a job returns, there's a sequence of physical and admin tasks before it's truly done. This system extends the existing `job_requirements` framework with **post-hire close-out requirement types** that auto-create when a job enters return status and auto-detect completion from real data sources (HH billing, excess table, interactions).
+
+**Design principle:** Same requirement card system as pre-hire prep, same status tracking, same UI patterns. Post-hire cards appear on the Job Detail "Job Requirements" tab under the Post-Hire toggle. The Returns page aggregates close-out progress across all returning jobs.
+
+**Auto-creation trigger:** Derivation engine creates post-hire close-out requirements when HH status reaches 6 (Returned Incomplete) or 7 (Returned). Some types are conditional — only created when the job has relevant data (crew, excess records, etc.).
+
+##### Close-Out Requirement Types
+
+| Type key | Label | Icon | Condition | Auto-detect source | Status flow |
+|----------|-------|------|-----------|-------------------|-------------|
+| `vehicle` | Vehicle Check-In | 🚐 | Self-drive vehicles on job | Already exists (post_hire phase) | Not Started → In Progress → Done |
+| `backline` | Backline De-Prep | 🎸 | Backline items on job | Already exists (post_hire phase) | Not Started → Working On It → Done |
+| `damage_review` | Damage & Issues | ⚠️ | Vehicle `has_damage=true` OR manual add | `vehicle_hire_assignments.has_damage`, manual | Open → Awaiting Quote → Quoted → Resolved |
+| `invoice` | Invoice | 🧾 | Always (every returned job) | HH `billing_list.php` kind:1 rows | Not Invoiced → Generated → Sent → Done |
+| `payment_reconcile` | Payment Reconciliation | 💷 | Always (every returned job) | HH billing balance check (deposits vs hire value) | Outstanding → Done |
+| `excess_resolve` | Excess Resolution | 🛡️ | `job_excess` records exist for this job | `job_excess.excess_status` | Pending → Resolved |
+| `freelancer_followup` | Freelancer Follow-Up | 👤 | `quote_assignments` exist (crew on job) | Manual (future: portal integration) | Not Contacted → Chased → Done |
+| `client_followup` | Client Follow-Up | 📞 | Always (every returned job) | Interactions table: any interaction logged after return_date | Not Contacted → Done |
+
+##### Status Auto-Detection Logic
+
+Close-out cards are **status-reactive** — they read from real data sources and auto-update their status:
+
+| Type | Auto-detection | Manual override? |
+|------|---------------|-----------------|
+| `invoice` | Polls HH `billing_list.php` for kind:1 (invoice) rows on Money tab load. If found → status moves to `generated`. `sent` is always manual (button click). | Yes — staff clicks "Sent to Client" |
+| `payment_reconcile` | Reads HH billing balance (same as Money tab). If `balance <= 0` → auto-resolves to `done`. | Can manually mark done if balance is within tolerance |
+| `excess_resolve` | Reads `job_excess` table. If all excess records are in terminal status (`reimbursed`, `fully_claimed`, `waived`, `rolled_over`) → auto-resolves. | Can manually mark done |
+| `client_followup` | Queries `interactions` table for any interaction with `job_id` created after `jobs.return_date`. If found → auto-resolves to `done`. | Can manually mark done |
+| `freelancer_followup` | Future: detect from freelancer portal submissions. For now: manual status change. | Yes — staff marks after contact |
+| `damage_review` | Created when vehicle assignment has `has_damage=true`, or manually added. Status is always manual (awaiting external quotes, etc.). Supports **chase date** for follow-up reminders. | Fully manual |
+
+##### Damage & Issues — "The Limbo Problem"
+
+The `damage_review` requirement type addresses the most painful post-hire issue: things stuck in limbo (waiting for damage quotes, missing cables, insurance claims, etc.).
+
+**Features:**
+- **Chase date field** — "Follow up on this in X days" (reuses the same chase mechanism as pipeline)
+- **Notes field** — free-text description of the issue (already exists on all requirements)
+- **Activity log** — status changes logged to job interactions timeline
+- **Dashboard surfacing** — future: "X jobs with unresolved damage" widget
+- **Multi-issue support** — a job can have multiple `damage_review` requirements (one per issue, using `custom_label` to distinguish: "Scratched bumper GX17DHN", "Missing XLR cable")
+
+**Status flow for damage:**
+```
+Open → Awaiting Quote → Quoted → Claimed (via excess) → Resolved
+                                → Written Off → Resolved
+                                → Client Paying → Resolved
+```
+For v1, simplified to: `Open → Awaiting Quote → Quoted → Resolved` (4 steps). Complex flows can be added later.
+
+##### Returns Page Redesign
+
+**Two sections (same as current but enhanced):**
+
+**Active Returns** (HH status 6, 7, 8):
+- Each job card shows close-out checklist as coloured dots/pills:
+  - Green dot = done, Amber dot = in progress, Red dot = blocked/overdue, Grey dot = not started
+- Sort by: return date (default), days since return, outstanding items count
+- Filter pills: "Needs Invoice", "Damage Open", "Excess Pending", "Freelancer Outstanding", "All"
+- Click job → Job Detail page, Post-Hire tab shows the close-out requirement cards
+- Jobs with `status=8` (Requires Attention) get a red highlight
+
+**Completed** (HH status 11):
+- Collapsible section (same as current)
+- Shows close-out summary (all dots green)
+
+**Close-out progress endpoint:**
+```
+GET /api/returns/close-out-progress
+```
+Returns close-out status per job in bulk — reads from requirements (post_hire phase) + HH billing + excess table + interactions. Single endpoint to power the Returns page without N+1 queries.
+
+##### Migration 044: Close-Out Requirement Types
+
+```sql
+-- New requirement type definitions for post-hire close-out
+INSERT INTO requirement_type_definitions (type, label, icon, steps, sort_order) VALUES
+  ('invoice',              'Invoice',                '🧾', NULL, 200),
+  ('payment_reconcile',    'Payment Reconciliation', '💷', NULL, 210),
+  ('excess_resolve',       'Excess Resolution',      '🛡️', NULL, 220),
+  ('freelancer_followup',  'Freelancer Follow-Up',   '👤', NULL, 230),
+  ('client_followup',      'Client Follow-Up',       '📞', NULL, 240),
+  ('damage_review',        'Damage & Issues',        '⚠️', NULL, 250)
+ON CONFLICT (type) DO NOTHING;
+```
+
+No new tables needed — all types use existing `job_requirements` table with `phase = 'post_hire'`.
+
+##### Implementation Phases
+
+**Phase A — Foundation (migration + derivation engine + Returns page)**
+- [ ] Migration 044: insert new requirement type definitions
+- [ ] Extend `hh-requirement-derivation.ts`: auto-create close-out requirements when job status >= 6
+- [ ] Conditional creation logic (only freelancer_followup if crew exists, only excess_resolve if excess records exist, only damage_review if has_damage flagged)
+- [ ] Returns page rebuild: close-out dots per job, filter pills, sort options
+- [ ] `GET /api/returns/close-out-progress` bulk endpoint
+
+**Phase B — Auto-detection (status-reactive cards)**
+- [ ] Invoice detection: read HH billing_list for kind:1 rows, auto-update requirement status
+- [ ] Payment reconciliation: read HH billing balance, auto-resolve when balance <= 0
+- [ ] Excess resolution: read job_excess statuses, auto-resolve when all terminal
+- [ ] Client follow-up: query interactions after return_date, auto-resolve when found
+- [ ] Wire auto-detection into Returns page load + Job Detail post-hire tab
+
+**Phase C — Damage workflow + polish**
+- [ ] Damage requirement: multi-issue support (custom_label per issue)
+- [ ] Chase date on damage_review requirements (follow-up reminders)
+- [ ] "Invoice Sent" manual button on invoice requirement card
+- [ ] RequirementCard type-specific rendering for close-out types
+- [ ] Damage creation from vehicle check-in flow (has_damage → auto-create damage_review requirement)
+
+**Phase D — Dashboard integration (future)**
+- [ ] Dashboard widget: "X jobs with open returns, Y need invoicing, Z have unresolved damage"
+- [ ] Freelancer portal integration: crew feedback prompts
+- [ ] Auto-email: remind freelancers to submit expenses/feedback after job
+
+##### Mobile Considerations (Apr 2026)
+- Returns page uses card layout (not tables) — already mobile-friendly
+- Close-out dots are small enough for mobile viewing
+- Job Detail post-hire tab scrollable via existing tab bar mobile fix
+- Filter pills use `flex-wrap` for mobile reflow
+
 #### Step 5: Payment Portal Repointing
 *Merged into Step 3 Phase E (Money System).* See above for full repointing plan with `DATA_BACKEND` env var toggle.
 
@@ -1165,7 +1290,7 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - General admin tasks
   - Linked optionally to person_id or job_id
 - [ ] Win/loss analysis dashboard (depends on pipeline — lost_reason basics included in pipeline)
-- [ ] Job close-out workflow
+- [ ] ~~Job close-out workflow~~ → See **Step 4b: Returns & Close-Out System** below
 - [ ] Xero financial summary integration
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)

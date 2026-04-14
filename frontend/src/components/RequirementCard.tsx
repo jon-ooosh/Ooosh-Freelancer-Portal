@@ -108,6 +108,12 @@ export const PREP_STATUS_ORDER: JobRequirement['status'][] = ['not_started', 'in
 const TYPE_STATUS_LABELS: Record<string, Record<string, string>> = {
   backline: { not_started: 'Not Started', in_progress: 'Working On It', done: 'Done', blocked: 'Problem' },
   rehearsal: { not_started: 'Not Started', in_progress: 'In Progress', done: 'Done', blocked: 'Problem' },
+  invoice: { not_started: 'Not Invoiced', in_progress: 'Sent', done: 'Done', blocked: 'Problem' },
+  payment_reconcile: { not_started: 'Outstanding', in_progress: 'Partial', done: 'Reconciled', blocked: 'Dispute' },
+  excess_resolve: { not_started: 'Pending', in_progress: 'In Progress', done: 'Resolved', blocked: 'Dispute' },
+  freelancer_followup: { not_started: 'Not Contacted', in_progress: 'Chased', done: 'Done', blocked: 'Overdue' },
+  client_followup: { not_started: 'Not Contacted', in_progress: 'In Progress', done: 'Done', blocked: 'No Response' },
+  damage_review: { not_started: 'Open', in_progress: 'Awaiting Quote', done: 'Resolved', blocked: 'Stalled' },
 };
 
 const EXCESS_STATUS_LABELS: Record<string, { label: string; colour: string }> = {
