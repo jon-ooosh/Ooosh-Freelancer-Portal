@@ -371,12 +371,13 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // ── Auto-generate post-hire requirements ──
     // When a job is dispatched (or has been dispatched), create post_hire
     // backline requirement if one doesn't exist yet and there's backline on the job.
+    // Use HH status integer (more reliable than pipeline_status which can lag behind)
     const jobStatus = await client.query(
-      `SELECT pipeline_status FROM jobs WHERE id = $1`,
+      `SELECT status, pipeline_status FROM jobs WHERE id = $1`,
       [jobId]
     );
-    const status = jobStatus.rows[0]?.pipeline_status;
-    const isPostHirePhase = ['dispatched', 'returned_incomplete', 'returned', 'completed'].includes(status);
+    const hhStatus = jobStatus.rows[0]?.status;
+    const isPostHirePhase = hhStatus >= 4; // 4=Part Dispatched, 5=Dispatched, 6=Returned Incomplete, 7=Returned, 11=Completed
 
     if (isPostHirePhase && flags.has_backline) {
       const existingPostHire = await client.query(

@@ -2122,6 +2122,7 @@ export default function JobDetailPage() {
             key={prepChecklistKey}
             jobId={id || ''}
             hhJobNumber={job.hh_job_number}
+            jobStatus={job.status}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
           />
@@ -3751,9 +3752,10 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   );
 }
 
-function JobPrepChecklist({ jobId, hhJobNumber, derivedFlags, seatAvailability }: {
+function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAvailability }: {
   jobId: string;
   hhJobNumber?: number | null;
+  jobStatus?: number;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
     seat_config: 'round_table' | 'forward_facing' | null;
@@ -3775,7 +3777,10 @@ function JobPrepChecklist({ jobId, hhJobNumber, derivedFlags, seatAvailability }
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
-  const [phase, setPhase] = useState<'pre_hire' | 'post_hire'>('pre_hire');
+  // Default to post_hire view for dispatched+ jobs (status 4+)
+  const [phase, setPhase] = useState<'pre_hire' | 'post_hire'>(
+    (jobStatus && jobStatus >= 4) ? 'post_hire' : 'pre_hire'
+  );
   const addMenuRef = useRef<HTMLDivElement>(null);
 
   // Click outside to dismiss Add Requirement menu
