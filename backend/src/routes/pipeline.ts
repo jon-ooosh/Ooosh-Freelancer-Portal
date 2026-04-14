@@ -425,6 +425,10 @@ const updateStatusSchema = z.object({
   lost_reason: z.string().optional().nullable(),
   lost_detail: z.string().optional().nullable(),
   transition_note: z.string().optional().nullable(),  // Why the status changed
+  // Completion retro
+  retro_rating: z.enum(['great', 'ok', 'issues']).optional().nullable(),
+  retro_notes: z.string().optional().nullable(),
+  retro_follow_up: z.string().optional().nullable(),
 });
 
 router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthRequest, res: Response) => {
@@ -433,6 +437,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     const {
       pipeline_status, hold_reason, hold_reason_detail,
       confirmed_method, lost_reason, lost_detail, transition_note,
+      retro_rating, retro_notes, retro_follow_up,
     } = req.body;
 
     // Get current state
@@ -511,6 +516,19 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
        VALUES ('status_transition', $1, $2, $3, $4)`,
       [transitionContent, jobId, req.user!.id, fromStatus]
     );
+
+    // Log completion retro as a separate interaction (so it's visible on timeline)
+    if (pipeline_status === 'completed' && (retro_rating || retro_notes || retro_follow_up)) {
+      const ratingLabels: Record<string, string> = { great: 'Great', ok: 'OK', issues: 'Issues' };
+      const retroParts = [`Job retro: ${ratingLabels[retro_rating || 'ok'] || retro_rating}`];
+      if (retro_notes) retroParts.push(retro_notes);
+      if (retro_follow_up) retroParts.push(`Follow-up: ${retro_follow_up}`);
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+         VALUES ('note', $1, $2, $3, 'completed')`,
+        [retroParts.join('\n'), jobId, req.user!.id]
+      );
+    }
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
 
