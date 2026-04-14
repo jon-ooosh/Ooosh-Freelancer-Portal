@@ -4384,7 +4384,7 @@ function StatusTransitionModal({
   onCancel,
   jobId,
 }: {
-  targetStatus: PipelineStatus;
+  targetStatus: PipelineStatus | 'completed';
   saving: boolean;
   onConfirm: (data: Record<string, string>) => void;
   onCancel: () => void;
@@ -4436,7 +4436,7 @@ function StatusTransitionModal({
     onConfirm(data);
   };
 
-  const config = PIPELINE_STATUS_CONFIG[targetStatus];
+  const config = PIPELINE_STATUS_CONFIG[targetStatus as PipelineStatus] || { label: 'Completed', colour: '#059669' };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
