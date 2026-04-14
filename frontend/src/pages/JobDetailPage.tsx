@@ -2068,16 +2068,27 @@ export default function JobDetailPage() {
         <div className="mt-3 pt-3 border-t border-gray-100">
           <button
             onClick={() => setShowDetailsNotes(!showDetailsNotes)}
-            className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 transition-colors"
+            className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 transition-colors w-full text-left"
           >
-            <svg className={`w-3.5 h-3.5 transition-transform ${showDetailsNotes ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className={`w-3.5 h-3.5 transition-transform flex-shrink-0 ${showDetailsNotes ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
             </svg>
             Details & Notes
-            {(job.details || job.notes) && (
-              <span className="w-1.5 h-1.5 rounded-full bg-ooosh-400" title="Has content" />
-            )}
           </button>
+          {/* Collapsed snippets */}
+          {!showDetailsNotes && (job.details || job.notes) && (
+            <div
+              onClick={() => setShowDetailsNotes(true)}
+              className="mt-1.5 ml-5 grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-0.5 cursor-pointer hover:bg-gray-50 rounded px-1 -mx-1 transition-colors"
+            >
+              {job.details && (
+                <p className="text-xs text-gray-400 truncate"><span className="font-medium text-gray-500">Details:</span> {job.details}</p>
+              )}
+              {job.notes && (
+                <p className="text-xs text-gray-400 truncate"><span className="font-medium text-gray-500">Notes:</span> {job.notes}</p>
+              )}
+            </div>
+          )}
           {showDetailsNotes && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
               <div>
