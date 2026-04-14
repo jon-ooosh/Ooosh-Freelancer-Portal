@@ -412,6 +412,63 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       }
     }
 
+    // ── Auto-generate close-out requirements when job reaches return status ──
+    // HH status 6=Returned Incomplete, 7=Returned, 8=Requires Attention, 11=Completed
+    const isReturnPhase = hhStatus >= 6 && hhStatus !== 9 && hhStatus !== 10; // exclude cancelled/not interested
+
+    if (isReturnPhase) {
+      // Helper: create a post_hire requirement if it doesn't exist yet
+      const ensureCloseout = async (type: string, notes: string) => {
+        const exists = await client.query(
+          `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 AND phase = 'post_hire'`,
+          [jobId, type]
+        );
+        if (exists.rows.length === 0) {
+          await client.query(
+            `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+             VALUES ($1, $2, 'not_started', $3, true, 'auto_post_hire', 'post_hire')`,
+            [jobId, type, notes]
+          );
+          result.requirementsCreated.push(`${type} (post_hire)`);
+        }
+      };
+
+      // Always create: invoice, payment reconciliation, client follow-up
+      await ensureCloseout('invoice', 'Check HireHop for invoice status');
+      await ensureCloseout('payment_reconcile', 'Verify all payments received and balance is zero');
+      await ensureCloseout('client_followup', 'Follow up with client post-hire');
+
+      // Conditional: excess resolution — only if job has excess records
+      const excessCount = await client.query(
+        `SELECT COUNT(*) AS cnt FROM job_excess WHERE job_id = $1`,
+        [jobId]
+      );
+      if (parseInt(excessCount.rows[0]?.cnt || '0') > 0) {
+        await ensureCloseout('excess_resolve', 'Resolve all insurance excess (reimburse, claim, or waive)');
+      }
+
+      // Conditional: freelancer follow-up — only if crew assignments exist
+      const crewCount = await client.query(
+        `SELECT COUNT(*) AS cnt FROM quote_assignments qa
+         JOIN quotes q ON q.id = qa.quote_id
+         WHERE q.job_id = $1 AND qa.status != 'cancelled'`,
+        [jobId]
+      );
+      if (parseInt(crewCount.rows[0]?.cnt || '0') > 0) {
+        await ensureCloseout('freelancer_followup', 'Check in with freelancers — expenses, feedback, issues');
+      }
+
+      // Conditional: damage review — only if any vehicle assignment has has_damage=true
+      const damageCount = await client.query(
+        `SELECT COUNT(*) AS cnt FROM vehicle_hire_assignments
+         WHERE job_id = $1 AND has_damage = true`,
+        [jobId]
+      );
+      if (parseInt(damageCount.rows[0]?.cnt || '0') > 0) {
+        await ensureCloseout('damage_review', 'Vehicle damage flagged during hire — review and resolve');
+      }
+    }
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');

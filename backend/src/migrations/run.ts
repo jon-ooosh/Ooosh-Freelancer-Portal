@@ -77,6 +77,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '041_hh_derived_requirements.sql',
         '042_requirement_phases.sql',
         '043_job_times.sql',
+        '044_closeout_requirement_types.sql',
       ];
 
       for (const migration of migrations) {

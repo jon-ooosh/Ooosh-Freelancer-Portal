@@ -75,6 +75,59 @@ router.post('/bulk', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Bulk close-out progress (for Returns page) ─────────────────────────
+
+router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
+  try {
+    const { job_ids } = req.body;
+    if (!Array.isArray(job_ids) || job_ids.length === 0) {
+      return res.json({ data: {} });
+    }
+    const ids = job_ids.slice(0, 500);
+
+    // Fetch all post_hire requirements for these jobs
+    const result = await query(
+      `SELECT jr.job_id, jr.requirement_type, jr.status, jr.custom_label,
+              rtd.label AS type_label, rtd.icon AS type_icon
+       FROM job_requirements jr
+       JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
+       WHERE jr.job_id = ANY($1) AND jr.phase = 'post_hire'
+       ORDER BY rtd.sort_order`,
+      [ids]
+    );
+
+    // Group by job_id: { jobId: { items: [...], summary: { total, done, blocked } } }
+    const grouped: Record<string, {
+      items: Array<{ type: string; label: string; icon: string; status: string; custom_label: string | null }>;
+      total: number;
+      done: number;
+      blocked: number;
+      in_progress: number;
+    }> = {};
+
+    for (const row of result.rows) {
+      if (!grouped[row.job_id]) {
+        grouped[row.job_id] = { items: [], total: 0, done: 0, blocked: 0, in_progress: 0 };
+      }
+      grouped[row.job_id].items.push({
+        type: row.requirement_type,
+        label: row.type_label,
+        icon: row.type_icon,
+        status: row.status,
+        custom_label: row.custom_label,
+      });
+      grouped[row.job_id].total++;
+      if (row.status === 'done') grouped[row.job_id].done++;
+      if (row.status === 'blocked') grouped[row.job_id].blocked++;
+      if (row.status === 'in_progress') grouped[row.job_id].in_progress++;
+    }
+    res.json({ data: grouped });
+  } catch (err) {
+    console.error('Error fetching closeout progress:', err);
+    res.status(500).json({ error: 'Failed to fetch closeout progress' });
+  }
+});
+
 // ── Add a requirement to a job ───────────────────────────────────────────
 
 const addRequirementSchema = z.object({
