@@ -2,6 +2,15 @@ import { Link } from 'react-router-dom';
 import type { BacklineOverview } from './types';
 import { formatPrepTime } from './helpers';
 
+interface PrepDayData {
+  job_count: number;
+  vehicle_count: number;
+  vehicle_prep_mins: number;
+  backline_prep_mins: number;
+  rehearsal_prep_mins: number;
+  total_prep_mins: number;
+}
+
 interface Props {
   transportOps: { summary: Record<string, number>; unassigned_count: number };
   fleet: {
@@ -12,6 +21,8 @@ interface Props {
     tax_due_soon: string;
   };
   backline: BacklineOverview | null;
+  todayPrep?: PrepDayData;
+  tomorrowPrep?: PrepDayData;
 }
 
 const OPS_STATUS_LABELS: Record<string, string> = {
@@ -23,7 +34,7 @@ const OPS_STATUS_LABELS: Record<string, string> = {
   completed: 'Completed',
 };
 
-export default function OperationsWidgets({ transportOps, fleet, backline }: Props) {
+export default function OperationsWidgets({ transportOps, fleet, backline, todayPrep, tomorrowPrep }: Props) {
   const activeFleet = parseInt(fleet.active_count) || 0;
   const motDue = parseInt(fleet.mot_due_soon) || 0;
   const insuranceDue = parseInt(fleet.insurance_due_soon) || 0;
@@ -176,6 +187,60 @@ export default function OperationsWidgets({ transportOps, fleet, backline }: Pro
           </p>
         </div>
       </div>
+
+      {/* Prep Workload — inside Operations */}
+      {(todayPrep || tomorrowPrep) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100 border-t border-gray-100">
+          <PrepDay label="Prep Workload — Today" prep={todayPrep} />
+          <PrepDay label="Prep Workload — Tomorrow" prep={tomorrowPrep} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PrepDay({ label, prep }: { label: string; prep?: PrepDayData }) {
+  if (!prep || prep.total_prep_mins === 0) {
+    return (
+      <div className="p-5">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">{label}</h3>
+        <p className="text-sm text-gray-400">No prep needed</p>
+      </div>
+    );
+  }
+
+  const categories = [
+    { label: 'Vehicles', count: prep.vehicle_count, mins: prep.vehicle_prep_mins, color: 'text-blue-600', bg: 'bg-blue-500' },
+    { label: 'Backline', count: null, mins: prep.backline_prep_mins, color: 'text-purple-600', bg: 'bg-purple-500' },
+    { label: 'Rehearsals', count: null, mins: prep.rehearsal_prep_mins, color: 'text-teal-600', bg: 'bg-teal-500' },
+  ].filter(c => c.mins > 0);
+
+  return (
+    <div className="p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{label}</h3>
+        <span className="text-sm font-bold text-gray-900">{formatPrepTime(prep.total_prep_mins)} total</span>
+      </div>
+      <div className="space-y-2">
+        {categories.map(cat => (
+          <div key={cat.label} className="flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2">
+              <div className={`w-1.5 h-1.5 rounded-full ${cat.bg}`} />
+              <span className="text-gray-600">
+                {cat.label}
+                {cat.count ? ` (${cat.count})` : ''}
+              </span>
+            </div>
+            <span className={`font-medium ${cat.color}`}>{formatPrepTime(cat.mins)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="h-2 bg-gray-100 rounded-full overflow-hidden flex mt-3">
+        {categories.map(cat => (
+          <div key={cat.label} className={cat.bg} style={{ width: `${(cat.mins / prep.total_prep_mins) * 100}%` }} />
+        ))}
+      </div>
+      <p className="text-[10px] text-gray-400 mt-1">{prep.job_count} job{prep.job_count !== 1 ? 's' : ''} need prepping</p>
     </div>
   );
 }
