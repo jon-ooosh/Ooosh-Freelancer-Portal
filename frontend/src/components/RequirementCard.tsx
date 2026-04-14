@@ -448,8 +448,35 @@ export default function RequirementCard({
               </div>
             )}
 
+            {/* Invoice — show "Mark as Sent" button when status is in_progress (generated) */}
+            {req.requirement_type === 'invoice' && req.status === 'in_progress' && (
+              <div className="mt-1.5">
+                <button
+                  onClick={() => onStatusChange(req.id, 'done')}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-green-50 text-green-700 border border-green-200 rounded hover:bg-green-100 transition-colors"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  Mark as Sent to Client
+                </button>
+              </div>
+            )}
+
+            {/* Damage — show notes + chase hint */}
+            {req.requirement_type === 'damage_review' && (
+              <div className="mt-1 text-xs text-gray-500">
+                {req.notes && <div>{req.notes}</div>}
+                {req.due_date && (
+                  <div className="text-amber-600 font-medium mt-0.5">
+                    Chase: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Notes (for types without specific rendering) */}
-            {!['vehicle', 'hire_forms', 'backline', 'excess'].includes(req.requirement_type) && req.notes && (
+            {!['vehicle', 'hire_forms', 'backline', 'excess', 'invoice', 'damage_review'].includes(req.requirement_type) && req.notes && (
               <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
             )}
 

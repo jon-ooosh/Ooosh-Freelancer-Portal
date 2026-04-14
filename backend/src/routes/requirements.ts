@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { hhBroker } from '../services/hirehop-broker';
 
 const router = Router();
 router.use(authenticate);
@@ -87,7 +88,7 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
 
     // Fetch all post_hire requirements for these jobs
     const result = await query(
-      `SELECT jr.job_id, jr.requirement_type, jr.status, jr.custom_label,
+      `SELECT jr.id, jr.job_id, jr.requirement_type, jr.status, jr.custom_label,
               rtd.label AS type_label, rtd.icon AS type_icon
        FROM job_requirements jr
        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
@@ -95,6 +96,86 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
        ORDER BY rtd.sort_order`,
       [ids]
     );
+
+    // ── HH billing auto-detection (invoice + payment reconciliation) ──
+    // Find jobs with invoice/payment_reconcile still at not_started and check HH billing
+    const jobsNeedingBillingCheck = new Set<string>();
+    const reqMap: Record<string, { id: string; type: string }[]> = {};
+    for (const row of result.rows) {
+      if ((row.requirement_type === 'invoice' || row.requirement_type === 'payment_reconcile')
+          && row.status === 'not_started') {
+        jobsNeedingBillingCheck.add(row.job_id);
+        if (!reqMap[row.job_id]) reqMap[row.job_id] = [];
+        reqMap[row.job_id].push({ id: row.id, type: row.requirement_type });
+      }
+    }
+
+    // Look up HH job numbers for these jobs (limit to 10 to avoid rate limiting)
+    if (jobsNeedingBillingCheck.size > 0) {
+      const checkIds = Array.from(jobsNeedingBillingCheck).slice(0, 10);
+      const hhNumbers = await query(
+        `SELECT id, hh_job_number FROM jobs WHERE id = ANY($1) AND hh_job_number IS NOT NULL`,
+        [checkIds]
+      );
+
+      for (const job of hhNumbers.rows) {
+        try {
+          const billingRes = await hhBroker.get('/php_functions/billing_list.php',
+            { main_id: job.hh_job_number, type: 1 },
+            { priority: 'low', cacheTTL: 300 }
+          );
+
+          if (billingRes.success && billingRes.data) {
+            const bl = billingRes.data as Record<string, any>;
+            if (bl.rows && Array.isArray(bl.rows)) {
+              let hasInvoice = false;
+              let hireValue = 0;
+              let totalDeposits = 0;
+
+              for (const row of bl.rows) {
+                const kind = parseInt(row.kind ?? '0');
+                const data = row.data || row;
+                if (kind === 0) {
+                  hireValue = parseFloat(data.accrued || data.ACCRUED || row.accrued || '0');
+                } else if (kind === 1) {
+                  const invoiceStatus = parseInt(data.STATUS || data.status || '0');
+                  if (invoiceStatus > 0) hasInvoice = true; // non-proforma invoice
+                } else if (kind === 6) {
+                  const credit = Math.abs(parseFloat(row.credit || data.credit || '0'));
+                  if (credit > 0) totalDeposits += credit;
+                }
+              }
+
+              const reqs = reqMap[job.id] || [];
+              for (const req of reqs) {
+                if (req.type === 'invoice' && hasInvoice) {
+                  await query(
+                    `UPDATE job_requirements SET status = 'in_progress', updated_at = NOW()
+                     WHERE id = $1 AND status = 'not_started'`,
+                    [req.id]
+                  );
+                  // Update the row in our result set so the response reflects the change
+                  const row = result.rows.find(r => r.id === req.id);
+                  if (row) row.status = 'in_progress';
+                }
+                if (req.type === 'payment_reconcile' && hireValue > 0 && totalDeposits >= hireValue - 0.01) {
+                  await query(
+                    `UPDATE job_requirements SET status = 'done', updated_at = NOW()
+                     WHERE id = $1 AND status = 'not_started'`,
+                    [req.id]
+                  );
+                  const row = result.rows.find(r => r.id === req.id);
+                  if (row) row.status = 'done';
+                }
+              }
+            }
+          }
+        } catch (hhErr) {
+          // Don't fail the whole request if HH billing check fails for one job
+          console.warn(`[Closeout] HH billing check failed for job ${job.id}:`, hhErr);
+        }
+      }
+    }
 
     // Group by job_id: { jobId: { items: [...], summary: { total, done, blocked } } }
     const grouped: Record<string, {
