@@ -604,6 +604,19 @@ export default function JobDetailPage() {
   const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'money'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
   const [showDetailsNotes, setShowDetailsNotes] = useState(false);
+  const detailsNotesRef = useRef<HTMLDivElement>(null);
+
+  // Close details/notes on click outside
+  useEffect(() => {
+    if (!showDetailsNotes) return;
+    function handleClick(e: MouseEvent) {
+      if (detailsNotesRef.current && !detailsNotesRef.current.contains(e.target as Node)) {
+        setShowDetailsNotes(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [showDetailsNotes]);
   const [showChaseModal, setShowChaseModal] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -2065,7 +2078,7 @@ export default function JobDetailPage() {
         </div>
 
         {/* Collapsible Details & Notes */}
-        <div className="mt-3 pt-3 border-t border-gray-100">
+        <div ref={detailsNotesRef} className="mt-3 pt-3 border-t border-gray-100">
           <button
             onClick={() => setShowDetailsNotes(!showDetailsNotes)}
             className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 transition-colors w-full text-left"
