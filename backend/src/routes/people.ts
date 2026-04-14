@@ -443,4 +443,131 @@ router.post('/:id/do-not-hire', authorize('admin', 'manager'), async (req: AuthR
   }
 });
 
+// ── Hire History (jobs linked via org memberships + crew assignments) ────
+
+router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const offset = (page - 1) * limit;
+
+    // Jobs linked through person's organisations (via person_organisation_roles → job_organisations)
+    // UNION with jobs where person is a crew assignment (via quote_assignments)
+    const jobsQuery = `
+      WITH person_jobs AS (
+        -- Jobs via organisation links
+        SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
+               j.job_date, j.job_end, j.return_date, j.job_value,
+               j.client_name, j.company_name,
+               jo.role AS link_role, o.name AS link_org_name,
+               'organisation' AS link_type
+        FROM person_organisation_roles por
+        JOIN job_organisations jo ON jo.organisation_id = por.organisation_id
+        JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+        LEFT JOIN organisations o ON o.id = por.organisation_id
+        WHERE por.person_id = $1
+
+        UNION
+
+        -- Jobs via crew assignments
+        SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
+               j.job_date, j.job_end, j.return_date, j.job_value,
+               j.client_name, j.company_name,
+               qa.role AS link_role, NULL AS link_org_name,
+               'crew' AS link_type
+        FROM quote_assignments qa
+        JOIN quotes q ON q.id = qa.quote_id
+        JOIN jobs j ON j.id = q.job_id AND j.is_deleted = false
+        WHERE qa.person_id = $1 AND qa.status != 'cancelled'
+      )
+      SELECT pj.*,
+             (SELECT i.content FROM interactions i
+              WHERE i.job_id = pj.id AND i.content LIKE 'Job retro:%'
+              ORDER BY i.created_at DESC LIMIT 1
+             ) AS retro_content
+      FROM person_jobs pj
+      ORDER BY pj.job_date DESC NULLS LAST
+      LIMIT $2 OFFSET $3
+    `;
+
+    const jobsResult = await query(jobsQuery, [id, limit, offset]);
+
+    // Count total (same UNION but just count)
+    const countResult = await query(`
+      SELECT COUNT(*) AS total FROM (
+        SELECT DISTINCT j.id
+        FROM person_organisation_roles por
+        JOIN job_organisations jo ON jo.organisation_id = por.organisation_id
+        JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+        WHERE por.person_id = $1
+
+        UNION
+
+        SELECT DISTINCT j.id
+        FROM quote_assignments qa
+        JOIN quotes q ON q.id = qa.quote_id
+        JOIN jobs j ON j.id = q.job_id AND j.is_deleted = false
+        WHERE qa.person_id = $1 AND qa.status != 'cancelled'
+      ) AS combined
+    `, [id]);
+    const total = parseInt(countResult.rows[0]?.total || '0');
+
+    // Stats
+    const statsResult = await query(`
+      WITH person_jobs AS (
+        SELECT DISTINCT j.id, j.pipeline_status, j.status, j.job_value
+        FROM person_organisation_roles por
+        JOIN job_organisations jo ON jo.organisation_id = por.organisation_id
+        JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+        WHERE por.person_id = $1
+
+        UNION
+
+        SELECT DISTINCT j.id, j.pipeline_status, j.status, j.job_value
+        FROM quote_assignments qa
+        JOIN quotes q ON q.id = qa.quote_id
+        JOIN jobs j ON j.id = q.job_id AND j.is_deleted = false
+        WHERE qa.person_id = $1 AND qa.status != 'cancelled'
+      )
+      SELECT
+        COUNT(*) AS total_jobs,
+        COUNT(*) FILTER (WHERE pipeline_status = 'completed' OR status = 11) AS completed_jobs,
+        COUNT(*) FILTER (WHERE pipeline_status = 'confirmed' OR status = 2) AS confirmed_jobs,
+        COUNT(*) FILTER (WHERE pipeline_status = 'lost') AS lost_jobs,
+        COALESCE(SUM(job_value) FILTER (WHERE pipeline_status IN ('confirmed','completed','prepped','dispatched','returned','returned_incomplete') OR status BETWEEN 2 AND 11), 0) AS total_value
+      FROM person_jobs
+    `, [id]);
+
+    // Parse retro
+    const jobs = jobsResult.rows.map(row => {
+      let retro_rating: string | null = null;
+      let retro_notes: string | null = null;
+      if (row.retro_content) {
+        const lines = row.retro_content.split('\n');
+        const ratingLine = lines[0] || '';
+        if (ratingLine.includes('Great')) retro_rating = 'great';
+        else if (ratingLine.includes('Issues')) retro_rating = 'issues';
+        else if (ratingLine.includes('OK')) retro_rating = 'ok';
+        retro_notes = lines.slice(1).filter((l: string) => l && !l.startsWith('Follow-up:')).join(' ') || null;
+      }
+      return {
+        ...row,
+        retro_content: undefined,
+        retro_rating,
+        retro_notes,
+      };
+    });
+
+    res.json({
+      data: jobs,
+      stats: statsResult.rows[0],
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
+    console.error('Person hire history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;
