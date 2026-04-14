@@ -18,12 +18,13 @@ export default function PipelineSnapshot({ byStatus, activeValue }: Props) {
       <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100">
         {/* Pipeline Snapshot */}
         <div className="p-5">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center justify-between mb-1">
             <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Pipeline Snapshot</h3>
             <Link to="/pipeline" className="text-[11px] text-ooosh-600 hover:text-ooosh-700 font-medium">
               Open Pipeline
             </Link>
           </div>
+          <p className="text-[10px] text-gray-400 mb-2">All open enquiries (excl. confirmed & lost)</p>
           {byStatus.length === 0 ? (
             <p className="text-sm text-gray-400">No active pipeline</p>
           ) : (

@@ -195,7 +195,7 @@ export function startScheduler() {
         `UPDATE jobs
          SET pipeline_status = 'lost',
              pipeline_status_changed_at = NOW(),
-             lost_reason = 'auto_expired',
+             lost_reason = 'No Decision',
              updated_at = NOW()
          WHERE job_date IS NOT NULL
            AND job_date::date < CURRENT_DATE
