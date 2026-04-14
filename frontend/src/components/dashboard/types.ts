@@ -133,6 +133,21 @@ export interface BacklineOverview {
   returning: { stats: BacklineStats };
 }
 
+export interface PrepEstimate {
+  job_count: number;
+  vehicle_count: number;
+  vehicle_prep_mins: number;
+  backline_prep_mins: number;
+  rehearsal_prep_mins: number;
+  total_prep_mins: number;
+  deprep_job_count: number;
+  deprep_vehicle_count: number;
+  vehicle_deprep_mins: number;
+  backline_deprep_mins: number;
+  rehearsal_deprep_mins: number;
+  total_deprep_mins: number;
+}
+
 export interface OperationsData {
   stat_cards: {
     on_hire_count: string;
@@ -177,14 +192,7 @@ export interface OperationsData {
     by_status: PipelineStat[];
     active_value: number;
   };
-  prep_estimates: Record<string, {
-    job_count: number;
-    vehicle_count: number;
-    vehicle_prep_mins: number;
-    backline_prep_mins: number;
-    rehearsal_prep_mins: number;
-    total_prep_mins: number;
-  }>;
+  prep_estimates: Record<string, PrepEstimate>;
   team_activity: TeamMember[];
   recent_activity: RecentActivity[];
 }

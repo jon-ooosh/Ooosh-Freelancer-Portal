@@ -10,13 +10,15 @@ interface Props {
   excessCount: number;
   excessTotal?: number;
   excessItems: PendingExcess[];
+  fleetAlerts?: { mot: number; insurance: number; tax: number };
 }
 
 export default function NeedsAttention({
   overdueReturns, chasesDue, referralCount, referrals,
-  excessCount, excessItems,
+  excessCount, excessItems, fleetAlerts,
 }: Props) {
-  const hasAnything = overdueReturns.length > 0 || chasesDue.length > 0 || referralCount > 0 || excessCount > 0;
+  const totalFleetAlerts = (fleetAlerts?.mot || 0) + (fleetAlerts?.insurance || 0) + (fleetAlerts?.tax || 0);
+  const hasAnything = overdueReturns.length > 0 || chasesDue.length > 0 || referralCount > 0 || excessCount > 0 || totalFleetAlerts > 0;
 
   if (!hasAnything) return null;
 
@@ -152,6 +154,33 @@ export default function NeedsAttention({
                 View pipeline
               </Link>
             )}
+          </div>
+        )}
+
+        {/* Fleet Compliance */}
+        {totalFleetAlerts > 0 && fleetAlerts && (
+          <div className="p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="w-2 h-2 rounded-full bg-purple-500" />
+              <h3 className="text-xs font-semibold text-purple-700 uppercase">Fleet Compliance</h3>
+              <span className="ml-auto text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full font-medium">
+                {totalFleetAlerts}
+              </span>
+            </div>
+            <div className="space-y-1.5">
+              {fleetAlerts.mot > 0 && (
+                <div className="text-xs text-amber-600">{fleetAlerts.mot} MOT{fleetAlerts.mot !== 1 ? 's' : ''} due within 30d</div>
+              )}
+              {fleetAlerts.insurance > 0 && (
+                <div className="text-xs text-amber-600">{fleetAlerts.insurance} insurance renewal{fleetAlerts.insurance !== 1 ? 's' : ''} due</div>
+              )}
+              {fleetAlerts.tax > 0 && (
+                <div className="text-xs text-amber-600">{fleetAlerts.tax} tax disc{fleetAlerts.tax !== 1 ? 's' : ''} due</div>
+              )}
+            </div>
+            <Link to="/vehicles/fleet" className="text-[11px] text-purple-600 hover:text-purple-700 font-medium mt-2 block">
+              View fleet
+            </Link>
           </div>
         )}
       </div>
