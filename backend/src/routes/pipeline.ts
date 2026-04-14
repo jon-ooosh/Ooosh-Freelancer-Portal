@@ -937,6 +937,29 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
     ];
 
     const changedFields: string[] = [];
+    const fieldLabels: Record<string, string> = {
+      job_name: 'Job name', out_date: 'Outgoing date', job_date: 'Job start',
+      job_end: 'Job end', return_date: 'Return date', out_time: 'Out time',
+      return_time: 'Return time', end_time: 'End time', client_name: 'Client',
+      hh_job_number: 'HH job #', job_value: 'Job value', likelihood: 'Likelihood',
+      next_chase_date: 'Next chase', details: 'Details', notes: 'Notes',
+    };
+    const dateFields = new Set(['out_date', 'job_date', 'job_end', 'return_date', 'next_chase_date']);
+    const timeFields = new Set(['out_time', 'return_time', 'end_time']);
+    const formatLogValue = (field: string, val: unknown): string => {
+      if (val === null || val === undefined || val === '') return '(empty)';
+      if (dateFields.has(field)) {
+        try {
+          const d = new Date(val as string);
+          if (!isNaN(d.getTime())) return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+        } catch { /* fall through */ }
+      }
+      if (timeFields.has(field)) {
+        const s = String(val);
+        return s.length >= 5 ? s.slice(0, 5) : s;
+      }
+      return String(val);
+    };
 
     for (const field of allowedFields) {
       if (field in fields) {
@@ -944,7 +967,7 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
         const newVal = fields[field];
         // Track what actually changed for the interaction log
         if (String(oldVal ?? '') !== String(newVal ?? '')) {
-          changedFields.push(`${field}: ${oldVal ?? '(empty)'} → ${newVal ?? '(empty)'}`);
+          changedFields.push(`${fieldLabels[field] || field}: ${formatLogValue(field, oldVal)} → ${formatLogValue(field, newVal)}`);
         }
         updates.push(`${field} = $${pIdx}`);
         params.push(newVal ?? null);
