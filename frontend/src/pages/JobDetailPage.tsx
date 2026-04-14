@@ -1014,7 +1014,7 @@ export default function JobDetailPage() {
 
   function initiateStatusChange(targetStatus: PipelineStatus) {
     setShowStatusDropdown(false);
-    const needsPrompt = ['paused', 'confirmed', 'lost'].includes(targetStatus);
+    const needsPrompt = ['paused', 'confirmed', 'lost', 'completed'].includes(targetStatus);
     const needsDispatchConfirm = ['dispatched'].includes(targetStatus);
     if (needsPrompt) {
       setTransitionTarget(targetStatus);
@@ -2173,7 +2173,7 @@ export default function JobDetailPage() {
           entityType="job_id"
           entityId={id}
           interactions={interactions}
-          onInteractionAdded={loadInteractions}
+          onInteractionAdded={() => { loadInteractions(); setPrepChecklistKey(k => k + 1); }}
         />
       )}
 
@@ -3346,6 +3346,7 @@ export default function JobDetailPage() {
         <StatusTransitionModal
           targetStatus={transitionTarget}
           saving={transitionSaving}
+          jobId={id}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
@@ -4381,11 +4382,13 @@ function StatusTransitionModal({
   saving,
   onConfirm,
   onCancel,
+  jobId,
 }: {
   targetStatus: PipelineStatus;
   saving: boolean;
   onConfirm: (data: Record<string, string>) => void;
   onCancel: () => void;
+  jobId?: string;
 }) {
   const [holdReason, setHoldReason] = useState<HoldReason>('client_undecided');
   const [holdDetail, setHoldDetail] = useState('');
@@ -4393,6 +4396,26 @@ function StatusTransitionModal({
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
+  const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('ok');
+  const [retroNotes, setRetroNotes] = useState('');
+  const [retroFollowUp, setRetroFollowUp] = useState('');
+  const [outstandingItems, setOutstandingItems] = useState<string[]>([]);
+
+  // Fetch outstanding close-out items when completing
+  useEffect(() => {
+    if (targetStatus !== 'completed' || !jobId) return;
+    api.post<{ data: Record<string, { items: Array<{ label: string; status: string }> }> }>(
+      '/requirements/closeout-progress', { job_ids: [jobId] }
+    ).then(res => {
+      const co = res.data[jobId];
+      if (co) {
+        const outstanding = co.items
+          .filter(i => i.status !== 'done')
+          .map(i => i.label);
+        setOutstandingItems(outstanding);
+      }
+    }).catch(() => {});
+  }, [targetStatus, jobId]);
 
   const handleSubmit = () => {
     const data: Record<string, string> = {};
@@ -4404,6 +4427,10 @@ function StatusTransitionModal({
     } else if (targetStatus === 'lost') {
       data.lost_reason = lostReason;
       if (lostDetail) data.lost_detail = lostDetail;
+    } else if (targetStatus === 'completed') {
+      data.retro_rating = retroRating;
+      if (retroNotes) data.retro_notes = retroNotes;
+      if (retroFollowUp) data.retro_follow_up = retroFollowUp;
     }
     if (note) data.transition_note = note;
     onConfirm(data);
@@ -4476,6 +4503,58 @@ function StatusTransitionModal({
               value={lostDetail}
               onChange={(e) => setLostDetail(e.target.value)}
               rows={2}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+          </div>
+        )}
+
+        {targetStatus === 'completed' && (
+          <div className="space-y-3 mb-4">
+            {outstandingItems.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm">
+                <div className="font-medium text-amber-800 mb-1">Outstanding close-out items:</div>
+                <ul className="text-amber-700 text-xs space-y-0.5">
+                  {outstandingItems.map((item, i) => (
+                    <li key={i} className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-xs text-amber-600 mt-2">You can still mark as completed — these will remain on the Returns page for follow-up.</p>
+              </div>
+            )}
+            <label className="block text-sm font-medium text-gray-700">Quick retro — how did this job go?</label>
+            <div className="flex gap-2">
+              {([
+                { key: 'great' as const, label: 'Great', colour: 'bg-green-100 text-green-700 border-green-300' },
+                { key: 'ok' as const, label: 'OK', colour: 'bg-amber-100 text-amber-700 border-amber-300' },
+                { key: 'issues' as const, label: 'Issues', colour: 'bg-red-100 text-red-700 border-red-300' },
+              ]).map(opt => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setRetroRating(opt.key)}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                    retroRating === opt.key ? opt.colour + ' ring-2 ring-offset-1 ring-current' : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <textarea
+              placeholder="Anything to note? Lessons learned, client feedback, things to improve..."
+              value={retroNotes}
+              onChange={(e) => setRetroNotes(e.target.value)}
+              rows={3}
+              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+            />
+            <input
+              type="text"
+              placeholder="Follow-up actions? (e.g. 'chase missing cable', 'thank client')"
+              value={retroFollowUp}
+              onChange={(e) => setRetroFollowUp(e.target.value)}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
           </div>

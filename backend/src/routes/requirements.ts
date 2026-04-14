@@ -129,20 +129,30 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
             const bl = billingRes.data as Record<string, any>;
             if (bl.rows && Array.isArray(bl.rows)) {
               let hasInvoice = false;
-              let hireValue = 0;
-              let totalDeposits = 0;
+              let allInvoicesPaid = true;
+              let hasAnyBillingRow = false;
+              let totalOwed = 0;
 
               for (const row of bl.rows) {
                 const kind = parseInt(row.kind ?? '0');
                 const data = row.data || row;
-                if (kind === 0) {
-                  hireValue = parseFloat(data.accrued || data.ACCRUED || row.accrued || '0');
-                } else if (kind === 1) {
+
+                if (kind === 1) {
+                  // Invoice row
                   const invoiceStatus = parseInt(data.STATUS || data.status || '0');
-                  if (invoiceStatus > 0) hasInvoice = true; // non-proforma invoice
-                } else if (kind === 6) {
-                  const credit = Math.abs(parseFloat(row.credit || data.credit || '0'));
-                  if (credit > 0) totalDeposits += credit;
+                  const isProforma = invoiceStatus === 0;
+                  const invoiceDesc = String(data.DESCRIPTION || row.desc || '');
+                  if (!isProforma && !invoiceDesc.toLowerCase().includes('proforma')) {
+                    hasInvoice = true;
+                    hasAnyBillingRow = true;
+                    const owing = parseFloat(data.OWING || data.owing || row.owing || '0');
+                    if (owing > 0.01) {
+                      allInvoicesPaid = false;
+                      totalOwed += owing;
+                    }
+                  }
+                } else if (kind === 0) {
+                  hasAnyBillingRow = true;
                 }
               }
 
@@ -154,11 +164,11 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
                      WHERE id = $1 AND status = 'not_started'`,
                     [req.id]
                   );
-                  // Update the row in our result set so the response reflects the change
                   const row = result.rows.find(r => r.id === req.id);
                   if (row) row.status = 'in_progress';
                 }
-                if (req.type === 'payment_reconcile' && hireValue > 0 && totalDeposits >= hireValue - 0.01) {
+                if (req.type === 'payment_reconcile' && hasInvoice && allInvoicesPaid) {
+                  // All invoices have £0 owed — payment is reconciled
                   await query(
                     `UPDATE job_requirements SET status = 'done', updated_at = NOW()
                      WHERE id = $1 AND status = 'not_started'`,
@@ -368,7 +378,22 @@ router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest,
       return res.status(404).json({ error: 'Requirement not found' });
     }
 
-    res.json({ data: result.rows[0] });
+    const updated = result.rows[0];
+
+    // ── Close-out cascades: when one requirement is resolved, auto-resolve related ones ──
+    if (updated.phase === 'post_hire' && updates.status === 'done') {
+      // Invoice sent → also resolve client follow-up (sending the invoice IS the follow-up)
+      if (updated.requirement_type === 'invoice') {
+        await query(
+          `UPDATE job_requirements SET status = 'done', updated_at = NOW()
+           WHERE job_id = $1 AND requirement_type = 'client_followup' AND phase = 'post_hire'
+             AND status IN ('not_started', 'in_progress')`,
+          [updated.job_id]
+        );
+      }
+    }
+
+    res.json({ data: updated });
   } catch (err) {
     console.error('Error updating requirement:', err);
     res.status(500).json({ error: 'Failed to update requirement' });
