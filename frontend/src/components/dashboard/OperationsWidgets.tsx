@@ -1,15 +1,6 @@
 import { Link } from 'react-router-dom';
-import type { BacklineOverview } from './types';
+import type { BacklineOverview, PrepEstimate } from './types';
 import { formatPrepTime } from './helpers';
-
-interface PrepDayData {
-  job_count: number;
-  vehicle_count: number;
-  vehicle_prep_mins: number;
-  backline_prep_mins: number;
-  rehearsal_prep_mins: number;
-  total_prep_mins: number;
-}
 
 interface Props {
   transportOps: { summary: Record<string, number>; unassigned_count: number };
@@ -21,8 +12,8 @@ interface Props {
     tax_due_soon: string;
   };
   backline: BacklineOverview | null;
-  todayPrep?: PrepDayData;
-  tomorrowPrep?: PrepDayData;
+  todayPrep?: PrepEstimate;
+  tomorrowPrep?: PrepEstimate;
 }
 
 const OPS_STATUS_LABELS: Record<string, string> = {
@@ -34,18 +25,14 @@ const OPS_STATUS_LABELS: Record<string, string> = {
   completed: 'Completed',
 };
 
-export default function OperationsWidgets({ transportOps, fleet, backline, todayPrep, tomorrowPrep }: Props) {
-  const activeFleet = parseInt(fleet.active_count) || 0;
-  const motDue = parseInt(fleet.mot_due_soon) || 0;
-  const insuranceDue = parseInt(fleet.insurance_due_soon) || 0;
-  const taxDue = parseInt(fleet.tax_due_soon) || 0;
-  const fleetIssues = motDue + insuranceDue + taxDue;
-
+export default function OperationsWidgets({ transportOps, backline, todayPrep, tomorrowPrep }: Props) {
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200">
       <div className="px-5 py-4 border-b border-gray-100">
         <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Operations</h2>
       </div>
+
+      {/* Row 1: Transport Ops + Backline summary */}
       <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100">
         {/* Transport Ops */}
         <div className="p-5">
@@ -80,53 +67,10 @@ export default function OperationsWidgets({ transportOps, fleet, backline, today
           )}
         </div>
 
-        {/* Fleet Health */}
+        {/* Backline status */}
         <div className="p-5">
           <div className="flex items-center justify-between mb-1">
-            <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Fleet Health</h3>
-            <Link to="/vehicles/fleet" className="text-[11px] text-ooosh-600 hover:text-ooosh-700 font-medium">
-              Open
-            </Link>
-          </div>
-          <p className="text-[10px] text-gray-400 mb-2">Due within 30 days</p>
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-gray-600">Active vehicles</span>
-              <span className="font-medium text-gray-900">{activeFleet}</span>
-            </div>
-            {fleetIssues > 0 ? (
-              <>
-                {motDue > 0 && (
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-amber-600">MOT due within 30d</span>
-                    <span className="font-medium text-amber-700">{motDue}</span>
-                  </div>
-                )}
-                {insuranceDue > 0 && (
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-amber-600">Insurance due within 30d</span>
-                    <span className="font-medium text-amber-700">{insuranceDue}</span>
-                  </div>
-                )}
-                {taxDue > 0 && (
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-amber-600">Tax due within 30d</span>
-                    <span className="font-medium text-amber-700">{taxDue}</span>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="text-xs text-green-600">All compliance up to date</div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100 border-t border-gray-100">
-        {/* Backline & Prep */}
-        <div className="p-5">
-          <div className="flex items-center justify-between mb-1">
-            <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Backline & Prep</h3>
+            <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Backline Status</h3>
             <Link to="/operations/backline" className="text-[11px] text-ooosh-600 hover:text-ooosh-700 font-medium">
               Open
             </Link>
@@ -175,72 +119,113 @@ export default function OperationsWidgets({ transportOps, fleet, backline, today
             </div>
           )}
         </div>
-
-        {/* Incoming Deliveries — Placeholder */}
-        <div className="p-5 opacity-60">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Incoming Deliveries</h3>
-            <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">Coming Soon</span>
-          </div>
-          <p className="text-xs text-gray-400">
-            Delivery tracking module coming soon — will show expected arrivals and received items across all jobs.
-          </p>
-        </div>
       </div>
 
-      {/* Prep Workload — inside Operations */}
-      {(todayPrep || tomorrowPrep) && (
-        <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100 border-t border-gray-100">
-          <PrepDay label="Prep Workload — Today" prep={todayPrep} />
-          <PrepDay label="Prep Workload — Tomorrow" prep={tomorrowPrep} />
+      {/* Row 2: Prep Workload — Today + Tomorrow with prep & de-prep per category */}
+      <div className="border-t border-gray-100">
+        <div className="px-5 py-3 border-b border-gray-50">
+          <h3 className="text-xs font-semibold text-gray-700 uppercase tracking-wider">Prep & De-Prep Workload</h3>
         </div>
-      )}
+        <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100">
+          <PrepColumn label="Today" prep={todayPrep} />
+          <PrepColumn label="Tomorrow" prep={tomorrowPrep} />
+        </div>
+      </div>
     </div>
   );
 }
 
-function PrepDay({ label, prep }: { label: string; prep?: PrepDayData }) {
-  if (!prep || prep.total_prep_mins === 0) {
+/* ── Prep column: shows prep + de-prep per category ── */
+
+const CATEGORIES = [
+  { key: 'vehicle', label: 'Vehicles', color: 'text-blue-600', bg: 'bg-blue-500', dot: 'bg-blue-500' },
+  { key: 'backline', label: 'Backline', color: 'text-purple-600', bg: 'bg-purple-500', dot: 'bg-purple-500' },
+  { key: 'rehearsal', label: 'Rehearsals', color: 'text-teal-600', bg: 'bg-teal-500', dot: 'bg-teal-500' },
+] as const;
+
+function PrepColumn({ label, prep }: { label: string; prep?: PrepEstimate }) {
+  const hasPrep = prep && prep.total_prep_mins > 0;
+  const hasDeprep = prep && prep.total_deprep_mins > 0;
+
+  if (!hasPrep && !hasDeprep) {
     return (
       <div className="p-5">
-        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">{label}</h3>
-        <p className="text-sm text-gray-400">No prep needed</p>
+        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">{label}</h4>
+        <p className="text-sm text-gray-400">No prep or de-prep needed</p>
       </div>
     );
   }
 
-  const categories = [
-    { label: 'Vehicles', count: prep.vehicle_count, mins: prep.vehicle_prep_mins, color: 'text-blue-600', bg: 'bg-blue-500' },
-    { label: 'Backline', count: null, mins: prep.backline_prep_mins, color: 'text-purple-600', bg: 'bg-purple-500' },
-    { label: 'Rehearsals', count: null, mins: prep.rehearsal_prep_mins, color: 'text-teal-600', bg: 'bg-teal-500' },
-  ].filter(c => c.mins > 0);
+  const prepItems = CATEGORIES.map(cat => ({
+    ...cat,
+    prepMins: prep?.[`${cat.key}_prep_mins` as keyof PrepEstimate] as number || 0,
+    deprepMins: prep?.[`${cat.key}_deprep_mins` as keyof PrepEstimate] as number || 0,
+    count: cat.key === 'vehicle' ? (prep?.vehicle_count || 0) : null,
+    deprepCount: cat.key === 'vehicle' ? (prep?.deprep_vehicle_count || 0) : null,
+  })).filter(c => c.prepMins > 0 || c.deprepMins > 0);
+
+  const totalPrep = prep?.total_prep_mins || 0;
+  const totalDeprep = prep?.total_deprep_mins || 0;
 
   return (
     <div className="p-5">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{label}</h3>
-        <span className="text-sm font-bold text-gray-900">{formatPrepTime(prep.total_prep_mins)} total</span>
+        <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{label}</h4>
+        <div className="flex items-center gap-3 text-xs">
+          {totalPrep > 0 && (
+            <span className="font-bold text-gray-900">{formatPrepTime(totalPrep)} prep</span>
+          )}
+          {totalDeprep > 0 && (
+            <span className="font-bold text-gray-600">{formatPrepTime(totalDeprep)} de-prep</span>
+          )}
+        </div>
       </div>
-      <div className="space-y-2">
-        {categories.map(cat => (
-          <div key={cat.label} className="flex items-center justify-between text-xs">
-            <div className="flex items-center gap-2">
-              <div className={`w-1.5 h-1.5 rounded-full ${cat.bg}`} />
-              <span className="text-gray-600">
-                {cat.label}
-                {cat.count ? ` (${cat.count})` : ''}
-              </span>
-            </div>
-            <span className={`font-medium ${cat.color}`}>{formatPrepTime(cat.mins)}</span>
-          </div>
-        ))}
+
+      {/* Category table */}
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-gray-400">
+            <th className="text-left font-medium pb-1.5" />
+            {totalPrep > 0 && <th className="text-right font-medium pb-1.5 w-20">Prep</th>}
+            {totalDeprep > 0 && <th className="text-right font-medium pb-1.5 w-20">De-prep</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {prepItems.map(cat => (
+            <tr key={cat.key}>
+              <td className="py-1">
+                <div className="flex items-center gap-2">
+                  <div className={`w-1.5 h-1.5 rounded-full ${cat.dot}`} />
+                  <span className="text-gray-600">
+                    {cat.label}
+                    {cat.count && cat.count > 0 ? ` (${cat.count})` : ''}
+                  </span>
+                </div>
+              </td>
+              {totalPrep > 0 && (
+                <td className={`text-right py-1 font-medium ${cat.prepMins > 0 ? cat.color : 'text-gray-300'}`}>
+                  {cat.prepMins > 0 ? formatPrepTime(cat.prepMins) : '-'}
+                </td>
+              )}
+              {totalDeprep > 0 && (
+                <td className={`text-right py-1 font-medium ${cat.deprepMins > 0 ? 'text-gray-600' : 'text-gray-300'}`}>
+                  {cat.deprepMins > 0 ? formatPrepTime(cat.deprepMins) : '-'}
+                </td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {/* Job counts */}
+      <div className="flex items-center gap-3 mt-2 pt-2 border-t border-gray-50">
+        {(prep?.job_count || 0) > 0 && (
+          <span className="text-[10px] text-gray-400">{prep!.job_count} job{prep!.job_count !== 1 ? 's' : ''} going out</span>
+        )}
+        {(prep?.deprep_job_count || 0) > 0 && (
+          <span className="text-[10px] text-gray-400">{prep!.deprep_job_count} job{prep!.deprep_job_count !== 1 ? 's' : ''} returning</span>
+        )}
       </div>
-      <div className="h-2 bg-gray-100 rounded-full overflow-hidden flex mt-3">
-        {categories.map(cat => (
-          <div key={cat.label} className={cat.bg} style={{ width: `${(cat.mins / prep.total_prep_mins) * 100}%` }} />
-        ))}
-      </div>
-      <p className="text-[10px] text-gray-400 mt-1">{prep.job_count} job{prep.job_count !== 1 ? 's' : ''} need prepping</p>
     </div>
   );
 }

@@ -193,6 +193,11 @@ export default function DashboardPage() {
         excessCount={data.needs_attention.excess_count}
         excessTotal={data.needs_attention.excess_total}
         excessItems={data.needs_attention.excess_items}
+        fleetAlerts={{
+          mot: parseInt(data.fleet.mot_due_soon) || 0,
+          insurance: parseInt(data.fleet.insurance_due_soon) || 0,
+          tax: parseInt(data.fleet.tax_due_soon) || 0,
+        }}
       />
 
       {/* Operations */}

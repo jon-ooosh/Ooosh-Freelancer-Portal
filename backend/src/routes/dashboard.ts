@@ -349,6 +349,30 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         GROUP BY prep_date
         ORDER BY prep_date ASC
       `),
+
+      // 23. De-prep time estimates — returning jobs today and tomorrow
+      query(`
+        SELECT
+          j.return_date::date as deprep_date,
+          COUNT(*) as job_count,
+          SUM(COALESCE((j.hh_derived_flags->'prep_time_by_category'->>'vehicles')::int, 0)) as vehicle_deprep_mins,
+          SUM(COALESCE((j.hh_derived_flags->'prep_time_by_category'->>'backline')::int, 0)) as backline_deprep_mins,
+          SUM(COALESCE((j.hh_derived_flags->'prep_time_by_category'->>'rehearsals')::int, 0)) as rehearsal_deprep_mins,
+          SUM(COALESCE((j.hh_derived_flags->>'total_prep_time_mins')::int, 0)) as total_deprep_mins,
+          SUM(COALESCE((j.hh_derived_flags->>'vehicle_count')::int, 0)) as vehicle_count
+        FROM jobs j
+        WHERE j.is_deleted = false
+          AND j.status IN (4, 5, 6)
+          AND j.hh_derived_flags IS NOT NULL
+          AND j.return_date IS NOT NULL
+          AND (
+            j.return_date::date = CURRENT_DATE
+            OR j.return_date::date = CURRENT_DATE + 1
+            OR (j.job_end IS NOT NULL AND j.job_end::date IN (CURRENT_DATE, CURRENT_DATE - 1))
+          )
+        GROUP BY deprep_date
+        ORDER BY deprep_date ASC
+      `),
     ]);
 
     const [
@@ -363,11 +387,17 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       todayTransportResult, todayVehiclesResult,
       teamActivityResult, recentActivityResult,
       pendingReferralsResult, pendingExcessResult,
-      prepTimeResult,
+      prepTimeResult, deprepTimeResult,
     ] = results;
 
     // Build prep time estimates by day
-    const prepEstimates: Record<string, { job_count: number; vehicle_count: number; vehicle_prep_mins: number; backline_prep_mins: number; rehearsal_prep_mins: number; total_prep_mins: number }> = {};
+    const prepEstimates: Record<string, {
+      job_count: number; vehicle_count: number;
+      vehicle_prep_mins: number; backline_prep_mins: number; rehearsal_prep_mins: number; total_prep_mins: number;
+      deprep_job_count: number; deprep_vehicle_count: number;
+      vehicle_deprep_mins: number; backline_deprep_mins: number; rehearsal_deprep_mins: number; total_deprep_mins: number;
+    }> = {};
+
     for (const row of prepTimeResult.rows) {
       const dateKey = new Date(row.prep_date as string).toISOString().split('T')[0];
       prepEstimates[dateKey] = {
@@ -377,7 +407,28 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         backline_prep_mins: parseInt(row.backline_prep_mins as string),
         rehearsal_prep_mins: parseInt(row.rehearsal_prep_mins as string),
         total_prep_mins: parseInt(row.total_prep_mins as string),
+        deprep_job_count: 0, deprep_vehicle_count: 0,
+        vehicle_deprep_mins: 0, backline_deprep_mins: 0, rehearsal_deprep_mins: 0, total_deprep_mins: 0,
       };
+    }
+
+    // Merge de-prep data
+    for (const row of deprepTimeResult.rows) {
+      const dateKey = new Date(row.deprep_date as string).toISOString().split('T')[0];
+      if (!prepEstimates[dateKey]) {
+        prepEstimates[dateKey] = {
+          job_count: 0, vehicle_count: 0,
+          vehicle_prep_mins: 0, backline_prep_mins: 0, rehearsal_prep_mins: 0, total_prep_mins: 0,
+          deprep_job_count: 0, deprep_vehicle_count: 0,
+          vehicle_deprep_mins: 0, backline_deprep_mins: 0, rehearsal_deprep_mins: 0, total_deprep_mins: 0,
+        };
+      }
+      prepEstimates[dateKey].deprep_job_count = parseInt(row.job_count as string);
+      prepEstimates[dateKey].deprep_vehicle_count = parseInt(row.vehicle_count as string);
+      prepEstimates[dateKey].vehicle_deprep_mins = parseInt(row.vehicle_deprep_mins as string);
+      prepEstimates[dateKey].backline_deprep_mins = parseInt(row.backline_deprep_mins as string);
+      prepEstimates[dateKey].rehearsal_deprep_mins = parseInt(row.rehearsal_deprep_mins as string);
+      prepEstimates[dateKey].total_deprep_mins = parseInt(row.total_deprep_mins as string);
     }
 
     // Merge upcoming departures + returns into a timeline
