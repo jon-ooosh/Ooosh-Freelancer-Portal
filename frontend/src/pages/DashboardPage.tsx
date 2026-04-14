@@ -1,52 +1,149 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { OperationsData, BacklineOverview } from '../components/dashboard/types';
+import { formatPrepTime } from '../components/dashboard/helpers';
 import TodaySchedule from '../components/dashboard/TodaySchedule';
 import NeedsAttention from '../components/dashboard/NeedsAttention';
 import ComingUpTimeline from '../components/dashboard/ComingUpTimeline';
 import OperationsWidgets from '../components/dashboard/OperationsWidgets';
 import PipelineSnapshot from '../components/dashboard/PipelineSnapshot';
 
-const TODAY_STR = new Date().toLocaleDateString('en-GB', {
-  weekday: 'long',
-  day: 'numeric',
-  month: 'long',
-  year: 'numeric',
-});
+function getDateStr() {
+  return new Date().toLocaleDateString('en-GB', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+  });
+}
+
+function formatLastRefresh(d: Date): string {
+  const diff = Date.now() - d.getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+}
+
+// Collapsed state persistence
+function getCollapsed(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem('dashboard_collapsed') || '{}');
+  } catch { return {}; }
+}
+function setCollapsedStorage(v: Record<string, boolean>) {
+  localStorage.setItem('dashboard_collapsed', JSON.stringify(v));
+}
 
 export default function DashboardPage() {
   const user = useAuthStore((s) => s.user);
   const [data, setData] = useState<OperationsData | null>(null);
   const [backline, setBackline] = useState<BacklineOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [, setTick] = useState(0); // force re-render for "X min ago"
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>(getCollapsed);
+  const loadedDateRef = useRef<string>(new Date().toDateString());
 
-  useEffect(() => {
-    Promise.all([
-      api.get<OperationsData>('/dashboard/operations').then(setData).catch(console.error),
-      api.get<{ data: BacklineOverview }>('/backline/overview')
-        .then(d => setBackline(d.data))
-        .catch(() => {}),
-    ]).finally(() => setLoading(false));
+  const loadData = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setRefreshing(true);
+    try {
+      const [opsData, blData] = await Promise.all([
+        api.get<OperationsData>('/dashboard/operations'),
+        api.get<{ data: BacklineOverview }>('/backline/overview').catch(() => null),
+      ]);
+      setData(opsData);
+      if (blData) setBackline(blData.data);
+      setLastRefresh(new Date());
+      loadedDateRef.current = new Date().toDateString();
+    } catch (err) {
+      console.error('Dashboard load failed:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   }, []);
+
+  // Initial load
+  useEffect(() => { loadData(); }, [loadData]);
+
+  // Auto-refresh: check every minute — if the date has changed (i.e. it's past midnight / 7am),
+  // or if data is stale (loaded on a different day), refresh automatically
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTick(t => t + 1); // update "X min ago" display
+      const now = new Date();
+      const currentDateStr = now.toDateString();
+      // If we loaded data on a different day, auto-refresh
+      if (loadedDateRef.current !== currentDateStr) {
+        loadData();
+      }
+    }, 60_000); // every minute
+    return () => clearInterval(interval);
+  }, [loadData]);
+
+  // Also auto-refresh if tab becomes visible after being hidden (user switches back)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        const now = new Date();
+        // Refresh if data is from a different day OR more than 5 minutes old
+        if (
+          loadedDateRef.current !== now.toDateString() ||
+          (lastRefresh && now.getTime() - lastRefresh.getTime() > 5 * 60_000)
+        ) {
+          loadData();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [loadData, lastRefresh]);
+
+  const toggleCollapse = (key: string) => {
+    setCollapsed(prev => {
+      const next = { ...prev, [key]: !prev[key] };
+      setCollapsedStorage(next);
+      return next;
+    });
+  };
 
   if (loading) return <div className="text-center py-12 text-gray-500">Loading Command Centre...</div>;
   if (!data) return <div className="text-center py-12 text-gray-500">Failed to load dashboard.</div>;
 
   const sc = data.stat_cards;
+  const todayKey = new Date().toISOString().split('T')[0];
+  const tomorrowKey = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+  const todayPrep = data.prep_estimates?.[todayKey];
+  const tomorrowPrep = data.prep_estimates?.[tomorrowKey];
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-end justify-between">
+      <div className="flex items-end justify-between flex-wrap gap-2">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Command Centre</h1>
           <p className="mt-1 text-sm text-gray-500">
-            Good {getGreeting()}, {user?.first_name}. {TODAY_STR}
+            Good {getGreeting()}, {user?.first_name}. {getDateStr()}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-3">
+          {lastRefresh && (
+            <span className="text-[11px] text-gray-400">
+              Updated {formatLastRefresh(lastRefresh)}
+            </span>
+          )}
+          <button
+            onClick={() => loadData(true)}
+            disabled={refreshing}
+            className="text-xs text-gray-500 hover:text-gray-700 border border-gray-200 px-2 py-1 rounded hover:bg-gray-50 disabled:opacity-50 transition-colors"
+            title="Refresh dashboard"
+          >
+            <svg className={`w-3.5 h-3.5 inline mr-1 ${refreshing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            {refreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
           <Link to="/pipeline/new" className="text-xs bg-ooosh-600 text-white px-3 py-1.5 rounded-lg hover:bg-ooosh-700 transition-colors font-medium">
             + New Enquiry
           </Link>
@@ -55,9 +152,9 @@ export default function DashboardPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <StatCard label="On Hire" value={sc.on_hire_count} color="bg-green-500" textColor="text-green-700" href="/jobs" />
-        <StatCard label="Going Out" value={sc.going_out_count} color="bg-blue-500" textColor="text-blue-700" href="/jobs" />
-        <StatCard label="Coming Back" value={sc.coming_back_count} color="bg-teal-500" textColor="text-teal-700" href="/jobs" />
+        <StatCard label="On Hire" value={sc.on_hire_count} color="bg-green-500" textColor="text-green-700" href="/jobs?status=4,5" />
+        <StatCard label="Going Out" value={sc.going_out_count} color="bg-blue-500" textColor="text-blue-700" href="/jobs?status=2,3" />
+        <StatCard label="Coming Back" value={sc.coming_back_count} color="bg-teal-500" textColor="text-teal-700" href="/jobs/returns" />
         <StatCard
           label="Overdue Returns"
           value={sc.overdue_count}
@@ -71,20 +168,22 @@ export default function DashboardPage() {
           value={sc.chases_due_count}
           color="bg-amber-500"
           textColor="text-amber-700"
-          href="/pipeline"
+          href="/pipeline?chase=overdue"
           alert={parseInt(sc.chases_due_count) > 0}
         />
         <StatCard label="Open Enquiries" value={sc.open_enquiries_count} color="bg-purple-500" textColor="text-purple-700" href="/pipeline" />
       </div>
 
       {/* Today's Schedule */}
-      <TodaySchedule
-        goingOut={data.today.going_out}
-        returning={data.today.returning}
-        vehicleAssignments={data.today.vehicle_assignments}
-        tomorrowGoingOut={data.tomorrow.going_out_count}
-        tomorrowReturning={data.tomorrow.returning_count}
-      />
+      <Section id="schedule" collapsed={collapsed} toggle={toggleCollapse}>
+        <TodaySchedule
+          goingOut={data.today.going_out}
+          returning={data.today.returning}
+          vehicleAssignments={data.today.vehicle_assignments}
+          tomorrowGoingOut={data.tomorrow.going_out_count}
+          tomorrowReturning={data.tomorrow.returning_count}
+        />
+      </Section>
 
       {/* Needs Attention */}
       <NeedsAttention
@@ -97,24 +196,45 @@ export default function DashboardPage() {
         excessItems={data.needs_attention.excess_items}
       />
 
+      {/* Prep Time Estimates */}
+      {(todayPrep || tomorrowPrep) && (
+        <Section id="prep" collapsed={collapsed} toggle={toggleCollapse}>
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+            <div className="px-5 py-4 border-b border-gray-100">
+              <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Prep Workload</h2>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-gray-100">
+              <PrepDay label="Today" prep={todayPrep} />
+              <PrepDay label="Tomorrow" prep={tomorrowPrep} />
+            </div>
+          </div>
+        </Section>
+      )}
+
       {/* Operations */}
-      <OperationsWidgets
-        transportOps={data.transport_ops}
-        fleet={data.fleet}
-        backline={backline}
-      />
+      <Section id="operations" collapsed={collapsed} toggle={toggleCollapse}>
+        <OperationsWidgets
+          transportOps={data.transport_ops}
+          fleet={data.fleet}
+          backline={backline}
+        />
+      </Section>
 
       {/* Who's In */}
       <WhosInPlaceholder />
 
       {/* Coming Up */}
-      <ComingUpTimeline events={data.upcoming_events} />
+      <Section id="coming_up" collapsed={collapsed} toggle={toggleCollapse}>
+        <ComingUpTimeline events={data.upcoming_events} />
+      </Section>
 
       {/* Pipeline & Sales */}
-      <PipelineSnapshot
-        byStatus={data.pipeline.by_status}
-        activeValue={data.pipeline.active_value}
-      />
+      <Section id="pipeline" collapsed={collapsed} toggle={toggleCollapse}>
+        <PipelineSnapshot
+          byStatus={data.pipeline.by_status}
+          activeValue={data.pipeline.active_value}
+        />
+      </Section>
 
       {/* Quick Actions */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
@@ -172,6 +292,100 @@ function StatCard({ label, value, color, textColor, href, alert }: {
   );
   if (href) return <Link to={href}>{inner}</Link>;
   return inner;
+}
+
+function Section({ id, collapsed, toggle, children }: {
+  id: string;
+  collapsed: Record<string, boolean>;
+  toggle: (key: string) => void;
+  children: React.ReactNode;
+}) {
+  const isCollapsed = collapsed[id] || false;
+  return (
+    <div>
+      {isCollapsed ? (
+        <button
+          onClick={() => toggle(id)}
+          className="w-full flex items-center gap-2 py-2 group"
+        >
+          <svg className="w-3 h-3 text-gray-400 -rotate-90" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+          </svg>
+          <span className="text-xs font-semibold text-gray-300 uppercase tracking-wider group-hover:text-gray-500 transition-colors">{id.replace(/_/g, ' ')}</span>
+          <div className="flex-1 border-t border-gray-100" />
+        </button>
+      ) : (
+        <div className="relative">
+          <button
+            onClick={() => toggle(id)}
+            className="absolute -left-2 top-5 z-10 w-5 h-5 flex items-center justify-center text-gray-300 hover:text-gray-500 transition-colors"
+            title={`Collapse ${id.replace(/_/g, ' ')}`}
+          >
+            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+          </button>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface PrepDayData {
+  job_count: number;
+  vehicle_count: number;
+  vehicle_prep_mins: number;
+  backline_prep_mins: number;
+  rehearsal_prep_mins: number;
+  total_prep_mins: number;
+}
+
+function PrepDay({ label, prep }: { label: string; prep?: PrepDayData }) {
+  if (!prep || prep.total_prep_mins === 0) {
+    return (
+      <div className="p-5">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">{label}</h3>
+        <p className="text-sm text-gray-400">No prep needed</p>
+      </div>
+    );
+  }
+
+  const categories = [
+    { label: 'Vehicles', count: prep.vehicle_count, mins: prep.vehicle_prep_mins, color: 'text-blue-600', bg: 'bg-blue-500' },
+    { label: 'Backline', count: null, mins: prep.backline_prep_mins, color: 'text-purple-600', bg: 'bg-purple-500' },
+    { label: 'Rehearsals', count: null, mins: prep.rehearsal_prep_mins, color: 'text-teal-600', bg: 'bg-teal-500' },
+  ].filter(c => c.mins > 0);
+
+  return (
+    <div className="p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{label}</h3>
+        <span className="text-sm font-bold text-gray-900">{formatPrepTime(prep.total_prep_mins)} total</span>
+      </div>
+      <div className="space-y-2">
+        {categories.map(cat => (
+          <div key={cat.label} className="flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2">
+              <div className={`w-1.5 h-1.5 rounded-full ${cat.bg}`} />
+              <span className="text-gray-600">
+                {cat.label}
+                {cat.count ? ` (${cat.count})` : ''}
+              </span>
+            </div>
+            <span className={`font-medium ${cat.color}`}>{formatPrepTime(cat.mins)}</span>
+          </div>
+        ))}
+      </div>
+      {/* Visual bar */}
+      <div className="h-2 bg-gray-100 rounded-full overflow-hidden flex mt-3">
+        {categories.map(cat => (
+          <div key={cat.label} className={cat.bg} style={{ width: `${(cat.mins / prep.total_prep_mins) * 100}%` }} />
+        ))}
+      </div>
+      <p className="text-[10px] text-gray-400 mt-1">{prep.job_count} job{prep.job_count !== 1 ? 's' : ''} need prepping</p>
+    </div>
+  );
 }
 
 function WhosInPlaceholder() {
