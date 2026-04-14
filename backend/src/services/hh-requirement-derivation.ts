@@ -415,6 +415,8 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // ── Auto-generate close-out requirements when job reaches return status ──
     // HH status 6=Returned Incomplete, 7=Returned, 8=Requires Attention, 11=Completed
     const isReturnPhase = hhStatus >= 6 && hhStatus !== 9 && hhStatus !== 10; // exclude cancelled/not interested
+    // HH status 7+ means everything is physically back (Returned, Requires Attention, Completed)
+    const isFullyReturned = hhStatus >= 7 && hhStatus !== 9 && hhStatus !== 10;
 
     if (isReturnPhase) {
       // Helper: create a post_hire requirement if it doesn't exist yet
@@ -466,6 +468,53 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       );
       if (parseInt(damageCount.rows[0]?.cnt || '0') > 0) {
         await ensureCloseout('damage_review', 'Vehicle damage flagged during hire — review and resolve');
+      }
+
+      // ── Auto-resolve statuses from real data sources ──
+      // Only auto-advance — never regress a status that staff has already progressed
+
+      // Helper: auto-resolve a requirement to 'done' if it's still 'not_started'
+      const autoResolve = async (type: string, newStatus: string) => {
+        await client.query(
+          `UPDATE job_requirements
+           SET status = $3, updated_at = NOW()
+           WHERE job_id = $1 AND requirement_type = $2 AND phase = 'post_hire'
+             AND status = 'not_started'`,
+          [jobId, type, newStatus]
+        );
+      };
+
+      // Vehicle check-in + backline de-prep: if HH says fully returned (status >= 7), auto-done
+      if (isFullyReturned) {
+        await autoResolve('vehicle', 'done');
+        await autoResolve('backline', 'done');
+      }
+
+      // Excess resolution: check if ALL excess records are in a terminal state
+      const unresolvedExcess = await client.query(
+        `SELECT COUNT(*) AS cnt FROM job_excess
+         WHERE job_id = $1
+           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'waived', 'rolled_over')`,
+        [jobId]
+      );
+      if (parseInt(excessCount.rows[0]?.cnt || '0') > 0 &&
+          parseInt(unresolvedExcess.rows[0]?.cnt || '0') === 0) {
+        await autoResolve('excess_resolve', 'done');
+      }
+
+      // Client follow-up: check if any interaction exists after return_date
+      const postReturnInteraction = await client.query(
+        `SELECT 1 FROM interactions i
+         JOIN jobs j ON j.id = i.job_id
+         WHERE i.job_id = $1
+           AND j.return_date IS NOT NULL
+           AND i.created_at > j.return_date
+           AND i.type IN ('note', 'call', 'email', 'meeting')
+         LIMIT 1`,
+        [jobId]
+      );
+      if (postReturnInteraction.rows.length > 0) {
+        await autoResolve('client_followup', 'done');
       }
     }
 
