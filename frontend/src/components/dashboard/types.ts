@@ -177,6 +177,14 @@ export interface OperationsData {
     by_status: PipelineStat[];
     active_value: number;
   };
+  prep_estimates: Record<string, {
+    job_count: number;
+    vehicle_count: number;
+    vehicle_prep_mins: number;
+    backline_prep_mins: number;
+    rehearsal_prep_mins: number;
+    total_prep_mins: number;
+  }>;
   team_activity: TeamMember[];
   recent_activity: RecentActivity[];
 }

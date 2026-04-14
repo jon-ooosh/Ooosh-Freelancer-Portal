@@ -330,6 +330,25 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         ORDER BY vha.hire_start ASC NULLS LAST
         LIMIT 5
       `),
+
+      // 22. Prep time estimates — today and tomorrow from hh_derived_flags
+      query(`
+        SELECT
+          COALESCE(j.out_date, j.job_date)::date as prep_date,
+          COUNT(*) as job_count,
+          SUM(COALESCE((j.hh_derived_flags->'prep_time_by_category'->>'vehicles')::int, 0)) as vehicle_prep_mins,
+          SUM(COALESCE((j.hh_derived_flags->'prep_time_by_category'->>'backline')::int, 0)) as backline_prep_mins,
+          SUM(COALESCE((j.hh_derived_flags->'prep_time_by_category'->>'rehearsals')::int, 0)) as rehearsal_prep_mins,
+          SUM(COALESCE((j.hh_derived_flags->>'total_prep_time_mins')::int, 0)) as total_prep_mins,
+          SUM(COALESCE((j.hh_derived_flags->>'vehicle_count')::int, 0)) as vehicle_count
+        FROM jobs j
+        WHERE j.is_deleted = false
+          AND j.status IN (2, 3)
+          AND j.hh_derived_flags IS NOT NULL
+          AND COALESCE(j.out_date, j.job_date)::date IN (CURRENT_DATE, CURRENT_DATE + 1)
+        GROUP BY prep_date
+        ORDER BY prep_date ASC
+      `),
     ]);
 
     const [
@@ -344,7 +363,22 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       todayTransportResult, todayVehiclesResult,
       teamActivityResult, recentActivityResult,
       pendingReferralsResult, pendingExcessResult,
+      prepTimeResult,
     ] = results;
+
+    // Build prep time estimates by day
+    const prepEstimates: Record<string, { job_count: number; vehicle_count: number; vehicle_prep_mins: number; backline_prep_mins: number; rehearsal_prep_mins: number; total_prep_mins: number }> = {};
+    for (const row of prepTimeResult.rows) {
+      const dateKey = new Date(row.prep_date as string).toISOString().split('T')[0];
+      prepEstimates[dateKey] = {
+        job_count: parseInt(row.job_count as string),
+        vehicle_count: parseInt(row.vehicle_count as string),
+        vehicle_prep_mins: parseInt(row.vehicle_prep_mins as string),
+        backline_prep_mins: parseInt(row.backline_prep_mins as string),
+        rehearsal_prep_mins: parseInt(row.rehearsal_prep_mins as string),
+        total_prep_mins: parseInt(row.total_prep_mins as string),
+      };
+    }
 
     // Merge upcoming departures + returns into a timeline
     const upcomingEvents = [
@@ -393,6 +427,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         by_status: pipelineStatsResult.rows,
         active_value: parseFloat(pipelineValueResult.rows[0].total as string),
       },
+      prep_estimates: prepEstimates,
       team_activity: teamActivityResult.rows,
       recent_activity: recentActivityResult.rows,
     });
