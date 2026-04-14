@@ -515,4 +515,103 @@ router.post('/:id/do-not-hire', authorize('admin', 'manager'), async (req: AuthR
   }
 });
 
+// ── Hire History (all jobs linked to this org) ──────────────────────────
+
+router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const page = parseInt(req.query.page as string) || 1;
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const offset = (page - 1) * limit;
+
+    // Count total
+    const countResult = await query(
+      `SELECT COUNT(*) AS total
+       FROM job_organisations jo
+       JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+       WHERE jo.organisation_id = $1`,
+      [id]
+    );
+    const total = parseInt(countResult.rows[0]?.total || '0');
+
+    // Fetch jobs with retro interaction
+    const jobsResult = await query(
+      `SELECT
+         jo.role,
+         j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
+         j.job_date, j.job_end, j.return_date, j.job_value,
+         j.client_name, j.company_name,
+         (SELECT i.content FROM interactions i
+          WHERE i.job_id = j.id AND i.content LIKE 'Job retro:%'
+          ORDER BY i.created_at DESC LIMIT 1
+         ) AS retro_content
+       FROM job_organisations jo
+       JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+       WHERE jo.organisation_id = $1
+       ORDER BY j.job_date DESC NULLS LAST
+       LIMIT $2 OFFSET $3`,
+      [id, limit, offset]
+    );
+
+    // Compute summary stats
+    const statsResult = await query(
+      `SELECT
+         COUNT(*) AS total_jobs,
+         COUNT(*) FILTER (WHERE j.pipeline_status = 'completed' OR j.status = 11) AS completed_jobs,
+         COUNT(*) FILTER (WHERE j.pipeline_status = 'confirmed' OR j.status = 2) AS confirmed_jobs,
+         COUNT(*) FILTER (WHERE j.pipeline_status = 'lost') AS lost_jobs,
+         COALESCE(SUM(j.job_value) FILTER (WHERE j.pipeline_status IN ('confirmed','completed','prepped','dispatched','returned','returned_incomplete') OR j.status BETWEEN 2 AND 11), 0) AS total_value
+       FROM job_organisations jo
+       JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+       WHERE jo.organisation_id = $1`,
+      [id]
+    );
+
+    // Count retros by rating
+    const retroResult = await query(
+      `SELECT
+         COUNT(*) FILTER (WHERE i.content LIKE 'Job retro: Great%') AS retro_great,
+         COUNT(*) FILTER (WHERE i.content LIKE 'Job retro: OK%') AS retro_ok,
+         COUNT(*) FILTER (WHERE i.content LIKE 'Job retro: Issues%') AS retro_issues
+       FROM job_organisations jo
+       JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+       LEFT JOIN interactions i ON i.job_id = j.id AND i.content LIKE 'Job retro:%'
+       WHERE jo.organisation_id = $1`,
+      [id]
+    );
+
+    // Parse retro from content string
+    const jobs = jobsResult.rows.map(row => {
+      let retro_rating: string | null = null;
+      let retro_notes: string | null = null;
+      if (row.retro_content) {
+        const lines = row.retro_content.split('\n');
+        const ratingLine = lines[0] || '';
+        if (ratingLine.includes('Great')) retro_rating = 'great';
+        else if (ratingLine.includes('Issues')) retro_rating = 'issues';
+        else if (ratingLine.includes('OK')) retro_rating = 'ok';
+        retro_notes = lines.slice(1).filter((l: string) => l && !l.startsWith('Follow-up:')).join(' ') || null;
+      }
+      return {
+        ...row,
+        retro_content: undefined,
+        retro_rating,
+        retro_notes,
+      };
+    });
+
+    res.json({
+      data: jobs,
+      stats: {
+        ...statsResult.rows[0],
+        ...retroResult.rows[0],
+      },
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
+    console.error('Hire history error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

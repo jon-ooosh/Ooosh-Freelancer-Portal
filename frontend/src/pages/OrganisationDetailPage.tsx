@@ -6,6 +6,7 @@ import OrganisationForm from '../components/OrganisationForm';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
+import HireHistoryTab from '../components/HireHistoryTab';
 import { ORG_RELATIONSHIP_LABELS, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -94,7 +95,7 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'timeline' | 'details' | 'excess'>('people');
+  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess'>('people');
 
   // Edit/delete
   const [showEdit, setShowEdit] = useState(false);
@@ -386,10 +387,12 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'timeline', 'details', 'excess'] as const).map((tab) => {
+          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
+            const linkedJobCount = (org.linked_jobs || []).length;
             const label = tab === 'people' ? `People (${(org.people || []).length})`
               : tab === 'relationships' ? `Relationships${relCount ? ` (${relCount})` : ''}`
+              : tab === 'hire_history' ? `Hire History${linkedJobCount ? ` (${linkedJobCount})` : ''}`
               : tab === 'timeline' ? 'Activity Timeline'
               : tab === 'excess' ? 'Excess History'
               : 'Details';
@@ -807,6 +810,11 @@ export default function OrganisationDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Hire History Tab */}
+      {activeTab === 'hire_history' && id && (
+        <HireHistoryTab entityType="organisation" entityId={id} />
       )}
 
       {/* Excess History Tab */}
