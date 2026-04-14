@@ -186,8 +186,11 @@ function buildStats(jobs: BacklineJob[]) {
     remainingPrepMins: jobs
       .filter(j => !j.effectivelyDone)
       .reduce((sum, j) => sum + j.prepTimeMins, 0),
+    // For de-prep: "effectively done" for prep doesn't mean de-prep is done.
+    // De-prep remaining = all returning jobs that haven't been marked 'done' on their post_hire card
+    // (or pre_hire card if no post_hire exists). Don't use effectivelyDone here.
     remainingDeprepMins: jobs
-      .filter(j => !j.effectivelyDone)
+      .filter(j => j.backlineStatus !== 'done')
       .reduce((sum, j) => sum + j.deprepTimeMins, 0),
   };
 }
