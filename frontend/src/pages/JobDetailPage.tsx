@@ -603,6 +603,7 @@ export default function JobDetailPage() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'money'>('overview');
   const [showCalculator, setShowCalculator] = useState(false);
+  const [showDetailsNotes, setShowDetailsNotes] = useState(false);
   const [showChaseModal, setShowChaseModal] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
@@ -1416,10 +1417,10 @@ export default function JobDetailPage() {
       </Link>
 
       {/* Header Card */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 mb-6">
-        <div className="flex items-start justify-between">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6 mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
               {/* HH Job Number — editable if NEW */}
               {job.hh_job_number ? (
                 <a
@@ -1536,11 +1537,11 @@ export default function JobDetailPage() {
                 onChange={(e) => setEditNameValue(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') saveEditName(); if (e.key === 'Escape') { setEditingName(false); } }}
                 onBlur={saveEditName}
-                className="text-2xl font-bold text-gray-900 mt-2 w-full border-b-2 border-ooosh-400 bg-transparent outline-none px-0 py-0.5"
+                className="text-lg sm:text-2xl font-bold text-gray-900 mt-2 w-full border-b-2 border-ooosh-400 bg-transparent outline-none px-0 py-0.5"
               />
             ) : (
               <h1
-                className="text-2xl font-bold text-gray-900 mt-2 cursor-pointer hover:bg-gray-50 rounded px-1 -ml-1 transition-colors group"
+                className="text-lg sm:text-2xl font-bold text-gray-900 mt-2 cursor-pointer hover:bg-gray-50 rounded px-1 -ml-1 transition-colors group"
                 onClick={startEditName}
                 title="Click to edit job name"
               >
@@ -1552,7 +1553,7 @@ export default function JobDetailPage() {
             )}
 
             {/* Client, Venue, Dates summary row */}
-            <div className="flex flex-wrap gap-4 mt-2 text-sm text-gray-600 items-center">
+            <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
               {/* Client — editable */}
               <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
                 {(job.client_name || job.company_name) ? (
@@ -1900,18 +1901,18 @@ export default function JobDetailPage() {
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-shrink-0">
             {job.hh_job_number && (
               <button
                 onClick={() => syncFromHireHop(true)}
                 disabled={hhSyncing}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
                 title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
               >
                 <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                 </svg>
-                {hhSyncing ? 'Syncing...' : 'Sync HH'}
+                <span className="hidden sm:inline">{hhSyncing ? 'Syncing...' : 'Sync HH'}</span>
               </button>
             )}
             {hhJobUrl && (
@@ -1919,7 +1920,7 @@ export default function JobDetailPage() {
                 href={hhJobUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
               >
                 Open in HireHop &rarr;
               </a>
@@ -1939,7 +1940,7 @@ export default function JobDetailPage() {
         )}
 
         {/* Linked Organisations (Band, Promoter, etc.) */}
-        <div className="mt-4 pt-4 border-t border-gray-100">
+        <div className="mt-3 pt-3 border-t border-gray-100">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Organisations:</span>
             {jobOrgs.map((jo) => {
@@ -2062,25 +2063,61 @@ export default function JobDetailPage() {
             </div>
           )}
         </div>
+
+        {/* Collapsible Details & Notes */}
+        <div className="mt-3 pt-3 border-t border-gray-100">
+          <button
+            onClick={() => setShowDetailsNotes(!showDetailsNotes)}
+            className="flex items-center gap-1.5 text-xs font-medium text-gray-500 hover:text-gray-700 transition-colors"
+          >
+            <svg className={`w-3.5 h-3.5 transition-transform ${showDetailsNotes ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            Details & Notes
+            {(job.details || job.notes) && (
+              <span className="w-1.5 h-1.5 rounded-full bg-ooosh-400" title="Has content" />
+            )}
+          </button>
+          {showDetailsNotes && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Details</label>
+                <EditableTextArea
+                  value={job.details || ''}
+                  placeholder="What do they want / what is it?"
+                  onSave={(val) => saveInlineField({ details: val || null })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Notes</label>
+                <EditableTextArea
+                  value={job.notes || ''}
+                  placeholder="Internal notes..."
+                  onSave={(val) => saveInlineField({ notes: val || null })}
+                />
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Tabs */}
-      <div className="border-b border-gray-200 mb-6">
-        <nav className="flex gap-6">
+      <div className="border-b border-gray-200 mb-6 -mx-4 px-4 sm:mx-0 sm:px-0 overflow-x-auto scrollbar-hide">
+        <nav className="flex gap-4 sm:gap-6 min-w-max">
           {(['overview', 'timeline', 'transport', 'drivers', 'money', 'files'] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`pb-3 text-sm font-medium border-b-2 transition-colors ${
+              className={`pb-3 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
                 activeTab === tab
                   ? 'border-ooosh-600 text-ooosh-600'
                   : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
               {tab === 'overview' ? 'Overview' :
-               tab === 'timeline' ? 'Activity Timeline' :
-               tab === 'transport' ? `Crew & Transport${(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}` :
-               tab === 'drivers' ? `Drivers & Vehicles${vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}` :
+               tab === 'timeline' ? (<><span className="sm:hidden">Timeline</span><span className="hidden sm:inline">Activity Timeline</span></>) :
+               tab === 'transport' ? (<><span className="sm:hidden">Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span><span className="hidden sm:inline">Crew & Transport{(() => { const active = quotes.filter(q => q.status !== 'cancelled').length; return active > 0 ? ` (${active})` : ''; })()}</span></>) :
+               tab === 'drivers' ? (<><span className="sm:hidden">Drivers{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span><span className="hidden sm:inline">Drivers & Vehicles{vehicleAssignments.length > 0 ? ` (${vehicleAssignments.length})` : ''}</span></>) :
                tab === 'money' ? 'Money' :
                `Files${fileCount > 0 ? ` (${fileCount})` : ''}`}
             </button>
@@ -2093,30 +2130,6 @@ export default function JobDetailPage() {
         <div className="space-y-4">
           {/* Compact financial progress strip */}
           {id && <OverviewFinancialStrip jobId={id} />}
-
-          {/* Editable Details & Notes */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Details (What do they want?) */}
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Details</label>
-                <EditableTextArea
-                  value={job.details || ''}
-                  placeholder="What do they want / what is it?"
-                  onSave={(val) => saveInlineField({ details: val || null })}
-                />
-              </div>
-              {/* Notes */}
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-1">Notes</label>
-                <EditableTextArea
-                  value={job.notes || ''}
-                  placeholder="Internal notes..."
-                  onSave={(val) => saveInlineField({ notes: val || null })}
-                />
-              </div>
-            </div>
-          </div>
 
           <JobPrepChecklist
             key={prepChecklistKey}

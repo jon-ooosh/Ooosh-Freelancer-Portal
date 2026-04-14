@@ -415,7 +415,7 @@ export default function OrganisationDetailPage() {
           {activePeople.length > 0 && (
             <div>
               <h3 className="text-sm font-semibold text-gray-700 mb-3">Current</h3>
-              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
