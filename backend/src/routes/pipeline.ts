@@ -20,6 +20,7 @@ const PIPELINE_LABELS: Record<string, string> = {
   provisional: 'Provisional',
   confirmed: 'Confirmed',
   lost: 'Lost',
+  cancelled: 'Cancelled',
 };
 
 // ── Pipeline list with filtering ───────────────────────────────────────────
@@ -418,7 +419,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
 // ── Update pipeline status (with transition logging) ───────────────────────
 
 const updateStatusSchema = z.object({
-  pipeline_status: z.enum(['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional', 'confirmed', 'lost',
+  pipeline_status: z.enum(['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional', 'confirmed', 'lost', 'cancelled',
     'prepped', 'dispatched', 'returned_incomplete', 'returned', 'completed']),
   // Context fields depending on status
   hold_reason: z.string().optional().nullable(),
@@ -486,6 +487,14 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updateParams.push(lost_detail || null);
       pIdx++;
       updates.push(`lost_at = NOW()`);
+      // Clear chase date — lost jobs don't need chasing
+      updates.push(`next_chase_date = NULL`);
+    } else if (pipeline_status === 'cancelled') {
+      // Cancellation fields are populated by the cancellations route (POST /api/cancellations/:id/process)
+      // The pipeline status change here just sets the status; the cancellation route handles the full workflow.
+      // Clear chase date — cancelled jobs don't need chasing
+      updates.push(`next_chase_date = NULL`);
+      updates.push(`cancelled_at = NOW()`);
     }
 
     // Clear hold fields when moving out of paused
@@ -499,6 +508,18 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updates.push(`lost_reason = NULL`);
       updates.push(`lost_detail = NULL`);
       updates.push(`lost_at = NULL`);
+    }
+
+    // Clear cancellation fields when moving out of cancelled (re-opening)
+    if (fromStatus === 'cancelled' && pipeline_status !== 'cancelled') {
+      updates.push(`cancelled_at = NULL`);
+      updates.push(`cancelled_by = NULL`);
+      updates.push(`cancellation_reason = NULL`);
+      updates.push(`cancellation_fee = NULL`);
+      updates.push(`cancellation_refund = NULL`);
+      updates.push(`cancellation_notice_days = NULL`);
+      updates.push(`cancellation_notes = NULL`);
+      updates.push(`cancellation_tier = NULL`);
     }
 
     updateParams.push(jobId);

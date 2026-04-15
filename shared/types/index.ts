@@ -193,7 +193,7 @@ export const HH_JOB_STATUS_MAP: Record<number, string> = {
 export const HH_ACTIVE_STATUSES = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
 // Pipeline status values
-export type PipelineStatus = 'new_enquiry' | 'quoting' | 'chasing' | 'paused' | 'provisional' | 'confirmed' | 'lost';
+export type PipelineStatus = 'new_enquiry' | 'quoting' | 'chasing' | 'paused' | 'provisional' | 'confirmed' | 'lost' | 'cancelled';
 export type OperationalStatus = 'prepped' | 'dispatched' | 'returned_incomplete' | 'returned' | 'completed';
 export type JobLifecycleStatus = PipelineStatus | OperationalStatus;
 export type QuoteStatus = 'not_quoted' | 'quoted' | 'revised' | 'accepted';
@@ -212,6 +212,7 @@ export const PIPELINE_STATUS_CONFIG: Record<PipelineStatus, { label: string; col
   paused:       { label: 'Paused Enquiry',  colour: '#6B7280', order: 4 },  // Grey
   confirmed:    { label: 'Confirmed',       colour: '#10B981', order: 5 },  // Green
   lost:         { label: 'Lost',            colour: '#374151', order: 6 },  // Dark grey
+  cancelled:    { label: 'Cancelled',       colour: '#DC2626', order: 7 },  // Red
 };
 
 // Operational status display config (post-confirmation lifecycle)
@@ -238,6 +239,16 @@ export const LOST_REASON_OPTIONS = [
   'Timing',
   'No Decision',
   'Cancelled Event',
+  'Other',
+] as const;
+
+export const CANCELLATION_REASON_OPTIONS = [
+  'Client cancelled',
+  'Event cancelled',
+  'Date change',
+  'Venue change',
+  'Budget',
+  'Overbooked',
   'Other',
 ] as const;
 
@@ -302,6 +313,17 @@ export interface Job {
   lost_reason: string | null;
   lost_detail: string | null;
   lost_at: string | null;
+  // Cancellation
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancellation_reason: string | null;
+  cancellation_fee: number | null;
+  cancellation_refund: number | null;
+  cancellation_notice_days: number | null;
+  cancellation_notes: string | null;
+  cancellation_tier: string | null;
+  reopened_from_job_id: string | null;
+  reopened_to_job_id: string | null;
   // Source
   enquiry_source: EnquirySource | null;
   // HireHop status (separate from pipeline_status)
