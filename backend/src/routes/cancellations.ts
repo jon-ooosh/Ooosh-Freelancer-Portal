@@ -1,0 +1,456 @@
+/**
+ * Cancellation Routes
+ *
+ * Handles the full cancellation workflow:
+ * - Calculate cancellation fee (no side effects)
+ * - Process cancellation (status change + automated actions)
+ * - List cancelled + lost jobs
+ * - Get transport/crew associated with a job
+ * - Re-open cancelled job as new booking (HH duplicate)
+ */
+import { Router, Response } from 'express';
+import { z } from 'zod';
+import { query } from '../config/database';
+import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { validate } from '../middleware/validate';
+import { logAudit } from '../middleware/audit';
+import { hhBroker } from '../services/hirehop-broker';
+import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { calculatePreHireCancellation, calculateEarlyReturn } from '../services/cancellation-calculator';
+import emailService from '../services/email-service';
+
+const router = Router();
+router.use(authenticate);
+
+// ── Calculate cancellation fee (no side effects) ────────────────────────
+
+const calculateSchema = z.object({
+  totalHireCost: z.number().min(0),
+  hireStartDate: z.string(),
+  cancellationDate: z.string().optional(),
+  transportCharges: z.number().min(0).optional(),
+  totalHireDays: z.number().min(1).optional(),
+  hireType: z.enum(['vehicle', 'backline', 'week']).optional(),
+});
+
+router.post('/:jobId/calculate', validate(calculateSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = calculatePreHireCancellation({
+      totalHireCost: req.body.totalHireCost,
+      hireStartDate: new Date(req.body.hireStartDate),
+      cancellationDate: req.body.cancellationDate ? new Date(req.body.cancellationDate) : undefined,
+      transportCharges: req.body.transportCharges,
+      totalHireDays: req.body.totalHireDays,
+    });
+    res.json(result);
+  } catch (error) {
+    console.error('Calculate cancellation error:', error);
+    res.status(500).json({ error: 'Calculation failed' });
+  }
+});
+
+// ── Get transport & crew for cancellation modal ─────────────────────────
+
+router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId;
+
+    // Get quotes (transport/crew)
+    const quotes = await query(
+      `SELECT q.id, q.job_type, q.venue_name, q.total_cost, q.ops_status,
+              q.delivery_date, q.collection_date
+       FROM quotes q WHERE q.job_id = $1 AND q.is_deleted = false`,
+      [jobId]
+    );
+
+    // Get crew assignments
+    const crew = await query(
+      `SELECT qa.id, qa.role, qa.agreed_rate, qa.status,
+              p.first_name, p.last_name, p.email, p.phone
+       FROM quote_assignments qa
+       JOIN people p ON p.id = qa.person_id
+       WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
+         AND qa.status NOT IN ('cancelled', 'declined')`,
+      [jobId]
+    );
+
+    // Get vehicle assignments
+    const vehicles = await query(
+      `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
+              fv.registration, fv.name AS vehicle_name
+       FROM vehicle_hire_assignments vha
+       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+       WHERE vha.job_id = $1 AND vha.status NOT IN ('cancelled')`,
+      [jobId]
+    );
+
+    // Get excess records
+    const excess = await query(
+      `SELECT id, excess_amount_required, excess_status, payment_method
+       FROM job_excess WHERE job_id = $1`,
+      [jobId]
+    );
+
+    res.json({
+      quotes: quotes.rows,
+      crew: crew.rows,
+      vehicles: vehicles.rows,
+      excess: excess.rows,
+    });
+  } catch (error) {
+    console.error('Get transport-crew error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Process cancellation (full workflow) ─────────────────────────────────
+
+const processSchema = z.object({
+  cancellation_reason: z.string().min(1),
+  cancellation_notes: z.string().optional(),
+  cancellation_fee: z.number().min(0),
+  cancellation_refund: z.number().min(0),
+  cancellation_tier: z.string(),
+  cancellation_notice_days: z.number().min(0),
+  transport_charges: z.number().min(0).optional(),
+  breakdown: z.string().optional(),
+});
+
+router.post(
+  '/:jobId/process',
+  authorize('admin', 'manager'),
+  validate(processSchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const jobId = req.params.jobId;
+      const userId = req.user!.id;
+      const {
+        cancellation_reason, cancellation_notes,
+        cancellation_fee, cancellation_refund,
+        cancellation_tier, cancellation_notice_days,
+        breakdown,
+      } = req.body;
+
+      // Verify job exists and is in a cancellable state (confirmed+)
+      const jobResult = await query(
+        `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+        [jobId]
+      );
+      if (jobResult.rows.length === 0) {
+        res.status(404).json({ error: 'Job not found' });
+        return;
+      }
+      const job = jobResult.rows[0];
+      const cancelableStatuses = ['confirmed', 'prepped', 'dispatched', 'returned_incomplete', 'returned'];
+      if (!cancelableStatuses.includes(job.pipeline_status)) {
+        res.status(400).json({ error: `Cannot cancel a job with status '${job.pipeline_status}'. Must be confirmed or later.` });
+        return;
+      }
+
+      // 1. Update job status to cancelled
+      await query(
+        `UPDATE jobs SET
+          pipeline_status = 'cancelled',
+          pipeline_status_changed_at = NOW(),
+          cancelled_at = NOW(),
+          cancelled_by = $2,
+          cancellation_reason = $3,
+          cancellation_notes = $4,
+          cancellation_fee = $5,
+          cancellation_refund = $6,
+          cancellation_tier = $7,
+          cancellation_notice_days = $8,
+          next_chase_date = NULL,
+          updated_at = NOW()
+        WHERE id = $1`,
+        [jobId, userId, cancellation_reason, cancellation_notes || null,
+         cancellation_fee, cancellation_refund, cancellation_tier, cancellation_notice_days]
+      );
+
+      // 2. Log cancellation as interaction on activity timeline
+      const timelineContent = [
+        `Job cancelled by ${req.user!.email}`,
+        `Reason: ${cancellation_reason}`,
+        cancellation_notes ? `Notes: ${cancellation_notes}` : null,
+        `Notice period: ${cancellation_notice_days} days (${cancellation_tier})`,
+        `Cancellation fee: £${cancellation_fee.toFixed(2)}`,
+        `Refund due: £${cancellation_refund.toFixed(2)}`,
+        breakdown ? `\nBreakdown:\n${breakdown}` : null,
+      ].filter(Boolean).join('\n');
+
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+         VALUES ('status_transition', $1, $2, $3, 'cancelled')`,
+        [timelineContent, jobId, userId]
+      );
+
+      // 3. Mark all job requirements as not needed
+      await query(
+        `UPDATE job_requirements SET status = 'done', notes = COALESCE(notes, '') || ' [Cancelled]', updated_at = NOW()
+         WHERE job_id = $1 AND status NOT IN ('done')`,
+        [jobId]
+      );
+
+      // 4. Cancel vehicle assignments
+      await query(
+        `UPDATE vehicle_hire_assignments SET status = 'cancelled', updated_at = NOW()
+         WHERE job_id = $1 AND status NOT IN ('cancelled')`,
+        [jobId]
+      );
+
+      // 5. Cancel crew assignments + send emails
+      const crewResult = await query(
+        `SELECT qa.id, qa.role, qa.status, p.first_name, p.last_name, p.email
+         FROM quote_assignments qa
+         JOIN people p ON p.id = qa.person_id
+         WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
+           AND qa.status NOT IN ('cancelled', 'declined')`,
+        [jobId]
+      );
+
+      // Cancel all crew assignments
+      if (crewResult.rows.length > 0) {
+        await query(
+          `UPDATE quote_assignments SET status = 'cancelled'
+           WHERE quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
+             AND status NOT IN ('cancelled', 'declined')`,
+          [jobId]
+        );
+      }
+
+      // Email crew members
+      const jobNumber = job.hh_job_number ? `J-${job.hh_job_number}` : 'NEW';
+      const jobName = job.job_name || 'Untitled';
+      const jobDates = [job.job_date, job.job_end].filter(Boolean).map(
+        (d: string) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+      ).join(' — ');
+
+      for (const crew of crewResult.rows) {
+        if (crew.email) {
+          emailService.send('job_cancelled_crew', {
+            to: crew.email,
+            variables: {
+              crewName: `${crew.first_name} ${crew.last_name}`.trim(),
+              jobName,
+              jobNumber,
+              jobDates,
+              crewRole: crew.role || 'Crew',
+            },
+          }).catch(err => console.error(`[Cancellation] Failed to email crew ${crew.email}:`, err));
+        }
+      }
+
+      // 6. Flag excess records for refund — add cancellation note, don't change status
+      // (staff processes actual refund via Money tab / excess ledger)
+      await query(
+        `UPDATE job_excess SET notes = COALESCE(notes, '') || ' [Job cancelled — refund due]', updated_at = NOW()
+         WHERE job_id = $1 AND excess_status IN ('needed', 'taken', 'pre_auth', 'partially_paid')`,
+        [jobId]
+      );
+
+      // 7. Write back to HireHop (status 9 = Cancelled)
+      writeBackStatusToHireHop(jobId, 'cancelled', req.user!.email || userId)
+        .catch(err => console.error('[Cancellation] HH write-back error:', err));
+
+      // 8. Create pending refund record in job_payments if refund > 0
+      if (cancellation_refund > 0) {
+        try {
+          await query(
+            `INSERT INTO job_payments (job_id, payment_type, amount, status, notes, recorded_by)
+             VALUES ($1, 'refund', $2, 'pending', $3, $4)`,
+            [jobId, cancellation_refund, `Cancellation refund — ${cancellation_reason}`, userId]
+          );
+        } catch (err) {
+          console.warn('[Cancellation] Failed to create refund record:', err);
+        }
+      }
+
+      // 9. Send internal notification email
+      const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+      emailService.send('job_cancelled_internal', {
+        to: 'info@oooshtours.co.uk',
+        variables: {
+          cancelledBy: req.user!.email || 'Unknown',
+          jobName,
+          jobNumber,
+          reason: cancellation_reason,
+          fee: `£${cancellation_fee.toFixed(2)}`,
+          refund: `£${cancellation_refund.toFixed(2)}`,
+          jobUrl: `${frontendUrl}/jobs/${jobId}`,
+        },
+      }).catch(err => console.error('[Cancellation] Internal email failed:', err));
+
+      // 10. Log audit
+      await logAudit(userId, 'jobs', jobId, 'update', job, { pipeline_status: 'cancelled', cancellation_reason });
+
+      res.json({ success: true, message: 'Job cancelled successfully' });
+    } catch (error) {
+      console.error('Process cancellation error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+// ── List cancelled + lost jobs ──────────────────────────────────────────
+
+router.get('/list', async (req: AuthRequest, res: Response) => {
+  try {
+    const { status, page = '1', limit = '50', sort = 'date_desc', search } = req.query as Record<string, string>;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    let whereClause = `j.is_deleted = false AND j.pipeline_status IN ('lost', 'cancelled')`;
+    const params: unknown[] = [];
+    let pIdx = 1;
+
+    if (status === 'cancelled') {
+      whereClause = `j.is_deleted = false AND j.pipeline_status = 'cancelled'`;
+    } else if (status === 'lost') {
+      whereClause = `j.is_deleted = false AND j.pipeline_status = 'lost'`;
+    }
+
+    if (search) {
+      whereClause += ` AND (j.job_name ILIKE $${pIdx} OR j.company_name ILIKE $${pIdx} OR j.client_name ILIKE $${pIdx})`;
+      params.push(`%${search}%`);
+      pIdx++;
+    }
+
+    let orderBy = 'j.cancelled_at DESC NULLS LAST, j.lost_at DESC NULLS LAST';
+    if (sort === 'date_asc') orderBy = 'COALESCE(j.cancelled_at, j.lost_at) ASC';
+    if (sort === 'value_desc') orderBy = 'j.job_value DESC NULLS LAST';
+    if (sort === 'name') orderBy = 'j.job_name ASC';
+
+    const countResult = await query(
+      `SELECT COUNT(*) FROM jobs j WHERE ${whereClause}`, params
+    );
+
+    params.push(parseInt(limit), offset);
+    const result = await query(
+      `SELECT j.id, j.hh_job_number, j.job_name, j.company_name, j.client_name,
+              j.job_date, j.job_end, j.job_value, j.pipeline_status,
+              j.lost_reason, j.lost_detail, j.lost_at,
+              j.cancelled_at, j.cancellation_reason, j.cancellation_fee,
+              j.cancellation_refund, j.cancellation_tier, j.cancellation_notice_days,
+              j.cancellation_notes, j.reopened_to_job_id
+       FROM jobs j
+       WHERE ${whereClause}
+       ORDER BY ${orderBy}
+       LIMIT $${pIdx} OFFSET $${pIdx + 1}`,
+      params
+    );
+
+    res.json({
+      data: result.rows,
+      pagination: {
+        total: parseInt(countResult.rows[0].count),
+        page: parseInt(page),
+        limit: parseInt(limit),
+      },
+    });
+  } catch (error) {
+    console.error('List cancelled/lost error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Re-open cancelled job as new booking ────────────────────────────────
+
+router.post(
+  '/:jobId/reopen',
+  authorize('admin', 'manager'),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const jobId = req.params.jobId;
+
+      const jobResult = await query(
+        `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
+        [jobId]
+      );
+      if (jobResult.rows.length === 0) {
+        res.status(404).json({ error: 'Job not found' });
+        return;
+      }
+      const job = jobResult.rows[0];
+      if (job.pipeline_status !== 'cancelled') {
+        res.status(400).json({ error: 'Only cancelled jobs can be re-opened as new bookings' });
+        return;
+      }
+
+      let newHhJobNumber: number | null = null;
+
+      // If the original had an HH job, duplicate it in HireHop
+      if (job.hh_job_number) {
+        try {
+          const hhResult = await hhBroker.post('/php_functions/job_duplicate.php', {
+            id: job.hh_job_number,
+            supplying: 1,
+            job_name: `${job.job_name || 'Job'} (rebooking)`,
+            local: new Date().toISOString().replace('T', ' ').substring(0, 16),
+          }, { priority: 'high' });
+
+          if (hhResult?.job) {
+            newHhJobNumber = hhResult.job;
+          }
+        } catch (hhErr) {
+          console.error('[Cancellation] HH duplicate failed:', hhErr);
+          // Continue without HH — create OP job anyway
+        }
+      }
+
+      // Create new job in OP
+      const newJobResult = await query(
+        `INSERT INTO jobs (
+          hh_job_number, job_name, client_id, client_name, company_name,
+          venue_id, venue_name, address, details, notes,
+          pipeline_status, pipeline_status_changed_at,
+          reopened_from_job_id, created_by
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+          'confirmed', NOW(), $11, $12
+        ) RETURNING id, hh_job_number`,
+        [
+          newHhJobNumber,
+          `${job.job_name || 'Job'} (rebooking)`,
+          job.client_id, job.client_name, job.company_name,
+          job.venue_id, job.venue_name, job.address,
+          job.details, job.notes,
+          jobId, req.user!.id,
+        ]
+      );
+
+      const newJob = newJobResult.rows[0];
+
+      // Link the original job to the new one
+      await query(
+        `UPDATE jobs SET reopened_to_job_id = $1 WHERE id = $2`,
+        [newJob.id, jobId]
+      );
+
+      // Log on both timelines
+      const origNote = `Re-opened as new booking ${newHhJobNumber ? `J-${newHhJobNumber}` : newJob.id}`;
+      const newNote = `Rebooking from cancelled job ${job.hh_job_number ? `J-${job.hh_job_number}` : jobId}`;
+
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+         VALUES ('note', $1, $2, $3, 'cancelled')`,
+        [origNote, jobId, req.user!.id]
+      );
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+         VALUES ('note', $1, $2, $3, 'confirmed')`,
+        [newNote, newJob.id, req.user!.id]
+      );
+
+      res.json({
+        success: true,
+        newJobId: newJob.id,
+        newHhJobNumber,
+        message: `Job re-opened as new booking${newHhJobNumber ? ` (J-${newHhJobNumber})` : ''}`,
+      });
+    } catch (error) {
+      console.error('Reopen cancelled job error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
+export default router;

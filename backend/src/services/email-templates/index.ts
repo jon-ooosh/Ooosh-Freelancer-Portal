@@ -617,6 +617,64 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  // ── Cancellation templates ──────────────────────────────────────────────
+
+  job_cancelled_crew: {
+    variant: 'internal',
+    subject: 'Job Cancelled — {{jobName}} ({{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job Cancelled</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{crewName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Unfortunately, job <strong>{{jobName}}</strong> ({{jobNumber}}) has been cancelled.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Dates</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{jobDates}}</p>
+            <p style="margin:4px 0 0;font-size:12px;color:#991b1b;">Your role</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{crewRole}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Please do not attend. We apologise for any inconvenience.
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        If you have any questions, please reply to this email.
+      </p>
+    `,
+  },
+
+  job_cancelled_internal: {
+    variant: 'internal',
+    subject: 'Cancellation Processed — {{jobName}} ({{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job Cancelled</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>{{cancelledBy}}</strong> has cancelled job <strong>{{jobName}}</strong> ({{jobNumber}}).
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Reason</p>
+            <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{reason}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Cancellation fee</p>
+            <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{fee}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Refund due</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{refund}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
 };
 
 export default templates;

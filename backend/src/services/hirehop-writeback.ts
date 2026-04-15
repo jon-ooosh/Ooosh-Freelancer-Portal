@@ -9,6 +9,7 @@
  *   provisional                     → 1 (Provisional)
  *   confirmed                       → 2 (Booked)
  *   lost                            → 10 (Not Interested)
+ *   cancelled                       → 9 (Cancelled)
  */
 import { hhBroker } from './hirehop-broker';
 import { query } from '../config/database';
@@ -22,7 +23,8 @@ const PIPELINE_TO_HH: Record<string, number> = {
   paused: 0,
   provisional: 1,
   confirmed: 2,
-  lost: 10,
+  lost: 10,        // Not Interested
+  cancelled: 9,    // Cancelled (distinct from lost)
   // Operational statuses
   prepped: 3,
   // dispatched (On Hire) is OP-only — HH is already at 5 when prepped, no push needed
@@ -40,7 +42,7 @@ export const HH_TO_PIPELINE: Record<number, string> = {
   5: 'prepped',    // HH skips to Dispatched(5) on checkout — OP treats as Prepped, staff clicks "On Hire" separately
   6: 'returned_incomplete',
   7: 'returned',
-  9: 'lost',       // Cancelled → lost
+  9: 'cancelled',  // HH Cancelled → OP cancelled
   10: 'lost',      // Not Interested → lost
   11: 'completed',
 };

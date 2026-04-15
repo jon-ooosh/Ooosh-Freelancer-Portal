@@ -6,6 +6,8 @@ import TransportCalculator from '../components/TransportCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
+import CancellationModal from '../components/CancellationModal';
+import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
 import ChaseModal from '../components/ChaseModal';
@@ -596,6 +598,7 @@ export default function JobDetailPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+  const user = useAuthStore(s => s.user);
   const backTo = (location.state as { from?: string })?.from || '/jobs';
   const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
@@ -1003,7 +1006,7 @@ export default function JobDetailPage() {
 
   function initiateStatusChange(targetStatus: PipelineStatus) {
     setShowStatusDropdown(false);
-    const needsPrompt = ['paused', 'confirmed', 'lost', 'completed'].includes(targetStatus);
+    const needsPrompt = ['paused', 'confirmed', 'lost', 'cancelled', 'completed'].includes(targetStatus);
     const needsDispatchConfirm = ['dispatched'].includes(targetStatus);
     if (needsPrompt) {
       setTransitionTarget(targetStatus);
@@ -1401,7 +1404,7 @@ export default function JobDetailPage() {
   // After confirmation: show operational progression + ability to go back
   // Before confirmation: show pipeline statuses only
   const availableStatuses = isConfirmed || isOperational
-    ? [...OPERATIONAL_STATUSES, 'confirmed', 'lost'].filter(s => s !== job.pipeline_status)
+    ? [...OPERATIONAL_STATUSES, 'confirmed', 'cancelled', 'lost'].filter(s => s !== job.pipeline_status)
     : PIPELINE_STATUSES.filter(s => s !== job.pipeline_status);
   const fileCount = (job.files || []).length;
   const hhJobUrl = job.hh_job_number
@@ -1417,6 +1420,51 @@ export default function JobDetailPage() {
       <Link to={backTo} className="text-sm text-ooosh-600 hover:text-ooosh-700 mb-4 inline-block">
         &larr; {backLabel}
       </Link>
+
+      {/* Cancelled banner */}
+      {job.pipeline_status === 'cancelled' && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <p className="text-sm font-bold text-red-700">
+                This job was cancelled{job.cancelled_at ? ` on ${new Date(job.cancelled_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}
+                {job.cancellation_reason ? ` — ${job.cancellation_reason}` : ''}
+              </p>
+              {(job.cancellation_fee != null || job.cancellation_refund != null) && (
+                <div className="flex gap-4 mt-1 text-sm">
+                  {job.cancellation_fee != null && (
+                    <span className="text-red-600">Fee retained: <strong>£{job.cancellation_fee.toFixed(2)}</strong></span>
+                  )}
+                  {job.cancellation_refund != null && job.cancellation_refund > 0 && (
+                    <span className="text-green-700">Refund due: <strong>£{job.cancellation_refund.toFixed(2)}</strong></span>
+                  )}
+                </div>
+              )}
+              {job.cancellation_notes && (
+                <p className="text-xs text-red-600 mt-1">{job.cancellation_notes}</p>
+              )}
+            </div>
+            {user?.role === 'admin' || user?.role === 'manager' ? (
+              <button
+                onClick={async () => {
+                  if (!window.confirm('Re-open this cancelled job as a new booking? The original job will stay cancelled for audit purposes.')) return;
+                  try {
+                    const result = await api.post<{ newJobId: string; message: string }>(`/cancellations/${job.id}/reopen`);
+                    alert(result.message);
+                    navigate(`/jobs/${result.newJobId}`);
+                  } catch (err) {
+                    console.error('Re-open failed:', err);
+                    alert('Failed to re-open job');
+                  }
+                }}
+                className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 whitespace-nowrap"
+              >
+                Re-open as New Booking
+              </button>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {/* Header Card */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6 mb-6">
@@ -1817,7 +1865,7 @@ export default function JobDetailPage() {
             )}
 
             {/* Pipeline fields row: Likelihood, Next Chase, Value */}
-            {hasPipelineStatus && !isConfirmed && !isOperational && (
+            {hasPipelineStatus && !isConfirmed && !isOperational && job.pipeline_status !== 'lost' && job.pipeline_status !== 'cancelled' && (
               <div className="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-gray-100">
                 {/* Likelihood */}
                 <button
@@ -1839,8 +1887,8 @@ export default function JobDetailPage() {
                   {job.likelihood ? (job.likelihood.charAt(0).toUpperCase() + job.likelihood.slice(1)) : 'Set likelihood'}
                 </button>
 
-                {/* Next Chase Date — opens full chase modal */}
-                {!isOperational && (
+                {/* Next Chase Date — opens full chase modal (hidden for lost/operational statuses) */}
+                {!isOperational && job.pipeline_status !== 'lost' && (
                 <div className="inline-flex items-center gap-1.5 text-xs text-gray-500">
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -3296,7 +3344,7 @@ export default function JobDetailPage() {
       )}
 
       {/* Status transition modal */}
-      {showTransitionModal && transitionTarget && (
+      {showTransitionModal && transitionTarget && transitionTarget !== 'cancelled' && (
         <StatusTransitionModal
           targetStatus={transitionTarget}
           saving={transitionSaving}
@@ -3304,6 +3352,37 @@ export default function JobDetailPage() {
           clientId={job?.client_id}
           clientName={job?.client_name || job?.company_name}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
+          onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
+        />
+      )}
+
+      {/* Cancellation modal */}
+      {showTransitionModal && transitionTarget === 'cancelled' && job && (
+        <CancellationModal
+          jobId={job.id}
+          jobName={job.job_name || 'Untitled'}
+          jobNumber={job.hh_job_number ? String(job.hh_job_number) : null}
+          hireValue={job.job_value}
+          hireStartDate={job.job_date}
+          totalHireDays={job.job_date && job.job_end
+            ? Math.ceil((new Date(job.job_end).getTime() - new Date(job.job_date).getTime()) / (1000 * 60 * 60 * 24))
+            : null}
+          userRole={user?.role || 'staff'}
+          saving={transitionSaving}
+          onConfirm={async (data) => {
+            setTransitionSaving(true);
+            try {
+              await api.post(`/cancellations/${job.id}/process`, data);
+              await loadJob();
+              await loadInteractions();
+              setShowTransitionModal(false);
+              setTransitionTarget(null);
+            } catch (err) {
+              console.error('Cancellation failed:', err);
+            } finally {
+              setTransitionSaving(false);
+            }
+          }}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
       )}

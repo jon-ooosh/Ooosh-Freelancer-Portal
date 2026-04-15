@@ -263,7 +263,8 @@ function PipelineCard({
   onChase: (job: Job) => void;
   progress?: ReqProgress;
 }) {
-  const chase = chaseDueLabel(job.next_chase_date);
+  const isLost = job.pipeline_status === 'lost';
+  const chase = isLost ? { text: '', urgency: 'none' as const } : chaseDueLabel(job.next_chase_date);
   const borderClass =
     chase.urgency === 'overdue' ? 'border-l-4 border-l-red-500' :
     chase.urgency === 'today' ? 'border-l-4 border-l-amber-400' :
@@ -2006,7 +2007,7 @@ export default function PipelinePage() {
 
             const renderListRow = (job: Job) => {
               const statusConfig = PIPELINE_STATUS_CONFIG[job.pipeline_status || 'new_enquiry'];
-              const chase = chaseDueLabel(job.next_chase_date);
+              const chase = job.pipeline_status === 'lost' ? { text: '', urgency: 'none' as const } : chaseDueLabel(job.next_chase_date);
               return (
                 <tr
                   key={job.id}
