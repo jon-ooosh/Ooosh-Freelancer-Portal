@@ -147,13 +147,15 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         const jobName = jobInfo.rows[0]?.job_name || 'Unknown job';
         const clientName = jobInfo.rows[0]?.client_name || '';
         await query(
-          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
-           VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4)`,
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, source_user_id)
+           VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, 'normal', $5, $6)`,
           [
             chase_alert_user_id,
             `Chase reminder: ${jobName}`,
             `Chase due for ${clientName} — ${jobName}. ${content}`,
             job_id,
+            `/jobs/${job_id}`,
+            req.user!.id,
           ]
         );
       }

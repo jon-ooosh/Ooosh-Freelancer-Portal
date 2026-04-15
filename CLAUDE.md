@@ -849,10 +849,11 @@ No new tables needed — all types use existing `job_requirements` table with `p
 - [ ] Chase date on damage_review requirements (follow-up reminders via scheduler)
 - [ ] Damage auto-creation from vehicle check-in flow (has_damage → auto-create damage_review requirement)
 
-**Phase D — Dashboard + notifications (next)**
-- [ ] Dashboard widget: "X jobs with open returns, Y need invoicing, Z have unresolved damage"
+**Phase D — Dashboard + notifications** ✅ MOSTLY COMPLETE (15 Apr 2026)
+- [x] Dashboard widget: "Returns & Close-Out" overview with active counts, outstanding items by type, oldest returns
+- [x] Notification escalation: priority-based email (normal=4h, high=1h, urgent=immediate), respects working hours + user preferences
+- [x] Damage auto-creation: vehicle check-in with `has_damage=true` auto-creates `damage_review` requirement immediately
 - [ ] Chase date notifications: daily scheduler scans due_date on post_hire requirements → bell notification
-- [ ] Email escalation: overdue chase dates → email to assigned user (tiered: bell → email → manager escalation)
 - [ ] Freelancer portal integration: crew feedback prompts
 - [ ] Auto-email: remind freelancers to submit expenses/feedback after job
 
@@ -862,8 +863,10 @@ No new tables needed — all types use existing `job_requirements` table with `p
 - [x] Retro stored as interaction on job timeline
 - [x] Hire History tab on Organisation + Person detail pages
 - [x] Lost reason displayed alongside retro in hire history
+- [x] Lost detail text visible (not just tooltip) in hire history
 - [x] Retro notes + follow-up shown inline (not just hover)
-- [ ] Task reminders / follow-up scheduling from retro (future: snooze-style "remind me in 6 months")
+- [x] Task reminders / follow-up scheduling from retro: date picker with 1m/3m/6m presets creates follow_up notification snoozed until due date
+- [x] Client's upcoming jobs shown in completion modal (blue info box with future bookings)
 - [ ] Show client's upcoming jobs in completion modal (future)
 
 ##### Mobile Considerations (Apr 2026)
@@ -1444,9 +1447,9 @@ Respects `user_notification_preferences.delivery_method` — if user has set `no
 
 ##### Implementation Phases
 
-**Phase A — Migration + Backend Foundation** ← IN PROGRESS
+**Phase A — Migration + Backend Foundation** ✅ COMPLETE
 - [x] Migration 045: extend notifications, create user_notification_preferences
-- [ ] Backend endpoints:
+- [x] Backend endpoints:
   - `GET /api/notifications/inbox` — paginated, filterable, supports tabs
   - `POST /api/notifications/:id/acknowledge` — mark as acknowledged
   - `POST /api/notifications/:id/snooze` — snooze with new due_date
@@ -1455,29 +1458,30 @@ Respects `user_notification_preferences.delivery_method` — if user has set `no
   - `POST /api/notifications/follow-up` — create follow-up reminder
   - `GET /api/notifications/preferences` — user's delivery preferences
   - `PUT /api/notifications/preferences` — update preferences
-- [ ] Extend existing notification creation points to populate new fields (source_user_id, interaction_id, action_url)
+- [x] Extend existing notification creation points to populate new fields (source_user_id, interaction_id, action_url)
 
-**Phase B — Inbox Page + Nav**
-- [ ] Inbox page at `/inbox` with All / Mentions / Follow-ups / System tabs
-- [ ] Inbox link in user avatar dropdown (above "My Profile")
-- [ ] Unread badge on inbox link
-- [ ] Acknowledge, snooze, dismiss actions
-- [ ] Click-through navigation to linked entities
+**Phase B — Inbox Page + Nav** ✅ COMPLETE
+- [x] Inbox page at `/inbox` with All / Mentions / Follow-ups / System tabs
+- [x] Inbox link in user avatar dropdown (above "My Profile")
+- [x] Unread badge on inbox link
+- [x] Acknowledge, snooze, dismiss actions
+- [x] Click-through navigation to linked entities (action_url with entity fallback)
 
-**Phase C — @Mention Improvements**
-- [ ] @mention autocomplete in interaction forms (type `@` → user picker dropdown)
-- [ ] Mention notifications include interaction content preview
+**Phase C — @Mention Improvements** ✅ MOSTLY COMPLETE
+- [x] @mention autocomplete in interaction forms (type `@` → user picker dropdown) — already built in ActivityTimeline.tsx
+- [x] Mention notifications include interaction content preview
 - [ ] Reply from inbox (creates interaction on linked entity)
-- [ ] "Sent" view with read receipts + nudge
+- [x] "Sent" view with read receipts + nudge
 
-**Phase D — Escalation Scheduler**
-- [ ] Scheduler task (every 15 min): check unread notifications, send email based on priority + working hours
-- [ ] Respect user_notification_preferences for delivery method
-- [ ] Default working hours 08:00-18:00 Mon-Fri (configurable when staff calendar built)
-- [ ] Urgent priority bypasses working hours
+**Phase D — Escalation Scheduler** ✅ COMPLETE
+- [x] Scheduler task (every 15 min): check unread notifications, send email based on priority + working hours
+- [x] Respect user_notification_preferences for delivery method
+- [x] Default working hours 08:00-18:00 Mon-Fri (configurable when staff calendar built)
+- [x] Urgent priority bypasses working hours
 
-**Phase E — Retro & Chase Integration**
-- [ ] Completion retro "follow up in X" creates follow_up notification with due_date
+**Phase E — Retro & Chase Integration** ✅ MOSTLY COMPLETE
+- [x] Completion retro "follow up in X" creates follow_up notification with due_date (with date picker + 1m/3m/6m presets)
+- [x] Client's upcoming jobs shown in completion modal
 - [ ] Chase system creates notifications through inbox (replaces direct notification creation)
 - [ ] Snooze on chase notifications (replaces "move back to enquiries" pattern)
 

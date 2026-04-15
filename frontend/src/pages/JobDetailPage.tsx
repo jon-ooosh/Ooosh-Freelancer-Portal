@@ -3345,6 +3345,8 @@ export default function JobDetailPage() {
           targetStatus={transitionTarget}
           saving={transitionSaving}
           jobId={id}
+          clientId={job?.client_id}
+          clientName={job?.client_name || job?.company_name}
           onConfirm={(data) => handleStatusTransition(transitionTarget, data)}
           onCancel={() => { setShowTransitionModal(false); setTransitionTarget(null); }}
         />
@@ -4381,12 +4383,16 @@ function StatusTransitionModal({
   onConfirm,
   onCancel,
   jobId,
+  clientId,
+  clientName,
 }: {
   targetStatus: PipelineStatus | 'completed';
   saving: boolean;
   onConfirm: (data: Record<string, string>) => void;
   onCancel: () => void;
   jobId?: string;
+  clientId?: string | null;
+  clientName?: string | null;
 }) {
   const [holdReason, setHoldReason] = useState<HoldReason>('client_undecided');
   const [holdDetail, setHoldDetail] = useState('');
@@ -4399,10 +4405,16 @@ function StatusTransitionModal({
   const [retroFollowUp, setRetroFollowUp] = useState('');
   const [retroFollowUpDate, setRetroFollowUpDate] = useState('');
   const [outstandingItems, setOutstandingItems] = useState<string[]>([]);
+  const [upcomingJobs, setUpcomingJobs] = useState<Array<{
+    id: string; hh_job_number: number | null; job_name: string | null;
+    job_date: string | null; pipeline_status: string | null;
+  }>>([]);
 
-  // Fetch outstanding close-out items when completing
+  // Fetch outstanding close-out items + upcoming client jobs when completing
   useEffect(() => {
     if (targetStatus !== 'completed' || !jobId) return;
+
+    // Close-out progress
     api.post<{ data: Record<string, { items: Array<{ label: string; status: string }> }> }>(
       '/requirements/closeout-progress', { job_ids: [jobId] }
     ).then(res => {
@@ -4414,7 +4426,34 @@ function StatusTransitionModal({
         setOutstandingItems(outstanding);
       }
     }).catch(() => {});
-  }, [targetStatus, jobId]);
+
+    // Upcoming client jobs
+    if (clientId || clientName) {
+      const params = clientId
+        ? `client_id=${encodeURIComponent(clientId)}&exclude_job_id=${jobId}`
+        : `client_name=${encodeURIComponent(clientName!)}&exclude_job_id=${jobId}`;
+      api.get<{ data: Array<Record<string, unknown>>; client_info?: Record<string, unknown> }>(
+        `/pipeline/client-history?${params}`
+      ).then(res => {
+        const now = new Date();
+        const upcoming = (res.data || [])
+          .filter((j: Record<string, unknown>) => {
+            const status = j.pipeline_status as string;
+            const jobDate = j.job_date ? new Date(j.job_date as string) : null;
+            return jobDate && jobDate >= now && status !== 'lost' && status !== 'completed';
+          })
+          .slice(0, 5)
+          .map((j: Record<string, unknown>) => ({
+            id: j.id as string,
+            hh_job_number: j.hh_job_number as number | null,
+            job_name: j.job_name as string | null,
+            job_date: j.job_date as string | null,
+            pipeline_status: j.pipeline_status as string | null,
+          }));
+        setUpcomingJobs(upcoming);
+      }).catch(() => {});
+    }
+  }, [targetStatus, jobId, clientId, clientName]);
 
   const handleSubmit = () => {
     const data: Record<string, string> = {};
@@ -4587,6 +4626,27 @@ function StatusTransitionModal({
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Upcoming client jobs (completion context) */}
+        {targetStatus === 'completed' && upcomingJobs.length > 0 && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+            <div className="text-xs font-medium text-blue-800 mb-1.5">
+              This client has {upcomingJobs.length} upcoming job{upcomingJobs.length !== 1 ? 's' : ''}:
+            </div>
+            <div className="space-y-1">
+              {upcomingJobs.map(uj => (
+                <div key={uj.id} className="flex items-center justify-between text-xs">
+                  <span className="text-blue-700 truncate max-w-[200px]">
+                    {uj.hh_job_number ? `J-${uj.hh_job_number} ` : ''}{uj.job_name || 'Untitled'}
+                  </span>
+                  <span className="text-blue-500 whitespace-nowrap ml-2">
+                    {uj.job_date ? new Date(uj.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
