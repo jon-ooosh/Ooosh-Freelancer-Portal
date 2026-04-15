@@ -22,6 +22,7 @@ import TransportOpsPage from './pages/TransportOpsPage';
 import BacklinePage from './pages/BacklinePage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
+import InboxPage from './pages/InboxPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 import { sharedRefreshToken } from './services/api';
@@ -73,6 +74,7 @@ export default function App() {
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
+                <Route path="/inbox" element={<InboxPage />} />
                 <Route path="/profile" element={<ProfilePage />} />
                 <Route path="/team" element={<Navigate to="/settings" replace />} />
                 <Route path="/settings" element={<SettingsPage />} />

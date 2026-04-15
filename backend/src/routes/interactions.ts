@@ -173,12 +173,20 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       const entityType = person_id ? 'people' : organisation_id ? 'organisations' : venue_id ? 'venues' : null;
       const entityId = person_id || organisation_id || venue_id || null;
 
+      // Build action URL for click-through navigation
+      const actionUrl = job_id ? `/jobs/${job_id}`
+        : person_id ? `/people/${person_id}`
+        : organisation_id ? `/organisations/${organisation_id}`
+        : venue_id ? `/venues/${venue_id}`
+        : null;
+
       for (const userId of mentioned_user_ids) {
         if (userId === req.user!.id) continue; // Don't notify yourself
 
         const notifResult = await query(
-          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
-           VALUES ($1, 'mention', $2, $3, $4, $5)
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id,
+             source_user_id, interaction_id, action_url, priority)
+           VALUES ($1, 'mention', $2, $3, $4, $5, $6, $7, $8, 'normal')
            RETURNING *`,
           [
             userId,
@@ -186,6 +194,9 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
             content.length > 200 ? content.slice(0, 200) + '...' : content,
             entityType,
             entityId,
+            req.user!.id,
+            result.rows[0].id,
+            actionUrl,
           ]
         );
 

@@ -4397,6 +4397,7 @@ function StatusTransitionModal({
   const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
   const [retroFollowUp, setRetroFollowUp] = useState('');
+  const [retroFollowUpDate, setRetroFollowUpDate] = useState('');
   const [outstandingItems, setOutstandingItems] = useState<string[]>([]);
 
   // Fetch outstanding close-out items when completing
@@ -4429,6 +4430,7 @@ function StatusTransitionModal({
       data.retro_rating = retroRating;
       if (retroNotes) data.retro_notes = retroNotes;
       if (retroFollowUp) data.retro_follow_up = retroFollowUp;
+      if (retroFollowUpDate) data.retro_follow_up_date = retroFollowUpDate;
     }
     if (note) data.transition_note = note;
     onConfirm(data);
@@ -4555,6 +4557,36 @@ function StatusTransitionModal({
               onChange={(e) => setRetroFollowUp(e.target.value)}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
+            {retroFollowUp && (
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-gray-500 whitespace-nowrap">Remind me:</label>
+                <input
+                  type="date"
+                  value={retroFollowUpDate}
+                  onChange={(e) => setRetroFollowUpDate(e.target.value)}
+                  className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
+                />
+                <div className="flex gap-1">
+                  {[
+                    { label: '1m', days: 30 },
+                    { label: '3m', days: 90 },
+                    { label: '6m', days: 180 },
+                  ].map(p => (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => {
+                        const d = new Date(Date.now() + p.days * 86400000);
+                        setRetroFollowUpDate(d.toISOString().split('T')[0]);
+                      }}
+                      className="px-2 py-1 text-[10px] border border-gray-200 rounded text-gray-500 hover:bg-gray-50"
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

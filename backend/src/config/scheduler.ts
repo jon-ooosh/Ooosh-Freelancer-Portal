@@ -234,6 +234,21 @@ export function startScheduler() {
   });
   console.log('Scheduler: Stale enquiry auto-lose scheduled daily at 10:00');
 
+  // ── Notification Escalation ──────────────────────────────────────────
+  // Every 15 minutes — check unread notifications and escalate to email
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { runNotificationEscalation } = await import('../services/notification-escalation');
+      const result = await runNotificationEscalation();
+      if (result.emailed > 0) {
+        console.log(`Scheduler: Notification escalation — ${result.checked} checked, ${result.emailed} emailed, ${result.skipped} skipped`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Notification escalation failed:', err);
+    }
+  });
+  console.log('Scheduler: Notification escalation scheduled every 15 minutes');
+
   // ── Hire Form Auto-Emails ────────────────────────────────────────────
   // Daily at 09:00 — send hire form emails for self-drive jobs approaching their start date
   // Logic: 10 days before job_date → initial email. 5 days before → chase (if no forms received).
