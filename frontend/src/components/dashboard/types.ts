@@ -148,6 +148,36 @@ export interface PrepEstimate {
   total_deprep_mins: number;
 }
 
+export interface ReturnsOverview {
+  counts: {
+    active_returns: number;
+    checking_in: number;
+    returned: number;
+    requires_attention: number;
+    overdue: number;
+  };
+  closeout_by_type: Record<string, {
+    total: number;
+    done: number;
+    in_progress: number;
+    not_started: number;
+    blocked: number;
+  }>;
+  outstanding: Array<{ type: string; outstanding: number; total: number }>;
+  oldest_returns: Array<{
+    id: string;
+    hh_job_number: number | null;
+    job_name: string | null;
+    client_name: string | null;
+    return_date: string | null;
+    days_since_return: number;
+  }>;
+  excess_pending: {
+    count: number;
+    total_amount: number;
+  };
+}
+
 export interface OperationsData {
   stat_cards: {
     on_hire_count: string;

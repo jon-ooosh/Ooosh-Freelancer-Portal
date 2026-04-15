@@ -2,12 +2,13 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import type { OperationsData, BacklineOverview } from '../components/dashboard/types';
+import type { OperationsData, BacklineOverview, ReturnsOverview } from '../components/dashboard/types';
 import TodaySchedule from '../components/dashboard/TodaySchedule';
 import NeedsAttention from '../components/dashboard/NeedsAttention';
 import ComingUpTimeline from '../components/dashboard/ComingUpTimeline';
 import OperationsWidgets from '../components/dashboard/OperationsWidgets';
 import PipelineSnapshot from '../components/dashboard/PipelineSnapshot';
+import ReturnsOverviewWidget from '../components/dashboard/ReturnsOverviewWidget';
 
 function getDateStr() {
   return new Date().toLocaleDateString('en-GB', {
@@ -37,6 +38,7 @@ export default function DashboardPage() {
   const user = useAuthStore((s) => s.user);
   const [data, setData] = useState<OperationsData | null>(null);
   const [backline, setBackline] = useState<BacklineOverview | null>(null);
+  const [returnsOverview, setReturnsOverview] = useState<ReturnsOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -47,12 +49,14 @@ export default function DashboardPage() {
   const loadData = useCallback(async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true);
     try {
-      const [opsData, blData] = await Promise.all([
+      const [opsData, blData, retData] = await Promise.all([
         api.get<OperationsData>('/dashboard/operations'),
         api.get<{ data: BacklineOverview }>('/backline/overview').catch(() => null),
+        api.get<ReturnsOverview>('/dashboard/returns-overview').catch(() => null),
       ]);
       setData(opsData);
       if (blData) setBackline(blData.data);
+      if (retData) setReturnsOverview(retData);
       setLastRefresh(new Date());
       loadedDateRef.current = new Date().toDateString();
     } catch (err) {
@@ -199,6 +203,13 @@ export default function DashboardPage() {
           tax: parseInt(data.fleet.tax_due_soon) || 0,
         }}
       />
+
+      {/* Returns & Close-Out */}
+      {returnsOverview && (returnsOverview.counts.active_returns > 0 || returnsOverview.counts.overdue > 0) && (
+        <Section id="returns" collapsed={collapsed} toggle={toggleCollapse}>
+          <ReturnsOverviewWidget data={returnsOverview} />
+        </Section>
+      )}
 
       {/* Operations */}
       <Section id="operations" collapsed={collapsed} toggle={toggleCollapse}>

@@ -448,6 +448,16 @@ export default function RequirementCard({
               </div>
             )}
 
+            {/* Rehearsal */}
+            {req.requirement_type === 'rehearsal' && derivedFlags?.has_rehearsal && (
+              <div className="mt-1 text-xs text-gray-500">
+                Rehearsal room detected
+                {derivedFlags.prep_time_by_category.rehearsals > 0 && (
+                  <span> — est. {formatPrepTime(derivedFlags.prep_time_by_category.rehearsals)} prep</span>
+                )}
+              </div>
+            )}
+
             {/* Invoice — show "Mark as Sent" button when status is in_progress (generated) */}
             {req.requirement_type === 'invoice' && req.status === 'in_progress' && (
               <div className="mt-1.5">

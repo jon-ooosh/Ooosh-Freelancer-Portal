@@ -488,6 +488,118 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/dashboard/returns-overview — aggregate close-out progress for returns widget ──
+router.get('/returns-overview', async (req: AuthRequest, res: Response) => {
+  try {
+    const results = await Promise.all([
+      // 1. Job counts by return status
+      query(`
+        SELECT
+          COUNT(*) FILTER (WHERE j.status IN (6, 7, 8)) as active_returns,
+          COUNT(*) FILTER (WHERE j.status = 6) as checking_in,
+          COUNT(*) FILTER (WHERE j.status = 7) as returned,
+          COUNT(*) FILTER (WHERE j.status = 8) as requires_attention,
+          COUNT(*) FILTER (WHERE j.status IN (4, 5) AND j.return_date::date < CURRENT_DATE) as overdue
+        FROM jobs j
+        WHERE j.is_deleted = false
+      `),
+
+      // 2. Close-out requirement status aggregation
+      query(`
+        SELECT
+          jr.requirement_type,
+          jr.status,
+          COUNT(*) as count
+        FROM job_requirements jr
+        JOIN jobs j ON j.id = jr.job_id
+        WHERE jr.phase = 'post_hire'
+          AND j.is_deleted = false
+          AND j.status IN (6, 7, 8)
+        GROUP BY jr.requirement_type, jr.status
+      `),
+
+      // 3. Oldest unresolved return (days since return)
+      query(`
+        SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
+               j.return_date,
+               CURRENT_DATE - j.return_date::date as days_since_return
+        FROM jobs j
+        WHERE j.is_deleted = false
+          AND j.status IN (6, 7, 8)
+          AND j.return_date IS NOT NULL
+        ORDER BY j.return_date ASC
+        LIMIT 5
+      `),
+
+      // 4. Excess records still pending on returning jobs
+      query(`
+        SELECT COUNT(*) as count,
+               COALESCE(SUM(je.excess_amount_required), 0) as total_amount
+        FROM job_excess je
+        JOIN jobs j ON j.id = je.job_id
+        WHERE je.excess_status IN ('needed', 'pending', 'taken', 'pre_auth')
+          AND j.is_deleted = false
+          AND j.status IN (6, 7, 8)
+      `),
+    ]);
+
+    const [countsResult, closeoutResult, oldestResult, excessResult] = results;
+    const counts = countsResult.rows[0];
+
+    // Build close-out summary: for each requirement type, count how many are outstanding vs done
+    const closeoutByType: Record<string, { total: number; done: number; in_progress: number; not_started: number; blocked: number }> = {};
+    for (const row of closeoutResult.rows) {
+      const type = row.requirement_type as string;
+      if (!closeoutByType[type]) {
+        closeoutByType[type] = { total: 0, done: 0, in_progress: 0, not_started: 0, blocked: 0 };
+      }
+      const count = parseInt(row.count as string);
+      closeoutByType[type].total += count;
+      const status = row.status as string;
+      if (status === 'done') closeoutByType[type].done += count;
+      else if (status === 'in_progress') closeoutByType[type].in_progress += count;
+      else if (status === 'blocked') closeoutByType[type].blocked += count;
+      else closeoutByType[type].not_started += count;
+    }
+
+    // Compute outstanding items per type (anything not done)
+    const outstanding: Array<{ type: string; outstanding: number; total: number }> = [];
+    for (const [type, stats] of Object.entries(closeoutByType)) {
+      const notDone = stats.total - stats.done;
+      if (notDone > 0) {
+        outstanding.push({ type, outstanding: notDone, total: stats.total });
+      }
+    }
+
+    res.json({
+      counts: {
+        active_returns: parseInt(counts.active_returns),
+        checking_in: parseInt(counts.checking_in),
+        returned: parseInt(counts.returned),
+        requires_attention: parseInt(counts.requires_attention),
+        overdue: parseInt(counts.overdue),
+      },
+      closeout_by_type: closeoutByType,
+      outstanding,
+      oldest_returns: oldestResult.rows.map(r => ({
+        id: r.id,
+        hh_job_number: r.hh_job_number,
+        job_name: r.job_name,
+        client_name: r.client_name || r.company_name,
+        return_date: r.return_date,
+        days_since_return: parseInt(r.days_since_return),
+      })),
+      excess_pending: {
+        count: parseInt(excessResult.rows[0]?.count || '0'),
+        total_amount: parseFloat(excessResult.rows[0]?.total_amount || '0'),
+      },
+    });
+  } catch (error) {
+    console.error('Dashboard returns-overview error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET /api/dashboard — aggregated stats for the Command Centre
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
