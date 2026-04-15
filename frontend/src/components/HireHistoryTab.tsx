@@ -44,6 +44,8 @@ interface HireHistoryJob {
   link_role?: string;
   link_org_name?: string;
   link_type?: string;
+  lost_reason?: string | null;
+  lost_detail?: string | null;
   retro_rating: string | null;
   retro_notes: string | null;
   retro_follow_up?: string | null;
@@ -221,6 +223,15 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
                               Follow-up: {job.retro_follow_up}
                             </div>
                           )}
+                        </div>
+                      ) : job.lost_reason ? (
+                        <div>
+                          <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">
+                            Lost
+                          </span>
+                          <div className="text-[10px] text-gray-500 mt-0.5 max-w-[200px] truncate" title={job.lost_detail || undefined}>
+                            {job.lost_reason}
+                          </div>
                         </div>
                       ) : (
                         <span className="text-gray-300 text-center block">&mdash;</span>

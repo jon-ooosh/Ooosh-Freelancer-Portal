@@ -309,6 +309,15 @@ export default function PersonDetailPage() {
             >
               Edit
             </button>
+            {!person.do_not_hire && isAdmin && (
+              <button
+                onClick={() => setShowDnoForm(true)}
+                className="px-3 py-1.5 text-sm border border-red-200 text-red-600 rounded hover:bg-red-50 transition-colors"
+                title="Flag as Do Not Hire"
+              >
+                DNH
+              </button>
+            )}
             <div className="relative">
               <button
                 onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
@@ -382,37 +391,28 @@ export default function PersonDetailPage() {
           )}
         </div>
       )}
-      {!person.do_not_hire && isAdmin && (
-        <div className="mb-4">
-          {showDnoForm ? (
-            <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
-              <input
-                value={dnoReason}
-                onChange={e => setDnoReason(e.target.value)}
-                placeholder="Reason (optional)..."
-                className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm"
-              />
-              <button
-                onClick={async () => {
-                  await api.post(`/people/${id}/do-not-hire`, { do_not_hire: true, reason: dnoReason || null });
-                  setShowDnoForm(false);
-                  setDnoReason('');
-                  loadPerson();
-                }}
-                className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700"
-              >
-                Confirm
-              </button>
-              <button onClick={() => { setShowDnoForm(false); setDnoReason(''); }} className="text-xs px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setShowDnoForm(true)}
-              className="text-xs px-3 py-1.5 border border-red-200 text-red-600 rounded hover:bg-red-50"
-            >
-              Flag as Do Not Hire
-            </button>
-          )}
+      {/* DNH reason form (shown when DNH button clicked) */}
+      {showDnoForm && !person.do_not_hire && (
+        <div className="mb-4 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 flex items-center gap-3">
+          <input
+            value={dnoReason}
+            onChange={e => setDnoReason(e.target.value)}
+            placeholder="Reason for Do Not Hire (optional)..."
+            className="flex-1 rounded border border-gray-300 px-3 py-1.5 text-sm"
+            autoFocus
+          />
+          <button
+            onClick={async () => {
+              await api.post(`/people/${id}/do-not-hire`, { do_not_hire: true, reason: dnoReason || null });
+              setShowDnoForm(false);
+              setDnoReason('');
+              loadPerson();
+            }}
+            className="text-xs px-3 py-1.5 bg-red-600 text-white rounded hover:bg-red-700"
+          >
+            Confirm
+          </button>
+          <button onClick={() => { setShowDnoForm(false); setDnoReason(''); }} className="text-xs px-3 py-1.5 border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
         </div>
       )}
 
