@@ -1328,14 +1328,166 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - [x] Settings link removed from main nav, now in user dropdown (admin/manager only)
   - [x] Admin force-password-reset from Settings page (sets temp password + force_password_change flag)
   - [x] Avatar stored in R2 under `avatars/{userId}/`, displayed in nav bar and user lists
-- [ ] **Tasks system** — general-purpose task management (not tied to specific jobs)
-  - Freelancer application review workflow
-  - Annual licence/detail review reminders
-  - General admin tasks
-  - Linked optionally to person_id or job_id
+- [ ] **Inbox & Notification System** — see dedicated section below (Step 7)
 - [ ] Win/loss analysis dashboard (depends on pipeline — lost_reason basics included in pipeline)
 - [ ] ~~Job close-out workflow~~ → See **Step 4b: Returns & Close-Out System** below
 - [ ] Xero financial summary integration
+
+#### Step 7: Inbox & Notification System ← IN PROGRESS (Apr 2026)
+
+Unified messaging, notification, and follow-up system. Replaces Monday.com's @mention/update system. The existing interaction/timeline system is the conversation layer; the inbox surfaces conversations and system alerts to the right people.
+
+**Design principles:**
+- @mention in timelines IS the messaging system — conversations happen on entities (jobs, people, orgs)
+- Chase pattern for follow-ups: set a date, get reminded, snooze/action/dismiss
+- Sender can see read/unread status and nudge recipients
+- Escalation respects working hours (staff calendar when built, defaults 08:00-18:00 Mon-Fri until then)
+- Users choose their reminder delivery: in-app notification, email, or both
+
+**Navigation:** Inbox link in user avatar dropdown (above "My Profile").
+
+##### Database Changes (migration 045)
+
+```sql
+-- Extend notifications table
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS priority VARCHAR(10) DEFAULT 'normal'
+  CHECK (priority IN ('low', 'normal', 'high', 'urgent'));
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS source_user_id UUID REFERENCES users(id);
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS interaction_id UUID REFERENCES interactions(id);
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMPTZ;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS email_sent_at TIMESTAMPTZ;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS nudged_at TIMESTAMPTZ;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS due_date TIMESTAMPTZ;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS snoozed_until TIMESTAMPTZ;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_url TEXT;
+
+-- User notification preferences
+CREATE TABLE IF NOT EXISTS user_notification_preferences (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  notification_type VARCHAR(50) NOT NULL,   -- mention, chase_alert, compliance, follow_up, etc.
+  delivery_method VARCHAR(20) DEFAULT 'both'
+    CHECK (delivery_method IN ('notification', 'email', 'both', 'none')),
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, notification_type)
+);
+```
+
+##### Notification Types (extended)
+
+| Type | Source | Default Priority | Default Delivery | Escalates? |
+|------|--------|-----------------|------------------|------------|
+| `mention` | @mention in interaction | normal | both | Yes (4h) |
+| `chase_alert` | Chase date due | normal | notification | Yes (4h) |
+| `compliance` | Scheduled check | high | both | Yes (1h) |
+| `hire_form` | Mid-tour driver submission | high | both | Yes (1h) |
+| `referral` | Driver requires referral | high | both | Yes (1h) |
+| `follow_up` | Retro / manual reminder | normal | notification | Yes (4h) |
+| `system` | General system alerts | low | notification | No |
+
+##### Escalation Scheduler
+
+Runs every 15 minutes. Checks unread notifications and escalates based on priority:
+
+| Priority | Email after | Notes |
+|----------|------------|-------|
+| Low | Never | Informational only |
+| Normal | 4h (working hours) | Standard escalation |
+| High | 1h (working hours) | Faster escalation |
+| Urgent | Immediately | Pushes through regardless of working hours |
+
+"Working hours" defaults to 08:00-18:00 Mon-Fri until staff calendar is built.
+Respects `user_notification_preferences.delivery_method` — if user has set `notification` only for a type, email escalation is skipped.
+
+##### @Mention Flow
+
+1. User writes interaction on a job/person/org timeline, @mentions colleagues
+2. System creates notification per mentionee: `type=mention`, `source_user_id=author`, `interaction_id=the interaction`
+3. Mentionee sees it in bell dropdown + inbox page
+4. Click → navigates to entity timeline, scrolled to that interaction
+5. Reply = new interaction on same entity → original author gets notification
+6. Sender can see read status in their "Sent" inbox view, and can "Nudge" unread recipients
+
+##### Follow-Up Reminder Flow (Chase Pattern)
+
+1. User creates follow-up (from retro modal, interaction form, or inbox "Remind me" button)
+2. System creates notification: `type=follow_up`, `due_date=chosen date`, `snoozed_until=due_date`
+3. Notification hidden from inbox until `snoozed_until` passes
+4. On due date: notification appears in inbox + bell
+5. User can: action it (acknowledge), snooze again (pick new date), or dismiss
+6. Delivery method per user preference (notification, email, or both)
+
+##### Nudge Flow
+
+1. Sender opens "Sent" view in inbox → sees who has/hasn't read their mentions
+2. Clicks "Nudge" on unread recipient → updates `nudged_at`, re-surfaces in recipient's bell
+3. Nudge is manual only — no auto-nudge
+
+##### Inbox Page (`/inbox`)
+
+**Tabs:**
+- **All** — everything unread + recent
+- **Mentions** — @mentions from colleagues (type=mention)
+- **Follow-ups** — reminders with due dates (type=follow_up), including upcoming ones
+- **System** — compliance, chase alerts, hire form alerts
+
+**Features:**
+- Filter by read/unread, priority
+- Acknowledge button (stronger than "mark read" — records `acknowledged_at`)
+- Snooze button on any notification (pick future date)
+- Reply to mentions inline (creates interaction on the linked entity)
+- "Sent" section: mentions you've sent, with read/unread status per recipient + nudge button
+- Notification preferences: per-type delivery method (notification / email / both / none)
+
+**Badge:** Unread count shown on inbox link in user dropdown + bell icon (existing).
+
+##### Implementation Phases
+
+**Phase A — Migration + Backend Foundation** ← IN PROGRESS
+- [x] Migration 045: extend notifications, create user_notification_preferences
+- [ ] Backend endpoints:
+  - `GET /api/notifications/inbox` — paginated, filterable, supports tabs
+  - `POST /api/notifications/:id/acknowledge` — mark as acknowledged
+  - `POST /api/notifications/:id/snooze` — snooze with new due_date
+  - `POST /api/notifications/:id/nudge` — sender nudges unread recipient
+  - `GET /api/notifications/sent` — notifications created by current user, with read status
+  - `POST /api/notifications/follow-up` — create follow-up reminder
+  - `GET /api/notifications/preferences` — user's delivery preferences
+  - `PUT /api/notifications/preferences` — update preferences
+- [ ] Extend existing notification creation points to populate new fields (source_user_id, interaction_id, action_url)
+
+**Phase B — Inbox Page + Nav**
+- [ ] Inbox page at `/inbox` with All / Mentions / Follow-ups / System tabs
+- [ ] Inbox link in user avatar dropdown (above "My Profile")
+- [ ] Unread badge on inbox link
+- [ ] Acknowledge, snooze, dismiss actions
+- [ ] Click-through navigation to linked entities
+
+**Phase C — @Mention Improvements**
+- [ ] @mention autocomplete in interaction forms (type `@` → user picker dropdown)
+- [ ] Mention notifications include interaction content preview
+- [ ] Reply from inbox (creates interaction on linked entity)
+- [ ] "Sent" view with read receipts + nudge
+
+**Phase D — Escalation Scheduler**
+- [ ] Scheduler task (every 15 min): check unread notifications, send email based on priority + working hours
+- [ ] Respect user_notification_preferences for delivery method
+- [ ] Default working hours 08:00-18:00 Mon-Fri (configurable when staff calendar built)
+- [ ] Urgent priority bypasses working hours
+
+**Phase E — Retro & Chase Integration**
+- [ ] Completion retro "follow up in X" creates follow_up notification with due_date
+- [ ] Chase system creates notifications through inbox (replaces direct notification creation)
+- [ ] Snooze on chase notifications (replaces "move back to enquiries" pattern)
+
+##### Future Enhancements
+- Staff working calendar integration (escalation timing based on actual schedules)
+- Group mentions (@warehouse, @office — mention a role/team, not just individuals)
+- File attachments in interaction messages (interactions already support files)
+- Notification digest email (daily summary instead of per-notification)
+- Mobile push notifications (if mobile app/PWA built)
+- Tasks system (general-purpose tasks linked to inbox — freelancer application review, annual reviews, admin tasks)
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
@@ -1352,8 +1504,8 @@ These are existing standalone tools that currently push to Monday.com. They need
 - Skills-based crew matching (auto-suggest freelancers with matching skills for job type)
 - Freelancer application inbound form (public form → creates person with `is_freelancer=true`, `is_approved=false`, generates review task)
 - **Mileage-based service threshold notifications** — add to daily compliance check, alert when vehicle within configurable miles of `next_service_due`
-- **Email notifications** — add SMTP/transactional email channel alongside in-app bell notifications (needs email service config)
-- **Per-user notification preferences** — allow users to opt in/out of specific notification categories (compliance, chase reminders, etc.)
+- ~~**Email notifications**~~ → Now part of Step 7 Inbox & Notification System (escalation scheduler)
+- ~~**Per-user notification preferences**~~ → Now part of Step 7 Inbox & Notification System (user_notification_preferences table)
 - **Freelancer portal repointing** — switch freelancer-facing app from Monday.com read/write to OP API for crew assignments, delivery jobs, studio sitter assignments, hire form status. **Note:** `share_with_freelancer` flag exists on venue files and job files — portal should filter files by this flag when serving to freelancers (only show files where `share_with_freelancer = true`). Backend endpoint: `PATCH /api/files/update-metadata` persists the toggle.
 - **Address Book CRM & Filtering Enhancements:**
   - *Tier 1 (quick wins):*
