@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { api } from '../services/api';
 import GlobalSearch from './GlobalSearch';
 import NotificationBell from './NotificationBell';
 
@@ -133,11 +134,25 @@ function UserAvatar({ size = 'sm' }: { size?: 'sm' | 'md' | 'lg' }) {
 
 function UserMenu() {
   const [open, setOpen] = useState(false);
+  const [inboxUnread, setInboxUnread] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const isAdmin = user?.role === 'admin' || user?.role === 'manager';
+
+  const loadInboxCount = useCallback(async () => {
+    try {
+      const data = await api.get<{ unread_count: number }>('/notifications?unread_only=true&limit=0');
+      setInboxUnread(data.unread_count);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    loadInboxCount();
+    const interval = setInterval(loadInboxCount, 60_000);
+    return () => clearInterval(interval);
+  }, [loadInboxCount]);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -170,6 +185,21 @@ function UserMenu() {
           </div>
 
           {/* Menu items */}
+          <button
+            onClick={() => { setOpen(false); navigate('/inbox'); }}
+            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+            </svg>
+            Inbox
+            {inboxUnread > 0 && (
+              <span className="ml-auto bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[18px] text-center">
+                {inboxUnread > 99 ? '99+' : inboxUnread}
+              </span>
+            )}
+          </button>
+
           <button
             onClick={() => { setOpen(false); navigate('/profile'); }}
             className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-ooosh-50 hover:text-ooosh-700 transition-colors flex items-center gap-2"
@@ -320,6 +350,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 )
               )}
               <div className="border-t border-ooosh-700 pt-2 mt-2">
+                <Link
+                  to="/inbox"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="block px-3 py-2 rounded text-sm font-medium text-ooosh-100 hover:bg-ooosh-700 hover:text-white transition-colors"
+                >
+                  Inbox
+                </Link>
                 <Link
                   to="/profile"
                   onClick={() => setMobileMenuOpen(false)}

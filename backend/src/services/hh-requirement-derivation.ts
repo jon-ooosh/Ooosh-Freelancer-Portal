@@ -554,7 +554,7 @@ async function upsertAutoRequirement(
 ): Promise<void> {
   // Check if requirement already exists (pre_hire phase only — derivation creates pre-hire)
   const existing = await client.query(
-    `SELECT id, is_auto, status, hh_item_snapshot, notes
+    `SELECT id, is_auto, status, hh_item_snapshot, notes, hh_mismatch
      FROM job_requirements
      WHERE job_id = $1 AND requirement_type = $2 AND phase = 'pre_hire'`,
     [jobId, requirementType]
@@ -576,8 +576,22 @@ async function upsertAutoRequirement(
 
   const req = existing.rows[0];
 
-  // Don't touch manually-created requirements
-  if (!req.is_auto) return;
+  // For manually-created requirements: don't update notes/snapshot,
+  // but DO clear mismatch flag if this type is now detected on HireHop.
+  // This fixes the case where a requirement created via the enquiry form
+  // gets flagged "Not detected on HireHop" during a sync where items were
+  // temporarily unavailable, and the flag is never cleared on later syncs.
+  if (!req.is_auto) {
+    if (req.hh_mismatch) {
+      await client.query(
+        `UPDATE job_requirements SET hh_mismatch = false,
+           hh_mismatch_detail = NULL, updated_at = NOW()
+         WHERE id = $1`,
+        [req.id]
+      );
+    }
+    return;
+  }
 
   // If staff has acted (status not 'not_started'), check for mismatch
   if (req.status !== 'not_started') {

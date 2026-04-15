@@ -11,6 +11,8 @@ interface Notification {
   content: string | null;
   entity_type: string | null;
   entity_id: string | null;
+  action_url: string | null;
+  priority: string | null;
   is_read: boolean;
   created_at: string;
 }
@@ -85,10 +87,16 @@ export default function NotificationBell() {
   }
 
   function handleNotificationClick(notif: Notification) {
-    // Navigate to the entity if available
-    if (notif.entity_type && notif.entity_id) {
+    // Navigate: prefer action_url, fall back to entity_type mapping
+    if (notif.action_url) {
+      navigate(notif.action_url);
+    } else if (notif.entity_type && notif.entity_id) {
       const pathMap: Record<string, string> = {
         fleet_vehicles: '/vehicles/fleet',
+        jobs: '/jobs',
+        people: '/people',
+        organisations: '/organisations',
+        venues: '/venues',
       };
       const basePath = pathMap[notif.entity_type] || `/${notif.entity_type}`;
       navigate(`${basePath}/${notif.entity_id}`);

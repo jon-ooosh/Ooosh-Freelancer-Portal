@@ -361,13 +361,15 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
     // Create chase alert notification if requested
     if (chase_alert_user_id) {
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
-         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4)`,
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, source_user_id)
+         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, 'normal', $5, $6)`,
         [
           chase_alert_user_id,
           `Chase reminder: ${finalJobName}`,
           `Chase due for ${client_name} — ${finalJobName}`,
           result.rows[0].id,
+          `/jobs/${result.rows[0].id}`,
+          req.user!.id,
         ]
       );
     }
@@ -429,6 +431,7 @@ const updateStatusSchema = z.object({
   retro_rating: z.enum(['great', 'ok', 'issues']).optional().nullable(),
   retro_notes: z.string().optional().nullable(),
   retro_follow_up: z.string().optional().nullable(),
+  retro_follow_up_date: z.string().optional().nullable(),
 });
 
 router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthRequest, res: Response) => {
@@ -437,7 +440,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     const {
       pipeline_status, hold_reason, hold_reason_detail,
       confirmed_method, lost_reason, lost_detail, transition_note,
-      retro_rating, retro_notes, retro_follow_up,
+      retro_rating, retro_notes, retro_follow_up, retro_follow_up_date,
     } = req.body;
 
     // Get current state
@@ -528,6 +531,30 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
          VALUES ('note', $1, $2, $3, 'completed')`,
         [retroParts.join('\n'), jobId, req.user!.id]
       );
+
+      // Create follow-up notification if a date was specified
+      if (retro_follow_up && retro_follow_up_date) {
+        const jobName = currentJob.job_name || currentJob.client_name || `Job ${currentJob.hh_job_number || ''}`;
+        const dueDate = new Date(retro_follow_up_date + 'T09:00:00Z').toISOString();
+        try {
+          await query(
+            `INSERT INTO notifications
+               (user_id, type, title, content, entity_type, entity_id, action_url,
+                priority, source_user_id, due_date, snoozed_until)
+             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, 'normal', $1, $6, $6)`,
+            [
+              req.user!.id,
+              `Follow-up: ${jobName}`,
+              retro_follow_up,
+              jobId,
+              `/jobs/${jobId}`,
+              dueDate,
+            ]
+          );
+        } catch (followUpErr) {
+          console.warn('[Pipeline] Failed to create follow-up notification:', followUpErr);
+        }
+      }
     }
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);

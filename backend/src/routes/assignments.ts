@@ -457,6 +457,41 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
       );
     }
 
+    // Auto-create damage_review close-out requirement if damage flagged
+    if (has_damage && assignment.job_id) {
+      try {
+        // Get vehicle reg for the note
+        let vehicleReg = '';
+        if (assignment.vehicle_id) {
+          const vResult = await query(
+            `SELECT registration FROM fleet_vehicles WHERE id = $1`,
+            [assignment.vehicle_id]
+          );
+          vehicleReg = vResult.rows[0]?.registration || '';
+        }
+
+        const noteText = vehicleReg
+          ? `Vehicle damage flagged on check-in — ${vehicleReg}`
+          : 'Vehicle damage flagged on check-in';
+
+        // Insert if not already exists (unique constraint: job_id + requirement_type + phase)
+        await query(
+          `INSERT INTO job_requirements (job_id, requirement_type, status, is_auto, source, phase, notes)
+           VALUES ($1, 'damage_review', 'not_started', true, 'check_in', 'post_hire', $2)
+           ON CONFLICT (job_id, requirement_type, phase) DO UPDATE
+             SET notes = CASE
+               WHEN job_requirements.notes IS NULL OR job_requirements.notes = '' THEN $2
+               WHEN job_requirements.notes NOT LIKE '%' || $2 || '%' THEN job_requirements.notes || E'\n' || $2
+               ELSE job_requirements.notes
+             END,
+             updated_at = NOW()`,
+          [assignment.job_id, noteText]
+        );
+      } catch (dmgErr) {
+        console.warn('[assignments] Damage requirement auto-creation failed:', dmgErr);
+      }
+    }
+
     res.json({ data: assignment });
   } catch (error) {
     console.error('[assignments] Check-in error:', error);

@@ -359,7 +359,8 @@ async function fetchLineItemsForJob(jobNumber: number): Promise<HHLineItem[]> {
   const data = result.data as any;
   if (data && typeof data === 'object' && !Array.isArray(data) && data.error) return [];
 
-  const rawItems: any[] = Array.isArray(data) ? data : (data.items || []);
+  // HH may return a plain array, { items: [...] }, or { rows: [...] }
+  const rawItems: any[] = Array.isArray(data) ? data : (data.items || data.rows || []);
 
   return rawItems
     .filter((item: any) => {
@@ -382,7 +383,7 @@ async function fetchLineItemsForJob(jobNumber: number): Promise<HHLineItem[]> {
         LIST_ID: Number(item.LIST_ID ?? 0),
         ITEM_NAME: String(item.title ?? item.NAME ?? item.ITEM_NAME ?? ''),
         QUANTITY: Number(item.QTY ?? item.qty ?? item.QUANTITY ?? item.quantity ?? 1),
-        CATEGORY_ID: Number(item.CATEGORY_ID ?? 0),
+        CATEGORY_ID: Number(item.CATEGORY_ID ?? item.ACC_CATEGORY ?? 0),
         kind: Number(item.kind ?? 2),
         AUTOPULL: Number(item.AUTOPULL ?? 0),
         VIRTUAL: item.VIRTUAL === '1' || item.VIRTUAL === 1 || item.VIRTUAL === true,
@@ -493,7 +494,8 @@ export async function fetchLineItemsOnDemand(jobNumber: number): Promise<HHLineI
   const data = result.data as any;
   if (data && typeof data === 'object' && !Array.isArray(data) && data.error) return [];
 
-  const rawItems: any[] = Array.isArray(data) ? data : (data.items || []);
+  // HH may return a plain array, { items: [...] }, or { rows: [...] }
+  const rawItems: any[] = Array.isArray(data) ? data : (data.items || data.rows || []);
 
   return rawItems
     .filter((item: any) => Number(item.kind ?? 2) !== 0)
@@ -509,7 +511,7 @@ export async function fetchLineItemsOnDemand(jobNumber: number): Promise<HHLineI
         LIST_ID: Number(item.LIST_ID ?? 0),
         ITEM_NAME: String(item.title ?? item.NAME ?? item.ITEM_NAME ?? ''),
         QUANTITY: Number(item.QTY ?? item.qty ?? item.QUANTITY ?? item.quantity ?? 1),
-        CATEGORY_ID: Number(item.CATEGORY_ID ?? 0),
+        CATEGORY_ID: Number(item.CATEGORY_ID ?? item.ACC_CATEGORY ?? 0),
         kind: Number(item.kind ?? 2),
         AUTOPULL: Number(item.AUTOPULL ?? 0),
         VIRTUAL: item.VIRTUAL === '1' || item.VIRTUAL === 1 || item.VIRTUAL === true,
