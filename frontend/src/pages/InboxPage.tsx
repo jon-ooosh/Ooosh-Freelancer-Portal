@@ -157,6 +157,7 @@ export default function InboxPage() {
 
   useEffect(() => {
     setPage(1);
+    setLoadError(null);
     loadInbox(1);
   }, [tab, loadInbox]);
 
