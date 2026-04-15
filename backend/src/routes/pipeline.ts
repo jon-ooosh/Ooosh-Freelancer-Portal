@@ -175,7 +175,7 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
         COUNT(*) FILTER (WHERE next_chase_date BETWEEN CURRENT_DATE + 1 AND CURRENT_DATE + 7) as due_this_week
       FROM jobs
       WHERE is_deleted = false
-        AND pipeline_status NOT IN ('confirmed', 'lost')
+        AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
         AND next_chase_date IS NOT NULL
     `);
 
@@ -184,7 +184,7 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
       SELECT COALESCE(SUM(job_value), 0) as total
       FROM jobs
       WHERE is_deleted = false
-        AND pipeline_status NOT IN ('confirmed', 'lost')
+        AND pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
     `);
 
     res.json({
@@ -208,7 +208,7 @@ router.get('/chase-due', async (_req: AuthRequest, res: Response) => {
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       WHERE j.is_deleted = false
-        AND j.pipeline_status NOT IN ('confirmed', 'lost')
+        AND j.pipeline_status NOT IN ('confirmed', 'lost', 'cancelled')
         AND j.next_chase_date IS NOT NULL
         AND j.next_chase_date <= CURRENT_DATE
       ORDER BY j.next_chase_date ASC, j.job_value DESC NULLS LAST
