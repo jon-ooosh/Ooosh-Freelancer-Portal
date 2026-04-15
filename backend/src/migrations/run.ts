@@ -79,6 +79,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '043_job_times.sql',
         '044_closeout_requirement_types.sql',
         '045_inbox_notifications.sql',
+        '046_repair_inbox_columns.sql',
       ];
 
       for (const migration of migrations) {

@@ -146,9 +146,10 @@ export default function InboxPage() {
         setPage(data.pagination.page);
         setTotalPages(data.pagination.totalPages);
       }
-    } catch (err) {
+    } catch (err: unknown) {
       console.error('Inbox load failed:', err);
-      setLoadError('Failed to load inbox. The notification migration may need to be re-run.');
+      const detail = err instanceof Error ? err.message : String(err);
+      setLoadError(`Failed to load inbox: ${detail}. Try re-running database migration (npm run db:migrate).`);
     } finally {
       setLoading(false);
     }
