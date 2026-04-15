@@ -99,7 +99,9 @@ export default function NotificationBell() {
         venues: '/venues',
       };
       const basePath = pathMap[notif.entity_type] || `/${notif.entity_type}`;
-      navigate(`${basePath}/${notif.entity_id}`);
+      // Mentions on jobs should open the Activity Timeline tab
+      const tabParam = notif.type === 'mention' && notif.entity_type === 'jobs' ? '?tab=timeline' : '';
+      navigate(`${basePath}/${notif.entity_id}${tabParam}`);
     }
     setOpen(false);
 
