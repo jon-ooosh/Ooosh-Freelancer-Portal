@@ -64,18 +64,14 @@ interface SyncLog {
   result: { jobsCreated: number; jobsUpdated: number; total: number } | null;
 }
 
-// Default: confirmed and active jobs (Booked through Requires Attention, excluding Returned)
+// Default: confirmed and active jobs — Returns and Enquiries live on their own pages
 const STATUS_FILTER_OPTIONS = [
   { label: 'Confirmed & Active', value: '2,3,4,5,8' },
-  { label: 'Including Returned', value: '2,3,4,5,6,7,8' },
-  { label: 'All Statuses', value: '' },
+  { label: 'All Active', value: '2,3,4,5,6,7,8' },
   { label: 'Booked', value: '2' },
   { label: 'Prepped', value: '3' },
-  { label: 'Dispatched', value: '4,5' },
-  { label: 'Returned', value: '6,7' },
-  { label: 'Requires Attention', value: '8' },
-  { label: 'Completed', value: '11' },
-  { label: 'Cancelled / Lost', value: '9,10' },
+  { label: 'On Hire', value: '4,5' },
+  { label: 'All Statuses', value: '' },
 ];
 
 type TimeFilter = 'all' | 'out_now' | 'next_2_weeks' | 'over_2_weeks';
