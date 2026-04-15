@@ -72,7 +72,7 @@ export async function calculateVatAdjustment(
 
     const rawItems = Array.isArray(itemsRes.data)
       ? itemsRes.data
-      : (itemsRes.data.items || []);
+      : (itemsRes.data.items || itemsRes.data.rows || []);
 
     // Step 2: Find trigger item and extract non-UK days
     const triggerItem = rawItems.find((item: any) => {
