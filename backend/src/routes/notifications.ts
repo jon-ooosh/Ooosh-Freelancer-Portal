@@ -11,6 +11,13 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const { unread_only, limit = '20' } = req.query;
 
+    // Check if new columns exist (migration 045)
+    const colCheck = await query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'notifications' AND column_name = 'snoozed_until'
+    `);
+    const hasSnoozed = colCheck.rows.length > 0;
+
     let sql = `
       SELECT * FROM notifications
       WHERE user_id = $1
@@ -22,21 +29,21 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       sql += ` AND is_read = false`;
     }
 
-    // Hide snoozed notifications from bell
-    sql += ` AND (snoozed_until IS NULL OR snoozed_until <= NOW())`;
+    // Hide snoozed notifications from bell (only if column exists)
+    if (hasSnoozed) {
+      sql += ` AND (snoozed_until IS NULL OR snoozed_until <= NOW())`;
+    }
 
     sql += ` ORDER BY created_at DESC LIMIT $${paramIndex}`;
     params.push(parseInt(limit as string));
 
     const result = await query(sql, params);
 
-    // Unread count (excluding snoozed)
-    const countResult = await query(
-      `SELECT COUNT(*) FROM notifications
-       WHERE user_id = $1 AND is_read = false
-       AND (snoozed_until IS NULL OR snoozed_until <= NOW())`,
-      [req.user!.id]
-    );
+    // Unread count
+    const countSql = hasSnoozed
+      ? `SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND is_read = false AND (snoozed_until IS NULL OR snoozed_until <= NOW())`
+      : `SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND is_read = false`;
+    const countResult = await query(countSql, [req.user!.id]);
 
     res.json({
       data: result.rows,
@@ -87,6 +94,13 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
     const limitNum = Math.min(100, parseInt(limit as string));
     const offset = (pageNum - 1) * limitNum;
 
+    // Check if new columns exist (migration 045)
+    const colCheck = await query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'notifications' AND column_name = 'priority'
+    `);
+    const hasNewColumns = colCheck.rows.length > 0;
+
     const conditions: string[] = ['n.user_id = $1'];
     const params: unknown[] = [userId];
     let pIdx = 2;
@@ -99,7 +113,6 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
     } else if (tab === 'system') {
       conditions.push(`n.type IN ('compliance', 'chase_alert', 'hire_form', 'referral', 'system')`);
     }
-    // 'all' = no type filter
 
     // Status filter
     if (status === 'unread') {
@@ -108,28 +121,44 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
       conditions.push(`n.is_read = true`);
     }
 
-    // Exclude snoozed (unless tab is follow_ups — show upcoming ones too)
-    if (tab !== 'follow_ups') {
+    // Exclude snoozed (only if column exists)
+    if (hasNewColumns && tab !== 'follow_ups') {
       conditions.push(`(n.snoozed_until IS NULL OR n.snoozed_until <= NOW())`);
     }
 
     const whereClause = conditions.join(' AND ');
 
+    // Build query depending on available columns
+    const selectCols = hasNewColumns
+      ? `n.*, su.first_name AS source_first_name, su.last_name AS source_last_name`
+      : `n.id, n.user_id, n.type, n.title, n.content, n.entity_type, n.entity_id,
+         n.is_read, n.read_at, n.created_at,
+         NULL::text AS source_first_name, NULL::text AS source_last_name,
+         NULL::text AS action_url, 'normal'::text AS priority,
+         NULL::timestamptz AS acknowledged_at, NULL::timestamptz AS nudged_at,
+         NULL::timestamptz AS due_date, NULL::timestamptz AS snoozed_until,
+         NULL::uuid AS source_user_id, NULL::uuid AS interaction_id,
+         NULL::timestamptz AS email_sent_at`;
+    const joinClause = hasNewColumns
+      ? `LEFT JOIN users su ON su.id = n.source_user_id`
+      : ``;
+    const orderClause = hasNewColumns
+      ? `ORDER BY
+           CASE WHEN n.priority = 'urgent' THEN 0
+                WHEN n.priority = 'high' THEN 1
+                WHEN n.priority = 'normal' THEN 2
+                ELSE 3 END,
+           CASE WHEN n.is_read = false THEN 0 ELSE 1 END,
+           n.created_at DESC`
+      : `ORDER BY CASE WHEN n.is_read = false THEN 0 ELSE 1 END, n.created_at DESC`;
+
     const [dataResult, countResult] = await Promise.all([
       query(`
-        SELECT n.*,
-          su.first_name AS source_first_name,
-          su.last_name AS source_last_name
+        SELECT ${selectCols}
         FROM notifications n
-        LEFT JOIN users su ON su.id = n.source_user_id
+        ${joinClause}
         WHERE ${whereClause}
-        ORDER BY
-          CASE WHEN n.priority = 'urgent' THEN 0
-               WHEN n.priority = 'high' THEN 1
-               WHEN n.priority = 'normal' THEN 2
-               ELSE 3 END,
-          CASE WHEN n.is_read = false THEN 0 ELSE 1 END,
-          n.created_at DESC
+        ${orderClause}
         LIMIT $${pIdx} OFFSET $${pIdx + 1}
       `, [...params, limitNum, offset]),
       query(`
@@ -137,22 +166,37 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
       `, params),
     ]);
 
-    // Tab counts for badge display
-    const tabCounts = await query(`
-      SELECT
-        COUNT(*) FILTER (WHERE is_read = false AND (snoozed_until IS NULL OR snoozed_until <= NOW())) AS all_unread,
-        COUNT(*) FILTER (WHERE type = 'mention' AND is_read = false) AS mentions_unread,
-        COUNT(*) FILTER (WHERE type = 'follow_up' AND (snoozed_until IS NULL OR snoozed_until <= NOW()) AND acknowledged_at IS NULL) AS follow_ups_active,
-        COUNT(*) FILTER (WHERE type IN ('compliance', 'chase_alert', 'hire_form', 'referral', 'system') AND is_read = false) AS system_unread
-      FROM notifications
-      WHERE user_id = $1
-    `, [userId]);
+    // Tab counts
+    let tabCountsRow;
+    if (hasNewColumns) {
+      const tabCounts = await query(`
+        SELECT
+          COUNT(*) FILTER (WHERE is_read = false AND (snoozed_until IS NULL OR snoozed_until <= NOW())) AS all_unread,
+          COUNT(*) FILTER (WHERE type = 'mention' AND is_read = false) AS mentions_unread,
+          COUNT(*) FILTER (WHERE type = 'follow_up' AND (snoozed_until IS NULL OR snoozed_until <= NOW()) AND acknowledged_at IS NULL) AS follow_ups_active,
+          COUNT(*) FILTER (WHERE type IN ('compliance', 'chase_alert', 'hire_form', 'referral', 'system') AND is_read = false) AS system_unread
+        FROM notifications
+        WHERE user_id = $1
+      `, [userId]);
+      tabCountsRow = tabCounts.rows[0];
+    } else {
+      const tabCounts = await query(`
+        SELECT
+          COUNT(*) FILTER (WHERE is_read = false) AS all_unread,
+          COUNT(*) FILTER (WHERE type = 'mention' AND is_read = false) AS mentions_unread,
+          0 AS follow_ups_active,
+          COUNT(*) FILTER (WHERE type IN ('compliance', 'chase_alert', 'hire_form', 'referral', 'system') AND is_read = false) AS system_unread
+        FROM notifications
+        WHERE user_id = $1
+      `, [userId]);
+      tabCountsRow = tabCounts.rows[0];
+    }
 
     const total = parseInt(countResult.rows[0].count);
 
     res.json({
       data: dataResult.rows,
-      tab_counts: tabCounts.rows[0],
+      tab_counts: tabCountsRow,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -162,7 +206,7 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     console.error('Inbox error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -174,6 +218,16 @@ router.get('/sent', async (req: AuthRequest, res: Response) => {
     const pageNum = Math.max(1, parseInt(page as string));
     const limitNum = Math.min(100, parseInt(limit as string));
     const offset = (pageNum - 1) * limitNum;
+
+    // Check if new columns exist
+    const colCheck = await query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'notifications' AND column_name = 'source_user_id'
+    `);
+    if (colCheck.rows.length === 0) {
+      // Migration 045 hasn't run — no sent data available
+      return res.json({ data: [], pagination: { page: 1, total: 0, totalPages: 0 } });
+    }
 
     // Get notifications this user created (mentions they sent)
     const result = await query(`

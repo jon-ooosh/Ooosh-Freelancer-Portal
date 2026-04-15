@@ -114,6 +114,7 @@ export default function InboxPage() {
   const [sentItems, setSentItems] = useState<SentNotification[]>([]);
   const [tabCounts, setTabCounts] = useState<TabCounts | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [showPrefs, setShowPrefs] = useState(false);
@@ -147,6 +148,7 @@ export default function InboxPage() {
       }
     } catch (err) {
       console.error('Inbox load failed:', err);
+      setLoadError('Failed to load inbox. The notification migration may need to be re-run.');
     } finally {
       setLoading(false);
     }
@@ -303,7 +305,11 @@ export default function InboxPage() {
       </div>
 
       {/* Content */}
-      {loading ? (
+      {loadError ? (
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700">
+          {loadError}
+        </div>
+      ) : loading ? (
         <div className="text-center py-12 text-gray-400">Loading...</div>
       ) : tab === 'sent' ? (
         <SentList items={sentItems} onNudge={nudge} onNavigate={navigateToEntity} />
