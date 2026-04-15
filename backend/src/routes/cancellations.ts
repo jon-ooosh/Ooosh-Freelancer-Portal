@@ -53,7 +53,7 @@ router.post('/:jobId/calculate', validate(calculateSchema), async (req: AuthRequ
 
 router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => {
   try {
-    const jobId = req.params.jobId;
+    const jobId = req.params.jobId as string;
 
     // Get quotes (transport/crew)
     const quotes = await query(
@@ -122,7 +122,7 @@ router.post(
   validate(processSchema),
   async (req: AuthRequest, res: Response) => {
     try {
-      const jobId = req.params.jobId;
+      const jobId = req.params.jobId as string;
       const userId = req.user!.id;
       const {
         cancellation_reason, cancellation_notes,
@@ -359,7 +359,7 @@ router.post(
   authorize('admin', 'manager'),
   async (req: AuthRequest, res: Response) => {
     try {
-      const jobId = req.params.jobId;
+      const jobId = req.params.jobId as string;
 
       const jobResult = await query(
         `SELECT * FROM jobs WHERE id = $1 AND is_deleted = false`,
@@ -387,8 +387,9 @@ router.post(
             local: new Date().toISOString().replace('T', ' ').substring(0, 16),
           }, { priority: 'high' });
 
-          if (hhResult?.job) {
-            newHhJobNumber = hhResult.job;
+          const hhData = hhResult as { job?: number };
+          if (hhData?.job) {
+            newHhJobNumber = hhData.job;
           }
         } catch (hhErr) {
           console.error('[Cancellation] HH duplicate failed:', hhErr);
