@@ -684,9 +684,9 @@ async function fireReferralNotification(
 
     for (const user of adminUsers.rows) {
       await query(
-        `INSERT INTO notifications (user_id, type, content, link)
-         VALUES ($1, 'referral', $2, $3)`,
-        [user.id, notificationContent, `/vehicles/drivers/${driverId}`]
+        `INSERT INTO notifications (user_id, type, title, content, action_url, priority)
+         VALUES ($1, 'referral', $2, $3, $4, 'high')`,
+        [user.id, `Referral needed: ${driverName}`, notificationContent, `/vehicles/drivers/${driverId}`]
       );
     }
 

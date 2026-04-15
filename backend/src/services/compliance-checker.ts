@@ -146,13 +146,15 @@ export async function runComplianceCheck(createNotifications = true): Promise<{
             : `due in ${alert.daysRemaining} days`;
 
           await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
-             VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4)`,
+            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url)
+             VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, $5, $6)`,
             [
               user.id,
               `${urgencyLabel}: ${alert.item} — ${alert.reg}`,
               `${alert.item} for ${alert.reg} is ${daysText} (${alert.date})`,
               alert.vehicleId,
+              alert.urgency === 'overdue' ? 'high' : 'normal',
+              `/vehicles/fleet/${alert.vehicleId}`,
             ]
           );
           notificationsCreated++;

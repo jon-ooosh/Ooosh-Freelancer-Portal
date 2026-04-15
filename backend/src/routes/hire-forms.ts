@@ -1210,13 +1210,14 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
               const adminUsers = await query(`SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`);
               for (const user of adminUsers.rows) {
                 await query(
-                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
-                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4)`,
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5)`,
                   [
                     user.id,
                     `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
                     `${assignment.driver_name || 'A driver'} submitted a hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}) which is already dispatched. Hire form assigned to ${assignment.vehicle_reg || 'unassigned vehicle'}.`,
                     id,
+                    assignment.job_id ? `/jobs/${assignment.job_id}` : null,
                   ]
                 );
               }

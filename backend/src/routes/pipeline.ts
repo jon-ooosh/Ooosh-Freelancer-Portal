@@ -361,13 +361,15 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
     // Create chase alert notification if requested
     if (chase_alert_user_id) {
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id)
-         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4)`,
+        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, source_user_id)
+         VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, 'normal', $5, $6)`,
         [
           chase_alert_user_id,
           `Chase reminder: ${finalJobName}`,
           `Chase due for ${client_name} — ${finalJobName}`,
           result.rows[0].id,
+          `/jobs/${result.rows[0].id}`,
+          req.user!.id,
         ]
       );
     }
