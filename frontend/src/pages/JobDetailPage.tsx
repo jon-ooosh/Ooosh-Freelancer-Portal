@@ -683,8 +683,6 @@ export default function JobDetailPage() {
   const [editingClient, setEditingClient] = useState(false);
   const [clientSearch, setClientSearch] = useState('');
   const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
-  const [editingValue, setEditingValue] = useState(false);
-  const [editValueAmount, setEditValueAmount] = useState('');
   const [inlineEditSaving, setInlineEditSaving] = useState(false);
   const [pushingToHH, setPushingToHH] = useState(false);
   const [hhClientOutOfSync, setHhClientOutOfSync] = useState(false);
@@ -720,7 +718,6 @@ export default function JobDetailPage() {
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
-  const editValueRef = useRef<HTMLInputElement>(null);
   const clientSearchRef = useRef<HTMLDivElement>(null);
 
   // ── Inline edit helpers ──────────────────────────────────────────────────
@@ -896,18 +893,6 @@ export default function JobDetailPage() {
     }
   }
 
-  function startEditValue() {
-    if (!job) return;
-    setEditValueAmount(job.job_value != null ? String(job.job_value) : '');
-    setEditingValue(true);
-    setTimeout(() => editValueRef.current?.focus(), 50);
-  }
-
-  async function saveEditValue() {
-    setEditingValue(false);
-    const parsed = parseFloat(editValueAmount);
-    await saveInlineField({ job_value: isNaN(parsed) ? null : parsed });
-  }
 
   async function cycleLikelihood() {
     if (!job) return;
@@ -1870,42 +1855,6 @@ export default function JobDetailPage() {
                 </div>
                 )}
 
-                {/* Job Value */}
-                <div className="inline-flex items-center text-xs">
-                  {editingValue ? (
-                    <div className="flex items-center gap-0.5">
-                      <span className="text-gray-500 font-medium">£</span>
-                      <input
-                        ref={editValueRef}
-                        type="number"
-                        value={editValueAmount}
-                        onChange={(e) => setEditValueAmount(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === 'Enter') saveEditValue(); if (e.key === 'Escape') { setEditingValue(false); } }}
-                        onBlur={saveEditValue}
-                        className="border border-gray-300 rounded px-1.5 py-0.5 text-xs w-24 focus:ring-ooosh-500 focus:border-ooosh-500"
-                        step="1"
-                        min="0"
-                      />
-                    </div>
-                  ) : job.hh_job_number ? (
-                    <span className="font-semibold text-gray-900">
-                      {job.job_value != null && job.job_value > 0
-                        ? `£${job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        : <span className="text-gray-400 font-normal">View Money tab</span>}
-                    </span>
-                  ) : (
-                    <button
-                      onClick={startEditValue}
-                      className="font-semibold text-gray-900 hover:text-ooosh-600 transition-colors"
-                      title="Click to edit job value"
-                    >
-                      {job.job_value != null
-                        ? `£${job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                        : <span className="text-gray-400 font-normal">Set value</span>}
-                    </button>
-                  )}
-                </div>
-
                 {inlineEditSaving && (
                   <span className="text-xs text-gray-400 animate-pulse">Saving...</span>
                 )}
@@ -2160,6 +2109,9 @@ export default function JobDetailPage() {
             jobStatus={job.status}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
+            hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
+            hasCrewOnHH={hhSyncResult?.derivation?.flags?.has_crew_items || false}
+            onOpenCrewCalculator={() => { setShowCalculator(true); setActiveTab('transport'); }}
           />
 
         </div>
@@ -3790,7 +3742,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   );
 }
 
-function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAvailability }: {
+function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
   jobId: string;
   hhJobNumber?: number | null;
   jobStatus?: number;
@@ -3808,6 +3760,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
     nonMatchingVans: Array<{ reg: string; seat_layout: string | null }>;
     unknownVans: Array<{ reg: string }>;
   } | null;
+  hasCrewQuotes?: boolean;
+  hasCrewOnHH?: boolean;
+  onOpenCrewCalculator?: () => void;
 }) {
   const [requirements, setRequirements] = useState<JobRequirement[]>([]);
   const [types, setTypes] = useState<RequirementTypeDef[]>([]);
@@ -3860,13 +3815,18 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
   }
 
   async function toggleVanAndDriver() {
+    const switchingToCrewed = !isVanAndDriver;
     try {
       const data = await api.patch<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/van-and-driver`, {
-        isVanAndDriver: !isVanAndDriver,
+        isVanAndDriver: switchingToCrewed,
       });
       setIsVanAndDriver(data.isVanAndDriver);
       // Reload requirements since derivation re-runs on toggle
       await loadAll();
+      // Auto-open crew calculator when switching to crewed mode and no crew exists
+      if (switchingToCrewed && !hasCrewQuotes && !hasCrewOnHH && onOpenCrewCalculator) {
+        onOpenCrewCalculator();
+      }
     } catch (err) {
       console.error('Failed to toggle van & driver:', err);
     }
