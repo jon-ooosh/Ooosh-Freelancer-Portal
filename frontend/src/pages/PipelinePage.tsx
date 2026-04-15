@@ -277,7 +277,7 @@ function PipelineCard({
       className={`bg-white rounded-lg shadow-sm border border-gray-200 p-3 cursor-grab active:cursor-grabbing
         hover:shadow-md transition-shadow ${borderClass}`}
     >
-      {/* Row 1: Job number */}
+      {/* Row 1: Job number + value */}
       <div className="flex items-center justify-between mb-1">
         {job.hh_job_number ? (
           <a
@@ -293,6 +293,9 @@ function PipelineCard({
         ) : (
           <span className="text-xs font-mono text-gray-400">NEW</span>
         )}
+        <span className="text-sm font-semibold text-gray-900">
+          {formatCurrency(job.job_value)}
+        </span>
       </div>
 
       {/* Row 2: Job name */}
@@ -2042,6 +2045,9 @@ export default function PipelinePage() {
                   <td className="px-4 py-3 text-sm text-gray-600">
                     {formatDateRange(job.job_date, job.job_end)}
                   </td>
+                  <td className="px-4 py-3 text-sm font-medium text-gray-900 text-right">
+                    {formatCurrency(job.job_value)}
+                  </td>
                   <td className="px-4 py-3">
                     {job.likelihood && (
                       <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${likelihoodColour(job.likelihood)}`}>
@@ -2081,6 +2087,7 @@ export default function PipelinePage() {
                   <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Client</th>
                   <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Status</th>
                   <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Dates</th>
+                  <th className="text-right text-xs font-medium text-gray-500 uppercase px-4 py-3">Value</th>
                   <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Likelihood</th>
                   <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Chase</th>
                 </tr>
