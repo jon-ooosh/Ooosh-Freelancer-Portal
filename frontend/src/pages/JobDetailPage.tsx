@@ -982,7 +982,7 @@ export default function JobDetailPage() {
     }
   }, [showStatusDropdown]);
 
-  async function handleStatusTransition(targetStatus: PipelineStatus, extraData?: Record<string, string>) {
+  async function handleStatusTransition(targetStatus: PipelineStatus, extraData?: Record<string, unknown>) {
     if (!job) return;
     setTransitionSaving(true);
     try {
@@ -4352,7 +4352,7 @@ function StatusTransitionModal({
 }: {
   targetStatus: PipelineStatus | 'completed';
   saving: boolean;
-  onConfirm: (data: Record<string, string>) => void;
+  onConfirm: (data: Record<string, unknown>) => void;
   onCancel: () => void;
   jobId?: string;
   clientId?: string | null;
@@ -4366,8 +4366,27 @@ function StatusTransitionModal({
   const [note, setNote] = useState('');
   const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
-  const [retroFollowUp, setRetroFollowUp] = useState('');
-  const [retroFollowUpDate, setRetroFollowUpDate] = useState('');
+
+  // Multi-reminder system
+  interface Reminder {
+    text: string;
+    date: string;
+    delivery: 'notification' | 'email' | 'both';
+    priority: 'normal' | 'high' | 'urgent';
+    userId: string; // '' = self
+  }
+  const [reminders, setReminders] = useState<Reminder[]>([
+    { text: '', date: '', delivery: 'both', priority: 'normal', userId: '' },
+  ]);
+  const [teamUsers, setTeamUsers] = useState<Array<{ id: string; first_name: string; last_name: string; email: string }>>([]);
+
+  // Load team users for "remind someone else"
+  useEffect(() => {
+    if (targetStatus !== 'completed') return;
+    api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string }> }>('/users')
+      .then(res => setTeamUsers(res.data))
+      .catch(() => {});
+  }, [targetStatus]);
   const [outstandingItems, setOutstandingItems] = useState<string[]>([]);
   const [upcomingJobs, setUpcomingJobs] = useState<Array<{
     id: string; hh_job_number: number | null; job_name: string | null;
@@ -4420,7 +4439,7 @@ function StatusTransitionModal({
   }, [targetStatus, jobId, clientId, clientName]);
 
   const handleSubmit = () => {
-    const data: Record<string, string> = {};
+    const data: Record<string, unknown> = {};
     if (targetStatus === 'paused') {
       data.hold_reason = holdReason;
       if (holdDetail) data.hold_reason_detail = holdDetail;
@@ -4432,10 +4451,20 @@ function StatusTransitionModal({
     } else if (targetStatus === 'completed') {
       data.retro_rating = retroRating;
       if (retroNotes) data.retro_notes = retroNotes;
-      if (retroFollowUp) data.retro_follow_up = retroFollowUp;
-      if (retroFollowUpDate) data.retro_follow_up_date = retroFollowUpDate;
+      // Collect valid reminders (have text + date)
+      const validReminders = reminders.filter(r => r.text.trim() && r.date);
+      if (validReminders.length > 0) {
+        data.retro_follow_up = validReminders[0].text; // backward compat for interaction text
+        data.retro_reminders = validReminders.map(r => ({
+          text: r.text.trim(),
+          date: r.date,
+          delivery: r.delivery,
+          priority: r.priority,
+          user_id: r.userId || null,
+        }));
+      }
     }
-    if (note) data.transition_note = note;
+    if (note) data.transition_note = note as string;
     onConfirm(data);
   };
 
@@ -4553,43 +4582,118 @@ function StatusTransitionModal({
               rows={3}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
-            <input
-              type="text"
-              placeholder="Follow-up actions? (e.g. 'chase missing cable', 'thank client')"
-              value={retroFollowUp}
-              onChange={(e) => setRetroFollowUp(e.target.value)}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-            />
-            {retroFollowUp && (
-              <div className="flex items-center gap-2">
-                <label className="text-xs text-gray-500 whitespace-nowrap">Remind me:</label>
-                <input
-                  type="date"
-                  value={retroFollowUpDate}
-                  onChange={(e) => setRetroFollowUpDate(e.target.value)}
-                  className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
-                />
-                <div className="flex gap-1">
-                  {[
-                    { label: '1m', days: 30 },
-                    { label: '3m', days: 90 },
-                    { label: '6m', days: 180 },
-                  ].map(p => (
-                    <button
-                      key={p.label}
-                      type="button"
-                      onClick={() => {
-                        const d = new Date(Date.now() + p.days * 86400000);
-                        setRetroFollowUpDate(d.toISOString().split('T')[0]);
+            {/* Reminders */}
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-gray-600">Follow-up reminders</label>
+              {reminders.map((rem, idx) => {
+                const hasText = rem.text.trim().length > 0;
+                return (
+                  <div key={idx} className="border border-gray-200 rounded-lg p-2.5 space-y-2 bg-gray-50">
+                    <input
+                      type="text"
+                      placeholder="e.g. 'Chase missing cable', 'Thank client', 'Check summer availability'"
+                      value={rem.text}
+                      onChange={(e) => {
+                        const updated = [...reminders];
+                        updated[idx] = { ...rem, text: e.target.value };
+                        setReminders(updated);
                       }}
-                      className="px-2 py-1 text-[10px] border border-gray-200 rounded text-gray-500 hover:bg-gray-50"
-                    >
-                      {p.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
+                      className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                    />
+                    <div className={`flex items-center gap-2 flex-wrap ${hasText ? '' : 'opacity-40 pointer-events-none'}`}>
+                      <input
+                        type="date"
+                        value={rem.date}
+                        onChange={(e) => {
+                          const updated = [...reminders];
+                          updated[idx] = { ...rem, date: e.target.value };
+                          setReminders(updated);
+                        }}
+                        className="border border-gray-300 rounded px-2 py-1 text-xs flex-1 min-w-[120px]"
+                      />
+                      <div className="flex gap-1">
+                        {[{ label: '1m', days: 30 }, { label: '3m', days: 90 }, { label: '6m', days: 180 }].map(p => (
+                          <button
+                            key={p.label}
+                            type="button"
+                            onClick={() => {
+                              const updated = [...reminders];
+                              updated[idx] = { ...rem, date: new Date(Date.now() + p.days * 86400000).toISOString().split('T')[0] };
+                              setReminders(updated);
+                            }}
+                            className="px-1.5 py-0.5 text-[10px] border border-gray-200 rounded text-gray-500 hover:bg-gray-100"
+                          >
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className={`flex items-center gap-2 flex-wrap ${hasText ? '' : 'opacity-40 pointer-events-none'}`}>
+                      <select
+                        value={rem.priority}
+                        onChange={(e) => {
+                          const updated = [...reminders];
+                          updated[idx] = { ...rem, priority: e.target.value as Reminder['priority'] };
+                          setReminders(updated);
+                        }}
+                        className="border border-gray-300 rounded px-2 py-1 text-xs"
+                      >
+                        <option value="normal">Normal</option>
+                        <option value="high">Important</option>
+                        <option value="urgent">Urgent</option>
+                      </select>
+                      <select
+                        value={rem.delivery}
+                        onChange={(e) => {
+                          const updated = [...reminders];
+                          updated[idx] = { ...rem, delivery: e.target.value as Reminder['delivery'] };
+                          setReminders(updated);
+                        }}
+                        className="border border-gray-300 rounded px-2 py-1 text-xs"
+                      >
+                        <option value="both">Bell + Email</option>
+                        <option value="notification">Bell only</option>
+                        <option value="email">Email only</option>
+                      </select>
+                      <select
+                        value={rem.userId}
+                        onChange={(e) => {
+                          const updated = [...reminders];
+                          updated[idx] = { ...rem, userId: e.target.value };
+                          setReminders(updated);
+                        }}
+                        className="border border-gray-300 rounded px-2 py-1 text-xs flex-1 min-w-[100px]"
+                      >
+                        <option value="">Remind me</option>
+                        {teamUsers.map(u => (
+                          <option key={u.id} value={u.id}>
+                            {u.first_name} {u.last_name}
+                          </option>
+                        ))}
+                      </select>
+                      {reminders.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setReminders(reminders.filter((_, i) => i !== idx))}
+                          className="text-[10px] text-red-400 hover:text-red-600"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+              {reminders.some(r => r.text.trim()) && (
+                <button
+                  type="button"
+                  onClick={() => setReminders([...reminders, { text: '', date: '', delivery: 'both', priority: 'normal', userId: '' }])}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                >
+                  + Add another reminder
+                </button>
+              )}
+            </div>
           </div>
         )}
 
