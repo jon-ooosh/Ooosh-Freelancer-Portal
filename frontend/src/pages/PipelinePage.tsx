@@ -264,10 +264,12 @@ function PipelineCard({
   progress?: ReqProgress;
 }) {
   const chase = chaseDueLabel(job.next_chase_date);
-  const borderClass =
-    chase.urgency === 'overdue' ? 'border-l-4 border-l-red-500' :
-    chase.urgency === 'today' ? 'border-l-4 border-l-amber-400' :
-    'border-l-4 border-l-transparent';
+  const isTerminal = job.pipeline_status === 'lost' || job.pipeline_status === 'cancelled';
+  const borderClass = isTerminal
+    ? 'border-l-4 border-l-transparent'
+    : chase.urgency === 'overdue' ? 'border-l-4 border-l-red-500'
+    : chase.urgency === 'today' ? 'border-l-4 border-l-amber-400'
+    : 'border-l-4 border-l-transparent';
 
   return (
     <div
@@ -359,24 +361,28 @@ function PipelineCard({
         );
       })()}
 
-      {/* Row 6: Chase due + chase button + manager */}
+      {/* Row 6: Chase due + chase button + manager (hidden for lost/cancelled) */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          {chase.text ? (
-            <span className={`text-xs font-medium ${
-              chase.urgency === 'overdue' ? 'text-red-600' :
-              chase.urgency === 'today' ? 'text-amber-600' : 'text-gray-400'
-            }`}>
-              {chase.text}
-            </span>
-          ) : <span />}
-          <button
-            onClick={(e) => { e.stopPropagation(); onChase(job); }}
-            className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
-            title="Log a chase"
-          >
-            Chase
-          </button>
+          {job.pipeline_status !== 'lost' && job.pipeline_status !== 'cancelled' && (
+            <>
+              {chase.text ? (
+                <span className={`text-xs font-medium ${
+                  chase.urgency === 'overdue' ? 'text-red-600' :
+                  chase.urgency === 'today' ? 'text-amber-600' : 'text-gray-400'
+                }`}>
+                  {chase.text}
+                </span>
+              ) : <span />}
+              <button
+                onClick={(e) => { e.stopPropagation(); onChase(job); }}
+                className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
+                title="Log a chase"
+              >
+                Chase
+              </button>
+            </>
+          )}
         </div>
         {job.manager1_name && (
           <span className="text-xs text-gray-400 font-medium">
@@ -1984,7 +1990,9 @@ export default function PipelinePage() {
 
             sorted.forEach(job => {
               const status = job.pipeline_status || 'new_enquiry';
-              if (status === 'paused') {
+              if (status === 'lost' || status === 'cancelled') {
+                other.push(job);
+              } else if (status === 'paused') {
                 paused.push(job);
               } else if (status === 'provisional') {
                 provisional.push(job);
@@ -2056,25 +2064,31 @@ export default function PipelinePage() {
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    <div className="flex items-center gap-2 text-xs">
-                      {chase.text && (
-                        <span className={`font-medium ${
-                          chase.urgency === 'overdue' ? 'text-red-600' :
-                          chase.urgency === 'today' ? 'text-amber-600' : 'text-gray-500'
-                        }`}>
-                          {chase.text}
-                        </span>
-                      )}
-                      {job.chase_count > 0 && (
-                        <span className="text-gray-400">x{job.chase_count}</span>
-                      )}
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setChaseModal(job); }}
-                        className="text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
-                      >
-                        Chase
-                      </button>
-                    </div>
+                    {job.pipeline_status !== 'lost' && job.pipeline_status !== 'cancelled' ? (
+                      <div className="flex items-center gap-2 text-xs">
+                        {chase.text && (
+                          <span className={`font-medium ${
+                            chase.urgency === 'overdue' ? 'text-red-600' :
+                            chase.urgency === 'today' ? 'text-amber-600' : 'text-gray-500'
+                          }`}>
+                            {chase.text}
+                          </span>
+                        )}
+                        {job.chase_count > 0 && (
+                          <span className="text-gray-400">x{job.chase_count}</span>
+                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setChaseModal(job); }}
+                          className="text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
+                        >
+                          Chase
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-gray-400">
+                        {job.pipeline_status === 'lost' ? 'Lost' : 'Cancelled'}
+                      </span>
+                    )}
                   </td>
                 </tr>
               );
