@@ -1774,37 +1774,35 @@ export default function JobDetailPage() {
                   </div>
                 </div>
                 {/* Time inputs row */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Out Time</label>
-                    <input
-                      type="time"
-                      value={editOutTime}
-                      onChange={(e) => setEditOutTime(e.target.value)}
-                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">End Time <span className="font-normal text-gray-400">(single-day)</span></label>
-                    <input
-                      type="time"
-                      value={editEndTime}
-                      onChange={(e) => setEditEndTime(e.target.value)}
-                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
-                      placeholder="Optional"
-                    />
-                  </div>
-                  <div />
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 mb-1">Return Time</label>
-                    <input
-                      type="time"
-                      value={editReturnTime}
-                      onChange={(e) => setEditReturnTime(e.target.value)}
-                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
-                    />
-                  </div>
-                </div>
+                {(() => {
+                  const isSingleDay = !editJobEnd || editJobDate === editJobEnd;
+                  return (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-500 mb-1">Out Time</label>
+                        <input
+                          type="time"
+                          value={editOutTime}
+                          onChange={(e) => setEditOutTime(e.target.value)}
+                          className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
+                        />
+                      </div>
+                      <div />
+                      <div>
+                        <label className="block text-xs font-medium text-gray-500 mb-1">
+                          {isSingleDay ? 'End Time' : 'Job End Time'}
+                        </label>
+                        <input
+                          type="time"
+                          value={isSingleDay ? editEndTime : editReturnTime}
+                          onChange={(e) => isSingleDay ? setEditEndTime(e.target.value) : setEditReturnTime(e.target.value)}
+                          className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
+                        />
+                      </div>
+                      <div />
+                    </div>
+                  );
+                })()}
                 {editJobDate && editJobEnd && (() => {
                   const start = new Date(editJobDate);
                   const end = new Date(editJobEnd);
@@ -4396,7 +4394,7 @@ function StatusTransitionModal({
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
-  const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('ok');
+  const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
   const [retroFollowUp, setRetroFollowUp] = useState('');
   const [outstandingItems, setOutstandingItems] = useState<string[]>([]);

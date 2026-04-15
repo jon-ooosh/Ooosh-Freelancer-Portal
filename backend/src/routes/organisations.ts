@@ -584,20 +584,25 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const jobs = jobsResult.rows.map(row => {
       let retro_rating: string | null = null;
       let retro_notes: string | null = null;
+      let retro_follow_up: string | null = null;
       if (row.retro_content) {
-        const lines = row.retro_content.split('\n');
+        const lines = (row.retro_content as string).split('\n');
         const ratingLine = lines[0] || '';
         if (ratingLine.includes('Great')) retro_rating = 'great';
         else if (ratingLine.includes('Issues')) retro_rating = 'issues';
         else if (ratingLine.includes('OK')) retro_rating = 'ok';
-        retro_notes = lines.slice(1).filter((l: string) => l && !l.startsWith('Follow-up:')).join(' ') || null;
+        const noteLines: string[] = [];
+        for (let i = 1; i < lines.length; i++) {
+          if (lines[i].startsWith('Follow-up:')) {
+            retro_follow_up = lines[i].replace('Follow-up:', '').trim() || null;
+          } else if (lines[i].trim()) {
+            noteLines.push(lines[i].trim());
+          }
+        }
+        retro_notes = noteLines.length > 0 ? noteLines.join(' ') : null;
       }
-      return {
-        ...row,
-        retro_content: undefined,
-        retro_rating,
-        retro_notes,
-      };
+      const { retro_content, ...rest } = row;
+      return { ...rest, retro_rating, retro_notes, retro_follow_up };
     });
 
     res.json({

@@ -46,6 +46,7 @@ interface HireHistoryJob {
   link_type?: string;
   retro_rating: string | null;
   retro_notes: string | null;
+  retro_follow_up?: string | null;
 }
 
 interface Stats {
@@ -204,16 +205,25 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
                         ? `\u00A3${job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 2 })}`
                         : ''}
                     </td>
-                    <td className="px-4 py-3 text-center">
+                    <td className="px-4 py-3">
                       {retro ? (
-                        <span
-                          className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${retro.bg} ${retro.text}`}
-                          title={job.retro_notes || undefined}
-                        >
-                          {retro.label}
-                        </span>
+                        <div>
+                          <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${retro.bg} ${retro.text}`}>
+                            {retro.label}
+                          </span>
+                          {job.retro_notes && (
+                            <div className="text-[10px] text-gray-500 mt-0.5 max-w-[200px] truncate" title={job.retro_notes}>
+                              {job.retro_notes}
+                            </div>
+                          )}
+                          {job.retro_follow_up && (
+                            <div className="text-[10px] text-amber-600 mt-0.5 max-w-[200px] truncate" title={job.retro_follow_up}>
+                              Follow-up: {job.retro_follow_up}
+                            </div>
+                          )}
+                        </div>
                       ) : (
-                        <span className="text-gray-300">&mdash;</span>
+                        <span className="text-gray-300 text-center block">&mdash;</span>
                       )}
                     </td>
                   </tr>
