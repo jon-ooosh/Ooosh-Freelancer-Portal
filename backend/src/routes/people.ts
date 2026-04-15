@@ -459,7 +459,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         -- Jobs via organisation links
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
                j.job_date, j.job_end, j.return_date, j.job_value,
-               j.client_name, j.company_name,
+               j.client_name, j.company_name, j.lost_reason, j.lost_detail,
                jo.role AS link_role, o.name AS link_org_name,
                'organisation' AS link_type
         FROM person_organisation_roles por
@@ -473,7 +473,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         -- Jobs via crew assignments
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
                j.job_date, j.job_end, j.return_date, j.job_value,
-               j.client_name, j.company_name,
+               j.client_name, j.company_name, j.lost_reason, j.lost_detail,
                qa.role AS link_role, NULL AS link_org_name,
                'crew' AS link_type
         FROM quote_assignments qa

@@ -540,7 +540,7 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
          jo.role,
          j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
          j.job_date, j.job_end, j.return_date, j.job_value,
-         j.client_name, j.company_name,
+         j.client_name, j.company_name, j.lost_reason, j.lost_detail,
          (SELECT i.content FROM interactions i
           WHERE i.job_id = j.id AND i.content LIKE 'Job retro:%'
           ORDER BY i.created_at DESC LIMIT 1

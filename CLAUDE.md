@@ -825,31 +825,46 @@ No new tables needed — all types use existing `job_requirements` table with `p
 
 ##### Implementation Phases
 
-**Phase A — Foundation (migration + derivation engine + Returns page)**
-- [ ] Migration 044: insert new requirement type definitions
-- [ ] Extend `hh-requirement-derivation.ts`: auto-create close-out requirements when job status >= 6
-- [ ] Conditional creation logic (only freelancer_followup if crew exists, only excess_resolve if excess records exist, only damage_review if has_damage flagged)
-- [ ] Returns page rebuild: close-out dots per job, filter pills, sort options
-- [ ] `GET /api/returns/close-out-progress` bulk endpoint
+**Phase A — Foundation (migration + derivation engine + Returns page)** ✅ COMPLETE
+- [x] Migration 044: insert new requirement type definitions
+- [x] Extend `hh-requirement-derivation.ts`: auto-create close-out requirements when job status >= 6
+- [x] Conditional creation logic (only freelancer_followup if crew exists, only excess_resolve if excess records exist, only damage_review if has_damage flagged)
+- [x] Returns page rebuild: close-out dots per job, filter pills, sort options
+- [x] `POST /api/requirements/closeout-progress` bulk endpoint
 
-**Phase B — Auto-detection (status-reactive cards)**
-- [ ] Invoice detection: read HH billing_list for kind:1 rows, auto-update requirement status
-- [ ] Payment reconciliation: read HH billing balance, auto-resolve when balance <= 0
-- [ ] Excess resolution: read job_excess statuses, auto-resolve when all terminal
-- [ ] Client follow-up: query interactions after return_date, auto-resolve when found
-- [ ] Wire auto-detection into Returns page load + Job Detail post-hire tab
+**Phase B — Auto-detection (status-reactive cards)** ✅ COMPLETE
+- [x] Vehicle check-in + backline de-prep: auto-done when HH status >= 7 (Returned)
+- [x] Invoice detection: read HH billing_list for kind:1 rows with OWING field, auto-update requirement status
+- [x] Payment reconciliation: auto-resolve when all invoices have £0 owed
+- [x] Excess resolution: read job_excess statuses, auto-resolve when all terminal
+- [x] Client follow-up: query interactions after return_date, auto-resolve when found
+- [x] Invoice "Sent" cascade: marking invoice done auto-resolves client_followup
+- [x] HH billing check rate-limited (max 10 jobs per request, 5min cache)
 
-**Phase C — Damage workflow + polish**
+**Phase C — Invoice Sent + type rendering** ✅ MOSTLY COMPLETE
+- [x] "Mark as Sent to Client" button on invoice requirement card (in_progress → done)
+- [x] RequirementCard type-specific rendering for close-out types (all 6 types have status labels)
+- [x] Damage review shows notes inline + chase date in amber
 - [ ] Damage requirement: multi-issue support (custom_label per issue)
-- [ ] Chase date on damage_review requirements (follow-up reminders)
-- [ ] "Invoice Sent" manual button on invoice requirement card
-- [ ] RequirementCard type-specific rendering for close-out types
-- [ ] Damage creation from vehicle check-in flow (has_damage → auto-create damage_review requirement)
+- [ ] Chase date on damage_review requirements (follow-up reminders via scheduler)
+- [ ] Damage auto-creation from vehicle check-in flow (has_damage → auto-create damage_review requirement)
 
-**Phase D — Dashboard integration (future)**
+**Phase D — Dashboard + notifications (next)**
 - [ ] Dashboard widget: "X jobs with open returns, Y need invoicing, Z have unresolved damage"
+- [ ] Chase date notifications: daily scheduler scans due_date on post_hire requirements → bell notification
+- [ ] Email escalation: overdue chase dates → email to assigned user (tiered: bell → email → manager escalation)
 - [ ] Freelancer portal integration: crew feedback prompts
 - [ ] Auto-email: remind freelancers to submit expenses/feedback after job
+
+**Completion retro + hire history** ✅ COMPLETE (15 Apr 2026)
+- [x] Completion retro modal with rating (Great/OK/Issues default Great), notes, follow-up
+- [x] Outstanding close-out items warning in completion modal
+- [x] Retro stored as interaction on job timeline
+- [x] Hire History tab on Organisation + Person detail pages
+- [x] Lost reason displayed alongside retro in hire history
+- [x] Retro notes + follow-up shown inline (not just hover)
+- [ ] Task reminders / follow-up scheduling from retro (future: snooze-style "remind me in 6 months")
+- [ ] Show client's upcoming jobs in completion modal (future)
 
 ##### Mobile Considerations (Apr 2026)
 - Returns page uses card layout (not tables) — already mobile-friendly
@@ -1255,6 +1270,35 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - [x] Band trading history on New Enquiry form sidebar (shows band's job history alongside client history)
   - [x] Band trading history on Job Detail sidebar (when band linked via job_organisations)
   - [x] Separate stacked sections: client history above, band history below, each with 4-square stats grid
+- [x] **Mobile Responsiveness & UX** (15 Apr 2026)
+  - [x] Job Detail header: responsive job name (text-lg/text-2xl), stacked action buttons on mobile, flex-wrap badges
+  - [x] Details & Notes collapsed into header card with truncated snippets, click-outside-to-close
+  - [x] Tab bar horizontally scrollable on mobile with shorter labels (scrollbar-hide CSS utility)
+  - [x] Activity timeline: fixed raw Date objects in change logs, human-readable field labels
+  - [x] overflow-x-auto on all list page tables (People, Orgs, Drivers, Team, Excess, Org Detail, Driver Detail)
+  - [x] "Open in HireHop" hidden on mobile (redundant with #number link)
+  - [x] Header card padding reduced on mobile (p-4 sm:p-6)
+- [x] **Hire History Tab** (15 Apr 2026)
+  - [x] `GET /api/organisations/:id/hire-history` — paginated jobs via job_organisations, retro + lost reason parsing
+  - [x] `GET /api/people/:id/hire-history` — jobs via org memberships UNION crew assignments
+  - [x] Reusable `HireHistoryTab.tsx` component with stats cards (total, confirmed, value, retro breakdown)
+  - [x] Retro rating badge + notes + follow-up shown inline (not just hover)
+  - [x] Lost reason shown for lost jobs (grey "Lost" badge + reason text)
+  - [x] Person hire history shows "Crew" label for crew assignment links
+  - [x] Organisation Detail: "Hire History" tab between Relationships and Activity Timeline
+  - [x] Person Detail: "Hire History" tab after Activity Timeline
+- [x] **Completion Retro** (15 Apr 2026)
+  - [x] Retro modal on status transition to Completed (like Lost reason modal)
+  - [x] Three-button rating: Great (default) / OK / Issues
+  - [x] Notes + follow-up fields, stored as interaction on activity timeline
+  - [x] Outstanding close-out items warning in modal (amber, non-blocking)
+  - [x] Retro data surfaced in Hire History tabs with breakdown stats
+- [x] **UX Polish** (15 Apr 2026)
+  - [x] Date editor: End Time only shown for single-day hires, Job End Time for multi-day
+  - [x] Jobs page: simplified status filter (removed Returned/Completed/Cancelled — they have dedicated pages)
+  - [x] Do Not Hire button moved next to Edit/Delete on Person + Org detail pages (was standalone section)
+  - [x] Invoice "Mark as Sent" cascades to auto-resolve client follow-up
+  - [x] Activity Timeline interaction refresh triggers prep checklist update
 - [ ] **Crew & Transport refinements**
   - [x] `is_freelancer` flag + freelancer filtering in crew assignment
   - [x] Tab badge count fix (show quote count on initial load)
