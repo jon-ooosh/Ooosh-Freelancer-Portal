@@ -7,7 +7,7 @@ import { query } from '../config/database';
 
 const router = Router();
 router.use(authenticate);
-router.use(authorize('admin', 'manager'));
+router.use(authorize('admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'));
 
 // GET /api/hirehop/status — check if HireHop is configured
 router.get('/status', async (_req: AuthRequest, res: Response) => {
