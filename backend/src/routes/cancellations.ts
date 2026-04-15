@@ -240,9 +240,10 @@ router.post(
         }
       }
 
-      // 6. Flag excess records for refund
+      // 6. Flag excess records for refund — add cancellation note, don't change status
+      // (staff processes actual refund via Money tab / excess ledger)
       await query(
-        `UPDATE job_excess SET excess_status = 'needs_reimbursement', updated_at = NOW()
+        `UPDATE job_excess SET notes = COALESCE(notes, '') || ' [Job cancelled — refund due]', updated_at = NOW()
          WHERE job_id = $1 AND excess_status IN ('needed', 'taken', 'pre_auth', 'partially_paid')`,
         [jobId]
       );
