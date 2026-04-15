@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
-import { useAuthStore } from '../hooks/useAuthStore';
 
 type Tab = 'all' | 'mentions' | 'follow_ups' | 'system' | 'sent';
 
@@ -110,7 +109,6 @@ function formatDate(dateStr: string): string {
 }
 
 export default function InboxPage() {
-  const user = useAuthStore((s) => s.user);
   const [tab, setTab] = useState<Tab>('all');
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [sentItems, setSentItems] = useState<SentNotification[]>([]);
