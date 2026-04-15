@@ -128,9 +128,10 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
 
       const [dataResult, countResult] = await Promise.all([
         query(`
-          SELECT n.*, su.first_name AS source_first_name, su.last_name AS source_last_name
+          SELECT n.*, sp.first_name AS source_first_name, sp.last_name AS source_last_name
           FROM notifications n
           LEFT JOIN users su ON su.id = n.source_user_id
+          LEFT JOIN people sp ON sp.id = su.person_id
           WHERE ${fullWhere}
           ORDER BY
             CASE WHEN n.priority = 'urgent' THEN 0
@@ -229,10 +230,11 @@ router.get('/sent', async (req: AuthRequest, res: Response) => {
                n.interaction_id, n.action_url, n.created_at,
                n.user_id AS recipient_id,
                n.is_read, n.read_at, n.acknowledged_at, n.nudged_at,
-               ru.first_name AS recipient_first_name,
-               ru.last_name AS recipient_last_name
+               rp.first_name AS recipient_first_name,
+               rp.last_name AS recipient_last_name
         FROM notifications n
         JOIN users ru ON ru.id = n.user_id
+        JOIN people rp ON rp.id = ru.person_id
         WHERE n.source_user_id = $1
         ORDER BY n.created_at DESC
         LIMIT $2 OFFSET $3
