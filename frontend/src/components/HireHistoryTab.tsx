@@ -227,11 +227,13 @@ export default function HireHistoryTab({ entityType, entityId }: Props) {
                       ) : job.lost_reason ? (
                         <div>
                           <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">
-                            Lost
+                            Lost: {job.lost_reason}
                           </span>
-                          <div className="text-[10px] text-gray-500 mt-0.5 max-w-[200px] truncate" title={job.lost_detail || undefined}>
-                            {job.lost_reason}
-                          </div>
+                          {job.lost_detail && (
+                            <div className="text-[10px] text-gray-400 italic mt-0.5 max-w-[200px]" title={job.lost_detail}>
+                              {job.lost_detail}
+                            </div>
+                          )}
                         </div>
                       ) : (
                         <span className="text-gray-300 text-center block">&mdash;</span>
