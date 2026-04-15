@@ -433,6 +433,13 @@ const updateStatusSchema = z.object({
   retro_notes: z.string().optional().nullable(),
   retro_follow_up: z.string().optional().nullable(),
   retro_follow_up_date: z.string().optional().nullable(),
+  retro_reminders: z.array(z.object({
+    text: z.string(),
+    date: z.string(),
+    delivery: z.enum(['notification', 'email', 'both']).default('both'),
+    priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
+    user_id: z.string().uuid().nullable().optional(),
+  })).optional().nullable(),
 });
 
 router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthRequest, res: Response) => {
@@ -442,6 +449,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       pipeline_status, hold_reason, hold_reason_detail,
       confirmed_method, lost_reason, lost_detail, transition_note,
       retro_rating, retro_notes, retro_follow_up, retro_follow_up_date,
+      retro_reminders,
     } = req.body;
 
     // Get current state
@@ -553,22 +561,32 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
         [retroParts.join('\n'), jobId, req.user!.id]
       );
 
-      // Create follow-up notification if a date was specified
-      if (retro_follow_up && retro_follow_up_date) {
-        const jobName = currentJob.job_name || currentJob.client_name || `Job ${currentJob.hh_job_number || ''}`;
-        const dueDate = new Date(retro_follow_up_date + 'T09:00:00Z').toISOString();
+      // Create follow-up notifications from reminders array (or legacy single reminder)
+      const jobName = currentJob.job_name || currentJob.client_name || `Job ${currentJob.hh_job_number || ''}`;
+      const remindersList = retro_reminders && retro_reminders.length > 0
+        ? retro_reminders
+        : (retro_follow_up && retro_follow_up_date
+          ? [{ text: retro_follow_up, date: retro_follow_up_date, delivery: 'both' as const, user_id: null }]
+          : []);
+
+      for (const reminder of remindersList) {
         try {
+          const targetUserId = reminder.user_id || req.user!.id;
+          const dueDate = new Date(reminder.date + 'T09:00:00Z').toISOString();
+
           await query(
             `INSERT INTO notifications
                (user_id, type, title, content, entity_type, entity_id, action_url,
                 priority, source_user_id, due_date, snoozed_until)
-             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, 'normal', $1, $6, $6)`,
+             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, $6, $7, $8, $8)`,
             [
-              req.user!.id,
+              targetUserId,
               `Follow-up: ${jobName}`,
-              retro_follow_up,
+              reminder.text,
               jobId,
-              `/jobs/${jobId}`,
+              `/jobs/${jobId}?tab=timeline`,
+              reminder.priority || 'normal',
+              req.user!.id,
               dueDate,
             ]
           );

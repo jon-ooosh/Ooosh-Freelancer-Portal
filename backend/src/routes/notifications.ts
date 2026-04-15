@@ -128,9 +128,10 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
 
       const [dataResult, countResult] = await Promise.all([
         query(`
-          SELECT n.*, su.first_name AS source_first_name, su.last_name AS source_last_name
+          SELECT n.*, sp.first_name AS source_first_name, sp.last_name AS source_last_name
           FROM notifications n
           LEFT JOIN users su ON su.id = n.source_user_id
+          LEFT JOIN people sp ON sp.id = su.person_id
           WHERE ${fullWhere}
           ORDER BY
             CASE WHEN n.priority = 'urgent' THEN 0
@@ -219,42 +220,44 @@ router.get('/sent', async (req: AuthRequest, res: Response) => {
     const limitNum = Math.min(100, parseInt(limit as string));
     const offset = (pageNum - 1) * limitNum;
 
-    // Check if new columns exist
-    const colCheck = await query(`
-      SELECT column_name FROM information_schema.columns
-      WHERE table_name = 'notifications' AND column_name = 'source_user_id'
-    `);
-    if (colCheck.rows.length === 0) {
-      // Migration 045 hasn't run — no sent data available
-      return res.json({ data: [], pagination: { page: 1, total: 0, totalPages: 0 } });
+    let dataRows: Record<string, unknown>[];
+    let totalCount: number;
+
+    try {
+      // Full query with new columns
+      const result = await query(`
+        SELECT n.id, n.type, n.title, n.content, n.entity_type, n.entity_id,
+               n.interaction_id, n.action_url, n.created_at,
+               n.user_id AS recipient_id,
+               n.is_read, n.read_at, n.acknowledged_at, n.nudged_at,
+               rp.first_name AS recipient_first_name,
+               rp.last_name AS recipient_last_name
+        FROM notifications n
+        JOIN users ru ON ru.id = n.user_id
+        JOIN people rp ON rp.id = ru.person_id
+        WHERE n.source_user_id = $1
+        ORDER BY n.created_at DESC
+        LIMIT $2 OFFSET $3
+      `, [userId, limitNum, offset]);
+
+      const countResult = await query(
+        `SELECT COUNT(*) FROM notifications WHERE source_user_id = $1`,
+        [userId]
+      );
+      dataRows = result.rows;
+      totalCount = parseInt(countResult.rows[0].count);
+    } catch (sentErr) {
+      console.warn('[Sent] Full query failed, returning empty:', (sentErr as Error).message);
+      dataRows = [];
+      totalCount = 0;
     }
 
-    // Get notifications this user created (mentions they sent)
-    const result = await query(`
-      SELECT n.id, n.type, n.title, n.content, n.entity_type, n.entity_id,
-             n.interaction_id, n.action_url, n.created_at,
-             n.user_id AS recipient_id,
-             n.is_read, n.read_at, n.acknowledged_at, n.nudged_at,
-             ru.first_name AS recipient_first_name,
-             ru.last_name AS recipient_last_name
-      FROM notifications n
-      JOIN users ru ON ru.id = n.user_id
-      WHERE n.source_user_id = $1
-      ORDER BY n.created_at DESC
-      LIMIT $2 OFFSET $3
-    `, [userId, limitNum, offset]);
-
-    const countResult = await query(
-      `SELECT COUNT(*) FROM notifications WHERE source_user_id = $1`,
-      [userId]
-    );
-
     res.json({
-      data: result.rows,
+      data: dataRows,
       pagination: {
         page: pageNum,
-        total: parseInt(countResult.rows[0].count),
-        totalPages: Math.ceil(parseInt(countResult.rows[0].count) / limitNum),
+        total: totalCount,
+        totalPages: Math.ceil(totalCount / limitNum),
       },
     });
   } catch (error) {

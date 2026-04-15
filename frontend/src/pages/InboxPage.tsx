@@ -157,6 +157,7 @@ export default function InboxPage() {
 
   useEffect(() => {
     setPage(1);
+    setLoadError(null);
     loadInbox(1);
   }, [tab, loadInbox]);
 
@@ -199,7 +200,9 @@ export default function InboxPage() {
   function navigateToEntity(notif: Notification | SentNotification) {
     const url = notif.action_url;
     if (url) {
-      navigate(url);
+      // Add timestamp to force re-navigation even if same URL
+      const sep = url.includes('?') ? '&' : '?';
+      navigate(`${url}${sep}_t=${Date.now()}`);
       return;
     }
     // Fallback: construct URL from entity_type + entity_id
@@ -212,7 +215,7 @@ export default function InboxPage() {
         fleet_vehicles: '/vehicles/fleet',
       };
       const base = pathMap[notif.entity_type];
-      if (base) navigate(`${base}/${notif.entity_id}`);
+      if (base) navigate(`${base}/${notif.entity_id}?_t=${Date.now()}`);
     }
   }
 
