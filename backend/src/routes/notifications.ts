@@ -11,9 +11,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const { unread_only, limit = '20' } = req.query;
 
-    // Check if new columns exist (migration 045)
+    // Check if snoozed_until column exists (migration 045)
     const colCheck = await query(`
-      SELECT column_name FROM information_schema.columns
+      SELECT 1 FROM information_schema.columns
       WHERE table_name = 'notifications' AND column_name = 'snoozed_until'
     `);
     const hasSnoozed = colCheck.rows.length > 0;
@@ -94,12 +94,14 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
     const limitNum = Math.min(100, parseInt(limit as string));
     const offset = (pageNum - 1) * limitNum;
 
-    // Check if new columns exist (migration 045)
+    // Check if ALL new columns exist (migration 045 may have partially applied)
     const colCheck = await query(`
       SELECT column_name FROM information_schema.columns
-      WHERE table_name = 'notifications' AND column_name = 'priority'
+      WHERE table_name = 'notifications'
+        AND column_name IN ('priority', 'source_user_id', 'snoozed_until', 'acknowledged_at', 'action_url')
     `);
-    const hasNewColumns = colCheck.rows.length > 0;
+    const existingCols = new Set(colCheck.rows.map((r: Record<string, unknown>) => r.column_name));
+    const hasNewColumns = existingCols.size >= 5; // all 5 key columns must exist
 
     const conditions: string[] = ['n.user_id = $1'];
     const params: unknown[] = [userId];

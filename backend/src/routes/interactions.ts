@@ -175,8 +175,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       const entityType = person_id ? 'people' : organisation_id ? 'organisations' : venue_id ? 'venues' : null;
       const entityId = person_id || organisation_id || venue_id || null;
 
-      // Build action URL for click-through navigation
-      const actionUrl = job_id ? `/jobs/${job_id}`
+      // Build action URL for click-through navigation (mentions go to timeline tab)
+      const actionUrl = job_id ? `/jobs/${job_id}?tab=timeline`
         : person_id ? `/people/${person_id}`
         : organisation_id ? `/organisations/${organisation_id}`
         : venue_id ? `/venues/${venue_id}`

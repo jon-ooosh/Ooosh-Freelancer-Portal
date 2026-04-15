@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, useNavigate, Link, useLocation } from 'react-router-dom';
+import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
@@ -595,13 +595,17 @@ export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
   const backTo = (location.state as { from?: string })?.from || '/jobs';
   const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'overview' | 'timeline' | 'files' | 'transport' | 'drivers' | 'money'>('overview');
+  const validTabs = ['overview', 'timeline', 'files', 'transport', 'drivers', 'money'] as const;
+  type TabType = typeof validTabs[number];
+  const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
+  const [activeTab, setActiveTab] = useState<TabType>(initialTab);
   const [showCalculator, setShowCalculator] = useState(false);
   const [showDetailsNotes, setShowDetailsNotes] = useState(false);
   const detailsNotesRef = useRef<HTMLDivElement>(null);
