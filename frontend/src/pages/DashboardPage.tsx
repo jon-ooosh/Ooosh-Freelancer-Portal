@@ -39,6 +39,11 @@ export default function DashboardPage() {
   const [data, setData] = useState<OperationsData | null>(null);
   const [backline, setBackline] = useState<BacklineOverview | null>(null);
   const [returnsOverview, setReturnsOverview] = useState<ReturnsOverview | null>(null);
+  const [cancellationsOverview, setCancellationsOverview] = useState<{
+    counts: { total_cancelled: number; pending_refunds: number; total_refund_due: number; total_fees_retained: number };
+    outstanding: Array<{ type: string; outstanding: number }>;
+    recent: Array<{ id: string; hh_job_number: number | null; job_name: string | null; cancelled_at: string; cancellation_fee: string; cancellation_refund: string; cancellation_reason: string }>;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -49,14 +54,16 @@ export default function DashboardPage() {
   const loadData = useCallback(async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true);
     try {
-      const [opsData, blData, retData] = await Promise.all([
+      const [opsData, blData, retData, cancelData] = await Promise.all([
         api.get<OperationsData>('/dashboard/operations'),
         api.get<{ data: BacklineOverview }>('/backline/overview').catch(() => null),
         api.get<ReturnsOverview>('/dashboard/returns-overview').catch(() => null),
+        api.get<typeof cancellationsOverview>('/dashboard/cancellations-overview').catch(() => null),
       ]);
       setData(opsData);
       if (blData) setBackline(blData.data);
       if (retData) setReturnsOverview(retData);
+      if (cancelData) setCancellationsOverview(cancelData);
       setLastRefresh(new Date());
       loadedDateRef.current = new Date().toDateString();
     } catch (err) {
@@ -209,6 +216,57 @@ export default function DashboardPage() {
         <Section id="returns" collapsed={collapsed} toggle={toggleCollapse}>
           <ReturnsOverviewWidget data={returnsOverview} />
         </Section>
+      )}
+
+      {/* Cancellations */}
+      {cancellationsOverview && (cancellationsOverview.counts.pending_refunds > 0 || cancellationsOverview.outstanding.length > 0) && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-900">Cancellations</h3>
+            <Link to="/jobs/lost-cancelled" className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium">
+              View all &rarr;
+            </Link>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            <div className="bg-red-50 rounded-lg p-2.5 text-center">
+              <p className="text-lg font-bold text-red-700">{cancellationsOverview.counts.total_cancelled}</p>
+              <p className="text-xs text-red-600">Cancelled</p>
+            </div>
+            {cancellationsOverview.counts.pending_refunds > 0 && (
+              <div className="bg-amber-50 rounded-lg p-2.5 text-center">
+                <p className="text-lg font-bold text-amber-700">{cancellationsOverview.counts.pending_refunds}</p>
+                <p className="text-xs text-amber-600">Refunds pending</p>
+              </div>
+            )}
+            {cancellationsOverview.counts.total_refund_due > 0 && (
+              <div className="bg-amber-50 rounded-lg p-2.5 text-center">
+                <p className="text-lg font-bold text-amber-700">
+                  {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(cancellationsOverview.counts.total_refund_due)}
+                </p>
+                <p className="text-xs text-amber-600">Refund total</p>
+              </div>
+            )}
+            {cancellationsOverview.counts.total_fees_retained > 0 && (
+              <div className="bg-green-50 rounded-lg p-2.5 text-center">
+                <p className="text-lg font-bold text-green-700">
+                  {new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(cancellationsOverview.counts.total_fees_retained)}
+                </p>
+                <p className="text-xs text-green-600">Fees retained</p>
+              </div>
+            )}
+          </div>
+          {cancellationsOverview.outstanding.length > 0 && (
+            <div className="text-xs text-gray-600">
+              <span className="font-medium">Outstanding:</span>{' '}
+              {cancellationsOverview.outstanding.map(o => {
+                const labels: Record<string, string> = {
+                  invoice: 'Invoices', payment_reconcile: 'Refunds', client_followup: 'Client follow-ups', excess_resolve: 'Excess'
+                };
+                return `${o.outstanding} ${labels[o.type] || o.type}`;
+              }).join(', ')}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Operations */}

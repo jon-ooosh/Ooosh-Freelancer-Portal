@@ -898,14 +898,22 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
 - [x] `cancellations.ts` route: calculate, process, transport-crew, list, reopen endpoints
 - [x] Cancellation workflow: status update, timeline log, requirements marked done, vehicle assignments cancelled, crew cancelled + emailed, excess flagged, pending refund created, HH write-back
 - [x] `CancellationModal.tsx`: calculator display, transport/crew summary, manual override, RBAC
+- [x] Per-tier fee breakdown (only shows tiers relevant to hire length), copyable summary sentence
+- [x] HH invoice section: net/VAT/gross breakdown with guidance
 - [x] `LostCancelledPage.tsx` at `/jobs/lost-cancelled` with Cancelled/Lost tabs, search, pagination
 - [x] Job Detail: red cancelled banner with fee/refund summary, "Re-open as New Booking" button
 - [x] Crew cancellation + internal notification email templates
+- [x] Client cancellation email (refund amount, timescale, invoice note)
 - [x] Chase reminders suppressed for lost/cancelled jobs (clear `next_chase_date`, hide UI)
 - [x] Pipeline fields (likelihood, chase) hidden for lost/cancelled jobs
+- [x] Re-open: full field copy (dates, managers, orgs, venue) + HH `job_duplicate.php` with items/notes/transport
+- [x] Cancellation close-out requirements auto-created (invoice, client follow-up, refund, excess) — same pattern as returns
+- [x] Dashboard widget: cancellation overview (pending refunds, outstanding close-out items, fees retained)
+- [x] "Back to Lost & Cancelled" navigation from Job Detail
 
 **Remaining work:**
 - [ ] HH invoice creation on cancellation (auto-create invoice for retained fee via `billing_deposit_save.php`)
+- [ ] Refund processing through OP (currently manual via Money tab — future enhancement)
 - [ ] Cancellation data surfaced in client hire history (like retro data)
 - [ ] Early return calculator frontend integration (clause 7.3 — backend built, UI not yet)
 - [ ] Partial cancellation / scope reduction (deferred — noted for future)
@@ -1502,23 +1510,27 @@ Respects `user_notification_preferences.delivery_method` — if user has set `no
 - [x] Acknowledge, snooze, dismiss actions
 - [x] Click-through navigation to linked entities (action_url with entity fallback)
 
-**Phase C — @Mention Improvements** ✅ MOSTLY COMPLETE
+**Phase C — @Mention Improvements** ✅ COMPLETE
 - [x] @mention autocomplete in interaction forms (type `@` → user picker dropdown) — already built in ActivityTimeline.tsx
 - [x] Mention notifications include interaction content preview
-- [ ] Reply from inbox (creates interaction on linked entity)
+- [x] Reply from inbox (creates interaction on linked entity)
 - [x] "Sent" view with read receipts + nudge
+- [x] Priority selector on @mentions (Normal / Important / Urgent) — controls escalation timing
+- [x] Reply marks notification as Done + reply text shown inline on notification card
 
 **Phase D — Escalation Scheduler** ✅ COMPLETE
 - [x] Scheduler task (every 15 min): check unread notifications, send email based on priority + working hours
 - [x] Respect user_notification_preferences for delivery method
 - [x] Default working hours 08:00-18:00 Mon-Fri (configurable when staff calendar built)
 - [x] Urgent priority bypasses working hours
+- [x] Close-out requirement chase scanner (daily 09:30): scans overdue post-hire requirements, creates notifications, 24h dedup
 
-**Phase E — Retro & Chase Integration** ✅ MOSTLY COMPLETE
+**Phase E — Retro & Chase Integration** ✅ COMPLETE
 - [x] Completion retro "follow up in X" creates follow_up notification with due_date (with date picker + 1m/3m/6m presets)
-- [x] Client's upcoming jobs shown in completion modal
-- [ ] Chase system creates notifications through inbox (replaces direct notification creation)
-- [ ] Snooze on chase notifications (replaces "move back to enquiries" pattern)
+- [x] Client's upcoming jobs shown in completion modal (blue info box with future bookings)
+- [x] Multi-reminder support: add multiple reminders, each with text, date, delivery method, priority, assigned user
+- [x] Chase auto-mover creates inbox notifications with snooze support (targets last chase assignee or admins)
+- [x] Reminder job requirement type (migration 047): add reminders to prep checklist with date, delivery, event triggers, multi-user assignment
 
 ##### Future Enhancements
 - Staff working calendar integration (escalation timing based on actual schedules)

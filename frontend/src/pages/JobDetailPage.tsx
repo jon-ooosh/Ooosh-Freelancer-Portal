@@ -611,7 +611,7 @@ export default function JobDetailPage() {
   const [searchParams] = useSearchParams();
   const user = useAuthStore(s => s.user);
   const backTo = (location.state as { from?: string })?.from || '/jobs';
-  const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
+  const backLabel = backTo.includes('/returns') ? 'Back to Returns' : backTo.includes('/lost-cancelled') ? 'Back to Lost & Cancelled' : backTo === '/pipeline' ? 'Back to Pipeline' : 'Back to Jobs';
 
   const [job, setJob] = useState<JobDetail | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
@@ -1444,10 +1444,10 @@ export default function JobDetailPage() {
               {(job.cancellation_fee != null || job.cancellation_refund != null) && (
                 <div className="flex gap-4 mt-1 text-sm">
                   {job.cancellation_fee != null && (
-                    <span className="text-red-600">Fee retained: <strong>£{job.cancellation_fee.toFixed(2)}</strong></span>
+                    <span className="text-red-600">Fee retained: <strong>£{Number(job.cancellation_fee).toFixed(2)}</strong></span>
                   )}
-                  {job.cancellation_refund != null && job.cancellation_refund > 0 && (
-                    <span className="text-green-700">Refund due: <strong>£{job.cancellation_refund.toFixed(2)}</strong></span>
+                  {job.cancellation_refund != null && Number(job.cancellation_refund) > 0 && (
+                    <span className="text-green-700">Refund due: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
                   )}
                 </div>
               )}
@@ -3937,7 +3937,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
   const [showReminderForm, setShowReminderForm] = useState(false);
   const [reminderText, setReminderText] = useState('');
   const [reminderDate, setReminderDate] = useState('');
-  const [reminderAssignee, setReminderAssignee] = useState('');
+  const [reminderDelivery, setReminderDelivery] = useState<'both' | 'notification' | 'email'>('both');
+  const [reminderAssignees, setReminderAssignees] = useState<string[]>(['']);
+  const [reminderEventTrigger, setReminderEventTrigger] = useState('');
   const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string }>>([]);
 
   async function addRequirement(typeKey: string) {
@@ -3947,7 +3949,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
       setShowReminderForm(true);
       setReminderText('');
       setReminderDate('');
-      setReminderAssignee('');
+      setReminderDelivery('both');
+      setReminderAssignees(['']);
+      setReminderEventTrigger('');
       if (reminderUsers.length === 0) {
         api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
           .then(res => setReminderUsers(res.data))
@@ -3968,14 +3972,23 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
   async function createReminder() {
     if (!reminderText.trim()) return;
     try {
-      await api.post(`/requirements/job/${jobId}`, {
-        requirement_type: 'reminder',
-        phase,
-        custom_label: reminderText.trim(),
-        due_date: reminderDate || null,
-        assigned_to: reminderAssignee || null,
-        notes: reminderText.trim(),
-      });
+      const validAssignees = reminderAssignees.filter(id => id);
+      const notesLines = [reminderText.trim()];
+      if (reminderDelivery !== 'both') notesLines.push(`Delivery: ${reminderDelivery}`);
+      if (reminderEventTrigger) notesLines.push(`Trigger: ${reminderEventTrigger}`);
+
+      // Create one requirement per assignee (or one for self if none selected)
+      const targets = validAssignees.length > 0 ? validAssignees : [null];
+      for (const assignee of targets) {
+        await api.post(`/requirements/job/${jobId}`, {
+          requirement_type: 'reminder',
+          phase,
+          custom_label: reminderText.trim(),
+          due_date: reminderDate || null,
+          assigned_to: assignee,
+          notes: notesLines.join('\n'),
+        });
+      }
       await loadAll();
       setShowReminderForm(false);
     } catch (err) {
@@ -4211,7 +4224,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
       {/* Reminder creation form modal */}
       {showReminderForm && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowReminderForm(false)}>
-          <div className="bg-white rounded-xl shadow-xl p-6 w-96" onClick={e => e.stopPropagation()}>
+          <div className="bg-white rounded-xl shadow-xl p-6 w-[420px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-gray-900 mb-3">Add Reminder</h3>
             <div className="space-y-3">
               <input
@@ -4222,6 +4235,8 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
                 autoFocus
               />
+
+              {/* Due date (no past dates) */}
               <div className="flex items-center gap-2">
                 <input
                   type="date"
@@ -4239,16 +4254,66 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
                   ))}
                 </div>
               </div>
-              <select
-                value={reminderAssignee}
-                onChange={e => setReminderAssignee(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
-              >
-                <option value="">Assign to me</option>
-                {reminderUsers.map(u => (
-                  <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
+
+              {/* Delivery method */}
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Notify via</label>
+                <select
+                  value={reminderDelivery}
+                  onChange={e => setReminderDelivery(e.target.value as 'both' | 'notification' | 'email')}
+                  className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                >
+                  <option value="both">Bell + Email</option>
+                  <option value="notification">Bell only</option>
+                  <option value="email">Email only</option>
+                </select>
+              </div>
+
+              {/* Event trigger (optional) */}
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Also notify me if...</label>
+                <select
+                  value={reminderEventTrigger}
+                  onChange={e => setReminderEventTrigger(e.target.value)}
+                  className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+                >
+                  <option value="">No event trigger</option>
+                  <option value="confirmed">This job confirms</option>
+                  <option value="cancelled">This job is cancelled</option>
+                  <option value="lost">This job is lost</option>
+                </select>
+              </div>
+
+              {/* Assignees (multi-user) */}
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Notify</label>
+                {reminderAssignees.map((assignee, idx) => (
+                  <div key={idx} className="flex items-center gap-1 mb-1">
+                    <select
+                      value={assignee}
+                      onChange={e => {
+                        const updated = [...reminderAssignees];
+                        updated[idx] = e.target.value;
+                        setReminderAssignees(updated);
+                      }}
+                      className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
+                    >
+                      <option value="">Me</option>
+                      {reminderUsers.map(u => (
+                        <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
+                      ))}
+                    </select>
+                    {reminderAssignees.length > 1 && (
+                      <button type="button" onClick={() => setReminderAssignees(reminderAssignees.filter((_, i) => i !== idx))}
+                        className="text-red-400 hover:text-red-600 text-xs px-1">&times;</button>
+                    )}
+                  </div>
                 ))}
-              </select>
+                <button type="button"
+                  onClick={() => setReminderAssignees([...reminderAssignees, ''])}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                >+ Add person</button>
+              </div>
             </div>
             <div className="flex justify-end gap-2 mt-4">
               <button onClick={() => setShowReminderForm(false)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>

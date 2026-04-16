@@ -27,6 +27,27 @@ interface LostCancelledJob {
   reopened_to_job_id: string | null;
 }
 
+interface CloseoutProgress {
+  items: Array<{ type: string; label: string; status: string; custom_label?: string }>;
+  done: number;
+  total: number;
+  blocked: number;
+}
+
+const CLOSEOUT_LABELS: Record<string, string> = {
+  invoice: 'Invoice',
+  payment_reconcile: 'Refund',
+  client_followup: 'Client',
+  excess_resolve: 'Excess',
+};
+
+const DOT_COLOUR: Record<string, string> = {
+  done: 'bg-green-500',
+  in_progress: 'bg-amber-400',
+  not_started: 'bg-gray-300',
+  blocked: 'bg-red-500',
+};
+
 function formatDate(d: string | null): string {
   if (!d) return '—';
   return new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -43,6 +64,7 @@ export default function LostCancelledPage() {
   const [jobs, setJobs] = useState<LostCancelledJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
+  const [closeoutData, setCloseoutData] = useState<Record<string, CloseoutProgress>>({});
 
   const tab = searchParams.get('tab') || 'cancelled';
   const page = parseInt(searchParams.get('page') || '1');
@@ -62,6 +84,14 @@ export default function LostCancelledPage() {
       );
       setJobs(res.data);
       setTotal(res.pagination.total);
+
+      // Fetch close-out progress for cancelled jobs
+      if (tab === 'cancelled' && res.data.length > 0) {
+        const jobIds = res.data.map((j: LostCancelledJob) => j.id);
+        api.post<{ data: Record<string, CloseoutProgress> }>('/requirements/closeout-progress', { job_ids: jobIds })
+          .then(r => setCloseoutData(r.data))
+          .catch(() => {});
+      }
     } catch (err) {
       console.error('Failed to load jobs:', err);
     } finally {
@@ -152,6 +182,7 @@ export default function LostCancelledPage() {
                     <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Notice</th>
                     <th className="text-right text-xs font-medium text-gray-500 uppercase px-4 py-3">Fee</th>
                     <th className="text-right text-xs font-medium text-gray-500 uppercase px-4 py-3">Refund</th>
+                    <th className="text-left text-xs font-medium text-gray-500 uppercase px-4 py-3">Close-out</th>
                   </>
                 ) : (
                   <>
@@ -166,7 +197,7 @@ export default function LostCancelledPage() {
               {jobs.map(job => (
                 <tr
                   key={job.id}
-                  onClick={() => navigate(`/jobs/${job.id}`)}
+                  onClick={() => navigate(`/jobs/${job.id}`, { state: { from: '/jobs/lost-cancelled' } })}
                   className="hover:bg-gray-50 cursor-pointer"
                 >
                   <td className="px-4 py-3">
@@ -216,6 +247,22 @@ export default function LostCancelledPage() {
                       </td>
                       <td className="px-4 py-3 text-sm font-medium text-green-700 text-right">
                         {formatCurrency(job.cancellation_refund)}
+                      </td>
+                      <td className="px-4 py-3">
+                        {closeoutData[job.id] && closeoutData[job.id].items.length > 0 ? (
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {closeoutData[job.id].items.map((item, i) => (
+                              <span key={i} className="inline-flex items-center gap-0.5" title={`${item.custom_label || item.label}: ${item.status.replace('_', ' ')}`}>
+                                <span className={`w-2 h-2 rounded-full ${DOT_COLOUR[item.status] || DOT_COLOUR.not_started}`} />
+                                <span className={`text-[10px] ${item.status === 'done' ? 'text-gray-400' : 'text-gray-600'}`}>
+                                  {CLOSEOUT_LABELS[item.type] || item.label}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-gray-400">—</span>
+                        )}
                       </td>
                     </>
                   ) : (
