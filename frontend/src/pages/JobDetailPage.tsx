@@ -3836,7 +3836,28 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
     }
   }
 
+  // Reminder form state
+  const [showReminderForm, setShowReminderForm] = useState(false);
+  const [reminderText, setReminderText] = useState('');
+  const [reminderDate, setReminderDate] = useState('');
+  const [reminderAssignee, setReminderAssignee] = useState('');
+  const [reminderUsers, setReminderUsers] = useState<Array<{ id: string; first_name: string; last_name: string }>>([]);
+
   async function addRequirement(typeKey: string) {
+    if (typeKey === 'reminder') {
+      // Show form instead of creating immediately
+      setShowAddMenu(false);
+      setShowReminderForm(true);
+      setReminderText('');
+      setReminderDate('');
+      setReminderAssignee('');
+      if (reminderUsers.length === 0) {
+        api.get<{ data: Array<{ id: string; first_name: string; last_name: string }> }>('/users')
+          .then(res => setReminderUsers(res.data))
+          .catch(() => {});
+      }
+      return;
+    }
     try {
       await api.post(`/requirements/job/${jobId}`, { requirement_type: typeKey, phase });
       await loadAll();
@@ -3844,6 +3865,24 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to add';
       console.error('Failed to add requirement:', msg);
+    }
+  }
+
+  async function createReminder() {
+    if (!reminderText.trim()) return;
+    try {
+      await api.post(`/requirements/job/${jobId}`, {
+        requirement_type: 'reminder',
+        phase,
+        custom_label: reminderText.trim(),
+        due_date: reminderDate || null,
+        assigned_to: reminderAssignee || null,
+        notes: reminderText.trim(),
+      });
+      await loadAll();
+      setShowReminderForm(false);
+    } catch (err) {
+      console.error('Failed to create reminder:', err);
     }
   }
 
@@ -4069,6 +4108,59 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
 
             return cards;
           })()}
+        </div>
+      )}
+
+      {/* Reminder creation form modal */}
+      {showReminderForm && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setShowReminderForm(false)}>
+          <div className="bg-white rounded-xl shadow-xl p-6 w-96" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-3">Add Reminder</h3>
+            <div className="space-y-3">
+              <input
+                type="text"
+                placeholder="What needs to be done?"
+                value={reminderText}
+                onChange={e => setReminderText(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                autoFocus
+              />
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={reminderDate}
+                  onChange={e => setReminderDate(e.target.value)}
+                  className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
+                />
+                <div className="flex gap-1">
+                  {[{ label: '1w', days: 7 }, { label: '2w', days: 14 }, { label: '1m', days: 30 }].map(p => (
+                    <button key={p.label} type="button"
+                      onClick={() => setReminderDate(new Date(Date.now() + p.days * 86400000).toISOString().split('T')[0])}
+                      className="px-1.5 py-0.5 text-[10px] border border-gray-200 rounded text-gray-500 hover:bg-gray-100"
+                    >{p.label}</button>
+                  ))}
+                </div>
+              </div>
+              <select
+                value={reminderAssignee}
+                onChange={e => setReminderAssignee(e.target.value)}
+                className="w-full border border-gray-300 rounded px-3 py-1.5 text-sm"
+              >
+                <option value="">Assign to me</option>
+                {reminderUsers.map(u => (
+                  <option key={u.id} value={u.id}>{u.first_name} {u.last_name}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setShowReminderForm(false)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button
+                onClick={createReminder}
+                disabled={!reminderText.trim()}
+                className="px-4 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
+              >Add Reminder</button>
+            </div>
+          </div>
         </div>
       )}
     </div>
