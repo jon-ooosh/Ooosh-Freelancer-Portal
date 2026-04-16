@@ -736,6 +736,8 @@ export default function JobDetailPage() {
     };
   } | null>(null);
   const [hhLastSynced, setHhLastSynced] = useState<string | null>(null);
+  const [hhStatusMismatch, setHhStatusMismatch] = useState<{ op_status: string; hh_status: number; hh_status_name: string } | null>(null);
+  const [pushingStatusToHH, setPushingStatusToHH] = useState(false);
   const [prepChecklistKey, setPrepChecklistKey] = useState(0);
   const editNameRef = useRef<HTMLInputElement>(null);
   const editHHRef = useRef<HTMLInputElement>(null);
@@ -1042,7 +1044,14 @@ export default function JobDetailPage() {
     setShowStatusDropdown(false);
     const needsPrompt = ['paused', 'confirmed', 'lost', 'cancelled', 'completed'].includes(targetStatus);
     const needsDispatchConfirm = ['dispatched'].includes(targetStatus);
-    if (needsPrompt) {
+    // Check if going backwards from confirmed/operational to enquiry stage
+    const enquiryStages = ['new_enquiry', 'chasing', 'provisional'];
+    const isGoingBackwards = (isConfirmed || isOperational) && enquiryStages.includes(targetStatus);
+    if (isGoingBackwards) {
+      const LABELS: Record<string, string> = { new_enquiry: 'Enquiry', chasing: 'Chasing', provisional: 'Provisional' };
+      if (!window.confirm(`Move this job back to "${LABELS[targetStatus] || targetStatus}"? This will also update HireHop.`)) return;
+      handleStatusTransition(targetStatus);
+    } else if (needsPrompt) {
       setTransitionTarget(targetStatus);
       setShowTransitionModal(true);
     } else if (needsDispatchConfirm) {
@@ -1276,9 +1285,12 @@ export default function JobDetailPage() {
       const data = await api.post<{
         success: boolean; itemCount: number;
         derivation: typeof hhSyncResult extends null ? never : NonNullable<typeof hhSyncResult>['derivation'];
+        statusMismatch?: { op_status: string; hh_status: number; hh_status_name: string } | null;
       }>(`/hirehop/jobs/${id}/sync`, {});
       setHhSyncResult({ itemCount: data.itemCount, derivation: data.derivation });
       setHhLastSynced(new Date().toISOString());
+      // Surface status mismatch if detected
+      setHhStatusMismatch(data.statusMismatch || null);
       // Always reload job after sync to pick up requirement changes
       loadJob();
       // Bump prepChecklistKey to force prep checklist to re-fetch
@@ -1287,6 +1299,23 @@ export default function JobDetailPage() {
       console.warn('HH sync failed:', err);
     } finally {
       if (showIndicator) setHhSyncing(false);
+    }
+  }
+
+  /** Push OP pipeline status to HireHop to resolve a mismatch */
+  async function pushStatusToHH() {
+    if (!job) return;
+    setPushingStatusToHH(true);
+    try {
+      await api.patch(`/pipeline/${job.id}/status`, {
+        pipeline_status: job.pipeline_status,
+      });
+      setHhStatusMismatch(null);
+      await loadJob();
+    } catch (err: any) {
+      alert(err?.message || 'Failed to push status to HireHop');
+    } finally {
+      setPushingStatusToHH(false);
     }
   }
 
@@ -1431,14 +1460,15 @@ export default function JobDetailPage() {
 
   // Available pipeline statuses for the dropdown (excluding current)
   // Contextual status transitions based on current status
-  const PIPELINE_STATUSES: PipelineStatus[] = ['new_enquiry', 'chasing', 'provisional', 'paused', 'confirmed', 'lost'];
+  const ENQUIRY_STATUSES: PipelineStatus[] = ['new_enquiry', 'chasing', 'provisional', 'paused'];
+  const PIPELINE_STATUSES: PipelineStatus[] = [...ENQUIRY_STATUSES, 'confirmed', 'lost'];
   const OPERATIONAL_STATUSES: string[] = ['prepped', 'dispatched', 'returned_incomplete', 'returned', 'completed'];
   const isOperational = OPERATIONAL_STATUSES.includes(job.pipeline_status || '');
   const isConfirmed = job.pipeline_status === 'confirmed';
-  // After confirmation: show operational progression + ability to go back
+  // After confirmation: show operational progression + enquiry stages (backwards) + cancelled/lost
   // Before confirmation: show pipeline statuses only
   const availableStatuses = isConfirmed || isOperational
-    ? [...OPERATIONAL_STATUSES, 'confirmed', 'cancelled', 'lost'].filter(s => s !== job.pipeline_status)
+    ? [...ENQUIRY_STATUSES, 'confirmed', ...OPERATIONAL_STATUSES, 'cancelled', 'lost'].filter(s => s !== job.pipeline_status)
     : PIPELINE_STATUSES.filter(s => s !== job.pipeline_status);
   const fileCount = (job.files || []).length;
   const hhJobUrl = job.hh_job_number
@@ -1789,6 +1819,31 @@ export default function JobDetailPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
                 Client synced to HireHop successfully.
+              </div>
+            )}
+
+            {/* HireHop status mismatch banner */}
+            {hhStatusMismatch && (
+              <div className="mt-2 flex items-center gap-3 bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-sm">
+                <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+                <span className="text-red-800">
+                  Status mismatch — OP shows <strong>{PIPELINE_STATUS_CONFIG[hhStatusMismatch.op_status as PipelineStatus]?.label || hhStatusMismatch.op_status}</strong> but HireHop shows <strong>{hhStatusMismatch.hh_status_name}</strong>
+                </span>
+                <button
+                  onClick={pushStatusToHH}
+                  disabled={pushingStatusToHH}
+                  className="ml-auto px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs font-medium rounded transition-colors disabled:opacity-50 whitespace-nowrap"
+                >
+                  {pushingStatusToHH ? 'Pushing...' : 'Push OP status to HireHop'}
+                </button>
+                <button
+                  onClick={() => setHhStatusMismatch(null)}
+                  className="text-red-600 hover:text-red-800 text-xs underline"
+                >
+                  Dismiss
+                </button>
               </div>
             )}
 

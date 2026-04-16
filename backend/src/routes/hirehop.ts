@@ -4,6 +4,7 @@ import { isHireHopConfigured } from '../config/hirehop';
 import { previewHireHopSync, syncContactsFromHireHop } from '../services/hirehop-sync';
 import { previewHireHopJobSync, syncJobsFromHireHop } from '../services/hirehop-job-sync';
 import { query } from '../config/database';
+import { hhBroker } from '../services/hirehop-broker';
 
 const router = Router();
 router.use(authenticate);
@@ -184,6 +185,7 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
 
 // POST /api/hirehop/jobs/:jobId/sync — on-demand sync for a single job
 // Fetches fresh line items from HH and runs requirement derivation.
+// Also checks for status mismatch between OP and HH.
 // Called by "Sync now" button and auto-sync on Job Detail page load.
 router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Response) => {
   try {
@@ -191,7 +193,7 @@ router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Res
 
     // Look up the job
     const jobResult = await query(
-      `SELECT id, hh_job_number FROM jobs WHERE id = $1 AND is_deleted = false`,
+      `SELECT id, hh_job_number, pipeline_status, status FROM jobs WHERE id = $1 AND is_deleted = false`,
       [jobId]
     );
 
@@ -222,10 +224,50 @@ router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Res
     const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
     const derivation = await deriveRequirementsForJob(jobId);
 
+    // Check for status mismatch between OP pipeline_status and actual HH status
+    let statusMismatch: { op_status: string; hh_status: number; hh_status_name: string } | null = null;
+    try {
+      const hhJobRes = await hhBroker.get('/api/job_data.php', { job: job.hh_job_number }, { priority: 'high', cacheTTL: 0 });
+      if (hhJobRes.success && hhJobRes.data) {
+        const hhData = hhJobRes.data as Record<string, any>;
+        const actualHHStatus = parseInt(hhData.STATUS ?? hhData.status ?? '-1');
+        if (actualHHStatus >= 0) {
+          // Update our cached HH status
+          await query(`UPDATE jobs SET status = $1, hh_status = $1, updated_at = NOW() WHERE id = $2`, [actualHHStatus, jobId]);
+
+          // Check if OP pipeline_status maps to a different HH status than what HH actually has
+          const PIPELINE_TO_HH: Record<string, number> = {
+            new_enquiry: 0, quoting: 0, chasing: 0, paused: 0,
+            provisional: 1, confirmed: 2,
+            prepped: 3, dispatched: 5,
+            returned_incomplete: 6, returned: 7,
+            completed: 11, cancelled: 9, lost: 10,
+          };
+          const HH_STATUS_NAMES: Record<number, string> = {
+            0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
+            4: 'Part Dispatched', 5: 'Dispatched', 6: 'Returned Incomplete',
+            7: 'Returned', 8: 'Requires Attention', 9: 'Cancelled',
+            10: 'Not Interested', 11: 'Completed',
+          };
+          const expectedHH = PIPELINE_TO_HH[job.pipeline_status || ''];
+          if (expectedHH !== undefined && expectedHH !== actualHHStatus) {
+            statusMismatch = {
+              op_status: job.pipeline_status,
+              hh_status: actualHHStatus,
+              hh_status_name: HH_STATUS_NAMES[actualHHStatus] || `Unknown (${actualHHStatus})`,
+            };
+          }
+        }
+      }
+    } catch {
+      // Non-fatal — status check is best-effort
+    }
+
     res.json({
       success: true,
       itemCount: items.length,
       derivation,
+      statusMismatch,
     });
   } catch (error) {
     console.error('On-demand sync error:', error);
