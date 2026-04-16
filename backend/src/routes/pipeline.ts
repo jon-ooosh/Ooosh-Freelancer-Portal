@@ -5,6 +5,7 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { hhBroker } from '../services/hirehop-broker';
 import { sendLastMinuteAlert } from '../services/money-emails';
 import emailService from '../services/email-service';
 
