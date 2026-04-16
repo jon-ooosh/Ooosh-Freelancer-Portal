@@ -476,9 +476,12 @@ router.post(
             local: new Date().toISOString().replace('T', ' ').substring(0, 16),
           }, { priority: 'high' });
 
-          const hhData = hhResult as { job?: number };
+          const hhData = hhResult?.data as { job?: number } | undefined;
           if (hhData?.job) {
             newHhJobNumber = hhData.job;
+            console.log(`[Cancellation] HH duplicate created: J-${newHhJobNumber}`);
+          } else {
+            console.warn('[Cancellation] HH duplicate returned no job number:', hhResult);
           }
         } catch (hhErr) {
           console.error('[Cancellation] HH duplicate failed:', hhErr);
@@ -508,7 +511,7 @@ router.post(
           $21, $22,
           $23, $24, $25, $26,
           $27, $28,
-          'confirmed', NOW(),
+          'new_enquiry', NOW(),
           $29, $30
         ) RETURNING id, hh_job_number`,
         [
@@ -555,7 +558,7 @@ router.post(
       );
       await query(
         `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-         VALUES ('note', $1, $2, $3, 'confirmed')`,
+         VALUES ('note', $1, $2, $3, 'new_enquiry')`,
         [newNote, newJob.id, req.user!.id]
       );
 
