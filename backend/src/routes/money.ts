@@ -994,11 +994,27 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
 
 // ── POST /api/money/:jobId/payment-event — Receive payment event from external system ──
 // Called by Payment Portal (or Stripe webhook) when a payment is processed externally.
+// The portal creates the HH deposit itself — this endpoint records it in OP + handles status transitions.
 
-router.post('/:jobId/payment-event', async (req: AuthRequest, res: Response) => {
+const paymentEventSchema = z.object({
+  payment_type: z.enum(['deposit', 'balance', 'excess', 'excess_pre_auth', 'refund', 'excess_refund', 'other']),
+  amount: z.number().min(0),
+  payment_method: z.string().max(50).optional(),
+  payment_reference: z.string().max(255).optional(),
+  stripe_payment_intent: z.string().max(255).optional(),
+  source: z.string().max(50).optional(),
+  excess_id: z.string().uuid().optional(),
+  hh_deposit_id: z.number().int().optional(),
+  notes: z.string().max(1000).optional(),
+});
+
+router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
-    const { payment_type, amount, payment_method, payment_reference, stripe_payment_intent, source, excess_id, notes } = req.body;
+    const {
+      payment_type, amount, payment_method, payment_reference,
+      stripe_payment_intent, source, excess_id, hh_deposit_id, notes,
+    } = req.body;
 
     const jobResult = await query(
       `SELECT id, hh_job_number, client_name FROM jobs WHERE id = $1`,
@@ -1011,48 +1027,163 @@ router.post('/:jobId/payment-event', async (req: AuthRequest, res: Response) => 
     }
 
     const job = jobResult.rows[0];
+    const effectiveMethod = payment_method || 'stripe_gbp';
+    const effectiveSource = source || 'payment_portal';
+    const isPreAuth = payment_type === 'excess_pre_auth';
+    const effectivePaymentType = isPreAuth ? 'excess' : (payment_type || 'deposit');
 
+    // Record in job_payments audit log
     const result = await query(
       `INSERT INTO job_payments
         (job_id, hirehop_job_id, payment_type, amount, payment_method,
          payment_reference, stripe_payment_intent, payment_status, source,
-         excess_id, client_name, notes, payment_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'completed', $8, $9, $10, $11, NOW())
+         excess_id, hirehop_deposit_id, client_name, notes, payment_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
        RETURNING *`,
       [
         job.id,
         job.hh_job_number,
-        payment_type || 'deposit',
+        effectivePaymentType,
         amount,
-        payment_method || 'stripe',
+        effectiveMethod,
         payment_reference || null,
         stripe_payment_intent || null,
-        source || 'payment_portal',
+        isPreAuth ? 'pre_auth' : 'completed',
+        effectiveSource,
         excess_id || null,
+        hh_deposit_id || null,
         job.client_name,
         notes || null,
       ]
     );
 
-    // Update excess if this is an excess payment
-    if ((payment_type === 'excess') && excess_id) {
-      await query(
-        `UPDATE job_excess SET
-          excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
-          excess_status = CASE
-            WHEN COALESCE(excess_amount_taken, 0) + $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
-            ELSE 'partially_paid'
-          END,
-          payment_method = $2,
-          payment_reference = $3,
-          payment_date = NOW(),
-          updated_at = NOW()
-        WHERE id = $4`,
-        [amount, payment_method, payment_reference || null, excess_id]
-      );
+    const payment = result.rows[0];
+
+    // ── Update excess if this is an excess payment or pre-auth ──
+    if ((effectivePaymentType === 'excess') && excess_id) {
+      if (isPreAuth) {
+        // Pre-auth: card hold taken, not yet charged. Set status to 'pre_auth'.
+        await query(
+          `UPDATE job_excess SET
+            excess_amount_taken = $1,
+            excess_status = 'pre_auth',
+            payment_method = $2,
+            payment_reference = $3,
+            payment_date = NOW(),
+            updated_at = NOW()
+          WHERE id = $4`,
+          [amount, effectiveMethod, payment_reference || null, excess_id]
+        );
+        console.log(`[money] Excess ${excess_id} set to pre_auth (£${amount})`);
+      } else {
+        // Actual excess payment
+        await query(
+          `UPDATE job_excess SET
+            excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
+            excess_status = CASE
+              WHEN COALESCE(excess_amount_taken, 0) + $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
+              ELSE 'partially_paid'
+            END,
+            payment_method = $2,
+            payment_reference = $3,
+            payment_date = NOW(),
+            updated_at = NOW()
+          WHERE id = $4`,
+          [amount, effectiveMethod, payment_reference || null, excess_id]
+        );
+      }
+
+      // Link HH deposit to excess record for reconciliation
+      if (hh_deposit_id) {
+        query(
+          `UPDATE job_excess SET hh_deposit_id = $1, hh_reconciled_at = NOW(), hh_reconcile_source = 'payment_portal' WHERE id = $2`,
+          [hh_deposit_id, excess_id]
+        ).catch(() => {}); // fire-and-forget
+      }
     }
 
-    res.json({ data: result.rows[0] });
+    // ── Status transition: deposit/balance payment on pre-confirmed job → Confirmed ──
+    // Portal already creates the HH deposit, so we only update OP status + push HH status.
+    let statusChanged = false;
+    if ((payment_type === 'deposit' || payment_type === 'balance') && amount > 0) {
+      try {
+        const statusResult = await query(
+          `SELECT pipeline_status, hh_job_number FROM jobs WHERE id = $1`,
+          [job.id]
+        );
+        const currentStatus = statusResult.rows[0]?.pipeline_status;
+        const hhNum = statusResult.rows[0]?.hh_job_number;
+
+        if (currentStatus && ['new_enquiry', 'quoting', 'chasing', 'provisional'].includes(currentStatus)) {
+          // Move to confirmed in OP
+          await query(
+            `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+            [job.id]
+          );
+          statusChanged = true;
+          console.log(`[money] Job ${job.id} moved to confirmed (payment portal deposit received)`);
+
+          // Push status to HireHop (status 2 = Booked)
+          if (hhNum) {
+            try {
+              await hhBroker.post('/frames/status_save.php', {
+                job: hhNum,
+                status: 2, // Booked
+                no_webhook: 1,
+              }, { priority: 'high' });
+              await query(
+                `UPDATE jobs SET status = 2, status_name = 'Booked', hh_status = 2 WHERE id = $1`,
+                [job.id]
+              );
+              console.log(`[money] HH job ${hhNum} status updated to Booked via payment-event`);
+            } catch {
+              console.error('[money] HH status update to Booked failed (non-fatal, payment-event)');
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[money] Status transition failed (non-fatal, payment-event):', err);
+      }
+    }
+
+    // ── Email triggers (fire-and-forget) ──
+    try {
+      if (effectivePaymentType === 'excess' && excess_id) {
+        // Excess payment/pre-auth email
+        sendExcessEmail({
+          templateId: isPreAuth ? 'excess_preauth_confirmed' : 'excess_payment_confirmed',
+          excessId: excess_id,
+          jobId: job.id,
+          amount,
+          paymentMethod: effectiveMethod,
+        }).catch(e => console.error('[money] Excess email failed (payment-event):', e));
+      } else if (effectivePaymentType !== 'refund' && effectivePaymentType !== 'excess_refund') {
+        // Hire deposit/balance email
+        const bankLabel = PAYMENT_METHODS_LABELS[effectiveMethod] || effectiveMethod;
+        sendPaymentEmail({
+          jobId: job.id,
+          amount,
+          bankName: bankLabel,
+          paymentType: effectivePaymentType,
+          isConfirmingBooking: statusChanged,
+        }).catch(e => console.error('[money] Payment email failed (payment-event):', e));
+
+        // Last-minute alert if job starts within 3 days and we just confirmed
+        if (statusChanged) {
+          sendLastMinuteAlert(job.id).catch(e => console.error('[money] Last-minute alert failed (payment-event):', e));
+        }
+      }
+    } catch (emailErr) {
+      console.error('[money] Email trigger error (non-fatal, payment-event):', emailErr);
+    }
+
+    res.json({
+      data: {
+        ...payment,
+        status_changed: statusChanged,
+        is_pre_auth: isPreAuth,
+      },
+    });
   } catch (error) {
     console.error('[money] Payment event error:', error);
     res.status(500).json({ error: 'Failed to record payment event' });
