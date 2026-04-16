@@ -82,6 +82,38 @@ const recordPaymentSchema = z.object({
   push_to_hirehop: z.boolean().default(true),
 });
 
+// ── GET /api/money/job-lookup/:hhJobNumber — Look up OP job by HireHop job number ──
+// Used by Payment Portal to resolve HH job numbers to OP UUIDs for subsequent API calls.
+// Returns core job details needed by the portal.
+
+router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) => {
+  try {
+    const hhJobNumber = parseInt(req.params.hhJobNumber);
+    if (isNaN(hhJobNumber)) {
+      res.status(400).json({ error: 'Invalid HireHop job number' });
+      return;
+    }
+
+    const result = await query(
+      `SELECT id, hh_job_number, job_name, client_name, company_name,
+              pipeline_status, status, status_name,
+              job_date, job_end, out_date, return_date
+       FROM jobs WHERE hh_job_number = $1`,
+      [hhJobNumber]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[money] Job lookup error:', error);
+    res.status(500).json({ error: 'Job lookup failed' });
+  }
+});
+
 // ── POST /api/money/sync-values — Bulk-update job_value for jobs missing values ──
 // Called on jobs/pipeline page load to populate cached hire values from HH billing
 
@@ -334,11 +366,15 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
 
-    // Get the job from OP database (need hh_job_number for HH API calls)
+    // Get the job from OP database (accept UUID or HH job number)
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
-      `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date
-       FROM jobs WHERE id = $1`,
-      [jobId]
+      isUuid
+        ? `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date
+           FROM jobs WHERE id = $1`
+        : `SELECT id, hh_job_number, client_id, client_name, company_name, job_date, job_end, out_date, return_date
+           FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId)]
     );
 
     if (jobResult.rows.length === 0) {
@@ -1016,9 +1052,13 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
       stripe_payment_intent, source, excess_id, hh_deposit_id, notes,
     } = req.body;
 
+    // Accept UUID or HH job number
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
-      `SELECT id, hh_job_number, client_name FROM jobs WHERE id = $1`,
-      [jobId]
+      isUuid
+        ? `SELECT id, hh_job_number, client_name FROM jobs WHERE id = $1`
+        : `SELECT id, hh_job_number, client_name FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId)]
     );
 
     if (jobResult.rows.length === 0) {
