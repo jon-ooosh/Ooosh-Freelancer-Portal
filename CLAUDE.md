@@ -557,6 +557,12 @@ Staff records manual payment (bank transfer, card in office, cash)
 **Excess calculation — "Top N Drivers" algorithm:**
 The hire form process calculates excess. The principle: charge the excess of the highest-risk drivers, one per van. Sort all drivers by excess descending, take top N (N = van count), sum. If fewer drivers than vans, fill remaining slots with standard £1,200/van. The OP stores the calculated total via `job_excess.excess_amount_required`.
 
+**Excess record lifecycle (16 Apr 2026):**
+`job_excess` records are created at three points — each subsequent step absorbs/updates the previous:
+1. **Derivation engine** (earliest): When self-drive vehicles detected on HH, auto-creates `job_excess` with `required = van_count × £1,200`, `status = 'needed'`. Gives the Money tab and payment portal a record before any hire form is submitted.
+2. **Payment portal** (mid): When portal charges/pre-auths excess before a hire form exists, `payment-event` finds the derivation-created record and updates `amount_taken` + `status` to `'taken'` or `'pre_auth'`. If no record exists (edge case), auto-creates one.
+3. **Hire form submission** (latest): When driver submits hire form with calculated excess, `POST /api/hire-forms` checks for an existing unlinked record (`assignment_id IS NULL`). If found, absorbs it: updates `required` to the hire-form-calculated amount while preserving `amount_taken`. This naturally surfaces gaps (e.g. £1,200 taken but £1,800 required → £600 outstanding).
+
 ##### Phase B — Excess Gate + Ledger UI ✅ COMPLETE (1 Apr 2026)
 - [x] `ExcessGateBanner.tsx` — amber warning on Job Detail Drivers & Vehicles tab with manager override flow
 - [x] `ExcessPaymentModal.tsx` — record payment, claim, reimburse, waive, rollover, move to different entity
@@ -682,19 +688,37 @@ The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from M
 - [x] `GET /api/money/:jobId/summary` — hire value, deposits, balance, excess status (built, replaces portal's `get-job-details-v2.js` Monday.com calls)
 - [x] `POST /api/money/:jobId/payment-event` — receive payment events from portal (built, replaces Monday.com status updates)
 - [x] `GET /api/money/:jobId/excess-info` — excess amount, driver breakdown, pre-auth eligibility (built, replaces `monday-driver-excess.js`)
+- [x] `GET /api/money/job-lookup/:hhJobNumber` — resolve HH job number to OP UUID + job details (16 Apr 2026)
+- [x] All money endpoints accept HH job number OR OP UUID in `:jobId` param (auto-detect via regex)
+- [x] API key auth on all money routes via `authenticateFlexible` middleware (prefix-based `api_keys` table lookup)
+
+*OP-side enhancements for portal go-live (16 Apr 2026):*
+- [x] `payment-event` auto-confirms bookings: deposit/balance payment on pre-confirmed job moves to `confirmed` + pushes HH status 2 (Booked)
+- [x] `payment-event` handles pre-auth: `payment_type: 'excess_pre_auth'` sets `excess_status = 'pre_auth'` (distinct from `taken`)
+- [x] `payment-event` auto-creates `job_excess` record when no `excess_id` provided (portal charges before hire form submitted)
+- [x] `payment-event` Zod input validation + email triggers (booking confirmed, excess payment, pre-auth, last-minute alert)
+- [x] `payment-event` accepts `hh_deposit_id` for HH ↔ OP reconciliation
+- [x] Hire form submission absorbs existing portal-created excess records (updates required amount, preserves amount already taken)
+- [x] Derivation engine auto-creates `job_excess` record with standard £1,200/van when self-drive vehicles detected
+- [x] Hire form auto-email triggered on confirmation via payment-event (was only in pipeline.ts status change)
+- [x] Excess-info response includes portal-compatible field aliases (`excess_amount`, `excess`, `id`)
 
 *Portal-side changes (in payment portal repo):*
-- [ ] Add `DATA_BACKEND` env var to Netlify config (default: `monday`)
-- [ ] Create `backend-client.js` abstraction layer
-- [ ] Repoint `monday-driver-excess.js` → OP excess-info endpoint
-- [ ] Repoint `monday-integration.js` payment status → OP payment-event endpoint
-- [ ] Repoint `monday-excess-checker.js` pre-auth status → OP excess endpoint
-- [ ] Repoint `handle-stripe-webhook.js` post-payment → OP payment-event endpoint
-- [ ] Repoint `admin-claim-preauth.js` post-capture → OP payment endpoint
-- [ ] Repoint `admin-refund-payment.js` post-refund → OP reimburse endpoint
-- [ ] Test on Netlify deploy preview with `DATA_BACKEND=op`
-- [ ] Flip to `op` on production, monitor 1-2 weeks
-- [ ] Remove Monday.com fallback code
+- [x] Add `DATA_BACKEND` env var to Netlify config (default: `monday`)
+- [x] Create `op-backend.js` shared helper (`isOpMode()`, `opFetch()`, retry logic)
+- [x] Repoint `get-job-details-v2.js` → `GET /api/money/{jobId}/summary`
+- [x] Repoint `get-admin-details.js` → `GET /api/money/{jobId}/summary`
+- [x] Repoint `monday-driver-excess.js` → `GET /api/money/{jobId}/excess-info`
+- [x] Repoint `monday-integration.js` payment status → `POST /api/money/{jobId}/payment-event`
+- [x] Repoint `monday-excess-checker.js` pre-auth status → `GET /api/money/{jobId}/excess-info`
+- [x] Repoint `handle-stripe-webhook.js` post-payment → `POST /api/money/{jobId}/payment-event` (passes `hh_deposit_id`)
+- [x] Repoint `admin-claim-preauth.js` post-capture → `POST /api/money/{jobId}/payment-event` (passes `hh_deposit_id`)
+- [x] Repoint `admin-refund-payment.js` post-refund → `POST /api/money/{jobId}/payment-event` with `payment_type: 'refund'`
+- [x] Repoint `validate-job.js` → `GET /api/money/job-lookup/{hhJobNumber}`
+- [x] Pre-auth timing: falls back to local `determineExcessPaymentTiming()` when OP doesn't provide `pre_auth.method`
+- [x] `DATA_BACKEND=op` deployed on Netlify production (16 Apr 2026)
+- [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
+- [ ] Client ledger balance surfaced in portal (requires `client_balance_on_account` in excess-info response)
 
 ##### Phase F — Staff Card Payments (future)
 Allow staff to take card payments directly from the Money tab, rather than walking to the card terminal.
