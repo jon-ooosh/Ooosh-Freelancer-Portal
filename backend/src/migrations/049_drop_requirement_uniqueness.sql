@@ -1,6 +1,9 @@
--- Migration 049: Drop unique constraint on job_requirements to allow multiple reminders/custom per job
--- The UNIQUE (job_id, requirement_type) constraint prevents creating multiple reminders
--- or custom requirements on the same job. Uniqueness for other types is enforced in
--- application logic (requirements.ts), which already exempts 'reminder' and 'custom' types.
+-- Migration 049: Drop unique constraints on job_requirements to allow multiple reminders/custom per job
+-- Uniqueness for non-reminder/non-custom types is enforced in application logic (requirements.ts).
+--
+-- Migration 021 created: unique_requirement_per_job UNIQUE (job_id, requirement_type)
+-- Migration 042 replaced it with: unique_requirement_per_job_phase UNIQUE (job_id, requirement_type, phase)
+-- Both must be dropped.
 
 ALTER TABLE job_requirements DROP CONSTRAINT IF EXISTS unique_requirement_per_job;
+ALTER TABLE job_requirements DROP CONSTRAINT IF EXISTS unique_requirement_per_job_phase;
