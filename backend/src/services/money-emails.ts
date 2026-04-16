@@ -39,7 +39,11 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   primaryFirstName: string | null;
   ccEmails: string[];
 }> {
-  // Get people associated with the job via job_organisations and direct people links
+  // Get people associated with the job's client organisations.
+  // Checks both job_organisations links AND the direct client_id on jobs table.
+  // NOTE: manager1_person_id / manager2_person_id are INTERNAL Ooosh staff (account managers),
+  // not client contacts — they must NOT be included as email recipients for client-facing emails.
+  // Also filter out @oooshtours.co.uk addresses as a safety net.
   const result = await query(
     `SELECT DISTINCT p.email, p.first_name, p.last_name,
        CASE
@@ -48,13 +52,12 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
          ELSE 3
        END AS priority
      FROM people p
-     LEFT JOIN person_organisation_roles por ON por.person_id = p.id AND por.status = 'active'
-     LEFT JOIN job_organisations jo ON jo.organisation_id = por.organisation_id AND jo.job_id = $1
+     JOIN person_organisation_roles por ON por.person_id = p.id AND por.status = 'active'
      WHERE p.email IS NOT NULL AND p.email != ''
+       AND p.email NOT LIKE '%@oooshtours.co.uk'
        AND (
-         jo.job_id IS NOT NULL
-         OR p.id IN (SELECT manager1_person_id FROM jobs WHERE id = $1)
-         OR p.id IN (SELECT manager2_person_id FROM jobs WHERE id = $1)
+         por.organisation_id IN (SELECT organisation_id FROM job_organisations WHERE job_id = $1)
+         OR por.organisation_id = (SELECT client_id FROM jobs WHERE id = $1)
        )
      ORDER BY priority ASC, p.first_name ASC
      LIMIT 5`,
