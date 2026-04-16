@@ -23,6 +23,7 @@ import BacklinePage from './pages/BacklinePage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
+import LostCancelledPage from './pages/LostCancelledPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 import { sharedRefreshToken } from './services/api';
@@ -63,6 +64,7 @@ export default function App() {
                 <Route path="/venues/:id" element={<VenueDetailPage />} />
                 <Route path="/jobs" element={<JobsPage />} />
                 <Route path="/jobs/returns" element={<ReturnsPage />} />
+                <Route path="/jobs/lost-cancelled" element={<LostCancelledPage />} />
                 <Route path="/jobs/:id" element={<JobDetailPage />} />
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />

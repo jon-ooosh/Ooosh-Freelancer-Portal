@@ -80,6 +80,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '044_closeout_requirement_types.sql',
         '045_inbox_notifications.sql',
         '046_repair_inbox_columns.sql',
+        '047_cancellations.sql',
         '047_reminder_requirement_type.sql',
       ];
 

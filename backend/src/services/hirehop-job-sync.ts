@@ -246,7 +246,8 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
           statusCode === 0 ? 'new_enquiry' :
           statusCode === 1 ? 'provisional' :
           statusCode >= 2 && statusCode <= 8 ? 'confirmed' :
-          statusCode === 9 || statusCode === 10 ? 'lost' :
+          statusCode === 9 ? 'cancelled' :
+          statusCode === 10 ? 'lost' :
           statusCode === 11 ? 'confirmed' : 'new_enquiry';
 
         const jobResult = await client.query(
