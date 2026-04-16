@@ -1444,10 +1444,10 @@ export default function JobDetailPage() {
               {(job.cancellation_fee != null || job.cancellation_refund != null) && (
                 <div className="flex gap-4 mt-1 text-sm">
                   {job.cancellation_fee != null && (
-                    <span className="text-red-600">Fee retained: <strong>£{job.cancellation_fee.toFixed(2)}</strong></span>
+                    <span className="text-red-600">Fee retained: <strong>£{Number(job.cancellation_fee).toFixed(2)}</strong></span>
                   )}
-                  {job.cancellation_refund != null && job.cancellation_refund > 0 && (
-                    <span className="text-green-700">Refund due: <strong>£{job.cancellation_refund.toFixed(2)}</strong></span>
+                  {job.cancellation_refund != null && Number(job.cancellation_refund) > 0 && (
+                    <span className="text-green-700">Refund due: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
                   )}
                 </div>
               )}
