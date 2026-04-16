@@ -283,10 +283,69 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // ── Insurance excess (only if hire forms needed) ──
     if (flags.has_vehicle && !isVanAndDriver) {
       await upsertAutoRequirement(client, jobId, 'excess', flags, previousFlags, result, {
-        notes: 'Insurance excess required for self-drive hire',
+        notes: `Insurance excess: £${(flags.vehicle_count * 1200).toLocaleString()} (${flags.vehicle_count} vehicle(s) × £1,200)`,
         snapshot: null,
       });
       await restoreSuspendedRequirement(client, jobId, 'excess');
+
+      // Ensure a job_excess record exists with the standard rate (£1,200 per self-drive van).
+      // This gives the Money tab and payment portal something to work with before hire forms are submitted.
+      // Only creates if no job_excess records exist yet — doesn't overwrite portal payments or hire form data.
+      const STANDARD_EXCESS_PER_VAN = 1200;
+      const expectedExcess = flags.vehicle_count * STANDARD_EXCESS_PER_VAN;
+      const existingExcess = await client.query(
+        `SELECT id FROM job_excess WHERE job_id = $1 LIMIT 1`,
+        [jobId]
+      );
+      if (existingExcess.rows.length === 0) {
+        await client.query(
+          `INSERT INTO job_excess (
+            job_id, hirehop_job_id, excess_amount_required, excess_status,
+            excess_calculation_basis, client_name, notes, created_by
+          ) VALUES ($1, $2, $3, 'needed', $4, $5, $6, $7)`,
+          [
+            jobId,
+            job.hh_job_number,
+            expectedExcess,
+            `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.vehicle_count} vehicle(s)`,
+            null, // client_name populated later
+            `Auto-created: ${flags.vehicle_count} self-drive vehicle(s) detected`,
+            '00000000-0000-0000-0000-000000000000',
+          ]
+        );
+        result.requirementsCreated.push(`excess_record (£${expectedExcess.toLocaleString()} for ${flags.vehicle_count} vehicle(s))`);
+      } else {
+        // Record exists — check if vehicle count changed and update required amount if not yet paid
+        const currentExcess = await client.query(
+          `SELECT id, excess_amount_required, excess_amount_taken, excess_status, assignment_id
+           FROM job_excess WHERE job_id = $1 AND assignment_id IS NULL
+             AND excess_status IN ('needed', 'pending')
+             AND (excess_amount_taken IS NULL OR excess_amount_taken = 0)
+           LIMIT 1`,
+          [jobId]
+        );
+        if (currentExcess.rows.length > 0) {
+          const curr = currentExcess.rows[0];
+          const currRequired = parseFloat(curr.excess_amount_required || 0);
+          if (currRequired !== expectedExcess) {
+            await client.query(
+              `UPDATE job_excess SET
+                excess_amount_required = $1,
+                excess_calculation_basis = $2,
+                notes = $3,
+                updated_at = NOW()
+              WHERE id = $4`,
+              [
+                expectedExcess,
+                `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.vehicle_count} vehicle(s)`,
+                `Updated: ${flags.vehicle_count} self-drive vehicle(s) detected`,
+                curr.id,
+              ]
+            );
+            result.requirementsUpdated.push(`excess_record (£${currRequired} → £${expectedExcess})`);
+          }
+        }
+      }
     } else if (isVanAndDriver) {
       await suspendRequirementForVanAndDriver(client, jobId, 'excess');
     }
