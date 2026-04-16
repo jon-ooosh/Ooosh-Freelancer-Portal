@@ -707,6 +707,9 @@ export default function JobDetailPage() {
   const [hhClientSyncName, setHhClientSyncName] = useState('');
   const [syncingClientToHH, setSyncingClientToHH] = useState(false);
   const [hhClientSyncSuccess, setHhClientSyncSuccess] = useState(false);
+  const [hhDatesOutOfSync, setHhDatesOutOfSync] = useState(false);
+  const [syncingDatesToHH, setSyncingDatesToHH] = useState(false);
+  const [hhDatesSyncSuccess, setHhDatesSyncSuccess] = useState(false);
 
   // ── HH Sync & Derived Requirements ──────────────────────────────────────
   const [hhSyncing, setHhSyncing] = useState(false);
@@ -876,6 +879,26 @@ export default function JobDetailPage() {
       return_time: editReturnTime || '09:00',
       end_time: editEndTime || null,
     });
+    // Prompt to sync dates to HireHop if job is linked
+    if (job?.hh_job_number) {
+      setHhDatesOutOfSync(true);
+      setHhDatesSyncSuccess(false);
+    }
+  }
+
+  async function syncDatesToHH() {
+    if (!job) return;
+    setSyncingDatesToHH(true);
+    try {
+      await api.post(`/pipeline/${job.id}/push-dates-to-hh`, {});
+      setHhDatesOutOfSync(false);
+      setHhDatesSyncSuccess(true);
+      setTimeout(() => setHhDatesSyncSuccess(false), 3000);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to sync dates to HireHop');
+    } finally {
+      setSyncingDatesToHH(false);
+    }
   }
 
   function startEditClient() {
@@ -1766,6 +1789,39 @@ export default function JobDetailPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
                 Client synced to HireHop successfully.
+              </div>
+            )}
+
+            {/* HireHop dates sync banner */}
+            {hhDatesOutOfSync && (
+              <div className="mt-2 flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm">
+                <svg className="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+                <span className="text-amber-800">
+                  Dates updated — also update on HireHop?
+                </span>
+                <button
+                  onClick={syncDatesToHH}
+                  disabled={syncingDatesToHH}
+                  className="ml-auto px-3 py-1 bg-amber-500 hover:bg-amber-600 text-white text-xs font-medium rounded transition-colors disabled:opacity-50"
+                >
+                  {syncingDatesToHH ? 'Syncing...' : 'Sync to HireHop'}
+                </button>
+                <button
+                  onClick={() => setHhDatesOutOfSync(false)}
+                  className="text-amber-600 hover:text-amber-800 text-xs underline"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            {hhDatesSyncSuccess && (
+              <div className="mt-2 flex items-center gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-sm text-green-700">
+                <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                Dates synced to HireHop successfully.
               </div>
             )}
 
