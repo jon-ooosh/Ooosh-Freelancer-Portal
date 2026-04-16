@@ -535,6 +535,25 @@ router.post(
           if (hhData?.job) {
             newHhJobNumber = hhData.job;
             console.log(`[Cancellation] HH duplicate created: J-${newHhJobNumber}`);
+
+            // Update HH job dates to 09:00 (duplicate may use current time)
+            try {
+              const fmtHH = (d: string | null) => {
+                if (!d) return null;
+                return new Date(d).toISOString().split('T')[0] + ' 09:00';
+              };
+              const dateParams: Record<string, unknown> = {
+                job: newHhJobNumber,
+                no_webhook: 1,
+              };
+              if (job.out_date) dateParams.out = fmtHH(job.out_date);
+              if (job.job_date) dateParams.start = fmtHH(job.job_date);
+              if (job.job_end) dateParams.end = fmtHH(job.job_end);
+              if (job.return_date) dateParams.to = fmtHH(job.return_date);
+              await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
+            } catch {
+              console.error('[Cancellation] HH date update failed (non-fatal)');
+            }
           } else {
             console.warn('[Cancellation] HH duplicate returned no job number:', hhResult);
           }
@@ -543,6 +562,17 @@ router.post(
           // Continue without HH — create OP job anyway
         }
       }
+
+      // Copy dates from original job, normalising times to 09:00
+      const normaliseDateTo0900 = (d: string | null): string | null => {
+        if (!d) return null;
+        const dateStr = new Date(d).toISOString().split('T')[0];
+        return `${dateStr} 09:00`;
+      };
+      const outDate = normaliseDateTo0900(job.out_date);
+      const jobDate = normaliseDateTo0900(job.job_date);
+      const jobEnd = normaliseDateTo0900(job.job_end);
+      const returnDate = normaliseDateTo0900(job.return_date);
 
       // Create new job in OP with all relevant fields from original
       const newJobResult = await query(
@@ -575,7 +605,7 @@ router.post(
           job.job_type,
           job.client_id, job.client_name, job.company_name, job.client_ref,
           job.venue_id, job.venue_name, job.address,
-          job.out_date, job.job_date, job.job_end, job.return_date,
+          outDate, jobDate, jobEnd, returnDate,
           job.duration_days, job.duration_hrs,
           job.manager1_name, job.manager1_person_id, job.manager2_name, job.manager2_person_id,
           job.hh_project_id, job.project_name,

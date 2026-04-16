@@ -1158,6 +1158,64 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
 });
 
 // ============================================================================
+// PUSH DATES TO HIREHOP — Sync OP dates to HireHop after editing in OP
+// ============================================================================
+
+router.post('/:id/push-dates-to-hh', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.id as string;
+
+    const jobResult = await query(
+      `SELECT id, hh_job_number, out_date, job_date, job_end, return_date FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const job = jobResult.rows[0];
+    if (!job.hh_job_number) {
+      res.status(400).json({ error: 'Job is not linked to HireHop' });
+      return;
+    }
+
+    // Format dates for HH: YYYY-MM-DD HH:MM
+    const fmtHH = (d: string | null): string | null => {
+      if (!d) return null;
+      const dt = new Date(d);
+      if (isNaN(dt.getTime())) return null;
+      const dateStr = dt.toISOString().split('T')[0];
+      const hours = String(dt.getHours()).padStart(2, '0');
+      const mins = String(dt.getMinutes()).padStart(2, '0');
+      // If time is midnight (00:00), default to 09:00
+      const timeStr = (hours === '00' && mins === '00') ? '09:00' : `${hours}:${mins}`;
+      return `${dateStr} ${timeStr}`;
+    };
+
+    const dateParams: Record<string, unknown> = {
+      job: job.hh_job_number,
+      no_webhook: 1,
+    };
+    if (job.out_date) dateParams.out = fmtHH(job.out_date);
+    if (job.job_date) dateParams.start = fmtHH(job.job_date);
+    if (job.job_end) dateParams.end = fmtHH(job.job_end);
+    if (job.return_date) dateParams.to = fmtHH(job.return_date);
+
+    const hhResult = await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
+
+    console.log(`[Pipeline] Pushed dates to HH job ${job.hh_job_number}:`, {
+      out: dateParams.out, start: dateParams.start, end: dateParams.end, to: dateParams.to,
+    });
+
+    res.json({ success: true, hh_job_number: job.hh_job_number });
+  } catch (error) {
+    console.error('Push dates to HH error:', error);
+    res.status(500).json({ error: 'Failed to update dates on HireHop' });
+  }
+});
+
+// ============================================================================
 // PUSH TO HIREHOP — Create a new HireHop job from an Ooosh-native enquiry
 // ============================================================================
 
