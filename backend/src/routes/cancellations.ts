@@ -57,8 +57,8 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
 
     // Get quotes (transport/crew)
     const quotes = await query(
-      `SELECT q.id, q.job_type, q.venue_name, q.total_cost, q.ops_status,
-              q.delivery_date, q.collection_date
+      `SELECT q.id, q.job_type, q.venue_name, q.client_charge_total, q.ops_status,
+              q.job_date, q.collection_date
        FROM quotes q WHERE q.job_id = $1 AND q.is_deleted = false`,
       [jobId]
     );
