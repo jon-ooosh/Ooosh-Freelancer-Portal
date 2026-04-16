@@ -96,7 +96,13 @@ export function startScheduler() {
       if (result.rows.length > 0) {
         console.log(`Scheduler: Chase auto-mover moved ${result.rows.length} job(s) to chasing`);
 
-        // Log a status_transition interaction for each moved job
+        // Get admin/manager users for notifications
+        const admins = await query(
+          `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
+        );
+        const adminIds = admins.rows.map((r: Record<string, unknown>) => r.id as string);
+
+        // Log a status_transition interaction + create inbox notification for each moved job
         for (const job of result.rows) {
           try {
             await query(
@@ -107,6 +113,34 @@ export function startScheduler() {
                 job.id,
               ]
             );
+
+            // Find most recent chase_alert_user_id for this job (if anyone was assigned)
+            const lastChase = await query(
+              `SELECT chase_alert_user_id FROM interactions
+               WHERE job_id = $1 AND type = 'chase' AND chase_alert_user_id IS NOT NULL
+               ORDER BY created_at DESC LIMIT 1`,
+              [job.id]
+            );
+            const targetUsers = lastChase.rows.length > 0 && lastChase.rows[0].chase_alert_user_id
+              ? [lastChase.rows[0].chase_alert_user_id as string]
+              : adminIds;
+
+            const jobName = job.job_name || `Job ${job.hh_job_number || ''}`;
+            for (const userId of targetUsers) {
+              try {
+                await query(
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+                   VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, 'normal')`,
+                  [
+                    userId,
+                    `Chase due: ${jobName}`,
+                    `Chase date reached for ${jobName} — needs follow-up`,
+                    job.id,
+                    `/jobs/${job.id}?tab=timeline`,
+                  ]
+                );
+              } catch { /* dedup or other error — non-critical */ }
+            }
           } catch {
             // Non-critical — don't block other jobs
           }
