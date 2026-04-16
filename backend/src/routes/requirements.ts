@@ -249,7 +249,7 @@ router.post('/job/:jobId', validate(addRequirementSchema), async (req: AuthReque
 
     // For non-custom types, check uniqueness within the same phase
     const reqPhase = phase || 'pre_hire';
-    if (requirement_type !== 'custom') {
+    if (requirement_type !== 'custom' && requirement_type !== 'reminder') {
       const existing = await query(
         'SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 AND phase = $3',
         [jobId, requirement_type, reqPhase]
