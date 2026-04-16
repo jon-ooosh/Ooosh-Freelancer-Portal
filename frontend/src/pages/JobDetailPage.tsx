@@ -108,6 +108,17 @@ interface JobDetail {
   tags: string[];
   files: FileAttachment[];
   created_at: string;
+  // Cancellation
+  cancelled_at: string | null;
+  cancelled_by: string | null;
+  cancellation_reason: string | null;
+  cancellation_fee: number | null;
+  cancellation_refund: number | null;
+  cancellation_notice_days: number | null;
+  cancellation_notes: string | null;
+  cancellation_tier: string | null;
+  reopened_from_job_id: string | null;
+  reopened_to_job_id: string | null;
 }
 
 interface Interaction {
@@ -1449,7 +1460,7 @@ export default function JobDetailPage() {
                 onClick={async () => {
                   if (!window.confirm('Re-open this cancelled job as a new booking? The original job will stay cancelled for audit purposes.')) return;
                   try {
-                    const result = await api.post<{ newJobId: string; message: string }>(`/cancellations/${job.id}/reopen`);
+                    const result = await api.post<{ newJobId: string; message: string }>(`/cancellations/${job.id}/reopen`, {});
                     alert(result.message);
                     navigate(`/jobs/${result.newJobId}`);
                   } catch (err) {
