@@ -634,7 +634,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
           // If email-only or both, send email immediately for event triggers (they're time-sensitive)
           if (deliveryMethod === 'email' || deliveryMethod === 'both') {
             try {
-              const userResult = await query('SELECT email, first_name FROM users WHERE id = $1', [targetUserId]);
+              const userResult = await query('SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1', [targetUserId]);
               if (userResult.rows.length > 0 && userResult.rows[0].email) {
                 await emailService.sendRaw({
                   to: userResult.rows[0].email,

@@ -340,7 +340,7 @@ export function startScheduler() {
           // If email-only, send immediately and mark as emailed
           if (deliveryMethod === 'email') {
             try {
-              const userResult = await query('SELECT email, first_name FROM users WHERE id = $1', [userId]);
+              const userResult = await query('SELECT u.email, p.first_name FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1', [userId]);
               if (userResult.rows.length > 0 && userResult.rows[0].email) {
                 await emailService.sendRaw({
                   to: userResult.rows[0].email,
