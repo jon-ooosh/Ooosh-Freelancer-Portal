@@ -15,6 +15,8 @@ interface CancellationCalcResult {
   tier: string;
   noticeDays: number;
   breakdown: string;
+  feeBreakdown: Array<{ label: string; amount: number }>;
+  summary: string;
   minimumApplied: boolean;
   transportIncluded: number;
 }
@@ -159,26 +161,59 @@ export default function CancellationModal({
                       {tierLabel[calcResult.tier] || calcResult.tier}
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="grid grid-cols-2 gap-3 text-sm mb-3">
                     <div>
                       <span className="text-gray-500">Notice period</span>
-                      <p className="font-semibold">{calcResult.noticeDays} days</p>
+                      <p className="font-semibold">{calcResult.noticeDays} day{calcResult.noticeDays !== 1 ? 's' : ''}</p>
                     </div>
                     <div>
                       <span className="text-gray-500">Hire value</span>
                       <p className="font-semibold">£{hireCost.toFixed(2)}</p>
                     </div>
-                    <div>
-                      <span className="text-gray-500">Fee to retain</span>
-                      <p className="font-bold text-red-700">£{calcResult.fee.toFixed(2)}</p>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Refund due</span>
-                      <p className="font-bold text-green-700">£{calcResult.refund.toFixed(2)}</p>
-                    </div>
                   </div>
+
+                  {/* Per-tier fee breakdown */}
+                  {calcResult.feeBreakdown && calcResult.feeBreakdown.length > 0 && (
+                    <div className="border-t border-red-200 pt-2 mb-2">
+                      {calcResult.feeBreakdown.map((line, i) => (
+                        <div key={i} className="flex justify-between text-sm py-0.5">
+                          <span className="text-gray-600">{line.label}</span>
+                          <span className="font-medium">£{line.amount.toFixed(2)}</span>
+                        </div>
+                      ))}
+                      <div className="flex justify-between text-sm pt-1 border-t border-red-200 mt-1">
+                        <span className="font-semibold text-red-800">Fee to retain</span>
+                        <span className="font-bold text-red-700">£{calcResult.fee.toFixed(2)}</span>
+                      </div>
+                      {calcResult.refund > 0 && (
+                        <div className="flex justify-between text-sm pt-0.5">
+                          <span className="font-semibold text-green-800">Refund due</span>
+                          <span className="font-bold text-green-700">£{calcResult.refund.toFixed(2)}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {calcResult.minimumApplied && (
-                    <p className="text-xs text-red-600 mt-2">Minimum fee of £30 (£25+VAT) applied</p>
+                    <p className="text-xs text-red-600 mt-1">Minimum fee of £30 (£25+VAT) applied</p>
+                  )}
+
+                  {/* Copyable summary */}
+                  {calcResult.summary && (
+                    <div className="mt-3 bg-white/60 rounded p-2 border border-red-100">
+                      <p className="text-xs text-gray-700 leading-relaxed">{calcResult.summary}</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(calcResult.summary);
+                          const btn = document.activeElement as HTMLButtonElement;
+                          if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); }
+                        }}
+                        className="mt-1 text-xs text-ooosh-600 hover:text-ooosh-700 font-medium hover:underline"
+                      >
+                        Copy
+                      </button>
+                    </div>
                   )}
                 </div>
               )}
