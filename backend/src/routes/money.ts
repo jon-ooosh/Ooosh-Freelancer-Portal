@@ -88,7 +88,7 @@ const recordPaymentSchema = z.object({
 
 router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) => {
   try {
-    const hhJobNumber = parseInt(req.params.hhJobNumber);
+    const hhJobNumber = parseInt(req.params.hhJobNumber as string);
     if (isNaN(hhJobNumber)) {
       res.status(400).json({ error: 'Invalid HireHop job number' });
       return;
@@ -364,7 +364,7 @@ router.get('/:jobId/vat-adjustment', async (req: AuthRequest, res: Response) => 
 
 router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = req.params.jobId as string;
 
     // Get the job from OP database (accept UUID or HH job number)
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
@@ -1046,7 +1046,7 @@ const paymentEventSchema = z.object({
 
 router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = req.params.jobId as string;
     const {
       payment_type, amount, payment_method, payment_reference,
       stripe_payment_intent, source, excess_id, hh_deposit_id, notes,
