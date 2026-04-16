@@ -250,25 +250,33 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     const vanCount = parseInt(vanCountResult.rows[0]?.van_count || '0');
 
     // Build per-driver breakdown
-    const drivers = excessResult.rows.map((r: any) => ({
-      excess_id: r.excess_id,
-      driver_id: r.driver_id,
-      driver_name: r.driver_name,
-      vehicle_id: r.vehicle_id,
-      vehicle_reg: r.vehicle_reg,
-      vehicle_type: r.vehicle_type,
-      excess_amount_required: parseFloat(r.excess_amount_required || 0),
-      excess_amount_taken: parseFloat(r.excess_amount_taken || 0),
-      excess_outstanding: Math.max(0, parseFloat(r.excess_amount_required || 0) - parseFloat(r.excess_amount_taken || 0)),
-      excess_status: r.excess_status,
-      excess_calculation_basis: r.excess_calculation_basis,
-      payment_method: r.payment_method,
-      payment_reference: r.payment_reference,
-      payment_date: r.payment_date,
-      licence_points: r.licence_points,
-      requires_referral: r.requires_referral,
-      suggested_collection_method: r.suggested_collection_method,
-    }));
+    const drivers = excessResult.rows.map((r: any) => {
+      const required = parseFloat(r.excess_amount_required || 0);
+      const taken = parseFloat(r.excess_amount_taken || 0);
+      return {
+        // Canonical OP fields
+        excess_id: r.excess_id,
+        id: r.excess_id, // alias for Payment Portal compat
+        driver_id: r.driver_id,
+        driver_name: r.driver_name,
+        vehicle_id: r.vehicle_id,
+        vehicle_reg: r.vehicle_reg,
+        vehicle_type: r.vehicle_type,
+        excess_amount_required: required,
+        excess_amount: required, // alias for Payment Portal compat (expects 'excess_amount')
+        excess: required, // alias — Payment Portal sorts on `.excess`
+        excess_amount_taken: taken,
+        excess_outstanding: Math.max(0, required - taken),
+        excess_status: r.excess_status,
+        excess_calculation_basis: r.excess_calculation_basis,
+        payment_method: r.payment_method,
+        payment_reference: r.payment_reference,
+        payment_date: r.payment_date,
+        licence_points: r.licence_points,
+        requires_referral: r.requires_referral,
+        suggested_collection_method: r.suggested_collection_method,
+      };
+    });
 
     // Totals
     const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
@@ -881,6 +889,11 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
       } catch (err) {
         console.error('[money] Status transition failed (non-fatal):', err);
       }
+
+      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now
+      triggerHireFormEmailOnConfirmation(job.id).catch(err =>
+        console.error('[money] Hire form email on confirmation failed (record-payment):', err)
+      );
     }
 
     // Push to HireHop as deposit (if requested and job has HH number)
@@ -1184,6 +1197,11 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
       } catch (err) {
         console.error('[money] Status transition failed (non-fatal, payment-event):', err);
       }
+
+      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now
+      triggerHireFormEmailOnConfirmation(job.id).catch(err =>
+        console.error('[money] Hire form email on confirmation failed (payment-event):', err)
+      );
     }
 
     // ── Email triggers (fire-and-forget) ──
@@ -1393,6 +1411,39 @@ async function reconcileExcessDeposits(
   }
 
   return results;
+}
+
+async function triggerHireFormEmailOnConfirmation(jobId: string): Promise<void> {
+  const jobData = await query(
+    `SELECT job_date, is_van_and_driver, hh_job_number FROM jobs WHERE id = $1`,
+    [jobId]
+  );
+  if (jobData.rows.length === 0) return;
+  const { job_date, is_van_and_driver, hh_job_number } = jobData.rows[0];
+  if (is_van_and_driver || !hh_job_number || !job_date) return;
+
+  const daysUntilStart = Math.ceil((new Date(job_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  if (daysUntilStart > 10) return;
+
+  const hfReq = await query(
+    `SELECT id, status FROM job_requirements WHERE job_id = $1 AND requirement_type = 'hire_forms'`,
+    [jobId]
+  );
+  if (hfReq.rows.length === 0 || hfReq.rows[0].status !== 'not_started') return;
+
+  const { sendHireFormEmailForJob } = await import('../services/hire-form-auto-email');
+  console.log(`[money] Job ${hh_job_number} confirmed with ${daysUntilStart} days to go — triggering hire form email`);
+
+  const jobRow = await query(
+    `SELECT j.id, j.hh_job_number, j.job_name, j.job_date, j.company_name, j.client_name, j.client_id,
+            jr.id AS req_id
+     FROM jobs j JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'hire_forms'
+     WHERE j.id = $1`,
+    [jobId]
+  );
+  if (jobRow.rows.length > 0) {
+    await sendHireFormEmailForJob(jobRow.rows[0], false);
+  }
 }
 
 export default router;
