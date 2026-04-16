@@ -42,8 +42,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   // Get people associated with the job's client organisations.
   // Checks both job_organisations links AND the direct client_id on jobs table.
   // NOTE: manager1_person_id / manager2_person_id are INTERNAL Ooosh staff (account managers),
-  // not client contacts — they must NOT be included as email recipients for client-facing emails.
-  // Also filter out @oooshtours.co.uk addresses as a safety net.
+  // not client contacts — they are NOT included here.
   const result = await query(
     `SELECT DISTINCT p.email, p.first_name, p.last_name,
        CASE
@@ -54,7 +53,6 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
      FROM people p
      JOIN person_organisation_roles por ON por.person_id = p.id AND por.status = 'active'
      WHERE p.email IS NOT NULL AND p.email != ''
-       AND p.email NOT LIKE '%@oooshtours.co.uk'
        AND (
          por.organisation_id IN (SELECT organisation_id FROM job_organisations WHERE job_id = $1)
          OR por.organisation_id = (SELECT client_id FROM jobs WHERE id = $1)
@@ -79,7 +77,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
       [jobId]
     );
 
-    if (orgResult.rows.length > 0 && !orgResult.rows[0].email.endsWith('@oooshtours.co.uk')) {
+    if (orgResult.rows.length > 0) {
       const org = orgResult.rows[0];
       return {
         primaryEmail: org.email,
@@ -237,10 +235,10 @@ export async function sendExcessEmail(opts: {
     recipientFirstName = driver.firstName;
   }
 
-  // Fall back to job contacts if no driver email — but never send to @oooshtours.co.uk (staff) as if they're the client
+  // Fall back to job contacts if no driver email
   const jobRecipients = await getJobEmailRecipients(jobId);
   if (!recipientEmail) {
-    if (jobRecipients.primaryEmail && !jobRecipients.primaryEmail.endsWith('@oooshtours.co.uk')) {
+    if (jobRecipients.primaryEmail) {
       recipientEmail = jobRecipients.primaryEmail;
       recipientFirstName = jobRecipients.primaryFirstName;
     }
