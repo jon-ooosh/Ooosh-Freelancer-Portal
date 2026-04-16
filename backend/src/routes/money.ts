@@ -881,6 +881,11 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
       } catch (err) {
         console.error('[money] Status transition failed (non-fatal):', err);
       }
+
+      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now
+      triggerHireFormEmailOnConfirmation(job.id).catch(err =>
+        console.error('[money] Hire form email on confirmation failed (record-payment):', err)
+      );
     }
 
     // Push to HireHop as deposit (if requested and job has HH number)
@@ -1184,6 +1189,11 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
       } catch (err) {
         console.error('[money] Status transition failed (non-fatal, payment-event):', err);
       }
+
+      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now
+      triggerHireFormEmailOnConfirmation(job.id).catch(err =>
+        console.error('[money] Hire form email on confirmation failed (payment-event):', err)
+      );
     }
 
     // ── Email triggers (fire-and-forget) ──
@@ -1393,6 +1403,39 @@ async function reconcileExcessDeposits(
   }
 
   return results;
+}
+
+async function triggerHireFormEmailOnConfirmation(jobId: string): Promise<void> {
+  const jobData = await query(
+    `SELECT job_date, is_van_and_driver, hh_job_number FROM jobs WHERE id = $1`,
+    [jobId]
+  );
+  if (jobData.rows.length === 0) return;
+  const { job_date, is_van_and_driver, hh_job_number } = jobData.rows[0];
+  if (is_van_and_driver || !hh_job_number || !job_date) return;
+
+  const daysUntilStart = Math.ceil((new Date(job_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+  if (daysUntilStart > 10) return;
+
+  const hfReq = await query(
+    `SELECT id, status FROM job_requirements WHERE job_id = $1 AND requirement_type = 'hire_forms'`,
+    [jobId]
+  );
+  if (hfReq.rows.length === 0 || hfReq.rows[0].status !== 'not_started') return;
+
+  const { sendHireFormEmailForJob } = await import('../services/hire-form-auto-email');
+  console.log(`[money] Job ${hh_job_number} confirmed with ${daysUntilStart} days to go — triggering hire form email`);
+
+  const jobRow = await query(
+    `SELECT j.id, j.hh_job_number, j.job_name, j.job_date, j.company_name, j.client_name, j.client_id,
+            jr.id AS req_id
+     FROM jobs j JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'hire_forms'
+     WHERE j.id = $1`,
+    [jobId]
+  );
+  if (jobRow.rows.length > 0) {
+    await sendHireFormEmailForJob(jobRow.rows[0], false);
+  }
 }
 
 export default router;
