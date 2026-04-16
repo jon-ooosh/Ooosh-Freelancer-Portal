@@ -56,49 +56,52 @@ export default function CancellationModal({
 
   const canAction = userRole === 'admin' || userRole === 'manager';
 
-  // Fetch transport/crew data and run calculator
+  // Fetch transport/crew data and run calculator (independent — one failing doesn't block the other)
   useEffect(() => {
     const fetchData = async () => {
       setLoading(true);
-      try {
-        // Fetch transport & crew in parallel with calculation
-        const [tcRes] = await Promise.all([
-          api.get<TransportCrewData>(`/cancellations/${jobId}/transport-crew`),
-        ]);
-        setTransportCrew(tcRes);
 
-        // Run calculator
-        if (hireValue && hireStartDate) {
+      // Fetch transport & crew (non-blocking)
+      api.get<TransportCrewData>(`/cancellations/${jobId}/transport-crew`)
+        .then(setTransportCrew)
+        .catch(err => console.warn('Failed to load transport/crew:', err));
+
+      // Run calculator
+      const cost = typeof hireValue === 'string' ? parseFloat(hireValue) : hireValue;
+      if (cost && cost > 0 && hireStartDate) {
+        try {
           const calcRes = await api.post<CancellationCalcResult>(`/cancellations/${jobId}/calculate`, {
-            totalHireCost: hireValue,
+            totalHireCost: cost,
             hireStartDate,
             transportCharges: 0,
-            totalHireDays: totalHireDays || undefined,
+            totalHireDays: totalHireDays && totalHireDays > 0 ? totalHireDays : undefined,
           });
           setCalcResult(calcRes);
+        } catch (err) {
+          console.error('Calculator failed:', err);
         }
-      } catch (err) {
-        console.error('Failed to load cancellation data:', err);
-      } finally {
-        setLoading(false);
       }
+
+      setLoading(false);
     };
     fetchData();
   }, [jobId, hireValue, hireStartDate, totalHireDays]);
 
   // Recalculate when transport charges change
   useEffect(() => {
-    if (!hireValue || !hireStartDate) return;
+    const cost = typeof hireValue === 'string' ? parseFloat(hireValue) : hireValue;
+    if (!cost || cost <= 0 || !hireStartDate || transportCharges === 0) return;
     api.post<CancellationCalcResult>(`/cancellations/${jobId}/calculate`, {
-      totalHireCost: hireValue,
+      totalHireCost: cost,
       hireStartDate,
       transportCharges,
-      totalHireDays: totalHireDays || undefined,
+      totalHireDays: totalHireDays && totalHireDays > 0 ? totalHireDays : undefined,
     }).then(setCalcResult).catch(() => {});
   }, [transportCharges, jobId, hireValue, hireStartDate, totalHireDays]);
 
-  const effectiveFee = useManual && manualFee ? parseFloat(manualFee) : (calcResult?.fee || 0);
-  const effectiveRefund = hireValue ? Math.max(0, hireValue - effectiveFee + transportCharges) : 0;
+  const hireCost = typeof hireValue === 'string' ? parseFloat(hireValue) : (hireValue || 0);
+  const effectiveFee = useManual && manualFee ? parseFloat(manualFee) : (calcResult?.fee ?? 0);
+  const effectiveRefund = calcResult ? calcResult.refund : (useManual && manualFee ? Math.max(0, hireCost - parseFloat(manualFee)) : 0);
 
   const handleSubmit = () => {
     onConfirm({
@@ -128,7 +131,17 @@ export default function CancellationModal({
             Cancel Job
           </h3>
           <p className="text-sm text-gray-500 mb-4">
-            {jobNumber ? `J-${jobNumber}` : ''} {jobName}
+            {jobNumber ? (
+              <a
+                href={`https://myhirehop.com/job.php?id=${jobNumber}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-ooosh-600 hover:text-ooosh-700 hover:underline font-mono"
+              >
+                J-{jobNumber}
+              </a>
+            ) : null}
+            {' '}{jobName}
           </p>
 
           {loading ? (
@@ -153,7 +166,7 @@ export default function CancellationModal({
                     </div>
                     <div>
                       <span className="text-gray-500">Hire value</span>
-                      <p className="font-semibold">£{(hireValue || 0).toFixed(2)}</p>
+                      <p className="font-semibold">£{hireCost.toFixed(2)}</p>
                     </div>
                     <div>
                       <span className="text-gray-500">Fee to retain</span>
@@ -167,6 +180,21 @@ export default function CancellationModal({
                   {calcResult.minimumApplied && (
                     <p className="text-xs text-red-600 mt-2">Minimum fee of £30 (£25+VAT) applied</p>
                   )}
+                </div>
+              )}
+
+              {/* HH Invoice / VAT breakdown */}
+              {effectiveFee > 0 && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm">
+                  <p className="font-medium text-blue-800 mb-1">HireHop Invoice Required</p>
+                  <div className="grid grid-cols-2 gap-2 text-blue-700">
+                    <div>Net (ex-VAT): <strong>£{effectiveFee.toFixed(2)}</strong></div>
+                    <div>VAT (20%): <strong>£{(effectiveFee * 0.2).toFixed(2)}</strong></div>
+                    <div className="col-span-2">Gross (inc VAT): <strong>£{(effectiveFee * 1.2).toFixed(2)}</strong></div>
+                  </div>
+                  <p className="text-xs text-blue-600 mt-2">
+                    Create an invoice in HireHop for the retained cancellation fee so it can be reconciled.
+                  </p>
                 </div>
               )}
 
