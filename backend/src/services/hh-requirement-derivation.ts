@@ -72,10 +72,26 @@ const SEAT_PARENT_LIST_ID = 1645; // "Rear seats:" stock item
 
 // ── Derived flags shape ──────────────────────────────────────────────────
 
+export type VehicleSlotMode = 'self_drive' | 'van_and_driver';
+
+/** Per-vehicle-slot mode overrides, keyed by HH ITEM_ID.
+ *  Array index = slot index within the line. Missing entries default to 'self_drive'. */
+export type VehicleSlotModes = Record<string, VehicleSlotMode[]>;
+
+export interface VehicleSlot {
+  item_id: number;
+  slot_index: number;
+  item_name: string;
+  mode: VehicleSlotMode;
+}
+
 export interface DerivedFlags {
   has_vehicle: boolean;
   vehicle_count: number;
   vehicle_types: string[];            // e.g. ["Premium LWB (M)", "Basic MWB (A)"]
+  vehicle_slots: VehicleSlot[];       // One entry per van slot (expanded from qty)
+  self_drive_count: number;           // Number of slots with mode='self_drive'
+  van_and_driver_count: number;       // Number of slots with mode='van_and_driver'
   seat_config: 'round_table' | 'forward_facing' | null;
   has_backline: boolean;
   backline_item_count: number;
@@ -96,11 +112,14 @@ export interface DerivedFlags {
 
 // ── Derive flags from line items ─────────────────────────────────────────
 
-export function deriveFlags(items: HHLineItem[]): DerivedFlags {
+export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {}): DerivedFlags {
   const flags: DerivedFlags = {
     has_vehicle: false,
     vehicle_count: 0,
     vehicle_types: [],
+    vehicle_slots: [],
+    self_drive_count: 0,
+    van_and_driver_count: 0,
     seat_config: null,
     has_backline: false,
     backline_item_count: 0,
@@ -119,10 +138,25 @@ export function deriveFlags(items: HHLineItem[]): DerivedFlags {
 
     // ── Vehicles (category 370) ──
     if (item.CATEGORY_ID === VEHICLE_CATEGORY && item.kind === 2 && !item.VIRTUAL) {
+      const qty = Math.max(1, item.QUANTITY);
       flags.has_vehicle = true;
-      flags.vehicle_count += Math.max(1, item.QUANTITY);
+      flags.vehicle_count += qty;
       flags.vehicle_types.push(item.ITEM_NAME);
-      flags.prep_time_by_category.vehicles += prepMins * Math.max(1, item.QUANTITY);
+      flags.prep_time_by_category.vehicles += prepMins * qty;
+      // Expand into per-slot entries with mode from override map.
+      const lineKey = String(item.ITEM_ID);
+      const modes = slotModes[lineKey] || [];
+      for (let slotIndex = 0; slotIndex < qty; slotIndex++) {
+        const mode: VehicleSlotMode = modes[slotIndex] || 'self_drive';
+        flags.vehicle_slots.push({
+          item_id: item.ITEM_ID,
+          slot_index: slotIndex,
+          item_name: item.ITEM_NAME,
+          mode,
+        });
+        if (mode === 'self_drive') flags.self_drive_count++;
+        else flags.van_and_driver_count++;
+      }
     }
 
     // ── Seat configuration (prompt detection) ──
@@ -237,7 +271,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
   // Load job with line items
   const jobResult = await query(
-    `SELECT id, hh_job_number, line_items, hh_derived_flags, is_van_and_driver
+    `SELECT id, hh_job_number, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes
      FROM jobs WHERE id = $1 AND is_deleted = false`,
     [jobId]
   );
@@ -248,12 +282,22 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
   if (items.length === 0) return result;
 
-  // Derive flags
-  const flags = deriveFlags(items);
+  // Derive flags — per-slot modes override the legacy job-level flag.
+  // If `vehicle_slot_modes` is empty but `is_van_and_driver=true`, fall back to
+  // marking every slot as van_and_driver (safety net for pre-migration data).
+  const slotModes: VehicleSlotModes = job.vehicle_slot_modes || {};
+  const flags = deriveFlags(items, slotModes);
+  if (Object.keys(slotModes).length === 0 && job.is_van_and_driver === true) {
+    for (const slot of flags.vehicle_slots) {
+      slot.mode = 'van_and_driver';
+    }
+    flags.van_and_driver_count = flags.vehicle_slots.length;
+    flags.self_drive_count = 0;
+  }
   result.flags = flags;
 
   const previousFlags: DerivedFlags | null = job.hh_derived_flags;
-  const isVanAndDriver = job.is_van_and_driver === true;
+  const hasAnySelfDrive = flags.self_drive_count > 0;
 
   const client = await getClient();
   try {
@@ -267,23 +311,23 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       });
     }
 
-    // ── Hire forms (only if self-drive) ──
-    if (flags.has_vehicle && !isVanAndDriver) {
+    // ── Hire forms (only if ≥1 self-drive van) ──
+    if (flags.has_vehicle && hasAnySelfDrive) {
       await upsertAutoRequirement(client, jobId, 'hire_forms', flags, previousFlags, result, {
-        notes: `${flags.vehicle_count} vehicle(s) — hire forms required`,
+        notes: `${flags.self_drive_count} self-drive vehicle(s) — hire forms required`,
         snapshot: items.filter(i => i.CATEGORY_ID === VEHICLE_CATEGORY && i.kind === 2),
       });
       // Restore if previously suspended by V&D toggle
       await restoreSuspendedRequirement(client, jobId, 'hire_forms');
-    } else if (isVanAndDriver) {
-      // Soft-suspend hire_forms (preserve data, mark as not required)
+    } else if (flags.has_vehicle) {
+      // Every vehicle slot is van_and_driver — soft-suspend hire_forms
       await suspendRequirementForVanAndDriver(client, jobId, 'hire_forms');
     }
 
-    // ── Insurance excess (only if hire forms needed) ──
-    if (flags.has_vehicle && !isVanAndDriver) {
+    // ── Insurance excess (only if ≥1 self-drive van) ──
+    if (flags.has_vehicle && hasAnySelfDrive) {
       await upsertAutoRequirement(client, jobId, 'excess', flags, previousFlags, result, {
-        notes: `Insurance excess: £${(flags.vehicle_count * 1200).toLocaleString()} (${flags.vehicle_count} vehicle(s) × £1,200)`,
+        notes: `Insurance excess: £${(flags.self_drive_count * 1200).toLocaleString()} (${flags.self_drive_count} self-drive vehicle(s) × £1,200)`,
         snapshot: null,
       });
       await restoreSuspendedRequirement(client, jobId, 'excess');
@@ -292,7 +336,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       // This gives the Money tab and payment portal something to work with before hire forms are submitted.
       // Only creates if no job_excess records exist yet — doesn't overwrite portal payments or hire form data.
       const STANDARD_EXCESS_PER_VAN = 1200;
-      const expectedExcess = flags.vehicle_count * STANDARD_EXCESS_PER_VAN;
+      const expectedExcess = flags.self_drive_count * STANDARD_EXCESS_PER_VAN;
       const existingExcess = await client.query(
         `SELECT id FROM job_excess WHERE job_id = $1 LIMIT 1`,
         [jobId]
@@ -307,13 +351,13 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
             jobId,
             job.hh_job_number,
             expectedExcess,
-            `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.vehicle_count} vehicle(s)`,
+            `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.self_drive_count} self-drive vehicle(s)`,
             null, // client_name populated later
-            `Auto-created: ${flags.vehicle_count} self-drive vehicle(s) detected`,
+            `Auto-created: ${flags.self_drive_count} self-drive vehicle(s) detected`,
             '00000000-0000-0000-0000-000000000000',
           ]
         );
-        result.requirementsCreated.push(`excess_record (£${expectedExcess.toLocaleString()} for ${flags.vehicle_count} vehicle(s))`);
+        result.requirementsCreated.push(`excess_record (£${expectedExcess.toLocaleString()} for ${flags.self_drive_count} self-drive vehicle(s))`);
       } else {
         // Record exists — check if vehicle count changed and update required amount
         // Safe to update: needed, pending, pre_auth (no real money moved — pre_auth is just a hold)
@@ -337,7 +381,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
               WHERE id = $3`,
               [
                 expectedExcess,
-                `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.vehicle_count} vehicle(s)`,
+                `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.self_drive_count} self-drive vehicle(s)`,
                 curr.id,
               ]
             );
@@ -358,17 +402,18 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
             if (chargedRequired !== expectedExcess) {
               await client.query(
                 `UPDATE job_excess SET
-                  notes = COALESCE(notes, '') || E'\n⚠️ Vehicle count changed: now ${flags.vehicle_count} van(s) = £${expectedExcess}, but £' || excess_amount_required::TEXT || ' already charged. Review required.',
+                  notes = COALESCE(notes, '') || E'\n⚠️ Self-drive van count changed: now ${flags.self_drive_count} van(s) = £${expectedExcess}, but £' || excess_amount_required::TEXT || ' already charged. Review required.',
                   updated_at = NOW()
                 WHERE id = $1`,
                 [charged.id]
               );
-              result.mismatchesFlagged.push(`excess_record (charged £${chargedRequired} but now ${flags.vehicle_count} van(s) = £${expectedExcess})`);
+              result.mismatchesFlagged.push(`excess_record (charged £${chargedRequired} but now ${flags.self_drive_count} self-drive van(s) = £${expectedExcess})`);
             }
           }
         }
       }
-    } else if (isVanAndDriver) {
+    } else if (flags.has_vehicle) {
+      // All vehicle slots are van_and_driver — suspend excess too
       await suspendRequirementForVanAndDriver(client, jobId, 'excess');
     }
 
@@ -397,14 +442,16 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     const DETECTABLE_TYPES = ['vehicle', 'hire_forms', 'excess', 'backline', 'rehearsal'];
     const activeTypes = new Set<string>();
     if (flags.has_vehicle) { activeTypes.add('vehicle'); }
-    if (flags.has_vehicle && !isVanAndDriver) { activeTypes.add('hire_forms'); activeTypes.add('excess'); }
+    if (flags.has_vehicle && hasAnySelfDrive) { activeTypes.add('hire_forms'); activeTypes.add('excess'); }
     if (flags.has_backline) { activeTypes.add('backline'); }
     if (flags.has_rehearsal) { activeTypes.add('rehearsal'); }
 
+    // Every vehicle slot is van_and_driver — hire_forms/excess are suspended, not stale
+    const allVanAndDriver = flags.has_vehicle && !hasAnySelfDrive;
+
     for (const reqType of DETECTABLE_TYPES) {
       if (activeTypes.has(reqType)) continue; // Still on HH — skip
-      // Skip hire_forms/excess when in V&D mode — they're suspended, not stale
-      if (isVanAndDriver && (reqType === 'hire_forms' || reqType === 'excess')) continue;
+      if (allVanAndDriver && (reqType === 'hire_forms' || reqType === 'excess')) continue;
       // Check if an auto pre_hire requirement exists for this type
       const existing = await client.query(
         `SELECT id, is_auto, status FROM job_requirements
@@ -445,8 +492,15 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
     // ── Save derived flags for next comparison ──
     await client.query(
-      `UPDATE jobs SET hh_derived_flags = $1 WHERE id = $2`,
-      [JSON.stringify(flags), jobId]
+      `UPDATE jobs SET hh_derived_flags = $1,
+         is_van_and_driver = $2
+       WHERE id = $3`,
+      [
+        JSON.stringify(flags),
+        // Keep the legacy boolean in sync: true iff every vehicle slot is van_and_driver
+        flags.has_vehicle && flags.self_drive_count === 0,
+        jobId,
+      ]
     );
 
     // ── Auto-generate post-hire requirements ──
@@ -476,8 +530,8 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       }
     }
 
-    // Similarly for vehicles — post-hire check-in
-    if (isPostHirePhase && flags.has_vehicle && !isVanAndDriver) {
+    // Similarly for vehicles — post-hire check-in (only if any self-drive vans)
+    if (isPostHirePhase && flags.has_vehicle && hasAnySelfDrive) {
       const existingPostVehicle = await client.query(
         `SELECT id FROM job_requirements
          WHERE job_id = $1 AND requirement_type = 'vehicle' AND phase = 'post_hire'`,
@@ -800,6 +854,12 @@ function hasSnapshotChanged(oldSnapshot: any, newItems: HHLineItem[] | null): bo
 function buildVehicleNotes(flags: DerivedFlags): string {
   const parts: string[] = [];
   parts.push(`${flags.vehicle_count} vehicle(s): ${flags.vehicle_types.join(', ')}`);
+
+  if (flags.self_drive_count > 0 && flags.van_and_driver_count > 0) {
+    parts.push(`${flags.self_drive_count} self-drive, ${flags.van_and_driver_count} van & driver`);
+  } else if (flags.van_and_driver_count > 0) {
+    parts.push('All van & driver');
+  }
 
   if (flags.seat_config === 'forward_facing') {
     parts.push('Seats: Forward-facing');

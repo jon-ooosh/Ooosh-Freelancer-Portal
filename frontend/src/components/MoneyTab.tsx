@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
+import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
 import type { JobExcess } from '../../../shared/types';
 
@@ -273,7 +274,17 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             {/* Payment progress bar */}
             <div className="mb-2">
               <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                <span>Payment Progress</span>
+                <div className="flex items-center gap-2">
+                  <span>Payment Progress</span>
+                  {(() => {
+                    const state = getPaymentState(financial);
+                    return (
+                      <span className={`px-2 py-0.5 rounded-full border text-[10px] font-medium uppercase tracking-wider ${PAYMENT_STATE_CLASSES[state].pill}`}>
+                        {PAYMENT_STATE_LABELS[state]}
+                      </span>
+                    );
+                  })()}
+                </div>
                 <span>{depositPercent.toFixed(0)}% paid</span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-2.5">

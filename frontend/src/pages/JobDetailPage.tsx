@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ActivityTimeline from '../components/ActivityTimeline';
 import TransportCalculator from '../components/TransportCalculator';
 import RequirementCard from '../components/RequirementCard';
@@ -3925,14 +3926,17 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 
   if (!data) return null;
 
+  const state = getPaymentState(data);
+  const stateClass = PAYMENT_STATE_CLASSES[state].text;
+
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-4 py-3">
       <div className="flex items-center gap-4">
         <div className="flex-1">
           <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
             <span>Payment: £{data.total_hire_deposits.toFixed(2)} of £{data.hire_value_inc_vat.toFixed(2)}</span>
-            <span className={data.deposit_paid ? 'text-green-600 font-medium' : 'text-amber-600'}>
-              {data.deposit_percent >= 100 ? 'Paid in full' : data.deposit_paid ? 'Deposit secured' : `${data.deposit_percent.toFixed(0)}% paid`}
+            <span className={`${stateClass} font-medium`}>
+              {PAYMENT_STATE_LABELS[state]}
             </span>
           </div>
           <div className="w-full bg-gray-200 rounded-full h-2">
@@ -3954,12 +3958,16 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   );
 }
 
+
 function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
   jobId: string;
   hhJobNumber?: number | null;
   jobStatus?: number;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
+    vehicle_slots?: Array<{ item_id: number; slot_index: number; item_name: string; mode: 'self_drive' | 'van_and_driver' }>;
+    self_drive_count?: number;
+    van_and_driver_count?: number;
     seat_config: 'round_table' | 'forward_facing' | null;
     has_backline: boolean; backline_item_count: number;
     has_rehearsal: boolean; has_staging: boolean; has_pa: boolean; has_lighting: boolean; has_crew_items: boolean; crew_item_count: number;
@@ -4041,6 +4049,26 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
       }
     } catch (err) {
       console.error('Failed to toggle van & driver:', err);
+    }
+  }
+
+  async function changeSlotMode(itemId: number, slotIndex: number, mode: 'self_drive' | 'van_and_driver') {
+    try {
+      const data = await api.patch<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/vehicle-slot-mode`, {
+        itemId,
+        slotIndex,
+        mode,
+      });
+      // Re-read the derived flags so vehicle_slots reflects the change
+      const flags = await api.get<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/derived-flags`);
+      setIsVanAndDriver(flags.isVanAndDriver || false);
+      await loadAll();
+      // Auto-open crew calculator if job just became fully van & driver and no crew exists
+      if (data.isVanAndDriver && !hasCrewQuotes && !hasCrewOnHH && onOpenCrewCalculator) {
+        onOpenCrewCalculator();
+      }
+    } catch (err) {
+      console.error('Failed to change slot mode:', err);
     }
   }
 
@@ -4303,6 +4331,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
                   onAdvanceStep={advanceStep}
                   onRemove={removeRequirement}
                   onVanAndDriverToggle={req.requirement_type === 'vehicle' ? toggleVanAndDriver : undefined}
+                  onSlotModeChange={req.requirement_type === 'vehicle' ? changeSlotMode : undefined}
                   onReload={loadAll}
                 />
               );
