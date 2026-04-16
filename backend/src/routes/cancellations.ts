@@ -18,6 +18,7 @@ import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { calculatePreHireCancellation, calculateEarlyReturn } from '../services/cancellation-calculator';
 import emailService from '../services/email-service';
+import { getJobEmailRecipients } from '../services/money-emails';
 
 const router = Router();
 router.use(authenticate);
@@ -85,7 +86,7 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
     try {
       vehicles = await query(
         `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
-                fv.registration, fv.name AS vehicle_name
+                fv.reg, fv.name AS vehicle_name
          FROM vehicle_hire_assignments vha
          LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
          WHERE vha.job_id = $1 AND vha.status NOT IN ('cancelled')`,
@@ -266,8 +267,8 @@ router.post(
       if (cancellation_refund > 0) {
         try {
           await query(
-            `INSERT INTO job_payments (job_id, payment_type, amount, status, notes, recorded_by)
-             VALUES ($1, 'refund', $2, 'pending', $3, $4)`,
+            `INSERT INTO job_payments (job_id, payment_type, amount, payment_method, payment_status, notes, recorded_by)
+             VALUES ($1, 'refund', $2, 'bank_transfer', 'pending', $3, $4)`,
             [jobId, cancellation_refund, `Cancellation refund — ${cancellation_reason}`, userId]
           );
         } catch (err) {
@@ -290,7 +291,41 @@ router.post(
         },
       }).catch(err => console.error('[Cancellation] Internal email failed:', err));
 
-      // 10. Log audit
+      // 10. Send client cancellation email
+      (async () => {
+        try {
+          const { primaryEmail, primaryFirstName, ccEmails } = await getJobEmailRecipients(jobId);
+          if (!primaryEmail) {
+            console.warn('[Cancellation] No client email found — skipping client notification');
+            return;
+          }
+
+          const refundSection = cancellation_refund > 0
+            ? `<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Refund</p>
+               <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">£${cancellation_refund.toFixed(2)} to be refunded within 10 working days</p>`
+            : '';
+          const invoiceNote = cancellation_fee > 0
+            ? `<p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">A cancellation fee of <strong>£${cancellation_fee.toFixed(2)} + VAT</strong> applies per our <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#7B5EA7;text-decoration:none;font-weight:600;">hire terms</a>. An invoice will follow shortly if not already sent.</p>`
+            : '';
+
+          await emailService.send('job_cancelled_client', {
+            to: primaryEmail,
+            cc: ccEmails,
+            variables: {
+              clientName: primaryFirstName || 'there',
+              jobNumber,
+              jobName,
+              jobDates,
+              refundSection,
+              invoiceNote,
+            },
+          });
+        } catch (err) {
+          console.error('[Cancellation] Client email failed:', err);
+        }
+      })();
+
+      // 11. Log audit
       await logAudit(userId, 'jobs', jobId, 'update', job, { pipeline_status: 'cancelled', cancellation_reason });
 
       res.json({ success: true, message: 'Job cancelled successfully' });
