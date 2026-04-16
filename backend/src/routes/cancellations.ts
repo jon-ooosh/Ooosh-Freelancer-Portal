@@ -55,41 +55,51 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
   try {
     const jobId = req.params.jobId as string;
 
-    // Get quotes (transport/crew)
-    const quotes = await query(
-      `SELECT q.id, q.job_type, q.venue_name, q.client_charge_total, q.ops_status,
-              q.job_date, q.collection_date
-       FROM quotes q WHERE q.job_id = $1 AND q.is_deleted = false`,
-      [jobId]
-    );
+    // Each query is independent — catch individually so one failing doesn't block others
+    let quotes = { rows: [] as any[] };
+    let crew = { rows: [] as any[] };
+    let vehicles = { rows: [] as any[] };
+    let excess = { rows: [] as any[] };
 
-    // Get crew assignments
-    const crew = await query(
-      `SELECT qa.id, qa.role, qa.agreed_rate, qa.status,
-              p.first_name, p.last_name, p.email, p.phone
-       FROM quote_assignments qa
-       JOIN people p ON p.id = qa.person_id
-       WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-         AND qa.status NOT IN ('cancelled', 'declined')`,
-      [jobId]
-    );
+    try {
+      quotes = await query(
+        `SELECT q.id, q.job_type, q.venue_name, q.client_charge_total, q.ops_status,
+                q.job_date, q.collection_date
+         FROM quotes q WHERE q.job_id = $1 AND q.is_deleted = false`,
+        [jobId]
+      );
+    } catch (e) { console.warn('[Cancellation] quotes query failed:', e); }
 
-    // Get vehicle assignments
-    const vehicles = await query(
-      `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
-              fv.registration, fv.name AS vehicle_name
-       FROM vehicle_hire_assignments vha
-       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-       WHERE vha.job_id = $1 AND vha.status NOT IN ('cancelled')`,
-      [jobId]
-    );
+    try {
+      crew = await query(
+        `SELECT qa.id, qa.role, qa.agreed_rate, qa.status,
+                p.first_name, p.last_name, p.email, p.phone
+         FROM quote_assignments qa
+         JOIN people p ON p.id = qa.person_id
+         WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
+           AND qa.status NOT IN ('cancelled', 'declined')`,
+        [jobId]
+      );
+    } catch (e) { console.warn('[Cancellation] crew query failed:', e); }
 
-    // Get excess records
-    const excess = await query(
-      `SELECT id, excess_amount_required, excess_status, payment_method
-       FROM job_excess WHERE job_id = $1`,
-      [jobId]
-    );
+    try {
+      vehicles = await query(
+        `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
+                fv.registration, fv.name AS vehicle_name
+         FROM vehicle_hire_assignments vha
+         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+         WHERE vha.job_id = $1 AND vha.status NOT IN ('cancelled')`,
+        [jobId]
+      );
+    } catch (e) { console.warn('[Cancellation] vehicles query failed:', e); }
+
+    try {
+      excess = await query(
+        `SELECT id, excess_amount_required, excess_status, payment_method
+         FROM job_excess WHERE job_id = $1`,
+        [jobId]
+      );
+    } catch (e) { console.warn('[Cancellation] excess query failed:', e); }
 
     res.json({
       quotes: quotes.rows,
