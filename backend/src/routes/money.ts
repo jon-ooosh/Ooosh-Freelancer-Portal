@@ -250,25 +250,33 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     const vanCount = parseInt(vanCountResult.rows[0]?.van_count || '0');
 
     // Build per-driver breakdown
-    const drivers = excessResult.rows.map((r: any) => ({
-      excess_id: r.excess_id,
-      driver_id: r.driver_id,
-      driver_name: r.driver_name,
-      vehicle_id: r.vehicle_id,
-      vehicle_reg: r.vehicle_reg,
-      vehicle_type: r.vehicle_type,
-      excess_amount_required: parseFloat(r.excess_amount_required || 0),
-      excess_amount_taken: parseFloat(r.excess_amount_taken || 0),
-      excess_outstanding: Math.max(0, parseFloat(r.excess_amount_required || 0) - parseFloat(r.excess_amount_taken || 0)),
-      excess_status: r.excess_status,
-      excess_calculation_basis: r.excess_calculation_basis,
-      payment_method: r.payment_method,
-      payment_reference: r.payment_reference,
-      payment_date: r.payment_date,
-      licence_points: r.licence_points,
-      requires_referral: r.requires_referral,
-      suggested_collection_method: r.suggested_collection_method,
-    }));
+    const drivers = excessResult.rows.map((r: any) => {
+      const required = parseFloat(r.excess_amount_required || 0);
+      const taken = parseFloat(r.excess_amount_taken || 0);
+      return {
+        // Canonical OP fields
+        excess_id: r.excess_id,
+        id: r.excess_id, // alias for Payment Portal compat
+        driver_id: r.driver_id,
+        driver_name: r.driver_name,
+        vehicle_id: r.vehicle_id,
+        vehicle_reg: r.vehicle_reg,
+        vehicle_type: r.vehicle_type,
+        excess_amount_required: required,
+        excess_amount: required, // alias for Payment Portal compat (expects 'excess_amount')
+        excess: required, // alias — Payment Portal sorts on `.excess`
+        excess_amount_taken: taken,
+        excess_outstanding: Math.max(0, required - taken),
+        excess_status: r.excess_status,
+        excess_calculation_basis: r.excess_calculation_basis,
+        payment_method: r.payment_method,
+        payment_reference: r.payment_reference,
+        payment_date: r.payment_date,
+        licence_points: r.licence_points,
+        requires_referral: r.requires_referral,
+        suggested_collection_method: r.suggested_collection_method,
+      };
+    });
 
     // Totals
     const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
