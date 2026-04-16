@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import api from '../api';
+import { api } from '../services/api';
 
 interface LostCancelledJob {
   id: string;

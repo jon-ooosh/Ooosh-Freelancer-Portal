@@ -1762,7 +1762,7 @@ export default function PipelinePage() {
 
   const jobsByStatus: Record<PipelineStatus, Job[]> = {
     new_enquiry: [], quoting: [], chasing: [], paused: [],
-    provisional: [], confirmed: [], lost: [],
+    provisional: [], confirmed: [], lost: [], cancelled: [],
   };
   for (const job of jobs) {
     // Merge quoting into new_enquiry (now "Enquiries")

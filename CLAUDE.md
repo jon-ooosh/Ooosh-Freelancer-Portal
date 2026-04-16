@@ -875,6 +875,41 @@ No new tables needed — all types use existing `job_requirements` table with `p
 - Job Detail post-hire tab scrollable via existing tab bar mobile fix
 - Filter pills use `flex-wrap` for mobile reflow
 
+#### Step 4c: Cancellation System ← FOUNDATION COMPLETE (Apr 2026)
+
+Full cancellation workflow distinguishing **lost enquiries** (never confirmed) from **cancelled bookings** (were confirmed, now cancelled). Replaces the previous approach where both mapped to `lost`.
+
+**Full spec:** `docs/CANCELLATION-SPEC.md`
+
+**Key decisions:**
+- `cancelled` is a distinct pipeline status from `lost` (maps to HH status 9 vs 10)
+- Cancellation calculator uses post-VAT-adjustment figures for accuracy
+- VE103B certs are NOT voided on cancellation — requirements marked as not needed
+- Transport & crew costs surfaced in modal for informed decisions
+- Admin/manager can action cancellation; other staff see "Refer to Manager"
+- Re-opening a cancelled job creates a new booking (via HH `job_duplicate.php`) — original stays cancelled for audit
+- Partial cancellation (scope reduction) deferred to future
+
+**Foundation — COMPLETE:**
+- [x] Migration 047: cancellation fields on jobs table (`cancelled_at`, `cancelled_by`, `cancellation_reason`, `cancellation_fee`, `cancellation_refund`, `cancellation_notice_days`, `cancellation_notes`, `cancellation_tier`, `reopened_from_job_id`, `reopened_to_job_id`)
+- [x] `cancelled` added to `PipelineStatus` type, config, writeback mapping, pipeline labels
+- [x] HH status mapping split: `cancelled → 9`, `lost → 10` (was both → lost)
+- [x] `cancellation-calculator.ts`: T&Cs clause 7.1 (pre-hire) + 7.3 (early return), three hire types, £25+VAT minimum
+- [x] `cancellations.ts` route: calculate, process, transport-crew, list, reopen endpoints
+- [x] Cancellation workflow: status update, timeline log, requirements marked done, vehicle assignments cancelled, crew cancelled + emailed, excess flagged, pending refund created, HH write-back
+- [x] `CancellationModal.tsx`: calculator display, transport/crew summary, manual override, RBAC
+- [x] `LostCancelledPage.tsx` at `/jobs/lost-cancelled` with Cancelled/Lost tabs, search, pagination
+- [x] Job Detail: red cancelled banner with fee/refund summary, "Re-open as New Booking" button
+- [x] Crew cancellation + internal notification email templates
+- [x] Chase reminders suppressed for lost/cancelled jobs (clear `next_chase_date`, hide UI)
+- [x] Pipeline fields (likelihood, chase) hidden for lost/cancelled jobs
+
+**Remaining work:**
+- [ ] HH invoice creation on cancellation (auto-create invoice for retained fee via `billing_deposit_save.php`)
+- [ ] Cancellation data surfaced in client hire history (like retro data)
+- [ ] Early return calculator frontend integration (clause 7.3 — backend built, UI not yet)
+- [ ] Partial cancellation / scope reduction (deferred — noted for future)
+
 #### Step 5: Payment Portal Repointing
 *Merged into Step 3 Phase E (Money System).* See above for full repointing plan with `DATA_BACKEND` env var toggle.
 

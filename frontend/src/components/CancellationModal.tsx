@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { CANCELLATION_REASON_OPTIONS } from '../../../shared/types';
-import api from '../api';
+import { api } from '../services/api';
 
 interface TransportCrewData {
   quotes: Array<{ id: string; job_type: string; venue_name: string; total_cost: number; ops_status: string }>;
@@ -45,7 +45,7 @@ export default function CancellationModal({
   jobId, jobName, jobNumber, hireValue, hireStartDate, totalHireDays,
   userRole, onConfirm, onCancel, saving,
 }: Props) {
-  const [reason, setReason] = useState(CANCELLATION_REASON_OPTIONS[0]);
+  const [reason, setReason] = useState<string>(CANCELLATION_REASON_OPTIONS[0]);
   const [notes, setNotes] = useState('');
   const [transportCharges, setTransportCharges] = useState(0);
   const [calcResult, setCalcResult] = useState<CancellationCalcResult | null>(null);
