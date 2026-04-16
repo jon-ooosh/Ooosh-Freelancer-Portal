@@ -1113,9 +1113,52 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     const payment = result.rows[0];
 
     // ── Update excess if this is an excess payment or pre-auth ──
-    if ((effectivePaymentType === 'excess') && excess_id) {
+    let resolvedExcessId = excess_id || null;
+
+    if (effectivePaymentType === 'excess') {
+      // If no excess_id provided, try to find or create a job_excess record
+      if (!resolvedExcessId) {
+        // Look for an existing job_excess record for this job
+        const existingExcess = await query(
+          `SELECT id, excess_status FROM job_excess
+           WHERE job_id = $1 AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+           ORDER BY created_at DESC LIMIT 1`,
+          [job.id]
+        );
+
+        if (existingExcess.rows.length > 0) {
+          resolvedExcessId = existingExcess.rows[0].id;
+          console.log(`[money] Found existing excess record ${resolvedExcessId} for job ${job.id}`);
+        } else {
+          // No excess record exists — auto-create one (payment portal charged before hire form submitted)
+          const newExcess = await query(
+            `INSERT INTO job_excess (
+              job_id, hirehop_job_id, excess_amount_required, excess_status,
+              client_name, notes, created_by
+            ) VALUES ($1, $2, $3, 'needed', $4, $5, $6)
+            RETURNING id`,
+            [
+              job.id,
+              job.hh_job_number,
+              amount, // Use payment amount as required (default £1,200 from portal)
+              job.client_name,
+              'Auto-created from payment portal excess payment',
+              '00000000-0000-0000-0000-000000000000', // system user
+            ]
+          );
+          resolvedExcessId = newExcess.rows[0].id;
+          console.log(`[money] Auto-created excess record ${resolvedExcessId} for job ${job.id} (£${amount})`);
+        }
+
+        // Update the job_payments record to link to the resolved excess
+        query(
+          `UPDATE job_payments SET excess_id = $1 WHERE id = $2`,
+          [resolvedExcessId, payment.id]
+        ).catch(() => {});
+      }
+
+      // Now update the excess record
       if (isPreAuth) {
-        // Pre-auth: card hold taken, not yet charged. Set status to 'pre_auth'.
         await query(
           `UPDATE job_excess SET
             excess_amount_taken = $1,
@@ -1125,11 +1168,10 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
             payment_date = NOW(),
             updated_at = NOW()
           WHERE id = $4`,
-          [amount, effectiveMethod, payment_reference || null, excess_id]
+          [amount, effectiveMethod, payment_reference || null, resolvedExcessId]
         );
-        console.log(`[money] Excess ${excess_id} set to pre_auth (£${amount})`);
+        console.log(`[money] Excess ${resolvedExcessId} set to pre_auth (£${amount})`);
       } else {
-        // Actual excess payment
         await query(
           `UPDATE job_excess SET
             excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
@@ -1142,7 +1184,7 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
             payment_date = NOW(),
             updated_at = NOW()
           WHERE id = $4`,
-          [amount, effectiveMethod, payment_reference || null, excess_id]
+          [amount, effectiveMethod, payment_reference || null, resolvedExcessId]
         );
       }
 
@@ -1150,7 +1192,7 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
       if (hh_deposit_id) {
         query(
           `UPDATE job_excess SET hh_deposit_id = $1, hh_reconciled_at = NOW(), hh_reconcile_source = 'payment_portal' WHERE id = $2`,
-          [hh_deposit_id, excess_id]
+          [hh_deposit_id, resolvedExcessId]
         ).catch(() => {}); // fire-and-forget
       }
     }
