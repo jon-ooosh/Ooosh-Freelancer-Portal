@@ -276,7 +276,7 @@ export function startScheduler() {
       // Find post_hire requirements with overdue due_date that haven't been notified today
       const overdue = await query(`
         SELECT jr.id, jr.job_id, jr.requirement_type, jr.custom_label, jr.due_date,
-               jr.assigned_to, jr.notes,
+               jr.assigned_to, jr.notes, jr.delivery_method,
                j.hh_job_number, j.job_name, j.client_name,
                rtd.label AS type_label
         FROM job_requirements jr
@@ -321,15 +321,41 @@ export function startScheduler() {
           );
           if (existing.rows.length > 0) continue;
 
+          // Respect per-requirement delivery_method
+          const deliveryMethod = req.delivery_method || 'both';
+          const basePriority = daysOverdue > 7 ? 'high' : 'normal';
+          // notification-only → low priority (escalation scheduler skips email for low)
+          const effectivePriority = deliveryMethod === 'notification' ? 'low' : basePriority;
+
           await query(
             `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
              VALUES ($1, 'chase_alert', $2, $3, 'job_requirements', $4, $5, $6)`,
             [
               userId, title, content, req.id,
               `/jobs/${req.job_id}?tab=overview`,
-              daysOverdue > 7 ? 'high' : 'normal',
+              effectivePriority,
             ]
           );
+
+          // If email-only, send immediately and mark as emailed
+          if (deliveryMethod === 'email') {
+            try {
+              const userResult = await query('SELECT email, first_name FROM users WHERE id = $1', [userId]);
+              if (userResult.rows.length > 0 && userResult.rows[0].email) {
+                await emailService.sendRaw({
+                  to: userResult.rows[0].email,
+                  subject: title,
+                  html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
+                         <p><strong>${label}</strong> for job <strong>${jobName}</strong> was due ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} ago.</p>
+                         ${req.notes ? `<p>Notes: ${req.notes}</p>` : ''}
+                         <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${req.job_id}?tab=overview">View Job</a></p>`,
+                });
+              }
+            } catch (emailErr) {
+              console.warn('Scheduler: Chase scanner email failed:', emailErr);
+            }
+          }
+
           created++;
         }
       }

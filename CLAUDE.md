@@ -1531,6 +1531,10 @@ Respects `user_notification_preferences.delivery_method` — if user has set `no
 - [x] Multi-reminder support: add multiple reminders, each with text, date, delivery method, priority, assigned user
 - [x] Chase auto-mover creates inbox notifications with snooze support (targets last chase assignee or admins)
 - [x] Reminder job requirement type (migration 047): add reminders to prep checklist with date, delivery, event triggers, multi-user assignment
+- [x] Event trigger reminders (migration 048): `event_trigger` + `delivery_method` columns on `job_requirements`, fire notifications when job status matches trigger (confirmed/cancelled/lost), triggers fire in both pipeline.ts status changes and cancellations.ts cancellation flow
+- [x] Per-reminder delivery enforcement: `delivery_method` (notification/email/both) respected when creating and escalating notifications — notification-only uses low priority (skips email escalation), email-only sends immediately, both uses normal escalation
+- [x] Dedicated "+ Reminder" button at top of prep checklist (next to "+ Add Job Requirement")
+- [x] Close-out chase scanner respects per-requirement delivery_method
 
 ##### Future Enhancements
 - Staff working calendar integration (escalation timing based on actual schedules)
