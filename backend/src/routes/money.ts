@@ -263,11 +263,12 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
         vehicle_reg: r.vehicle_reg,
         vehicle_type: r.vehicle_type,
         excess_amount_required: required,
-        excess_amount: required, // alias for Payment Portal compat (expects 'excess_amount')
+        excess_amount: required, // alias for Payment Portal compat
         excess: required, // alias — Payment Portal sorts on `.excess`
         excess_amount_taken: taken,
         excess_outstanding: Math.max(0, required - taken),
         excess_status: r.excess_status,
+        status: r.excess_status, // alias — Payment Portal checks `.status`
         excess_calculation_basis: r.excess_calculation_basis,
         payment_method: r.payment_method,
         payment_reference: r.payment_reference,
@@ -285,6 +286,12 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     const resolvedStatuses = ['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'];
     const driversCleared = drivers.filter((d: any) => resolvedStatuses.includes(d.excess_status)).length;
     const driversPending = drivers.filter((d: any) => !resolvedStatuses.includes(d.excess_status)).length;
+
+    // Summary flags for Payment Portal — quick checks without parsing driver array
+    const hasPreAuth = drivers.some((d: any) => d.excess_status === 'pre_auth');
+    const hasPaid = drivers.some((d: any) => d.excess_status === 'taken' || (d.excess_amount_taken > 0 && d.excess_status !== 'pre_auth'));
+    const hasRetained = drivers.some((d: any) => d.excess_status === 'rolled_over');
+    const allCleared = drivers.length > 0 && driversPending === 0;
 
     res.json({
       data: {
@@ -305,6 +312,13 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
             : preAuthMethod === 'too_early'
               ? `Hire is ≤4 days but ends in ${daysUntilEnd} days (>5 days away)`
               : `Hire is ≤4 days and ends within 5 days`,
+        },
+        // Summary flags — portal-friendly boolean checks
+        excess_status_flags: {
+          has_pre_auth: hasPreAuth,
+          has_paid: hasPaid,
+          has_retained: hasRetained,
+          all_cleared: allCleared,
         },
         // Per-driver breakdown (sorted by excess amount descending)
         drivers,
@@ -1248,16 +1262,16 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
 
     // ── Email triggers (fire-and-forget) ──
     try {
-      if (effectivePaymentType === 'excess' && excess_id) {
+      if (effectivePaymentType === 'excess' && resolvedExcessId) {
         // Excess payment/pre-auth email
         sendExcessEmail({
           templateId: isPreAuth ? 'excess_preauth_confirmed' : 'excess_payment_confirmed',
-          excessId: excess_id,
+          excessId: resolvedExcessId,
           jobId: job.id,
           amount,
           paymentMethod: effectiveMethod,
         }).catch(e => console.error('[money] Excess email failed (payment-event):', e));
-      } else if (effectivePaymentType !== 'refund' && effectivePaymentType !== 'excess_refund') {
+      } else if (effectivePaymentType !== 'refund' && effectivePaymentType !== 'excess_refund' && effectivePaymentType !== 'excess') {
         // Hire deposit/balance email
         const bankLabel = PAYMENT_METHODS_LABELS[effectiveMethod] || effectiveMethod;
         sendPaymentEmail({
