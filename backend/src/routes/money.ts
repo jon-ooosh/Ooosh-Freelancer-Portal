@@ -1262,16 +1262,16 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
 
     // ── Email triggers (fire-and-forget) ──
     try {
-      if (effectivePaymentType === 'excess' && excess_id) {
+      if (effectivePaymentType === 'excess' && resolvedExcessId) {
         // Excess payment/pre-auth email
         sendExcessEmail({
           templateId: isPreAuth ? 'excess_preauth_confirmed' : 'excess_payment_confirmed',
-          excessId: excess_id,
+          excessId: resolvedExcessId,
           jobId: job.id,
           amount,
           paymentMethod: effectiveMethod,
         }).catch(e => console.error('[money] Excess email failed (payment-event):', e));
-      } else if (effectivePaymentType !== 'refund' && effectivePaymentType !== 'excess_refund') {
+      } else if (effectivePaymentType !== 'refund' && effectivePaymentType !== 'excess_refund' && effectivePaymentType !== 'excess') {
         // Hire deposit/balance email
         const bankLabel = PAYMENT_METHODS_LABELS[effectiveMethod] || effectiveMethod;
         sendPaymentEmail({

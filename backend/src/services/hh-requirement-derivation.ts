@@ -344,6 +344,29 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
             );
             result.requirementsUpdated.push(`excess_record (£${currRequired} → £${expectedExcess})`);
           }
+        } else {
+          // Check for paid/pre-auth records where van count changed — flag mismatch but don't alter amount
+          const paidExcess = await client.query(
+            `SELECT id, excess_amount_required, excess_status
+             FROM job_excess WHERE job_id = $1 AND assignment_id IS NULL
+               AND excess_status NOT IN ('needed', 'pending', 'reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+             LIMIT 1`,
+            [jobId]
+          );
+          if (paidExcess.rows.length > 0) {
+            const paid = paidExcess.rows[0];
+            const paidRequired = parseFloat(paid.excess_amount_required || 0);
+            if (paidRequired !== expectedExcess) {
+              await client.query(
+                `UPDATE job_excess SET
+                  notes = COALESCE(notes, '') || E'\n⚠️ Vehicle count changed: now ${flags.vehicle_count} van(s) = £${expectedExcess}, but £' || excess_amount_required::TEXT || ' already ${paid.excess_status}. Review required.',
+                  updated_at = NOW()
+                WHERE id = $1`,
+                [paid.id]
+              );
+              result.mismatchesFlagged.push(`excess_record (${paid.excess_status} £${paidRequired} but now ${flags.vehicle_count} van(s) = £${expectedExcess})`);
+            }
+          }
         }
       }
     } else if (isVanAndDriver) {
