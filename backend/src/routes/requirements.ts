@@ -232,12 +232,14 @@ const addRequirementSchema = z.object({
   source: z.string().optional(),
   source_id: z.string().uuid().optional(),
   phase: z.enum(['pre_hire', 'post_hire']).optional(),
+  event_trigger: z.enum(['confirmed', 'cancelled', 'lost']).optional().nullable(),
+  delivery_method: z.enum(['notification', 'email', 'both']).optional(),
 });
 
 router.post('/job/:jobId', validate(addRequirementSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
-    const { requirement_type, custom_label, notes, assigned_to, due_date, status, current_step, source, source_id, phase } = req.body;
+    const { requirement_type, custom_label, notes, assigned_to, due_date, status, current_step, source, source_id, phase, event_trigger, delivery_method } = req.body;
 
     // Verify the requirement type exists
     const typeCheck = await query('SELECT type, steps FROM requirement_type_definitions WHERE type = $1', [requirement_type]);
@@ -272,12 +274,12 @@ router.post('/job/:jobId', validate(addRequirementSchema), async (req: AuthReque
     );
 
     const result = await query(
-      `INSERT INTO job_requirements (job_id, requirement_type, custom_label, notes, assigned_to, due_date, status, current_step, source, source_id, sort_order, created_by, phase)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      `INSERT INTO job_requirements (job_id, requirement_type, custom_label, notes, assigned_to, due_date, status, current_step, source, source_id, sort_order, created_by, phase, event_trigger, delivery_method)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING *`,
       [jobId, requirement_type, custom_label || null, notes || null, assigned_to || null, due_date || null,
        status || 'not_started', initialStep || null, source || 'manual', source_id || null,
-       maxOrder.rows[0].next_order, req.user!.id, reqPhase]
+       maxOrder.rows[0].next_order, req.user!.id, reqPhase, event_trigger || null, delivery_method || 'both']
     );
 
     res.status(201).json({ data: result.rows[0] });
