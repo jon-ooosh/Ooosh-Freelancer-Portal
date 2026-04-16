@@ -219,9 +219,11 @@ export default function InboxPage() {
     }
   }
 
+  // Track replies sent from inbox (for inline display)
+  const [replies, setReplies] = useState<Record<string, string>>({});
+
   async function replyToMention(notif: Notification, text: string) {
     if (!notif.source_user_id || !notif.entity_type || !notif.entity_id) return;
-    // Map entity_type to the interaction field name
     const fieldMap: Record<string, string> = {
       jobs: 'job_id', people: 'person_id', organisations: 'organisation_id', venues: 'venue_id',
     };
@@ -235,8 +237,9 @@ export default function InboxPage() {
       mentioned_user_ids: [notif.source_user_id],
       mention_priority: 'normal',
     });
-    // Mark original as acknowledged
+    // Mark as Done + store reply text for inline display
     await acknowledge(notif.id);
+    setReplies(prev => ({ ...prev, [notif.id]: text }));
   }
 
   async function loadPreferences() {
@@ -355,6 +358,7 @@ export default function InboxPage() {
               onSnoozeClick={(id) => { setSnoozeId(id); setSnoozeDays(7); }}
               onNavigate={navigateToEntity}
               onReply={replyToMention}
+              replyText={replies[notif.id]}
             />
           ))}
         </div>
@@ -446,16 +450,17 @@ export default function InboxPage() {
 
 /* ── Notification Row ─────────────────────────────────────────────── */
 
-function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNavigate, onReply }: {
+function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNavigate, onReply, replyText }: {
   notif: Notification;
   onMarkRead: (id: string) => void;
   onAcknowledge: (id: string) => void;
   onSnoozeClick: (id: string) => void;
   onNavigate: (n: Notification) => void;
   onReply: (notif: Notification, text: string) => Promise<void>;
+  replyText?: string;
 }) {
   const [showReply, setShowReply] = useState(false);
-  const [replyText, setReplyText] = useState('');
+  const [replyDraft, setReplyDraft] = useState('');
   const [replying, setReplying] = useState(false);
   const ps = PRIORITY_STYLES[notif.priority] || PRIORITY_STYLES.normal;
   const isFollowUp = notif.type === 'follow_up';
@@ -464,11 +469,11 @@ function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNa
   const isAcknowledged = !!notif.acknowledged_at;
 
   async function handleReply() {
-    if (!replyText.trim() || replying) return;
+    if (!replyDraft.trim() || replying) return;
     setReplying(true);
     try {
-      await onReply(notif, replyText.trim());
-      setReplyText('');
+      await onReply(notif, replyDraft.trim());
+      setReplyDraft('');
       setShowReply(false);
     } catch { /* handled by parent */ }
     finally { setReplying(false); }
@@ -573,14 +578,26 @@ function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNa
         </div>
       </div>
 
+      {/* Reply sent indicator */}
+      {replyText && (
+        <div className="mt-2 pt-2 border-t border-green-100 flex items-start gap-2">
+          <svg className="w-3 h-3 text-green-500 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+            <path fillRule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+          </svg>
+          <div className="text-xs text-green-700">
+            <span className="font-medium">You replied:</span> {replyText}
+          </div>
+        </div>
+      )}
+
       {/* Inline reply form */}
-      {showReply && (
+      {showReply && !replyText && (
         <div className="mt-3 pt-3 border-t border-gray-200" onClick={e => e.stopPropagation()}>
           <div className="flex gap-2">
             <input
               type="text"
-              value={replyText}
-              onChange={e => setReplyText(e.target.value)}
+              value={replyDraft}
+              onChange={e => setReplyDraft(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleReply(); } }}
               placeholder={`Reply to ${notif.source_first_name || 'sender'}...`}
               className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none"
@@ -588,7 +605,7 @@ function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNa
             />
             <button
               onClick={handleReply}
-              disabled={!replyText.trim() || replying}
+              disabled={!replyDraft.trim() || replying}
               className="px-3 py-1.5 text-xs bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
             >
               {replying ? '...' : 'Send'}
