@@ -315,56 +315,55 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         );
         result.requirementsCreated.push(`excess_record (£${expectedExcess.toLocaleString()} for ${flags.vehicle_count} vehicle(s))`);
       } else {
-        // Record exists — check if vehicle count changed and update required amount if not yet paid
-        const currentExcess = await client.query(
+        // Record exists — check if vehicle count changed and update required amount
+        // Safe to update: needed, pending, pre_auth (no real money moved — pre_auth is just a hold)
+        // Flag only: taken, partially_paid (real money has changed hands)
+        const updatableExcess = await client.query(
           `SELECT id, excess_amount_required, excess_amount_taken, excess_status, assignment_id
            FROM job_excess WHERE job_id = $1 AND assignment_id IS NULL
-             AND excess_status IN ('needed', 'pending')
-             AND (excess_amount_taken IS NULL OR excess_amount_taken = 0)
+             AND excess_status IN ('needed', 'pending', 'pre_auth')
            LIMIT 1`,
           [jobId]
         );
-        if (currentExcess.rows.length > 0) {
-          const curr = currentExcess.rows[0];
+        if (updatableExcess.rows.length > 0) {
+          const curr = updatableExcess.rows[0];
           const currRequired = parseFloat(curr.excess_amount_required || 0);
           if (currRequired !== expectedExcess) {
             await client.query(
               `UPDATE job_excess SET
                 excess_amount_required = $1,
                 excess_calculation_basis = $2,
-                notes = $3,
                 updated_at = NOW()
-              WHERE id = $4`,
+              WHERE id = $3`,
               [
                 expectedExcess,
                 `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.vehicle_count} vehicle(s)`,
-                `Updated: ${flags.vehicle_count} self-drive vehicle(s) detected`,
                 curr.id,
               ]
             );
             result.requirementsUpdated.push(`excess_record (£${currRequired} → £${expectedExcess})`);
           }
         } else {
-          // Check for paid/pre-auth records where van count changed — flag mismatch but don't alter amount
-          const paidExcess = await client.query(
+          // Check for actually-charged records where van count changed — flag mismatch only
+          const chargedExcess = await client.query(
             `SELECT id, excess_amount_required, excess_status
              FROM job_excess WHERE job_id = $1 AND assignment_id IS NULL
-               AND excess_status NOT IN ('needed', 'pending', 'reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+               AND excess_status IN ('taken', 'partially_paid')
              LIMIT 1`,
             [jobId]
           );
-          if (paidExcess.rows.length > 0) {
-            const paid = paidExcess.rows[0];
-            const paidRequired = parseFloat(paid.excess_amount_required || 0);
-            if (paidRequired !== expectedExcess) {
+          if (chargedExcess.rows.length > 0) {
+            const charged = chargedExcess.rows[0];
+            const chargedRequired = parseFloat(charged.excess_amount_required || 0);
+            if (chargedRequired !== expectedExcess) {
               await client.query(
                 `UPDATE job_excess SET
-                  notes = COALESCE(notes, '') || E'\n⚠️ Vehicle count changed: now ${flags.vehicle_count} van(s) = £${expectedExcess}, but £' || excess_amount_required::TEXT || ' already ${paid.excess_status}. Review required.',
+                  notes = COALESCE(notes, '') || E'\n⚠️ Vehicle count changed: now ${flags.vehicle_count} van(s) = £${expectedExcess}, but £' || excess_amount_required::TEXT || ' already charged. Review required.',
                   updated_at = NOW()
                 WHERE id = $1`,
-                [paid.id]
+                [charged.id]
               );
-              result.mismatchesFlagged.push(`excess_record (${paid.excess_status} £${paidRequired} but now ${flags.vehicle_count} van(s) = £${expectedExcess})`);
+              result.mismatchesFlagged.push(`excess_record (charged £${chargedRequired} but now ${flags.vehicle_count} van(s) = £${expectedExcess})`);
             }
           }
         }
