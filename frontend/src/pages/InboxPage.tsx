@@ -219,6 +219,26 @@ export default function InboxPage() {
     }
   }
 
+  async function replyToMention(notif: Notification, text: string) {
+    if (!notif.source_user_id || !notif.entity_type || !notif.entity_id) return;
+    // Map entity_type to the interaction field name
+    const fieldMap: Record<string, string> = {
+      jobs: 'job_id', people: 'person_id', organisations: 'organisation_id', venues: 'venue_id',
+    };
+    const entityField = fieldMap[notif.entity_type];
+    if (!entityField) return;
+
+    await api.post('/interactions', {
+      type: 'note',
+      content: text,
+      [entityField]: notif.entity_id,
+      mentioned_user_ids: [notif.source_user_id],
+      mention_priority: 'normal',
+    });
+    // Mark original as acknowledged
+    await acknowledge(notif.id);
+  }
+
   async function loadPreferences() {
     try {
       const data = await api.get<{ data: Preferences }>('/notifications/preferences');
@@ -334,6 +354,7 @@ export default function InboxPage() {
               onAcknowledge={acknowledge}
               onSnoozeClick={(id) => { setSnoozeId(id); setSnoozeDays(7); }}
               onNavigate={navigateToEntity}
+              onReply={replyToMention}
             />
           ))}
         </div>
@@ -425,17 +446,33 @@ export default function InboxPage() {
 
 /* ── Notification Row ─────────────────────────────────────────────── */
 
-function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNavigate }: {
+function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNavigate, onReply }: {
   notif: Notification;
   onMarkRead: (id: string) => void;
   onAcknowledge: (id: string) => void;
   onSnoozeClick: (id: string) => void;
   onNavigate: (n: Notification) => void;
+  onReply: (notif: Notification, text: string) => Promise<void>;
 }) {
+  const [showReply, setShowReply] = useState(false);
+  const [replyText, setReplyText] = useState('');
+  const [replying, setReplying] = useState(false);
   const ps = PRIORITY_STYLES[notif.priority] || PRIORITY_STYLES.normal;
   const isFollowUp = notif.type === 'follow_up';
+  const isMention = notif.type === 'mention';
   const isSnoozed = notif.snoozed_until && new Date(notif.snoozed_until) > new Date();
   const isAcknowledged = !!notif.acknowledged_at;
+
+  async function handleReply() {
+    if (!replyText.trim() || replying) return;
+    setReplying(true);
+    try {
+      await onReply(notif, replyText.trim());
+      setReplyText('');
+      setShowReply(false);
+    } catch { /* handled by parent */ }
+    finally { setReplying(false); }
+  }
 
   return (
     <div
@@ -508,6 +545,14 @@ function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNa
           <span className="text-[10px] text-gray-400">{formatTimeAgo(notif.created_at)}</span>
 
           <div className="flex items-center gap-1 mt-1" onClick={e => e.stopPropagation()}>
+            {isMention && notif.source_user_id && (
+              <button
+                onClick={() => setShowReply(!showReply)}
+                className="text-[10px] text-ooosh-600 hover:text-ooosh-700 border border-ooosh-200 px-2 py-0.5 rounded hover:bg-ooosh-50 transition-colors"
+              >
+                Reply
+              </button>
+            )}
             {!isAcknowledged && (
               <button
                 onClick={() => onAcknowledge(notif.id)}
@@ -527,6 +572,30 @@ function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNa
           </div>
         </div>
       </div>
+
+      {/* Inline reply form */}
+      {showReply && (
+        <div className="mt-3 pt-3 border-t border-gray-200" onClick={e => e.stopPropagation()}>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={replyText}
+              onChange={e => setReplyText(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleReply(); } }}
+              placeholder={`Reply to ${notif.source_first_name || 'sender'}...`}
+              className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none"
+              autoFocus
+            />
+            <button
+              onClick={handleReply}
+              disabled={!replyText.trim() || replying}
+              className="px-3 py-1.5 text-xs bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
+            >
+              {replying ? '...' : 'Send'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

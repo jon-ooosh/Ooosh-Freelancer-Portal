@@ -19,6 +19,7 @@ const createInteractionSchema = z.object({
   venue_id: z.string().uuid().optional().nullable(),
   // @mentions
   mentioned_user_ids: z.array(z.string().uuid()).optional().default([]),
+  mention_priority: z.enum(['normal', 'high', 'urgent']).optional().default('normal'),
   // Chase-specific fields
   chase_method: z.enum(['phone', 'email', 'text', 'whatsapp']).optional().nullable(),
   chase_response: z.string().optional().nullable(),
@@ -84,7 +85,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
   try {
     const {
       type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-      mentioned_user_ids, chase_method, chase_response, next_chase_date,
+      mentioned_user_ids, mention_priority, chase_method, chase_response, next_chase_date,
       chase_alert_user_id,
     } = req.body;
 
@@ -188,7 +189,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         const notifResult = await query(
           `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id,
              source_user_id, interaction_id, action_url, priority)
-           VALUES ($1, 'mention', $2, $3, $4, $5, $6, $7, $8, 'normal')
+           VALUES ($1, 'mention', $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING *`,
           [
             userId,
@@ -199,6 +200,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
             req.user!.id,
             result.rows[0].id,
             actionUrl,
+            mention_priority || 'normal',
           ]
         );
 

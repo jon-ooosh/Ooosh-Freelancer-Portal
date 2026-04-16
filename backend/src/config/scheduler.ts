@@ -96,7 +96,13 @@ export function startScheduler() {
       if (result.rows.length > 0) {
         console.log(`Scheduler: Chase auto-mover moved ${result.rows.length} job(s) to chasing`);
 
-        // Log a status_transition interaction for each moved job
+        // Get admin/manager users for notifications
+        const admins = await query(
+          `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
+        );
+        const adminIds = admins.rows.map((r: Record<string, unknown>) => r.id as string);
+
+        // Log a status_transition interaction + create inbox notification for each moved job
         for (const job of result.rows) {
           try {
             await query(
@@ -107,6 +113,34 @@ export function startScheduler() {
                 job.id,
               ]
             );
+
+            // Find most recent chase_alert_user_id for this job (if anyone was assigned)
+            const lastChase = await query(
+              `SELECT chase_alert_user_id FROM interactions
+               WHERE job_id = $1 AND type = 'chase' AND chase_alert_user_id IS NOT NULL
+               ORDER BY created_at DESC LIMIT 1`,
+              [job.id]
+            );
+            const targetUsers = lastChase.rows.length > 0 && lastChase.rows[0].chase_alert_user_id
+              ? [lastChase.rows[0].chase_alert_user_id as string]
+              : adminIds;
+
+            const jobName = job.job_name || `Job ${job.hh_job_number || ''}`;
+            for (const userId of targetUsers) {
+              try {
+                await query(
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+                   VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, 'normal')`,
+                  [
+                    userId,
+                    `Chase due: ${jobName}`,
+                    `Chase date reached for ${jobName} — needs follow-up`,
+                    job.id,
+                    `/jobs/${job.id}?tab=timeline`,
+                  ]
+                );
+              } catch { /* dedup or other error — non-critical */ }
+            }
           } catch {
             // Non-critical — don't block other jobs
           }
@@ -233,6 +267,81 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Stale enquiry auto-lose scheduled daily at 10:00');
+
+  // ── Close-Out Requirement Chase Scanner ─────────────────────────────
+  // Daily at 09:30 — check for overdue post-hire requirements and create notifications
+  cron.schedule('30 9 * * *', async () => {
+    console.log('Scheduler: Scanning for overdue close-out requirements...');
+    try {
+      // Find post_hire requirements with overdue due_date that haven't been notified today
+      const overdue = await query(`
+        SELECT jr.id, jr.job_id, jr.requirement_type, jr.custom_label, jr.due_date,
+               jr.assigned_to, jr.notes,
+               j.hh_job_number, j.job_name, j.client_name,
+               rtd.label AS type_label
+        FROM job_requirements jr
+        JOIN jobs j ON j.id = jr.job_id AND j.is_deleted = false
+        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
+        WHERE jr.phase = 'post_hire'
+          AND jr.status NOT IN ('done', 'blocked')
+          AND jr.due_date IS NOT NULL
+          AND jr.due_date::date <= CURRENT_DATE
+          AND j.status IN (6, 7, 8)
+      `);
+
+      if (overdue.rows.length === 0) {
+        console.log('Scheduler: No overdue close-out requirements found');
+        return;
+      }
+
+      // Get admin/manager users to notify (if no assigned_to on the requirement)
+      const admins = await query(
+        `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
+      );
+      const adminIds = admins.rows.map((r: Record<string, unknown>) => r.id as string);
+
+      let created = 0;
+      for (const req of overdue.rows) {
+        const jobName = req.job_name || req.client_name || `Job ${req.hh_job_number || ''}`;
+        const label = req.custom_label || req.type_label;
+        const daysOverdue = Math.floor((Date.now() - new Date(req.due_date as string).getTime()) / 86400000);
+        const title = `Overdue: ${label} — ${jobName}`;
+        const content = `${label} was due ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} ago${req.notes ? `: ${req.notes}` : ''}`;
+
+        // Notify assigned user, or all admins/managers
+        const targetUsers = req.assigned_to ? [req.assigned_to] : adminIds;
+
+        for (const userId of targetUsers) {
+          // Dedup: don't create if already notified in last 24h for this requirement
+          const existing = await query(
+            `SELECT id FROM notifications
+             WHERE user_id = $1 AND entity_type = 'job_requirements' AND entity_id = $2
+               AND created_at > NOW() - INTERVAL '24 hours'`,
+            [userId, req.id]
+          );
+          if (existing.rows.length > 0) continue;
+
+          await query(
+            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+             VALUES ($1, 'chase_alert', $2, $3, 'job_requirements', $4, $5, $6)`,
+            [
+              userId, title, content, req.id,
+              `/jobs/${req.job_id}?tab=overview`,
+              daysOverdue > 7 ? 'high' : 'normal',
+            ]
+          );
+          created++;
+        }
+      }
+
+      if (created > 0) {
+        console.log(`Scheduler: Created ${created} overdue close-out notifications for ${overdue.rows.length} requirements`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Close-out chase scan failed:', err);
+    }
+  });
+  console.log('Scheduler: Close-out requirement chase scanner scheduled daily at 09:30');
 
   // ── Notification Escalation ──────────────────────────────────────────
   // Every 15 minutes — check unread notifications and escalate to email

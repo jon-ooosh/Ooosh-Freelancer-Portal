@@ -113,6 +113,7 @@ const TYPE_STATUS_LABELS: Record<string, Record<string, string>> = {
   excess_resolve: { not_started: 'Pending', in_progress: 'In Progress', done: 'Resolved', blocked: 'Dispute' },
   freelancer_followup: { not_started: 'Not Contacted', in_progress: 'Chased', done: 'Done', blocked: 'Overdue' },
   client_followup: { not_started: 'Not Contacted', in_progress: 'In Progress', done: 'Done', blocked: 'No Response' },
+  reminder: { not_started: 'To Do', in_progress: 'In Progress', done: 'Done', blocked: 'Blocked' },
   damage_review: { not_started: 'Open', in_progress: 'Awaiting Quote', done: 'Resolved', blocked: 'Stalled' },
 };
 
@@ -473,6 +474,22 @@ export default function RequirementCard({
               </div>
             )}
 
+            {/* Reminder — show due date, assigned user, notes */}
+            {req.requirement_type === 'reminder' && (
+              <div className="mt-1 text-xs text-gray-500 space-y-0.5">
+                {req.due_date && (
+                  <div className={`font-medium ${new Date(req.due_date) <= new Date() ? 'text-red-600' : 'text-blue-600'}`}>
+                    Due: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
+                    {new Date(req.due_date) <= new Date() && ' (overdue)'}
+                  </div>
+                )}
+                {req.assigned_to_name && (
+                  <div className="text-gray-400">Assigned to: {req.assigned_to_name}</div>
+                )}
+                {req.notes && <div>{req.notes}</div>}
+              </div>
+            )}
+
             {/* Damage — show notes + chase hint */}
             {req.requirement_type === 'damage_review' && (
               <div className="mt-1 text-xs text-gray-500">
@@ -486,7 +503,7 @@ export default function RequirementCard({
             )}
 
             {/* Notes (for types without specific rendering) */}
-            {!['vehicle', 'hire_forms', 'backline', 'excess', 'invoice', 'damage_review'].includes(req.requirement_type) && req.notes && (
+            {!['vehicle', 'hire_forms', 'backline', 'excess', 'invoice', 'damage_review', 'reminder'].includes(req.requirement_type) && req.notes && (
               <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
             )}
 
