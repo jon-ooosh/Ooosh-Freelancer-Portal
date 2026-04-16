@@ -365,24 +365,75 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
 
     const assignment = assignmentResult.rows[0];
 
-    // 7. Create excess record (stores whatever the hire form app calculated)
-    const excessResult = await client.query(
-      `INSERT INTO job_excess (
-        assignment_id, job_id, hirehop_job_id,
-        excess_amount_required, excess_calculation_basis,
-        excess_status,
-        xero_contact_id, xero_contact_name, client_name,
-        created_by
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      RETURNING *`,
-      [
-        assignment.id, jobId, f.hirehop_job_id || null,
-        excessAmount, calculationBasis,
-        'pending',
-        f.xero_contact_id || null, f.xero_contact_name || null, f.client_name || null,
-        req.user!.id,
-      ]
-    );
+    // 7. Create or absorb excess record
+    // Check for an existing portal-created excess record (no assignment_id, created before hire form)
+    // If found, absorb it: link to this assignment and update the required amount from the hire form calculation.
+    // This handles the case where the payment portal collected excess before the driver submitted the hire form.
+    let excessResult;
+    const existingPortalExcess = jobId ? await client.query(
+      `SELECT id, excess_amount_taken, excess_status, payment_method, payment_reference, payment_date, hh_deposit_id
+       FROM job_excess
+       WHERE job_id = $1 AND assignment_id IS NULL
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+       ORDER BY created_at DESC LIMIT 1`,
+      [jobId]
+    ) : { rows: [] };
+
+    if (existingPortalExcess.rows.length > 0) {
+      const portalRecord = existingPortalExcess.rows[0];
+      const alreadyTaken = parseFloat(portalRecord.excess_amount_taken || 0);
+      const newRequired = excessAmount || 0;
+      // Determine new status based on what's already been collected
+      let newStatus = 'pending';
+      if (portalRecord.excess_status === 'pre_auth') {
+        newStatus = 'pre_auth';
+      } else if (alreadyTaken > 0 && alreadyTaken >= newRequired) {
+        newStatus = 'taken';
+      } else if (alreadyTaken > 0) {
+        newStatus = 'partially_paid';
+      }
+
+      excessResult = await client.query(
+        `UPDATE job_excess SET
+          assignment_id = $1,
+          excess_amount_required = $2,
+          excess_calculation_basis = $3,
+          excess_status = $4,
+          xero_contact_id = COALESCE($5, xero_contact_id),
+          xero_contact_name = COALESCE($6, xero_contact_name),
+          client_name = COALESCE($7, client_name),
+          notes = COALESCE(notes, '') || E'\nHire form submitted — excess updated from £' || COALESCE(excess_amount_required, 0)::TEXT || ' to £' || $2::TEXT,
+          updated_at = NOW()
+        WHERE id = $8
+        RETURNING *`,
+        [
+          assignment.id, newRequired, calculationBasis,
+          newStatus,
+          f.xero_contact_id || null, f.xero_contact_name || null, f.client_name || null,
+          portalRecord.id,
+        ]
+      );
+      console.log(`[hire-forms] Absorbed portal excess ${portalRecord.id}: required £${newRequired}, already taken £${alreadyTaken}, status=${newStatus}`);
+    } else {
+      // No existing portal excess — create fresh (normal flow)
+      excessResult = await client.query(
+        `INSERT INTO job_excess (
+          assignment_id, job_id, hirehop_job_id,
+          excess_amount_required, excess_calculation_basis,
+          excess_status,
+          xero_contact_id, xero_contact_name, client_name,
+          created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        RETURNING *`,
+        [
+          assignment.id, jobId, f.hirehop_job_id || null,
+          excessAmount, calculationBasis,
+          'pending',
+          f.xero_contact_id || null, f.xero_contact_name || null, f.client_name || null,
+          req.user!.id,
+        ]
+      );
+    }
 
     await client.query('COMMIT');
 
