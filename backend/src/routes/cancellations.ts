@@ -390,6 +390,25 @@ router.post(
           const hhData = hhResult as { job?: number };
           if (hhData?.job) {
             newHhJobNumber = hhData.job;
+
+            // Update HH job dates to 09:00 (duplicate may use current time)
+            try {
+              const fmtHH = (d: string | null) => {
+                if (!d) return null;
+                return new Date(d).toISOString().split('T')[0] + ' 09:00';
+              };
+              const dateParams: Record<string, unknown> = {
+                job: newHhJobNumber,
+                no_webhook: 1,
+              };
+              if (job.out_date) dateParams.out = fmtHH(job.out_date);
+              if (job.job_date) dateParams.start = fmtHH(job.job_date);
+              if (job.job_end) dateParams.end = fmtHH(job.job_end);
+              if (job.return_date) dateParams.to = fmtHH(job.return_date);
+              await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
+            } catch {
+              console.error('[Cancellation] HH date update failed (non-fatal)');
+            }
           }
         } catch (hhErr) {
           console.error('[Cancellation] HH duplicate failed:', hhErr);
@@ -397,16 +416,29 @@ router.post(
         }
       }
 
+      // Copy dates from original job, normalising times to 09:00
+      const normaliseDateTo0900 = (d: string | null): string | null => {
+        if (!d) return null;
+        const dateStr = new Date(d).toISOString().split('T')[0];
+        return `${dateStr} 09:00`;
+      };
+      const outDate = normaliseDateTo0900(job.out_date);
+      const jobDate = normaliseDateTo0900(job.job_date);
+      const jobEnd = normaliseDateTo0900(job.job_end);
+      const returnDate = normaliseDateTo0900(job.return_date);
+
       // Create new job in OP
       const newJobResult = await query(
         `INSERT INTO jobs (
           hh_job_number, job_name, client_id, client_name, company_name,
           venue_id, venue_name, address, details, notes,
+          out_date, job_date, job_end, return_date,
           pipeline_status, pipeline_status_changed_at,
           reopened_from_job_id, created_by
         ) VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-          'confirmed', NOW(), $11, $12
+          $11, $12, $13, $14,
+          'confirmed', NOW(), $15, $16
         ) RETURNING id, hh_job_number`,
         [
           newHhJobNumber,
@@ -414,6 +446,7 @@ router.post(
           job.client_id, job.client_name, job.company_name,
           job.venue_id, job.venue_name, job.address,
           job.details, job.notes,
+          outDate, jobDate, jobEnd, returnDate,
           jobId, req.user!.id,
         ]
       );

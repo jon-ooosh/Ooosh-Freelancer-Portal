@@ -1455,7 +1455,14 @@ export default function JobDetailPage() {
                 <p className="text-xs text-red-600 mt-1">{job.cancellation_notes}</p>
               )}
             </div>
-            {user?.role === 'admin' || user?.role === 'manager' ? (
+            {job.reopened_to_job_id ? (
+              <Link
+                to={`/jobs/${job.reopened_to_job_id}`}
+                className="text-xs px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 whitespace-nowrap"
+              >
+                Already reopened &rarr; View new booking
+              </Link>
+            ) : (user?.role === 'admin' || user?.role === 'manager') ? (
               <button
                 onClick={async () => {
                   if (!window.confirm('Re-open this cancelled job as a new booking? The original job will stay cancelled for audit purposes.')) return;
@@ -4219,6 +4226,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
                 <input
                   type="date"
                   value={reminderDate}
+                  min={new Date(Date.now() + 86400000).toISOString().split('T')[0]}
                   onChange={e => setReminderDate(e.target.value)}
                   className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm"
                 />
@@ -4786,6 +4794,7 @@ function StatusTransitionModal({
                       <input
                         type="date"
                         value={rem.date}
+                        min={new Date(Date.now() + 86400000).toISOString().split('T')[0]}
                         onChange={(e) => {
                           const updated = [...reminders];
                           updated[idx] = { ...rem, date: e.target.value };
