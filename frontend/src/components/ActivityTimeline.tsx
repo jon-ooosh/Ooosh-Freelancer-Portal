@@ -162,6 +162,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
   const [mentionFilter, setMentionFilter] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionedIds, setMentionedIds] = useState<string[]>([]);
+  const [mentionPriority, setMentionPriority] = useState<'normal' | 'high' | 'urgent'>('normal');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -246,6 +247,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         content: content.trim(),
         [entityType]: entityId,
         mentioned_user_ids: mentionedIds,
+        mention_priority: mentionedIds.length > 0 ? mentionPriority : undefined,
       };
       if (interactionType === 'chase') {
         payload.chase_method = chaseMethod;
@@ -255,6 +257,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       await api.post('/interactions', payload);
       setContent('');
       setMentionedIds([]);
+      setMentionPriority('normal');
       setNextChaseDate('');
       setSelectedChasePreset(null);
       setChaseAlertUserId('');
@@ -412,9 +415,9 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
           )}
         </div>
 
-        {/* Mentioned users tags */}
+        {/* Mentioned users tags + priority */}
         {mentionedIds.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-1.5">
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
             {mentionedIds.map((uid) => {
               const u = users.find((x) => x.id === uid);
               if (!u) return null;
@@ -431,6 +434,19 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                 </span>
               );
             })}
+            <select
+              value={mentionPriority}
+              onChange={(e) => setMentionPriority(e.target.value as 'normal' | 'high' | 'urgent')}
+              className={`text-[10px] border rounded px-1.5 py-0.5 ${
+                mentionPriority === 'urgent' ? 'border-red-300 bg-red-50 text-red-700' :
+                mentionPriority === 'high' ? 'border-amber-300 bg-amber-50 text-amber-700' :
+                'border-gray-200 text-gray-500'
+              }`}
+            >
+              <option value="normal">Normal</option>
+              <option value="high">Important</option>
+              <option value="urgent">Urgent</option>
+            </select>
           </div>
         )}
 
