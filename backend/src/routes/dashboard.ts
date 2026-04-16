@@ -808,4 +808,75 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/dashboard/cancellations-overview ─────────────────────────────
+router.get('/cancellations-overview', async (req: AuthRequest, res: Response) => {
+  try {
+    const results = await Promise.all([
+      // 1. Counts
+      query(`
+        SELECT
+          COUNT(*) as total_cancelled,
+          COUNT(*) FILTER (WHERE j.cancellation_refund > 0) as pending_refunds,
+          COALESCE(SUM(j.cancellation_refund) FILTER (WHERE j.cancellation_refund > 0), 0) as total_refund_due,
+          COALESCE(SUM(j.cancellation_fee), 0) as total_fees_retained
+        FROM jobs j
+        WHERE j.is_deleted = false AND j.pipeline_status = 'cancelled'
+      `),
+
+      // 2. Close-out requirements on cancelled jobs
+      query(`
+        SELECT jr.requirement_type, jr.status, COUNT(*) as count
+        FROM job_requirements jr
+        JOIN jobs j ON j.id = jr.job_id
+        WHERE jr.phase = 'post_hire'
+          AND j.is_deleted = false
+          AND j.pipeline_status = 'cancelled'
+        GROUP BY jr.requirement_type, jr.status
+      `),
+
+      // 3. Recent cancellations
+      query(`
+        SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
+               j.cancelled_at, j.cancellation_fee, j.cancellation_refund, j.cancellation_reason
+        FROM jobs j
+        WHERE j.is_deleted = false AND j.pipeline_status = 'cancelled'
+        ORDER BY j.cancelled_at DESC NULLS LAST
+        LIMIT 5
+      `),
+    ]);
+
+    const [countsResult, closeoutResult, recentResult] = results;
+    const counts = countsResult.rows[0];
+
+    // Outstanding close-out items
+    const outstanding: Array<{ type: string; outstanding: number }> = [];
+    const byType: Record<string, { total: number; done: number }> = {};
+    for (const row of closeoutResult.rows) {
+      const type = row.requirement_type as string;
+      if (!byType[type]) byType[type] = { total: 0, done: 0 };
+      const count = parseInt(row.count as string);
+      byType[type].total += count;
+      if (row.status === 'done') byType[type].done += count;
+    }
+    for (const [type, stats] of Object.entries(byType)) {
+      const notDone = stats.total - stats.done;
+      if (notDone > 0) outstanding.push({ type, outstanding: notDone });
+    }
+
+    res.json({
+      counts: {
+        total_cancelled: parseInt(counts.total_cancelled),
+        pending_refunds: parseInt(counts.pending_refunds),
+        total_refund_due: parseFloat(counts.total_refund_due),
+        total_fees_retained: parseFloat(counts.total_fees_retained),
+      },
+      outstanding,
+      recent: recentResult.rows,
+    });
+  } catch (error) {
+    console.error('Dashboard cancellations-overview error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;

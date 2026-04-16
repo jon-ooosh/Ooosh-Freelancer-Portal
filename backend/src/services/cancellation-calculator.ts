@@ -38,6 +38,10 @@ export interface CancellationResult {
   noticeDays: number;
   /** Human-readable breakdown */
   breakdown: string;
+  /** Structured fee breakdown lines (only relevant tiers shown) */
+  feeBreakdown: Array<{ label: string; amount: number }>;
+  /** Copyable summary sentence in UK English */
+  summary: string;
   /** Whether the £25+VAT (£30) minimum was used instead of percentage */
   minimumApplied: boolean;
   /** Transport charges included in fee */
@@ -145,24 +149,42 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
     breakdownParts.push(`Notice period: ${Math.max(0, noticeDays)} day${noticeDays !== 1 ? 's' : ''} (<2 days — clause 7.1)`);
   }
 
+  // Build structured fee breakdown (only relevant tiers for this hire length)
+  const hireDays = totalHireDays || 14;
+  const feeBreakdown = buildFeeBreakdown(tier, totalHireCost, hireDays, fee, minimumApplied);
+
   // Add transport charges
   if (transportCharges > 0) {
     fee += transportCharges;
+    feeBreakdown.push({ label: 'Transport/crew charges', amount: transportCharges });
     breakdownParts.push(`Transport/crew charges: £${transportCharges.toFixed(2)}`);
   }
 
-  // Calculate refund (transport charges are additional — not deducted from hire cost refund)
+  // Calculate refund
   const refund = Math.max(0, totalHireCost - fee + transportCharges);
 
   breakdownParts.push(`Cancellation fee: £${fee.toFixed(2)}`);
   breakdownParts.push(`Refund due: £${refund.toFixed(2)}`);
 
+  // Build copyable summary sentence
+  const feeRounded = Math.round(fee * 100) / 100;
+  const refundRounded = Math.round(refund * 100) / 100;
+  const noticeText = Math.max(0, noticeDays);
+  const tierText = tier === '>7_days' ? 'more than 7 days\' notice' :
+    tier === '2_to_7_days' ? `${noticeText} days' notice` :
+    `less than 2 days' notice`;
+  const summary = refundRounded > 0
+    ? `Cancelled with ${tierText}. £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 7.1). Refund of £${refundRounded.toFixed(2)} to be processed.`
+    : `Cancelled with ${tierText}. Full hire charge of £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 7.1).`;
+
   return {
-    fee: Math.round(fee * 100) / 100,
-    refund: Math.round(refund * 100) / 100,
+    fee: feeRounded,
+    refund: refundRounded,
     tier,
     noticeDays: Math.max(0, noticeDays),
     breakdown: breakdownParts.join('\n'),
+    feeBreakdown,
+    summary,
     minimumApplied,
     transportIncluded: transportCharges,
   };
@@ -243,6 +265,76 @@ export function calculateEarlyReturn(input: EarlyReturnInput): EarlyReturnResult
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Build a structured fee breakdown showing only the tiers relevant to this hire.
+ */
+function buildFeeBreakdown(
+  tier: CancellationTier,
+  totalHireCost: number,
+  hireDays: number,
+  fee: number,
+  minimumApplied: boolean,
+): Array<{ label: string; amount: number }> {
+  const lines: Array<{ label: string; amount: number }> = [];
+
+  if (tier === '>7_days') {
+    if (minimumApplied) {
+      lines.push({ label: 'Minimum cancellation fee (£25+VAT)', amount: fee });
+    } else {
+      lines.push({ label: '10% cancellation fee', amount: fee });
+    }
+    return lines;
+  }
+
+  if (tier === '2_to_7_days') {
+    if (minimumApplied) {
+      lines.push({ label: 'Minimum cancellation fee (£25+VAT)', amount: fee });
+    } else {
+      lines.push({ label: '25% cancellation fee', amount: fee });
+    }
+    return lines;
+  }
+
+  // <2 days — show the per-period breakdown
+  const dailyRate = totalHireCost / hireDays;
+
+  if (hireDays <= 7) {
+    // Short hire: full charge, one line
+    lines.push({ label: `Full hire (${hireDays} day${hireDays !== 1 ? 's' : ''})`, amount: fee });
+    return lines;
+  }
+
+  // First 7 days always fully charged
+  const first7 = Math.round(7 * dailyRate * 100) / 100;
+  lines.push({ label: 'First 7 days (full rate)', amount: first7 });
+
+  // Days 8-14 at 50% charge (i.e. 50% refunded)
+  if (hireDays > 7) {
+    const daysInBand = Math.min(hireDays, 14) - 7;
+    const bandCost = daysInBand * dailyRate;
+    const retained = Math.round(bandCost * 0.5 * 100) / 100;
+    lines.push({ label: `Days 8-${Math.min(hireDays, 14)} (50% retained)`, amount: retained });
+  }
+
+  // Days 15-30 at 25% charge (i.e. 75% refunded)
+  if (hireDays > 14) {
+    const daysInBand = Math.min(hireDays, 30) - 14;
+    const bandCost = daysInBand * dailyRate;
+    const retained = Math.round(bandCost * 0.25 * 100) / 100;
+    lines.push({ label: `Days 15-${Math.min(hireDays, 30)} (25% retained)`, amount: retained });
+  }
+
+  // Days 31+ at 10% charge (i.e. 90% refunded)
+  if (hireDays > 30) {
+    const daysInBand = hireDays - 30;
+    const bandCost = daysInBand * dailyRate;
+    const retained = Math.round(bandCost * 0.1 * 100) / 100;
+    lines.push({ label: `Days 31-${hireDays} (10% retained)`, amount: retained });
+  }
+
+  return lines;
+}
 
 /**
  * Calculate tiered refund based on calendar day position.

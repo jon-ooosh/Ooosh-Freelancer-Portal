@@ -898,14 +898,22 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
 - [x] `cancellations.ts` route: calculate, process, transport-crew, list, reopen endpoints
 - [x] Cancellation workflow: status update, timeline log, requirements marked done, vehicle assignments cancelled, crew cancelled + emailed, excess flagged, pending refund created, HH write-back
 - [x] `CancellationModal.tsx`: calculator display, transport/crew summary, manual override, RBAC
+- [x] Per-tier fee breakdown (only shows tiers relevant to hire length), copyable summary sentence
+- [x] HH invoice section: net/VAT/gross breakdown with guidance
 - [x] `LostCancelledPage.tsx` at `/jobs/lost-cancelled` with Cancelled/Lost tabs, search, pagination
 - [x] Job Detail: red cancelled banner with fee/refund summary, "Re-open as New Booking" button
 - [x] Crew cancellation + internal notification email templates
+- [x] Client cancellation email (refund amount, timescale, invoice note)
 - [x] Chase reminders suppressed for lost/cancelled jobs (clear `next_chase_date`, hide UI)
 - [x] Pipeline fields (likelihood, chase) hidden for lost/cancelled jobs
+- [x] Re-open: full field copy (dates, managers, orgs, venue) + HH `job_duplicate.php` with items/notes/transport
+- [x] Cancellation close-out requirements auto-created (invoice, client follow-up, refund, excess) — same pattern as returns
+- [x] Dashboard widget: cancellation overview (pending refunds, outstanding close-out items, fees retained)
+- [x] "Back to Lost & Cancelled" navigation from Job Detail
 
 **Remaining work:**
 - [ ] HH invoice creation on cancellation (auto-create invoice for retained fee via `billing_deposit_save.php`)
+- [ ] Refund processing through OP (currently manual via Money tab — future enhancement)
 - [ ] Cancellation data surfaced in client hire history (like retro data)
 - [ ] Early return calculator frontend integration (clause 7.3 — backend built, UI not yet)
 - [ ] Partial cancellation / scope reduction (deferred — noted for future)

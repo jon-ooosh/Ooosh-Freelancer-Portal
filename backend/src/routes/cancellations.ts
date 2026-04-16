@@ -18,6 +18,7 @@ import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { calculatePreHireCancellation, calculateEarlyReturn } from '../services/cancellation-calculator';
 import emailService from '../services/email-service';
+import { getJobEmailRecipients } from '../services/money-emails';
 
 const router = Router();
 router.use(authenticate);
@@ -55,41 +56,51 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
   try {
     const jobId = req.params.jobId as string;
 
-    // Get quotes (transport/crew)
-    const quotes = await query(
-      `SELECT q.id, q.job_type, q.venue_name, q.client_charge_total, q.ops_status,
-              q.job_date, q.collection_date
-       FROM quotes q WHERE q.job_id = $1 AND q.is_deleted = false`,
-      [jobId]
-    );
+    // Each query is independent — catch individually so one failing doesn't block others
+    let quotes = { rows: [] as any[] };
+    let crew = { rows: [] as any[] };
+    let vehicles = { rows: [] as any[] };
+    let excess = { rows: [] as any[] };
 
-    // Get crew assignments
-    const crew = await query(
-      `SELECT qa.id, qa.role, qa.agreed_rate, qa.status,
-              p.first_name, p.last_name, p.email, p.phone
-       FROM quote_assignments qa
-       JOIN people p ON p.id = qa.person_id
-       WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
-         AND qa.status NOT IN ('cancelled', 'declined')`,
-      [jobId]
-    );
+    try {
+      quotes = await query(
+        `SELECT q.id, q.job_type, q.venue_name, q.client_charge_total, q.ops_status,
+                q.job_date, q.collection_date
+         FROM quotes q WHERE q.job_id = $1 AND q.is_deleted = false`,
+        [jobId]
+      );
+    } catch (e) { console.warn('[Cancellation] quotes query failed:', e); }
 
-    // Get vehicle assignments
-    const vehicles = await query(
-      `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
-              fv.registration, fv.name AS vehicle_name
-       FROM vehicle_hire_assignments vha
-       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-       WHERE vha.job_id = $1 AND vha.status NOT IN ('cancelled')`,
-      [jobId]
-    );
+    try {
+      crew = await query(
+        `SELECT qa.id, qa.role, qa.agreed_rate, qa.status,
+                p.first_name, p.last_name, p.email, p.phone
+         FROM quote_assignments qa
+         JOIN people p ON p.id = qa.person_id
+         WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
+           AND qa.status NOT IN ('cancelled', 'declined')`,
+        [jobId]
+      );
+    } catch (e) { console.warn('[Cancellation] crew query failed:', e); }
 
-    // Get excess records
-    const excess = await query(
-      `SELECT id, excess_amount_required, excess_status, payment_method
-       FROM job_excess WHERE job_id = $1`,
-      [jobId]
-    );
+    try {
+      vehicles = await query(
+        `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
+                fv.reg, fv.name AS vehicle_name
+         FROM vehicle_hire_assignments vha
+         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+         WHERE vha.job_id = $1 AND vha.status NOT IN ('cancelled')`,
+        [jobId]
+      );
+    } catch (e) { console.warn('[Cancellation] vehicles query failed:', e); }
+
+    try {
+      excess = await query(
+        `SELECT id, excess_amount_required, excess_status, payment_method
+         FROM job_excess WHERE job_id = $1`,
+        [jobId]
+      );
+    } catch (e) { console.warn('[Cancellation] excess query failed:', e); }
 
     res.json({
       quotes: quotes.rows,
@@ -256,8 +267,8 @@ router.post(
       if (cancellation_refund > 0) {
         try {
           await query(
-            `INSERT INTO job_payments (job_id, payment_type, amount, status, notes, recorded_by)
-             VALUES ($1, 'refund', $2, 'pending', $3, $4)`,
+            `INSERT INTO job_payments (job_id, payment_type, amount, payment_method, payment_status, notes, recorded_by)
+             VALUES ($1, 'refund', $2, 'bank_transfer', 'pending', $3, $4)`,
             [jobId, cancellation_refund, `Cancellation refund — ${cancellation_reason}`, userId]
           );
         } catch (err) {
@@ -280,7 +291,82 @@ router.post(
         },
       }).catch(err => console.error('[Cancellation] Internal email failed:', err));
 
-      // 10. Log audit
+      // 10. Send client cancellation email
+      (async () => {
+        try {
+          const { primaryEmail, primaryFirstName, ccEmails } = await getJobEmailRecipients(jobId);
+          if (!primaryEmail) {
+            console.warn('[Cancellation] No client email found — skipping client notification');
+            return;
+          }
+
+          const refundSection = cancellation_refund > 0
+            ? `<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Refund</p>
+               <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">£${cancellation_refund.toFixed(2)} to be refunded within 10 working days</p>`
+            : '';
+          const invoiceNote = cancellation_fee > 0
+            ? `<p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">A cancellation fee of <strong>£${cancellation_fee.toFixed(2)} + VAT</strong> applies per our <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#7B5EA7;text-decoration:none;font-weight:600;">hire terms</a>. An invoice will follow shortly if not already sent.</p>`
+            : '';
+
+          await emailService.send('job_cancelled_client', {
+            to: primaryEmail,
+            cc: ccEmails,
+            variables: {
+              clientName: primaryFirstName || 'there',
+              jobNumber,
+              jobName,
+              jobDates,
+              refundSection,
+              invoiceNote,
+            },
+          });
+        } catch (err) {
+          console.error('[Cancellation] Client email failed:', err);
+        }
+      })();
+
+      // 11. Create cancellation close-out requirements (same pattern as returns close-out)
+      try {
+        const ensureReq = async (type: string, notes: string) => {
+          const exists = await query(
+            `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = $2 AND phase = 'post_hire'`,
+            [jobId, type]
+          );
+          if (exists.rows.length === 0) {
+            await query(
+              `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+               VALUES ($1, $2, 'not_started', $3, true, 'cancellation', 'post_hire')`,
+              [jobId, type, notes]
+            );
+          }
+        };
+
+        // Always: invoice for cancellation fee
+        if (cancellation_fee > 0) {
+          await ensureReq('invoice', `Create HireHop invoice for cancellation fee: £${cancellation_fee.toFixed(2)} + VAT (£${(cancellation_fee * 1.2).toFixed(2)} gross)`);
+        }
+
+        // Always: client follow-up (confirm cancellation received, handle any queries)
+        await ensureReq('client_followup', 'Confirm client received cancellation notification');
+
+        // If refund due: payment reconciliation
+        if (cancellation_refund > 0) {
+          await ensureReq('payment_reconcile', `Process refund of £${cancellation_refund.toFixed(2)} to client (10 working day target)`);
+        }
+
+        // If excess records: resolve them
+        const excessCount = await query(
+          `SELECT COUNT(*) AS cnt FROM job_excess WHERE job_id = $1`,
+          [jobId]
+        );
+        if (parseInt(excessCount.rows[0]?.cnt || '0') > 0) {
+          await ensureReq('excess_resolve', 'Resolve insurance excess — reimburse or waive');
+        }
+      } catch (err) {
+        console.warn('[Cancellation] Failed to create close-out requirements:', err);
+      }
+
+      // 12. Log audit
       await logAudit(userId, 'jobs', jobId, 'update', job, { pipeline_status: 'cancelled', cancellation_reason });
 
       res.json({ success: true, message: 'Job cancelled successfully' });
@@ -377,12 +463,15 @@ router.post(
 
       let newHhJobNumber: number | null = null;
 
-      // If the original had an HH job, duplicate it in HireHop
+      // If the original had an HH job, duplicate it in HireHop (copies items, dates, etc.)
       if (job.hh_job_number) {
         try {
           const hhResult = await hhBroker.post('/php_functions/job_duplicate.php', {
             id: job.hh_job_number,
-            supplying: 1,
+            supplying: 1,       // Copy the items/supplying list
+            notes: 1,           // Copy notes
+            transport: 1,       // Copy transport
+            reserved: 1,        // Copy reserved items (conflicts omitted)
             job_name: `${job.job_name || 'Job'} (rebooking)`,
             local: new Date().toISOString().replace('T', ' ').substring(0, 16),
           }, { priority: 'high' });
@@ -397,28 +486,57 @@ router.post(
         }
       }
 
-      // Create new job in OP
+      // Create new job in OP with all relevant fields from original
       const newJobResult = await query(
         `INSERT INTO jobs (
-          hh_job_number, job_name, client_id, client_name, company_name,
-          venue_id, venue_name, address, details, notes,
+          hh_job_number, job_name, job_type, client_id, client_name, company_name, client_ref,
+          venue_id, venue_name, address,
+          out_date, job_date, job_end, return_date,
+          duration_days, duration_hrs,
+          manager1_name, manager1_person_id, manager2_name, manager2_person_id,
+          hh_project_id, project_name,
+          details, notes, custom_index, depot_name,
+          enquiry_source, likelihood,
           pipeline_status, pipeline_status_changed_at,
           reopened_from_job_id, created_by
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-          'confirmed', NOW(), $11, $12
+          $1, $2, $3, $4, $5, $6, $7,
+          $8, $9, $10,
+          $11, $12, $13, $14,
+          $15, $16,
+          $17, $18, $19, $20,
+          $21, $22,
+          $23, $24, $25, $26,
+          $27, $28,
+          'confirmed', NOW(),
+          $29, $30
         ) RETURNING id, hh_job_number`,
         [
           newHhJobNumber,
           `${job.job_name || 'Job'} (rebooking)`,
-          job.client_id, job.client_name, job.company_name,
+          job.job_type,
+          job.client_id, job.client_name, job.company_name, job.client_ref,
           job.venue_id, job.venue_name, job.address,
-          job.details, job.notes,
+          job.out_date, job.job_date, job.job_end, job.return_date,
+          job.duration_days, job.duration_hrs,
+          job.manager1_name, job.manager1_person_id, job.manager2_name, job.manager2_person_id,
+          job.hh_project_id, job.project_name,
+          job.details, job.notes, job.custom_index, job.depot_name,
+          job.enquiry_source, 'hot',
           jobId, req.user!.id,
         ]
       );
 
       const newJob = newJobResult.rows[0];
+
+      // Copy job_organisations links (band, client, promoter etc.)
+      try {
+        await query(
+          `INSERT INTO job_organisations (job_id, organisation_id, role)
+           SELECT $1, organisation_id, role FROM job_organisations WHERE job_id = $2`,
+          [newJob.id, jobId]
+        );
+      } catch (e) { console.warn('[Cancellation] Failed to copy job_organisations:', e); }
 
       // Link the original job to the new one
       await query(

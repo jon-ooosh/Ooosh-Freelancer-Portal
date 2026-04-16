@@ -166,7 +166,7 @@ export default function LostCancelledPage() {
               {jobs.map(job => (
                 <tr
                   key={job.id}
-                  onClick={() => navigate(`/jobs/${job.id}`)}
+                  onClick={() => navigate(`/jobs/${job.id}`, { state: { from: '/jobs/lost-cancelled' } })}
                   className="hover:bg-gray-50 cursor-pointer"
                 >
                   <td className="px-4 py-3">
