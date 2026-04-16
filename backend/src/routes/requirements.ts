@@ -223,17 +223,17 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
 
 const addRequirementSchema = z.object({
   requirement_type: z.string().min(1),
-  custom_label: z.string().optional(),
-  notes: z.string().optional(),
-  assigned_to: z.string().uuid().optional(),
-  due_date: z.string().optional(),
-  status: z.enum(VALID_STATUSES).optional(),
-  current_step: z.string().optional(),
-  source: z.string().optional(),
-  source_id: z.string().uuid().optional(),
-  phase: z.enum(['pre_hire', 'post_hire']).optional(),
+  custom_label: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+  assigned_to: z.string().uuid().optional().nullable(),
+  due_date: z.string().optional().nullable(),
+  status: z.enum(VALID_STATUSES).optional().nullable(),
+  current_step: z.string().optional().nullable(),
+  source: z.string().optional().nullable(),
+  source_id: z.string().uuid().optional().nullable(),
+  phase: z.enum(['pre_hire', 'post_hire']).optional().nullable(),
   event_trigger: z.enum(['confirmed', 'cancelled', 'lost']).optional().nullable(),
-  delivery_method: z.enum(['notification', 'email', 'both']).optional(),
+  delivery_method: z.enum(['notification', 'email', 'both']).optional().nullable(),
 });
 
 router.post('/job/:jobId', validate(addRequirementSchema), async (req: AuthRequest, res: Response) => {
