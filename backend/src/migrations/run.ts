@@ -82,6 +82,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '046_repair_inbox_columns.sql',
         '047_cancellations.sql',
         '047_reminder_requirement_type.sql',
+        '048_reminder_fields.sql',
       ];
 
       for (const migration of migrations) {

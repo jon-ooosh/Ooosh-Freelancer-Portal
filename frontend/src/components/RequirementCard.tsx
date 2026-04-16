@@ -37,6 +37,8 @@ export interface JobRequirement {
   type_icon: string;
   type_steps: string[] | null;
   sort_order: number;
+  event_trigger: string | null;
+  delivery_method: string | null;
 }
 
 export interface DerivedFlags {
@@ -474,13 +476,23 @@ export default function RequirementCard({
               </div>
             )}
 
-            {/* Reminder — show due date, assigned user, notes */}
+            {/* Reminder — show due date, assigned user, event trigger, delivery, notes */}
             {req.requirement_type === 'reminder' && (
               <div className="mt-1 text-xs text-gray-500 space-y-0.5">
                 {req.due_date && (
                   <div className={`font-medium ${new Date(req.due_date) <= new Date() ? 'text-red-600' : 'text-blue-600'}`}>
                     Due: {new Date(req.due_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
                     {new Date(req.due_date) <= new Date() && ' (overdue)'}
+                  </div>
+                )}
+                {req.event_trigger && (
+                  <div className="text-[10px] text-purple-600">
+                    Triggers on: job {req.event_trigger}
+                  </div>
+                )}
+                {req.delivery_method && req.delivery_method !== 'both' && (
+                  <div className="text-[10px] text-gray-400">
+                    Notify via: {req.delivery_method === 'notification' ? 'Bell only' : 'Email only'}
                   </div>
                 )}
                 {req.assigned_to_name && (

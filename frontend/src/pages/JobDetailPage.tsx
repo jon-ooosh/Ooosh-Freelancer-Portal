@@ -3966,9 +3966,6 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
     if (!reminderText.trim()) return;
     try {
       const validAssignees = reminderAssignees.filter(id => id);
-      const notesLines = [reminderText.trim()];
-      if (reminderDelivery !== 'both') notesLines.push(`Delivery: ${reminderDelivery}`);
-      if (reminderEventTrigger) notesLines.push(`Trigger: ${reminderEventTrigger}`);
 
       // Create one requirement per assignee (or one for self if none selected)
       const targets = validAssignees.length > 0 ? validAssignees : [null];
@@ -3979,7 +3976,9 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
           custom_label: reminderText.trim(),
           due_date: reminderDate || null,
           assigned_to: assignee,
-          notes: notesLines.join('\n'),
+          notes: reminderText.trim(),
+          event_trigger: reminderEventTrigger || null,
+          delivery_method: reminderDelivery,
         });
       }
       await loadAll();
@@ -4094,7 +4093,14 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
           )}
         </div>
 
-        <div className="relative" ref={addMenuRef}>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => addRequirement('reminder')}
+            className="px-3 py-1.5 text-sm border border-ooosh-200 text-ooosh-600 rounded-lg hover:bg-ooosh-50"
+          >
+            + Reminder
+          </button>
+          <div className="relative" ref={addMenuRef}>
           <button
             onClick={() => setShowAddMenu(!showAddMenu)}
             className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700"
@@ -4144,6 +4150,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
               )}
             </div>
           )}
+        </div>
         </div>
       </div>
 

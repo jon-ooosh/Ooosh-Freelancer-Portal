@@ -6,6 +6,7 @@ import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { sendLastMinuteAlert } from '../services/money-emails';
+import emailService from '../services/email-service';
 
 const router = Router();
 router.use(authenticate);
@@ -597,6 +598,68 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     }
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
+
+    // Fire event-triggered reminders (reminder requirements with matching event_trigger)
+    if (['confirmed', 'cancelled', 'lost'].includes(pipeline_status)) {
+      try {
+        const triggered = await query(
+          `SELECT jr.id, jr.custom_label, jr.assigned_to, jr.notes, jr.delivery_method, jr.job_id
+           FROM job_requirements jr
+           WHERE jr.job_id = $1
+             AND jr.requirement_type = 'reminder'
+             AND jr.event_trigger = $2
+             AND jr.status != 'done'`,
+          [jobId, pipeline_status]
+        );
+
+        const jobName = currentJob.job_name || currentJob.client_name || `Job ${currentJob.hh_job_number || ''}`;
+        for (const rem of triggered.rows) {
+          const targetUserId = rem.assigned_to || req.user!.id;
+          const title = `Reminder triggered: ${rem.custom_label || 'Reminder'}`;
+          const content = `Job ${pipeline_status} — ${rem.custom_label || 'Reminder'} (${jobName})`;
+          const deliveryMethod = rem.delivery_method || 'both';
+
+          // Respect delivery_method: 'notification' → low priority (no email escalation),
+          // 'email' → send email immediately + mark as emailed, 'both' → normal escalation
+          const priority = deliveryMethod === 'notification' ? 'low' : 'high';
+          const emailSentClause = deliveryMethod === 'email' ? `, email_sent_at = NOW()` : '';
+
+          await query(
+            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
+             VALUES ($1, 'follow_up', $2, $3, 'jobs', $4, $5, $6, $7)`,
+            [targetUserId, title, content, rem.job_id, `/jobs/${rem.job_id}?tab=overview`, priority, req.user!.id]
+          );
+
+          // If email-only or both, send email immediately for event triggers (they're time-sensitive)
+          if (deliveryMethod === 'email' || deliveryMethod === 'both') {
+            try {
+              const userResult = await query('SELECT email, first_name FROM users WHERE id = $1', [targetUserId]);
+              if (userResult.rows.length > 0 && userResult.rows[0].email) {
+                await emailService.sendRaw({
+                  to: userResult.rows[0].email,
+                  subject: title,
+                  html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
+                         <p>Your reminder "<strong>${rem.custom_label || 'Reminder'}</strong>" has been triggered because the job <strong>${jobName}</strong> is now <strong>${pipeline_status}</strong>.</p>
+                         ${rem.notes ? `<p>Notes: ${rem.notes}</p>` : ''}
+                         <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
+                });
+              }
+            } catch (emailErr) {
+              console.warn('[Pipeline] Event trigger email failed:', emailErr);
+            }
+          }
+
+          // Mark the reminder as done
+          await query(`UPDATE job_requirements SET status = 'done', updated_at = NOW() WHERE id = $1`, [rem.id]);
+        }
+
+        if (triggered.rows.length > 0) {
+          console.log(`[Pipeline] Fired ${triggered.rows.length} event-triggered reminder(s) for job ${jobId} → ${pipeline_status}`);
+        }
+      } catch (triggerErr) {
+        console.warn('[Pipeline] Event trigger check failed:', triggerErr);
+      }
+    }
 
     // Last-minute booking alert (any route to confirmed, job starts within 3 days)
     if (pipeline_status === 'confirmed') {
