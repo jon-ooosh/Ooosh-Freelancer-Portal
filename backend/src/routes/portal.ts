@@ -681,7 +681,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         qa.id as assignment_id, qa.role as assignment_role,
         qa.agreed_rate, qa.rate_type,
         qa.expected_expenses as assignment_expected_expenses,
-        j.job_name, j.hirehop_id, j.client_name as job_client_name,
+        j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address, v.city as venue_city
        FROM quote_assignments qa
@@ -766,7 +766,7 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         qa.id as assignment_id, qa.role as assignment_role,
         qa.agreed_rate, qa.rate_type,
         qa.expected_expenses as assignment_expected_expenses,
-        j.job_name, j.hirehop_id, j.client_name as job_client_name,
+        j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address,
         v.city as venue_city, v.what_three_words as venue_w3w,
@@ -837,7 +837,7 @@ router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response)
 
     // Verify access and get HireHop job ID
     const result = await query(
-      `SELECT q.what_is_it, j.hirehop_id
+      `SELECT q.what_is_it, j.hh_job_number AS hirehop_id
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
@@ -928,7 +928,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
               q.id AS quote_id, q.ops_status, q.job_type, q.what_is_it,
               q.venue_name, q.venue_id, q.job_date,
               q.client_name AS quote_client_name,
-              j.id AS job_id, j.job_name, j.hirehop_id, j.client_name AS job_client_name,
+              j.id AS job_id, j.job_name, j.hh_job_number AS hirehop_id, j.client_name AS job_client_name,
               o.email AS client_email,
               v.name AS linked_venue_name, v.address AS venue_address,
               v.city AS venue_city, v.postcode AS venue_postcode
