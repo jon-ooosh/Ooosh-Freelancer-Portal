@@ -83,7 +83,7 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
   // Fetch overdue candidates: confirmed, not completed/cancelled,
   // with a crew assignment to a real person (not Ooosh crew), who has an email.
   // Looking back 48h to catch stragglers but not run wild.
-  const candidates = await query<OverdueQuote>(
+  const candidates = await query(
     `SELECT q.id, q.job_type, q.venue_name, q.job_date, q.arrival_time,
             COALESCE(q.completion_reminder_level, 0) AS completion_reminder_level,
             qa.agreed_rate,
@@ -105,11 +105,12 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
        AND q.job_date <= NOW()
        AND COALESCE(q.completion_reminder_level, 0) < 3`
   );
+  const rows = candidates.rows as OverdueQuote[];
 
   let sent = 0;
   let skipped = 0;
 
-  for (const row of candidates.rows) {
+  for (const row of rows) {
     const hours = hoursPastJob(row);
     const level = levelDueForElapsed(hours, row.completion_reminder_level);
     if (level === 0) {
@@ -204,5 +205,5 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
     }
   }
 
-  return { scanned: candidates.rows.length, sent, skipped };
+  return { scanned: rows.length, sent, skipped };
 }
