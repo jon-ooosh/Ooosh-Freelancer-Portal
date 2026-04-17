@@ -125,6 +125,8 @@ const processSchema = z.object({
   cancellation_notice_days: z.number().min(0),
   transport_charges: z.number().min(0).optional(),
   breakdown: z.string().optional(),
+  // Reminder IDs to cancel when cancelling the job
+  cancel_reminder_ids: z.array(z.string().uuid()).optional().nullable(),
 });
 
 router.post(
@@ -139,7 +141,7 @@ router.post(
         cancellation_reason, cancellation_notes,
         cancellation_fee, cancellation_refund,
         cancellation_tier, cancellation_notice_days,
-        breakdown,
+        breakdown, cancel_reminder_ids,
       } = req.body;
 
       // Verify job exists and is in a cancellable state (confirmed+)
@@ -195,6 +197,28 @@ router.post(
         [timelineContent, jobId, userId]
       );
 
+      // 2a. Cancel reminders the user ticked in the modal (if any) — must run
+      // before event triggers so event-triggered reminders the user cancelled
+      // don't still fire notifications on the way out.
+      if (Array.isArray(cancel_reminder_ids) && cancel_reminder_ids.length > 0) {
+        try {
+          await query(
+            `UPDATE job_requirements
+             SET status = 'cancelled',
+                 notes = COALESCE(notes, '') ||
+                         E'\n[Auto-cancelled: job cancelled]',
+                 updated_at = NOW()
+             WHERE id = ANY($1::uuid[])
+               AND job_id = $2
+               AND requirement_type = 'reminder'
+               AND status NOT IN ('done', 'cancelled')`,
+            [cancel_reminder_ids, jobId]
+          );
+        } catch (cancelErr) {
+          console.warn('[Cancellation] Failed to cancel reminders:', cancelErr);
+        }
+      }
+
       // 2b. Fire event-triggered reminders (before blanket mark-as-done)
       try {
         const triggered = await query(
@@ -203,7 +227,7 @@ router.post(
            WHERE jr.job_id = $1
              AND jr.requirement_type = 'reminder'
              AND jr.event_trigger = 'cancelled'
-             AND jr.status != 'done'`,
+             AND jr.status NOT IN ('done', 'cancelled')`,
           [jobId]
         );
 

@@ -8,6 +8,7 @@ import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
 import CancellationModal from '../components/CancellationModal';
+import CancelRemindersSection from '../components/CancelRemindersSection';
 import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
@@ -4776,6 +4777,7 @@ function StatusTransitionModal({
   const [note, setNote] = useState('');
   const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
+  const [cancelReminderIds, setCancelReminderIds] = useState<Set<string>>(new Set());
 
   // Multi-reminder system
   interface Reminder {
@@ -4858,6 +4860,7 @@ function StatusTransitionModal({
     } else if (targetStatus === 'lost') {
       data.lost_reason = lostReason;
       if (lostDetail) data.lost_detail = lostDetail;
+      if (cancelReminderIds.size > 0) data.cancel_reminder_ids = Array.from(cancelReminderIds);
     } else if (targetStatus === 'completed') {
       data.retro_rating = retroRating;
       if (retroNotes) data.retro_notes = retroNotes;
@@ -4947,6 +4950,14 @@ function StatusTransitionModal({
               rows={2}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
+            {jobId && (
+              <CancelRemindersSection
+                jobId={jobId}
+                targetStatus="lost"
+                selected={cancelReminderIds}
+                onChange={setCancelReminderIds}
+              />
+            )}
           </div>
         )}
 
