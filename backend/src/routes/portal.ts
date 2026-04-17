@@ -681,7 +681,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         qa.id as assignment_id, qa.role as assignment_role,
         qa.agreed_rate, qa.rate_type,
         qa.expected_expenses as assignment_expected_expenses,
-        j.job_name, j.hirehop_id, j.client_name as job_client_name,
+        j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address, v.city as venue_city
        FROM quote_assignments qa
@@ -708,19 +708,27 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
     for (const row of result.rows) {
       const item = formatJobForPortal(row);
 
+      // Normalise job_date to an ISO "YYYY-MM-DD" string. Postgres TIMESTAMPTZ
+      // comes back as a JS Date, which compared against a date string with `>`
+      // / `<` ends up as timestamp-vs-NaN (always false) and the job silently
+      // drops out of every bucket.
+      const jobDateStr: string | null = row.job_date instanceof Date
+        ? row.job_date.toISOString().split('T')[0]
+        : (typeof row.job_date === 'string' ? row.job_date.split('T')[0] : null);
+
       if (row.ops_status === 'completed' || row.status === 'completed') {
-        if (row.job_date >= thirtyDaysAgo) {
+        if (jobDateStr && jobDateStr >= thirtyDaysAgo) {
           completed.push(item);
         }
       } else if (row.ops_status === 'cancelled' || row.status === 'cancelled') {
-        if (row.job_date >= thirtyDaysAgo) {
+        if (jobDateStr && jobDateStr >= thirtyDaysAgo) {
           cancelled.push(item);
         }
-      } else if (row.job_date === todayStr) {
+      } else if (jobDateStr === todayStr) {
         today.push(item);
-      } else if (row.job_date > todayStr) {
+      } else if (jobDateStr && jobDateStr > todayStr) {
         upcoming.push(item);
-      } else if (row.job_date && row.job_date < todayStr) {
+      } else if (jobDateStr && jobDateStr < todayStr) {
         // Past job that hasn't been completed — show in today for action
         today.push(item);
       }
@@ -752,18 +760,20 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     const quoteId = req.params.quoteId;
 
     // Verify this freelancer is assigned to this quote
+    // NOTE: venues table has no direct contact columns — site contacts live on
+    // linked organisation's people. Those are surfaced via portal UI separately.
+    // Access notes come from venue.approach_notes (fallback to general_notes).
     const result = await query(
       `SELECT
         q.*,
         qa.id as assignment_id, qa.role as assignment_role,
         qa.agreed_rate, qa.rate_type,
         qa.expected_expenses as assignment_expected_expenses,
-        j.job_name, j.hirehop_id, j.client_name as job_client_name,
+        j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address,
-        v.city as venue_city, v.what_three_words as venue_w3w,
-        v.contact_name as venue_contact1, v.contact_phone as venue_phone,
-        v.contact_email as venue_email, v.notes as venue_access_notes
+        v.city as venue_city, v.w3w_address as venue_w3w,
+        COALESCE(v.approach_notes, v.general_notes) as venue_access_notes
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
@@ -794,9 +804,11 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         name: row.linked_venue_name || row.venue_name,
         address: row.venue_address,
         whatThreeWords: row.venue_w3w,
-        contact1: row.venue_contact1,
-        phone: contactsVisible ? row.venue_phone : null,
-        email: row.venue_email,
+        // Venue contacts not stored on venues table — placeholder until a
+        // person-link-based contact lookup is added
+        contact1: null as string | null,
+        phone: null as string | null,
+        email: null as string | null,
         accessNotes: row.venue_access_notes,
         phoneHidden: !contactsVisible,
         phoneVisibleFrom: !contactsVisible && jobDate
@@ -829,7 +841,7 @@ router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response)
 
     // Verify access and get HireHop job ID
     const result = await query(
-      `SELECT q.what_is_it, j.hirehop_id
+      `SELECT q.what_is_it, j.hh_job_number AS hirehop_id
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
@@ -920,7 +932,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
               q.id AS quote_id, q.ops_status, q.job_type, q.what_is_it,
               q.venue_name, q.venue_id, q.job_date,
               q.client_name AS quote_client_name,
-              j.id AS job_id, j.job_name, j.hirehop_id, j.client_name AS job_client_name,
+              j.id AS job_id, j.job_name, j.hh_job_number AS hirehop_id, j.client_name AS job_client_name,
               o.email AS client_email,
               v.name AS linked_venue_name, v.address AS venue_address,
               v.city AS venue_city, v.postcode AS venue_postcode
@@ -1286,8 +1298,9 @@ router.get('/venues/:id', async (req: PortalRequest, res: Response) => {
   try {
     const result = await query(
       `SELECT v.id, v.name, v.address, v.city, v.postcode,
-              v.what_three_words, v.contact_name, v.contact_phone,
-              v.contact_email, v.notes, v.files
+              v.w3w_address AS what_three_words,
+              COALESCE(v.approach_notes, v.general_notes) AS notes,
+              v.files
        FROM venues v WHERE v.id = $1`,
       [req.params.id]
     );
@@ -1307,9 +1320,10 @@ router.get('/venues/:id', async (req: PortalRequest, res: Response) => {
         city: v.city,
         postcode: v.postcode,
         whatThreeWords: v.what_three_words,
-        contact1: v.contact_name,
-        phone: v.contact_phone,
-        email: v.contact_email,
+        // Venue contacts not stored on venues table — surfaced via org people link
+        contact1: null,
+        phone: null,
+        email: null,
         accessNotes: v.notes,
         files: v.files || [],
       },
