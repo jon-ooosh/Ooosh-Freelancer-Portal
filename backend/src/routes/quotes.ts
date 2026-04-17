@@ -583,10 +583,15 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
     const opsStatusClause = status === 'cancelled' ? ', ops_status = \'cancelled\'' : '';
     // When restoring from cancelled (back to draft), reset ops_status to todo
     const restoreOpsClause = status === 'draft' ? ', ops_status = \'todo\'' : '';
+    // When confirming a quote, bump ops_status from 'todo' to 'arranging' so the
+    // Transport Ops overview reflects the commercial commitment. Leave alone if
+    // already past todo (e.g. already arranging/arranged/dispatched).
+    const confirmOpsBump =
+      status === 'confirmed' ? `, ops_status = CASE WHEN ops_status = 'todo' THEN 'arranging' ELSE ops_status END` : '';
     const result = await query(
       `UPDATE quotes
        SET status = $1, status_changed_at = NOW(), status_changed_by = $2,
-           cancelled_reason = $3, updated_at = NOW()${opsStatusClause}${restoreOpsClause}
+           cancelled_reason = $3, updated_at = NOW()${opsStatusClause}${restoreOpsClause}${confirmOpsBump}
        WHERE id = $4 AND is_deleted = false
        RETURNING id, status, ops_status`,
       [status, req.user!.id, status === 'cancelled' ? (cancelledReason || null) : null, req.params.id]
@@ -822,9 +827,20 @@ router.patch('/:id/ops-status', validate(opsStatusSchema), async (req: AuthReque
       params.push(req.user!.email);
     }
 
+    // Auto-sync commercial status with operational progress.
+    // - Moving ops into arranging/arranged/dispatched/arrived/completed on a
+    //   still-draft quote implies we've committed to the job → confirm it.
+    // - Cancelling ops on a still-draft quote leaves it draft.
+    if (['arranging', 'arranged', 'dispatched', 'arrived', 'completed'].includes(ops_status)) {
+      updates.push(`status = CASE WHEN status = 'draft' THEN 'confirmed' ELSE status END`);
+      updates.push(`status_changed_at = CASE WHEN status = 'draft' THEN NOW() ELSE status_changed_at END`);
+      updates.push(`status_changed_by = CASE WHEN status = 'draft' THEN $${params.length + 1} ELSE status_changed_by END`);
+      params.push(req.user!.id);
+    }
+
     params.push(req.params.id);
     const result = await query(
-      `UPDATE quotes SET ${updates.join(', ')} WHERE id = $${params.length} AND is_deleted = false RETURNING id, ops_status`,
+      `UPDATE quotes SET ${updates.join(', ')} WHERE id = $${params.length} AND is_deleted = false RETURNING id, ops_status, status`,
       params
     );
     if (result.rows.length === 0) {
