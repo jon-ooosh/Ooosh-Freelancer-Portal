@@ -283,9 +283,19 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
     const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken, 0);
     const totalOutstanding = Math.max(0, totalRequired - totalCollected);
-    const resolvedStatuses = ['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'];
-    const driversCleared = drivers.filter((d: any) => resolvedStatuses.includes(d.excess_status)).length;
-    const driversPending = drivers.filter((d: any) => !resolvedStatuses.includes(d.excess_status)).length;
+
+    // A record is "covered" if it's in a terminal state (waived/reimbursed/claimed/rolled_over/not_required),
+    // OR enough money has been taken/held to meet the required amount. This catches the edge case of a
+    // pre-auth or 'taken' record that's underfunded (e.g. £600 pre-auth against £1,200 required).
+    const terminalStatuses = ['waived', 'rolled_over', 'not_required', 'reimbursed', 'fully_claimed', 'partially_reimbursed'];
+    const isCovered = (d: any) => {
+      if (terminalStatuses.includes(d.excess_status)) return true;
+      const required = d.excess_amount_required || 0;
+      const taken = d.excess_amount_taken || 0;
+      return required > 0 && taken >= required;
+    };
+    const driversCleared = drivers.filter(isCovered).length;
+    const driversPending = drivers.length - driversCleared;
 
     // Summary flags for Payment Portal — quick checks without parsing driver array
     const hasPreAuth = drivers.some((d: any) => d.excess_status === 'pre_auth');
