@@ -101,6 +101,19 @@ function parseBool(s: string | null): boolean {
   return low === 'yes' || low === 'true' || low === '1' || low === 'y';
 }
 
+/** Normalise a phone number. Excel's CSV export often strips the leading
+ *  zero from UK mobiles (e.g. 07941991311 → 7941991311) when it parses
+ *  unspaced digit strings as numbers. Pad UK-shaped mobiles back to 11
+ *  digits; leave international and already-correct numbers alone. */
+function normalisePhone(s: string | null): string | null {
+  if (!s) return null;
+  const trimmed = s.trim();
+  if (!trimmed) return null;
+  // 10 digits starting with 7 → UK mobile that lost its 0
+  if (/^7\d{9}$/.test(trimmed)) return '0' + trimmed;
+  return trimmed;
+}
+
 /** Build a "Ref 1 OK (12/05/2024) · Ref 2 OK (01/06/2024)" string */
 function buildReferences(
   ref1: string | null, date1: string | null,
@@ -170,8 +183,8 @@ function extractRow(raw: Record<string, unknown>): Row {
     name:            cell(raw, ['Name', 'A']),
     freelanceStatus: cell(raw, ['Freelance status', 'B']),
     email:           cell(raw, ['Email', 'E']),
-    phone:           cell(raw, ['Phone number', 'G']),
-    mobile:          cell(raw, ['Phone number 2', 'H']),
+    phone:           normalisePhone(cell(raw, ['Phone number', 'G'])),
+    mobile:          normalisePhone(cell(raw, ['Phone number 2', 'H'])),
     skills:          cell(raw, ['Skills', 'D']),
     availableFor:    cell(raw, ['Available for', 'I']),
     insurance:       cell(raw, ['Insurance status', 'K']),
@@ -179,7 +192,7 @@ function extractRow(raw: Record<string, unknown>): Row {
     homeAddress:     cell(raw, ['Home address', 'S']),
     licenceExpiry:   cell(raw, ['Licence expiry date', 'T']),
     emergencyName:   cell(raw, ['Emergency contact name', 'U']),
-    emergencyPhone:  cell(raw, ['Emergency contact phone', 'V']),
+    emergencyPhone:  normalisePhone(cell(raw, ['Emergency contact phone', 'V'])),
     dob:             cell(raw, ['Date of birth', 'W']),
     ref1:            cell(raw, ['Reference 1 ok?', 'X']),
     ref1Date:        cell(raw, ['< Date confirmed', 'Y']),
