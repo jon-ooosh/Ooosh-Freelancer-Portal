@@ -702,6 +702,9 @@ The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from M
 - [x] Derivation engine auto-creates `job_excess` record with standard £1,200/van when self-drive vehicles detected
 - [x] Hire form auto-email triggered on confirmation via payment-event (was only in pipeline.ts status change)
 - [x] Excess-info response includes portal-compatible field aliases (`excess_amount`, `excess`, `id`)
+- [x] **Excess requirement auto-completes (17 Apr 2026):** `syncExcessRequirementStatus()` helper promotes the pre-hire excess requirement to `done` when coverage is met — called from payment-event, record-payment, excess payment/claim/reimburse/waive, and the derivation engine. Forward-only (doesn't un-do on reversal).
+- [x] **`all_cleared` semantics tightened (17 Apr 2026):** a record is cleared only if in a terminal state OR `amount_taken >= amount_required`. Previously `pre_auth` alone flipped `all_cleared=true` regardless of amount — underfunded pre-auths now correctly surface as outstanding.
+- [x] **Overview card field-name fix (17 Apr 2026):** RequirementCard reads `total_excess_required/collected/outstanding` (matches API), not the old `total_required/collected/outstanding` aliases.
 
 *Portal-side changes (in payment portal repo):*
 - [x] Add `DATA_BACKEND` env var to Netlify config (default: `monday`)
@@ -717,8 +720,24 @@ The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from M
 - [x] Repoint `validate-job.js` → `GET /api/money/job-lookup/{hhJobNumber}`
 - [x] Pre-auth timing: falls back to local `determineExcessPaymentTiming()` when OP doesn't provide `pre_auth.method`
 - [x] `DATA_BACKEND=op` deployed on Netlify production (16 Apr 2026)
+- [x] Pre-auth display in portal (17 Apr 2026): date, amount, method, Stripe PI reference rendered alongside payment history. All fields already in `excess-info` response per driver (`payment_date`, `payment_reference`, `payment_method`, `excess_amount_taken`, `driver_name`).
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
 - [ ] Client ledger balance surfaced in portal (requires `client_balance_on_account` in excess-info response)
+
+*Known gaps / follow-ups (non-blocking, captured 17 Apr 2026):*
+- [ ] **API key auth vuln — MUST FIX:** `authenticateFlexible` in `money.ts` only matches `apiKey.substring(0, 8)` against `key_prefix`. Any string starting with `ppk_live` authenticates. Needs full-key hash comparison.
+- [ ] **Refund path doesn't unwind excess record:** `payment-event` with `payment_type: 'refund'` or `'excess_refund'` records the payment in `job_payments` but doesn't flip `excess_status` back from `pre_auth`/`taken`. Staff must manually mark reimbursed on Money tab.
+- [ ] **Pre-auth capture vs release:** portal's `admin-claim-preauth.js` fires `payment_type: 'excess'` to capture a hold as a real charge. Works in common case but on pre_auth records `amount_taken` is REPLACED (not added), so split-capture scenarios could produce odd aggregates.
+- [ ] **Stripe pre-auth expiry:** ~7-day auto-void. Portal takes pre-auths inside a 4-day window so usually fine; no OP polling. Flag only.
+- [ ] **Rolled-over balance linking:** recording a payment with method `rolled_over` updates the current job's excess to `taken` but doesn't mark the *previous* job's excess as `rolled_over` — two-step manual process. Could be automated when client ledger integration lands.
+
+*Excess lifecycle — "three births" model (for future reference):*
+A `job_excess` row is created exactly once per self-drive slot and enriched through three stages:
+1. **Derivation** (earliest) — HH sync detects self-drive vans, auto-creates record with `required = van_count × £1,200` (floor, inc VAT), `status = needed`.
+2. **Money collected** (any channel) — portal pre-auth/payment, Worldpay/Amex in-person, cash, bank transfer, PayPal, rolled-over balance. Updates `amount_taken`, flips status to `pre_auth`/`taken`/`partially_paid`. £1,200 is the FLOOR — any DVLA points/referral surcharge gets added on top, never replaces.
+3. **Hire form absorbs** (latest) — driver submits form, system finds the existing unlinked record, keeps `amount_taken`, updates `required` to the hire-form-calculated figure (floor + surcharge). Gap between required and taken surfaces as outstanding.
+
+Coverage rule used by `all_cleared` and `syncExcessRequirementStatus`: **covered = terminal status (waived/reimbursed/claimed/rolled_over/not_required) OR amount_taken >= amount_required**.
 
 ##### Phase F — Staff Card Payments (future)
 Allow staff to take card payments directly from the Money tab, rather than walking to the card terminal.
