@@ -3990,6 +3990,11 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
   const [loading, setLoading] = useState(true);
   const [showAddMenu, setShowAddMenu] = useState(false);
   const [isVanAndDriver, setIsVanAndDriver] = useState(false);
+  // Local copy of derived flags so per-slot toggles can update the UI without a page refresh.
+  // Seeded from the parent prop; refreshed from the PATCH response on every slot/toggle change.
+  const [localFlags, setLocalFlags] = useState<typeof derivedFlags>(derivedFlags);
+  useEffect(() => { setLocalFlags(derivedFlags); }, [derivedFlags]);
+  const effectiveFlags = localFlags || derivedFlags;
   // Default to post_hire view for dispatched+ jobs (status 4+)
   const [phase, setPhase] = useState<'pre_hire' | 'post_hire'>(
     (jobStatus && jobStatus >= 4) ? 'post_hire' : 'pre_hire'
@@ -4034,19 +4039,30 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
     }
   }
 
-  async function toggleVanAndDriver() {
-    const switchingToCrewed = !isVanAndDriver;
-    try {
-      const data = await api.patch<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/van-and-driver`, {
-        isVanAndDriver: switchingToCrewed,
-      });
-      setIsVanAndDriver(data.isVanAndDriver);
-      // Reload requirements since derivation re-runs on toggle
+  // Apply the result of a toggle/slot PATCH: update flags, van-and-driver flag,
+  // reload requirement list, and open crew calculator if job just became fully V&D.
+  async function applyDerivationResult(derivation: { flags?: typeof derivedFlags } | undefined) {
+    const flags = derivation?.flags;
+    if (flags) {
+      setLocalFlags(flags);
+      const allVanAndDriver = !!(flags.has_vehicle && flags.self_drive_count === 0);
+      setIsVanAndDriver(allVanAndDriver);
       await loadAll();
-      // Auto-open crew calculator when switching to crewed mode and no crew exists
-      if (switchingToCrewed && !hasCrewQuotes && !hasCrewOnHH && onOpenCrewCalculator) {
+      if (allVanAndDriver && !hasCrewQuotes && !hasCrewOnHH && onOpenCrewCalculator) {
         onOpenCrewCalculator();
       }
+    } else {
+      await loadAll();
+    }
+  }
+
+  async function toggleVanAndDriver() {
+    try {
+      const data = await api.patch<{ derivation?: { flags?: typeof derivedFlags } }>(
+        `/hirehop/jobs/${jobId}/van-and-driver`,
+        { isVanAndDriver: !isVanAndDriver }
+      );
+      await applyDerivationResult(data.derivation);
     } catch (err) {
       console.error('Failed to toggle van & driver:', err);
     }
@@ -4054,19 +4070,11 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
 
   async function changeSlotMode(itemId: number, slotIndex: number, mode: 'self_drive' | 'van_and_driver') {
     try {
-      const data = await api.patch<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/vehicle-slot-mode`, {
-        itemId,
-        slotIndex,
-        mode,
-      });
-      // Re-read the derived flags so vehicle_slots reflects the change
-      const flags = await api.get<{ isVanAndDriver: boolean }>(`/hirehop/jobs/${jobId}/derived-flags`);
-      setIsVanAndDriver(flags.isVanAndDriver || false);
-      await loadAll();
-      // Auto-open crew calculator if job just became fully van & driver and no crew exists
-      if (data.isVanAndDriver && !hasCrewQuotes && !hasCrewOnHH && onOpenCrewCalculator) {
-        onOpenCrewCalculator();
-      }
+      const data = await api.patch<{ derivation?: { flags?: typeof derivedFlags } }>(
+        `/hirehop/jobs/${jobId}/vehicle-slot-mode`,
+        { itemId, slotIndex, mode }
+      );
+      await applyDerivationResult(data.derivation);
     } catch (err) {
       console.error('Failed to change slot mode:', err);
     }
@@ -4322,7 +4330,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
                 <RequirementCard
                   key={req.id}
                   req={req}
-                  derivedFlags={derivedFlags}
+                  derivedFlags={effectiveFlags}
                   seatAvailability={seatAvailability}
                   jobId={jobId}
                   hhJobNumber={hhJobNumber}
@@ -4344,7 +4352,7 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
                     <RequirementCard
                       key={nr.id}
                       req={nr}
-                      derivedFlags={derivedFlags}
+                      derivedFlags={effectiveFlags}
                       isNested
                       jobId={jobId}
                       hhJobNumber={hhJobNumber}
