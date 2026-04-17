@@ -14,8 +14,10 @@ import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
+import crypto from 'crypto';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
+import { emailService } from '../services/email-service';
 
 const router = Router();
 
@@ -161,6 +163,457 @@ router.post('/auth/login', async (req: Request, res: Response) => {
 router.post('/auth/logout', (_req: Request, res: Response) => {
   res.clearCookie('session', { path: '/' });
   res.json({ success: true });
+});
+
+// ── Registration: gate check + OTP ───────────────────────────────────
+// Mirrors the two-tick Monday.com gate but against the OP people table:
+// is_freelancer = true AND is_approved = true.
+
+const registerStartSchema = z.object({
+  email: z.string().email(),
+});
+
+router.post('/auth/register/start', async (req: Request, res: Response) => {
+  try {
+    const parsed = registerStartSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'A valid email address is required' });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase().trim();
+
+    // Two-tick gate: must be an approved freelancer in the people table
+    const result = await query(
+      `SELECT id, first_name, last_name, email, portal_password_hash, is_approved
+       FROM people
+       WHERE LOWER(email) = $1 AND is_freelancer = true`,
+      [email]
+    );
+
+    // Don't leak whether the email exists — return the same message regardless.
+    // (But only send a code if they're a legitimate approved freelancer.)
+    const genericResponse = {
+      success: true,
+      message: 'If your email is on our approved freelancer list, a verification code is on its way.',
+    };
+
+    if (result.rows.length === 0 || !result.rows[0].is_approved) {
+      res.json(genericResponse);
+      return;
+    }
+
+    const person = result.rows[0];
+    if (person.portal_password_hash) {
+      // Already registered — tell them (no leak: they already know they have an account)
+      res.status(409).json({
+        error: 'An account already exists for this email. Please log in or reset your password.',
+      });
+      return;
+    }
+
+    // Generate 6-digit code, 15 min TTL
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    await query(
+      `INSERT INTO portal_verification_codes (email, code, expires_at) VALUES ($1, $2, $3)`,
+      [email, code, expiresAt]
+    );
+
+    const freelancerName = person.first_name || 'there';
+    await emailService.send('portal_verification_code', {
+      to: email,
+      variables: { freelancerName, code },
+    });
+
+    res.json(genericResponse);
+  } catch (error) {
+    console.error('Portal register/start error:', error);
+    res.status(500).json({ error: 'Failed to start registration' });
+  }
+});
+
+const registerVerifySchema = z.object({
+  email: z.string().email(),
+  code: z.string().length(6),
+});
+
+router.post('/auth/register/verify', async (req: Request, res: Response) => {
+  try {
+    const parsed = registerVerifySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Email and 6-digit code are required' });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase().trim();
+    const code = parsed.data.code;
+
+    // Find the newest unexpired unconsumed code for this email
+    const result = await query(
+      `SELECT id, code, attempts
+       FROM portal_verification_codes
+       WHERE LOWER(email) = $1 AND consumed_at IS NULL AND expires_at > NOW()
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(400).json({ error: 'No active code — please request a new one' });
+      return;
+    }
+
+    const row = result.rows[0];
+    if (row.attempts >= 5) {
+      res.status(429).json({ error: 'Too many attempts — please request a new code' });
+      return;
+    }
+
+    if (row.code !== code) {
+      await query(
+        `UPDATE portal_verification_codes SET attempts = attempts + 1 WHERE id = $1`,
+        [row.id]
+      );
+      res.status(400).json({ error: 'Incorrect code' });
+      return;
+    }
+
+    // Valid — mark consumed
+    await query(
+      `UPDATE portal_verification_codes SET consumed_at = NOW() WHERE id = $1`,
+      [row.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Portal register/verify error:', error);
+    res.status(500).json({ error: 'Failed to verify code' });
+  }
+});
+
+const registerCompleteSchema = z.object({
+  email: z.string().email(),
+  code: z.string().length(6),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+});
+
+router.post('/auth/register/complete', async (req: Request, res: Response) => {
+  try {
+    const parsed = registerCompleteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid input' });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase().trim();
+    const { code, password } = parsed.data;
+
+    // Require that verify was called within the last 15 min (consumed_at set for this code)
+    const codeResult = await query(
+      `SELECT id FROM portal_verification_codes
+       WHERE LOWER(email) = $1 AND code = $2 AND consumed_at IS NOT NULL
+         AND consumed_at > NOW() - INTERVAL '15 minutes'
+       ORDER BY created_at DESC LIMIT 1`,
+      [email, code]
+    );
+    if (codeResult.rows.length === 0) {
+      res.status(400).json({ error: 'Please verify your email first' });
+      return;
+    }
+
+    // Gate again — still must be an approved freelancer
+    const personResult = await query(
+      `SELECT id, first_name, last_name, email FROM people
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true`,
+      [email]
+    );
+    if (personResult.rows.length === 0) {
+      res.status(403).json({ error: 'Your account is no longer approved. Please contact us.' });
+      return;
+    }
+    const person = personResult.rows[0];
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    await query(
+      `UPDATE people
+       SET portal_password_hash = $1,
+           portal_email_verified = true,
+           portal_last_login = NOW()
+       WHERE id = $2`,
+      [passwordHash, person.id]
+    );
+
+    // Issue session token (same shape as login)
+    const name = `${person.first_name || ''} ${person.last_name || ''}`.trim();
+    const sessionToken = jwt.sign(
+      { id: person.id, email: person.email || email, name },
+      PORTAL_SECRET,
+      { expiresIn: '30d', algorithm: 'HS256' }
+    );
+
+    res.cookie('session', sessionToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+
+    res.json({
+      success: true,
+      user: { id: person.id, name, email: person.email || email },
+    });
+  } catch (error) {
+    console.error('Portal register/complete error:', error);
+    res.status(500).json({ error: 'Failed to complete registration' });
+  }
+});
+
+// ── Forgot / reset password ──────────────────────────────────────────
+
+const PORTAL_FRONTEND_URL = (
+  process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk'
+).replace(/\/$/, '');
+
+function hashToken(raw: string): string {
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+const forgotSchema = z.object({
+  email: z.string().email(),
+});
+
+router.post('/auth/forgot-password', async (req: Request, res: Response) => {
+  try {
+    const parsed = forgotSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'A valid email address is required' });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase().trim();
+
+    const result = await query(
+      `SELECT id, first_name, email FROM people
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true`,
+      [email]
+    );
+
+    // Don't leak whether the email exists
+    const genericResponse = {
+      success: true,
+      message: 'If your email is on our approved freelancer list, a reset link is on its way.',
+    };
+
+    if (result.rows.length === 0) {
+      res.json(genericResponse);
+      return;
+    }
+
+    const person = result.rows[0];
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1h
+
+    await query(
+      `INSERT INTO portal_password_reset_tokens (person_id, token_hash, expires_at, ip_address)
+       VALUES ($1, $2, $3, $4)`,
+      [person.id, tokenHash, expiresAt, req.ip || null]
+    );
+
+    const resetUrl = `${PORTAL_FRONTEND_URL}/reset-password?token=${rawToken}`;
+    const freelancerName = person.first_name || 'there';
+
+    await emailService.send('portal_password_reset', {
+      to: person.email || email,
+      variables: { freelancerName, resetUrl },
+    });
+
+    res.json(genericResponse);
+  } catch (error) {
+    console.error('Portal forgot-password error:', error);
+    res.status(500).json({ error: 'Failed to send reset link' });
+  }
+});
+
+const resetSchema = z.object({
+  token: z.string().min(40),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+});
+
+router.post('/auth/reset-password', async (req: Request, res: Response) => {
+  try {
+    const parsed = resetSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid input' });
+      return;
+    }
+    const { token, password } = parsed.data;
+    const tokenHash = hashToken(token);
+
+    const result = await query(
+      `SELECT t.id, t.person_id, p.first_name, p.last_name, p.email,
+              p.is_freelancer, p.is_approved
+       FROM portal_password_reset_tokens t
+       JOIN people p ON p.id = t.person_id
+       WHERE t.token_hash = $1
+         AND t.used_at IS NULL
+         AND t.expires_at > NOW()`,
+      [tokenHash]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(400).json({ error: 'This reset link is invalid or has expired.' });
+      return;
+    }
+
+    const row = result.rows[0];
+    if (!row.is_freelancer || !row.is_approved) {
+      res.status(403).json({ error: 'Your account is no longer approved. Please contact us.' });
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // Transaction: set password + mark token used
+    await query('BEGIN');
+    try {
+      await query(
+        `UPDATE people
+         SET portal_password_hash = $1,
+             portal_email_verified = true,
+             portal_last_login = NOW()
+         WHERE id = $2`,
+        [passwordHash, row.person_id]
+      );
+      await query(
+        `UPDATE portal_password_reset_tokens SET used_at = NOW() WHERE id = $1`,
+        [row.id]
+      );
+      // Invalidate all other pending tokens for this person
+      await query(
+        `UPDATE portal_password_reset_tokens
+         SET used_at = NOW()
+         WHERE person_id = $1 AND used_at IS NULL AND id != $2`,
+        [row.person_id, row.id]
+      );
+      await query('COMMIT');
+    } catch (err) {
+      await query('ROLLBACK');
+      throw err;
+    }
+
+    // Issue session token so they go straight into the portal
+    const name = `${row.first_name || ''} ${row.last_name || ''}`.trim();
+    const sessionToken = jwt.sign(
+      { id: row.person_id, email: row.email, name },
+      PORTAL_SECRET,
+      { expiresIn: '30d', algorithm: 'HS256' }
+    );
+
+    res.cookie('session', sessionToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+
+    res.json({ success: true, user: { id: row.person_id, name, email: row.email } });
+  } catch (error) {
+    console.error('Portal reset-password error:', error);
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// ── Telemetry: Monday fallback alert ─────────────────────────────────
+// Called by the Next.js portal when an OP-backend call fails and it
+// falls back to Monday.com. Dedup'd to once per operation per hour.
+
+const fallbackSchema = z.object({
+  operation: z.string().min(1).max(50),
+  errorMessage: z.string().max(2000).optional(),
+  email: z.string().email().optional(),
+  stack: z.string().max(4000).optional(),
+});
+
+router.post('/telemetry/monday-fallback', async (req: Request, res: Response) => {
+  try {
+    const headerSecret = req.headers['x-portal-telemetry-key'];
+    const expected = process.env.PORTAL_TELEMETRY_SECRET;
+    if (!expected || headerSecret !== expected) {
+      // Don't leak whether the secret is configured; simple 401.
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const parsed = fallbackSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid payload' });
+      return;
+    }
+
+    const { operation, errorMessage, email, stack } = parsed.data;
+    console.warn(`[PORTAL FALLBACK] operation=${operation} email=${email || 'unknown'} error=${errorMessage || 'unknown'}`);
+
+    // Always record the event for forensics
+    await query(
+      `INSERT INTO portal_fallback_events (operation, error_message, email)
+       VALUES ($1, $2, $3)`,
+      [operation, errorMessage || null, email || null]
+    );
+
+    // Dedup: suppress further alerts for this operation within the last hour.
+    // We count events BEFORE the one we just inserted.
+    const dedupResult = await query(
+      `SELECT COUNT(*)::int AS count
+       FROM portal_fallback_events
+       WHERE operation = $1
+         AND created_at > NOW() - INTERVAL '1 hour'`,
+      [operation]
+    );
+    const eventsInWindow = dedupResult.rows[0].count as number;
+    const shouldAlert = eventsInWindow <= 1; // just the one we inserted
+
+    if (shouldAlert) {
+      // Create an inbox notification for all admin/manager users
+      const adminUsers = await query(
+        `SELECT id FROM users
+         WHERE role IN ('admin', 'manager') AND is_active = true`
+      );
+      for (const user of adminUsers.rows) {
+        await query(
+          `INSERT INTO notifications (user_id, type, priority, title, content, action_url)
+           VALUES ($1, 'portal_fallback', 'high', $2, $3, $4)`,
+          [
+            user.id,
+            `Portal fell back to Monday: ${operation}`,
+            `${errorMessage || 'No error message'}${email ? ` — ${email}` : ''}`,
+            '/settings',
+          ]
+        ).catch((err) => {
+          // Schema may differ — log and move on. Email is the important alert.
+          console.error('Failed to insert portal_fallback notification:', err);
+        });
+      }
+
+      // Send alert email to ops inbox
+      await emailService.send('monday_fallback_alert', {
+        to: 'info@oooshtours.co.uk',
+        variables: {
+          operation,
+          errorMessage: errorMessage || 'No error message provided',
+          email: email || 'unknown',
+        },
+      }).catch((err) => console.error('Failed to send monday_fallback_alert:', err));
+    }
+
+    res.json({ success: true, alerted: shouldAlert, eventsInWindow });
+    if (stack) {
+      console.warn(`[PORTAL FALLBACK] stack: ${stack}`);
+    }
+  } catch (error) {
+    console.error('Portal fallback telemetry error:', error);
+    res.status(500).json({ error: 'Failed to record fallback' });
+  }
 });
 
 // ── All remaining routes require portal auth ─────────────────────────
