@@ -4,6 +4,7 @@ import { jobDisplayName, daysAgo, formatCurrency } from './helpers';
 
 interface Props {
   overdueReturns: ScheduleJob[];
+  overdueTotalCount?: number;
   chasesDue: ChaseJob[];
   referralCount: number;
   referrals: PendingReferral[];
@@ -14,11 +15,12 @@ interface Props {
 }
 
 export default function NeedsAttention({
-  overdueReturns, chasesDue, referralCount, referrals,
+  overdueReturns, overdueTotalCount, chasesDue, referralCount, referrals,
   excessCount, excessItems, fleetAlerts,
 }: Props) {
   const totalFleetAlerts = (fleetAlerts?.mot || 0) + (fleetAlerts?.insurance || 0) + (fleetAlerts?.tax || 0);
-  const hasAnything = overdueReturns.length > 0 || chasesDue.length > 0 || referralCount > 0 || excessCount > 0 || totalFleetAlerts > 0;
+  const overdueCount = overdueTotalCount ?? overdueReturns.length;
+  const hasAnything = overdueCount > 0 || chasesDue.length > 0 || referralCount > 0 || excessCount > 0 || totalFleetAlerts > 0;
 
   if (!hasAnything) return null;
 
@@ -29,13 +31,13 @@ export default function NeedsAttention({
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0 divide-y sm:divide-y-0 sm:divide-x divide-gray-100">
         {/* Overdue Returns */}
-        {overdueReturns.length > 0 && (
+        {overdueCount > 0 && (
           <div className="p-4">
             <div className="flex items-center gap-2 mb-3">
               <span className="w-2 h-2 rounded-full bg-red-500" />
               <h3 className="text-xs font-semibold text-red-700 uppercase">Overdue Returns</h3>
               <span className="ml-auto text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-medium">
-                {overdueReturns.length}
+                {overdueCount}
               </span>
             </div>
             <div className="space-y-2">
@@ -51,9 +53,9 @@ export default function NeedsAttention({
                 </Link>
               ))}
             </div>
-            {overdueReturns.length > 3 && (
+            {overdueCount > 3 && (
               <Link to="/jobs/returns" className="text-[11px] text-red-600 hover:text-red-700 font-medium mt-2 block">
-                View all {overdueReturns.length}
+                View all {overdueCount}
               </Link>
             )}
           </div>

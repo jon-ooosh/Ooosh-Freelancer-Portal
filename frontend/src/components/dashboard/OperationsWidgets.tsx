@@ -58,10 +58,14 @@ export default function OperationsWidgets({ transportOps, backline, todayPrep, t
                 );
               })}
               {transportOps.unassigned_count > 0 && (
-                <div className="flex items-center justify-between text-xs pt-1 border-t border-gray-100">
+                <Link
+                  to="/operations/transport?needs_crew=1"
+                  className="flex items-center justify-between text-xs pt-1 border-t border-gray-100 hover:bg-amber-50 -mx-1 px-1 rounded"
+                  title="View quotes without crew assigned"
+                >
                   <span className="text-amber-600">Needs crew</span>
                   <span className="font-medium text-amber-700">{transportOps.unassigned_count}</span>
-                </div>
+                </Link>
               )}
             </div>
           )}

@@ -195,9 +195,21 @@ export default function DashboardPage() {
         />
       </Section>
 
+      {/* Operations */}
+      <Section id="operations" collapsed={collapsed} toggle={toggleCollapse}>
+        <OperationsWidgets
+          transportOps={data.transport_ops}
+          fleet={data.fleet}
+          backline={backline}
+          todayPrep={todayPrep}
+          tomorrowPrep={tomorrowPrep}
+        />
+      </Section>
+
       {/* Needs Attention */}
       <NeedsAttention
         overdueReturns={data.needs_attention.overdue_returns}
+        overdueTotalCount={parseInt(sc.overdue_count) || 0}
         chasesDue={data.needs_attention.chases_due}
         referralCount={data.needs_attention.referral_count}
         referrals={data.needs_attention.referrals}
@@ -268,17 +280,6 @@ export default function DashboardPage() {
           )}
         </div>
       )}
-
-      {/* Operations */}
-      <Section id="operations" collapsed={collapsed} toggle={toggleCollapse}>
-        <OperationsWidgets
-          transportOps={data.transport_ops}
-          fleet={data.fleet}
-          backline={backline}
-          todayPrep={todayPrep}
-          tomorrowPrep={tomorrowPrep}
-        />
-      </Section>
 
       {/* Who's In */}
       <WhosInPlaceholder />
