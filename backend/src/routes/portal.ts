@@ -436,6 +436,38 @@ router.post('/auth/forgot-password', async (req: Request, res: Response) => {
   }
 });
 
+// ── GET /api/portal/auth/verify-reset-token — check a reset token ─
+// Validates a password reset token without consuming it. The Next.js
+// portal calls this on /reset-password page load to decide whether to
+// show the form or the "expired" message. Confirms the token is
+// valid + unexpired + unused + belongs to an approved freelancer.
+
+router.get('/auth/verify-reset-token', async (req: Request, res: Response) => {
+  try {
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    if (!token || token.length < 40) {
+      res.json({ valid: false });
+      return;
+    }
+    const tokenHash = hashToken(token);
+    const result = await query(
+      `SELECT 1
+       FROM portal_password_reset_tokens t
+       JOIN people p ON p.id = t.person_id
+       WHERE t.token_hash = $1
+         AND t.used_at IS NULL
+         AND t.expires_at > NOW()
+         AND p.is_freelancer = true
+         AND p.is_approved = true`,
+      [tokenHash]
+    );
+    res.json({ valid: result.rows.length > 0 });
+  } catch (error) {
+    console.error('Portal verify-reset-token error:', error);
+    res.json({ valid: false });
+  }
+});
+
 const resetSchema = z.object({
   token: z.string().min(40),
   password: z.string().min(8, 'Password must be at least 8 characters'),

@@ -289,6 +289,20 @@ export async function forgotPasswordOP(email: string): Promise<{ success: boolea
   return opPostJson('/auth/forgot-password', { email })
 }
 
+/**
+ * Check whether a password reset token is still valid (not consumed, not
+ * expired, and owned by an approved freelancer). Does not consume it.
+ */
+export async function verifyResetTokenOP(token: string): Promise<{ valid: boolean }> {
+  const url = `${getOpUrl()}/api/portal/auth/verify-reset-token?token=${encodeURIComponent(token)}`
+  const response = await fetch(url, { method: 'GET' })
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`)
+  }
+  const data = await response.json().catch(() => ({ valid: false }))
+  return { valid: !!data.valid }
+}
+
 export async function resetPasswordOP(
   token: string,
   password: string
