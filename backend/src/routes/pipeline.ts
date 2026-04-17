@@ -442,6 +442,9 @@ const updateStatusSchema = z.object({
     priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
     user_id: z.string().uuid().nullable().optional(),
   })).optional().nullable(),
+  // Reminder IDs to cancel when transitioning to lost/cancelled
+  // (user is asked in the modal which reminders are still relevant)
+  cancel_reminder_ids: z.array(z.string().uuid()).optional().nullable(),
 });
 
 router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthRequest, res: Response) => {
@@ -451,7 +454,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       pipeline_status, hold_reason, hold_reason_detail,
       confirmed_method, lost_reason, lost_detail, transition_note,
       retro_rating, retro_notes, retro_follow_up, retro_follow_up_date,
-      retro_reminders,
+      retro_reminders, cancel_reminder_ids,
     } = req.body;
 
     // Get current state
@@ -600,6 +603,32 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
 
+    // Cancel reminders the user ticked in the Lost / Cancelled modal (if any).
+    // Done before event triggers fire so event-triggered reminders the user
+    // chose to cancel don't still send notifications on the way out.
+    if (
+      Array.isArray(cancel_reminder_ids) &&
+      cancel_reminder_ids.length > 0 &&
+      ['lost', 'cancelled'].includes(pipeline_status)
+    ) {
+      try {
+        await query(
+          `UPDATE job_requirements
+           SET status = 'cancelled',
+               notes = COALESCE(notes, '') ||
+                       E'\n[Auto-cancelled: job ' || $1 || ']',
+               updated_at = NOW()
+           WHERE id = ANY($2::uuid[])
+             AND job_id = $3
+             AND requirement_type = 'reminder'
+             AND status NOT IN ('done', 'cancelled')`,
+          [pipeline_status, cancel_reminder_ids, jobId]
+        );
+      } catch (cancelErr) {
+        console.warn('[Pipeline] Failed to cancel reminders on status change:', cancelErr);
+      }
+    }
+
     // Fire event-triggered reminders (reminder requirements with matching event_trigger)
     if (['confirmed', 'cancelled', 'lost'].includes(pipeline_status)) {
       try {
@@ -609,7 +638,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
            WHERE jr.job_id = $1
              AND jr.requirement_type = 'reminder'
              AND jr.event_trigger = $2
-             AND jr.status != 'done'`,
+             AND jr.status NOT IN ('done', 'cancelled')`,
           [jobId, pipeline_status]
         );
 

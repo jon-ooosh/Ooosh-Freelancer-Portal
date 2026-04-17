@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import DatePicker from '../components/DatePicker';
 import ChaseModal from '../components/ChaseModal';
+import CancelRemindersSection from '../components/CancelRemindersSection';
 import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
@@ -394,12 +395,14 @@ function PipelineCard({
 function TransitionModal({
   isOpen,
   targetStatus,
+  jobId,
   onConfirm,
   onCancel,
 }: {
   isOpen: boolean;
   targetStatus: PipelineStatus | null;
-  onConfirm: (data: Record<string, string>) => void;
+  jobId?: string;
+  onConfirm: (data: Record<string, unknown>) => void;
   onCancel: () => void;
 }) {
   const [holdReason, setHoldReason] = useState<HoldReason>('client_undecided');
@@ -408,11 +411,12 @@ function TransitionModal({
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
+  const [cancelReminderIds, setCancelReminderIds] = useState<Set<string>>(new Set());
 
   if (!isOpen || !targetStatus) return null;
 
   const handleSubmit = () => {
-    const data: Record<string, string> = {};
+    const data: Record<string, unknown> = {};
     if (targetStatus === 'paused') {
       data.hold_reason = holdReason;
       if (holdDetail) data.hold_reason_detail = holdDetail;
@@ -421,6 +425,7 @@ function TransitionModal({
     } else if (targetStatus === 'lost') {
       data.lost_reason = lostReason;
       if (lostDetail) data.lost_detail = lostDetail;
+      if (cancelReminderIds.size > 0) data.cancel_reminder_ids = Array.from(cancelReminderIds);
     }
     if (note) data.transition_note = note;
     onConfirm(data);
@@ -496,6 +501,14 @@ function TransitionModal({
               rows={2}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
             />
+            {jobId && (
+              <CancelRemindersSection
+                jobId={jobId}
+                targetStatus="lost"
+                selected={cancelReminderIds}
+                onChange={setCancelReminderIds}
+              />
+            )}
           </div>
         )}
 
@@ -2164,6 +2177,7 @@ export default function PipelinePage() {
       <TransitionModal
         isOpen={!!transitionModal}
         targetStatus={transitionModal?.targetStatus || null}
+        jobId={transitionModal?.jobId}
         onConfirm={handleTransitionConfirm}
         onCancel={() => setTransitionModal(null)}
       />

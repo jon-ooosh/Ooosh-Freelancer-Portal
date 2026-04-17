@@ -283,7 +283,7 @@ export function startScheduler() {
         JOIN jobs j ON j.id = jr.job_id AND j.is_deleted = false
         JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
         WHERE jr.phase = 'post_hire'
-          AND jr.status NOT IN ('done', 'blocked')
+          AND jr.status NOT IN ('done', 'blocked', 'cancelled')
           AND jr.due_date IS NOT NULL
           AND jr.due_date::date <= CURRENT_DATE
           AND j.status IN (6, 7, 8)
@@ -383,6 +383,106 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Notification escalation scheduled every 15 minutes');
+
+  // ── Reminder Scanner (due-date reminders) ────────────────────────────
+  // Hourly — fires `reminder` requirements with a due_date <= today that
+  // haven't been dispatched yet. Works regardless of phase or job status,
+  // which distinguishes it from the close-out scanner.
+  cron.schedule('0 * * * *', async () => {
+    try {
+      const due = await query(`
+        SELECT jr.id, jr.job_id, jr.custom_label, jr.notes, jr.due_date,
+               jr.assigned_to, jr.created_by, jr.delivery_method,
+               j.hh_job_number, j.job_name, j.client_name, j.pipeline_status
+        FROM job_requirements jr
+        JOIN jobs j ON j.id = jr.job_id AND j.is_deleted = false
+        WHERE jr.requirement_type = 'reminder'
+          AND jr.status NOT IN ('done', 'blocked', 'cancelled')
+          AND jr.due_date IS NOT NULL
+          AND jr.due_date::date <= CURRENT_DATE
+      `);
+
+      if (due.rows.length === 0) return;
+
+      let created = 0;
+      for (const rem of due.rows) {
+        const jobName = rem.job_name || rem.client_name || `Job ${rem.hh_job_number || ''}`;
+        const label = rem.custom_label || 'Reminder';
+        const title = `Reminder: ${label}`;
+        const content = `${label}${rem.notes && rem.notes !== rem.custom_label ? ` — ${rem.notes}` : ''} (${jobName})`;
+        const deliveryMethod = rem.delivery_method || 'both';
+
+        // Target: assigned user if set, else the user who created the reminder.
+        // Reminders default to the creator — they're personal, not team-wide.
+        const targetUserId = rem.assigned_to || rem.created_by;
+        if (!targetUserId) continue;
+
+        // Dedup: don't re-create if we already notified this user for this
+        // reminder in the last 24h (cron catches up quickly after a restart).
+        const existing = await query(
+          `SELECT id FROM notifications
+           WHERE user_id = $1 AND entity_type = 'job_requirements' AND entity_id = $2
+             AND created_at > NOW() - INTERVAL '24 hours'`,
+          [targetUserId, rem.id]
+        );
+        if (existing.rows.length > 0) continue;
+
+        // Priority controls email escalation cadence.
+        // notification-only → low (escalation scheduler skips email for low).
+        // email / both → normal (so the escalator will email within a few hours).
+        const priority = deliveryMethod === 'notification' ? 'low' : 'normal';
+
+        const inserted = await query(
+          `INSERT INTO notifications
+            (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+           VALUES ($1, 'follow_up', $2, $3, 'job_requirements', $4, $5, $6)
+           RETURNING id`,
+          [
+            targetUserId, title, content, rem.id,
+            `/jobs/${rem.job_id}?tab=overview`,
+            priority,
+          ]
+        );
+
+        // Send email immediately for email-only delivery (time-sensitive)
+        if (deliveryMethod === 'email') {
+          try {
+            const userResult = await query(
+              `SELECT u.email, p.first_name
+               FROM users u LEFT JOIN people p ON p.id = u.person_id
+               WHERE u.id = $1`,
+              [targetUserId]
+            );
+            if (userResult.rows.length > 0 && userResult.rows[0].email) {
+              await emailService.sendRaw({
+                to: userResult.rows[0].email,
+                subject: title,
+                html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
+                       <p>Reminder: <strong>${label}</strong> for <strong>${jobName}</strong>.</p>
+                       ${rem.notes && rem.notes !== rem.custom_label ? `<p>Notes: ${rem.notes}</p>` : ''}
+                       <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
+              });
+              await query(
+                `UPDATE notifications SET email_sent_at = NOW() WHERE id = $1`,
+                [inserted.rows[0].id]
+              );
+            }
+          } catch (emailErr) {
+            console.warn('Scheduler: Reminder email failed:', emailErr);
+          }
+        }
+
+        created++;
+      }
+
+      if (created > 0) {
+        console.log(`Scheduler: Reminder scanner — ${created} notification(s) created from ${due.rows.length} due reminder(s)`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Reminder scanner failed:', err);
+    }
+  });
+  console.log('Scheduler: Reminder scanner scheduled hourly');
 
   // ── Hire Form Auto-Emails ────────────────────────────────────────────
   // Daily at 09:00 — send hire form emails for self-drive jobs approaching their start date

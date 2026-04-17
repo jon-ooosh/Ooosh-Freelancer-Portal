@@ -115,6 +115,7 @@ export const PREP_STATUS_CONFIG: Record<string, { label: string; colour: string;
   in_progress: { label: 'In Progress', colour: 'text-amber-700', bg: 'bg-amber-100', border: 'border-amber-200' },
   done:        { label: 'Done',        colour: 'text-green-700', bg: 'bg-green-100', border: 'border-green-200' },
   blocked:     { label: 'Blocked',     colour: 'text-red-700',   bg: 'bg-red-100',   border: 'border-red-200' },
+  cancelled:   { label: 'Cancelled',   colour: 'text-gray-500',  bg: 'bg-gray-50',   border: 'border-gray-200' },
 };
 
 export const PREP_STATUS_ORDER: JobRequirement['status'][] = ['not_started', 'in_progress', 'done', 'blocked'];
