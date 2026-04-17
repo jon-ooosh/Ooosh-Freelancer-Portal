@@ -11,6 +11,7 @@ import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { sendExcessEmail } from '../services/money-emails';
+import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { emailService } from '../services/email-service';
@@ -481,6 +482,13 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
       paymentMethod: method,
     }).catch(e => console.error('[excess] Payment email failed:', e));
 
+    // Promote the excess requirement to 'done' if coverage is now met
+    if (excess.job_id) {
+      syncExcessRequirementStatus(excess.job_id).catch(e =>
+        console.error('[excess] syncExcessRequirementStatus failed (payment):', e)
+      );
+    }
+
     res.json({ data: result.rows[0] });
   } catch (error) {
     console.error('[excess] Payment error:', error);
@@ -521,6 +529,12 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       amount,
       reason: notes || undefined,
     }).catch(e => console.error('[excess] Claim email failed:', e));
+
+    if (excess.job_id) {
+      syncExcessRequirementStatus(excess.job_id).catch(e =>
+        console.error('[excess] syncExcessRequirementStatus failed (claim):', e)
+      );
+    }
 
     res.json({ data: result.rows[0] });
   } catch (error) {
@@ -667,6 +681,12 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
       retainedAmount: isPartial ? amountTaken - amount : 0,
     }).catch(e => console.error('[excess] Reimburse email failed:', e));
 
+    if (excess.job_id) {
+      syncExcessRequirementStatus(excess.job_id).catch(e =>
+        console.error('[excess] syncExcessRequirementStatus failed (reimburse):', e)
+      );
+    }
+
     res.json({ data: { ...excess, hh_payment_application_id: hhPaymentAppId } });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
@@ -701,6 +721,13 @@ router.post('/:id/waive', authorize('admin'), validate(waiveSchema), async (req:
     if (result.rows.length === 0) {
       res.status(404).json({ error: 'Excess record not found' });
       return;
+    }
+
+    const excess = result.rows[0];
+    if (excess.job_id) {
+      syncExcessRequirementStatus(excess.job_id).catch(e =>
+        console.error('[excess] syncExcessRequirementStatus failed (waive):', e)
+      );
     }
 
     res.json({ data: result.rows[0] });
