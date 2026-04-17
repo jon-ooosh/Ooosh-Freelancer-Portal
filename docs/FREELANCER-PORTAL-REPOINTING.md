@@ -92,16 +92,20 @@ Goal: if something breaks on OP and freelancers silently drop back to Monday, we
 
 ## Build order (each step commits + pushes)
 
-1. **Migration 052** — `portal_password_reset_tokens` table, `completion_reminder_level INTEGER DEFAULT 0` on `quotes`
-2. **OP backend portal auth** — `POST /portal/auth/register/start|verify|complete`, `POST /portal/auth/forgot-password`, `POST /portal/auth/reset-password`; new email templates; verification code storage reusing the OP's existing verification pattern where possible
-3. **OP backend portal telemetry** — `POST /portal/telemetry/monday-fallback` endpoint + inbox notification + email (internal)
-4. **Next.js portal repointing** — `register/start|verify|complete`, `forgot-password`, `reset-password` all get `isOpMode()` branch with fallback; shared `src/lib/fallback-alert.ts` helper that reports every fallback to OP telemetry
-5. **Assignment email** — fire `freelancer_assignment` in `POST /api/assignments`; also change-notify path stays as-is
-6. **Delivery-note PDF service** — port from `src/lib/pdf.ts`; add `delivery_note`, `collection_confirmation`, `completion_driver_notes` templates
-7. **Completion flow overhaul** — R2 for photos + signature + PDF; PDF generation for deliveries; client email; staff alert
-8. **Portal files endpoint** — `GET /api/portal/jobs/:id/files` returning `jobs.files + venues.files` filtered by `share_with_freelancer=true`; Next.js side gets OP-mode branch
-9. **Completion chase scheduler** — cron every 30 min, 2/6/14h thresholds, level column, staff escalation
-10. **Docs** — update CLAUDE.md Phase 2 checkboxes + AGENT_MAP.md
+All 10 steps below landed on `claude/ooosh-operations-platform-KMIQj` on
+17 Apr 2026. Server deployment + env-var setup still outstanding (see
+flip-the-switch checklist below).
+
+1. ✅ **Migration 052** — `portal_verification_codes`, `portal_password_reset_tokens`, `portal_fallback_events` tables; `completion_reminder_level + completion_last_reminder_at` on `quotes`
+2. ✅ **OP backend portal auth** — `POST /portal/auth/register/start|verify|complete`, `POST /portal/auth/forgot-password`, `POST /portal/auth/reset-password`. Two-tick gate (is_freelancer + is_approved) against `people`.
+3. ✅ **OP backend portal telemetry** — `POST /portal/telemetry/monday-fallback` with shared-secret auth, dedup per-operation-per-hour, admin inbox notification + email alert
+4. ✅ **Next.js portal repointing** — `register/start|verify|complete`, `forgot-password`, `reset-password`, `login`, `jobs`, `jobs/[id]`, `jobs/[id]/complete` all get `isOpMode()` branch with fallback + `reportFallback()` helper. Register page now forwards the verification code through to /complete.
+5. ✅ **Assignment email** — `freelancer_assignment` template wired into POST `/api/quotes/:id/assignments` (new assignment on confirmed quote) AND PATCH `/api/quotes/:id/status` (draft → confirmed with existing assignees). Deduped via `quote_assignments.confirmed_at`.
+6. ✅ **Delivery-note PDF service** — `backend/src/services/delivery-note-pdf.ts` (port of Next.js `src/lib/pdf.ts`). Logo from R2 via shared `fetchLogo()` in `hire-form-pdf.ts`. Accepts base64 or Buffer input for photos/signature.
+7. ✅ **Completion flow overhaul** — photos + signature → R2 under `completion/{quote_id}/...`; PDF for deliveries → R2 at `delivery-notes/{quote_id}/...`; client email with PDF attached; staff alert to `info@` with driver notes. Responds to freelancer immediately, runs PDF + emails in background.
+8. ✅ **Portal files endpoint** — `GET /api/portal/jobs/:id/files` returning `jobs.files + venues.files` filtered by `share_with_freelancer=true`, with source tag. Next.js consumer wiring deferred (portal-side file list UI exists against Monday currently — will be repointed when the resources page is).
+9. ✅ **Completion chase scheduler** — `backend/src/services/completion-chaser.ts`, cron every 30 min, 2/6/14h levels, business hours (Europe/London 07:00–22:00), idempotent via conditional update on `completion_reminder_level`, staff escalation at level 3.
+10. ⏳ **Docs** — this file + CLAUDE.md + AGENT_MAP.md updates (in progress)
 
 ## Flip-the-switch checklist (end of session)
 

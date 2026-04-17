@@ -16,6 +16,7 @@
 | Agent 2 | `feature/excess-gate-ledger` | Excess Gate UI & Ledger | 🔴 Not started |
 | Agent 3 | `feature/ops-dashboard-streams` | Global Ops Dashboard Widgets + Backline | 🔴 Not started |
 | Agent 4 | `feature/deliveries-payments` | Incoming Deliveries, Lost Property & Payment Tracking | 🔴 Not started |
+| Agent 5 | `claude/ooosh-operations-platform-KMIQj` | Freelancer Portal Go-Live Repointing (auth, completion, chaser, fallback alerting) | 🟢 Complete pending PR — see `docs/FREELANCER-PORTAL-REPOINTING.md` |
 
 ---
 
@@ -357,6 +358,69 @@ Both agents may want to add a tab to `JobDetailPage.tsx` — Agent 3 for Backlin
 - [ ] Payment progress visible on Job Detail
 - [ ] Payment terms field on Organisation detail
 - [ ] Migration 026 runs cleanly
+
+---
+
+## Agent 5 — Freelancer Portal Go-Live Repointing
+
+**Branch:** `claude/ooosh-operations-platform-KMIQj`
+**Priority:** 🔴 HIGHEST — required to cut over off Monday.com for crew / D&C by EOD 17 Apr 2026
+**Status:** Code complete on branch, pending PR + server deploy + env-var config
+**Spec:** `docs/FREELANCER-PORTAL-REPOINTING.md`
+
+### What was built (17 Apr 2026)
+- Migration 052: portal_verification_codes, portal_password_reset_tokens, portal_fallback_events, completion_reminder_level + completion_last_reminder_at on quotes
+- OP backend endpoints (`backend/src/routes/portal.ts`):
+  - `/auth/register/start|verify|complete` — two-tick gate against `people` (is_freelancer AND is_approved), 6-digit OTP, 5 attempts cap
+  - `/auth/forgot-password`, `/auth/reset-password` — SHA-256 hashed, single-use, 1h TTL reset tokens, invalidate all other pending tokens on consume
+  - `/telemetry/monday-fallback` — shared-secret auth, dedup per-operation-per-hour, admin inbox notification + email to info@
+  - `/jobs/:quoteId/files` — share_with_freelancer filter on jobs.files + venues.files
+- Next.js portal OP-mode branches added to: `login`, `register/start|verify|complete`, `forgot-password`, `reset-password`, `jobs`, `jobs/[id]`, `jobs/[id]/complete`. All fallback paths call `reportFallback()`.
+- New email templates: `portal_verification_code`, `portal_password_reset`, `delivery_note`, `collection_confirmation`, `completion_driver_notes`, `monday_fallback_alert`
+- `freelancer_assignment` template wired into crew assignment creation + draft→confirmed transitions (`backend/src/routes/quotes.ts`)
+- `backend/src/services/delivery-note-pdf.ts` — port of `src/lib/pdf.ts`, logo from R2
+- Completion flow rewritten: photos+signature → R2, PDF generation for deliveries, client email with PDF attached, staff alert with driver notes, runs in background after responding to freelancer
+- `backend/src/services/completion-chaser.ts` + scheduler cron every 30 min: 2h/6h/14h reminders with staff escalation, business hours (Europe/London 07:00–22:00), idempotent via conditional level bump
+
+### Env vars needed before cutover
+On **OP server (`/var/www/ooosh-portal/.env`)**:
+- `PORTAL_TELEMETRY_SECRET=<random>` (matches Netlify side)
+- `FRONTEND_PORTAL_URL=https://freelancer.oooshtours.co.uk`
+- `PORTAL_SESSION_SECRET` — confirm already set (used by portal.ts auth)
+- R2 creds: confirm `R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / R2_BUCKET_NAME` set
+
+On **Netlify portal**:
+- `PORTAL_TELEMETRY_SECRET=<same value>`
+- `OP_BACKEND_URL=https://staff.oooshtours.co.uk`
+- `DATA_BACKEND=op` (flip when ready)
+
+### Files touched
+```
+backend/src/migrations/052_portal_auth_and_chase.sql
+backend/src/migrations/run.ts
+backend/src/routes/portal.ts
+backend/src/routes/quotes.ts
+backend/src/services/email-templates/index.ts
+backend/src/services/delivery-note-pdf.ts
+backend/src/services/completion-chaser.ts
+backend/src/config/scheduler.ts
+src/lib/op-api.ts
+src/app/api/auth/login/route.ts
+src/app/api/auth/register/start|verify|complete/route.ts
+src/app/api/auth/forgot-password/route.ts
+src/app/api/auth/reset-password/route.ts
+src/app/api/jobs/route.ts
+src/app/api/jobs/[id]/route.ts
+src/app/api/jobs/[id]/complete/route.ts
+src/app/register/page.tsx
+docs/FREELANCER-PORTAL-REPOINTING.md
+AGENT_MAP.md, CLAUDE.md
+```
+
+### Not in scope (handled elsewhere or deferred)
+- Van book-out token + hire-form-from-portal (parallel session)
+- Resources page repointing (deferred — low priority)
+- Staff / warehouse / hirehop-items / settings-notifications portal sub-routes (stay Monday-wired for now)
 
 ---
 

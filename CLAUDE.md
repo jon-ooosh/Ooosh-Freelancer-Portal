@@ -1113,6 +1113,7 @@ Global operational view for what's currently happening / about to happen with tr
 - [x] Completion tracking (signature, photos, notes, customer present toggle)
 - [x] Arranging details (key points, client introductions, tolls/accommodation/flight booking status)
 - [x] Freelancer portal repointing: feature-flagged DATA_BACKEND=op (auth, jobs, completion, equipment) with Monday.com fallback
+- [x] **Freelancer portal go-live repointing (17 Apr 2026)** — see `docs/FREELANCER-PORTAL-REPOINTING.md`. Migration 052 adds portal_verification_codes + portal_password_reset_tokens + portal_fallback_events + completion_reminder_level. New OP endpoints: `/portal/auth/register/start|verify|complete`, `/portal/auth/forgot-password`, `/portal/auth/reset-password`, `/portal/telemetry/monday-fallback`, `/portal/jobs/:id/files`. Completion flow now uploads photos/signature to R2 under `completion/{quote_id}/`, generates delivery-note PDF (port of `src/lib/pdf.ts` → `backend/src/services/delivery-note-pdf.ts`), emails client + staff alert. Completion chaser scheduler every 30 min (2h/6h/14h + staff escalation). `freelancer_assignment` email now fires on new crew assignment + on draft→confirmed transition.
 - [x] Inline crew assignment on Transport Ops page (same picker as Job Detail, bidirectional)
 - [x] Local D/C form improvements: venue address book lookup, smart date defaults, amber warning on change
 - [x] Quote editing: Edit Quote modal on Transport Ops page + Job Detail page (venue, date, time, fees, notes)
@@ -1121,11 +1122,11 @@ Global operational view for what's currently happening / about to happen with tr
 - [x] Colour-matched status dropdown (replaces plain select)
 - [x] Completion details view: photos, signature, timestamp, customer present, notes
 - [x] Separate completed/cancelled toggles
-- [ ] Reminder system (unassigned deliveries approaching, overdue completions)
-- [ ] Change notifications to freelancers (date/time/venue changes → email alert)
+- [ ] Reminder system (unassigned deliveries approaching, overdue completions) — overdue-completion chaser is live (17 Apr 2026, every 30 min, 2h/6h/14h + staff escalation). Unassigned-deliveries chaser still TODO.
+- [x] Change notifications to freelancers (date/time/venue changes → email alert) — fires from `quotes.ts` PUT via `job_change_notification` template
 - [ ] Issues on road reporting (breakdowns, delays, problems)
-- [ ] PDF delivery note generation (migrate from Netlify function to OP backend)
-- [ ] Client delivery note emails via OP email service
+- [x] PDF delivery note generation (migrate from Netlify function to OP backend) — `backend/src/services/delivery-note-pdf.ts` (17 Apr 2026)
+- [x] Client delivery note emails via OP email service — `delivery_note` template, fires on completion of `job_type = 'delivery'` quotes
 - [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging) — nice-to-have, post go-live
 - [ ] **Arrangement pills → dashboard integration**: Surface arrangement statuses on Dashboard and Job Requirements
   - Dashboard widget: "X jobs in next 7 days need client intros" (query `client_introduction = 'todo'` where `job_date` within 7 days)
