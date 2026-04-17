@@ -1752,7 +1752,7 @@ export default function PipelinePage() {
     }
   };
 
-  const handleTransitionConfirm = async (data: Record<string, string>) => {
+  const handleTransitionConfirm = async (data: Record<string, unknown>) => {
     if (!transitionModal) return;
     try {
       await api.patch(`/pipeline/${transitionModal.jobId}/status`, {
