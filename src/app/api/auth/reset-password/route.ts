@@ -1,18 +1,26 @@
 /**
  * Reset Password API Endpoint
- * 
+ *
  * POST /api/auth/reset-password
- * 
- * Resets a user's password using a valid reset token:
- * 1. Validates and consumes the token
- * 2. Hashes the new password
- * 3. Updates Monday.com with the new password hash
+ *
+ * In OP mode: consumes the token on the OP backend which hashes and stores
+ * the new password, then issues a session cookie so the user is logged in.
+ *
+ * In Monday mode: validates token against Monday.com and updates there.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import bcrypt from 'bcryptjs'
+import { SignJWT } from 'jose'
 import { updateFreelancerTextColumn, FREELANCER_COLUMNS } from '@/lib/monday'
 import { consumeResetToken } from '@/lib/password-reset'
+import { isOpMode, resetPasswordOP, reportFallback } from '@/lib/op-api'
+
+const getSessionSecret = () => {
+  const secret = process.env.SESSION_SECRET
+  if (!secret) throw new Error('SESSION_SECRET environment variable is not set')
+  return new TextEncoder().encode(secret)
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -27,13 +35,56 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate password length
     if (password.length < 8) {
       return NextResponse.json(
         { error: 'Password must be at least 8 characters' },
         { status: 400 }
       )
     }
+
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      try {
+        const opResult = await resetPasswordOP(token, password)
+        if (opResult.success && opResult.user) {
+          // Re-sign with SESSION_SECRET (see login/route.ts for rationale)
+          const sessionToken = await new SignJWT({
+            id: opResult.user.id,
+            email: opResult.user.email,
+            name: opResult.user.name,
+          })
+            .setProtectedHeader({ alg: 'HS256' })
+            .setIssuedAt()
+            .setExpirationTime('30d')
+            .sign(getSessionSecret())
+
+          const response = NextResponse.json({
+            success: true,
+            message: 'Password has been reset successfully.',
+            user: opResult.user,
+          })
+
+          response.cookies.set('session', sessionToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+            maxAge: 30 * 24 * 60 * 60,
+            path: '/',
+          })
+
+          return response
+        }
+      } catch (opError: unknown) {
+        const status = (opError as { status?: number })?.status
+        if (status === 400 || status === 403) {
+          const err = opError as Error
+          return NextResponse.json({ error: err.message }, { status })
+        }
+        console.error('Reset-password: OP backend error, falling back:', opError)
+        reportFallback('reset-password', opError)
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
 
     // Consume (validate and invalidate) the token
     const tokenData = consumeResetToken(token)

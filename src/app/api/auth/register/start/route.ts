@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { findFreelancerByEmail } from '@/lib/monday'
 import { sendVerificationEmail } from '@/lib/email'
-import { 
-  generateVerificationCode, 
-  storeVerificationCode, 
-  checkEmailRateLimit 
+import {
+  generateVerificationCode,
+  storeVerificationCode,
+  checkEmailRateLimit
 } from '@/lib/verification'
+import { isOpMode, registerStartOP, reportFallback } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -29,6 +30,25 @@ export async function POST(request: NextRequest) {
         { status: 429 }
       )
     }
+
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      try {
+        const result = await registerStartOP(normalizedEmail)
+        return NextResponse.json(result)
+      } catch (opError: unknown) {
+        const status = (opError as { status?: number })?.status
+        // 409 = already registered — surface directly, don't fall back
+        if (status === 409) {
+          const err = opError as Error
+          return NextResponse.json({ error: err.message }, { status: 409 })
+        }
+        // Anything else is a real failure — alert + fall back to Monday.com
+        console.error('Register/start: OP backend error, falling back:', opError)
+        reportFallback('register-start', opError, { email: normalizedEmail })
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
 
     // Check if email exists in Monday
     const freelancer = await findFreelancerByEmail(normalizedEmail)

@@ -230,3 +230,138 @@ export async function loginToOP(
 
   return { success: true, user: data.user, sessionToken }
 }
+
+// =============================================================================
+// REGISTRATION + PASSWORD RESET (OP mode)
+// =============================================================================
+
+async function opPostJson<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const url = `${getOpUrl()}/api/portal${path}`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const err = new Error(data.error || `HTTP ${response.status}`) as Error & { status?: number }
+    err.status = response.status
+    throw err
+  }
+  return data
+}
+
+export async function registerStartOP(email: string): Promise<{ success: boolean; message?: string }> {
+  return opPostJson('/auth/register/start', { email })
+}
+
+export async function registerVerifyOP(email: string, code: string): Promise<{ success: boolean }> {
+  return opPostJson('/auth/register/verify', { email, code })
+}
+
+export async function registerCompleteOP(
+  email: string,
+  code: string,
+  password: string
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string }> {
+  const url = `${getOpUrl()}/api/portal/auth/register/complete`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code, password }),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const err = new Error(data.error || `HTTP ${response.status}`) as Error & { status?: number }
+    err.status = response.status
+    throw err
+  }
+  let sessionToken: string | undefined
+  const setCookie = response.headers.get('set-cookie')
+  if (setCookie) {
+    const m = setCookie.match(/session=([^;]+)/)
+    if (m) sessionToken = m[1]
+  }
+  return { success: true, user: data.user, sessionToken }
+}
+
+export async function forgotPasswordOP(email: string): Promise<{ success: boolean; message?: string }> {
+  return opPostJson('/auth/forgot-password', { email })
+}
+
+export async function resetPasswordOP(
+  token: string,
+  password: string
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string }> {
+  const url = `${getOpUrl()}/api/portal/auth/reset-password`
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, password }),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const err = new Error(data.error || `HTTP ${response.status}`) as Error & { status?: number }
+    err.status = response.status
+    throw err
+  }
+  let sessionToken: string | undefined
+  const setCookie = response.headers.get('set-cookie')
+  if (setCookie) {
+    const m = setCookie.match(/session=([^;]+)/)
+    if (m) sessionToken = m[1]
+  }
+  return { success: true, user: data.user, sessionToken }
+}
+
+// =============================================================================
+// FALLBACK TELEMETRY
+// =============================================================================
+
+/**
+ * Report a Monday-fallback event to the OP so staff get alerted.
+ *
+ * Called whenever the portal attempts an OP operation, fails, and falls
+ * back to Monday.com. Fire-and-forget — we never want telemetry to
+ * block the user-facing flow.
+ *
+ * Requires env vars:
+ *   OP_BACKEND_URL
+ *   PORTAL_TELEMETRY_SECRET (matching value on OP server)
+ *
+ * If the secret isn't configured we log locally and give up — no exception
+ * is thrown.
+ */
+export function reportFallback(operation: string, error: unknown, context: { email?: string } = {}): void {
+  const secret = process.env.PORTAL_TELEMETRY_SECRET
+  const baseUrl = process.env.OP_BACKEND_URL
+
+  const errorMessage = error instanceof Error ? error.message : String(error ?? 'Unknown error')
+  const stack = error instanceof Error ? error.stack : undefined
+
+  // Always log so Netlify function logs capture it
+  console.warn(`[PORTAL FALLBACK] operation=${operation} email=${context.email || 'unknown'} error=${errorMessage}`)
+
+  if (!secret || !baseUrl) {
+    console.warn('[PORTAL FALLBACK] Skipping OP telemetry — PORTAL_TELEMETRY_SECRET or OP_BACKEND_URL not set')
+    return
+  }
+
+  // Fire-and-forget
+  fetch(`${baseUrl.replace(/\/$/, '')}/api/portal/telemetry/monday-fallback`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Portal-Telemetry-Key': secret,
+    },
+    body: JSON.stringify({
+      operation,
+      errorMessage,
+      email: context.email,
+      stack,
+    }),
+  }).catch((err) => {
+    // Last-resort log. Telemetry failing shouldn't cascade into user-facing errors.
+    console.error('[PORTAL FALLBACK] Failed to report to OP:', err)
+  })
+}

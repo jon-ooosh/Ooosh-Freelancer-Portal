@@ -15,7 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobById, getCrewJobById, getVenueById, VenueRecord } from '@/lib/monday'
-import { isOpMode, getJobDetailFromOP } from '@/lib/op-api'
+import { isOpMode, getJobDetailFromOP, reportFallback } from '@/lib/op-api'
 
 /**
  * Check if a date is within 48 hours of now (before or after)
@@ -98,6 +98,7 @@ export async function GET(
         return NextResponse.json(opData)
       } catch (opError) {
         console.error('OP backend job detail error:', opError)
+        reportFallback('job-detail', opError, { email: session.email })
         // Fall through to Monday.com
         console.log('Job API: Falling back to Monday.com')
       }

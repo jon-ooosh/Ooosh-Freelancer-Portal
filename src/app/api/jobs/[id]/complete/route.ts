@@ -31,7 +31,7 @@ import {
   mondayQuery,
   getFreelancerNameByEmail
 } from '@/lib/monday'
-import { isOpMode, submitCompletionToOP } from '@/lib/op-api'
+import { isOpMode, submitCompletionToOP, reportFallback } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES
@@ -167,6 +167,7 @@ export async function POST(
         })
       } catch (opError) {
         console.error('OP backend completion error:', opError)
+        reportFallback('completion', opError, { email: session.email })
         // Fall through to Monday.com
         console.log('Complete API: Falling back to Monday.com')
       }

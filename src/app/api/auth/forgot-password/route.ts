@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { findFreelancerByEmail } from '@/lib/monday'
 import { sendPasswordResetEmail } from '@/lib/email'
 import { createResetToken, checkResetRateLimit } from '@/lib/password-reset'
+import { isOpMode, forgotPasswordOP, reportFallback } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -38,6 +39,18 @@ export async function POST(request: NextRequest) {
         { status: 429 }
       )
     }
+
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      try {
+        const result = await forgotPasswordOP(normalizedEmail)
+        return NextResponse.json(result)
+      } catch (opError) {
+        console.error('Forgot-password: OP backend error, falling back:', opError)
+        reportFallback('forgot-password', opError, { email: normalizedEmail })
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
 
     // Always return success to prevent email enumeration
     // But only send email if account exists and is verified
