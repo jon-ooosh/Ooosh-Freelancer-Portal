@@ -18,6 +18,8 @@ import crypto from 'crypto';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
 import { emailService } from '../services/email-service';
+import { uploadToR2, isR2Configured } from '../config/r2';
+import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 
 const router = Router();
 
@@ -910,11 +912,19 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const personId = req.portalUser!.id;
     const quoteId = req.params.quoteId;
 
-    // Verify access
+    // Verify access + pull full context we'll need for PDF/emails
     const accessCheck = await query(
-      `SELECT qa.id, q.id as quote_id, q.ops_status
+      `SELECT qa.id AS assignment_id,
+              q.id AS quote_id, q.ops_status, q.job_type, q.what_is_it,
+              q.venue_name, q.venue_id, q.job_date, q.client_email,
+              q.client_name AS quote_client_name,
+              j.id AS job_id, j.job_name, j.hirehop_id, j.client_name AS job_client_name,
+              v.name AS linked_venue_name, v.address AS venue_address,
+              v.city AS venue_city, v.postcode AS venue_postcode
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
+       LEFT JOIN jobs j ON j.id = q.job_id
+       LEFT JOIN venues v ON v.id = q.venue_id
        WHERE qa.quote_id = $1 AND qa.person_id = $2
          AND q.is_deleted = false`,
       [quoteId, personId]
@@ -924,6 +934,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       res.status(404).json({ error: 'Job not found' });
       return;
     }
+    const ctx = accessCheck.rows[0];
 
     const parsed = completionSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -931,47 +942,77 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       return;
     }
 
-    const { notes, customerPresent, equipmentChecklist, staffName } = parsed.data;
+    const { notes, customerPresent, equipmentChecklist, clientEmails, staffName } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
-    // Build completion data
-    const completionPhotos: string[] = [];
-    // Store photos as base64 in JSONB for now (R2 upload can be added later)
+    // ── Upload photos + signature to R2 ────────────────────────────
+    // We keep the raw buffers around for embedding in the PDF.
+    const photoUploads: Array<{ key: string; mimeType: string; buffer: Buffer }> = [];
+    const photoKeysForStorage: Array<{ key: string; mime_type: string; uploaded_at: string }> = [];
     if (files?.photos) {
-      for (const photo of files.photos) {
-        const base64 = `data:${photo.mimetype};base64,${photo.buffer.toString('base64')}`;
-        completionPhotos.push(base64);
+      for (let i = 0; i < files.photos.length; i++) {
+        const photo = files.photos[i];
+        const ext = photo.mimetype === 'image/png' ? 'png' : 'jpg';
+        const key = `completion/${quoteId}/photo-${Date.now()}-${i + 1}.${ext}`;
+        if (isR2Configured()) {
+          try {
+            await uploadToR2(key, photo.buffer, photo.mimetype);
+            photoUploads.push({ key, mimeType: photo.mimetype, buffer: photo.buffer });
+            photoKeysForStorage.push({
+              key,
+              mime_type: photo.mimetype,
+              uploaded_at: new Date().toISOString(),
+            });
+          } catch (err) {
+            console.error(`[portal completion] R2 upload failed for photo ${i + 1}:`, err);
+          }
+        } else {
+          // R2 not configured — keep the buffer in memory for PDF but don't persist
+          photoUploads.push({ key: '', mimeType: photo.mimetype, buffer: photo.buffer });
+          console.warn('[portal completion] R2 not configured — photos not persisted');
+        }
       }
     }
 
-    let signatureValue: string | null = null;
+    let signatureBuffer: Buffer | null = null;
+    let signatureKey: string | null = null;
     if (files?.signature?.[0]) {
       const sig = files.signature[0];
-      signatureValue = `data:${sig.mimetype};base64,${sig.buffer.toString('base64')}`;
+      signatureBuffer = sig.buffer;
+      const sigPath = `completion/${quoteId}/signature-${Date.now()}.png`;
+      if (isR2Configured()) {
+        try {
+          await uploadToR2(sigPath, sig.buffer, sig.mimetype || 'image/png');
+          signatureKey = sigPath;
+        } catch (err) {
+          console.error('[portal completion] R2 upload failed for signature:', err);
+        }
+      }
     }
 
     // Build completion notes
     let fullNotes = notes || '';
     if (!customerPresent) {
-      fullNotes = `[Customer not present] ${fullNotes}`;
+      fullNotes = `[Customer not present] ${fullNotes}`.trim();
     }
 
-    // Parse equipment checklist
-    let checklistData = null;
+    // Parse equipment checklist if provided
+    let checklistData: Record<string, boolean> | null = null;
     if (equipmentChecklist) {
       try {
         checklistData = JSON.parse(equipmentChecklist);
       } catch {
-        // Ignore parse errors
+        // ignore parse errors
       }
     }
 
-    // Build completed_by: use staffName if provided (Ooosh staff completing via system account)
+    // Resolve completed_by / display name
     const completedBy = staffName
       ? `${staffName} (${req.portalUser!.email})`
       : req.portalUser!.email;
+    const completionName = staffName || req.portalUser!.name;
 
-    // Update the quote
+    // ── Persist to DB ──────────────────────────────────────────────
     await query(
       `UPDATE quotes SET
         ops_status = 'completed',
@@ -986,22 +1027,19 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       [
         completedBy,
         fullNotes,
-        signatureValue,
-        JSON.stringify(completionPhotos),
+        signatureKey,
+        JSON.stringify(photoKeysForStorage),
         customerPresent,
         quoteId,
       ]
     );
 
-    // Update the assignment status
     await query(
       `UPDATE quote_assignments SET status = 'completed', updated_at = NOW()
        WHERE quote_id = $1 AND person_id = $2`,
       [quoteId, personId]
     );
 
-    // Store checklist in an interaction if provided
-    const completionName = staffName || req.portalUser!.name;
     if (checklistData) {
       await query(
         `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata)
@@ -1015,10 +1053,226 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       );
     }
 
+    // Return success IMMEDIATELY, fire PDF + emails in background
     res.json({ success: true, message: 'Job completed successfully' });
+
+    // ── Background: PDF + client email + staff alert ──────────────
+    (async () => {
+      const jobType: string = ctx.job_type;
+      const isDelivery = jobType === 'delivery';
+      const isCollection = jobType === 'collection';
+      const jobName: string = ctx.job_name || ctx.linked_venue_name || ctx.venue_name || 'Ooosh Job';
+      const clientName: string | null = ctx.job_client_name || ctx.quote_client_name || null;
+      const venueName: string = ctx.linked_venue_name || ctx.venue_name || '';
+      const completedAt = new Date().toISOString();
+      const completedDate = new Date().toLocaleDateString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric',
+      });
+      const completedDateTime = new Date().toLocaleString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
+
+      // Build client email recipients list
+      const recipients = new Set<string>();
+      if (clientEmails) {
+        clientEmails.split(',').map(e => e.trim()).filter(Boolean).forEach(e => recipients.add(e));
+      }
+      if (ctx.client_email) recipients.add(ctx.client_email);
+
+      // Send delivery-note PDF for deliveries
+      if (isDelivery && recipients.size > 0 && ctx.hirehop_id) {
+        try {
+          // Pull equipment from HireHop via broker
+          let items: DeliveryNoteItem[] = [];
+          try {
+            const hhResponse = await hhBroker.get('/api/job_data.php', {
+              job: ctx.hirehop_id,
+            }, { priority: 'high', cacheTTL: 300 });
+            const hhData = hhResponse as unknown as Record<string, unknown>;
+            const rawItems = Array.isArray(hhData.items) ? hhData.items : [];
+            items = (rawItems as Array<Record<string, unknown>>)
+              .filter((item) => !item.VIRTUAL)
+              .map((item) => ({
+                name: String(item.DESCRIPTION || item.name || ''),
+                quantity: Number(item.QUANTITY || item.qty || 1),
+                category: String(item.ACC_CATEGORY_NAME || item.category || '') || undefined,
+              }))
+              .filter((item) => item.name);
+          } catch (hhErr) {
+            console.error('[portal completion] HH equipment fetch failed:', hhErr);
+          }
+
+          const pdfBuffer = await generateDeliveryNotePdf({
+            hhRef: String(ctx.hirehop_id),
+            jobDate: ctx.job_date
+              ? (ctx.job_date instanceof Date ? ctx.job_date.toISOString() : String(ctx.job_date))
+              : completedAt,
+            completedAt,
+            clientName: clientName || undefined,
+            venueName: venueName || 'N/A',
+            deliveryAddress: [ctx.venue_address, ctx.venue_city, ctx.venue_postcode]
+              .filter(Boolean).join(', ') || undefined,
+            items,
+            signature: signatureBuffer,
+            photos: photoUploads.map(p => p.buffer),
+            driverName: completionName,
+          });
+
+          // Store the PDF in R2 for future re-access
+          if (isR2Configured()) {
+            const pdfKey = `delivery-notes/${quoteId}/delivery-note-${Date.now()}.pdf`;
+            try {
+              await uploadToR2(pdfKey, pdfBuffer, 'application/pdf');
+            } catch (err) {
+              console.error('[portal completion] R2 upload failed for PDF:', err);
+            }
+          }
+
+          // Email each recipient
+          for (const to of recipients) {
+            try {
+              await emailService.send('delivery_note', {
+                to,
+                variables: {
+                  clientName: clientName || 'there',
+                  jobName,
+                  venueName: venueName || 'your venue',
+                  deliveryDate: completedDate,
+                  driverName: completionName,
+                  completedAt: completedDateTime,
+                },
+                attachments: [{
+                  filename: `delivery-note-${ctx.hirehop_id}.pdf`,
+                  content: pdfBuffer,
+                  contentType: 'application/pdf',
+                }],
+              });
+            } catch (emailErr) {
+              console.error(`[portal completion] Failed to email delivery note to ${to}:`, emailErr);
+            }
+          }
+        } catch (err) {
+          console.error('[portal completion] Delivery note PDF/email failed:', err);
+        }
+      }
+
+      // Send collection confirmation email for collections (no PDF)
+      if (isCollection && recipients.size > 0) {
+        for (const to of recipients) {
+          try {
+            await emailService.send('collection_confirmation', {
+              to,
+              variables: {
+                clientName: clientName || 'there',
+                jobName,
+                venueName: venueName || 'your venue',
+                driverName: completionName,
+                completedDate,
+                completedAt: completedDateTime,
+              },
+            });
+          } catch (emailErr) {
+            console.error(`[portal completion] Failed to email collection confirmation to ${to}:`, emailErr);
+          }
+        }
+      }
+
+      // Always send staff alert when the driver has notes
+      if (fullNotes.trim()) {
+        try {
+          const jobUrl = ctx.job_id ? `/jobs/${ctx.job_id}` : '#';
+          await emailService.send('completion_driver_notes', {
+            to: 'info@oooshtours.co.uk',
+            variables: {
+              jobName,
+              jobType: jobType === 'crewed' ? 'crew work' : jobType,
+              driverName: completionName,
+              venueName: venueName || 'N/A',
+              customerPresent: customerPresent ? 'Yes' : 'No',
+              completedAt: completedDateTime,
+              completedDate,
+              notes: fullNotes,
+              jobUrl,
+            },
+          });
+        } catch (emailErr) {
+          console.error('[portal completion] Failed to send staff alert:', emailErr);
+        }
+      }
+    })().catch(err => console.error('[portal completion] Background task error:', err));
   } catch (error) {
     console.error('Portal completion error:', error);
     res.status(500).json({ error: 'Failed to submit completion' });
+  }
+});
+
+// ── GET /api/portal/jobs/:quoteId/files — shared job + venue files ───
+// Returns files tagged share_with_freelancer = true from the linked job
+// and its venue. Portal UI uses this to offer file downloads.
+
+router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => {
+  try {
+    const personId = req.portalUser!.id;
+    const quoteId = req.params.quoteId;
+
+    const result = await query(
+      `SELECT j.files AS job_files, v.files AS venue_files,
+              j.job_name, v.name AS venue_name
+       FROM quote_assignments qa
+       JOIN quotes q ON q.id = qa.quote_id
+       LEFT JOIN jobs j ON j.id = q.job_id
+       LEFT JOIN venues v ON v.id = q.venue_id
+       WHERE qa.quote_id = $1 AND qa.person_id = $2
+         AND q.is_deleted = false`,
+      [quoteId, personId]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const row = result.rows[0];
+    interface SharedFileRaw {
+      share_with_freelancer?: boolean;
+      name?: string;
+      original_name?: string;
+      url?: string;
+      key?: string;
+      type?: string;
+      content_type?: string;
+      label?: string;
+      uploaded_at?: string;
+    }
+    const filterShared = (files: unknown, source: 'job' | 'venue') => {
+      if (!Array.isArray(files)) return [];
+      return (files as SharedFileRaw[])
+        .filter((f) => f?.share_with_freelancer === true)
+        .map((f) => ({
+          name: f.name || f.original_name || 'File',
+          url: f.url || null,
+          key: f.key || null,
+          type: f.type || f.content_type || '',
+          label: f.label || '',
+          uploadedAt: f.uploaded_at || null,
+          source,
+        }));
+    };
+
+    const shared = [
+      ...filterShared(row.job_files, 'job'),
+      ...filterShared(row.venue_files, 'venue'),
+    ];
+
+    res.json({
+      success: true,
+      files: shared,
+      job: { name: row.job_name || null },
+      venue: { name: row.venue_name || null },
+    });
+  } catch (error) {
+    console.error('Portal files error:', error);
+    res.status(500).json({ error: 'Failed to load files' });
   }
 });
 
