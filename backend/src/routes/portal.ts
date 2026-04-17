@@ -760,6 +760,9 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     const quoteId = req.params.quoteId;
 
     // Verify this freelancer is assigned to this quote
+    // NOTE: venues table has no direct contact columns — site contacts live on
+    // linked organisation's people. Those are surfaced via portal UI separately.
+    // Access notes come from venue.approach_notes (fallback to general_notes).
     const result = await query(
       `SELECT
         q.*,
@@ -769,9 +772,8 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         j.job_name, j.hh_job_number AS hirehop_id, j.client_name as job_client_name,
         j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address,
-        v.city as venue_city, v.what_three_words as venue_w3w,
-        v.contact_name as venue_contact1, v.contact_phone as venue_phone,
-        v.contact_email as venue_email, v.notes as venue_access_notes
+        v.city as venue_city, v.w3w_address as venue_w3w,
+        COALESCE(v.approach_notes, v.general_notes) as venue_access_notes
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
@@ -802,9 +804,11 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         name: row.linked_venue_name || row.venue_name,
         address: row.venue_address,
         whatThreeWords: row.venue_w3w,
-        contact1: row.venue_contact1,
-        phone: contactsVisible ? row.venue_phone : null,
-        email: row.venue_email,
+        // Venue contacts not stored on venues table — placeholder until a
+        // person-link-based contact lookup is added
+        contact1: null as string | null,
+        phone: null as string | null,
+        email: null as string | null,
         accessNotes: row.venue_access_notes,
         phoneHidden: !contactsVisible,
         phoneVisibleFrom: !contactsVisible && jobDate
@@ -1294,8 +1298,9 @@ router.get('/venues/:id', async (req: PortalRequest, res: Response) => {
   try {
     const result = await query(
       `SELECT v.id, v.name, v.address, v.city, v.postcode,
-              v.what_three_words, v.contact_name, v.contact_phone,
-              v.contact_email, v.notes, v.files
+              v.w3w_address AS what_three_words,
+              COALESCE(v.approach_notes, v.general_notes) AS notes,
+              v.files
        FROM venues v WHERE v.id = $1`,
       [req.params.id]
     );
@@ -1315,9 +1320,10 @@ router.get('/venues/:id', async (req: PortalRequest, res: Response) => {
         city: v.city,
         postcode: v.postcode,
         whatThreeWords: v.what_three_words,
-        contact1: v.contact_name,
-        phone: v.contact_phone,
-        email: v.contact_email,
+        // Venue contacts not stored on venues table — surfaced via org people link
+        contact1: null,
+        phone: null,
+        email: null,
         accessNotes: v.notes,
         files: v.files || [],
       },
