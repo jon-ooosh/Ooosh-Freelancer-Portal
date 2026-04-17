@@ -281,7 +281,7 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
   try {
     const jobId = req.params.jobId as string;
     const jobResult = await query(
-      `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver FROM jobs WHERE id = $1`,
+      `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE id = $1`,
       [jobId]
     );
 
@@ -304,7 +304,9 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
     res.json({
       flags,
       lastSynced: job.line_items_synced_at,
-      isVanAndDriver: job.is_van_and_driver,
+      vehicleSlotModes: job.vehicle_slot_modes || {},
+      // Legacy field — kept for one release for any lingering clients
+      isVanAndDriver: flags?.has_vehicle && flags?.self_drive_count === 0,
       seatAvailability,
     });
   } catch (error) {
@@ -313,22 +315,96 @@ router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, 
   }
 });
 
-// PATCH /api/hirehop/jobs/:jobId/van-and-driver — toggle van & driver override
+// PATCH /api/hirehop/jobs/:jobId/vehicle-slot-mode — set mode for a single van slot
+router.patch('/jobs/:jobId/vehicle-slot-mode', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const { itemId, slotIndex, mode } = req.body as { itemId?: number | string; slotIndex?: number; mode?: string };
+
+    if (itemId === undefined || slotIndex === undefined || !mode) {
+      res.status(400).json({ error: 'itemId, slotIndex, and mode are required' });
+      return;
+    }
+    if (mode !== 'self_drive' && mode !== 'van_and_driver') {
+      res.status(400).json({ error: 'mode must be self_drive or van_and_driver' });
+      return;
+    }
+    if (!Number.isInteger(slotIndex) || slotIndex < 0) {
+      res.status(400).json({ error: 'slotIndex must be a non-negative integer' });
+      return;
+    }
+
+    const key = String(itemId);
+    const current = await query(
+      `SELECT vehicle_slot_modes FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const modes: Record<string, string[]> = current.rows[0].vehicle_slot_modes || {};
+    const arr = Array.isArray(modes[key]) ? [...modes[key]] : [];
+    // Pad with 'self_drive' up to slotIndex so index alignment is preserved
+    while (arr.length <= slotIndex) arr.push('self_drive');
+    arr[slotIndex] = mode;
+    modes[key] = arr;
+
+    await query(
+      `UPDATE jobs SET vehicle_slot_modes = $1, updated_at = NOW() WHERE id = $2`,
+      [JSON.stringify(modes), jobId]
+    );
+
+    // Re-derive requirements after slot change
+    const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
+    const derivation = await deriveRequirementsForJob(jobId);
+
+    res.json({ success: true, vehicleSlotModes: modes, derivation });
+  } catch (error) {
+    console.error('Vehicle slot mode error:', error);
+    res.status(500).json({ error: 'Failed to update' });
+  }
+});
+
+// PATCH /api/hirehop/jobs/:jobId/van-and-driver — legacy job-level toggle (kept for transitional clients)
+// Applies the chosen mode to every current vehicle slot.
 router.patch('/jobs/:jobId/van-and-driver', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = req.params.jobId as string;
     const { isVanAndDriver } = req.body;
+    const mode = isVanAndDriver ? 'van_and_driver' : 'self_drive';
+
+    // Read current flags to know which slots exist
+    const jobRow = await query(
+      `SELECT hh_derived_flags, line_items FROM jobs WHERE id = $1`,
+      [jobId]
+    );
+    if (jobRow.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const flags = jobRow.rows[0].hh_derived_flags;
+    const slots: Array<{ item_id: number; slot_index: number }> = flags?.vehicle_slots || [];
+
+    // Rebuild slot modes map
+    const modes: Record<string, string[]> = {};
+    for (const slot of slots) {
+      const key = String(slot.item_id);
+      if (!modes[key]) modes[key] = [];
+      while (modes[key].length <= slot.slot_index) modes[key].push('self_drive');
+      modes[key][slot.slot_index] = mode;
+    }
 
     await query(
-      `UPDATE jobs SET is_van_and_driver = $1, updated_at = NOW() WHERE id = $2`,
-      [!!isVanAndDriver, jobId]
+      `UPDATE jobs SET vehicle_slot_modes = $1, is_van_and_driver = $2, updated_at = NOW() WHERE id = $3`,
+      [JSON.stringify(modes), !!isVanAndDriver, jobId]
     );
 
-    // Re-derive requirements after toggling
     const { deriveRequirementsForJob } = await import('../services/hh-requirement-derivation');
     const derivation = await deriveRequirementsForJob(jobId);
 
-    res.json({ success: true, isVanAndDriver: !!isVanAndDriver, derivation });
+    res.json({ success: true, isVanAndDriver: !!isVanAndDriver, vehicleSlotModes: modes, derivation });
   } catch (error) {
     console.error('Van & driver toggle error:', error);
     res.status(500).json({ error: 'Failed to update' });

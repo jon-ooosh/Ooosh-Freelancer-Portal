@@ -154,7 +154,7 @@ export default function DashboardPage() {
             </svg>
             {refreshing ? 'Refreshing...' : 'Refresh'}
           </button>
-          <Link to="/pipeline/new" className="text-xs bg-ooosh-600 text-white px-3 py-1.5 rounded-lg hover:bg-ooosh-700 transition-colors font-medium">
+          <Link to="/pipeline?newEnquiry=1" className="text-xs bg-ooosh-600 text-white px-3 py-1.5 rounded-lg hover:bg-ooosh-700 transition-colors font-medium">
             + New Enquiry
           </Link>
         </div>
@@ -300,7 +300,7 @@ export default function DashboardPage() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
         <div className="flex items-center gap-4 flex-wrap">
           <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Quick Actions</span>
-          <Link to="/pipeline/new" className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium flex items-center gap-1">
+          <Link to="/pipeline?newEnquiry=1" className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium flex items-center gap-1">
             <span className="w-4 h-4 rounded bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-[10px] font-bold">+</span>
             New Enquiry
           </Link>

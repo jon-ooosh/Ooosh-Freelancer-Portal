@@ -41,10 +41,22 @@ export interface JobRequirement {
   delivery_method: string | null;
 }
 
+export type VehicleSlotMode = 'self_drive' | 'van_and_driver';
+
+export interface VehicleSlot {
+  item_id: number;
+  slot_index: number;
+  item_name: string;
+  mode: VehicleSlotMode;
+}
+
 export interface DerivedFlags {
   has_vehicle: boolean;
   vehicle_count: number;
   vehicle_types: string[];
+  vehicle_slots?: VehicleSlot[];
+  self_drive_count?: number;
+  van_and_driver_count?: number;
   seat_config: 'round_table' | 'forward_facing' | null;
   has_backline: boolean;
   backline_item_count: number;
@@ -154,6 +166,7 @@ export default function RequirementCard({
   onAdvanceStep,
   onRemove,
   onVanAndDriverToggle,
+  onSlotModeChange,
   onReload,
 }: {
   req: JobRequirement;
@@ -167,6 +180,7 @@ export default function RequirementCard({
   onAdvanceStep: (reqId: string) => void;
   onRemove: (reqId: string, reason?: string) => void;
   onVanAndDriverToggle?: () => void;
+  onSlotModeChange?: (itemId: number, slotIndex: number, mode: VehicleSlotMode) => void;
   onReload?: () => void;
 }) {
   const [showStatusMenu, setShowStatusMenu] = useState(false);
@@ -297,23 +311,63 @@ export default function RequirementCard({
 
             {/* Vehicle */}
             {req.requirement_type === 'vehicle' && derivedFlags?.has_vehicle && (
-              <div className="mt-1 text-xs text-gray-500 space-y-0.5">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span>{derivedFlags.vehicle_count} vehicle{derivedFlags.vehicle_count !== 1 ? 's' : ''}: {derivedFlags.vehicle_types.join(', ')}</span>
-                  {onVanAndDriverToggle && (
-                    <button
-                      onClick={onVanAndDriverToggle}
-                      className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
-                        isVanAndDriver
-                          ? 'bg-indigo-100 text-indigo-700 border-indigo-300 hover:bg-indigo-200'
-                          : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
-                      }`}
-                      title={isVanAndDriver ? 'Currently Van & Driver — click to switch to Self-Drive' : 'Currently Self-Drive — click to switch to Van & Driver'}
-                    >
-                      {isVanAndDriver ? '👤 Van & Driver' : '🔑 Self-Drive'}
-                    </button>
-                  )}
-                </div>
+              <div className="mt-1 text-xs text-gray-500 space-y-1">
+                {/* Per-slot rows (preferred) with fallback to job-level toggle for pre-migration jobs */}
+                {derivedFlags.vehicle_slots && derivedFlags.vehicle_slots.length > 0 ? (
+                  <>
+                    {(() => {
+                      // Count slots per item_id so we can show slot numbers when there are multiple of the same type
+                      const slotsByItem = new Map<number, number>();
+                      for (const s of derivedFlags.vehicle_slots) {
+                        slotsByItem.set(s.item_id, (slotsByItem.get(s.item_id) || 0) + 1);
+                      }
+                      return derivedFlags.vehicle_slots.map((slot) => {
+                        const totalOfType = slotsByItem.get(slot.item_id) || 1;
+                        const isSelfDrive = slot.mode === 'self_drive';
+                        return (
+                          <div key={`${slot.item_id}-${slot.slot_index}`} className="flex items-center gap-2 flex-wrap">
+                            <span>
+                              {slot.item_name}
+                              {totalOfType > 1 && <span className="text-gray-400"> — Van {slot.slot_index + 1}</span>}
+                            </span>
+                            {onSlotModeChange ? (
+                              <button
+                                onClick={() => onSlotModeChange(slot.item_id, slot.slot_index, isSelfDrive ? 'van_and_driver' : 'self_drive')}
+                                className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                                  isSelfDrive
+                                    ? 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                                    : 'bg-indigo-100 text-indigo-700 border-indigo-300 hover:bg-indigo-200'
+                                }`}
+                                title={isSelfDrive ? 'Currently Self-Drive — click to switch to Van & Driver' : 'Currently Van & Driver — click to switch to Self-Drive'}
+                              >
+                                {isSelfDrive ? '🔑 Self-Drive' : '👤 Van & Driver'}
+                              </button>
+                            ) : (
+                              <span className="text-[10px] text-gray-400">{isSelfDrive ? 'Self-Drive' : 'Van & Driver'}</span>
+                            )}
+                          </div>
+                        );
+                      });
+                    })()}
+                  </>
+                ) : (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span>{derivedFlags.vehicle_count} vehicle{derivedFlags.vehicle_count !== 1 ? 's' : ''}: {derivedFlags.vehicle_types.join(', ')}</span>
+                    {onVanAndDriverToggle && (
+                      <button
+                        onClick={onVanAndDriverToggle}
+                        className={`px-2 py-0.5 rounded text-[10px] font-medium border transition-colors ${
+                          isVanAndDriver
+                            ? 'bg-indigo-100 text-indigo-700 border-indigo-300 hover:bg-indigo-200'
+                            : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
+                        }`}
+                        title={isVanAndDriver ? 'Currently Van & Driver — click to switch to Self-Drive' : 'Currently Self-Drive — click to switch to Van & Driver'}
+                      >
+                        {isVanAndDriver ? '👤 Van & Driver' : '🔑 Self-Drive'}
+                      </button>
+                    )}
+                  </div>
+                )}
                 {derivedFlags.seat_config && (
                   <div className={derivedFlags.seat_config === 'forward_facing' ? 'text-amber-600' : 'text-green-600'}>
                     {derivedFlags.seat_config === 'forward_facing' ? '⬆️ Forward-facing seats' : '🔄 Round a table'}
