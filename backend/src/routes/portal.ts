@@ -708,19 +708,27 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
     for (const row of result.rows) {
       const item = formatJobForPortal(row);
 
+      // Normalise job_date to an ISO "YYYY-MM-DD" string. Postgres TIMESTAMPTZ
+      // comes back as a JS Date, which compared against a date string with `>`
+      // / `<` ends up as timestamp-vs-NaN (always false) and the job silently
+      // drops out of every bucket.
+      const jobDateStr: string | null = row.job_date instanceof Date
+        ? row.job_date.toISOString().split('T')[0]
+        : (typeof row.job_date === 'string' ? row.job_date.split('T')[0] : null);
+
       if (row.ops_status === 'completed' || row.status === 'completed') {
-        if (row.job_date >= thirtyDaysAgo) {
+        if (jobDateStr && jobDateStr >= thirtyDaysAgo) {
           completed.push(item);
         }
       } else if (row.ops_status === 'cancelled' || row.status === 'cancelled') {
-        if (row.job_date >= thirtyDaysAgo) {
+        if (jobDateStr && jobDateStr >= thirtyDaysAgo) {
           cancelled.push(item);
         }
-      } else if (row.job_date === todayStr) {
+      } else if (jobDateStr === todayStr) {
         today.push(item);
-      } else if (row.job_date > todayStr) {
+      } else if (jobDateStr && jobDateStr > todayStr) {
         upcoming.push(item);
-      } else if (row.job_date && row.job_date < todayStr) {
+      } else if (jobDateStr && jobDateStr < todayStr) {
         // Past job that hasn't been completed — show in today for action
         today.push(item);
       }
