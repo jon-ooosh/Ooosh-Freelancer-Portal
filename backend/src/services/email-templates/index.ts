@@ -681,6 +681,187 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Freelancer portal auth ─────────────────────────────────────────────
+
+  portal_verification_code: {
+    variant: 'internal',
+    subject: 'Your Ooosh freelancer verification code',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Verify your email</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Enter this code on the registration page to verify your email address:
+      </p>
+      <div style="margin:0 0 20px;padding:20px;text-align:center;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+        <p style="margin:0;font-size:32px;font-weight:700;letter-spacing:6px;color:#7B5EA7;font-family:monospace;">{{code}}</p>
+      </div>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        This code expires in 15 minutes. If you didn't request this, please ignore.
+      </p>
+    `,
+  },
+
+  portal_password_reset: {
+    variant: 'internal',
+    subject: 'Reset your Ooosh freelancer password',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Reset your password</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Hi {{freelancerName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        Click the button below to set a new password for your freelancer portal account.
+        The link is valid for 1 hour.
+      </p>
+      <p style="margin:0 0 20px;">
+        <a href="{{resetUrl}}" style="display:inline-block;padding:12px 24px;background-color:#7B5EA7;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;font-size:15px;">Reset password</a>
+      </p>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        If the button doesn't work, paste this URL into your browser:<br>
+        <span style="word-break:break-all;">{{resetUrl}}</span>
+      </p>
+      <p style="margin:16px 0 0;font-size:13px;color:#64748b;line-height:1.5;">
+        Didn't request this? Ignore this email — your password stays unchanged.
+      </p>
+    `,
+  },
+
+  // ── Completion emails (client + staff) ─────────────────────────────────
+
+  delivery_note: {
+    variant: 'client',
+    preheader: 'Your Ooosh Tours delivery note is attached',
+    subject: 'Delivery note — {{jobName}} ({{deliveryDate}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Delivery Complete</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Your Ooosh delivery has been completed. Please find your delivery note attached.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Job</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Venue</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{venueName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Delivered by</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Completed at</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{completedAt}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        If you spot anything missing or damaged, let us know as soon as possible on
+        <a href="mailto:info@oooshtours.co.uk" style="color:#7B5EA7;">info@oooshtours.co.uk</a>
+        or call <strong>+44 (0) 1273 911382</strong>.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Have a great show!
+      </p>
+    `,
+  },
+
+  collection_confirmation: {
+    variant: 'client',
+    preheader: 'Your Ooosh Tours collection is complete',
+    subject: 'Collection complete — {{jobName}} ({{completedDate}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Collection Complete</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Our team has collected your gear from <strong>{{venueName}}</strong>.
+        It's now on its way back to our warehouse.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Job</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Collected by</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Completed at</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{completedAt}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        We'll be in touch if anything needs your attention. Thanks for hiring with Ooosh!
+      </p>
+    `,
+  },
+
+  completion_driver_notes: {
+    variant: 'internal',
+    subject: 'Driver notes — {{jobName}} ({{completedDate}})',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Driver notes logged</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>{{driverName}}</strong> completed <strong>{{jobType}}</strong> for
+        <strong>{{jobName}}</strong> and left notes for the team:
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:14px 16px;background-color:#fef3c7;border-radius:8px;border:1px solid #fde68a;">
+            <p style="margin:0;font-size:14px;color:#78350f;line-height:1.6;white-space:pre-wrap;">{{notes}}</p>
+          </td>
+        </tr>
+      </table>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Venue</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{venueName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Customer present?</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{customerPresent}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Completed at</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;font-weight:600;">{{completedAt}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
+  // ── Internal ops alerts ────────────────────────────────────────────────
+
+  monday_fallback_alert: {
+    variant: 'internal',
+    subject: '[Portal fallback] {{operation}} fell back to Monday',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#b91c1c;">Freelancer portal fell back to Monday.com</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        The Next.js freelancer portal tried to use the OP backend for <strong>{{operation}}</strong>
+        but errored — it's now serving from Monday.com. Investigate before this becomes a trend.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fee2e2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Operation</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{operation}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Error</p>
+            <p style="margin:0 0 8px;font-size:13px;color:#1e293b;font-family:monospace;white-space:pre-wrap;">{{errorMessage}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Freelancer email</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;font-weight:600;">{{email}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        Further identical events in the next hour are suppressed to avoid inbox flooding.
+        Check server logs or the portal_fallback_events table for full history.
+      </p>
+    `,
+  },
+
   job_cancelled_internal: {
     variant: 'internal',
     subject: 'Cancellation Processed — {{jobName}} ({{jobNumber}})',
