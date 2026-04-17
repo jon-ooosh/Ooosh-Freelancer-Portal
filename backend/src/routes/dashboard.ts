@@ -164,6 +164,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       `),
 
       // 11. Transport — unassigned quotes (need crew)
+      // Aligned with the summary date range so the "Needs crew" count
+      // references the same set of quotes shown in the To Do / Arranged piles.
       query(`
         SELECT COUNT(*) as count
         FROM quotes q
@@ -171,6 +173,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           AND q.status NOT IN ('cancelled', 'completed')
           AND COALESCE(q.ops_status, 'todo') IN ('todo', 'arranging')
           AND q.job_date >= CURRENT_DATE
+          AND q.job_date <= CURRENT_DATE + 30
           AND NOT EXISTS (
             SELECT 1 FROM quote_assignments qa
             WHERE qa.quote_id = q.id AND qa.status != 'cancelled'

@@ -133,6 +133,10 @@ export default function TransportOpsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState<'all' | 'transport' | 'crewed'>('all');
+  const [needsCrewOnly, setNeedsCrewOnly] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('needs_crew') === '1';
+  });
   const [viewMode, setViewMode] = useState<'table' | 'calendar'>('table');
   const [showCompleted, setShowCompleted] = useState(false);
   const [showCancelled, setShowCancelled] = useState(false);
@@ -294,13 +298,16 @@ export default function TransportOpsPage() {
     for (const status of OPS_STATUSES) {
       groups[status] = [];
     }
-    for (const q of quotes) {
+    const source = needsCrewOnly
+      ? quotes.filter((q) => (q.assignments || []).filter((a) => a.status !== 'cancelled').length === 0)
+      : quotes;
+    for (const q of source) {
       const status = q.ops_status || 'todo';
       if (!groups[status]) groups[status] = [];
       groups[status].push(q);
     }
     return groups;
-  }, [quotes]);
+  }, [quotes, needsCrewOnly]);
 
   // Calendar data: group by date (respects completed/cancelled toggles)
   const calendarData = useMemo(() => {
@@ -385,6 +392,23 @@ export default function TransportOpsPage() {
           </label>
         </div>
       </div>
+
+      {needsCrewOnly && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800 flex items-center justify-between">
+          <span>Showing quotes without crew assigned.</span>
+          <button
+            onClick={() => {
+              setNeedsCrewOnly(false);
+              const url = new URL(window.location.href);
+              url.searchParams.delete('needs_crew');
+              window.history.replaceState({}, '', url.toString());
+            }}
+            className="text-amber-700 hover:text-amber-900 font-medium"
+          >
+            Clear filter &times;
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{error}</div>
