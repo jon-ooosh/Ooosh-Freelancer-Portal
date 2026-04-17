@@ -498,4 +498,23 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Hire form auto-emails scheduled daily at 09:00');
+
+  // ── Freelancer completion chaser ─────────────────────────────────────
+  // Every 30 minutes — nudge freelancers who haven't completed jobs that
+  // are past their scheduled time. Levels: 2h / 6h / 14h, then staff
+  // escalation. Business hours only (London 07:00–22:00).
+  cron.schedule('*/30 * * * *', async () => {
+    try {
+      const { runCompletionChase } = await import('../services/completion-chaser');
+      const result = await runCompletionChase();
+      if (result.scanned > 0 || result.sent > 0) {
+        console.log(
+          `Scheduler: Completion chase — scanned ${result.scanned}, sent ${result.sent}, skipped ${result.skipped}`
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Completion chaser failed:', err);
+    }
+  });
+  console.log('Scheduler: Completion chaser scheduled every 30 minutes');
 }
