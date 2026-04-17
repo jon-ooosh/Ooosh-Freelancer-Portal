@@ -14,8 +14,12 @@ import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
+import crypto from 'crypto';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
+import { emailService } from '../services/email-service';
+import { uploadToR2, isR2Configured } from '../config/r2';
+import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 
 const router = Router();
 
@@ -161,6 +165,457 @@ router.post('/auth/login', async (req: Request, res: Response) => {
 router.post('/auth/logout', (_req: Request, res: Response) => {
   res.clearCookie('session', { path: '/' });
   res.json({ success: true });
+});
+
+// ── Registration: gate check + OTP ───────────────────────────────────
+// Mirrors the two-tick Monday.com gate but against the OP people table:
+// is_freelancer = true AND is_approved = true.
+
+const registerStartSchema = z.object({
+  email: z.string().email(),
+});
+
+router.post('/auth/register/start', async (req: Request, res: Response) => {
+  try {
+    const parsed = registerStartSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'A valid email address is required' });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase().trim();
+
+    // Two-tick gate: must be an approved freelancer in the people table
+    const result = await query(
+      `SELECT id, first_name, last_name, email, portal_password_hash, is_approved
+       FROM people
+       WHERE LOWER(email) = $1 AND is_freelancer = true`,
+      [email]
+    );
+
+    // Don't leak whether the email exists — return the same message regardless.
+    // (But only send a code if they're a legitimate approved freelancer.)
+    const genericResponse = {
+      success: true,
+      message: 'If your email is on our approved freelancer list, a verification code is on its way.',
+    };
+
+    if (result.rows.length === 0 || !result.rows[0].is_approved) {
+      res.json(genericResponse);
+      return;
+    }
+
+    const person = result.rows[0];
+    if (person.portal_password_hash) {
+      // Already registered — tell them (no leak: they already know they have an account)
+      res.status(409).json({
+        error: 'An account already exists for this email. Please log in or reset your password.',
+      });
+      return;
+    }
+
+    // Generate 6-digit code, 15 min TTL
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    await query(
+      `INSERT INTO portal_verification_codes (email, code, expires_at) VALUES ($1, $2, $3)`,
+      [email, code, expiresAt]
+    );
+
+    const freelancerName = person.first_name || 'there';
+    await emailService.send('portal_verification_code', {
+      to: email,
+      variables: { freelancerName, code },
+    });
+
+    res.json(genericResponse);
+  } catch (error) {
+    console.error('Portal register/start error:', error);
+    res.status(500).json({ error: 'Failed to start registration' });
+  }
+});
+
+const registerVerifySchema = z.object({
+  email: z.string().email(),
+  code: z.string().length(6),
+});
+
+router.post('/auth/register/verify', async (req: Request, res: Response) => {
+  try {
+    const parsed = registerVerifySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Email and 6-digit code are required' });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase().trim();
+    const code = parsed.data.code;
+
+    // Find the newest unexpired unconsumed code for this email
+    const result = await query(
+      `SELECT id, code, attempts
+       FROM portal_verification_codes
+       WHERE LOWER(email) = $1 AND consumed_at IS NULL AND expires_at > NOW()
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(400).json({ error: 'No active code — please request a new one' });
+      return;
+    }
+
+    const row = result.rows[0];
+    if (row.attempts >= 5) {
+      res.status(429).json({ error: 'Too many attempts — please request a new code' });
+      return;
+    }
+
+    if (row.code !== code) {
+      await query(
+        `UPDATE portal_verification_codes SET attempts = attempts + 1 WHERE id = $1`,
+        [row.id]
+      );
+      res.status(400).json({ error: 'Incorrect code' });
+      return;
+    }
+
+    // Valid — mark consumed
+    await query(
+      `UPDATE portal_verification_codes SET consumed_at = NOW() WHERE id = $1`,
+      [row.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Portal register/verify error:', error);
+    res.status(500).json({ error: 'Failed to verify code' });
+  }
+});
+
+const registerCompleteSchema = z.object({
+  email: z.string().email(),
+  code: z.string().length(6),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+});
+
+router.post('/auth/register/complete', async (req: Request, res: Response) => {
+  try {
+    const parsed = registerCompleteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid input' });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase().trim();
+    const { code, password } = parsed.data;
+
+    // Require that verify was called within the last 15 min (consumed_at set for this code)
+    const codeResult = await query(
+      `SELECT id FROM portal_verification_codes
+       WHERE LOWER(email) = $1 AND code = $2 AND consumed_at IS NOT NULL
+         AND consumed_at > NOW() - INTERVAL '15 minutes'
+       ORDER BY created_at DESC LIMIT 1`,
+      [email, code]
+    );
+    if (codeResult.rows.length === 0) {
+      res.status(400).json({ error: 'Please verify your email first' });
+      return;
+    }
+
+    // Gate again — still must be an approved freelancer
+    const personResult = await query(
+      `SELECT id, first_name, last_name, email FROM people
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true`,
+      [email]
+    );
+    if (personResult.rows.length === 0) {
+      res.status(403).json({ error: 'Your account is no longer approved. Please contact us.' });
+      return;
+    }
+    const person = personResult.rows[0];
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    await query(
+      `UPDATE people
+       SET portal_password_hash = $1,
+           portal_email_verified = true,
+           portal_last_login = NOW()
+       WHERE id = $2`,
+      [passwordHash, person.id]
+    );
+
+    // Issue session token (same shape as login)
+    const name = `${person.first_name || ''} ${person.last_name || ''}`.trim();
+    const sessionToken = jwt.sign(
+      { id: person.id, email: person.email || email, name },
+      PORTAL_SECRET,
+      { expiresIn: '30d', algorithm: 'HS256' }
+    );
+
+    res.cookie('session', sessionToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+
+    res.json({
+      success: true,
+      user: { id: person.id, name, email: person.email || email },
+    });
+  } catch (error) {
+    console.error('Portal register/complete error:', error);
+    res.status(500).json({ error: 'Failed to complete registration' });
+  }
+});
+
+// ── Forgot / reset password ──────────────────────────────────────────
+
+const PORTAL_FRONTEND_URL = (
+  process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk'
+).replace(/\/$/, '');
+
+function hashToken(raw: string): string {
+  return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+const forgotSchema = z.object({
+  email: z.string().email(),
+});
+
+router.post('/auth/forgot-password', async (req: Request, res: Response) => {
+  try {
+    const parsed = forgotSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'A valid email address is required' });
+      return;
+    }
+    const email = parsed.data.email.toLowerCase().trim();
+
+    const result = await query(
+      `SELECT id, first_name, email FROM people
+       WHERE LOWER(email) = $1 AND is_freelancer = true AND is_approved = true`,
+      [email]
+    );
+
+    // Don't leak whether the email exists
+    const genericResponse = {
+      success: true,
+      message: 'If your email is on our approved freelancer list, a reset link is on its way.',
+    };
+
+    if (result.rows.length === 0) {
+      res.json(genericResponse);
+      return;
+    }
+
+    const person = result.rows[0];
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1h
+
+    await query(
+      `INSERT INTO portal_password_reset_tokens (person_id, token_hash, expires_at, ip_address)
+       VALUES ($1, $2, $3, $4)`,
+      [person.id, tokenHash, expiresAt, req.ip || null]
+    );
+
+    const resetUrl = `${PORTAL_FRONTEND_URL}/reset-password?token=${rawToken}`;
+    const freelancerName = person.first_name || 'there';
+
+    await emailService.send('portal_password_reset', {
+      to: person.email || email,
+      variables: { freelancerName, resetUrl },
+    });
+
+    res.json(genericResponse);
+  } catch (error) {
+    console.error('Portal forgot-password error:', error);
+    res.status(500).json({ error: 'Failed to send reset link' });
+  }
+});
+
+const resetSchema = z.object({
+  token: z.string().min(40),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+});
+
+router.post('/auth/reset-password', async (req: Request, res: Response) => {
+  try {
+    const parsed = resetSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message || 'Invalid input' });
+      return;
+    }
+    const { token, password } = parsed.data;
+    const tokenHash = hashToken(token);
+
+    const result = await query(
+      `SELECT t.id, t.person_id, p.first_name, p.last_name, p.email,
+              p.is_freelancer, p.is_approved
+       FROM portal_password_reset_tokens t
+       JOIN people p ON p.id = t.person_id
+       WHERE t.token_hash = $1
+         AND t.used_at IS NULL
+         AND t.expires_at > NOW()`,
+      [tokenHash]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(400).json({ error: 'This reset link is invalid or has expired.' });
+      return;
+    }
+
+    const row = result.rows[0];
+    if (!row.is_freelancer || !row.is_approved) {
+      res.status(403).json({ error: 'Your account is no longer approved. Please contact us.' });
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // Transaction: set password + mark token used
+    await query('BEGIN');
+    try {
+      await query(
+        `UPDATE people
+         SET portal_password_hash = $1,
+             portal_email_verified = true,
+             portal_last_login = NOW()
+         WHERE id = $2`,
+        [passwordHash, row.person_id]
+      );
+      await query(
+        `UPDATE portal_password_reset_tokens SET used_at = NOW() WHERE id = $1`,
+        [row.id]
+      );
+      // Invalidate all other pending tokens for this person
+      await query(
+        `UPDATE portal_password_reset_tokens
+         SET used_at = NOW()
+         WHERE person_id = $1 AND used_at IS NULL AND id != $2`,
+        [row.person_id, row.id]
+      );
+      await query('COMMIT');
+    } catch (err) {
+      await query('ROLLBACK');
+      throw err;
+    }
+
+    // Issue session token so they go straight into the portal
+    const name = `${row.first_name || ''} ${row.last_name || ''}`.trim();
+    const sessionToken = jwt.sign(
+      { id: row.person_id, email: row.email, name },
+      PORTAL_SECRET,
+      { expiresIn: '30d', algorithm: 'HS256' }
+    );
+
+    res.cookie('session', sessionToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+      path: '/',
+    });
+
+    res.json({ success: true, user: { id: row.person_id, name, email: row.email } });
+  } catch (error) {
+    console.error('Portal reset-password error:', error);
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// ── Telemetry: Monday fallback alert ─────────────────────────────────
+// Called by the Next.js portal when an OP-backend call fails and it
+// falls back to Monday.com. Dedup'd to once per operation per hour.
+
+const fallbackSchema = z.object({
+  operation: z.string().min(1).max(50),
+  errorMessage: z.string().max(2000).optional(),
+  email: z.string().email().optional(),
+  stack: z.string().max(4000).optional(),
+});
+
+router.post('/telemetry/monday-fallback', async (req: Request, res: Response) => {
+  try {
+    const headerSecret = req.headers['x-portal-telemetry-key'];
+    const expected = process.env.PORTAL_TELEMETRY_SECRET;
+    if (!expected || headerSecret !== expected) {
+      // Don't leak whether the secret is configured; simple 401.
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const parsed = fallbackSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid payload' });
+      return;
+    }
+
+    const { operation, errorMessage, email, stack } = parsed.data;
+    console.warn(`[PORTAL FALLBACK] operation=${operation} email=${email || 'unknown'} error=${errorMessage || 'unknown'}`);
+
+    // Always record the event for forensics
+    await query(
+      `INSERT INTO portal_fallback_events (operation, error_message, email)
+       VALUES ($1, $2, $3)`,
+      [operation, errorMessage || null, email || null]
+    );
+
+    // Dedup: suppress further alerts for this operation within the last hour.
+    // We count events BEFORE the one we just inserted.
+    const dedupResult = await query(
+      `SELECT COUNT(*)::int AS count
+       FROM portal_fallback_events
+       WHERE operation = $1
+         AND created_at > NOW() - INTERVAL '1 hour'`,
+      [operation]
+    );
+    const eventsInWindow = dedupResult.rows[0].count as number;
+    const shouldAlert = eventsInWindow <= 1; // just the one we inserted
+
+    if (shouldAlert) {
+      // Create an inbox notification for all admin/manager users
+      const adminUsers = await query(
+        `SELECT id FROM users
+         WHERE role IN ('admin', 'manager') AND is_active = true`
+      );
+      for (const user of adminUsers.rows) {
+        await query(
+          `INSERT INTO notifications (user_id, type, priority, title, content, action_url)
+           VALUES ($1, 'portal_fallback', 'high', $2, $3, $4)`,
+          [
+            user.id,
+            `Portal fell back to Monday: ${operation}`,
+            `${errorMessage || 'No error message'}${email ? ` — ${email}` : ''}`,
+            '/settings',
+          ]
+        ).catch((err) => {
+          // Schema may differ — log and move on. Email is the important alert.
+          console.error('Failed to insert portal_fallback notification:', err);
+        });
+      }
+
+      // Send alert email to ops inbox
+      await emailService.send('monday_fallback_alert', {
+        to: 'info@oooshtours.co.uk',
+        variables: {
+          operation,
+          errorMessage: errorMessage || 'No error message provided',
+          email: email || 'unknown',
+        },
+      }).catch((err) => console.error('Failed to send monday_fallback_alert:', err));
+    }
+
+    res.json({ success: true, alerted: shouldAlert, eventsInWindow });
+    if (stack) {
+      console.warn(`[PORTAL FALLBACK] stack: ${stack}`);
+    }
+  } catch (error) {
+    console.error('Portal fallback telemetry error:', error);
+    res.status(500).json({ error: 'Failed to record fallback' });
+  }
 });
 
 // ── All remaining routes require portal auth ─────────────────────────
@@ -457,11 +912,19 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const personId = req.portalUser!.id;
     const quoteId = req.params.quoteId;
 
-    // Verify access
+    // Verify access + pull full context we'll need for PDF/emails
     const accessCheck = await query(
-      `SELECT qa.id, q.id as quote_id, q.ops_status
+      `SELECT qa.id AS assignment_id,
+              q.id AS quote_id, q.ops_status, q.job_type, q.what_is_it,
+              q.venue_name, q.venue_id, q.job_date, q.client_email,
+              q.client_name AS quote_client_name,
+              j.id AS job_id, j.job_name, j.hirehop_id, j.client_name AS job_client_name,
+              v.name AS linked_venue_name, v.address AS venue_address,
+              v.city AS venue_city, v.postcode AS venue_postcode
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
+       LEFT JOIN jobs j ON j.id = q.job_id
+       LEFT JOIN venues v ON v.id = q.venue_id
        WHERE qa.quote_id = $1 AND qa.person_id = $2
          AND q.is_deleted = false`,
       [quoteId, personId]
@@ -471,6 +934,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       res.status(404).json({ error: 'Job not found' });
       return;
     }
+    const ctx = accessCheck.rows[0];
 
     const parsed = completionSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -478,47 +942,77 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       return;
     }
 
-    const { notes, customerPresent, equipmentChecklist, staffName } = parsed.data;
+    const { notes, customerPresent, equipmentChecklist, clientEmails, staffName } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
-    // Build completion data
-    const completionPhotos: string[] = [];
-    // Store photos as base64 in JSONB for now (R2 upload can be added later)
+    // ── Upload photos + signature to R2 ────────────────────────────
+    // We keep the raw buffers around for embedding in the PDF.
+    const photoUploads: Array<{ key: string; mimeType: string; buffer: Buffer }> = [];
+    const photoKeysForStorage: Array<{ key: string; mime_type: string; uploaded_at: string }> = [];
     if (files?.photos) {
-      for (const photo of files.photos) {
-        const base64 = `data:${photo.mimetype};base64,${photo.buffer.toString('base64')}`;
-        completionPhotos.push(base64);
+      for (let i = 0; i < files.photos.length; i++) {
+        const photo = files.photos[i];
+        const ext = photo.mimetype === 'image/png' ? 'png' : 'jpg';
+        const key = `completion/${quoteId}/photo-${Date.now()}-${i + 1}.${ext}`;
+        if (isR2Configured()) {
+          try {
+            await uploadToR2(key, photo.buffer, photo.mimetype);
+            photoUploads.push({ key, mimeType: photo.mimetype, buffer: photo.buffer });
+            photoKeysForStorage.push({
+              key,
+              mime_type: photo.mimetype,
+              uploaded_at: new Date().toISOString(),
+            });
+          } catch (err) {
+            console.error(`[portal completion] R2 upload failed for photo ${i + 1}:`, err);
+          }
+        } else {
+          // R2 not configured — keep the buffer in memory for PDF but don't persist
+          photoUploads.push({ key: '', mimeType: photo.mimetype, buffer: photo.buffer });
+          console.warn('[portal completion] R2 not configured — photos not persisted');
+        }
       }
     }
 
-    let signatureValue: string | null = null;
+    let signatureBuffer: Buffer | null = null;
+    let signatureKey: string | null = null;
     if (files?.signature?.[0]) {
       const sig = files.signature[0];
-      signatureValue = `data:${sig.mimetype};base64,${sig.buffer.toString('base64')}`;
+      signatureBuffer = sig.buffer;
+      const sigPath = `completion/${quoteId}/signature-${Date.now()}.png`;
+      if (isR2Configured()) {
+        try {
+          await uploadToR2(sigPath, sig.buffer, sig.mimetype || 'image/png');
+          signatureKey = sigPath;
+        } catch (err) {
+          console.error('[portal completion] R2 upload failed for signature:', err);
+        }
+      }
     }
 
     // Build completion notes
     let fullNotes = notes || '';
     if (!customerPresent) {
-      fullNotes = `[Customer not present] ${fullNotes}`;
+      fullNotes = `[Customer not present] ${fullNotes}`.trim();
     }
 
-    // Parse equipment checklist
-    let checklistData = null;
+    // Parse equipment checklist if provided
+    let checklistData: Record<string, boolean> | null = null;
     if (equipmentChecklist) {
       try {
         checklistData = JSON.parse(equipmentChecklist);
       } catch {
-        // Ignore parse errors
+        // ignore parse errors
       }
     }
 
-    // Build completed_by: use staffName if provided (Ooosh staff completing via system account)
+    // Resolve completed_by / display name
     const completedBy = staffName
       ? `${staffName} (${req.portalUser!.email})`
       : req.portalUser!.email;
+    const completionName = staffName || req.portalUser!.name;
 
-    // Update the quote
+    // ── Persist to DB ──────────────────────────────────────────────
     await query(
       `UPDATE quotes SET
         ops_status = 'completed',
@@ -533,22 +1027,19 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       [
         completedBy,
         fullNotes,
-        signatureValue,
-        JSON.stringify(completionPhotos),
+        signatureKey,
+        JSON.stringify(photoKeysForStorage),
         customerPresent,
         quoteId,
       ]
     );
 
-    // Update the assignment status
     await query(
       `UPDATE quote_assignments SET status = 'completed', updated_at = NOW()
        WHERE quote_id = $1 AND person_id = $2`,
       [quoteId, personId]
     );
 
-    // Store checklist in an interaction if provided
-    const completionName = staffName || req.portalUser!.name;
     if (checklistData) {
       await query(
         `INSERT INTO interactions (type, notes, related_type, related_id, created_by, metadata)
@@ -562,10 +1053,226 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       );
     }
 
+    // Return success IMMEDIATELY, fire PDF + emails in background
     res.json({ success: true, message: 'Job completed successfully' });
+
+    // ── Background: PDF + client email + staff alert ──────────────
+    (async () => {
+      const jobType: string = ctx.job_type;
+      const isDelivery = jobType === 'delivery';
+      const isCollection = jobType === 'collection';
+      const jobName: string = ctx.job_name || ctx.linked_venue_name || ctx.venue_name || 'Ooosh Job';
+      const clientName: string | null = ctx.job_client_name || ctx.quote_client_name || null;
+      const venueName: string = ctx.linked_venue_name || ctx.venue_name || '';
+      const completedAt = new Date().toISOString();
+      const completedDate = new Date().toLocaleDateString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric',
+      });
+      const completedDateTime = new Date().toLocaleString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
+
+      // Build client email recipients list
+      const recipients = new Set<string>();
+      if (clientEmails) {
+        clientEmails.split(',').map(e => e.trim()).filter(Boolean).forEach(e => recipients.add(e));
+      }
+      if (ctx.client_email) recipients.add(ctx.client_email);
+
+      // Send delivery-note PDF for deliveries
+      if (isDelivery && recipients.size > 0 && ctx.hirehop_id) {
+        try {
+          // Pull equipment from HireHop via broker
+          let items: DeliveryNoteItem[] = [];
+          try {
+            const hhResponse = await hhBroker.get('/api/job_data.php', {
+              job: ctx.hirehop_id,
+            }, { priority: 'high', cacheTTL: 300 });
+            const hhData = hhResponse as unknown as Record<string, unknown>;
+            const rawItems = Array.isArray(hhData.items) ? hhData.items : [];
+            items = (rawItems as Array<Record<string, unknown>>)
+              .filter((item) => !item.VIRTUAL)
+              .map((item) => ({
+                name: String(item.DESCRIPTION || item.name || ''),
+                quantity: Number(item.QUANTITY || item.qty || 1),
+                category: String(item.ACC_CATEGORY_NAME || item.category || '') || undefined,
+              }))
+              .filter((item) => item.name);
+          } catch (hhErr) {
+            console.error('[portal completion] HH equipment fetch failed:', hhErr);
+          }
+
+          const pdfBuffer = await generateDeliveryNotePdf({
+            hhRef: String(ctx.hirehop_id),
+            jobDate: ctx.job_date
+              ? (ctx.job_date instanceof Date ? ctx.job_date.toISOString() : String(ctx.job_date))
+              : completedAt,
+            completedAt,
+            clientName: clientName || undefined,
+            venueName: venueName || 'N/A',
+            deliveryAddress: [ctx.venue_address, ctx.venue_city, ctx.venue_postcode]
+              .filter(Boolean).join(', ') || undefined,
+            items,
+            signature: signatureBuffer,
+            photos: photoUploads.map(p => p.buffer),
+            driverName: completionName,
+          });
+
+          // Store the PDF in R2 for future re-access
+          if (isR2Configured()) {
+            const pdfKey = `delivery-notes/${quoteId}/delivery-note-${Date.now()}.pdf`;
+            try {
+              await uploadToR2(pdfKey, pdfBuffer, 'application/pdf');
+            } catch (err) {
+              console.error('[portal completion] R2 upload failed for PDF:', err);
+            }
+          }
+
+          // Email each recipient
+          for (const to of recipients) {
+            try {
+              await emailService.send('delivery_note', {
+                to,
+                variables: {
+                  clientName: clientName || 'there',
+                  jobName,
+                  venueName: venueName || 'your venue',
+                  deliveryDate: completedDate,
+                  driverName: completionName,
+                  completedAt: completedDateTime,
+                },
+                attachments: [{
+                  filename: `delivery-note-${ctx.hirehop_id}.pdf`,
+                  content: pdfBuffer,
+                  contentType: 'application/pdf',
+                }],
+              });
+            } catch (emailErr) {
+              console.error(`[portal completion] Failed to email delivery note to ${to}:`, emailErr);
+            }
+          }
+        } catch (err) {
+          console.error('[portal completion] Delivery note PDF/email failed:', err);
+        }
+      }
+
+      // Send collection confirmation email for collections (no PDF)
+      if (isCollection && recipients.size > 0) {
+        for (const to of recipients) {
+          try {
+            await emailService.send('collection_confirmation', {
+              to,
+              variables: {
+                clientName: clientName || 'there',
+                jobName,
+                venueName: venueName || 'your venue',
+                driverName: completionName,
+                completedDate,
+                completedAt: completedDateTime,
+              },
+            });
+          } catch (emailErr) {
+            console.error(`[portal completion] Failed to email collection confirmation to ${to}:`, emailErr);
+          }
+        }
+      }
+
+      // Always send staff alert when the driver has notes
+      if (fullNotes.trim()) {
+        try {
+          const jobUrl = ctx.job_id ? `/jobs/${ctx.job_id}` : '#';
+          await emailService.send('completion_driver_notes', {
+            to: 'info@oooshtours.co.uk',
+            variables: {
+              jobName,
+              jobType: jobType === 'crewed' ? 'crew work' : jobType,
+              driverName: completionName,
+              venueName: venueName || 'N/A',
+              customerPresent: customerPresent ? 'Yes' : 'No',
+              completedAt: completedDateTime,
+              completedDate,
+              notes: fullNotes,
+              jobUrl,
+            },
+          });
+        } catch (emailErr) {
+          console.error('[portal completion] Failed to send staff alert:', emailErr);
+        }
+      }
+    })().catch(err => console.error('[portal completion] Background task error:', err));
   } catch (error) {
     console.error('Portal completion error:', error);
     res.status(500).json({ error: 'Failed to submit completion' });
+  }
+});
+
+// ── GET /api/portal/jobs/:quoteId/files — shared job + venue files ───
+// Returns files tagged share_with_freelancer = true from the linked job
+// and its venue. Portal UI uses this to offer file downloads.
+
+router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => {
+  try {
+    const personId = req.portalUser!.id;
+    const quoteId = req.params.quoteId;
+
+    const result = await query(
+      `SELECT j.files AS job_files, v.files AS venue_files,
+              j.job_name, v.name AS venue_name
+       FROM quote_assignments qa
+       JOIN quotes q ON q.id = qa.quote_id
+       LEFT JOIN jobs j ON j.id = q.job_id
+       LEFT JOIN venues v ON v.id = q.venue_id
+       WHERE qa.quote_id = $1 AND qa.person_id = $2
+         AND q.is_deleted = false`,
+      [quoteId, personId]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const row = result.rows[0];
+    interface SharedFileRaw {
+      share_with_freelancer?: boolean;
+      name?: string;
+      original_name?: string;
+      url?: string;
+      key?: string;
+      type?: string;
+      content_type?: string;
+      label?: string;
+      uploaded_at?: string;
+    }
+    const filterShared = (files: unknown, source: 'job' | 'venue') => {
+      if (!Array.isArray(files)) return [];
+      return (files as SharedFileRaw[])
+        .filter((f) => f?.share_with_freelancer === true)
+        .map((f) => ({
+          name: f.name || f.original_name || 'File',
+          url: f.url || null,
+          key: f.key || null,
+          type: f.type || f.content_type || '',
+          label: f.label || '',
+          uploadedAt: f.uploaded_at || null,
+          source,
+        }));
+    };
+
+    const shared = [
+      ...filterShared(row.job_files, 'job'),
+      ...filterShared(row.venue_files, 'venue'),
+    ];
+
+    res.json({
+      success: true,
+      files: shared,
+      job: { name: row.job_name || null },
+      venue: { name: row.venue_name || null },
+    });
+  } catch (error) {
+    console.error('Portal files error:', error);
+    res.status(500).json({ error: 'Failed to load files' });
   }
 });
 

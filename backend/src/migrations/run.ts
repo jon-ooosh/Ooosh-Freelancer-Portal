@@ -86,6 +86,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '049_drop_requirement_uniqueness.sql',
         '050_drop_requirement_phase_uniqueness.sql',
         '051_vehicle_slot_modes.sql',
+        '052_portal_auth_and_chase.sql',
       ];
 
       for (const migration of migrations) {
