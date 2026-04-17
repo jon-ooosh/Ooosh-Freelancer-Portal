@@ -200,7 +200,10 @@ async function main() {
   const wb = XLSX.readFile(filePath!, { raw: false, dateNF: 'yyyy-mm-dd' });
   const firstSheet = wb.SheetNames[0];
   const sheet = wb.Sheets[firstSheet];
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+  // header:'A' keys cells by column letter (A,B,C…) regardless of any header row.
+  // The Monday export has section banners (rows 1-29) above the real header row,
+  // so we can't rely on xlsx auto-detecting headers. defval keeps blanks present.
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { header: 'A', defval: '' });
 
   console.log(`Parsed ${rows.length} rows from sheet "${firstSheet}"\n`);
 
