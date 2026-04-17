@@ -882,6 +882,121 @@ function nextStatus(current: string, list: readonly string[]): string {
   return list[(idx + 1) % list.length];
 }
 
+// ── Completion image helpers ────────────────────────────────────────
+// Photos/signature are stored either as a legacy data URL ("data:...")
+// or an R2 key ("completion/..."). R2 keys are fetched authenticated
+// and turned into blob URLs; data URLs render directly. Thumbnails open
+// a lightbox with a download action.
+
+function isDirectImageSrc(ref: string): boolean {
+  return ref.startsWith('data:') || ref.startsWith('http://') || ref.startsWith('https://');
+}
+
+function useResolvedImageSrc(ref: string): { src: string | null; loading: boolean } {
+  const [src, setSrc] = useState<string | null>(() => (isDirectImageSrc(ref) ? ref : null));
+  const [loading, setLoading] = useState(!isDirectImageSrc(ref));
+
+  useEffect(() => {
+    if (isDirectImageSrc(ref)) {
+      setSrc(ref);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setLoading(true);
+    api.blob(`/files/download?key=${encodeURIComponent(ref)}`)
+      .then(({ blob, contentType }) => {
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(new Blob([blob], { type: contentType }));
+        setSrc(objectUrl);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error('[CompletionImage] load failed:', ref, err);
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [ref]);
+
+  return { src, loading };
+}
+
+function ImageLightbox({ src, filename, onClose }: { src: string; filename: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4"
+      onClick={onClose}
+    >
+      <div className="relative max-h-full max-w-full" onClick={(e) => e.stopPropagation()}>
+        <img
+          src={src}
+          alt={filename}
+          className="max-h-[85vh] max-w-[90vw] object-contain rounded shadow-2xl bg-white"
+        />
+        <div className="absolute top-2 right-2 flex gap-2">
+          <a
+            href={src}
+            download={filename}
+            className="px-3 py-1.5 text-sm bg-white/95 hover:bg-white rounded shadow font-medium text-gray-800"
+          >
+            Download
+          </a>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-1.5 text-sm bg-white/95 hover:bg-white rounded shadow font-medium text-gray-800"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function CompletionImageThumb({ refString, alt, filename, thumbClassName }: {
+  refString: string;
+  alt: string;
+  filename: string;
+  thumbClassName?: string;
+}) {
+  const { src, loading } = useResolvedImageSrc(refString);
+  const [open, setOpen] = useState(false);
+  const cls = thumbClassName || 'h-20 w-20 object-cover rounded border border-gray-200 hover:border-ooosh-500 transition-colors';
+
+  if (!src) {
+    return (
+      <div className={`${cls} flex items-center justify-center bg-gray-50 text-xs text-gray-400`}>
+        {loading ? '…' : 'Load failed'}
+      </div>
+    );
+  }
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="block focus:outline-none focus:ring-2 focus:ring-ooosh-500 rounded"
+        title="Click to enlarge"
+      >
+        <img src={src} alt={alt} className={cls} />
+      </button>
+      {open && <ImageLightbox src={src} filename={filename} onClose={() => setOpen(false)} />}
+    </>
+  );
+}
+
 function ExpandedDetail({
   q,
   assignments,
@@ -1246,7 +1361,12 @@ function ExpandedDetail({
                 <div>
                   <span className="text-gray-500">Signature:</span>
                   <div className="mt-1 bg-white rounded border border-gray-200 p-2 inline-block">
-                    <img src={q.completion_signature} alt="Signature" className="h-16 max-w-[200px] object-contain" />
+                    <CompletionImageThumb
+                      refString={q.completion_signature}
+                      alt="Signature"
+                      filename={`signature-${q.id}.png`}
+                      thumbClassName="h-16 max-w-[200px] object-contain cursor-zoom-in"
+                    />
                   </div>
                 </div>
               )}
@@ -1256,13 +1376,12 @@ function ExpandedDetail({
                   <span className="text-gray-500">Photos ({q.completion_photos.length}):</span>
                   <div className="mt-1 flex flex-wrap gap-2">
                     {q.completion_photos.map((photo, idx) => (
-                      <a key={idx} href={photo} target="_blank" rel="noopener noreferrer" className="block">
-                        <img
-                          src={photo}
-                          alt={`Completion photo ${idx + 1}`}
-                          className="h-20 w-20 object-cover rounded border border-gray-200 hover:border-ooosh-500 transition-colors"
-                        />
-                      </a>
+                      <CompletionImageThumb
+                        key={idx}
+                        refString={photo}
+                        alt={`Completion photo ${idx + 1}`}
+                        filename={`photo-${q.id}-${idx + 1}.jpg`}
+                      />
                     ))}
                   </div>
                 </div>

@@ -961,40 +961,53 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const { notes, customerPresent, equipmentChecklist, clientEmails, staffName } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
-    // ── Upload photos + signature to R2 for audit, plus keep data URLs
-    // for UI-compatible display ─────────────────────────────────────
-    // We keep the raw buffers around for embedding in the PDF. The DB stores
-    // data URLs (as the old completion code did) so the TransportOpsPage
-    // `<img src={photo}>` renders directly without needing authenticated
-    // blob fetches. R2 gets a forensic copy of each file.
+    // ── Upload photos + signature to R2 (preferred storage) ────────
+    // completion_photos / completion_signature store either an R2 key
+    // ("completion/{quoteId}/...") served via /api/files/download, or a
+    // legacy data URL ("data:image/...") for historical records and the
+    // R2-unavailable fallback. TransportOpsPage detects the format and
+    // renders accordingly (blob fetch vs direct <img src>).
+    // Raw buffers are kept in memory for PDF embedding regardless.
     const photoUploads: Array<{ mimeType: string; buffer: Buffer }> = [];
-    const photoDataUrls: string[] = [];
+    const photoRefs: string[] = [];
     if (files?.photos) {
       for (let i = 0; i < files.photos.length; i++) {
         const photo = files.photos[i];
         photoUploads.push({ mimeType: photo.mimetype, buffer: photo.buffer });
-        photoDataUrls.push(`data:${photo.mimetype};base64,${photo.buffer.toString('base64')}`);
+        let stored: string | null = null;
         if (isR2Configured()) {
           const ext = photo.mimetype === 'image/png' ? 'png' : 'jpg';
           const key = `completion/${quoteId}/photo-${Date.now()}-${i + 1}.${ext}`;
-          uploadToR2(key, photo.buffer, photo.mimetype).catch((err) =>
-            console.error(`[portal completion] R2 upload failed for photo ${i + 1}:`, err)
-          );
+          try {
+            await uploadToR2(key, photo.buffer, photo.mimetype);
+            stored = key;
+          } catch (err) {
+            console.error(`[portal completion] R2 upload failed for photo ${i + 1}:`, err);
+          }
         }
+        if (!stored) {
+          stored = `data:${photo.mimetype};base64,${photo.buffer.toString('base64')}`;
+        }
+        photoRefs.push(stored);
       }
     }
 
     let signatureBuffer: Buffer | null = null;
-    let signatureDataUrl: string | null = null;
+    let signatureRef: string | null = null;
     if (files?.signature?.[0]) {
       const sig = files.signature[0];
       signatureBuffer = sig.buffer;
-      signatureDataUrl = `data:${sig.mimetype || 'image/png'};base64,${sig.buffer.toString('base64')}`;
       if (isR2Configured()) {
         const sigPath = `completion/${quoteId}/signature-${Date.now()}.png`;
-        uploadToR2(sigPath, sig.buffer, sig.mimetype || 'image/png').catch((err) =>
-          console.error('[portal completion] R2 upload failed for signature:', err)
-        );
+        try {
+          await uploadToR2(sigPath, sig.buffer, sig.mimetype || 'image/png');
+          signatureRef = sigPath;
+        } catch (err) {
+          console.error('[portal completion] R2 upload failed for signature:', err);
+        }
+      }
+      if (!signatureRef) {
+        signatureRef = `data:${sig.mimetype || 'image/png'};base64,${sig.buffer.toString('base64')}`;
       }
     }
 
@@ -1040,8 +1053,8 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       [
         completedBy,
         fullNotes,
-        signatureDataUrl,
-        JSON.stringify(photoDataUrls),
+        signatureRef,
+        JSON.stringify(photoRefs),
         customerPresent,
         quoteId,
       ]
@@ -1095,22 +1108,34 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // Send delivery-note PDF for deliveries
       if (isDelivery && recipients.size > 0 && ctx.hirehop_id) {
         try {
-          // Pull equipment from HireHop via broker
+          // Pull equipment from HireHop via broker.
+          // Line items live on /frames/items_to_supply_list.php (not job_data.php).
+          // Broker returns { success, data } — data may be an array or { items/rows }.
+          // We want real physical items only: kind:2, not VIRTUAL (prompt parents),
+          // so we exclude headers (kind:0), selected prompts (kind:3), crew (kind:4).
           let items: DeliveryNoteItem[] = [];
           try {
-            const hhResponse = await hhBroker.get('/api/job_data.php', {
+            const hhResponse = await hhBroker.get<unknown>('/frames/items_to_supply_list.php', {
               job: ctx.hirehop_id,
             }, { priority: 'high', cacheTTL: 300 });
-            const hhData = hhResponse as unknown as Record<string, unknown>;
-            const rawItems = Array.isArray(hhData.items) ? hhData.items : [];
-            items = (rawItems as Array<Record<string, unknown>>)
-              .filter((item) => !item.VIRTUAL)
-              .map((item) => ({
-                name: String(item.DESCRIPTION || item.name || ''),
-                quantity: Number(item.QUANTITY || item.qty || 1),
-                category: String(item.ACC_CATEGORY_NAME || item.category || '') || undefined,
-              }))
-              .filter((item) => item.name);
+
+            if (hhResponse.success && hhResponse.data) {
+              const data = hhResponse.data as Record<string, unknown>;
+              const rawItems: unknown[] = Array.isArray(data)
+                ? data
+                : (Array.isArray(data.items) ? data.items : (Array.isArray(data.rows) ? data.rows : []));
+              items = (rawItems as Array<Record<string, unknown>>)
+                .filter((item) => {
+                  const kind = Number(item.kind ?? 2);
+                  const isVirtual = item.VIRTUAL === '1' || item.VIRTUAL === 1 || item.VIRTUAL === true;
+                  return kind === 2 && !isVirtual;
+                })
+                .map((item) => ({
+                  name: String(item.title ?? item.NAME ?? item.ITEM_NAME ?? ''),
+                  quantity: Number(item.qty ?? item.QUANTITY ?? item.quantity ?? 1),
+                }))
+                .filter((item) => item.name);
+            }
           } catch (hhErr) {
             console.error('[portal completion] HH equipment fetch failed:', hhErr);
           }
