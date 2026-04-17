@@ -137,7 +137,14 @@ router.get('/download', async (req: AuthRequest, res: Response) => {
     }
 
     // Validate key starts with known prefix to prevent path traversal
-    if (!key.startsWith('files/') && !key.startsWith('backups/') && !key.startsWith('avatars/')) {
+    const allowedPrefixes = [
+      'files/',
+      'backups/',
+      'avatars/',
+      'completion/',     // portal completion photos + signatures
+      'delivery-notes/', // completion delivery-note PDFs
+    ];
+    if (!allowedPrefixes.some((p) => key.startsWith(p))) {
       res.status(403).json({ error: 'Invalid file key' });
       return;
     }
