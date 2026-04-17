@@ -15,6 +15,7 @@ import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
+import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 
 const router = Router();
 
@@ -870,6 +871,11 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         WHERE id = $4`,
         [amount, payment_method, payment_reference || null, excess_id]
       );
+
+      // Promote the excess requirement to 'done' if coverage is now met
+      syncExcessRequirementStatus(job.id).catch(e =>
+        console.error('[money] syncExcessRequirementStatus failed (record-payment):', e)
+      );
     }
 
     // Status transition: deposit payment on enquiry/provisional → Booked
@@ -1219,6 +1225,11 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
           [hh_deposit_id, resolvedExcessId]
         ).catch(() => {}); // fire-and-forget
       }
+
+      // Promote the excess requirement to 'done' if coverage is now met
+      syncExcessRequirementStatus(job.id).catch(e =>
+        console.error('[money] syncExcessRequirementStatus failed (payment-event):', e)
+      );
     }
 
     // ── Status transition: deposit/balance payment on pre-confirmed job → Confirmed ──

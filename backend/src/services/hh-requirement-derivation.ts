@@ -16,6 +16,7 @@
 
 import { query, getClient } from '../config/database';
 import type { HHLineItem } from './hirehop-job-sync';
+import { syncExcessRequirementStatus } from './excess-requirement-sync';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -412,6 +413,10 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
           }
         }
       }
+
+      // Promote the excess requirement to 'done' if coverage is already met
+      // (e.g. derivation runs after a portal pre-auth has landed).
+      await syncExcessRequirementStatus(jobId, client);
     } else if (flags.has_vehicle) {
       // All vehicle slots are van_and_driver — suspend excess too
       await suspendRequirementForVanAndDriver(client, jobId, 'excess');
