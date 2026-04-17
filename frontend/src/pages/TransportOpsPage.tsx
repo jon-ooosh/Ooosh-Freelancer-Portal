@@ -892,6 +892,25 @@ function isDirectImageSrc(ref: string): boolean {
   return ref.startsWith('data:') || ref.startsWith('http://') || ref.startsWith('https://');
 }
 
+/**
+ * Build a human-friendly download filename like "15746-2026-04-17-1.jpg"
+ * or "15746-2026-04-17-signature.png". Falls back to quote-id snippet
+ * and "unknown-date" if the quote has no HH job number or job date.
+ */
+function buildCompletionFilename(q: OpsQuote, which: 'signature' | number): string {
+  const rawDate = q.completed_at
+    || (q.job_date ? (q.job_date instanceof Date ? q.job_date.toISOString() : String(q.job_date)) : null);
+  let datePart = 'unknown-date';
+  if (rawDate) {
+    const d = new Date(rawDate);
+    if (!isNaN(d.getTime())) datePart = d.toISOString().slice(0, 10);
+  }
+  const jobPart = q.hh_job_number ? String(q.hh_job_number) : `quote-${q.id.slice(0, 8)}`;
+  return which === 'signature'
+    ? `${jobPart}-${datePart}-signature.png`
+    : `${jobPart}-${datePart}-${which}.jpg`;
+}
+
 function useResolvedImageSrc(ref: string): { src: string | null; loading: boolean } {
   const [src, setSrc] = useState<string | null>(() => (isDirectImageSrc(ref) ? ref : null));
   const [loading, setLoading] = useState(!isDirectImageSrc(ref));
@@ -1364,7 +1383,7 @@ function ExpandedDetail({
                     <CompletionImageThumb
                       refString={q.completion_signature}
                       alt="Signature"
-                      filename={`signature-${q.id}.png`}
+                      filename={buildCompletionFilename(q, 'signature')}
                       thumbClassName="h-16 max-w-[200px] object-contain cursor-zoom-in"
                     />
                   </div>
@@ -1380,7 +1399,7 @@ function ExpandedDetail({
                         key={idx}
                         refString={photo}
                         alt={`Completion photo ${idx + 1}`}
-                        filename={`photo-${q.id}-${idx + 1}.jpg`}
+                        filename={buildCompletionFilename(q, idx + 1)}
                       />
                     ))}
                   </div>
