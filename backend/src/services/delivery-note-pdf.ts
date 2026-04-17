@@ -234,7 +234,17 @@ export async function generateDeliveryNotePdf(data: DeliveryNoteData): Promise<B
     page.drawText('Delivery Address:', {
       x: margin, y: yPosition, size: labelSize, font: helvetica, color: lightGray,
     });
-    const addressLines = wrapText(data.deliveryAddress, 80);
+    // Venue addresses often arrive with literal newlines. pdf-lib's drawText
+    // renders "\n" as extra lines WITHIN a single draw call but our yPosition
+    // accounting wasn't tracking those — the address bled into the equipment
+    // table. Split on newlines first, THEN wrap each piece by width, then
+    // draw line-by-line so the height matches the actual rendered output.
+    const addressLines: string[] = [];
+    for (const rawLine of data.deliveryAddress.split(/\r?\n/)) {
+      const trimmed = rawLine.trim();
+      if (!trimmed) continue;
+      addressLines.push(...wrapText(trimmed, 80));
+    }
     addressLines.forEach((line, idx) => {
       page.drawText(line, {
         x: margin, y: yPosition - 13 - idx * 13, size: valueSize, font: helvetica, color: textColor,
