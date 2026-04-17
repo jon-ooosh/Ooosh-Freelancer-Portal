@@ -588,10 +588,13 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
     // already past todo (e.g. already arranging/arranged/dispatched).
     const confirmOpsBump =
       status === 'confirmed' ? `, ops_status = CASE WHEN ops_status = 'todo' THEN 'arranging' ELSE ops_status END` : '';
+    // When completing a quote, also mark ops as completed (Transport Ops and
+    // Job Detail stay aligned).
+    const completeOpsBump = status === 'completed' ? `, ops_status = 'completed', completed_at = NOW()` : '';
     const result = await query(
       `UPDATE quotes
        SET status = $1, status_changed_at = NOW(), status_changed_by = $2,
-           cancelled_reason = $3, updated_at = NOW()${opsStatusClause}${restoreOpsClause}${confirmOpsBump}
+           cancelled_reason = $3, updated_at = NOW()${opsStatusClause}${restoreOpsClause}${confirmOpsBump}${completeOpsBump}
        WHERE id = $4 AND is_deleted = false
        RETURNING id, status, ops_status`,
       [status, req.user!.id, status === 'cancelled' ? (cancelledReason || null) : null, req.params.id]
@@ -828,13 +831,26 @@ router.patch('/:id/ops-status', validate(opsStatusSchema), async (req: AuthReque
     }
 
     // Auto-sync commercial status with operational progress.
-    // - Moving ops into arranging/arranged/dispatched/arrived/completed on a
-    //   still-draft quote implies we've committed to the job → confirm it.
-    // - Cancelling ops on a still-draft quote leaves it draft.
-    if (['arranging', 'arranged', 'dispatched', 'arrived', 'completed'].includes(ops_status)) {
+    // - Moving ops into arranging/arranged/dispatched/arrived on a still-draft
+    //   quote implies we've committed to the job → confirm it.
+    // - Moving ops to 'completed' also completes the commercial quote if it
+    //   wasn't already, so Job Detail's Crew & Transport card stops showing
+    //   a still-active "Complete" button after the portal completion.
+    // - Moving ops to 'cancelled' also cancels the commercial quote.
+    if (['arranging', 'arranged', 'dispatched', 'arrived'].includes(ops_status)) {
       updates.push(`status = CASE WHEN status = 'draft' THEN 'confirmed' ELSE status END`);
       updates.push(`status_changed_at = CASE WHEN status = 'draft' THEN NOW() ELSE status_changed_at END`);
       updates.push(`status_changed_by = CASE WHEN status = 'draft' THEN $${params.length + 1} ELSE status_changed_by END`);
+      params.push(req.user!.id);
+    } else if (ops_status === 'completed') {
+      updates.push(`status = CASE WHEN status IN ('draft', 'confirmed') THEN 'completed' ELSE status END`);
+      updates.push(`status_changed_at = CASE WHEN status IN ('draft', 'confirmed') THEN NOW() ELSE status_changed_at END`);
+      updates.push(`status_changed_by = CASE WHEN status IN ('draft', 'confirmed') THEN $${params.length + 1} ELSE status_changed_by END`);
+      params.push(req.user!.id);
+    } else if (ops_status === 'cancelled') {
+      updates.push(`status = CASE WHEN status IN ('draft', 'confirmed') THEN 'cancelled' ELSE status END`);
+      updates.push(`status_changed_at = CASE WHEN status IN ('draft', 'confirmed') THEN NOW() ELSE status_changed_at END`);
+      updates.push(`status_changed_by = CASE WHEN status IN ('draft', 'confirmed') THEN $${params.length + 1} ELSE status_changed_by END`);
       params.push(req.user!.id);
     }
 

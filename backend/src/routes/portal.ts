@@ -961,48 +961,40 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const { notes, customerPresent, equipmentChecklist, clientEmails, staffName } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
-    // ── Upload photos + signature to R2 ────────────────────────────
-    // We keep the raw buffers around for embedding in the PDF.
-    const photoUploads: Array<{ key: string; mimeType: string; buffer: Buffer }> = [];
-    const photoKeysForStorage: Array<{ key: string; mime_type: string; uploaded_at: string }> = [];
+    // ── Upload photos + signature to R2 for audit, plus keep data URLs
+    // for UI-compatible display ─────────────────────────────────────
+    // We keep the raw buffers around for embedding in the PDF. The DB stores
+    // data URLs (as the old completion code did) so the TransportOpsPage
+    // `<img src={photo}>` renders directly without needing authenticated
+    // blob fetches. R2 gets a forensic copy of each file.
+    const photoUploads: Array<{ mimeType: string; buffer: Buffer }> = [];
+    const photoDataUrls: string[] = [];
     if (files?.photos) {
       for (let i = 0; i < files.photos.length; i++) {
         const photo = files.photos[i];
-        const ext = photo.mimetype === 'image/png' ? 'png' : 'jpg';
-        const key = `completion/${quoteId}/photo-${Date.now()}-${i + 1}.${ext}`;
+        photoUploads.push({ mimeType: photo.mimetype, buffer: photo.buffer });
+        photoDataUrls.push(`data:${photo.mimetype};base64,${photo.buffer.toString('base64')}`);
         if (isR2Configured()) {
-          try {
-            await uploadToR2(key, photo.buffer, photo.mimetype);
-            photoUploads.push({ key, mimeType: photo.mimetype, buffer: photo.buffer });
-            photoKeysForStorage.push({
-              key,
-              mime_type: photo.mimetype,
-              uploaded_at: new Date().toISOString(),
-            });
-          } catch (err) {
-            console.error(`[portal completion] R2 upload failed for photo ${i + 1}:`, err);
-          }
-        } else {
-          // R2 not configured — keep the buffer in memory for PDF but don't persist
-          photoUploads.push({ key: '', mimeType: photo.mimetype, buffer: photo.buffer });
-          console.warn('[portal completion] R2 not configured — photos not persisted');
+          const ext = photo.mimetype === 'image/png' ? 'png' : 'jpg';
+          const key = `completion/${quoteId}/photo-${Date.now()}-${i + 1}.${ext}`;
+          uploadToR2(key, photo.buffer, photo.mimetype).catch((err) =>
+            console.error(`[portal completion] R2 upload failed for photo ${i + 1}:`, err)
+          );
         }
       }
     }
 
     let signatureBuffer: Buffer | null = null;
-    let signatureKey: string | null = null;
+    let signatureDataUrl: string | null = null;
     if (files?.signature?.[0]) {
       const sig = files.signature[0];
       signatureBuffer = sig.buffer;
-      const sigPath = `completion/${quoteId}/signature-${Date.now()}.png`;
+      signatureDataUrl = `data:${sig.mimetype || 'image/png'};base64,${sig.buffer.toString('base64')}`;
       if (isR2Configured()) {
-        try {
-          await uploadToR2(sigPath, sig.buffer, sig.mimetype || 'image/png');
-          signatureKey = sigPath;
-        } catch (err) {
-          console.error('[portal completion] R2 upload failed for signature:', err);
-        }
+        const sigPath = `completion/${quoteId}/signature-${Date.now()}.png`;
+        uploadToR2(sigPath, sig.buffer, sig.mimetype || 'image/png').catch((err) =>
+          console.error('[portal completion] R2 upload failed for signature:', err)
+        );
       }
     }
 
@@ -1029,9 +1021,14 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const completionName = staffName || req.portalUser!.name;
 
     // ── Persist to DB ──────────────────────────────────────────────
+    // Also bump commercial status to 'completed' so Job Detail's Crew &
+    // Transport card stops showing "Confirmed + Complete button" once the
+    // job is actually finished. Keeps transport-ops page and job-detail
+    // in lock-step.
     await query(
       `UPDATE quotes SET
         ops_status = 'completed',
+        status = CASE WHEN status IN ('draft', 'confirmed') THEN 'completed' ELSE status END,
         completed_at = NOW(),
         completed_by = $1,
         completion_notes = $2,
@@ -1043,8 +1040,8 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       [
         completedBy,
         fullNotes,
-        signatureKey,
-        JSON.stringify(photoKeysForStorage),
+        signatureDataUrl,
+        JSON.stringify(photoDataUrls),
         customerPresent,
         quoteId,
       ]
