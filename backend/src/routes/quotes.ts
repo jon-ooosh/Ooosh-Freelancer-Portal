@@ -570,6 +570,15 @@ const statusSchema = z.object({
 router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { status, cancelledReason } = req.body;
+
+    // Capture old status so we can detect draft → confirmed transitions
+    // and fire freelancer_assignment emails for pre-existing assignees.
+    const oldStatusResult = await query(
+      `SELECT status FROM quotes WHERE id = $1 AND is_deleted = false`,
+      [req.params.id]
+    );
+    const oldStatus = oldStatusResult.rows[0]?.status;
+
     // When cancelling a quote, also set ops_status to cancelled so it appears in the cancelled group on Transport Ops
     const opsStatusClause = status === 'cancelled' ? ', ops_status = \'cancelled\'' : '';
     // When restoring from cancelled (back to draft), reset ops_status to todo
@@ -586,6 +595,61 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
       res.status(404).json({ error: 'Quote not found' });
       return;
     }
+
+    // Fire freelancer_assignment email when a quote is confirmed for any
+    // already-assigned freelancers. This covers: (a) staff assigned crew
+    // during draft, then confirmed later; (b) quote reopened (draft) then
+    // re-confirmed. We dedup on assignment.confirmed_at timestamp set below.
+    if (status === 'confirmed' && oldStatus !== 'confirmed') {
+      (async () => {
+        try {
+          const assignees = await query(
+            `SELECT qa.id AS assignment_id, qa.role, qa.agreed_rate, qa.rate_type,
+                    p.first_name, p.email, p.is_freelancer,
+                    q.job_date, q.venue_name, j.job_name
+             FROM quote_assignments qa
+             JOIN people p ON p.id = qa.person_id
+             JOIN quotes q ON q.id = qa.quote_id
+             LEFT JOIN jobs j ON j.id = q.job_id
+             WHERE qa.quote_id = $1
+               AND qa.status NOT IN ('declined', 'cancelled')
+               AND qa.confirmed_at IS NULL
+               AND qa.is_ooosh_crew = false
+               AND p.is_freelancer = true
+               AND p.email IS NOT NULL`,
+            [req.params.id]
+          );
+          for (const a of assignees.rows) {
+            const freelancerName = (a.first_name || '').trim() || 'there';
+            const jobName = a.job_name || a.venue_name || 'a job';
+            const jobDate = a.job_date
+              ? new Date(a.job_date).toLocaleDateString('en-GB', {
+                  weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+                })
+              : 'TBC';
+            const rateDisplay = a.agreed_rate
+              ? `£${Number(a.agreed_rate).toFixed(2)}${a.rate_type === 'hourly' ? '/hr' : a.rate_type === 'dayrate' ? ' per day' : ''}`
+              : 'To be confirmed';
+            try {
+              await emailService.send('freelancer_assignment', {
+                to: a.email,
+                variables: { freelancerName, jobName, jobDate, role: a.role || 'Crew', rate: rateDisplay },
+              });
+              // Record that we've notified so we don't re-send on re-confirm
+              await query(
+                `UPDATE quote_assignments SET confirmed_at = NOW() WHERE id = $1`,
+                [a.assignment_id]
+              );
+            } catch (emailErr) {
+              console.error(`freelancer_assignment to ${a.email} failed:`, emailErr);
+            }
+          }
+        } catch (err) {
+          console.error('Failed to notify assignees on quote confirmation:', err);
+        }
+      })();
+    }
+
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Update quote status error:', error);
@@ -647,6 +711,14 @@ const assignSchema = z.object({
 router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { personId, role, agreedRate, rateType, rateNotes, notes } = req.body;
+
+    // Check if assignment already exists — if so, this is an edit, not a fresh assignment
+    const existing = await query(
+      `SELECT id FROM quote_assignments WHERE quote_id = $1 AND person_id = $2`,
+      [req.params.id, personId]
+    );
+    const isNewAssignment = existing.rows.length === 0;
+
     const result = await query(
       `INSERT INTO quote_assignments (quote_id, person_id, role, agreed_rate, rate_type, rate_notes, notes, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -657,6 +729,55 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
        RETURNING id`,
       [req.params.id, personId, role, agreedRate || null, rateType || null, rateNotes || null, notes || null, req.user!.id]
     );
+
+    // Fire-and-forget freelancer_assignment email for new assignments on confirmed
+    // quotes where the person is a freelancer with an email on file.
+    if (isNewAssignment) {
+      (async () => {
+        try {
+          const ctx = await query(
+            `SELECT p.first_name, p.last_name, p.email, p.is_freelancer,
+                    q.status AS quote_status, q.job_date, q.arrival_time,
+                    q.venue_name, q.job_type,
+                    j.job_name
+             FROM people p
+             CROSS JOIN quotes q
+             LEFT JOIN jobs j ON j.id = q.job_id
+             WHERE p.id = $1 AND q.id = $2`,
+            [personId, req.params.id]
+          );
+          if (ctx.rows.length === 0) return;
+          const row = ctx.rows[0];
+          if (!row.is_freelancer || !row.email) return;
+          if (row.quote_status !== 'confirmed') return;
+
+          const freelancerName = (row.first_name || '').trim() || 'there';
+          const jobName = row.job_name || row.venue_name || 'a job';
+          const jobDate = row.job_date
+            ? new Date(row.job_date).toLocaleDateString('en-GB', {
+                weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+              })
+            : 'TBC';
+          const rateDisplay = agreedRate
+            ? `£${Number(agreedRate).toFixed(2)}${rateType === 'hourly' ? '/hr' : rateType === 'dayrate' ? ' per day' : ''}`
+            : 'To be confirmed';
+
+          await emailService.send('freelancer_assignment', {
+            to: row.email,
+            variables: {
+              freelancerName,
+              jobName,
+              jobDate,
+              role: role || 'Crew',
+              rate: rateDisplay,
+            },
+          });
+        } catch (emailErr) {
+          console.error('Failed to send freelancer_assignment email:', emailErr);
+        }
+      })();
+    }
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('Assign person to quote error:', error);
