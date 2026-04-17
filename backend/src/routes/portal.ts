@@ -675,7 +675,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         q.freelancer_notes, q.freelancer_fee, q.freelancer_fee_rounded,
         q.run_group, q.run_order, q.run_group_fee,
         q.is_local, q.completed_at, q.completion_notes,
-        q.client_name, q.client_email,
+        q.client_name,
         q.tolls_status, q.accommodation_status, q.flight_status,
         q.expenses,
         qa.id as assignment_id, qa.role as assignment_role,
@@ -912,18 +912,22 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const personId = req.portalUser!.id;
     const quoteId = req.params.quoteId;
 
-    // Verify access + pull full context we'll need for PDF/emails
+    // Verify access + pull full context we'll need for PDF/emails.
+    // Client email comes from the linked client organisation (quotes table
+    // itself doesn't carry one).
     const accessCheck = await query(
       `SELECT qa.id AS assignment_id,
               q.id AS quote_id, q.ops_status, q.job_type, q.what_is_it,
-              q.venue_name, q.venue_id, q.job_date, q.client_email,
+              q.venue_name, q.venue_id, q.job_date,
               q.client_name AS quote_client_name,
               j.id AS job_id, j.job_name, j.hirehop_id, j.client_name AS job_client_name,
+              o.email AS client_email,
               v.name AS linked_venue_name, v.address AS venue_address,
               v.city AS venue_city, v.postcode AS venue_postcode
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
+       LEFT JOIN organisations o ON o.id = j.client_id
        LEFT JOIN venues v ON v.id = q.venue_id
        WHERE qa.quote_id = $1 AND qa.person_id = $2
          AND q.is_deleted = false`,
@@ -1423,7 +1427,7 @@ function formatJobForPortal(row: Record<string, unknown>) {
     ...base,
     isGrouped: false,
     whatIsIt: row.what_is_it === 'vehicle' ? 'A vehicle' : 'Equipment',
-    clientEmail: row.client_email as string | null,
+    clientEmail: null as string | null,
   };
 }
 
