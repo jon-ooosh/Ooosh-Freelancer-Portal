@@ -3909,6 +3909,7 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
   } | null>(null);
 
   useEffect(() => {
+    setData(null);
     api.get<{ data: { financial: any } }>(`/money/${jobId}/summary`)
       .then(res => {
         const f = res.data.financial;

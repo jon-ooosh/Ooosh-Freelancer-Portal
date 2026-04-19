@@ -116,10 +116,8 @@ export function wrapInBaseLayout(
  */
 export function testModeBanner(intendedRecipient: string): string {
   return `
-    <div style="background-color:#fef3c7;border:2px solid #f59e0b;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
-      <p style="margin:0;font-size:13px;color:#92400e;font-weight:600;">
-        TEST MODE — This email would have been sent to: ${intendedRecipient}
-      </p>
-    </div>
+    <p style="margin:0 0 16px 0;font-size:12px;color:#6b7280;">
+      TEST MODE — This email would have been sent to: ${intendedRecipient}
+    </p>
   `;
 }
