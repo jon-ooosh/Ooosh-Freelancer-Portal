@@ -106,6 +106,9 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
   const [recordVersion, setRecordVersion] = useState<number | null>(null);
   const [emailWarning, setEmailWarning] = useState<{ name: string; id: string } | null>(null);
   const emailCheckRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [originalName, setOriginalName] = useState<string>('');
+  const [linkedOrgs, setLinkedOrgs] = useState<Array<{ id: string; name: string }>>([]);
+  const [syncOrgIds, setSyncOrgIds] = useState<Set<string>>(new Set());
 
   const isEdit = !!personId;
 
@@ -147,6 +150,17 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
       });
       setShowFreelancer((data.is_freelancer as boolean) || false);
       if (data.version !== undefined) setRecordVersion(data.version as number);
+
+      const first = (data.first_name as string) || '';
+      const last = (data.last_name as string) || '';
+      setOriginalName(`${first} ${last}`.trim());
+      const orgs = (data.organisations as Array<{ organisation_id: string; organisation_name: string; status: string }> | null) || [];
+      setLinkedOrgs(
+        orgs
+          .filter(o => o.status === 'active')
+          .map(o => ({ id: o.organisation_id, name: o.organisation_name }))
+      );
+      setSyncOrgIds(new Set());
     } catch {
       setError('Failed to load person');
     } finally {
@@ -237,6 +251,17 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         const putBody = recordVersion !== null ? { ...body, version: recordVersion } : body;
         const result = await api.put<Record<string, unknown>>(`/people/${personId}`, putBody);
         if (result.version !== undefined) setRecordVersion(result.version as number);
+
+        if (syncOrgIds.size > 0) {
+          const newName = `${form.first_name.trim()} ${form.last_name.trim()}`.trim();
+          await Promise.all(
+            Array.from(syncOrgIds).map(orgId =>
+              api.put(`/organisations/${orgId}`, { name: newName }).catch(err => {
+                console.error(`Failed to sync organisation ${orgId} name:`, err);
+              })
+            )
+          );
+        }
       } else {
         await api.post('/people', body);
       }
@@ -263,6 +288,36 @@ export default function PersonForm({ personId, onSaved, onCancel }: PersonFormPr
         <Field label="First Name *" value={form.first_name} onChange={v => set('first_name', v)} />
         <Field label="Last Name *" value={form.last_name} onChange={v => set('last_name', v)} />
       </div>
+      {(() => {
+        const currentName = `${form.first_name.trim()} ${form.last_name.trim()}`.trim();
+        if (!isEdit || !originalName || currentName === originalName) return null;
+        const matches = linkedOrgs.filter(o => o.name.trim() === originalName);
+        if (matches.length === 0) return null;
+        return (
+          <div className="bg-amber-50 border border-amber-200 rounded px-3 py-2 text-xs text-amber-800">
+            <p className="font-medium mb-1">Linked organisation has the old name</p>
+            <p className="text-amber-700 mb-2">
+              Rename to <span className="font-medium">{currentName || '(empty)'}</span> too?
+            </p>
+            {matches.map(org => (
+              <label key={org.id} className="flex items-center gap-2 py-0.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={syncOrgIds.has(org.id)}
+                  onChange={e => {
+                    const next = new Set(syncOrgIds);
+                    if (e.target.checked) next.add(org.id);
+                    else next.delete(org.id);
+                    setSyncOrgIds(next);
+                  }}
+                  className="rounded"
+                />
+                <span>{org.name}</span>
+              </label>
+            ))}
+          </div>
+        );
+      })()}
 
       {/* Contact */}
       <div>

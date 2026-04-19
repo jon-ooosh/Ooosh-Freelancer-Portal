@@ -1642,7 +1642,7 @@ function NewEnquiryModal({
 
 export default function PipelinePage() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [stats, setStats] = useState<PipelineStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -2168,7 +2168,14 @@ export default function PipelinePage() {
       {/* Modals */}
       <NewEnquiryModal
         isOpen={showNewEnquiry}
-        onClose={() => setShowNewEnquiry(false)}
+        onClose={() => {
+          setShowNewEnquiry(false);
+          if (searchParams.get('newEnquiry')) {
+            const next = new URLSearchParams(searchParams);
+            next.delete('newEnquiry');
+            setSearchParams(next, { replace: true });
+          }
+        }}
         onCreated={(jobId) => {
           fetchPipeline();
           if (jobId) navigate(`/jobs/${jobId}`);
