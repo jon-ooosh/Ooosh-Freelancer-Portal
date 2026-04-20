@@ -18,7 +18,7 @@ import crypto from 'crypto';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
 import { emailService } from '../services/email-service';
-import { uploadToR2, isR2Configured } from '../config/r2';
+import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 
 const router = Router();
@@ -29,6 +29,8 @@ interface PortalUser {
   id: string;       // person_id from people table
   email: string;
   name: string;
+  /** true = shared staff login (e.g. info@), sees all Ooosh-crew assignments */
+  isStaffShared: boolean;
 }
 
 interface PortalRequest extends Request {
@@ -37,7 +39,7 @@ interface PortalRequest extends Request {
 
 const PORTAL_SECRET = process.env.PORTAL_SESSION_SECRET || process.env.SESSION_SECRET || process.env.JWT_SECRET!;
 
-function portalAuth(req: PortalRequest, res: Response, next: NextFunction) {
+async function portalAuth(req: PortalRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     // Check session cookie first, then Authorization header
     const token = req.cookies?.session ||
@@ -48,11 +50,21 @@ function portalAuth(req: PortalRequest, res: Response, next: NextFunction) {
       return;
     }
 
-    const decoded = jwt.verify(token, PORTAL_SECRET) as PortalUser & { iat: number; exp: number };
+    const decoded = jwt.verify(token, PORTAL_SECRET) as { id: string; email: string; name: string; iat: number; exp: number };
+
+    // Look up the shared-account flag fresh on every request — the JWT was
+    // minted before the flag existed for some tokens, and this lets us
+    // toggle staff access by updating the DB without forcing re-login.
+    const flagResult = await query(
+      `SELECT is_portal_shared_account FROM people WHERE id = $1`,
+      [decoded.id]
+    );
+
     req.portalUser = {
       id: decoded.id,
       email: decoded.email,
       name: decoded.name,
+      isStaffShared: flagResult.rows[0]?.is_portal_shared_account === true,
     };
     next();
   } catch {
@@ -693,8 +705,15 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
   try {
     const email = req.portalUser!.email.toLowerCase();
     const personId = req.portalUser!.id;
+    const isStaffShared = req.portalUser!.isStaffShared;
 
-    // Get all quotes where this freelancer is assigned (by person_id or by email)
+    // Shared staff accounts (e.g. info@) see every is_ooosh_crew assignment
+    // — local deliveries, collections, in-house runs get divvied up ad-hoc,
+    // so the account acts as a pool. Freelancers see only their own.
+    const assignmentFilter = isStaffShared
+      ? `(qa.person_id = $1 OR qa.is_ooosh_crew = true)`
+      : `qa.person_id = $1`;
+
     const result = await query(
       `SELECT
         q.id, q.job_id, q.job_type, q.calculation_mode,
@@ -720,7 +739,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
-       WHERE qa.person_id = $1
+       WHERE ${assignmentFilter}
          AND q.is_deleted = false
          AND q.status IN ('confirmed', 'completed')
        ORDER BY q.job_date ASC NULLS LAST, q.arrival_time ASC NULLS LAST`,
@@ -789,6 +808,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
 router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
   try {
     const personId = req.portalUser!.id;
+    const isStaffShared = req.portalUser!.isStaffShared;
     const quoteId = req.params.quoteId;
 
     // Verify this freelancer is assigned to this quote
@@ -805,14 +825,15 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         j.out_date, j.return_date, j.files as job_files,
         v.name as linked_venue_name, v.address as venue_address,
         v.city as venue_city, v.w3w_address as venue_w3w,
+        v.files as venue_files,
         COALESCE(v.approach_notes, v.general_notes) as venue_access_notes
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
-       WHERE qa.quote_id = $1 AND qa.person_id = $2
+       WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
          AND q.is_deleted = false`,
-      [quoteId, personId]
+      [quoteId, personId, isStaffShared]
     );
 
     if (result.rows.length === 0) {
@@ -822,6 +843,43 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
 
     const row = result.rows[0];
     const job = formatJobForPortal(row);
+
+    // Shape shared files for the portal. Files in the JSONB are shaped
+    // { url (R2 key | external URL), name, type, label, share_with_freelancer, ... }.
+    // Portal expects { assetId | null, name, url, fileType } with a
+    // directly-openable URL. Presign R2 keys for 1h, pass external URLs
+    // straight through.
+    const shapeSharedFiles = async (files: unknown): Promise<Array<{ assetId: null; name: string; url: string; fileType: string }>> => {
+      if (!Array.isArray(files)) return [];
+      const shared = (files as Array<Record<string, unknown>>).filter((f) => f?.share_with_freelancer === true);
+      const out: Array<{ assetId: null; name: string; url: string; fileType: string }> = [];
+      for (const f of shared) {
+        const rawUrl = typeof f.url === 'string' ? f.url : '';
+        if (!rawUrl) continue;
+        let url = rawUrl;
+        if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
+          try {
+            url = await getPresignedDownloadUrl(rawUrl, 3600);
+          } catch (err) {
+            console.error('[portal] presign failed for', rawUrl, err);
+            continue;
+          }
+        }
+        out.push({
+          assetId: null,
+          name: String(f.name || f.label || 'File'),
+          url,
+          fileType: String(f.type || f.content_type || 'FILE'),
+        });
+      }
+      return out;
+    };
+
+    const venueSharedFiles = await shapeSharedFiles(row.venue_files);
+    const jobSharedFiles = await shapeSharedFiles(row.job_files);
+
+    // Merge into job so portal page can render a "Job Files" section
+    (job as Record<string, unknown>).files = jobSharedFiles;
 
     // Build venue info
     let venue = null;
@@ -842,6 +900,7 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
         phone: null as string | null,
         email: null as string | null,
         accessNotes: row.venue_access_notes,
+        files: venueSharedFiles,
         phoneHidden: !contactsVisible,
         phoneVisibleFrom: !contactsVisible && jobDate
           ? new Date(jobDate.getTime() - 48 * 60 * 60 * 1000).toLocaleDateString('en-GB', {
@@ -869,6 +928,7 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
 router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response) => {
   try {
     const personId = req.portalUser!.id;
+    const isStaffShared = req.portalUser!.isStaffShared;
     const quoteId = req.params.quoteId;
 
     // Verify access and get HireHop job ID
@@ -877,9 +937,9 @@ router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response)
        FROM quote_assignments qa
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
-       WHERE qa.quote_id = $1 AND qa.person_id = $2
+       WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
          AND q.is_deleted = false`,
-      [quoteId, personId]
+      [quoteId, personId, isStaffShared]
     );
 
     if (result.rows.length === 0) {
@@ -954,6 +1014,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
 }, async (req: PortalRequest, res: Response) => {
   try {
     const personId = req.portalUser!.id;
+    const isStaffShared = req.portalUser!.isStaffShared;
     const quoteId = req.params.quoteId;
 
     // Verify access + pull full context we'll need for PDF/emails.
@@ -973,9 +1034,9 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN organisations o ON o.id = j.client_id
        LEFT JOIN venues v ON v.id = q.venue_id
-       WHERE qa.quote_id = $1 AND qa.person_id = $2
+       WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
          AND q.is_deleted = false`,
-      [quoteId, personId]
+      [quoteId, personId, isStaffShared]
     );
 
     if (accessCheck.rows.length === 0) {
@@ -1094,8 +1155,8 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
 
     await query(
       `UPDATE quote_assignments SET status = 'completed', updated_at = NOW()
-       WHERE quote_id = $1 AND person_id = $2`,
-      [quoteId, personId]
+       WHERE quote_id = $1 AND (person_id = $2 OR (is_ooosh_crew = true AND $3 = true))`,
+      [quoteId, personId, isStaffShared]
     );
 
     if (checklistData) {
@@ -1283,6 +1344,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
 router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => {
   try {
     const personId = req.portalUser!.id;
+    const isStaffShared = req.portalUser!.isStaffShared;
     const quoteId = req.params.quoteId;
 
     const result = await query(
@@ -1292,9 +1354,9 @@ router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => 
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
-       WHERE qa.quote_id = $1 AND qa.person_id = $2
+       WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
          AND q.is_deleted = false`,
-      [quoteId, personId]
+      [quoteId, personId, isStaffShared]
     );
 
     if (result.rows.length === 0) {

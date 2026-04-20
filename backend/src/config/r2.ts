@@ -1,4 +1,5 @@
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -50,6 +51,23 @@ export async function getFromR2(key: string) {
     Key: key,
   }));
   return response;
+}
+
+/**
+ * Generate a time-limited presigned GET URL for an R2 object.
+ * Used to hand off file downloads directly to the browser without
+ * proxying through authenticated endpoints — short expiry keeps the
+ * share radius small.
+ */
+export async function getPresignedDownloadUrl(
+  key: string,
+  expiresInSeconds = 3600
+): Promise<string> {
+  return getSignedUrl(
+    s3,
+    new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }),
+    { expiresIn: expiresInSeconds }
+  );
 }
 
 export async function listR2Objects(prefix: string) {
