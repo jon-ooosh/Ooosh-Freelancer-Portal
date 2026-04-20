@@ -1677,35 +1677,50 @@ export default function JobDetailPage() {
 
             {/* Client, Venue, Dates summary row */}
             <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600 items-center">
-              {/* Client — editable */}
+              {/* Client headline — prefer band → linked client org → company → client_name
+                  Contact person surfaced separately when HH CONTACT differs from HH COMPANY */}
               <div className="relative inline-flex items-center gap-1" ref={clientSearchRef}>
-                {(job.client_name || job.company_name) ? (
-                  <>
-                    {job.client_id ? (
-                      <Link to={`/organisations/${job.client_id}`} className="text-ooosh-600 hover:text-ooosh-700">
-                        {job.client_name || job.company_name}
-                      </Link>
-                    ) : (
-                      <span>{job.client_name || job.company_name}</span>
-                    )}
-                    <button
-                      onClick={startEditClient}
-                      className="text-gray-300 hover:text-gray-500 transition-colors"
-                      title="Change client"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                      </svg>
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    onClick={startEditClient}
-                    className="text-gray-400 hover:text-ooosh-600 transition-colors text-xs border border-dashed border-gray-300 px-2 py-0.5 rounded"
-                  >
-                    + Add client
-                  </button>
-                )}
+                {(() => {
+                  const bandOrg = jobOrgs.find(jo => jo.role === 'band');
+                  const hasClient = !!(job.client_name || job.company_name);
+                  if (!bandOrg && !hasClient) {
+                    return (
+                      <button
+                        onClick={startEditClient}
+                        className="text-gray-400 hover:text-ooosh-600 transition-colors text-xs border border-dashed border-gray-300 px-2 py-0.5 rounded"
+                      >
+                        + Add client
+                      </button>
+                    );
+                  }
+                  const headlineText = bandOrg?.organisation_name
+                    || job.company_name
+                    || job.client_name;
+                  const headlineLinkId = bandOrg?.organisation_id || job.client_id;
+                  return (
+                    <>
+                      {headlineLinkId ? (
+                        <Link to={`/organisations/${headlineLinkId}`} className="text-ooosh-600 hover:text-ooosh-700">
+                          {headlineText}
+                        </Link>
+                      ) : (
+                        <span>{headlineText}</span>
+                      )}
+                      {bandOrg && (
+                        <span className="text-xs text-purple-500 font-medium">(Band)</span>
+                      )}
+                      <button
+                        onClick={startEditClient}
+                        className="text-gray-300 hover:text-gray-500 transition-colors"
+                        title="Change client"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                        </svg>
+                      </button>
+                    </>
+                  );
+                })()}
                 {editingClient && (
                   <div className="absolute top-full left-0 mt-1 z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-64">
                     <input
@@ -1736,6 +1751,37 @@ export default function JobDetailPage() {
                   </div>
                 )}
               </div>
+              {/* Billed to sub-line (when Band takes top slot) */}
+              {(() => {
+                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
+                if (!bandOrg) return null;
+                const billedToText = job.company_name || job.client_name;
+                if (!billedToText) return null;
+                return (
+                  <span className="text-xs text-gray-500">
+                    Billed to:{' '}
+                    {job.client_id ? (
+                      <Link to={`/organisations/${job.client_id}`} className="text-gray-600 hover:text-ooosh-600 underline decoration-dotted">
+                        {billedToText}
+                      </Link>
+                    ) : (
+                      <span className="text-gray-600">{billedToText}</span>
+                    )}
+                  </span>
+                );
+              })()}
+              {/* Contact pill (HH CONTACT differs from HH COMPANY → person contact) */}
+              {(() => {
+                const bandOrg = jobOrgs.find(jo => jo.role === 'band');
+                if (bandOrg) return null;
+                if (!job.company_name || !job.client_name) return null;
+                if (job.client_name === job.company_name) return null;
+                return (
+                  <span className="text-xs text-gray-500">
+                    Contact: <span className="text-gray-700">{job.client_name}</span>
+                  </span>
+                );
+              })()}
 
               {/* Venue */}
               {job.venue_name && (

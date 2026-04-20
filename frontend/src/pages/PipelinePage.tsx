@@ -305,15 +305,21 @@ function PipelineCard({
         {job.job_name || 'Untitled'}
       </div>
 
-      {/* Row 3: Client */}
-      <div className="text-xs text-gray-500 truncate mb-0.5">
-        {job.company_name || job.client_name || '—'}
-      </div>
-
-      {/* Row 3b: Band (if linked) */}
-      {(job as any).band_name && (
-        <div className="text-xs text-purple-600 truncate mb-1">
-          <span className="text-purple-400">Band:</span> {(job as any).band_name}
+      {/* Row 3: Band (if linked) takes top slot, else Client */}
+      {(job as any).band_name ? (
+        <>
+          <div className="text-xs text-purple-700 font-medium truncate mb-0.5">
+            {(job as any).band_name} <span className="text-purple-400 font-normal">(Band)</span>
+          </div>
+          {(job.company_name || job.client_name) && (
+            <div className="text-xs text-gray-400 truncate mb-1">
+              Billed to: {job.company_name || job.client_name}
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="text-xs text-gray-500 truncate mb-1">
+          {job.company_name || job.client_name || '—'}
         </div>
       )}
 
