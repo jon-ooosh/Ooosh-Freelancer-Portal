@@ -40,6 +40,9 @@ const getArg = (flag: string): string | undefined => {
 };
 const filePath = getArg('--file');
 const commit = args.includes('--commit');
+// --force overwrites freelancer fields on matched rows rather than COALESCE-ing.
+// Use this to correct an earlier import that had bad/missing data.
+const force = args.includes('--force');
 
 if (!filePath) {
   console.error('Usage: npx tsx src/scripts/import-freelancers-csv.ts --file <path> [--commit]');
@@ -56,29 +59,52 @@ function fmtUK(date: Date | string | null | undefined): string {
   return `${String(d.getUTCDate()).padStart(2, '0')}/${String(d.getUTCMonth() + 1).padStart(2, '0')}/${d.getUTCFullYear()}`;
 }
 
-/** Normalise a CSV cell value to a trimmed string or null */
+/** Normalise a CSV cell value to a trimmed string or null.
+ *  Handles xlsx-returned Date objects by emitting ISO YYYY-MM-DD. */
 function cell(row: Record<string, unknown>, keys: string[]): string | null {
   for (const k of keys) {
     const v = row[k];
-    if (v !== undefined && v !== null && String(v).trim() !== '') {
-      return String(v).trim();
+    if (v === undefined || v === null) continue;
+    if (v instanceof Date) {
+      if (isNaN(v.getTime())) continue;
+      const y = v.getUTCFullYear();
+      const m = String(v.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(v.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
     }
+    const s = String(v).trim();
+    if (s !== '') return s;
   }
   return null;
 }
 
-/** Parse an ISO-ish date string. Treat the 1970 sentinel and blanks as null. */
+/** Parse a date string in any sensible format → ISO YYYY-MM-DD.
+ *  Handles ISO, ISO+time, JS Date.toString output, and UK DD/MM/YYYY.
+ *  Treats the 1970 sentinel and blanks as null. */
 function parseDate(s: string | null): string | null {
   if (!s) return null;
   const trimmed = s.trim();
-  if (!trimmed) return null;
-  // 1970-01-01 is a Monday sentinel for "no date set"
-  if (trimmed.startsWith('1970-01-01')) return null;
-  // XLSX may give us a Date object stringified — take just the date part
-  const datePart = trimmed.split(/[ T]/)[0];
-  const m = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return null;
-  return `${m[1]}-${m[2]}-${m[3]}`;
+  if (!trimmed || trimmed.startsWith('1970-01-01')) return null;
+
+  // ISO YYYY-MM-DD (with optional time after a space or T)
+  const isoMatch = trimmed.split(/[ T]/)[0].match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+
+  // UK DD/MM/YYYY or DD-MM-YYYY
+  const ukMatch = trimmed.match(/^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$/);
+  if (ukMatch) {
+    return `${ukMatch[3]}-${ukMatch[2].padStart(2, '0')}-${ukMatch[1].padStart(2, '0')}`;
+  }
+
+  // Fallback — JS Date parser. Catches "Wed Dec 31 1992 00:00:00 GMT+0000".
+  const d = new Date(trimmed);
+  if (!isNaN(d.getTime()) && d.getUTCFullYear() > 1971) {
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+  return null;
 }
 
 /** Split a full name into first / last on the first space */
@@ -183,8 +209,10 @@ function extractRow(raw: Record<string, unknown>): Row {
     name:            cell(raw, ['Name', 'A']),
     freelanceStatus: cell(raw, ['Freelance status', 'B']),
     email:           cell(raw, ['Email', 'E']),
-    phone:           normalisePhone(cell(raw, ['Phone number', 'G'])),
-    mobile:          normalisePhone(cell(raw, ['Phone number 2', 'H'])),
+    // Monday's "Phone number" (G) is typically the freelancer's mobile;
+    // "Phone number 2" (H) is an alternative. Map G → mobile, H → phone.
+    mobile:          normalisePhone(cell(raw, ['Phone number', 'G'])),
+    phone:           normalisePhone(cell(raw, ['Phone number 2', 'H'])),
     skills:          cell(raw, ['Skills', 'D']),
     availableFor:    cell(raw, ['Available for', 'I']),
     insurance:       cell(raw, ['Insurance status', 'K']),
@@ -206,7 +234,7 @@ function extractRow(raw: Record<string, unknown>): Row {
 async function main() {
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('Freelancer CSV Import');
-  console.log(`Mode: ${commit ? 'COMMIT (writing to DB)' : 'DRY-RUN (no changes)'}`);
+  console.log(`Mode: ${commit ? 'COMMIT (writing to DB)' : 'DRY-RUN (no changes)'}${force ? ' [FORCE — overwriting existing freelancer fields]' : ''}`);
   console.log(`File: ${path.resolve(filePath!)}`);
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
@@ -277,6 +305,15 @@ async function main() {
         if (commit) {
           const mergedTags = Array.from(new Set([...(p.tags || []), 'freelancer']));
           const mergedSkills = Array.from(new Set([...(p.skills || []), ...skills]));
+
+          // Default mode keeps existing values via COALESCE (safe first-run).
+          // --force overwrites freelancer fields outright (use to correct an
+          // earlier import). Tags + skills are always merged.
+          const dateExpr = (n: number, col: string) =>
+            force ? `$${n}` : `COALESCE($${n}, ${col})`;
+          const textExpr = (n: number, col: string) =>
+            force ? `NULLIF($${n}, '')` : `COALESCE(NULLIF($${n}, ''), ${col})`;
+
           await pool.query(
             `UPDATE people SET
                is_freelancer = true,
@@ -285,14 +322,16 @@ async function main() {
                has_tshirt = $4,
                skills = $5,
                tags = $6,
-               freelancer_joined_date = COALESCE($7, freelancer_joined_date),
-               freelancer_next_review_date = COALESCE($8, freelancer_next_review_date),
-               date_of_birth = COALESCE($9, date_of_birth),
-               home_address = COALESCE(NULLIF($10, ''), home_address),
-               emergency_contact_name = COALESCE(NULLIF($11, ''), emergency_contact_name),
-               emergency_contact_phone = COALESCE(NULLIF($12, ''), emergency_contact_phone),
-               licence_details = COALESCE(NULLIF($13, ''), licence_details),
-               freelancer_references = COALESCE(NULLIF($14, ''), freelancer_references),
+               freelancer_joined_date = ${dateExpr(7, 'freelancer_joined_date')},
+               freelancer_next_review_date = ${dateExpr(8, 'freelancer_next_review_date')},
+               date_of_birth = ${dateExpr(9, 'date_of_birth')},
+               home_address = ${textExpr(10, 'home_address')},
+               emergency_contact_name = ${textExpr(11, 'emergency_contact_name')},
+               emergency_contact_phone = ${textExpr(12, 'emergency_contact_phone')},
+               licence_details = ${textExpr(13, 'licence_details')},
+               freelancer_references = ${textExpr(14, 'freelancer_references')},
+               phone = ${textExpr(15, 'phone')},
+               mobile = ${textExpr(16, 'mobile')},
                updated_at = NOW()
              WHERE id = $1`,
             [
@@ -300,6 +339,7 @@ async function main() {
               mergedSkills, mergedTags, joinedDate, nextReview, dob,
               row.homeAddress, row.emergencyName, row.emergencyPhone,
               licenceDetails, references,
+              row.phone, row.mobile,
             ]
           );
         }
@@ -308,8 +348,11 @@ async function main() {
         console.log(
           `  + NEW    ${first} ${last} <${email}>` +
           `${isApproved ? ' [approved]' : ''}` +
-          `${row.phone ? `  phone ${row.phone}` : ''}` +
-          `${row.mobile ? `  mob ${row.mobile}` : ''}`
+          `${row.mobile ? `  mob ${row.mobile}` : ''}` +
+          `${row.phone ? `  ph ${row.phone}` : ''}` +
+          `${dob ? `  DOB ${fmtUK(dob)}` : ''}` +
+          `${joinedDate ? `  joined ${fmtUK(joinedDate)}` : ''}` +
+          `${nextReview ? `  review ${fmtUK(nextReview)}` : ''}`
         );
 
         if (commit) {
