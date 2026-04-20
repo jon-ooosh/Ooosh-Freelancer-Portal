@@ -1615,15 +1615,26 @@ These are existing standalone tools that currently push to Monday.com. They need
     - [x] Multi-filter on Venues page: city, has org link
     - [x] Sort options on all list pages: alphabetical, recently added, recently updated
     - [x] "Last contacted" indicator on People/Orgs — show most recent interaction date, flag overdue contacts
+    - [x] **Freelancer-aware People page** — when `is_freelancer` filter is on, swap "Organisations & Roles" column for "Skills" + "Next Review" (with overdue/due/OK pip), add "Sort: Review due soonest", trait chips (Insured / Has T-shirt), review-status segmented chips (All / Overdue / Due ≤30d / OK / No date), skills multi-select, and group-by-review toggle. Skills list endpoint: `GET /api/people/skills` (distinct skills across all freelancers).
   - *Tier 2 (medium effort):*
     - [ ] Saved filters / smart lists — save filter combinations as named views (e.g. "London promoters", "Bands without management link", "Contacts not chased in 90 days")
     - [ ] Bulk tagging — select multiple orgs/people, apply tag in one click (campaign prep)
     - [ ] Export to CSV — filtered results exportable for mailouts or spreadsheet work
     - [ ] "Related to jobs" filter — show orgs/people involved in jobs within a date range, or who've never had a job (partially available via job_organisations links already)
+    - [ ] **Active jobs column for freelancers** — when freelancer filter is on, show count of in-progress assignments per person (joins `vehicle_hire_assignments` + `quote_assignments`). Heavier query so left as a per-row aggregate or a separate endpoint rather than baking into the bulk list.
   - *Tier 3 (larger lift):*
     - [ ] Pipeline-style contact nurturing — track where leads/contacts are in a relationship lifecycle
     - [ ] Campaign/mailout integration — tag contacts for a promo, send via email service
     - [ ] Activity scoring — surface who's most engaged / least contacted
+
+- **Bulk file import from Monday.com** — Monday's freelancer board has DVLA / licence / passport scans as attachments. Bulk migration to OP needs:
+  1. Iterate Monday API for each freelancer's file column.
+  2. Download each file (Monday gives short-lived signed URLs).
+  3. Upload to R2 under `freelancers/<person-id>/<labelled-filename>` (e.g. `licence-front.pdf`).
+  4. Append entry to `people.files` JSONB: `{name, url, type, uploaded_at, uploaded_by}`.
+  5. Match Monday rows to OP people by email.
+
+  Best done from Claude Desktop (has Monday + R2 + OP credentials). Volume: ~50 freelancers × 2-4 files. The CSV importer (`backend/src/scripts/import-freelancers-csv.ts`) deliberately ignores file columns — files come across separately via this manual / desktop flow.
 
 ### Phase 3–5
 

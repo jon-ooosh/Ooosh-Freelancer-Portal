@@ -79,12 +79,33 @@ function cell(row: Record<string, unknown>, keys: string[]): string | null {
 }
 
 /** Parse a date string in any sensible format → ISO YYYY-MM-DD.
- *  Handles ISO, ISO+time, JS Date.toString output, and UK DD/MM/YYYY.
+ *  Handles ISO, ISO+time, JS Date.toString output, UK DD/MM/YYYY, and
+ *  Excel serial numbers (bare integers in a 1900-epoch range).
  *  Treats the 1970 sentinel and blanks as null. */
 function parseDate(s: string | null): string | null {
   if (!s) return null;
   const trimmed = s.trim();
   if (!trimmed || trimmed.startsWith('1970-01-01')) return null;
+
+  // Excel serial number. Monday's CSV export sometimes writes dates as
+  // serial numbers (days since 1899-12-30) when the cell isn't
+  // date-formatted. Range roughly covers 1900-01-01 → 2099-12-31.
+  if (/^\d+$/.test(trimmed)) {
+    const serial = parseInt(trimmed, 10);
+    if (serial > 1 && serial < 73050) {
+      const ms = (serial - 25569) * 86400000; // 25569 = days from 1900-01-01 to 1970-01-01
+      const d = new Date(ms);
+      if (!isNaN(d.getTime()) && d.getUTCFullYear() > 1900 && d.getUTCFullYear() < 2100) {
+        const y = d.getUTCFullYear();
+        const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+    }
+    // Bare number outside the Excel-serial range → treat as unparseable
+    // (don't let JS Date interpret "32667" as year 32667).
+    return null;
+  }
 
   // ISO YYYY-MM-DD (with optional time after a space or T)
   const isoMatch = trimmed.split(/[ T]/)[0].match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -98,7 +119,7 @@ function parseDate(s: string | null): string | null {
 
   // Fallback — JS Date parser. Catches "Wed Dec 31 1992 00:00:00 GMT+0000".
   const d = new Date(trimmed);
-  if (!isNaN(d.getTime()) && d.getUTCFullYear() > 1971) {
+  if (!isNaN(d.getTime()) && d.getUTCFullYear() > 1971 && d.getUTCFullYear() < 2100) {
     const y = d.getUTCFullYear();
     const m = String(d.getUTCMonth() + 1).padStart(2, '0');
     const day = String(d.getUTCDate()).padStart(2, '0');

@@ -65,7 +65,12 @@ const personOrgRoleSchema = z.object({
 // GET /api/people — list with search and pagination
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, page = '1', limit = '50', tag, is_freelancer, is_approved, has_email, has_phone, missing_email, missing_phone, location, sort } = req.query;
+    const {
+      search, page = '1', limit = '50', tag,
+      is_freelancer, is_approved, is_insured, has_tshirt,
+      has_email, has_phone, missing_email, missing_phone,
+      location, sort, review_status, skills_any,
+    } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
@@ -113,6 +118,35 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       sql += ` AND p.is_approved = true`;
     }
 
+    if (is_insured === 'true') {
+      sql += ` AND p.is_insured_on_vehicles = true`;
+    }
+
+    if (has_tshirt === 'true') {
+      sql += ` AND p.has_tshirt = true`;
+    }
+
+    // Freelancer review status — only relevant when listing freelancers
+    if (review_status === 'overdue') {
+      sql += ` AND p.freelancer_next_review_date IS NOT NULL AND p.freelancer_next_review_date::date < CURRENT_DATE`;
+    } else if (review_status === 'due_soon') {
+      sql += ` AND p.freelancer_next_review_date::date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '30 days'`;
+    } else if (review_status === 'ok') {
+      sql += ` AND p.freelancer_next_review_date::date > CURRENT_DATE + INTERVAL '30 days'`;
+    } else if (review_status === 'none') {
+      sql += ` AND p.freelancer_next_review_date IS NULL`;
+    }
+
+    // Skills filter — match any selected skill (OR semantics)
+    if (skills_any && typeof skills_any === 'string' && skills_any.trim()) {
+      const skillList = skills_any.split(',').map((s) => s.trim()).filter(Boolean);
+      if (skillList.length > 0) {
+        sql += ` AND p.skills && $${paramIndex}::text[]`;
+        params.push(skillList);
+        paramIndex++;
+      }
+    }
+
     if (has_email === 'true') {
       sql += ` AND p.email IS NOT NULL AND p.email != ''`;
     }
@@ -148,6 +182,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       'recently_added': 'p.created_at DESC',
       'recently_updated': 'p.updated_at DESC',
       'last_contacted': '(SELECT MAX(i.created_at) FROM interactions i WHERE i.person_id = p.id) DESC NULLS LAST',
+      'review_due': 'p.freelancer_next_review_date ASC NULLS LAST',
     };
     const orderBy = sortMap[sort as string] || 'p.last_name, p.first_name';
 
@@ -167,6 +202,24 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     console.error('List people error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/people/skills — distinct skills across all freelancers
+// Used to populate the skills multi-select on the People page.
+router.get('/skills', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT DISTINCT TRIM(skill) AS skill
+       FROM people, UNNEST(skills) AS skill
+       WHERE is_freelancer = true AND is_deleted = false
+         AND skill IS NOT NULL AND TRIM(skill) <> ''
+       ORDER BY skill`
+    );
+    res.json({ data: result.rows.map((r: { skill: string }) => r.skill) });
+  } catch (error) {
+    console.error('List skills error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
