@@ -74,6 +74,19 @@ async function portalAuth(req: PortalRequest, res: Response, next: NextFunction)
 
 // ── POST /api/portal/auth/login — freelancer login ───────────────────
 
+/**
+ * Quotes are UUIDs. Some portal clients (old sessions, Monday fallback
+ * round-trips, cached local state) still hand the endpoints a Monday
+ * item ID (11-digit int) as the `quoteId`. Without a shape check the
+ * UUID cast in the query throws and the endpoint 500s — which triggers
+ * a silent Monday fallback on the portal side and a telemetry alert.
+ * Cleanly 404 non-UUIDs so legacy IDs are harmless.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuidLike(value: unknown): boolean {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
@@ -811,6 +824,13 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     const isStaffShared = req.portalUser!.isStaffShared;
     const quoteId = req.params.quoteId;
 
+    // Legacy Monday IDs (11-digit int) land on OP when a client has stale
+    // state — 404 cleanly instead of blowing up the UUID cast.
+    if (!isUuidLike(quoteId)) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
     // Verify this freelancer is assigned to this quote
     // NOTE: venues table has no direct contact columns — site contacts live on
     // linked organisation's people. Those are surfaced via portal UI separately.
@@ -931,6 +951,13 @@ router.get('/jobs/:quoteId/equipment', async (req: PortalRequest, res: Response)
     const isStaffShared = req.portalUser!.isStaffShared;
     const quoteId = req.params.quoteId;
 
+    // Legacy Monday IDs (11-digit int) land on OP when a client has stale
+    // state — 404 cleanly instead of blowing up the UUID cast.
+    if (!isUuidLike(quoteId)) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
     // Verify access and get HireHop job ID
     const result = await query(
       `SELECT q.what_is_it, j.hh_job_number AS hirehop_id
@@ -1016,6 +1043,13 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
     const personId = req.portalUser!.id;
     const isStaffShared = req.portalUser!.isStaffShared;
     const quoteId = req.params.quoteId;
+
+    // Legacy Monday IDs (11-digit int) land on OP when a client has stale
+    // state — 404 cleanly instead of blowing up the UUID cast.
+    if (!isUuidLike(quoteId)) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
 
     // Verify access + pull full context we'll need for PDF/emails.
     // Client email comes from the linked client organisation (quotes table
@@ -1346,6 +1380,11 @@ router.get('/jobs/:quoteId/files', async (req: PortalRequest, res: Response) => 
     const personId = req.portalUser!.id;
     const isStaffShared = req.portalUser!.isStaffShared;
     const quoteId = req.params.quoteId;
+
+    if (!isUuidLike(quoteId)) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
 
     const result = await query(
       `SELECT j.files AS job_files, v.files AS venue_files,
