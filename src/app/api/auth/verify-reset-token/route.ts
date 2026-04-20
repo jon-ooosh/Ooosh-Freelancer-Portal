@@ -14,7 +14,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { validateResetToken } from '@/lib/password-reset'
-import { isOpMode, verifyResetTokenOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, verifyResetTokenOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 export async function GET(request: NextRequest) {
   try {
@@ -33,6 +33,9 @@ export async function GET(request: NextRequest) {
       } catch (opError) {
         console.error('Verify-reset-token: OP backend error, falling back:', opError)
         reportFallback('verify-reset-token', opError)
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json({ valid: false })
+        }
       }
     }
     // ── End OP Backend mode ──────────────────────────────────────

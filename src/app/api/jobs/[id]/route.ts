@@ -15,7 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobById, getCrewJobById, getVenueById, VenueRecord } from '@/lib/monday'
-import { isOpMode, getJobDetailFromOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, getJobDetailFromOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 /**
  * Check if a date is within 48 hours of now (before or after)
@@ -99,7 +99,12 @@ export async function GET(
       } catch (opError) {
         console.error('OP backend job detail error:', opError)
         reportFallback('job-detail', opError, { email: session.email })
-        // Fall through to Monday.com
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { success: false, error: 'Unable to load this job. Please refresh and try again.' },
+            { status: 502 }
+          )
+        }
         console.log('Job API: Falling back to Monday.com')
       }
     }

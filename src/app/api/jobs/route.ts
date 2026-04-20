@@ -18,7 +18,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobsForFreelancer, JobRecord, getCrewJobsForFreelancer, CrewJobRecord } from '@/lib/monday'
-import { isOpMode, getJobsFromOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, getJobsFromOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES
@@ -367,7 +367,12 @@ export async function GET(request: NextRequest): Promise<NextResponse<JobsApiRes
       } catch (opError) {
         console.error('OP backend error:', opError)
         reportFallback('jobs', opError, { email: user.email })
-        // Fall through to Monday.com as fallback
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { success: false, error: 'Unable to load jobs. Please refresh and try again, or contact us if it persists.' },
+            { status: 502 }
+          )
+        }
         console.log('Jobs API: Falling back to Monday.com')
       }
     }
