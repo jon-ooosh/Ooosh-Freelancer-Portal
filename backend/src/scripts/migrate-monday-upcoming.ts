@@ -141,7 +141,7 @@ interface MondayItem {
  * this group we create the quote without an assignment, skipping the
  * usual freelancer-email check.
  */
-const DC_UNASSIGNED_GROUP_ID = 'new_group47521';
+const DC_UNASSIGNED_GROUP_ID = 'new_group';
 
 async function fetchBoardItems(boardId: string, cols: string[]): Promise<MondayItem[]> {
   const all: MondayItem[] = [];
