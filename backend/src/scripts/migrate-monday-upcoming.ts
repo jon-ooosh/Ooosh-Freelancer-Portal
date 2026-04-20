@@ -378,7 +378,7 @@ async function migrateDC(): Promise<void> {
            $8, $9,
            $10, $10,
            false, 'confirmed', 'arranging',
-           'monday-migration'
+           NULL
          )
          RETURNING id`,
         [
@@ -403,7 +403,7 @@ async function migrateDC(): Promise<void> {
         await pool.query(
           `INSERT INTO quote_assignments (
              quote_id, person_id, role, agreed_rate, rate_type, status, is_ooosh_crew, created_by
-           ) VALUES ($1, $2, 'driver', $3, 'flat', 'confirmed', false, 'monday-migration')`,
+           ) VALUES ($1, $2, 'driver', $3, 'flat', 'confirmed', false, NULL)`,
           [quoteId, person.id, driverPay]
         );
       }
@@ -527,7 +527,7 @@ async function migrateCrew(): Promise<void> {
            $13,
            $14, $14,
            false, 'confirmed', 'arranging',
-           'monday-migration'
+           NULL
          )
          RETURNING id`,
         [
@@ -552,7 +552,7 @@ async function migrateCrew(): Promise<void> {
       await pool.query(
         `INSERT INTO quote_assignments (
            quote_id, person_id, role, agreed_rate, rate_type, status, is_ooosh_crew, created_by
-         ) VALUES ($1, $2, 'crew', $3, 'flat', 'confirmed', false, 'monday-migration')`,
+         ) VALUES ($1, $2, 'crew', $3, 'flat', 'confirmed', false, NULL)`,
         [quoteId, person.id, freelancerFee]
       );
       await pool.query('COMMIT');
