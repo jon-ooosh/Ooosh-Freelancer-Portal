@@ -305,15 +305,21 @@ function PipelineCard({
         {job.job_name || 'Untitled'}
       </div>
 
-      {/* Row 3: Client */}
-      <div className="text-xs text-gray-500 truncate mb-0.5">
-        {job.company_name || job.client_name || '—'}
-      </div>
-
-      {/* Row 3b: Band (if linked) */}
-      {(job as any).band_name && (
-        <div className="text-xs text-purple-600 truncate mb-1">
-          <span className="text-purple-400">Band:</span> {(job as any).band_name}
+      {/* Row 3: Band (if linked) takes top slot, else Client */}
+      {(job as any).band_name ? (
+        <>
+          <div className="text-xs text-purple-700 font-medium truncate mb-0.5">
+            {(job as any).band_name} <span className="text-purple-400 font-normal">(Band)</span>
+          </div>
+          {(job.company_name || job.client_name) && (
+            <div className="text-xs text-gray-400 truncate mb-1">
+              Billed to: {job.company_name || job.client_name}
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="text-xs text-gray-500 truncate mb-1">
+          {job.company_name || job.client_name || '—'}
         </div>
       )}
 
@@ -617,6 +623,15 @@ function NewEnquiryModal({
   const [bandSearch, setBandSearch] = useState('');
   const [bandResults, setBandResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
 
+  // Person-picked-as-client prompt. Clients must be organisations; if the
+  // user selects a person, we show their orgs as quick-picks rather than
+  // letting the person end up as client_name.
+  const [pendingPerson, setPendingPerson] = useState<{
+    id: string;
+    name: string;
+    orgs: Array<{ id: string; name: string; role: string | null }>;
+  } | null>(null);
+
   // File staging
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const [fileTag, setFileTag] = useState('');
@@ -712,18 +727,31 @@ function NewEnquiryModal({
 
   if (!isOpen) return null;
 
-  const handleClientSelect = (result: SearchResult) => {
-    setClientName(result.name);
-    // Reset new client state when selecting an existing result
+  const handleClientSelect = async (result: SearchResult) => {
     setIsNewClient(false);
     setNewClientEmail('');
     setNewClientPhone('');
     if (result.type === 'organisation') {
+      setPendingPerson(null);
+      setClientName(result.name);
       setClientId(result.id);
       fetchClientHistory(result.id, result.name, bandId);
-    } else {
-      setClientId(null);
-      fetchClientHistory(null, result.name, bandId);
+      return;
+    }
+    // Person selected — clients must be orgs. Clear the field and surface
+    // their orgs as quick-picks.
+    setClientName('');
+    setClientId(null);
+    try {
+      const personData = await api.get<{
+        organisations: Array<{ organisation_id: string; organisation_name: string; status: string; role: string | null }> | null;
+      }>(`/people/${result.id}`);
+      const activeOrgs = (personData.organisations || [])
+        .filter(o => o.status === 'active')
+        .map(o => ({ id: o.organisation_id, name: o.organisation_name, role: o.role }));
+      setPendingPerson({ id: result.id, name: result.name, orgs: activeOrgs });
+    } catch {
+      setPendingPerson({ id: result.id, name: result.name, orgs: [] });
     }
   };
 
@@ -835,6 +863,10 @@ function NewEnquiryModal({
   const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   const handleSave = async (alsoCreateInHH = false) => {
+    if (pendingPerson) {
+      setError('Pick an organisation for the client, or dismiss the person warning.');
+      return;
+    }
     if (!clientName || (!details && serviceTypes.length === 0)) {
       setError('Client and description are required');
       return;
@@ -934,6 +966,7 @@ function NewEnquiryModal({
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setClientHistory(null);
       setBandName(''); setBandId(null); setBandSearch(''); setBandResults([]);
+      setPendingPerson(null);
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
       setNextChaseDate(addDaysToDate(5)); setSelectedChasePreset('5 days'); setChaseAlertUserId('');
@@ -966,11 +999,58 @@ function NewEnquiryModal({
             <label className="block text-sm font-medium text-gray-700 mb-1">Client *</label>
             <ClientPicker
               value={clientName}
-              onChange={(name) => { setClientName(name); setClientId(null); setIsNewClient(false); }}
+              onChange={(name) => { setClientName(name); setClientId(null); setIsNewClient(false); setPendingPerson(null); }}
               onSelect={handleClientSelect}
               onCreateNew={handleCreateNewClient}
             />
-            {clientId && (
+            {pendingPerson && (
+              <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div>
+                    <p className="text-sm font-medium text-amber-900">
+                      <span className="font-semibold">{pendingPerson.name}</span> is a person — clients must be an organisation.
+                    </p>
+                    {pendingPerson.orgs.length > 0 ? (
+                      <p className="text-xs text-amber-700 mt-1">Pick one of their organisations as the client:</p>
+                    ) : (
+                      <p className="text-xs text-amber-700 mt-1">
+                        They aren't linked to any organisations. Search again for the client org, or type a new name to create one.
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPendingPerson(null)}
+                    className="text-amber-500 hover:text-amber-700 text-lg leading-none"
+                    title="Dismiss"
+                  >
+                    &times;
+                  </button>
+                </div>
+                {pendingPerson.orgs.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {pendingPerson.orgs.map(org => (
+                      <button
+                        key={org.id}
+                        type="button"
+                        onClick={() => {
+                          setClientName(org.name);
+                          setClientId(org.id);
+                          setIsNewClient(false);
+                          setPendingPerson(null);
+                          fetchClientHistory(org.id, org.name, bandId);
+                        }}
+                        className="px-2.5 py-1 bg-white border border-amber-300 rounded text-xs text-amber-900 hover:bg-amber-100 transition-colors"
+                      >
+                        {org.name}
+                        {org.role && <span className="text-amber-500 ml-1">({org.role})</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {clientId && !pendingPerson && (
               <p className="text-xs text-green-600 mt-1">Linked to organisation</p>
             )}
             {isNewClient && (

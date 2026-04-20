@@ -116,6 +116,7 @@ export interface JobSyncResult {
   jobsCreated: number;
   jobsUpdated: number;
   clientsLinked: number;
+  clientsCreated: number;
   venuesLinked: number;
   errors: string[];
   total: number;
@@ -126,6 +127,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
     jobsCreated: 0,
     jobsUpdated: 0,
     clientsLinked: 0,
+    clientsCreated: 0,
     venuesLinked: 0,
     errors: [],
     total: 0,
@@ -170,20 +172,33 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
         [jobNumber]
       );
 
-      // Try to link client org via external_id_map
-      // We don't have CLIENT_ID from search_list, so match by company name
+      // Link (or create) the client organisation from HH COMPANY.
+      // COMPANY on an HH job is the billing entity — always an org in our
+      // model. If it doesn't match an existing organisation by name, we
+      // create a lightweight type='client' record so the Job Detail page
+      // headline and Money tab have a linkable client from day one, and
+      // future contact-detail enrichment has somewhere to hang.
       let clientOrgId: string | null = null;
-      if (job.COMPANY) {
-        // Try exact match on org name first
+      if (job.COMPANY && job.COMPANY.trim()) {
+        const companyName = job.COMPANY.trim();
         const orgMatch = await client.query(
           `SELECT id FROM organisations
            WHERE lower(name) = lower($1) AND is_deleted = false
            LIMIT 1`,
-          [job.COMPANY.trim()]
+          [companyName]
         );
         if (orgMatch.rows.length > 0) {
           clientOrgId = orgMatch.rows[0].id;
           result.clientsLinked++;
+        } else {
+          const newOrg = await client.query(
+            `INSERT INTO organisations (name, type, created_by)
+             VALUES ($1, 'client', $2)
+             RETURNING id`,
+            [companyName, 'hirehop_sync']
+          );
+          clientOrgId = newOrg.rows[0].id;
+          result.clientsCreated++;
         }
       }
 
@@ -315,6 +330,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
     jobsCreated: result.jobsCreated,
     jobsUpdated: result.jobsUpdated,
     clientsLinked: result.clientsLinked,
+    clientsCreated: result.clientsCreated,
     venuesLinked: result.venuesLinked,
     errors: result.errors.length,
   });
