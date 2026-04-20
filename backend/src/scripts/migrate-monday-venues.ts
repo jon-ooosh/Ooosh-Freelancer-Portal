@@ -318,8 +318,9 @@ async function upsertVenue(item: MondayItem): Promise<UpsertResult> {
        name, address, w3w_address,
        approach_notes, technical_notes,
        default_miles_from_base, default_drive_time_mins, default_tolls_amount,
-       general_notes
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       general_notes,
+       created_by
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'monday-migration')
      RETURNING id`,
     [name, address, w3w, accessNotes, stageNotes, distance, driveTime !== null ? Math.round(driveTime) : null, tolls, newNotes]
   );
