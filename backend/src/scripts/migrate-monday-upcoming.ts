@@ -63,9 +63,20 @@ if (!MONDAY_API_TOKEN) {
   console.error('Missing MONDAY_API_TOKEN');
   process.exit(1);
 }
-if (!DC_BOARD_ID || !CREW_BOARD_ID) {
-  console.error('Missing MONDAY_BOARD_ID_DELIVERIES or MONDAY_BOARD_ID_CREW_JOBS');
-  process.exit(1);
+
+// Board-id checks are per-mode so modes that only touch one board don't
+// fail at startup for missing env vars they don't actually need.
+function requireDcBoard(): void {
+  if (!DC_BOARD_ID) {
+    console.error('Missing MONDAY_BOARD_ID_DELIVERIES');
+    process.exit(1);
+  }
+}
+function requireCrewBoard(): void {
+  if (!CREW_BOARD_ID) {
+    console.error('Missing MONDAY_BOARD_ID_CREW_JOBS');
+    process.exit(1);
+  }
 }
 
 // ── Column IDs (mirror of src/lib/monday.ts) ────────────────────────
@@ -665,6 +676,7 @@ async function refreshVenueLinks(): Promise<void> {
 async function main(): Promise<void> {
   if (REFRESH_VENUES) {
     console.log(`Venue-link refresh ${COMMIT ? '(COMMIT MODE)' : '(DRY RUN)'}`);
+    requireDcBoard();
     await refreshVenueLinks();
     await pool.end();
     return;
@@ -673,8 +685,8 @@ async function main(): Promise<void> {
   console.log(`Monday → OP migration ${COMMIT ? '(COMMIT MODE)' : '(DRY RUN)'}`);
   console.log(`Cutoff date (SINCE): ${SINCE}`);
 
-  if (!ONLY_CREW) await migrateDC();
-  if (!ONLY_DC) await migrateCrew();
+  if (!ONLY_CREW) { requireDcBoard(); await migrateDC(); }
+  if (!ONLY_DC) { requireCrewBoard(); await migrateCrew(); }
 
   // Summary
   const by = (board: 'dc' | 'crew', st: MigrationOutcome['status']) =>
