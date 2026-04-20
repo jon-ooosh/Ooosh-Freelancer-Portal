@@ -259,6 +259,20 @@ async function migrateDC(): Promise<void> {
   const items = await fetchBoardItems(DC_BOARD_ID!, cols);
   console.log(`Fetched ${items.length} D&C items`);
 
+  // Diagnostic: count items by group id so we can verify the
+  // "unassigned / to be arranged" group id is correct.
+  const groupCounts = new Map<string, number>();
+  for (const it of items) {
+    const g = it.group?.id || '(no group)';
+    groupCounts.set(g, (groupCounts.get(g) || 0) + 1);
+  }
+  const sorted = [...groupCounts.entries()].sort((a, b) => b[1] - a[1]);
+  console.log('D&C items by group id (top 10):');
+  for (const [g, n] of sorted.slice(0, 10)) {
+    const marker = g === DC_UNASSIGNED_GROUP_ID ? '  <-- DC_UNASSIGNED_GROUP_ID' : '';
+    console.log(`  ${g}: ${n}${marker}`);
+  }
+
   for (const item of items) {
     const tracking = cvText(item, DC_COLS.tracking).toLowerCase();
     if (tracking === 'yes') {
@@ -554,7 +568,9 @@ async function migrateCrew(): Promise<void> {
 // ── Helpers ──────────────────────────────────────────────────────────
 
 async function recordFailure(item: MondayItem, board: 'dc' | 'crew', reason: string): Promise<void> {
-  outcomes.push({ itemId: item.id, itemName: item.name, board, hhRef: cvText(item, board === 'dc' ? DC_COLS.hhRef : CREW_COLS.hhRef) || null, status: 'fail', reason });
+  const groupId = item.group?.id || '(no group)';
+  const reasonWithGroup = `${reason} [group: ${groupId}]`;
+  outcomes.push({ itemId: item.id, itemName: item.name, board, hhRef: cvText(item, board === 'dc' ? DC_COLS.hhRef : CREW_COLS.hhRef) || null, status: 'fail', reason: reasonWithGroup });
   if (COMMIT && board === 'dc') {
     try {
       await writeTrackingColumn(DC_BOARD_ID!, item.id, DC_COLS.tracking, `fail: ${reason.slice(0, 100)}`);
