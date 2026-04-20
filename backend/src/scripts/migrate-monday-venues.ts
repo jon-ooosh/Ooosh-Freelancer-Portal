@@ -70,11 +70,10 @@ const COLS = {
   email: 'email',
   accessNotes: 'long_text9',
   stageNotes: 'long_text7',
-  // Distance / Drive time / Tolls — IDs TBD (dumped at start of run).
-  // Wire in after first diagnostic.
-  distance: process.env.MONDAY_VENUES_DISTANCE_COL || '',
-  driveTime: process.env.MONDAY_VENUES_DRIVE_TIME_COL || '',
-  tolls: process.env.MONDAY_VENUES_TOLLS_COL || '',
+  // Quoting defaults (confirmed from the first dry-run column dump)
+  distance: 'numeric_mm07y9eq',   // Distance (miles, one-way)
+  driveTime: 'numeric_mm074a1k',  // Drive Time (minutes, one-way)
+  tolls: 'numeric_mm07cvgv',      // Tolls / Parking / Crossings (£)
 } as const;
 
 // ── Monday GraphQL ───────────────────────────────────────────────────
@@ -336,15 +335,6 @@ async function main(): Promise<void> {
 
   // Column dump first — lets user verify known IDs + find unknown ones.
   await dumpBoardColumns(VENUES_BOARD_ID!);
-
-  // Warn when optional defaults aren't wired yet
-  const missingDefaults: string[] = [];
-  if (!COLS.distance) missingDefaults.push('distance (MONDAY_VENUES_DISTANCE_COL)');
-  if (!COLS.driveTime) missingDefaults.push('drive time (MONDAY_VENUES_DRIVE_TIME_COL)');
-  if (!COLS.tolls) missingDefaults.push('tolls (MONDAY_VENUES_TOLLS_COL)');
-  if (missingDefaults.length) {
-    console.log(`\nNot pulling (set env var to enable): ${missingDefaults.join(', ')}`);
-  }
 
   console.log('\nFetching venues...');
   const items = await fetchAllItems(VENUES_BOARD_ID!);
