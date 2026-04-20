@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { validateCode, markVerified } from '@/lib/verification'
-import { isOpMode, registerVerifyOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, registerVerifyOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -36,6 +36,12 @@ export async function POST(request: NextRequest) {
         // System-level error — alert + fall back to Monday.com
         console.error('Register/verify: OP backend error, falling back:', opError)
         reportFallback('register-verify', opError, { email: normalizedEmail })
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { error: 'Unable to verify code right now. Please try again in a moment.' },
+            { status: 502 }
+          )
+        }
       }
     }
     // ── End OP Backend mode ──────────────────────────────────────

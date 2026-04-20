@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { findFreelancerByEmail } from '@/lib/monday'
 import { sendPasswordResetEmail } from '@/lib/email'
 import { createResetToken, checkResetRateLimit } from '@/lib/password-reset'
-import { isOpMode, forgotPasswordOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, forgotPasswordOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -48,6 +48,14 @@ export async function POST(request: NextRequest) {
       } catch (opError) {
         console.error('Forgot-password: OP backend error, falling back:', opError)
         reportFallback('forgot-password', opError, { email: normalizedEmail })
+        if (!mondayFallbackAllowed()) {
+          // Don't leak which path we tried. Return the generic response so the
+          // attacker can't enumerate emails.
+          return NextResponse.json({
+            success: true,
+            message: 'If your email is on our approved list, a reset link is on its way.',
+          })
+        }
       }
     }
     // ── End OP Backend mode ──────────────────────────────────────

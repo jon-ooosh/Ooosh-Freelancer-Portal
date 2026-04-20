@@ -11,7 +11,7 @@ import {
   updateFreelancerDateColumn,
   FREELANCER_COLUMNS
 } from '@/lib/monday'
-import { isOpMode, registerCompleteOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, registerCompleteOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 // Session secret for JWT signing
 const getSessionSecret = () => {
@@ -93,6 +93,12 @@ export async function POST(request: NextRequest) {
         // System-level error — alert + fall back
         console.error('Register/complete: OP backend error, falling back:', opError)
         reportFallback('register-complete', opError, { email: normalizedEmail })
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { error: 'Unable to complete registration right now. Please try again in a moment.' },
+            { status: 502 }
+          )
+        }
       }
     }
     // ── End OP Backend mode ──────────────────────────────────────

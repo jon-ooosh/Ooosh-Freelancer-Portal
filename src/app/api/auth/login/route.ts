@@ -6,7 +6,7 @@ import {
   updateFreelancerDateColumn,
   FREELANCER_COLUMNS
 } from '@/lib/monday'
-import { isOpMode, loginToOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, loginToOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 // Session secret for JWT signing
 const getSessionSecret = () => {
@@ -130,9 +130,21 @@ export async function POST(request: NextRequest) {
         // Note: this is a "credentials rejected" path, not a system error,
         // so we don't fire fallback telemetry here — real errors go via catch.
         console.log('Login: OP backend rejected credentials for:', normalizedEmail, '- falling back to Monday.com')
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { error: 'Invalid email or password. If you registered before we moved systems, please use "Forgot password" to set a new one.' },
+            { status: 401 }
+          )
+        }
       } catch (opError) {
         console.error('Login: OP backend error, falling back to Monday.com:', opError)
         reportFallback('login', opError, { email: normalizedEmail })
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { error: 'Login service temporarily unavailable. Please try again in a moment.' },
+            { status: 502 }
+          )
+        }
       }
     }
     // ── End OP Backend mode ──────────────────────────────────────

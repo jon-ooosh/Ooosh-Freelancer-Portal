@@ -31,7 +31,7 @@ import {
   mondayQuery,
   getFreelancerNameByEmail
 } from '@/lib/monday'
-import { isOpMode, submitCompletionToOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, submitCompletionToOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES
@@ -168,7 +168,12 @@ export async function POST(
       } catch (opError) {
         console.error('OP backend completion error:', opError)
         reportFallback('completion', opError, { email: session.email })
-        // Fall through to Monday.com
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { success: false, error: 'Unable to submit completion. Please try again in a moment.' },
+            { status: 502 }
+          )
+        }
         console.log('Complete API: Falling back to Monday.com')
       }
     }
