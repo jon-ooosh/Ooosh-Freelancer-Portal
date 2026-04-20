@@ -127,7 +127,21 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
 }
 
 interface MondayColumn { id: string; text: string | null; value: string | null }
-interface MondayItem { id: string; name: string; column_values: MondayColumn[] }
+interface MondayItem {
+  id: string;
+  name: string;
+  group?: { id: string | null } | null;
+  column_values: MondayColumn[];
+}
+
+/**
+ * D&C Monday group for "upcoming / to be arranged" items — these don't yet
+ * have a freelancer assigned. They're the most important to migrate so
+ * staff can see + arrange them in OP's Transport Ops page. For items in
+ * this group we create the quote without an assignment, skipping the
+ * usual freelancer-email check.
+ */
+const DC_UNASSIGNED_GROUP_ID = 'new_group47521';
 
 async function fetchBoardItems(boardId: string, cols: string[]): Promise<MondayItem[]> {
   const all: MondayItem[] = [];
@@ -141,6 +155,7 @@ async function fetchBoardItems(boardId: string, cols: string[]): Promise<MondayI
             items {
               id
               name
+              group { id }
               column_values(ids: ${JSON.stringify(cols)}) {
                 id
                 text
@@ -253,16 +268,21 @@ async function migrateDC(): Promise<void> {
     const hhRef = cvText(item, DC_COLS.hhRef);
     const dateStr = cvText(item, DC_COLS.date);
     const status = cvText(item, DC_COLS.status);
+    const isUnassignedGroup = item.group?.id === DC_UNASSIGNED_GROUP_ID;
 
-    // Filter: upcoming only (date >= SINCE), not completed/cancelled
-    if (!dateStr || dateStr < SINCE) {
-      outcomes.push({ itemId: item.id, itemName: item.name, board: 'dc', hhRef: hhRef || null, status: 'skip', reason: `date ${dateStr || 'blank'} < ${SINCE}` });
-      continue;
-    }
-    const statusLower = status.toLowerCase();
-    if (statusLower.includes('complete') || statusLower.includes('cancel') || statusLower.includes('done')) {
-      outcomes.push({ itemId: item.id, itemName: item.name, board: 'dc', hhRef: hhRef || null, status: 'skip', reason: `status is "${status}"` });
-      continue;
+    // Filter: upcoming only (date >= SINCE), not completed/cancelled.
+    // Unassigned-group items ("to be arranged") bypass date + status filters
+    // — they're the pile we most need in OP for staff to pick up.
+    if (!isUnassignedGroup) {
+      if (!dateStr || dateStr < SINCE) {
+        outcomes.push({ itemId: item.id, itemName: item.name, board: 'dc', hhRef: hhRef || null, status: 'skip', reason: `date ${dateStr || 'blank'} < ${SINCE}` });
+        continue;
+      }
+      const statusLower = status.toLowerCase();
+      if (statusLower.includes('complete') || statusLower.includes('cancel') || statusLower.includes('done')) {
+        outcomes.push({ itemId: item.id, itemName: item.name, board: 'dc', hhRef: hhRef || null, status: 'skip', reason: `status is "${status}"` });
+        continue;
+      }
     }
 
     if (!hhRef) {
@@ -278,10 +298,11 @@ async function migrateDC(): Promise<void> {
 
     const freelancerEmail = cvText(item, DC_COLS.driverEmailGC);
     const person = await findPersonByEmail(freelancerEmail);
-    if (!person) {
+    if (!person && !isUnassignedGroup) {
       await recordFailure(item, 'dc', freelancerEmail ? `freelancer "${freelancerEmail}" not in OP people` : 'no freelancer email on Monday item');
       continue;
     }
+    // Unassigned-group items with no person → quote only, no assignment row.
 
     const deliverCollect = cvText(item, DC_COLS.deliverCollect).toLowerCase();
     const jobType = deliverCollect === 'collection' ? 'collection' : 'delivery';
@@ -308,6 +329,10 @@ async function migrateDC(): Promise<void> {
       } catch { /* ignore parse */ }
     }
 
+    const driverSummary = person
+      ? `driver ${freelancerEmail} (${person.id})`
+      : `UNASSIGNED (group ${DC_UNASSIGNED_GROUP_ID})`;
+
     if (!COMMIT) {
       outcomes.push({
         itemId: item.id,
@@ -315,7 +340,7 @@ async function migrateDC(): Promise<void> {
         board: 'dc',
         hhRef,
         status: 'ok',
-        reason: `would insert: ${jobType}/${whatIsItNorm} @ ${dateStr} ${arrivalTime || ''} — driver ${freelancerEmail} (${person.id}) @ £${driverPay || '?'}`,
+        reason: `would insert: ${jobType}/${whatIsItNorm} @ ${dateStr || 'TBC'} ${arrivalTime || ''} — ${driverSummary} @ £${driverPay || '?'}`,
       });
       continue;
     }
@@ -348,7 +373,7 @@ async function migrateDC(): Promise<void> {
           whatIsItNorm,
           venueId,
           null, // venue_name resolved from venue_id join
-          dateStr,
+          dateStr || null,
           arrivalTime,
           keyPoints,
           runGroup,
@@ -357,12 +382,17 @@ async function migrateDC(): Promise<void> {
       );
       const quoteId = quoteInsert.rows[0].id;
 
-      await pool.query(
-        `INSERT INTO quote_assignments (
-           quote_id, person_id, role, agreed_rate, rate_type, status, is_ooosh_crew, created_by
-         ) VALUES ($1, $2, 'driver', $3, 'flat', 'confirmed', false, 'monday-migration')`,
-        [quoteId, person.id, driverPay]
-      );
+      // Only create the assignment row when we have a real person — for
+      // unassigned-group items we leave the quote free for staff to
+      // assign in Transport Ops.
+      if (person) {
+        await pool.query(
+          `INSERT INTO quote_assignments (
+             quote_id, person_id, role, agreed_rate, rate_type, status, is_ooosh_crew, created_by
+           ) VALUES ($1, $2, 'driver', $3, 'flat', 'confirmed', false, 'monday-migration')`,
+          [quoteId, person.id, driverPay]
+        );
+      }
       await pool.query('COMMIT');
 
       // Writeback
