@@ -6,7 +6,7 @@ import {
   storeVerificationCode,
   checkEmailRateLimit
 } from '@/lib/verification'
-import { isOpMode, registerStartOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, registerStartOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -46,6 +46,13 @@ export async function POST(request: NextRequest) {
         // Anything else is a real failure — alert + fall back to Monday.com
         console.error('Register/start: OP backend error, falling back:', opError)
         reportFallback('register-start', opError, { email: normalizedEmail })
+        if (!mondayFallbackAllowed()) {
+          // Return generic "code sent" to avoid leaking which backend failed.
+          return NextResponse.json({
+            success: true,
+            message: 'If your email is on our approved list, a verification code is on its way.',
+          })
+        }
       }
     }
     // ── End OP Backend mode ──────────────────────────────────────

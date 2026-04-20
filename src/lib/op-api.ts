@@ -333,6 +333,17 @@ export async function resetPasswordOP(
 // =============================================================================
 
 /**
+ * Whether silent fallback to Monday is allowed when an OP call errors.
+ *
+ * Default: true (safety net during migration). Set PORTAL_MONDAY_FALLBACK_ENABLED=false
+ * on Netlify once OP is the sole source of truth — callers then return a clean
+ * 502 instead of silently serving Monday data.
+ */
+export function mondayFallbackAllowed(): boolean {
+  return process.env.PORTAL_MONDAY_FALLBACK_ENABLED !== 'false'
+}
+
+/**
  * Report a Monday-fallback event to the OP so staff get alerted.
  *
  * Called whenever the portal attempts an OP operation, fails, and falls

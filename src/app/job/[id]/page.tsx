@@ -53,6 +53,7 @@ interface Job {
   expenseArrangement?: string         // How expenses are handled
   pdArrangement?: string              // Per diem arrangement
   pdAmount?: number                   // Per diem daily rate
+  files?: VenueFile[]                 // Shared job-level files (OP only)
 }
 
 interface Venue {
@@ -450,7 +451,7 @@ function NotificationMuteToggle({ jobId }: { jobId: string }) {
 // VENUE FILES COMPONENT
 // =============================================================================
 
-function VenueFiles({ files }: { files: VenueFile[] }) {
+function VenueFiles({ files, title = 'Venue Files' }: { files: VenueFile[]; title?: string }) {
   const [loadingFile, setLoadingFile] = useState<string | null>(null)
 
   if (!files || files.length === 0) return null
@@ -496,7 +497,7 @@ function VenueFiles({ files }: { files: VenueFile[] }) {
   return (
     <div className="bg-white rounded-xl shadow-sm p-6">
       <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
-        <span>📁</span> Venue Files
+        <span>📁</span> {title}
         <span className="text-sm font-normal text-gray-500">
           ({files.length} file{files.length !== 1 ? 's' : ''})
         </span>
@@ -930,6 +931,11 @@ function CrewJobDetail({ job, venue }: { job: Job; venue: Venue | null }) {
       {/* Venue Files — shared from the venue board */}
       {venue?.files && venue.files.length > 0 && (
         <VenueFiles files={venue.files} />
+      )}
+
+      {/* Job Files — tagged "share_with_freelancer" on the job in OP */}
+      {job.files && job.files.length > 0 && (
+        <VenueFiles files={job.files} title="Job Files" />
       )}
 
       {/* Q&H Job Files — tech riders, stage plots, etc. */}
@@ -1399,6 +1405,11 @@ export default function JobDetailsPage() {
                 {/* Venue Files — shared from the venue board */}
                 {venue?.files && venue.files.length > 0 && (
                   <VenueFiles files={venue.files} />
+                )}
+
+                {/* Job Files — tagged "share_with_freelancer" on the job in OP */}
+                {job.files && job.files.length > 0 && (
+                  <VenueFiles files={job.files} title="Job Files" />
                 )}
 
                 {/* Q&H Job Files — tech riders, stage plots, etc. */}

@@ -14,7 +14,7 @@ import bcrypt from 'bcryptjs'
 import { SignJWT } from 'jose'
 import { updateFreelancerTextColumn, FREELANCER_COLUMNS } from '@/lib/monday'
 import { consumeResetToken } from '@/lib/password-reset'
-import { isOpMode, resetPasswordOP, reportFallback } from '@/lib/op-api'
+import { isOpMode, resetPasswordOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 const getSessionSecret = () => {
   const secret = process.env.SESSION_SECRET
@@ -82,6 +82,12 @@ export async function POST(request: NextRequest) {
         }
         console.error('Reset-password: OP backend error, falling back:', opError)
         reportFallback('reset-password', opError)
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { error: 'Unable to reset password right now. Please try again in a moment.' },
+            { status: 502 }
+          )
+        }
       }
     }
     // ── End OP Backend mode ──────────────────────────────────────
