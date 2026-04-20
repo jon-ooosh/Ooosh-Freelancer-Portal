@@ -40,15 +40,18 @@ export async function runNotificationEscalation(): Promise<{
   try {
     // Find unread notifications that haven't been emailed yet
     // Exclude: snoozed, already emailed, follow_ups not yet due, low priority
+    // Names live on people, not users, so join via users.person_id.
     const result = await query(`
       SELECT n.id, n.user_id, n.type, n.title, n.content, n.priority,
              n.entity_type, n.entity_id, n.action_url, n.created_at,
              n.source_user_id,
-             u.email AS recipient_email, u.first_name AS recipient_name,
-             su.first_name AS sender_name, su.last_name AS sender_last_name
+             u.email AS recipient_email, rp.first_name AS recipient_name,
+             sp.first_name AS sender_name, sp.last_name AS sender_last_name
       FROM notifications n
       JOIN users u ON u.id = n.user_id AND u.is_active = true
+      JOIN people rp ON rp.id = u.person_id
       LEFT JOIN users su ON su.id = n.source_user_id
+      LEFT JOIN people sp ON sp.id = su.person_id
       WHERE n.is_read = false
         AND n.email_sent_at IS NULL
         AND n.priority != 'low'
