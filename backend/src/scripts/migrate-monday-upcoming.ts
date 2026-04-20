@@ -49,6 +49,7 @@ const args = process.argv.slice(2);
 const COMMIT = args.includes('--commit');
 const ONLY_DC = args.includes('--only-dc');
 const ONLY_CREW = args.includes('--only-crew');
+const REFRESH_VENUES = args.includes('--refresh-venues');
 const SINCE_IDX = args.indexOf('--since');
 const SINCE = SINCE_IDX >= 0 ? args[SINCE_IDX + 1] : new Date().toISOString().slice(0, 10);
 
@@ -580,7 +581,95 @@ async function recordFailure(item: MondayItem, board: 'dc' | 'crew', reason: str
 
 // ── Main ─────────────────────────────────────────────────────────────
 
+// ── Refresh venue_id on already-migrated D&C quotes ─────────────────
+// Monday venue board is migrated separately (migrate-monday-venues.ts).
+// Once venues exist in OP with external_id_map entries, this pass walks
+// every D&C item whose tracking column reads "yes" and fills in the
+// venue_id on the corresponding OP quote by:
+//   1. Resolving the Monday venue id on the item to an OP venue
+//   2. Matching the OP quote by (hh_job_number → job_id, job_type, job_date)
+// Only updates quotes where venue_id IS NULL and venue_name IS NULL —
+// i.e. the ones the initial migration created without a venue link.
+// Keeps staff-edited quotes untouched.
+
+async function refreshVenueLinks(): Promise<void> {
+  console.log('\n=== D&C venue-link refresh ===');
+  const cols = Object.values(DC_COLS);
+  const items = await fetchBoardItems(DC_BOARD_ID!, cols);
+  console.log(`Fetched ${items.length} D&C items from Monday`);
+
+  let scanned = 0, matched = 0, updated = 0, noMondayVenue = 0, noOpVenue = 0, noQuote = 0, ambiguous = 0, skipped = 0;
+
+  for (const item of items) {
+    if (cvText(item, DC_COLS.tracking).toLowerCase() !== 'yes') {
+      continue; // only refresh items we actually migrated
+    }
+    scanned++;
+
+    // Parse the Monday venue id off the connect column
+    const venueRaw = cv(item, DC_COLS.venueConnect)?.value;
+    let mondayVenueId: number | null = null;
+    if (venueRaw) {
+      try {
+        const parsed = JSON.parse(venueRaw) as { linkedPulseIds?: Array<{ linkedPulseId: number }> };
+        mondayVenueId = parsed.linkedPulseIds?.[0]?.linkedPulseId ?? null;
+      } catch { /* ignore */ }
+    }
+    if (!mondayVenueId) { noMondayVenue++; continue; }
+
+    const opVenue = await findVenueByMondayId(String(mondayVenueId));
+    if (!opVenue) { noOpVenue++; continue; }
+
+    // Heuristic match to OP quote: HH → job_id, plus job_type + job_date
+    // Only quotes that currently have NO venue — leave human-edited ones alone.
+    const hhRef = cvText(item, DC_COLS.hhRef);
+    const dateStr = cvText(item, DC_COLS.date);
+    const deliverCollect = cvText(item, DC_COLS.deliverCollect).toLowerCase();
+    const jobType = deliverCollect === 'collection' ? 'collection' : 'delivery';
+    if (!hhRef || !dateStr) { skipped++; continue; }
+
+    const opJob = await findOpJobByHhNumber(hhRef);
+    if (!opJob) { skipped++; continue; }
+
+    const matchRes = await pool.query(
+      `SELECT id FROM quotes
+       WHERE job_id = $1 AND job_type = $2 AND job_date = $3
+         AND venue_id IS NULL AND (venue_name IS NULL OR venue_name = '')
+         AND is_deleted = false`,
+      [opJob.id, jobType, dateStr]
+    );
+    if (matchRes.rows.length === 0) { noQuote++; continue; }
+    if (matchRes.rows.length > 1) { ambiguous++; continue; }
+    matched++;
+
+    if (!COMMIT) continue;
+
+    await pool.query(
+      `UPDATE quotes SET venue_id = $1, updated_at = NOW() WHERE id = $2`,
+      [opVenue.id, matchRes.rows[0].id]
+    );
+    updated++;
+  }
+
+  console.log('\n=== Refresh summary ===');
+  console.log(`scanned (tracking=yes): ${scanned}`);
+  console.log(`  matched to OP quote:    ${matched}`);
+  console.log(`  ${COMMIT ? 'updated' : 'would update'}:            ${COMMIT ? updated : matched}`);
+  console.log(`  no Monday venue link:   ${noMondayVenue}`);
+  console.log(`  Monday venue not in OP: ${noOpVenue}  (run migrate-monday-venues.ts --commit first)`);
+  console.log(`  no matching OP quote:   ${noQuote}  (quote may have been staff-edited)`);
+  console.log(`  ambiguous (>1 match):   ${ambiguous}`);
+  console.log(`  data-insufficient:      ${skipped}`);
+}
+
 async function main(): Promise<void> {
+  if (REFRESH_VENUES) {
+    console.log(`Venue-link refresh ${COMMIT ? '(COMMIT MODE)' : '(DRY RUN)'}`);
+    await refreshVenueLinks();
+    await pool.end();
+    return;
+  }
+
   console.log(`Monday → OP migration ${COMMIT ? '(COMMIT MODE)' : '(DRY RUN)'}`);
   console.log(`Cutoff date (SINCE): ${SINCE}`);
 
