@@ -398,7 +398,12 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     if (existingPortalExcess.rows.length > 0) {
       const portalRecord = existingPortalExcess.rows[0];
       const alreadyTaken = parseFloat(portalRecord.excess_amount_taken || 0);
-      const newRequired = excessAmount || 0;
+      // Enforce the £1,200 floor and never regress from amount already
+      // taken. Hire form app sometimes sends 0 for returning drivers who
+      // skip the DVLA flow — without this clamp we'd wipe a live pre-auth.
+      const STANDARD_EXCESS_PER_VAN = 1200;
+      const hireFormCalculated = parseFloat(String(excessAmount)) || 0;
+      const newRequired = Math.max(hireFormCalculated, STANDARD_EXCESS_PER_VAN, alreadyTaken);
       // Determine new status based on what's already been collected
       let newStatus = 'pending';
       if (portalRecord.excess_status === 'pre_auth') {
@@ -975,28 +980,47 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
 
   const logoImage = await fetchLogo();
 
+  // node-postgres returns DATE columns as JS Date objects (not ISO strings).
+  // String(dateObj) produces locale toString() output like "Sun Jan 09 1983
+  // 00:00:00 GMT+0000 (GMT)" — no 'T' character to split on, so the previous
+  // .split('T')[0] approach returned the raw toString which leaked into the
+  // PDF as "Sun Jan 09 1983 00:00:00 GM...". Use toISOString() which is
+  // always YYYY-MM-DDTHH:MM:SS.sssZ.
+  function toISODate(v: unknown): string | undefined {
+    if (v === null || v === undefined || v === '') return undefined;
+    if (v instanceof Date) {
+      if (isNaN(v.getTime())) return undefined;
+      return v.toISOString().split('T')[0];
+    }
+    const s = String(v);
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const d = new Date(s);
+    if (isNaN(d.getTime())) return undefined;
+    return d.toISOString().split('T')[0];
+  }
+
   return {
     driverName: row.driver_name || '',
     email: row.driver_email || row.client_email || '',
     phoneCountry: row.driver_phone_country || '',
     phoneNumber: row.driver_phone || '',
-    dateOfBirth: row.driver_dob ? String(row.driver_dob).split('T')[0] : undefined,
+    dateOfBirth: toISODate(row.driver_dob),
     homeAddress,
     licenceAddress: row.driver_licence_address || undefined,
     licenceNumber: row.driver_licence_number || '',
     licenceIssuedBy: row.driver_licence_issued_by || '',
-    licenceValidTo: row.driver_licence_valid_to ? String(row.driver_licence_valid_to).split('T')[0] : undefined,
-    datePassedTest: row.driver_date_passed_test ? String(row.driver_date_passed_test).split('T')[0] : undefined,
+    licenceValidTo: toISODate(row.driver_licence_valid_to),
+    datePassedTest: toISODate(row.driver_date_passed_test),
     vehicleReg: row.vehicle_reg || '',
     vehicleModel: row.vehicle_model || '',
-    hireStartDate: row.hire_start ? String(row.hire_start).split('T')[0] : undefined,
+    hireStartDate: toISODate(row.hire_start),
     hireStartTime: row.start_time ? String(row.start_time) : undefined,
-    hireEndDate: row.hire_end ? String(row.hire_end).split('T')[0] : undefined,
+    hireEndDate: toISODate(row.hire_end),
     hireEndTime: row.end_time ? String(row.end_time) : undefined,
     insuranceExcess: excessStr || undefined,
     hireFormNumber: `OT-HF-${assignmentId.substring(0, 8).toUpperCase()}`,
     contractNumber: row.hirehop_job_id ? String(row.hirehop_job_id) : '',
-    signatureDate: row.driver_signature_date ? String(row.driver_signature_date).split('T')[0] : undefined,
+    signatureDate: toISODate(row.driver_signature_date),
     signatureImage,
     logoImage,
   };
@@ -1007,13 +1031,20 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
 router.post('/:id/generate-pdf', authenticateOrApiKey, async (req: AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const sendEmail = req.query.send_email === 'true';
+    const sendEmailRequested = req.query.send_email === 'true';
 
     // Load all data
     const formData = await loadHireFormData(id);
     if (!formData) {
       return res.status(404).json({ error: 'Hire form not found' });
     }
+
+    // Gate: only email the hire agreement PDF once a vehicle has been
+    // assigned. A PDF generated at signature time (before van allocation)
+    // has "TBC" for vehicle reg — emailing that to the driver is premature
+    // and confusing. The definitive hire agreement email fires at book-out
+    // instead, by which point the vehicle is known.
+    const sendEmail = sendEmailRequested && !!formData.vehicleReg && formData.vehicleReg !== 'TBC';
 
     // Generate PDF
     const { pdfBytes, filename } = await generateHireFormPdf(formData);
