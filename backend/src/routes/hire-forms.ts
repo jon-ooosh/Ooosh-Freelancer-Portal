@@ -322,7 +322,10 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     );
 
     if (existingAssignment.rows.length > 0) {
-      // Duplicate — commit driver updates but skip assignment creation
+      // Duplicate — commit driver updates but skip assignment creation.
+      // Return the SAME shape as the create path so clients can rely on
+      // data.assignment.id regardless of whether the call was a fresh create
+      // or a dedup hit.
       await client.query('COMMIT');
       client.release();
       console.log(`[hire-forms] Deduplicated: existing assignment ${existingAssignment.rows[0].id} for driver ${driverId}`);
@@ -334,7 +337,20 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
          WHERE a.id = $1`,
         [existingAssignment.rows[0].id]
       );
-      return res.status(200).json({ data: full.rows[0], deduplicated: true });
+      const existingExcess = await getPool().query(
+        `SELECT * FROM job_excess WHERE assignment_id = $1 ORDER BY created_at DESC LIMIT 1`,
+        [existingAssignment.rows[0].id]
+      );
+      return res.status(200).json({
+        data: {
+          driver_id: driverId,
+          assignment: full.rows[0],
+          excess: existingExcess.rows[0] || null,
+          requires_referral: requiresReferral,
+          referral_reason: requiresReferral ? referralReason : null,
+        },
+        deduplicated: true,
+      });
     }
 
     // 7. Create vehicle hire assignment
