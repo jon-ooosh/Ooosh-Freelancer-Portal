@@ -244,6 +244,7 @@ function addressesDiffer(a: string, b: string): boolean {
 
 /**
  * Unified driver status — single source of truth, same as DriversPage.
+ * Six statuses: In Progress / Approved / Manual Review / Refer to Insurers / Referred & Waiting / Not Approved
  */
 function deriveDriverStatus(driver: { requires_referral: boolean; referral_status: string | null; licence_valid_to: string | null; dvla_valid_until?: string | null; poa1_valid_until: string | null; signature_date: string | null; licence_number: string | null; dvla_check_date: string | null; email: string | null }): { label: string; colour: string } {
   if (driver.requires_referral) {
@@ -252,13 +253,13 @@ function deriveDriverStatus(driver: { requires_referral: boolean; referral_statu
     if (driver.referral_status === 'pending') return { label: 'Referred & Waiting', colour: 'bg-amber-100 text-amber-700' };
     return { label: 'Refer to Insurers', colour: 'bg-red-100 text-red-700' };
   }
+  if (!driver.signature_date) {
+    return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
+  }
   if (isDateExpired(driver.licence_valid_to) || isDateExpired(driver.poa1_valid_until)) {
     return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
   }
-  if (!driver.signature_date && driver.email && !driver.licence_number && !driver.dvla_check_date) {
-    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
-  }
-  if (driver.signature_date && !driver.licence_valid_to) {
+  if (!driver.licence_valid_to) {
     return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
   }
   return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
@@ -549,8 +550,10 @@ export default function DriverDetailPage() {
         </div>
       </div>
 
-      {/* Referral panel — shown prominently at top when applicable */}
-      {driver.requires_referral && (
+      {/* Referral panel — shown when a referral is pending OR has been
+          resolved (keeps historical context visible even after approve
+          clears requires_referral). */}
+      {(driver.requires_referral || driver.referral_status) && (
         <div className="mt-4">
           <ReferralPanel driver={driver} onDriverUpdate={setDriver} />
         </div>
