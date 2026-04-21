@@ -218,6 +218,10 @@ async function discoverColumns(boardId: string): Promise<void> {
   console.log('  npx tsx src/scripts/migrate-monday-drivers.ts\n');
 }
 
+interface DriverItemsPageResponse {
+  boards: Array<{ items_page: { cursor: string | null; items: MondayItem[] } }>;
+}
+
 async function fetchAllDriverItems(boardId: string): Promise<MondayItem[]> {
   // Pull every column — we don't know yet exactly which IDs are populated,
   // and the board is only ~150 rows so the payload is manageable.
@@ -238,7 +242,7 @@ async function fetchAllDriverItems(boardId: string): Promise<MondayItem[]> {
         }
       }
     `;
-    const data = await mondayQuery<{ boards: Array<{ items_page: { cursor: string | null; items: MondayItem[] } }> }>(
+    const data: DriverItemsPageResponse = await mondayQuery<DriverItemsPageResponse>(
       query, { boardId, cursor }
     );
     const page = data.boards[0].items_page;
