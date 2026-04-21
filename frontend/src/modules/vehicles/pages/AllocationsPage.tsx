@@ -12,6 +12,7 @@
 
 import { useState, useMemo, useCallback } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useUpcomingJobs, useUpcomingDueBackJobs } from '../hooks/useHireHopJobs'
 import { HireHopCacheStatus } from '../components/HireHopCacheStatus'
@@ -449,12 +450,18 @@ function RequirementSlots({
   onRemove: (allocationId: string) => void
   saving: boolean
 }) {
+  const queryClient = useQueryClient()
   const [showPicker, setShowPicker] = useState(false)
   // Inline picker state keyed by allocation id — used when a hire-form-
   // created slot has a driver attached but no vehicle yet, letting staff
   // pick a van for that specific driver card without leaving the page.
   const [linkPickerForId, setLinkPickerForId] = useState<string | null>(null)
   const [linking, setLinking] = useState(false)
+
+  /** Soft-refresh allocations data without a full page reload — preserves scroll. */
+  function refreshAllocationsSoftly() {
+    queryClient.invalidateQueries({ queryKey: ['allocations'] })
+  }
 
   const label = formatVanType(requirement.simpleType, requirement.gearbox)
   const slotsNeeded = requirement.quantity
@@ -497,8 +504,9 @@ function RequirementSlots({
           throw new Error(`PATCH failed for ${id}: ${resp.status} ${txt}`)
         }
       }
-      // Soft-refresh so allocations reload with the updated state
-      window.location.reload()
+      // Soft-refresh without full page reload so the user's scroll
+      // position stays put after they pick a van.
+      refreshAllocationsSoftly()
     } catch (err) {
       console.error('[allocations] Link vehicle to hire form failed:', err)
       alert(err instanceof Error ? err.message : 'Failed to link vehicle')
@@ -543,7 +551,7 @@ function RequirementSlots({
           throw new Error(`PATCH failed for ${id}: ${resp.status} ${txt}`)
         }
       }
-      window.location.reload()
+      refreshAllocationsSoftly()
     } catch (err) {
       console.error('[allocations] Unlink vehicle from hire form failed:', err)
       alert(err instanceof Error ? err.message : 'Failed to unlink vehicle')

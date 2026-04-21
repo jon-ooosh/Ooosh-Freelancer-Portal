@@ -924,6 +924,34 @@ router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthReques
         console.warn(`[hire-forms] fleet_vehicles hire_status update failed for vehicle ${updated.vehicle_id}:`, err);
       });
 
+      // Advance pre-hire requirement cards to 'done' so the Job
+      // Requirements view flips from yellow (in progress) to green
+      // (complete) once the van is physically booked out. The excess
+      // sync helper is forward-only and respects coverage rules. The
+      // hire_forms and vehicle rows we flip directly — book-out by
+      // definition means the hire agreement has been executed and
+      // the van has left the warehouse.
+      if (updated.job_id) {
+        const jobId: string = updated.job_id;
+        setImmediate(async () => {
+          try {
+            await query(
+              `UPDATE job_requirements
+               SET status = 'done', updated_at = NOW()
+               WHERE job_id = $1
+                 AND requirement_type IN ('hire_forms', 'vehicle')
+                 AND phase = 'pre_hire'
+                 AND status IN ('not_started', 'in_progress')`,
+              [jobId]
+            );
+            const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+            await syncExcessRequirementStatus(jobId);
+          } catch (err) {
+            console.warn(`[hire-forms] Post-book-out requirement advance failed for job ${jobId}:`, err);
+          }
+        });
+      }
+
       // Generate + email PDF if this is the first book-out email for this
       // assignment. Runs after we respond so the PATCH stays fast.
       if (!updated.hire_form_emailed_at) {

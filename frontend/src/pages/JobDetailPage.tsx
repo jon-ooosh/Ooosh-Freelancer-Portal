@@ -382,6 +382,26 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt }: {
     }
   }
 
+  async function viewPdf() {
+    // Raw <a href> to the download endpoint fails because the browser
+    // opens the URL in a new tab WITHOUT the Authorization header, so
+    // the auth-protected endpoint returns 401. Fetch the PDF as a blob
+    // via the authenticated api client, then open a blob: URL instead.
+    setGenerating(true);
+    setMessage(null);
+    try {
+      const { blob } = await api.blob(`/hire-forms/${assignmentId}/download`);
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      // Revoke after a delay so the new tab has time to load the PDF.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      setMessage(`Error: ${err instanceof Error ? err.message : 'Failed to open PDF'}`);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   async function resendEmail() {
     setGenerating(true);
     setMessage(null);
@@ -423,14 +443,13 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt }: {
           </button>
           {pdfKey && (
             <>
-              <a
-                href={`/api/hire-forms/${assignmentId}/download`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs px-2.5 py-1.5 bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
+              <button
+                onClick={viewPdf}
+                disabled={generating}
+                className="text-xs px-2.5 py-1.5 bg-blue-50 text-blue-700 rounded hover:bg-blue-100 disabled:opacity-50"
               >
                 View PDF
-              </a>
+              </button>
               <button
                 onClick={resendEmail}
                 disabled={generating}
