@@ -361,6 +361,38 @@ See **Vehicle Module Integration** section below for technical details.
 Driver hire forms calculate the insurance excess amount based on DVLA record points.
 See `docs/DRIVER-HIRE-EXCESS-SPEC.md` for full spec.
 
+##### ⚠️ Scope rules — what is per-driver vs per-van vs per-job
+
+A hire can have multiple drivers on a single van, and a job can have
+multiple vans. Different artefacts scope differently and every Claude
+tends to get this wrong on first pass, so it's pinned here:
+
+| Artefact | Scope | Rule |
+|---|---|---|
+| **Hire form PDF** | **Per-driver** | Each driver signs their own agreement; each gets their own PDF, all with the same van reg on them |
+| **Hire agreement email** | **Per-driver** | Each driver gets emailed their own PDF at book-out |
+| **VE103B certificate** | **Per hire (1 cert, lead driver only)** | One cert number per job regardless of driver count; `ve103b_ref` writeback is scoped to the LEAD driver's `vehicle_hire_assignments` row only |
+| **Insurance excess** | **Per job (top-N-drivers algorithm)** | Sort all drivers by individual calculated excess descending, take the top N where N = HH van count, SUM those. £1,200 floor per slot. Drivers beyond N get `excess_status='not_required'`, £0 |
+| **Additional driver charge (HH stock 1324)** | **Per job** | `max(0, totalDrivers - 2 × vanCount) × £20+VAT`. 2 drivers per van are free; anything above is billable |
+| **Book-out** | **Per van** | Physical, once per van — the van leaves with all its drivers at the same time |
+| **Check-in** | **Per van** | Physical, once per van — all drivers on the van flip to `returned` at the same time |
+
+**Worked excess examples:**
+
+| Scenario | Excess outcome |
+|---|---|
+| 1 van, 2 drivers each £1,200 standard | £1,200 total (top 1 × 1 slot) |
+| 1 van, 3 drivers all £1,200 | £1,200 total, + 1 additional driver charge |
+| 1 van, 3 drivers (one £1,800 via referral, two £1,200) | £1,800 total (top 1 wins), + 1 additional driver charge |
+| 2 vans, 3 drivers all £1,200 | £2,400 total (top 2 × 2 slots), 0 additional driver charges |
+| 2 vans, 4 drivers all £1,200 | £2,400 total, 0 additional driver charges |
+| 2 vans, 5 drivers all £1,200 | £2,400 total, + 1 additional driver charge |
+
+**Data-model corollary:** `vehicle_hire_assignments` has one row per
+(driver, van, job). Multiple drivers sharing one van = multiple rows
+with the SAME `vehicle_id`. The Allocations UI cascades van picks
+across siblings so staff only picks once per van slot.
+
 **Phase A — Database + API** ✅ COMPLETE
 - [x] Migration 017: `drivers`, `vehicle_hire_assignments`, `job_excess`, `excess_rules`, `client_excess_ledger` view
 - [x] Migration 018: `webhook_log`, `api_keys` tables
@@ -1617,6 +1649,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 ### Future Enhancements (captured, not scheduled)
 
+- **Allocations UI — van-centric rebuild** — current layout renders one card per hire-form assignment (per-driver), which misrepresents the model where N drivers share one van on one slot. Tactical fixes in place (cascade van pick across sibling drivers, single unlink button, "No van selected yet" placeholder on cards awaiting a van). Target end state: one card per van slot, with all drivers assigned to that slot listed nested inside, ONE van picker per slot rather than per driver. See "Scope rules" block in Step 2 for the model this should reflect.
 - **Vehicle book-out / check-in HireHop auto-push** — deferred 21 Apr 2026. Previously wired in `BookOutPage.tsx` via `barcodeCheckout()` (items_barcode_save.php) to auto-scan the van reg into HH and flip HH status to 5 (Dispatched). Never quite worked reliably — removed to unblock go-live. Staff currently advance HH status manually. Revisit once we've proven the write-back behaviour end-to-end. Equivalent on check-in side also deferred (HH barcode check-in + status 6/7 push). See `backend/src/services/hirehop-writeback.ts` for the pattern we'd reuse.
 - **Hard book-out gate on vehicle prep status with admin override** — currently the book-out gate only enforces referral + excess (and even those are amber warnings, non-blocking). `fleet_vehicles.hire_status` is observed but not gated. Target ~May 2026: add a hard gate blocking book-out unless the van is `hire_status='Available'` OR the user is `admin`/`manager` and supplies an override reason (logged to audit). Keep the existing amber warnings in place through the transition.
 - **"Your van is ready for pickup" email** — trigger when vehicle is allocated + prep complete. Considered 21 Apr 2026 and declined as too much noise for the current hire volume. Reopen if/when volume grows and clients start asking.

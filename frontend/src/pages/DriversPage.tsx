@@ -56,7 +56,9 @@ function isDateExpired(d: string | null): boolean {
 
 /**
  * Unified driver status — single source of truth.
- * Six statuses: In Progress / Approved / Manual Review / Refer to Insurers / Referred & Waiting / Not Approved
+ * Six statuses: In Progress / Approved / Expired / Refer to Insurers / Referred & Waiting / Not Approved
+ * "Expired" means one or more of the driver's documents (licence, DVLA,
+ * POA) has passed its validity window — surfaced so staff can renew.
  */
 function deriveDriverStatus(driver: DriverListItem): { label: string; colour: string } {
   // Referral statuses take priority once set
@@ -86,11 +88,11 @@ function deriveDriverStatus(driver: DriverListItem): { label: string; colour: st
   if (isDateExpired(driver.poa1_valid_until)) expiredDocs.push('POA');
 
   if (expiredDocs.length > 0) {
-    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
   }
 
   if (!driver.dvla_valid_until && !driver.licence_valid_to) {
-    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
   }
 
   return { label: 'Approved', colour: 'bg-green-100 text-green-700' };

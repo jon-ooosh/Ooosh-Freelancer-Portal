@@ -244,7 +244,8 @@ function addressesDiffer(a: string, b: string): boolean {
 
 /**
  * Unified driver status — single source of truth, same as DriversPage.
- * Six statuses: In Progress / Approved / Manual Review / Refer to Insurers / Referred & Waiting / Not Approved
+ * Six statuses: In Progress / Approved / Expired / Refer to Insurers / Referred & Waiting / Not Approved
+ * "Expired" = one or more documents past its validity window (renewable).
  */
 function deriveDriverStatus(driver: { requires_referral: boolean; referral_status: string | null; licence_valid_to: string | null; dvla_valid_until?: string | null; poa1_valid_until: string | null; signature_date: string | null; licence_number: string | null; dvla_check_date: string | null; email: string | null }): { label: string; colour: string } {
   if (driver.requires_referral) {
@@ -257,10 +258,10 @@ function deriveDriverStatus(driver: { requires_referral: boolean; referral_statu
     return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
   }
   if (isDateExpired(driver.licence_valid_to) || isDateExpired(driver.poa1_valid_until)) {
-    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
   }
   if (!driver.licence_valid_to) {
-    return { label: 'Manual Review', colour: 'bg-amber-100 text-amber-700' };
+    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
   }
   return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
 }
