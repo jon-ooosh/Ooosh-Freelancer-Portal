@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
   calculateCosts,
@@ -869,6 +869,168 @@ router.patch('/:id/ops-status', validate(opsStatusSchema), async (req: AuthReque
     res.status(500).json({ error: 'Failed to update operational status' });
   }
 });
+
+// ── POST /api/quotes/:id/complete-override ─────────────────────────
+// Manager/admin fallback when the freelancer portal can't be used (driver
+// vanished, portal malfunction, catching up legacy data). The primary path
+// is the portal — photos, signature, notes on site. Here we just capture
+// WHY we're bypassing it and log to the job timeline.
+
+const completeOverrideSchema = z.object({
+  reason: z.string().min(10, 'Please give a bit more detail about why you are completing this here.'),
+  notes: z.string().optional().nullable(),
+});
+
+router.post(
+  '/:id/complete-override',
+  authorize('admin', 'manager'),
+  validate(completeOverrideSchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { reason, notes } = req.body as { reason: string; notes?: string | null };
+      const quoteId = req.params.id;
+
+      const quoteResult = await query(
+        `SELECT q.id, q.job_id, q.status, q.ops_status, q.venue_name, j.job_name
+         FROM quotes q
+         LEFT JOIN jobs j ON j.id = q.job_id
+         WHERE q.id = $1 AND q.is_deleted = false`,
+        [quoteId]
+      );
+      if (quoteResult.rows.length === 0) {
+        res.status(404).json({ error: 'Quote not found' });
+        return;
+      }
+      const quote = quoteResult.rows[0];
+
+      const prefix = `[OP OVERRIDE – ${reason.trim()}]`;
+      const combined = notes && notes.trim()
+        ? `${prefix} ${notes.trim()}`
+        : prefix;
+
+      await query(
+        `UPDATE quotes SET
+           ops_status = 'completed',
+           status = CASE WHEN status IN ('draft', 'confirmed') THEN 'completed' ELSE status END,
+           status_changed_at = CASE WHEN status IN ('draft', 'confirmed') THEN NOW() ELSE status_changed_at END,
+           status_changed_by = CASE WHEN status IN ('draft', 'confirmed') THEN $1 ELSE status_changed_by END,
+           completed_at = NOW(),
+           completed_by = $2,
+           completion_notes = $3,
+           updated_at = NOW()
+         WHERE id = $4`,
+        [req.user!.id, req.user!.email, combined, quoteId]
+      );
+
+      // Mark this user's assignment completed; leave others untouched
+      // (staff override doesn't know which crew member actually did it).
+      await query(
+        `UPDATE quote_assignments
+         SET status = 'completed', updated_at = NOW()
+         WHERE quote_id = $1 AND status NOT IN ('declined', 'cancelled', 'completed')`,
+        [quoteId]
+      );
+
+      // Timeline log on the linked job (skip for local quotes with no job).
+      if (quote.job_id) {
+        const venueLabel = quote.venue_name || quote.job_name || 'quote';
+        await query(
+          `INSERT INTO interactions (type, content, job_id, created_by)
+           VALUES ('status_transition', $1, $2, $3)`,
+          [
+            `Transport quote manually marked complete (${venueLabel}) — reason: ${reason.trim()}` +
+              (notes && notes.trim() ? `. Notes: ${notes.trim()}` : ''),
+            quote.job_id,
+            req.user!.id,
+          ]
+        );
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Complete override error:', error);
+      res.status(500).json({ error: 'Failed to complete quote' });
+    }
+  }
+);
+
+// ── POST /api/quotes/:id/nudge-completion ──────────────────────────
+// Staff-initiated reminder nudge to an assigned freelancer. Independent
+// of the auto scheduler's reminder ladder (doesn't bump
+// completion_reminder_level). Used from the completion-override modal
+// before staff decide to bypass the portal.
+
+const nudgeSchema = z.object({
+  personId: z.string().uuid(),
+});
+
+router.post(
+  '/:id/nudge-completion',
+  validate(nudgeSchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { personId } = req.body as { personId: string };
+      const quoteId = req.params.id;
+
+      const result = await query(
+        `SELECT q.id AS quote_id, q.job_type, q.venue_name, q.job_date, q.arrival_time,
+                p.id AS person_id, p.email AS person_email,
+                p.first_name, p.last_name,
+                j.job_name
+         FROM quote_assignments qa
+         JOIN quotes q ON q.id = qa.quote_id
+         JOIN people p ON p.id = qa.person_id
+         LEFT JOIN jobs j ON j.id = q.job_id
+         WHERE qa.quote_id = $1 AND qa.person_id = $2
+           AND q.is_deleted = false
+           AND qa.is_ooosh_crew = false
+         LIMIT 1`,
+        [quoteId, personId]
+      );
+      if (result.rows.length === 0) {
+        res.status(404).json({ error: 'Assignment not found or is Ooosh crew' });
+        return;
+      }
+      const row = result.rows[0];
+      if (!row.person_email) {
+        res.status(400).json({ error: 'Assigned freelancer has no email on file' });
+        return;
+      }
+
+      const firstName = (row.first_name || '').trim() || 'there';
+      const venueName = row.venue_name || 'the venue';
+      const jobName = row.job_name || row.venue_name || 'your job';
+      const portalBase = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
+      const portalUrl = `${portalBase}/job/${quoteId}/complete`;
+
+      await emailService.sendRaw({
+        to: row.person_email,
+        subject: `Quick nudge — please complete ${jobName}`,
+        html: `
+          <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">One last thing</h2>
+          <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">Hi ${firstName},</p>
+          <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+            Just checking in — could you finish off your ${row.job_type || 'job'}
+            at <strong>${venueName}</strong> in the portal when you've got a moment?
+            Photos, signature, any notes and you're done.
+          </p>
+          <p style="margin:0 0 20px;">
+            <a href="${portalUrl}" style="display:inline-block;padding:12px 24px;background-color:#7B5EA7;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;font-size:15px;">Complete job</a>
+          </p>
+          <p style="margin:0;font-size:13px;color:#64748b;line-height:1.5;">
+            Any questions: <a href="mailto:info@oooshtours.co.uk" style="color:#7B5EA7;">info@oooshtours.co.uk</a>.
+          </p>
+        `,
+        variant: 'internal',
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Nudge completion error:', error);
+      res.status(500).json({ error: 'Failed to send nudge' });
+    }
+  }
+);
 
 // ── PUT /api/quotes/:id/ops-details — update arranging/ops fields ───
 
