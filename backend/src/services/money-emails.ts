@@ -138,7 +138,10 @@ export async function getDriverEmail(driverId: string): Promise<{
   };
 }
 
-/** Send payment confirmation email */
+/** Send payment confirmation email.
+ *  Returns a result so callers can distinguish "sent" from silent skips
+ *  (e.g. no recipient found in OP address book — common for HH-synced jobs
+ *  whose client org has no email and no linked people yet). */
 export async function sendPaymentEmail(opts: {
   jobId: string;
   amount: number;
@@ -147,10 +150,10 @@ export async function sendPaymentEmail(opts: {
   isConfirmingBooking: boolean;
   balanceOutstanding?: number;
   hireDates?: string;
-}) {
+}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string }> {
   const { jobId, amount, bankName, paymentType, isConfirmingBooking, balanceOutstanding, hireDates } = opts;
   const recipients = await getJobEmailRecipients(jobId);
-  if (!recipients.primaryEmail) return;
+  if (!recipients.primaryEmail) return { sent: false, reason: 'no_recipient' };
 
   const templateId = isConfirmingBooking ? 'booking_confirmed_deposit' : 'payment_received';
   const jobResult = await query(
@@ -178,19 +181,25 @@ export async function sendPaymentEmail(opts: {
     ? 'Your hire is now fully paid. Thank you!'
     : `Remaining balance: \u00A3${(balanceOutstanding || 0).toFixed(2)}.`;
 
-  await emailService.send(templateId, {
-    to: recipients.primaryEmail,
-    cc: recipients.ccEmails.length > 0 ? recipients.ccEmails : undefined,
-    variables: {
-      firstName: recipients.primaryFirstName || 'there',
-      amount: `\u00A3${amount.toFixed(2)}`,
-      bankName: bankName || 'card',
-      jobName,
-      hireDates: hireDatesStr,
-      balanceSection,
-      statusMessage,
-    },
-  });
+  try {
+    const res = await emailService.send(templateId, {
+      to: recipients.primaryEmail,
+      cc: recipients.ccEmails.length > 0 ? recipients.ccEmails : undefined,
+      variables: {
+        firstName: recipients.primaryFirstName || 'there',
+        amount: `\u00A3${amount.toFixed(2)}`,
+        bankName: bankName || 'card',
+        jobName,
+        hireDates: hireDatesStr,
+        balanceSection,
+        statusMessage,
+      },
+    });
+    if (!res.success) return { sent: false, reason: 'error', error: res.error };
+    return { sent: true };
+  } catch (err) {
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /** Send excess lifecycle email */

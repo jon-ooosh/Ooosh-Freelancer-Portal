@@ -8,6 +8,11 @@ import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { hhBroker } from '../services/hirehop-broker';
 import { sendLastMinuteAlert } from '../services/money-emails';
 import emailService from '../services/email-service';
+import {
+  triggerHireFormEmailOnConfirmation,
+  hireFormResultIsAnomaly,
+  sendConfirmationSilentSkipAlert,
+} from '../services/confirmation-hooks';
 
 const router = Router();
 router.use(authenticate);
@@ -695,38 +700,28 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     if (pipeline_status === 'confirmed') {
       sendLastMinuteAlert(jobId).catch(e => console.error('[Pipeline] Last-minute alert failed:', e));
 
-      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now
+      // Hire form email: runs HH-derivation inline (covers HH-synced jobs whose
+      // requirements hadn't yet been derived) and fires the hire form request
+      // email if the job has a self-drive vehicle and starts within 10 days.
+      // Silent skips alert info@oooshtours.co.uk so they don't go unnoticed.
       (async () => {
         try {
-          const jobData = await query(
-            `SELECT job_date, is_van_and_driver, hh_job_number FROM jobs WHERE id = $1`,
-            [jobId]
-          );
-          if (jobData.rows.length === 0) return;
-          const { job_date, is_van_and_driver, hh_job_number } = jobData.rows[0];
-          if (is_van_and_driver || !hh_job_number || !job_date) return;
-
-          const daysUntilStart = Math.ceil((new Date(job_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-          if (daysUntilStart <= 10) {
-            // Check if hire_forms requirement exists
-            const hfReq = await query(
-              `SELECT id, status FROM job_requirements WHERE job_id = $1 AND requirement_type = 'hire_forms'`,
+          const hfResult = await triggerHireFormEmailOnConfirmation(jobId);
+          const anomaly = hireFormResultIsAnomaly(hfResult);
+          if (anomaly) {
+            const jobRow = await query(
+              `SELECT hh_job_number, job_name, client_name FROM jobs WHERE id = $1`,
               [jobId]
             );
-            if (hfReq.rows.length > 0 && hfReq.rows[0].status === 'not_started') {
-              const { sendHireFormEmailForJob } = await import('../services/hire-form-auto-email');
-              console.log(`[Pipeline] Job ${hh_job_number} confirmed with ${daysUntilStart} days to go — triggering hire form email`);
-              const jobRow = await query(
-                `SELECT j.id, j.hh_job_number, j.job_name, j.job_date, j.company_name, j.client_name, j.client_id,
-                        jr.id AS req_id
-                 FROM jobs j JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'hire_forms'
-                 WHERE j.id = $1`,
-                [jobId]
-              );
-              if (jobRow.rows.length > 0) {
-                await sendHireFormEmailForJob(jobRow.rows[0], false);
-              }
-            }
+            const j = jobRow.rows[0] || {};
+            await sendConfirmationSilentSkipAlert({
+              jobId,
+              jobNumber: j.hh_job_number,
+              jobName: j.job_name ?? null,
+              clientName: j.client_name ?? null,
+              triggerSource: 'status_change',
+              issues: [anomaly],
+            });
           }
         } catch (err) {
           console.error('[Pipeline] Hire form email on confirmation failed:', err);
