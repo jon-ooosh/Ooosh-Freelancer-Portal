@@ -430,16 +430,24 @@ Netlify functions being repointed with `DATA_BACKEND` feature flag (default: `mo
   - Return result summary (charges added, mid-tour detected, etc.)
 - [ ] `generate-hire-form.js` (v5.6) → repoint to `POST /api/hire-forms/:id/generate-pdf` in OP mode (hire form app side)
 
-*Phase C4: Go-live cutover:*
+*Phase C4: Go-live cutover:* ✅ LIVE (21 Apr 2026)
 - [x] Set env vars on OP server (`HIRE_FORM_VERIFICATION_SECRET`, `HIRE_FORM_API_KEY`) — confirmed present
 - [x] Run migration 020 on production (`npm run db:migrate`) — done
-- [ ] Repoint `SignaturePage.js` to OP endpoints (see Phase C3 above — hire form app side)
+- [x] Repoint `SignaturePage.js` to OP endpoints — hire form Claude chained steps A→B→C: `POST /api/hire-forms` → `POST /:id/generate-pdf?send_email=true` → `POST /:id/post-signature`
 - [x] `POST /api/hire-forms/:id/post-signature` built (additional driver charge + mid-tour notification)
+- [x] `generate-hire-form.js` Netlify function: early 410 return in OP mode (redundant, OP endpoint replaces it)
+- [x] Monday-fallback telemetry: `POST /api/driver-verification/telemetry/monday-fallback` on OP side + `reportFallback` helper in hire form app's `op-backend.js` → `hire_form_fallback_events` table + admin inbox notification + email to info@ (dedup per-operation-per-hour)
+- [x] Migration 055: `hire_form_fallback_events` table
+- [x] Excess gate override bug fixed: book-out now respects `job_excess.dispatch_override` (manager override previously recorded but didn't unblock)
+- [x] `POST /api/hire-forms` response shape normalised — dedup path returns the same `{ data: { assignment: { id } } }` shape as fresh-create so SignaturePage's `copyResult.assignmentId` extraction is reliable
+- [x] Flip `DATA_BACKEND=op` on Netlify production (21 Apr 2026, 14:00 BST)
+- [x] Monday Board A driver migration: 145 new drivers + 1 updated via `backend/src/scripts/migrate-monday-drivers.ts` — upsert by email, derives `dvla_check_date` from `dvla_valid_until - 30d`, migrates "Manual review needed" from Monday overall_status into proper OP `requires_referral=true/status=pending` so staff can resolve via the existing Phase D2 referral panel
+- [x] Monday Board A driver files migration: 857 files across 146 drivers via `backend/src/scripts/migrate-monday-driver-files.ts` — downloads assets via Monday GraphQL, uploads to R2 under `files/drivers/<uuid>/<tag>-<assetId>.<ext>`, appends to `drivers.files` JSONB with matching DriverDetailPage labels
+- [x] `hire-forms/quick-assign`: searchable driver + vehicle pickers, vehicle is optional, active fleet only (`is_active=true AND fleet_group != 'old_sold'`), £1,200 floor (no longer reads excess_rules), absorbs HH derivation orphan records, implements top-N-drivers (additional drivers beyond van count → `excess_status='not_required'`)
+- [x] Driver names on Job Detail > Drivers & Vehicles tab click through to DriverDetailPage
 - [ ] Add "Generate Snapshot PDF" button on Insurance Referral panel (DriverDetailPage)
 - [ ] Mid-tour driver surfacing: badge on Fleet on-hire cards + status on Job Detail Drivers tab
 - [ ] Vehicle swap flow (see Phase D3 below)
-- [ ] Test end-to-end with `DATA_BACKEND=op` on Netlify deploy preview
-- [ ] Flip `DATA_BACKEND=op` on Netlify production
 - [ ] Monitor for 1-2 weeks, then remove Monday.com fallback code
 
 **Phase C5 — VE103B Certificate Generation** ✅ COMPLETE (9 Apr 2026)
