@@ -835,7 +835,11 @@ router.get('/:id', authenticateOrApiKey, async (req: AuthRequest, res: Response)
 // ── PATCH /api/hire-forms/:id — Update hire assignment (mid-hire changes) ──
 
 const patchSchema = z.object({
-  vehicle_id: z.string().uuid().optional(),
+  // vehicle_id accepts null so staff can "unlink" a van from an assignment
+  // before book-out (e.g. after picking the wrong van, or if plans change).
+  // The Allocations UI sends null to clear the link for this driver and —
+  // via its cascade logic — for every sibling driver on the same slot.
+  vehicle_id: z.string().uuid().nullable().optional(),
   hire_end: z.string().optional(),
   start_time: z.string().optional(),
   end_time: z.string().optional(),
@@ -1601,14 +1605,20 @@ async function processAdditionalDriverCharge(hhJobId: number, jobId: string | nu
 
   for (const item of items as Record<string, unknown>[]) {
     const categoryId = parseInt(String(item.CATEGORY_ID || 0));
-    const itemId = parseInt(String(item.ITEM_ID || item.LIST_ID || item.ID || 0));
+    // LIST_ID is the stock item ID (stable, shared across lines pointing at
+    // the same stock entry). ITEM_ID is the per-LINE row ID (unique per
+    // line, big number) — using it here would never match
+    // ADDITIONAL_DRIVER_ITEM_ID = 1324, so existingCharges would stay at 0
+    // and every submission would add another line. That's the bug we hit
+    // on 22 Apr 2026 where 3 hire-form submissions produced 3 line items.
+    const stockId = parseInt(String(item.LIST_ID || item.ITEM_ID || item.ID || 0));
     const qty = parseFloat(String(item.qty || item.QTY || item.quantity || item.QUANTITY || 1));
     const isVirtual = item.VIRTUAL === '1';
 
     if (categoryId === VEHICLE_CATEGORY_ID && !isVirtual) {
       vehicleCount += qty;
     }
-    if (itemId === ADDITIONAL_DRIVER_ITEM_ID) {
+    if (stockId === ADDITIONAL_DRIVER_ITEM_ID) {
       existingCharges += qty;
     }
   }

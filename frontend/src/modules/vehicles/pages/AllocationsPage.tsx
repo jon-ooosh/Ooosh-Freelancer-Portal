@@ -468,20 +468,36 @@ function RequirementSlots({
     [vehicles, requirement, allAllocations],
   )
 
+  /**
+   * Cascade-link a van to this driver AND to every other hire-form
+   * assignment that's on the same job + same van-requirement slot and
+   * doesn't yet have a vehicle. Mirrors the van ↔ driver model: a single
+   * van carries all the drivers assigned to that slot (typically 2, up to
+   * 3+ on longer tours), so staff picks once and all siblings share the
+   * vehicle_id.
+   */
   async function linkVehicleToHireForm(allocationId: string, vehicle: Vehicle) {
     try {
       setLinking(true)
       const { apiFetch } = await import('../config/api-config')
-      const resp = await apiFetch(`/api/hire-forms/${encodeURIComponent(allocationId)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ vehicle_id: vehicle.id }),
-      })
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => 'Unknown error')
-        throw new Error(`PATCH failed: ${resp.status} ${txt}`)
+
+      const siblingIds = slotAllocations
+        .filter(a => a.hireFormLinked && !a.vehicleReg && a.id !== allocationId)
+        .map(a => a.id)
+      const ids = [allocationId, ...siblingIds]
+
+      for (const id of ids) {
+        const resp = await apiFetch(`/api/hire-forms/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vehicle_id: vehicle.id }),
+        })
+        if (!resp.ok) {
+          const txt = await resp.text().catch(() => 'Unknown error')
+          throw new Error(`PATCH failed for ${id}: ${resp.status} ${txt}`)
+        }
       }
-      // Reload by soft-refreshing the page — parent pulls allocations on mount
+      // Soft-refresh so allocations reload with the updated state
       window.location.reload()
     } catch (err) {
       console.error('[allocations] Link vehicle to hire form failed:', err)
@@ -489,6 +505,50 @@ function RequirementSlots({
     } finally {
       setLinking(false)
       setLinkPickerForId(null)
+    }
+  }
+
+  /**
+   * Clear vehicle_id on this driver card AND every sibling driver card
+   * sharing the same van slot with the same currently-linked vehicle.
+   * Lets staff undo a van pick pre-book-out without touching the
+   * driver's hire form itself.
+   */
+  async function unlinkVehicleFromHireForm(allocationId: string) {
+    const anchor = slotAllocations.find(a => a.id === allocationId)
+    if (!anchor || !anchor.vehicleId) return
+    if (!confirm(`Unlink ${anchor.vehicleReg || 'this van'} from ${anchor.driverName || 'this driver'} and the other drivers on this slot? You'll be able to pick a different van.`)) {
+      return
+    }
+
+    try {
+      setLinking(true)
+      const { apiFetch } = await import('../config/api-config')
+
+      // Sibling = same slot, hire-form-created, same vehicleId (so we
+      // don't accidentally unlink drivers already moved to another van).
+      const siblingIds = slotAllocations
+        .filter(a => a.hireFormLinked && a.vehicleId === anchor.vehicleId && a.id !== allocationId)
+        .map(a => a.id)
+      const ids = [allocationId, ...siblingIds]
+
+      for (const id of ids) {
+        const resp = await apiFetch(`/api/hire-forms/${encodeURIComponent(id)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vehicle_id: null }),
+        })
+        if (!resp.ok) {
+          const txt = await resp.text().catch(() => 'Unknown error')
+          throw new Error(`PATCH failed for ${id}: ${resp.status} ${txt}`)
+        }
+      }
+      window.location.reload()
+    } catch (err) {
+      console.error('[allocations] Unlink vehicle from hire form failed:', err)
+      alert(err instanceof Error ? err.message : 'Failed to unlink vehicle')
+    } finally {
+      setLinking(false)
     }
   }
 
@@ -548,6 +608,20 @@ function RequirementSlots({
                   <span className="text-[10px] font-medium text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">
                     Hire Form
                   </span>
+                )}
+                {/* Unlink van — available on hire-form cards that have a
+                    van linked but aren't yet booked out. Cascades the
+                    clear to every driver sharing this van on this slot
+                    (per van/driver model — 1 van, N drivers). */}
+                {allocation.hireFormLinked && allocation.vehicleReg && allocation.status !== 'booked_out' && (
+                  <button
+                    onClick={() => unlinkVehicleFromHireForm(allocation.id)}
+                    disabled={linking}
+                    className="text-xs font-medium text-red-600 disabled:text-gray-400"
+                    title="Unlink this van from all drivers on this slot"
+                  >
+                    Unlink van
+                  </button>
                 )}
                 {!allocation.readOnly && (
                   <button
