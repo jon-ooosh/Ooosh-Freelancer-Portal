@@ -834,6 +834,34 @@ const templates: Record<string, EmailTemplate> = {
 
   // ── Internal ops alerts ────────────────────────────────────────────────
 
+  hire_form_fallback_alert: {
+    variant: 'internal',
+    subject: '[Hire form fallback] {{operation}} fell back to Monday',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#b91c1c;">Driver hire form app fell back to Monday.com</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        The standalone driver hire form app tried to use the OP backend for <strong>{{operation}}</strong>
+        but errored — it's now serving from Monday.com. Investigate before this becomes a trend.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fee2e2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Operation</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{operation}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Error</p>
+            <p style="margin:0 0 8px;font-size:13px;color:#1e293b;font-family:monospace;white-space:pre-wrap;">{{errorMessage}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Driver email</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;font-weight:600;">{{email}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 8px;font-size:13px;color:#64748b;line-height:1.5;">
+        Further identical events in the next hour are suppressed to avoid inbox flooding.
+        Check server logs or the hire_form_fallback_events table for full history.
+      </p>
+    `,
+  },
+
   monday_fallback_alert: {
     variant: 'internal',
     subject: '[Portal fallback] {{operation}} fell back to Monday',

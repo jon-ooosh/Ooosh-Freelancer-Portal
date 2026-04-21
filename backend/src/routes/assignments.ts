@@ -323,11 +323,14 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
     const { id } = req.params;
     const { mileage_out, fuel_level_out } = req.body;
 
-    // Per-driver gate: check if this driver's referral and excess are cleared
+    // Per-driver gate: check if this driver's referral and excess are cleared.
+    // dispatch_override lets a manager let the assignment through despite an
+    // unresolved excess — the override is recorded on the job_excess row with
+    // reason + user + timestamp for audit.
     const gateCheck = await query(
       `SELECT vha.assignment_type, vha.driver_id,
         d.requires_referral, d.referral_status,
-        je.excess_status
+        je.excess_status, je.dispatch_override
       FROM vehicle_hire_assignments vha
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
@@ -343,8 +346,12 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
         if (row.requires_referral && row.referral_status !== 'approved') {
           gateBlockers.push('Driver referral pending — must be approved before book-out');
         }
-        if (row.excess_status && !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status)) {
-          gateBlockers.push('Insurance excess not resolved — must be taken or waived before book-out');
+        if (
+          row.excess_status &&
+          !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status) &&
+          !row.dispatch_override
+        ) {
+          gateBlockers.push('Insurance excess not resolved — must be taken, waived, or manager-overridden before book-out');
         }
       }
 

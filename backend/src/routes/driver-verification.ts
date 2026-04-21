@@ -21,6 +21,7 @@ import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { uploadToR2, isR2Configured } from '../config/r2';
+import { emailService } from '../services/email-service';
 
 const router = Router();
 
@@ -1098,5 +1099,92 @@ function buildNewDriverStatus(email: string) {
     dvlaCalculatedExcess: null,
   };
 }
+
+// ============================================================================
+// POST /api/driver-verification/telemetry/monday-fallback
+// Called by the Netlify hire form app whenever an OP call fails and the
+// function falls back to Monday.com. Records every event; the first event per
+// operation per hour also fires an admin inbox notification + email to
+// info@oooshtours.co.uk. Mirrors the freelancer portal telemetry pattern.
+// ============================================================================
+
+const fallbackSchema = z.object({
+  operation: z.string().min(1).max(50),
+  errorMessage: z.string().max(2000).optional(),
+  email: z.string().email().optional(),
+  stack: z.string().max(4000).optional(),
+});
+
+router.post('/telemetry/monday-fallback', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = fallbackSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid payload' });
+      return;
+    }
+
+    const { operation, errorMessage, email, stack } = parsed.data;
+    console.warn(`[HIRE-FORM FALLBACK] operation=${operation} email=${email || 'unknown'} error=${errorMessage || 'unknown'}`);
+
+    // Always record the event for forensics
+    await query(
+      `INSERT INTO hire_form_fallback_events (operation, error_message, email)
+       VALUES ($1, $2, $3)`,
+      [operation, errorMessage || null, email || null]
+    );
+
+    // Dedup: suppress further alerts for this operation within the last hour.
+    // The one we just inserted counts — shouldAlert only when it's the first.
+    const dedupResult = await query(
+      `SELECT COUNT(*)::int AS count
+       FROM hire_form_fallback_events
+       WHERE operation = $1
+         AND created_at > NOW() - INTERVAL '1 hour'`,
+      [operation]
+    );
+    const eventsInWindow = dedupResult.rows[0].count as number;
+    const shouldAlert = eventsInWindow <= 1;
+
+    if (shouldAlert) {
+      // Inbox notifications for all admin/manager users
+      const adminUsers = await query(
+        `SELECT id FROM users
+         WHERE role IN ('admin', 'manager') AND is_active = true`
+      );
+      for (const user of adminUsers.rows) {
+        await query(
+          `INSERT INTO notifications (user_id, type, priority, title, content, action_url)
+           VALUES ($1, 'hire_form_fallback', 'high', $2, $3, $4)`,
+          [
+            user.id,
+            `Hire form app fell back to Monday: ${operation}`,
+            `${errorMessage || 'No error message'}${email ? ` — ${email}` : ''}`,
+            '/settings',
+          ]
+        ).catch((err) => {
+          console.error('Failed to insert hire_form_fallback notification:', err);
+        });
+      }
+
+      // Email to ops inbox
+      await emailService.send('hire_form_fallback_alert', {
+        to: 'info@oooshtours.co.uk',
+        variables: {
+          operation,
+          errorMessage: errorMessage || 'No error message provided',
+          email: email || 'unknown',
+        },
+      }).catch((err) => console.error('Failed to send hire_form_fallback_alert:', err));
+    }
+
+    res.json({ success: true, alerted: shouldAlert, eventsInWindow });
+    if (stack) {
+      console.warn(`[HIRE-FORM FALLBACK] stack for ${operation}:\n${stack}`);
+    }
+  } catch (error) {
+    console.error('[driver-verification] Fallback telemetry error:', error);
+    res.status(500).json({ error: 'Failed to record fallback event' });
+  }
+});
 
 export default router;
