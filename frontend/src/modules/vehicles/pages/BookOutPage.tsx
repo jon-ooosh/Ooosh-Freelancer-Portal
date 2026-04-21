@@ -373,7 +373,7 @@ export function BookOutPage() {
     const results: OpResult[] = []
     const mileageNum = parseInt(form.mileage, 10)
 
-    // ── Step 1: Create Monday.com event (with retry) ──
+    // ── Step 1: Create vehicle event (with retry) ──
     setUploadProgress('Creating event...')
     const eventResult = await withRetry(
       () =>
@@ -1596,7 +1596,7 @@ function StepDriverHire({
         onUpdate={onUpdate}
       />
 
-      {/* Hire form fields — editable, auto-populated from Monday.com */}
+      {/* Hire form fields — editable, auto-populated from the linked hire form */}
       {form.hireHopJob && (
         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-3">
           <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Hire Details</p>
@@ -1647,7 +1647,7 @@ function StepDriverHire({
           {form.excess && (
             <div className="text-xs text-gray-600">
               Excess: <strong>{form.excess}</strong>
-              <span className="ml-1 text-gray-400">(mirrored — edit in Monday.com)</span>
+              <span className="ml-1 text-gray-400">(read-only — calculated from hire form data)</span>
             </div>
           )}
         </div>
@@ -2146,7 +2146,7 @@ function StepConfirm({
       )}
 
       <p className="text-center text-xs text-gray-400">
-        This will create a Book Out event on Monday.com
+        This will record the book-out and email the hire agreement(s) to the driver(s).
       </p>
     </div>
   )

@@ -1054,14 +1054,28 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
     excessStr = `\u00A3${parseFloat(row.excess_amount_required).toLocaleString('en-GB', { minimumFractionDigits: 0 })}`;
   }
 
-  // Try to load signature from driver files (look for tag 'signature')
+  // Try to load signature from driver files. Files are stored via
+  // driver-verification's /upload endpoint with the R2 key under `url`
+  // (not `r2_key` — that was an aborted schema). We match by tag first
+  // ('signature'), falling back to label and filename-prefix to catch
+  // variations from the hire form app. `r2_key` is kept as a last-resort
+  // fallback in case any legacy records ever shipped with it.
   let signatureImage: Buffer | null = null;
   if (row.driver_files) {
     const files = typeof row.driver_files === 'string' ? JSON.parse(row.driver_files) : row.driver_files;
-    const sigFile = Array.isArray(files) ? files.find((f: any) => f.tag === 'signature') : null;
-    if (sigFile?.r2_key) {
+    const matchesSignature = (f: Record<string, unknown>) => {
+      const tag = String(f.tag || '').toLowerCase();
+      const label = String(f.label || '').toLowerCase();
+      const name = String(f.name || '').toLowerCase();
+      return tag === 'signature' || tag === 'sig' ||
+             label === 'signature' || label === 'sig' ||
+             name.startsWith('signature') || name.startsWith('sig_');
+    };
+    const sigFile = Array.isArray(files) ? files.find(matchesSignature) : null;
+    const sigKey = (sigFile?.url || sigFile?.r2_key) as string | undefined;
+    if (sigKey) {
       try {
-        const resp = await getFromR2(sigFile.r2_key);
+        const resp = await getFromR2(sigKey);
         if (resp.Body) {
           const chunks: Buffer[] = [];
           const stream = resp.Body as NodeJS.ReadableStream;
@@ -1069,10 +1083,13 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
             chunks.push(Buffer.from(chunk as Uint8Array));
           }
           signatureImage = Buffer.concat(chunks);
+          console.log(`[hire-forms] Loaded signature from R2: ${sigKey}`);
         }
       } catch (e) {
-        console.log('[hire-forms] Could not load signature from R2');
+        console.warn('[hire-forms] Could not load signature from R2:', (e as Error).message);
       }
+    } else if (Array.isArray(files) && files.length > 0) {
+      console.warn('[hire-forms] No signature file found in driver.files (tag/label/name match failed)');
     }
   }
 
