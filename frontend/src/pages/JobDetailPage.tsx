@@ -451,13 +451,20 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt }: {
   );
 }
 
-// ── Quick Assign Driver + Vehicle to Job (for testing) ──────────────────
+// ── Quick Assign Driver (+ optional Vehicle) to Job ────────────────────
+// Links a driver to a hire in one click — vehicle is optional so staff can
+// assign the driver up front and pick the vehicle later (vehicle choice is
+// a separate prep-side decision).
 function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: string; jobDate?: string; returnDate?: string; onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [drivers, setDrivers] = useState<any[]>([]);
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [driverId, setDriverId] = useState('');
+  const [driverSearch, setDriverSearch] = useState('');
+  const [driverFocus, setDriverFocus] = useState(false);
   const [vehicleId, setVehicleId] = useState('');
+  const [vehicleSearch, setVehicleSearch] = useState('');
+  const [vehicleFocus, setVehicleFocus] = useState(false);
   const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : new Date().toISOString().substring(0, 10));
   const [hireEnd, setHireEnd] = useState(returnDate ? returnDate.substring(0, 10) : '');
   const [saving, setSaving] = useState(false);
@@ -473,21 +480,25 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
     }
   }
 
+  function resetForm() {
+    setDriverId(''); setDriverSearch('');
+    setVehicleId(''); setVehicleSearch('');
+  }
+
   async function handleSubmit() {
-    if (!driverId || !vehicleId) { setError('Select both driver and vehicle'); return; }
+    if (!driverId) { setError('Select a driver'); return; }
     setSaving(true);
     setError('');
     try {
       await api.post('/hire-forms/quick-assign', {
         driver_id: driverId,
-        vehicle_id: vehicleId,
+        vehicle_id: vehicleId || undefined,          // optional
         job_id: jobId,
         hire_start: hireStart || undefined,
         hire_end: hireEnd || undefined,
       });
       setOpen(false);
-      setDriverId('');
-      setVehicleId('');
+      resetForm();
       onCreated();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed');
@@ -496,44 +507,132 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
     }
   }
 
+  const selectedDriver = drivers.find(d => d.id === driverId);
+  const selectedVehicle = vehicles.find(v => v.id === vehicleId);
+
+  // Simple case-insensitive substring filter. 150+ drivers so limit to 20 results.
+  const filteredDrivers = driverSearch.trim() === ''
+    ? drivers.slice(0, 20)
+    : drivers.filter(d =>
+        (d.full_name || '').toLowerCase().includes(driverSearch.toLowerCase()) ||
+        (d.email || '').toLowerCase().includes(driverSearch.toLowerCase())
+      ).slice(0, 20);
+
+  const filteredVehicles = vehicleSearch.trim() === ''
+    ? vehicles
+    : vehicles.filter(v =>
+        (v.reg || '').toLowerCase().includes(vehicleSearch.toLowerCase()) ||
+        (v.vehicle_type || '').toLowerCase().includes(vehicleSearch.toLowerCase()) ||
+        (v.simple_type || '').toLowerCase().includes(vehicleSearch.toLowerCase())
+      );
+
   return (
     <>
       <button
         onClick={() => { setOpen(true); loadOptions(); }}
         className="flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
       >
-        + Assign Driver & Vehicle
+        + Assign Driver
       </button>
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/50" onClick={() => setOpen(false)} />
           <div className="relative bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
-            <h3 className="text-lg font-semibold text-gray-900 mb-4">Assign Driver & Vehicle</h3>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Assign Driver to Hire</h3>
+            <p className="text-xs text-gray-500 mb-4">Vehicle is optional — assign a driver now and pick the vehicle during prep.</p>
 
             {error && <div className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded mb-3">{error}</div>}
 
             <div className="space-y-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Driver</label>
-                <select value={driverId} onChange={e => setDriverId(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                  <option value="">Select driver...</option>
-                  {drivers.map(d => (
-                    <option key={d.id} value={d.id}>{d.full_name} ({d.email || 'no email'}) — {d.licence_points || 0} pts</option>
-                  ))}
-                </select>
+              {/* Driver picker — searchable */}
+              <div className="relative">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Driver <span className="text-red-500">*</span></label>
+                {selectedDriver ? (
+                  <div className="flex items-center justify-between border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50">
+                    <span>
+                      <span className="font-medium">{selectedDriver.full_name}</span>
+                      <span className="text-gray-500"> ({selectedDriver.email || 'no email'}) — {selectedDriver.licence_points || 0} pts</span>
+                    </span>
+                    <button type="button" onClick={() => { setDriverId(''); setDriverSearch(''); }}
+                      className="text-gray-400 hover:text-gray-600 ml-2" aria-label="Clear driver">&times;</button>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={driverSearch}
+                      onChange={e => setDriverSearch(e.target.value)}
+                      onFocus={() => setDriverFocus(true)}
+                      onBlur={() => setTimeout(() => setDriverFocus(false), 150)}
+                      placeholder="Search by name or email..."
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                    {driverFocus && filteredDrivers.length > 0 && (
+                      <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+                        {filteredDrivers.map(d => (
+                          <button
+                            key={d.id}
+                            type="button"
+                            onClick={() => { setDriverId(d.id); setDriverSearch(''); }}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
+                          >
+                            <div className="font-medium text-gray-900">{d.full_name}</div>
+                            <div className="text-xs text-gray-500">{d.email || 'no email'} — {d.licence_points || 0} pts</div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {driverFocus && filteredDrivers.length === 0 && driverSearch.trim() !== '' && (
+                      <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg px-3 py-2 text-sm text-gray-500">No matching drivers</div>
+                    )}
+                  </>
+                )}
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Vehicle</label>
-                <select value={vehicleId} onChange={e => setVehicleId(e.target.value)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-                  <option value="">Select vehicle...</option>
-                  {vehicles.map(v => (
-                    <option key={v.id} value={v.id}>{v.reg} — {v.vehicle_type || v.simple_type || 'Unknown'} ({v.hire_status})</option>
-                  ))}
-                </select>
+              {/* Vehicle picker — searchable, optional */}
+              <div className="relative">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Vehicle <span className="text-gray-400 text-xs font-normal">(optional)</span></label>
+                {selectedVehicle ? (
+                  <div className="flex items-center justify-between border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50">
+                    <span>
+                      <span className="font-medium">{selectedVehicle.reg}</span>
+                      <span className="text-gray-500"> — {selectedVehicle.vehicle_type || selectedVehicle.simple_type || 'Unknown'}</span>
+                    </span>
+                    <button type="button" onClick={() => { setVehicleId(''); setVehicleSearch(''); }}
+                      className="text-gray-400 hover:text-gray-600 ml-2" aria-label="Clear vehicle">&times;</button>
+                  </div>
+                ) : (
+                  <>
+                    <input
+                      type="text"
+                      value={vehicleSearch}
+                      onChange={e => setVehicleSearch(e.target.value)}
+                      onFocus={() => setVehicleFocus(true)}
+                      onBlur={() => setTimeout(() => setVehicleFocus(false), 150)}
+                      placeholder="Search by reg or type..."
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                    {vehicleFocus && filteredVehicles.length > 0 && (
+                      <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+                        {filteredVehicles.map(v => (
+                          <button
+                            key={v.id}
+                            type="button"
+                            onClick={() => { setVehicleId(v.id); setVehicleSearch(''); }}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
+                          >
+                            <div className="font-medium text-gray-900">{v.reg}</div>
+                            <div className="text-xs text-gray-500">{v.vehicle_type || v.simple_type || 'Unknown'}</div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {vehicleFocus && filteredVehicles.length === 0 && vehicleSearch.trim() !== '' && (
+                      <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg px-3 py-2 text-sm text-gray-500">No matching vehicles</div>
+                    )}
+                  </>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -549,10 +648,10 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
             </div>
 
             <div className="flex justify-end gap-2 mt-5">
-              <button onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
-              <button onClick={handleSubmit} disabled={saving}
+              <button onClick={() => { setOpen(false); resetForm(); }} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={handleSubmit} disabled={saving || !driverId}
                 className="px-4 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium disabled:opacity-50">
-                {saving ? 'Creating...' : 'Create Assignment'}
+                {saving ? 'Creating...' : (vehicleId ? 'Assign Driver & Vehicle' : 'Assign Driver')}
               </button>
             </div>
           </div>

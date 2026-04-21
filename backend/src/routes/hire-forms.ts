@@ -614,7 +614,7 @@ router.get('/active', authenticate, async (_req: AuthRequest, res: Response) => 
 
 const quickAssignSchema = z.object({
   driver_id: z.string().uuid(),
-  vehicle_id: z.string().uuid(),
+  vehicle_id: z.string().uuid().nullable().optional(),   // optional — staff can link driver-only first, pick the vehicle later
   job_id: z.string().uuid(),
   hire_start: z.string().optional(),
   hire_end: z.string().optional(),
@@ -630,7 +630,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     const hhJobId = jobResult.rows[0]?.hh_job_number || null;
     const hhJobName = jobResult.rows[0]?.job_name || null;
 
-    // Create assignment
+    // Create assignment (vehicle_id may be null — DB column is nullable)
     const result = await query(
       `INSERT INTO vehicle_hire_assignments (
         vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
@@ -641,7 +641,7 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
       ) VALUES ($1, $2, $3, $4, $5, 'self_drive', 'confirmed', NOW(), $6, $7, $8, $9)
       RETURNING *`,
       [
-        f.vehicle_id, f.job_id, hhJobId, hhJobName,
+        f.vehicle_id || null, f.job_id, hhJobId, hhJobName,
         f.driver_id,
         f.hire_start || null, f.hire_end || null, f.client_email || null,
         req.user!.id,
@@ -681,8 +681,13 @@ router.get('/options/lists', authenticate, async (_req: AuthRequest, res: Respon
     const drivers = await query(
       `SELECT id, full_name, email, licence_points FROM drivers WHERE is_active = true ORDER BY full_name`
     );
+    // Active fleet only — matches the canonical filter used elsewhere
+    // (dashboard.ts, compliance-checker.ts, vehicles.ts fleet overview).
     const vehicles = await query(
-      `SELECT id, reg, vehicle_type, simple_type, hire_status FROM fleet_vehicles WHERE hire_status != 'Sold' ORDER BY reg`
+      `SELECT id, reg, vehicle_type, simple_type, hire_status
+       FROM fleet_vehicles
+       WHERE is_active = true AND fleet_group != 'old_sold'
+       ORDER BY reg`
     );
     res.json({
       drivers: drivers.rows,
