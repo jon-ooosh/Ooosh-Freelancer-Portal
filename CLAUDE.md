@@ -736,7 +736,7 @@ The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from M
 - [ ] **API key auth vuln — MUST FIX:** `authenticateFlexible` in `money.ts` only matches `apiKey.substring(0, 8)` against `key_prefix`. Any string starting with `ppk_live` authenticates. Needs full-key hash comparison.
 - [ ] **Refund path doesn't unwind excess record:** `payment-event` with `payment_type: 'refund'` or `'excess_refund'` records the payment in `job_payments` but doesn't flip `excess_status` back from `pre_auth`/`taken`. Staff must manually mark reimbursed on Money tab.
 - [ ] **Pre-auth capture vs release:** portal's `admin-claim-preauth.js` fires `payment_type: 'excess'` to capture a hold as a real charge. Works in common case but on pre_auth records `amount_taken` is REPLACED (not added), so split-capture scenarios could produce odd aggregates.
-- [ ] **Stripe pre-auth expiry:** ~7-day auto-void. Portal takes pre-auths inside a 4-day window so usually fine; no OP polling. Flag only.
+- [ ] **Stripe pre-auth expiry scheduler — FAIRLY HIGH PRIORITY (21 Apr 2026):** OP currently trusts a stored `excess_status = 'pre_auth'` indefinitely, but Stripe auto-voids holds after ~7 days and Ooosh policy is to re-take inside 4 days. Need a daily scheduler task that scans `job_excess` records with `status = 'pre_auth'` and a `payment_date` (or `updated_at`) older than 4 days, flips them to a new `expired` (or `pre_auth_expired`) status, and fires a bell notification + email to staff prompting re-take. Touches `backend/src/config/scheduler.ts`, `backend/src/routes/excess.ts`, probably a new excess status value in migration. See handoff 21 Apr 2026 open item #3.
 - [ ] **Rolled-over balance linking:** recording a payment with method `rolled_over` updates the current job's excess to `taken` but doesn't mark the *previous* job's excess as `rolled_over` — two-step manual process. Could be automated when client ledger integration lands.
 
 *Excess lifecycle — "three births" model (for future reference):*
@@ -1960,6 +1960,7 @@ Self-drive hires require an insurance excess. The amount is calculated by the dr
 | HireHop job sync | Every 30 minutes | Pull active jobs from HireHop + sync line items + derive requirements |
 | Chase auto-mover | Every 15 minutes | Move overdue-chase jobs to "chasing" column |
 | On-demand job sync | On page load / button | Per-job: fresh line item fetch from HH, re-derive requirements (non-blocking) |
+| Pre-auth expiry check | Daily (TODO — not yet built, fairly-high priority) | Scan `job_excess` with `status='pre_auth'` older than 4 days, flip to expired + notify staff to re-take. Stripe auto-voids at ~7 days; Ooosh policy re-takes inside 4. |
 
 ## HireHop Integration
 

@@ -480,12 +480,21 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
       return;
     }
 
-    // Build update fields
+    // Build update fields.
+    //
+    // On approve we clear `requires_referral` outright — the referral has
+    // been processed and the driver is now a normal approved driver; the UI
+    // no longer needs to treat them as a referral case. Decline keeps the
+    // flag set so the "Not Approved" label (which is gated on
+    // requires_referral=true && referral_status='declined') stays accurate.
     const updates: Record<string, unknown> = {
       referral_status: outcome,
       referral_notes: [driver.referral_notes, notes].filter(Boolean).join(' | '),
       insurance_status: outcome === 'approved' ? 'Approved' : 'Failed',
     };
+    if (outcome === 'approved') {
+      updates.requires_referral = false;
+    }
 
     // If approved, optionally extend validity dates
     if (outcome === 'approved' && extend_dates) {

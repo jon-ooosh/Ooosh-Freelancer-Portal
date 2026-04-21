@@ -1039,12 +1039,29 @@ router.post('/:id/generate-pdf', authenticateOrApiKey, async (req: AuthRequest, 
       return res.status(404).json({ error: 'Hire form not found' });
     }
 
-    // Gate: only email the hire agreement PDF once a vehicle has been
-    // assigned. A PDF generated at signature time (before van allocation)
-    // has "TBC" for vehicle reg — emailing that to the driver is premature
-    // and confusing. The definitive hire agreement email fires at book-out
-    // instead, by which point the vehicle is known.
-    const sendEmail = sendEmailRequested && !!formData.vehicleReg && formData.vehicleReg !== 'TBC';
+    // Gate: the hire agreement PDF is only meaningful once a vehicle has
+    // been assigned. Without a vehicle reg, the PDF would say "TBC", which
+    // is neither a valid record nor appropriate to send to the driver.
+    // The hire form app calls this endpoint at signature time as part of
+    // its A→B→C chain — in that case we silently no-op and let the
+    // definitive generation happen at book-out (or via ad-hoc staff action
+    // after a vehicle is linked).
+    const hasVehicle = !!formData.vehicleReg && formData.vehicleReg !== 'TBC';
+    if (!hasVehicle) {
+      console.log(`[hire-forms] PDF generation skipped for ${id}: no vehicle assigned yet`);
+      return res.json({
+        data: {
+          pdf_key: null,
+          filename: null,
+          size: 0,
+          email_sent: false,
+          skipped: true,
+          reason: 'no_vehicle_assigned',
+        },
+      });
+    }
+
+    const sendEmail = sendEmailRequested;
 
     // Generate PDF
     const { pdfBytes, filename } = await generateHireFormPdf(formData);
