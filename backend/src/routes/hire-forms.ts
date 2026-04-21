@@ -848,7 +848,7 @@ const patchSchema = z.object({
 
 router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const updates = req.body;
 
     // Build dynamic SET clause
