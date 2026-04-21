@@ -73,73 +73,73 @@ if (!process.env.DATABASE_URL) {
 
 // ── Column mapping ───────────────────────────────────────────────────────
 //
-// Best-guess column IDs based on the hire-form-repointing spec and Monday
-// naming conventions. Run `--discover` first to print every column on the
-// board; if any of these are wrong, update the mapping here and re-run.
+// Real column IDs from Monday Board A (9798399405), verified via --discover
+// on 21 Apr 2026. The board has an "IGNORE EVERYTHING PAST HERE >>>" divider
+// column (color_mkxw8p5b) — columns BELOW it are Monday workaround helpers
+// and are not migrated.
+//
+// NOT migrated (deliberately):
+//   - Derived per-doc status columns (Licence/POA/DVLA/Passport/POA system-set
+//     status) — these are computed from dates at query time in OP.
+//   - "Calculated xs" — excess is computed live from DVLA points.
+//   - File columns — handled by migrate-monday-driver-files.ts (Phase 4).
+//   - "Driver country" — redundant with nationality.
+//   - Everything below the divider (poa1URL/poa2URL, Licence Ending, duplicate
+//     Driver Name, Created Date, Last Updated, helper-label columns).
 
 const DRIVER_COLS = {
   // Identity
-  email: 'email',                                // Monday default email column
-  phone: 'phone',                                // Monday default phone column
-  phoneCountry: 'phoneCountry',
-  firstName: 'firstName',
-  lastName: 'lastName',
-  dateOfBirth: 'dateOfBirth',
-  nationality: 'nationality',
+  email: 'email_mktrgzj',
+  phoneCountry: 'text_mkty5hzk',
+  phoneNumber: 'text_mktrfqe2',
+  firstName: 'text_mkwhc7a',
+  lastName: 'text_mkwhm2n5',
+  dateOfBirth: 'date_mktr2x01',
+  nationality: 'text_mktrdh72',
 
   // Address
-  homeAddress: 'homeAddress',
-  licenseAddress: 'licenseAddress',
+  homeAddress: 'long_text_mktr2jhb',
+  licenceAddress: 'long_text_mktrs5a0',
 
   // Licence
-  licenseNumber: 'licenseNumber',
-  licenseType: 'licenseType',
-  licenseIssueCountry: 'licenseIssueCountry',
-  licenseIssuedBy: 'licenseIssuedBy',
-  licenseValidFrom: 'licenseValidFrom',
-  licenseValidTo: 'licenseValidTo',
-  licenseNextCheckDue: 'licenseNextCheckDue',
-  licensePoints: 'licensePoints',
-  licenseEndorsements: 'licenseEndorsements',
-  datePassedTest: 'datePassedTest',
+  licenceNumber: 'text_mktrrv38',
+  licenceIssuedBy: 'text_mktrz69',
+  licenceValidFrom: 'date_mktrmdx5',
+  licenceValidTo: 'date_mktrwk94',
+  licenceNextCheckDue: 'date_mktsbgpy',
+  licencePoints: 'text_mkwfhvve',
+  licenceEndorsements: 'text_mkwf6e1n',
+  datePassedTest: 'date_mktr93jq',
 
   // Document expiry dates
-  poa1ValidUntil: 'poa1ValidUntil',
-  poa2ValidUntil: 'poa2ValidUntil',
-  dvlaValidUntil: 'dvlaValidUntil',
-  passportValidUntil: 'passportValidUntil',
+  poa1ValidUntil: 'date_mktr1keg',
+  poa2ValidUntil: 'date_mktra1a6',
+  dvlaValidUntil: 'date_mktrmjfr',
+  passportValidUntil: 'date_mkvxy5t1',
 
   // Document providers
-  poa1Provider: 'poa1Provider',
-  poa2Provider: 'poa2Provider',
+  poa1Provider: 'text_mkyarprf',
+  poa2Provider: 'text_mkyapcr6',
 
-  // DVLA
-  dvlaCheckCode: 'dvlaCheckCode',
-  dvlaCheckDate: 'dvlaCheckDate',
+  // Questionnaire (statuses with Yes/No text)
+  hasDisability: 'status',                 // the default "status" column — repurposed
+  hasConvictions: 'color_mktr4w0',
+  hasProsecution: 'color_mktrbt3x',
+  hasAccidents: 'color_mktraeas',
+  hasInsuranceIssues: 'color_mktrpe6q',
+  hasDrivingBan: 'color_mktr2t8a',
+  additionalDetails: 'long_text_mktr1a66',
 
-  // Questionnaire
-  hasDisability: 'hasDisability',
-  hasConvictions: 'hasConvictions',
-  hasProsecution: 'hasProsecution',
-  hasAccidents: 'hasAccidents',
-  hasInsuranceIssues: 'hasInsuranceIssues',
-  hasDrivingBan: 'hasDrivingBan',
-  additionalDetails: 'additionalDetails',
-
-  // Statuses
-  insuranceStatus: 'insuranceStatus',
-  overallStatus: 'overallStatus',
-  requiresReferral: 'requiresReferral',
-  referralStatus: 'referralStatus',
-  referralDate: 'referralDate',
-  referralNotes: 'referralNotes',
+  // Aggregated statuses
+  insuranceStatus: 'color_mkxvxskq',       // "Approved" / "Referral" / "Failed"
+  overallStatus: 'color_mkye2thx',         // "Approved" / "Action Required" / "Not Approved"
 
   // iDenfy
-  idenfyCheckDate: 'idenfyCheckDate',
-  idenfyScanRef: 'idenfyScanRef',
+  idenfyCheckDate: 'text_mkvv2z8p',
+  idenfyScanRef: 'text_mkwbn8bx',
 
   // Signature
-  signatureDate: 'signatureDate',
+  signatureDate: 'date_mkw4apb7',
 } as const;
 
 // ── Monday helpers ───────────────────────────────────────────────────────
@@ -340,13 +340,12 @@ interface DriverRow {
   address_full: string | null;
   licence_address: string | null;
   licence_number: string | null;
-  licence_type: string | null;
-  licence_issue_country: string | null;
   licence_issued_by: string | null;
   licence_valid_from: string | null;
   licence_valid_to: string | null;
   licence_next_check_due: string | null;
   licence_points: number;
+  licence_endorsements: unknown[];
   date_passed_test: string | null;
   poa1_valid_until: string | null;
   poa2_valid_until: string | null;
@@ -354,8 +353,6 @@ interface DriverRow {
   passport_valid_until: string | null;
   poa1_provider: string | null;
   poa2_provider: string | null;
-  dvla_check_code: string | null;
-  dvla_check_date: string | null;
   has_disability: boolean;
   has_convictions: boolean;
   has_prosecution: boolean;
@@ -367,44 +364,59 @@ interface DriverRow {
   overall_status: string | null;
   requires_referral: boolean;
   referral_status: string | null;
-  referral_date: string | null;
-  referral_notes: string | null;
   idenfy_check_date: string | null;
   idenfy_scan_ref: string | null;
   signature_date: string | null;
+}
+
+/** Parse Monday's licenceEndorsements text into a JSON array.
+ *  Values look like '[{"code":"SP30","points":3,...}]' or literally "None".
+ *  Returns [] for missing/None/invalid. */
+function parseEndorsements(raw: string | null): unknown[] {
+  if (!raw) return [];
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'none') return [];
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function itemToDriver(item: MondayItem): DriverRow | { skip: string } {
   const email = cvEmail(item, DRIVER_COLS.email);
   if (!email) return { skip: 'no email' };
 
-  // Compose full_name from firstName + lastName if split columns, else use item.name
+  // Compose full_name: prefer firstName + lastName, fall back to item.name.
   const firstName = cvText(item, DRIVER_COLS.firstName);
   const lastName = cvText(item, DRIVER_COLS.lastName);
   let fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
   if (!fullName) fullName = item.name?.trim() || '';
   if (!fullName) return { skip: 'no name' };
 
-  const { phone, country: phoneCountryFromPhone } = cvPhone(item, DRIVER_COLS.phone);
+  // Derive referral state from insurance_status — Monday doesn't have a
+  // separate column, referrals are implied by insurance_status = "Referral".
+  const insuranceStatus = cvText(item, DRIVER_COLS.insuranceStatus);
+  const requiresReferral = insuranceStatus?.toLowerCase() === 'referral';
 
   return {
     monday_item_id: item.id,
     full_name: fullName,
     email,
-    phone,
-    phone_country: cvText(item, DRIVER_COLS.phoneCountry) || phoneCountryFromPhone,
+    phone: cvText(item, DRIVER_COLS.phoneNumber),
+    phone_country: cvText(item, DRIVER_COLS.phoneCountry),
     date_of_birth: cvDate(item, DRIVER_COLS.dateOfBirth),
     nationality: cvText(item, DRIVER_COLS.nationality),
     address_full: cvText(item, DRIVER_COLS.homeAddress),
-    licence_address: cvText(item, DRIVER_COLS.licenseAddress),
-    licence_number: cvText(item, DRIVER_COLS.licenseNumber),
-    licence_type: cvText(item, DRIVER_COLS.licenseType),
-    licence_issue_country: cvText(item, DRIVER_COLS.licenseIssueCountry),
-    licence_issued_by: cvText(item, DRIVER_COLS.licenseIssuedBy),
-    licence_valid_from: cvDate(item, DRIVER_COLS.licenseValidFrom),
-    licence_valid_to: cvDate(item, DRIVER_COLS.licenseValidTo),
-    licence_next_check_due: cvDate(item, DRIVER_COLS.licenseNextCheckDue),
-    licence_points: cvNumber(item, DRIVER_COLS.licensePoints) || 0,
+    licence_address: cvText(item, DRIVER_COLS.licenceAddress),
+    licence_number: cvText(item, DRIVER_COLS.licenceNumber),
+    licence_issued_by: cvText(item, DRIVER_COLS.licenceIssuedBy),
+    licence_valid_from: cvDate(item, DRIVER_COLS.licenceValidFrom),
+    licence_valid_to: cvDate(item, DRIVER_COLS.licenceValidTo),
+    licence_next_check_due: cvDate(item, DRIVER_COLS.licenceNextCheckDue),
+    licence_points: cvNumber(item, DRIVER_COLS.licencePoints) || 0,
+    licence_endorsements: parseEndorsements(cvText(item, DRIVER_COLS.licenceEndorsements)),
     date_passed_test: cvDate(item, DRIVER_COLS.datePassedTest),
     poa1_valid_until: cvDate(item, DRIVER_COLS.poa1ValidUntil),
     poa2_valid_until: cvDate(item, DRIVER_COLS.poa2ValidUntil),
@@ -412,8 +424,6 @@ function itemToDriver(item: MondayItem): DriverRow | { skip: string } {
     passport_valid_until: cvDate(item, DRIVER_COLS.passportValidUntil),
     poa1_provider: cvText(item, DRIVER_COLS.poa1Provider),
     poa2_provider: cvText(item, DRIVER_COLS.poa2Provider),
-    dvla_check_code: cvText(item, DRIVER_COLS.dvlaCheckCode),
-    dvla_check_date: cvDate(item, DRIVER_COLS.dvlaCheckDate),
     has_disability: cvBool(item, DRIVER_COLS.hasDisability),
     has_convictions: cvBool(item, DRIVER_COLS.hasConvictions),
     has_prosecution: cvBool(item, DRIVER_COLS.hasProsecution),
@@ -421,12 +431,10 @@ function itemToDriver(item: MondayItem): DriverRow | { skip: string } {
     has_insurance_issues: cvBool(item, DRIVER_COLS.hasInsuranceIssues),
     has_driving_ban: cvBool(item, DRIVER_COLS.hasDrivingBan),
     additional_details: cvText(item, DRIVER_COLS.additionalDetails),
-    insurance_status: cvText(item, DRIVER_COLS.insuranceStatus),
+    insurance_status: insuranceStatus,
     overall_status: cvText(item, DRIVER_COLS.overallStatus),
-    requires_referral: cvBool(item, DRIVER_COLS.requiresReferral),
-    referral_status: cvText(item, DRIVER_COLS.referralStatus),
-    referral_date: cvDate(item, DRIVER_COLS.referralDate),
-    referral_notes: cvText(item, DRIVER_COLS.referralNotes),
+    requires_referral: requiresReferral,
+    referral_status: requiresReferral ? 'pending' : null,
     idenfy_check_date: cvText(item, DRIVER_COLS.idenfyCheckDate),
     idenfy_scan_ref: cvText(item, DRIVER_COLS.idenfyScanRef),
     signature_date: cvDate(item, DRIVER_COLS.signatureDate),
@@ -454,13 +462,12 @@ async function upsertDriver(pool: Pool, d: DriverRow): Promise<'inserted' | 'upd
     ['address_full', d.address_full],
     ['licence_address', d.licence_address],
     ['licence_number', d.licence_number],
-    ['licence_type', d.licence_type],
-    ['licence_issue_country', d.licence_issue_country],
     ['licence_issued_by', d.licence_issued_by],
     ['licence_valid_from', d.licence_valid_from],
     ['licence_valid_to', d.licence_valid_to],
     ['licence_next_check_due', d.licence_next_check_due],
     ['licence_points', d.licence_points],
+    ['licence_endorsements', JSON.stringify(d.licence_endorsements)],
     ['date_passed_test', d.date_passed_test],
     ['poa1_valid_until', d.poa1_valid_until],
     ['poa2_valid_until', d.poa2_valid_until],
@@ -468,8 +475,6 @@ async function upsertDriver(pool: Pool, d: DriverRow): Promise<'inserted' | 'upd
     ['passport_valid_until', d.passport_valid_until],
     ['poa1_provider', d.poa1_provider],
     ['poa2_provider', d.poa2_provider],
-    ['dvla_check_code', d.dvla_check_code],
-    ['dvla_check_date', d.dvla_check_date],
     ['has_disability', d.has_disability],
     ['has_convictions', d.has_convictions],
     ['has_prosecution', d.has_prosecution],
@@ -481,8 +486,6 @@ async function upsertDriver(pool: Pool, d: DriverRow): Promise<'inserted' | 'upd
     ['overall_status', d.overall_status],
     ['requires_referral', d.requires_referral],
     ['referral_status', d.referral_status],
-    ['referral_date', d.referral_date],
-    ['referral_notes', d.referral_notes],
     ['idenfy_check_date', d.idenfy_check_date],
     ['idenfy_scan_ref', d.idenfy_scan_ref],
     ['signature_date', d.signature_date],
@@ -494,12 +497,17 @@ async function upsertDriver(pool: Pool, d: DriverRow): Promise<'inserted' | 'upd
     // NOTE: booleans (has_*, requires_referral) bypass COALESCE because
     // `false` would be preserved as non-null — use --force or trust the Monday
     // value. We trust Monday here (Monday is source of truth at migration time).
+    // Fields where Monday is authoritative — always overwrite, ignore COALESCE.
+    // Booleans and points can't be meaningfully COALESCE'd (false/0 aren't
+    // null but also aren't "authoritative"). licence_endorsements defaults to
+    // '[]'::jsonb which is non-null, so it would never update via COALESCE.
     const alwaysOverwrite = new Set([
       'monday_item_id',
       'has_disability', 'has_convictions', 'has_prosecution',
       'has_accidents', 'has_insurance_issues', 'has_driving_ban',
       'requires_referral',
       'licence_points',
+      'licence_endorsements',
     ]);
     const setParts: string[] = [];
     const params: unknown[] = [];
@@ -608,18 +616,25 @@ async function main() {
       for (const row of sampleRows) {
         console.log(`\n── ${row.full_name} <${row.email}> (Monday ${row.monday_item_id})`);
         const visible: [string, unknown][] = [
-          ['phone', row.phone],
+          ['phone', `${row.phone_country || ''}${row.phone || ''}`.trim()],
+          ['date_of_birth', row.date_of_birth],
+          ['nationality', row.nationality],
           ['licence_number', row.licence_number],
+          ['licence_issued_by', row.licence_issued_by],
           ['licence_valid_to', row.licence_valid_to],
           ['licence_next_check_due', row.licence_next_check_due],
           ['licence_points', row.licence_points],
+          ['licence_endorsements', row.licence_endorsements.length > 0 ? JSON.stringify(row.licence_endorsements) : null],
           ['poa1_valid_until', row.poa1_valid_until],
           ['poa2_valid_until', row.poa2_valid_until],
+          ['poa1_provider', row.poa1_provider],
+          ['poa2_provider', row.poa2_provider],
           ['dvla_valid_until', row.dvla_valid_until],
           ['passport_valid_until', row.passport_valid_until],
           ['insurance_status', row.insurance_status],
           ['overall_status', row.overall_status],
           ['requires_referral', row.requires_referral],
+          ['signature_date', row.signature_date],
         ];
         for (const [k, v] of visible) {
           if (v !== null && v !== '' && v !== false) {
