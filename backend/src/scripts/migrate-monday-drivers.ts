@@ -353,6 +353,7 @@ interface DriverRow {
   passport_valid_until: string | null;
   poa1_provider: string | null;
   poa2_provider: string | null;
+  dvla_check_date: string | null;
   has_disability: boolean;
   has_convictions: boolean;
   has_prosecution: boolean;
@@ -364,6 +365,7 @@ interface DriverRow {
   overall_status: string | null;
   requires_referral: boolean;
   referral_status: string | null;
+  referral_notes: string | null;
   idenfy_check_date: string | null;
   idenfy_scan_ref: string | null;
   signature_date: string | null;
@@ -384,6 +386,17 @@ function parseEndorsements(raw: string | null): unknown[] {
   }
 }
 
+/** Derive dvla_check_date from dvla_valid_until by subtracting 30 days.
+ *  Matches the convention used in driver-verification.ts:807 + DriverDetailPage:224.
+ *  Returns null if validUntil is missing or unparseable. */
+function deriveDvlaCheckDate(validUntil: string | null): string | null {
+  if (!validUntil) return null;
+  const d = new Date(validUntil);
+  if (isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() - 30);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
 function itemToDriver(item: MondayItem): DriverRow | { skip: string } {
   const email = cvEmail(item, DRIVER_COLS.email);
   if (!email) return { skip: 'no email' };
@@ -395,10 +408,33 @@ function itemToDriver(item: MondayItem): DriverRow | { skip: string } {
   if (!fullName) fullName = item.name?.trim() || '';
   if (!fullName) return { skip: 'no name' };
 
-  // Derive referral state from insurance_status — Monday doesn't have a
-  // separate column, referrals are implied by insurance_status = "Referral".
+  // Referral derivation:
+  //   - Directly from insurance_status === "Referral" (standard route — DVLA
+  //     points or questionnaire triggered it)
+  //   - ALSO from overall_status when it's anything non-"Approved" (e.g.
+  //     "Manual review needed", "Action Required"). These are human overrides
+  //     on Monday that don't surface via insurance_status. We flag them as
+  //     pending referrals so staff can clear them via the DriverDetailPage
+  //     resolve-referral panel.
+  //
+  // overall_status itself is NOT migrated — OP computes it live from doc dates
+  // and referral state, so storing a Monday-computed value would go stale.
   const insuranceStatus = cvText(item, DRIVER_COLS.insuranceStatus);
-  const requiresReferral = insuranceStatus?.toLowerCase() === 'referral';
+  const overallStatusRaw = cvText(item, DRIVER_COLS.overallStatus);
+  const insuranceReferral = insuranceStatus?.toLowerCase() === 'referral';
+  const overallReferral = !!overallStatusRaw && overallStatusRaw.toLowerCase() !== 'approved';
+  const requiresReferral = insuranceReferral || overallReferral;
+
+  let referralNotes: string | null = null;
+  if (requiresReferral) {
+    if (insuranceReferral) {
+      referralNotes = 'Migrated from Monday.com — insurance_status was "Referral". Resolve via panel below or clear if no longer applicable.';
+    } else {
+      referralNotes = `Migrated from Monday.com — original overall status: "${overallStatusRaw}". Resolve via panel below or clear if no longer applicable.`;
+    }
+  }
+
+  const dvlaValidUntil = cvDate(item, DRIVER_COLS.dvlaValidUntil);
 
   return {
     monday_item_id: item.id,
@@ -420,10 +456,11 @@ function itemToDriver(item: MondayItem): DriverRow | { skip: string } {
     date_passed_test: cvDate(item, DRIVER_COLS.datePassedTest),
     poa1_valid_until: cvDate(item, DRIVER_COLS.poa1ValidUntil),
     poa2_valid_until: cvDate(item, DRIVER_COLS.poa2ValidUntil),
-    dvla_valid_until: cvDate(item, DRIVER_COLS.dvlaValidUntil),
+    dvla_valid_until: dvlaValidUntil,
     passport_valid_until: cvDate(item, DRIVER_COLS.passportValidUntil),
     poa1_provider: cvText(item, DRIVER_COLS.poa1Provider),
     poa2_provider: cvText(item, DRIVER_COLS.poa2Provider),
+    dvla_check_date: deriveDvlaCheckDate(dvlaValidUntil),
     has_disability: cvBool(item, DRIVER_COLS.hasDisability),
     has_convictions: cvBool(item, DRIVER_COLS.hasConvictions),
     has_prosecution: cvBool(item, DRIVER_COLS.hasProsecution),
@@ -432,9 +469,10 @@ function itemToDriver(item: MondayItem): DriverRow | { skip: string } {
     has_driving_ban: cvBool(item, DRIVER_COLS.hasDrivingBan),
     additional_details: cvText(item, DRIVER_COLS.additionalDetails),
     insurance_status: insuranceStatus,
-    overall_status: cvText(item, DRIVER_COLS.overallStatus),
+    overall_status: null,                         // let OP compute live
     requires_referral: requiresReferral,
     referral_status: requiresReferral ? 'pending' : null,
+    referral_notes: referralNotes,
     idenfy_check_date: cvText(item, DRIVER_COLS.idenfyCheckDate),
     idenfy_scan_ref: cvText(item, DRIVER_COLS.idenfyScanRef),
     signature_date: cvDate(item, DRIVER_COLS.signatureDate),
@@ -475,6 +513,7 @@ async function upsertDriver(pool: Pool, d: DriverRow): Promise<'inserted' | 'upd
     ['passport_valid_until', d.passport_valid_until],
     ['poa1_provider', d.poa1_provider],
     ['poa2_provider', d.poa2_provider],
+    ['dvla_check_date', d.dvla_check_date],
     ['has_disability', d.has_disability],
     ['has_convictions', d.has_convictions],
     ['has_prosecution', d.has_prosecution],
@@ -486,6 +525,7 @@ async function upsertDriver(pool: Pool, d: DriverRow): Promise<'inserted' | 'upd
     ['overall_status', d.overall_status],
     ['requires_referral', d.requires_referral],
     ['referral_status', d.referral_status],
+    ['referral_notes', d.referral_notes],
     ['idenfy_check_date', d.idenfy_check_date],
     ['idenfy_scan_ref', d.idenfy_scan_ref],
     ['signature_date', d.signature_date],
@@ -501,6 +541,12 @@ async function upsertDriver(pool: Pool, d: DriverRow): Promise<'inserted' | 'upd
     // Booleans and points can't be meaningfully COALESCE'd (false/0 aren't
     // null but also aren't "authoritative"). licence_endorsements defaults to
     // '[]'::jsonb which is non-null, so it would never update via COALESCE.
+    // overall_status is always set to null by the migration (OP computes it
+    // live) — needs to overwrite any stale value from a prior run.
+    //
+    // NOT in alwaysOverwrite (intentional): referral_status, referral_notes,
+    // dvla_check_date — staff resolutions and hire-form data should persist
+    // across re-runs of the migration (COALESCE preserves them).
     const alwaysOverwrite = new Set([
       'monday_item_id',
       'has_disability', 'has_convictions', 'has_prosecution',
@@ -508,6 +554,7 @@ async function upsertDriver(pool: Pool, d: DriverRow): Promise<'inserted' | 'upd
       'requires_referral',
       'licence_points',
       'licence_endorsements',
+      'overall_status',
     ]);
     const setParts: string[] = [];
     const params: unknown[] = [];
@@ -630,10 +677,12 @@ async function main() {
           ['poa1_provider', row.poa1_provider],
           ['poa2_provider', row.poa2_provider],
           ['dvla_valid_until', row.dvla_valid_until],
+          ['dvla_check_date (derived)', row.dvla_check_date],
           ['passport_valid_until', row.passport_valid_until],
           ['insurance_status', row.insurance_status],
-          ['overall_status', row.overall_status],
           ['requires_referral', row.requires_referral],
+          ['referral_status', row.referral_status],
+          ['referral_notes', row.referral_notes],
           ['signature_date', row.signature_date],
         ];
         for (const [k, v] of visible) {
