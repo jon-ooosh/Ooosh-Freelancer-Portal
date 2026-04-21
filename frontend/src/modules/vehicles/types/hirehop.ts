@@ -110,6 +110,7 @@ export interface VanAllocation {
   vehicleReg: string
   driverName: string | null
   status: 'soft' | 'confirmed'  // soft = pre-assigned, confirmed = booked out
+  rawStatus?: 'soft' | 'confirmed' | 'booked_out' | 'active' | 'returned' | 'cancelled'  // underlying vehicle_hire_assignments.status (compat layer collapses these into status=confirmed)
   allocatedAt: string            // ISO timestamp
   allocatedBy: string            // Staff name who made the allocation
   confirmedAt: string | null     // When booked out (null for soft allocations)
