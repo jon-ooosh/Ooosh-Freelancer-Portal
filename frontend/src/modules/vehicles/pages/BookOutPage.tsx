@@ -6,7 +6,6 @@ import { useVehicles } from '../hooks/useVehicles'
 import { createVehicleEvent } from '../lib/events-api'
 import { uploadAllPhotos } from '../lib/photo-upload'
 import { updateFleetHireStatus } from '../lib/fleet-status'
-import { barcodeCheckout } from '../lib/hirehop-api'
 import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { withRetry } from '../lib/retry'
 import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
@@ -644,22 +643,11 @@ export function BookOutPage() {
       return trackResults
     })()
 
-    // Track: HireHop checkout (independent)
-    const hirehopTrack = (async () => {
-      if (!form.hireHopJob || !form.vehicleReg) return []
-      const hhResult = await withRetry(
-        () => barcodeCheckout(parseInt(form.hireHopJob, 10), form.vehicleReg),
-        'HireHop barcode checkout',
-      )
-      if (hhResult.success && hhResult.data?.success) {
-        return [{ label: 'HireHop checkout', success: true, detail: `${form.vehicleReg} checked out` }]
-      }
-      return [{
-        label: 'HireHop checkout',
-        success: false,
-        detail: hhResult.data?.error || hhResult.error || 'Barcode checkout failed',
-      }]
-    })()
+    // HireHop barcode checkout (auto-scan van reg into HH and trigger HH status 5)
+    // was previously wired here as a parallel track. Removed 21 Apr 2026 —
+    // the experiment never quite worked reliably and staff now advance HH
+    // status manually. Future nice-to-have: re-enable once the write-back
+    // behaviour is proven (see CLAUDE.md "Future nice-to-haves").
 
     // Track: Allocation confirm (independent)
     const allocationTrack = (async () => {
@@ -759,14 +747,13 @@ export function BookOutPage() {
     })()
 
     // Wait for all parallel tracks to complete
-    const [pdfEmailResults, hhResults, allocResults, wbResults, ve103bResults] = await Promise.all([
+    const [pdfEmailResults, allocResults, wbResults, ve103bResults] = await Promise.all([
       pdfEmailTrack,
-      hirehopTrack,
       allocationTrack,
       writeBackTrack,
       ve103bTrack,
     ])
-    results.push(...pdfEmailResults, ...hhResults, ...allocResults, ...wbResults, ...ve103bResults)
+    results.push(...pdfEmailResults, ...allocResults, ...wbResults, ...ve103bResults)
 
     setOpResults(results)
     setUploadProgress(null)

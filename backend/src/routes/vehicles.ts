@@ -20,6 +20,7 @@ import { isHireHopConfigured } from '../config/hirehop';
 import { hhBroker } from '../services/hirehop-broker';
 import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
+import { sendVehicleCheckedInEmail } from '../services/vehicle-emails';
 
 const router = Router();
 router.use(authenticate);
@@ -1551,6 +1552,64 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
         }
       } catch (err) {
         console.warn('[vehicles/events] Failed to log mileage:', err);
+      }
+    }
+
+    // Check-in side effects: when CheckInPage.tsx fires a 'check-in' event via
+    // save-event, flip the matching hire assignment(s) to 'returned' and
+    // dispatch the client confirmation email. Idempotent — skips if any
+    // matching assignment has already been checked in.
+    if (event.eventType === 'check-in' && event.hireHopJob) {
+      try {
+        const hhJob = parseInt(String(event.hireHopJob), 10);
+        if (!isNaN(hhJob)) {
+          const matched = await query(
+            `SELECT vha.id, vha.checked_in_at
+             FROM vehicle_hire_assignments vha
+             JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+             WHERE fv.reg = $1
+               AND vha.hirehop_job_id = $2
+               AND vha.status = 'booked_out'
+             ORDER BY vha.booked_out_at DESC NULLS LAST`,
+            [reg, hhJob]
+          );
+          if (matched.rows.length > 0) {
+            const userId = req.user?.id || null;
+            const mileageIn = event.mileage ? Number(event.mileage) : null;
+            const fuelIn = event.fuelLevel || null;
+            const hasDamage = event.hasDamage === true;
+            const anyAlreadyCheckedIn = matched.rows.some((r: any) => r.checked_in_at !== null);
+            for (const row of matched.rows) {
+              await query(
+                `UPDATE vehicle_hire_assignments
+                 SET status = 'returned',
+                     status_changed_at = NOW(),
+                     checked_in_at = COALESCE(checked_in_at, NOW()),
+                     checked_in_by = COALESCE(checked_in_by, $1),
+                     mileage_in = COALESCE(mileage_in, $2),
+                     fuel_level_in = COALESCE(fuel_level_in, $3),
+                     has_damage = COALESCE(has_damage, $4),
+                     updated_at = NOW()
+                 WHERE id = $5`,
+                [userId, mileageIn, fuelIn, hasDamage, row.id]
+              );
+            }
+            // Only email once per (van, job) check-in — keyed on whether
+            // any of the matching assignments was already checked-in.
+            if (!anyAlreadyCheckedIn) {
+              const leadAssignmentId = matched.rows[0].id;
+              setImmediate(() => {
+                sendVehicleCheckedInEmail(leadAssignmentId).catch((err) => {
+                  console.error('[vehicles/events] vehicle_checked_in email dispatch failed:', err);
+                });
+              });
+            }
+          } else {
+            console.log(`[vehicles/events] check-in: no matching booked_out assignment for ${reg} / HH#${hhJob} — no assignment state flip or client email`);
+          }
+        }
+      } catch (err) {
+        console.warn('[vehicles/events] check-in side-effect failed:', err);
       }
     }
 

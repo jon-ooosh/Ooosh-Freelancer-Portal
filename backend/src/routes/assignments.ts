@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { sendVehicleCheckedInEmail } from '../services/vehicle-emails';
 
 const router = Router();
 router.use(authenticate);
@@ -323,10 +324,13 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
     const { id } = req.params;
     const { mileage_out, fuel_level_out } = req.body;
 
-    // Per-driver gate: check if this driver's referral and excess are cleared.
-    // dispatch_override lets a manager let the assignment through despite an
-    // unresolved excess — the override is recorded on the job_excess row with
-    // reason + user + timestamp for audit.
+    // Per-driver advisory check: gather any unresolved referral / excess
+    // issues so they can be returned as warnings. These are NON-BLOCKING —
+    // staff see the equivalent amber banners on Job Detail and are trusted
+    // to proceed if they know what they're doing. The hard-gate-with-admin-
+    // override version is planned for ~May 2026 (see CLAUDE.md "Future nice-
+    // to-haves"). dispatch_override on job_excess still suppresses the
+    // warning for audit tidiness.
     const gateCheck = await query(
       `SELECT vha.assignment_type, vha.driver_id,
         d.requires_referral, d.referral_status,
@@ -338,29 +342,20 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
       [id]
     );
 
+    const warnings: string[] = [];
     if (gateCheck.rows.length > 0) {
       const row = gateCheck.rows[0];
-      const gateBlockers: string[] = [];
-
       if (row.assignment_type === 'self_drive') {
         if (row.requires_referral && row.referral_status !== 'approved') {
-          gateBlockers.push('Driver referral pending — must be approved before book-out');
+          warnings.push('Driver referral pending — not yet approved');
         }
         if (
           row.excess_status &&
           !['taken', 'waived', 'rolled_over', 'not_required', 'reimbursed', 'partially_reimbursed', 'fully_claimed', 'pre_auth'].includes(row.excess_status) &&
           !row.dispatch_override
         ) {
-          gateBlockers.push('Insurance excess not resolved — must be taken, waived, or manager-overridden before book-out');
+          warnings.push('Insurance excess not resolved');
         }
-      }
-
-      if (gateBlockers.length > 0) {
-        res.status(409).json({
-          error: 'Book-out blocked',
-          blockers: gateBlockers,
-        });
-        return;
       }
     }
 
@@ -403,7 +398,16 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
       );
     }
 
-    res.json({ data: assignment });
+    // Flip the vehicle's fleet-level hire_status to 'On Hire' so the Fleet
+    // page reflects reality. Check-in will flip it to 'Prep Needed'.
+    if (assignment.vehicle_id) {
+      await query(
+        `UPDATE fleet_vehicles SET hire_status = 'On Hire', updated_at = NOW() WHERE id = $1`,
+        [assignment.vehicle_id]
+      );
+    }
+
+    res.json({ data: assignment, warnings });
   } catch (error) {
     console.error('[assignments] Book-out error:', error);
     res.status(500).json({ error: 'Failed to record book-out' });
@@ -416,6 +420,14 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
   try {
     const { id } = req.params;
     const { mileage_in, fuel_level_in, has_damage } = req.body;
+
+    // Capture pre-update state so we can tell whether this is the first
+    // check-in (and therefore whether to fire the client email).
+    const preResult = await query(
+      `SELECT checked_in_at FROM vehicle_hire_assignments WHERE id = $1`,
+      [id]
+    );
+    const alreadyCheckedIn = preResult.rows.length > 0 && preResult.rows[0].checked_in_at !== null;
 
     const result = await query(
       `UPDATE vehicle_hire_assignments
@@ -497,6 +509,17 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
       } catch (dmgErr) {
         console.warn('[assignments] Damage requirement auto-creation failed:', dmgErr);
       }
+    }
+
+    // Fire "vehicle checked in" client email on first check-in only —
+    // avoids double-sends if staff re-submits the check-in form. Runs
+    // after the response so the UI stays snappy.
+    if (!alreadyCheckedIn) {
+      setImmediate(() => {
+        sendVehicleCheckedInEmail(id).catch((err) => {
+          console.error('[assignments] vehicle_checked_in email dispatch failed:', err);
+        });
+      });
     }
 
     res.json({ data: assignment });
