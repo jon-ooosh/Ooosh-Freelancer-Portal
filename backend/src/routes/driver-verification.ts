@@ -298,6 +298,30 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       'requires_referral', 'referral_status', 'referral_date', 'referral_notes',
     ]);
 
+    // DATE fields need normalisation — the hire form app sometimes sends
+    // values as JS Date.toString() output ("Fri Jun 04 2021 00:00:00 GMT+...")
+    // which Postgres DATE can't parse. We coerce any non-ISO date string
+    // through JS Date and re-emit as YYYY-MM-DD. Empty strings → null.
+    const DATE_FIELDS = new Set([
+      'date_of_birth', 'licence_valid_from', 'licence_valid_to',
+      'date_passed_test', 'licence_next_check_due',
+      'poa1_valid_until', 'poa2_valid_until',
+      'dvla_valid_until', 'passport_valid_until',
+      'dvla_check_date', 'signature_date', 'referral_date',
+    ]);
+
+    function normaliseDate(raw: unknown): string | null {
+      if (raw === null || raw === undefined || raw === '') return null;
+      const s = String(raw).trim();
+      if (!s) return null;
+      if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);    // already ISO
+      const d = new Date(s);
+      if (isNaN(d.getTime())) return null;
+      const y = d.getUTCFullYear();
+      if (y < 1900 || y > 2100) return null;
+      return `${y}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+    }
+
     const setClauses: string[] = [];
     const params: unknown[] = [];
 
@@ -305,7 +329,11 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       // Normalise: accept both camelCase and snake_case
       const dbField = camelToSnake[key] || key;
       if (!allowedFields.has(dbField)) continue;
-      params.push(value ?? null);
+      let coerced: unknown = value ?? null;
+      if (DATE_FIELDS.has(dbField)) {
+        coerced = normaliseDate(coerced);
+      }
+      params.push(coerced);
       setClauses.push(`${dbField} = $${params.length}`);
     }
 
