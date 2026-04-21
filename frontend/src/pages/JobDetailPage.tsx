@@ -13,6 +13,8 @@ import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
 import ChaseModal from '../components/ChaseModal';
+import { VenuePicker } from '../components/VenuePicker';
+import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
 
@@ -142,6 +144,7 @@ interface QuoteAssignment {
   status: string;
   agreed_rate: number | null;
   rate_type: string | null;
+  is_ooosh_crew?: boolean;
 }
 
 interface SavedQuote {
@@ -648,6 +651,7 @@ export default function JobDetailPage() {
   const [editingQuoteId, setEditingQuoteId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Record<string, unknown>>({});
   const [editSaving, setEditSaving] = useState(false);
+  const [completingQuote, setCompletingQuote] = useState<SavedQuote | null>(null);
   const [cancelledQuotesExpanded, setCancelledQuotesExpanded] = useState(false);
   const [showLocalForm, setShowLocalForm] = useState(false);
   const [localFormData, setLocalFormData] = useState({
@@ -2884,8 +2888,9 @@ export default function JobDetailPage() {
                           )}
                           {quoteStatus === 'confirmed' && (
                             <button
-                              onClick={() => updateQuoteStatus(q.id, 'completed')}
+                              onClick={() => setCompletingQuote(q)}
                               className="px-2.5 py-1 bg-emerald-600 text-white rounded text-xs hover:bg-emerald-700 font-medium"
+                              title="Normally the freelancer completes via the portal. This is a manager override."
                             >
                               Complete
                             </button>
@@ -3021,11 +3026,14 @@ export default function JobDetailPage() {
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
-                    <input
-                      type="text"
-                      value={String(editForm.venue_name || '')}
-                      onChange={(e) => setEditForm((p) => ({ ...p, venue_name: e.target.value, venue_id: null }))}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    <VenuePicker
+                      value={{
+                        venueId: (editForm.venue_id as string | null) || null,
+                        venueName: String(editForm.venue_name || ''),
+                      }}
+                      onChange={({ venueId, venueName }) =>
+                        setEditForm((p) => ({ ...p, venue_id: venueId, venue_name: venueName }))
+                      }
                     />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -3171,6 +3179,23 @@ export default function JobDetailPage() {
           )}
 
           {/* Hire Forms Section (testing) */}
+
+          {/* Complete Quote Override Modal */}
+          {completingQuote && (
+            <CompleteQuoteOverrideModal
+              quoteId={completingQuote.id}
+              assignees={(completingQuote.assignments || []).map((a) => ({
+                id: a.person_id,
+                name: `${a.first_name || ''} ${a.last_name || ''}`.trim() || 'Assigned crew',
+                is_ooosh_crew: a.is_ooosh_crew === true,
+              }))}
+              onClose={() => setCompletingQuote(null)}
+              onCompleted={() => {
+                setCompletingQuote(null);
+                loadQuotes();
+              }}
+            />
+          )}
         </div>
       )}
 

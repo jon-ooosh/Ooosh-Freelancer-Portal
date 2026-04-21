@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import DatePicker from '../components/DatePicker';
+import { VenuePicker } from '../components/VenuePicker';
+import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -186,6 +188,15 @@ export default function TransportOpsPage() {
   }
 
   async function updateOpsStatus(quoteId: string, newStatus: string) {
+    // Completion should go through the override modal (captures reason,
+    // offers a nudge first). Portal is still the primary completion path.
+    if (newStatus === 'completed') {
+      const quote = quotes.find((q) => q.id === quoteId);
+      if (quote) {
+        setCompletingQuote(quote);
+        return;
+      }
+    }
     try {
       await api.patch(`/quotes/${quoteId}/ops-status`, { ops_status: newStatus });
       setQuotes((prev) =>
@@ -254,6 +265,7 @@ export default function TransportOpsPage() {
   // ── Editing handlers ──
 
   const [editingQuote, setEditingQuote] = useState<OpsQuote | null>(null);
+  const [completingQuote, setCompletingQuote] = useState<OpsQuote | null>(null);
 
   function openEditModal(quote: OpsQuote) {
     setEditingQuote(quote);
@@ -624,6 +636,27 @@ export default function TransportOpsPage() {
           onClose={() => setEditingQuote(null)}
         />
       )}
+
+      {/* Complete Quote Override Modal */}
+      {completingQuote && (
+        <CompleteQuoteOverrideModal
+          quoteId={completingQuote.id}
+          assignees={(completingQuote.assignments || [])
+            .filter((a): a is Assignment & { person_id: string } => !!a.person_id)
+            .map((a) => ({
+              id: a.person_id,
+              name: a.is_ooosh_crew
+                ? 'Ooosh Crew'
+                : `${a.first_name || ''} ${a.last_name || ''}`.trim() || 'Assigned crew',
+              is_ooosh_crew: a.is_ooosh_crew === true,
+            }))}
+          onClose={() => setCompletingQuote(null)}
+          onCompleted={() => {
+            setCompletingQuote(null);
+            loadOps();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -712,9 +745,25 @@ function QuoteRow({
         {/* Job / Venue name + badges */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className="text-sm font-medium text-gray-900 truncate">
-              {q.linked_venue_name || q.venue_name || 'No venue'}
-            </span>
+            {q.linked_venue_name || q.venue_name ? (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onEdit(q); }}
+                className="text-sm font-medium text-gray-900 truncate hover:text-ooosh-600 hover:underline text-left"
+                title="Edit venue / quote details"
+              >
+                {q.linked_venue_name || q.venue_name}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onEdit(q); }}
+                className="text-sm font-medium text-red-500 truncate hover:text-red-700 hover:underline text-left"
+                title="Click to link a venue"
+              >
+                No venue — click to add
+              </button>
+            )}
             {q.is_local && (
               <span className="text-xs px-1.5 py-0.5 rounded bg-teal-100 text-teal-700 font-medium flex-shrink-0">Local</span>
             )}
@@ -1554,22 +1603,7 @@ function EditQuoteModal({
     freelancer_fee_rounded: quote.freelancer_fee_rounded || 0,
   });
   const [saving, setSaving] = useState(false);
-
-  // Venue search
-  const [venueSearch, setVenueSearch] = useState('');
-  const [venueOptions, setVenueOptions] = useState<{ id: string; name: string; address?: string; city?: string }[]>([]);
   const [selectedVenueId, setSelectedVenueId] = useState<string | null>(quote.venue_id || null);
-
-  async function searchVenues(search: string) {
-    try {
-      const data = await api.get<{ data: { id: string; name: string; address?: string; city?: string }[] }>(
-        `/venues?search=${encodeURIComponent(search)}&limit=8`
-      );
-      setVenueOptions(data.data);
-    } catch {
-      // ignore
-    }
-  }
 
   async function handleSave() {
     setSaving(true);
@@ -1631,38 +1665,13 @@ function EditQuoteModal({
           {/* Venue */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
-            <input
-              type="text"
-              value={venueSearch || form.venue_name}
-              onChange={(e) => {
-                setVenueSearch(e.target.value);
-                setForm((p) => ({ ...p, venue_name: e.target.value }));
-                setSelectedVenueId(null);
-                if (e.target.value.length >= 2) searchVenues(e.target.value);
-                else setVenueOptions([]);
+            <VenuePicker
+              value={{ venueId: selectedVenueId, venueName: form.venue_name }}
+              onChange={({ venueId, venueName }) => {
+                setSelectedVenueId(venueId);
+                setForm((p) => ({ ...p, venue_name: venueName }));
               }}
-              onFocus={() => { if (form.venue_name.length >= 2) searchVenues(form.venue_name); }}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
             />
-            {venueOptions.length > 0 && !selectedVenueId && (
-              <div className="mt-1 border border-gray-200 rounded-lg max-h-32 overflow-y-auto divide-y divide-gray-100">
-                {venueOptions.map((v) => (
-                  <button
-                    key={v.id}
-                    onClick={() => {
-                      setForm((p) => ({ ...p, venue_name: v.name }));
-                      setSelectedVenueId(v.id);
-                      setVenueSearch('');
-                      setVenueOptions([]);
-                    }}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-ooosh-50"
-                  >
-                    <span className="font-medium">{v.name}</span>
-                    {v.city && <span className="text-xs text-gray-400 ml-1">({v.city})</span>}
-                  </button>
-                ))}
-              </div>
-            )}
           </div>
 
           {/* Date & Time row */}
