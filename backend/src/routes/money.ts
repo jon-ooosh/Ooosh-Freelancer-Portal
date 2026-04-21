@@ -14,6 +14,12 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
+import {
+  triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
+  hireFormResultIsAnomaly,
+  sendConfirmationSilentSkipAlert,
+  type SilentSkipIssue,
+} from '../services/confirmation-hooks';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
 
@@ -820,7 +826,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
 
     // Look up the job
     const jobResult = await query(
-      `SELECT id, hh_job_number, client_name, company_name FROM jobs WHERE id = $1`,
+      `SELECT id, hh_job_number, client_name, company_name, job_name FROM jobs WHERE id = $1`,
       [jobId]
     );
 
@@ -920,10 +926,26 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         console.error('[money] Status transition failed (non-fatal):', err);
       }
 
-      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now
-      triggerHireFormEmailOnConfirmation(job.id).catch(err =>
-        console.error('[money] Hire form email on confirmation failed (record-payment):', err)
-      );
+      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now.
+      // Runs HH-derivation inline. Silent skips alert info@oooshtours.co.uk.
+      (async () => {
+        try {
+          const hfResult = await triggerHireFormEmailOnConfirmationShared(job.id);
+          const anomaly = hireFormResultIsAnomaly(hfResult);
+          if (anomaly) {
+            await sendConfirmationSilentSkipAlert({
+              jobId: job.id,
+              jobNumber: job.hh_job_number,
+              jobName: job.job_name ?? null,
+              clientName: job.client_name,
+              triggerSource: 'status_change',
+              issues: [anomaly],
+            });
+          }
+        } catch (err) {
+          console.error('[money] Hire form email on confirmation failed (record-payment):', err);
+        }
+      })();
     }
 
     // Push to HireHop as deposit (if requested and job has HH number)
@@ -1041,13 +1063,32 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         const currentStatus = (await query(`SELECT pipeline_status FROM jobs WHERE id = $1`, [job.id])).rows[0]?.pipeline_status;
         const isConfirming = currentStatus === 'confirmed';
 
-        sendPaymentEmail({
+        const payResult = await sendPaymentEmail({
           jobId: job.id,
           amount,
           bankName: bankLabel,
           paymentType: payment_type,
           isConfirmingBooking: isConfirming,
-        }).catch(e => console.error('[money] Payment email failed:', e));
+        });
+        if (!payResult.sent) {
+          console.error(
+            `[money] Payment email not sent (record-payment, job ${job.id}): ${payResult.reason}${payResult.error ? ` — ${payResult.error}` : ''}`
+          );
+          sendConfirmationSilentSkipAlert({
+            jobId: job.id,
+            jobNumber: job.hh_job_number,
+            jobName: job.job_name ?? null,
+            clientName: job.client_name,
+            triggerSource: 'status_change',
+            issues: [{
+              kind: 'payment_email',
+              reason: payResult.reason === 'no_recipient'
+                ? 'no client email found in OP address book (client org has no email and no linked contacts with emails)'
+                : 'unexpected error while sending payment confirmation email',
+              context: payResult.error,
+            }],
+          }).catch(e => console.error('[money] Silent-skip alert failed (record-payment):', e));
+        }
 
         // Last-minute alert if job starts within 3 days
         if (isConfirming) {
@@ -1099,8 +1140,8 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
       isUuid
-        ? `SELECT id, hh_job_number, client_name FROM jobs WHERE id = $1`
-        : `SELECT id, hh_job_number, client_name FROM jobs WHERE hh_job_number = $1`,
+        ? `SELECT id, hh_job_number, client_name, job_name FROM jobs WHERE id = $1`
+        : `SELECT id, hh_job_number, client_name, job_name FROM jobs WHERE hh_job_number = $1`,
       [isUuid ? jobId : parseInt(jobId)]
     );
 
@@ -1275,16 +1316,32 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
         console.error('[money] Status transition failed (non-fatal, payment-event):', err);
       }
 
-      // Hire form email: if job has self-drive vehicle and starts within 10 days, send now
-      triggerHireFormEmailOnConfirmation(job.id).catch(err =>
-        console.error('[money] Hire form email on confirmation failed (payment-event):', err)
-      );
     }
 
-    // ── Email triggers (fire-and-forget) ──
+    // ── Hire form email + payment email + silent-skip alerting ──
+    // Awaited so the info@ alert (if any) aggregates every issue into a single email.
+    // Derivation inside triggerHireFormEmailOnConfirmationShared covers the common
+    // "HH-synced job whose requirements hadn't been derived yet" timing gap.
+    const silentSkipIssues: SilentSkipIssue[] = [];
+
+    if (statusChanged) {
+      try {
+        const hfResult = await triggerHireFormEmailOnConfirmationShared(job.id);
+        const anomaly = hireFormResultIsAnomaly(hfResult);
+        if (anomaly) silentSkipIssues.push(anomaly);
+      } catch (err) {
+        console.error('[money] Hire form email on confirmation failed (payment-event):', err);
+        silentSkipIssues.push({
+          kind: 'hire_form_email',
+          reason: 'unexpected error while triggering hire form email',
+          context: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     try {
       if (effectivePaymentType === 'excess' && resolvedExcessId) {
-        // Excess payment/pre-auth email
+        // Excess payment/pre-auth email (fire-and-forget — no silent-skip alerting)
         sendExcessEmail({
           templateId: isPreAuth ? 'excess_preauth_confirmed' : 'excess_payment_confirmed',
           excessId: resolvedExcessId,
@@ -1295,13 +1352,26 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
       } else if (effectivePaymentType !== 'refund' && effectivePaymentType !== 'excess_refund' && effectivePaymentType !== 'excess') {
         // Hire deposit/balance email
         const bankLabel = PAYMENT_METHODS_LABELS[effectiveMethod] || effectiveMethod;
-        sendPaymentEmail({
+        const payResult = await sendPaymentEmail({
           jobId: job.id,
           amount,
           bankName: bankLabel,
           paymentType: effectivePaymentType,
           isConfirmingBooking: statusChanged,
-        }).catch(e => console.error('[money] Payment email failed (payment-event):', e));
+        });
+        if (!payResult.sent) {
+          const isMissingRecipient = payResult.reason === 'no_recipient';
+          console.error(
+            `[money] Payment email not sent (payment-event, job ${job.id}): ${payResult.reason}${payResult.error ? ` — ${payResult.error}` : ''}`
+          );
+          silentSkipIssues.push({
+            kind: 'payment_email',
+            reason: isMissingRecipient
+              ? 'no client email found in OP address book (client org has no email and no linked contacts with emails)'
+              : 'unexpected error while sending payment confirmation email',
+            context: payResult.error,
+          });
+        }
 
         // Last-minute alert if job starts within 3 days and we just confirmed
         if (statusChanged) {
@@ -1310,6 +1380,17 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
       }
     } catch (emailErr) {
       console.error('[money] Email trigger error (non-fatal, payment-event):', emailErr);
+    }
+
+    if (silentSkipIssues.length > 0) {
+      sendConfirmationSilentSkipAlert({
+        jobId: job.id,
+        jobNumber: job.hh_job_number,
+        jobName: (job as { job_name?: string }).job_name ?? null,
+        clientName: job.client_name,
+        triggerSource: 'payment_event',
+        issues: silentSkipIssues,
+      }).catch(e => console.error('[money] Silent-skip alert failed (payment-event):', e));
     }
 
     res.json({
@@ -1488,39 +1569,6 @@ async function reconcileExcessDeposits(
   }
 
   return results;
-}
-
-async function triggerHireFormEmailOnConfirmation(jobId: string): Promise<void> {
-  const jobData = await query(
-    `SELECT job_date, is_van_and_driver, hh_job_number FROM jobs WHERE id = $1`,
-    [jobId]
-  );
-  if (jobData.rows.length === 0) return;
-  const { job_date, is_van_and_driver, hh_job_number } = jobData.rows[0];
-  if (is_van_and_driver || !hh_job_number || !job_date) return;
-
-  const daysUntilStart = Math.ceil((new Date(job_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-  if (daysUntilStart > 10) return;
-
-  const hfReq = await query(
-    `SELECT id, status FROM job_requirements WHERE job_id = $1 AND requirement_type = 'hire_forms'`,
-    [jobId]
-  );
-  if (hfReq.rows.length === 0 || hfReq.rows[0].status !== 'not_started') return;
-
-  const { sendHireFormEmailForJob } = await import('../services/hire-form-auto-email');
-  console.log(`[money] Job ${hh_job_number} confirmed with ${daysUntilStart} days to go — triggering hire form email`);
-
-  const jobRow = await query(
-    `SELECT j.id, j.hh_job_number, j.job_name, j.job_date, j.company_name, j.client_name, j.client_id,
-            jr.id AS req_id
-     FROM jobs j JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'hire_forms'
-     WHERE j.id = $1`,
-    [jobId]
-  );
-  if (jobRow.rows.length > 0) {
-    await sendHireFormEmailForJob(jobRow.rows[0], false);
-  }
 }
 
 export default router;
