@@ -898,13 +898,107 @@ router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthReques
       return res.status(404).json({ error: 'Hire form not found' });
     }
 
+    const updated = result.rows[0];
     console.log(`[hire-forms] Updated assignment ${id}:`, Object.keys(updates).join(', '));
-    res.json({ data: result.rows[0] });
+
+    // Post-update side effects on book-out transition.
+    //
+    // The live book-out UI (frontend/src/modules/vehicles/pages/BookOutPage.tsx)
+    // drives a PATCH here with status='booked_out' once the walkaround is
+    // complete. At that point the assignment has a confirmed vehicle, so
+    // this is the right moment to (a) update the fleet's hire_status and
+    // (b) generate + email the definitive hire agreement PDF with the real
+    // reg. We skip the email if one has already been sent for this
+    // assignment (idempotent — a staff PATCH retry shouldn't re-spam).
+    const nowBookedOut = updates.status === 'booked_out' && updated.status === 'booked_out';
+    if (nowBookedOut && updated.vehicle_id) {
+      // Flip fleet hire_status — fire-and-forget, non-blocking.
+      query(
+        `UPDATE fleet_vehicles SET hire_status = 'On Hire', updated_at = NOW() WHERE id = $1`,
+        [updated.vehicle_id]
+      ).catch((err) => {
+        console.warn(`[hire-forms] fleet_vehicles hire_status update failed for vehicle ${updated.vehicle_id}:`, err);
+      });
+
+      // Generate + email PDF if this is the first book-out email for this
+      // assignment. Runs after we respond so the PATCH stays fast.
+      if (!updated.hire_form_emailed_at) {
+        setImmediate(() => {
+          generateAndEmailHireFormPdf(id, 'book-out').catch((err) => {
+            console.error(`[hire-forms] Post-book-out PDF+email failed for ${id}:`, err);
+          });
+        });
+      }
+    }
+
+    res.json({ data: updated });
   } catch (error) {
     console.error('[hire-forms] Patch error:', error);
     res.status(500).json({ error: 'Failed to update hire form' });
   }
 });
+
+/**
+ * Generate the definitive hire agreement PDF for an assignment, upload to R2,
+ * and email it to the driver with the PDF attached. Used by the book-out
+ * transition hook in the PATCH handler above, and shared with the on-demand
+ * generate-pdf endpoint below.
+ */
+async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string): Promise<void> {
+  const formData = await loadHireFormData(assignmentId);
+  if (!formData) {
+    console.warn(`[hire-forms] ${trigger}: loadHireFormData returned null for ${assignmentId}`);
+    return;
+  }
+  if (!formData.vehicleReg || formData.vehicleReg === 'TBC') {
+    console.warn(`[hire-forms] ${trigger}: skipping PDF for ${assignmentId} — no vehicle assigned`);
+    return;
+  }
+
+  const { pdfBytes, filename } = await generateHireFormPdf(formData);
+  const r2Key = `hire-forms/${assignmentId}/${filename}`;
+  await uploadToR2(r2Key, Buffer.from(pdfBytes), 'application/pdf');
+
+  await query(
+    `UPDATE vehicle_hire_assignments
+     SET hire_form_pdf_key = $1, hire_form_generated_at = NOW(), updated_at = NOW()
+     WHERE id = $2`,
+    [r2Key, assignmentId]
+  );
+
+  console.log(`[hire-forms] ${trigger}: PDF generated for ${assignmentId} (${pdfBytes.length} bytes)`);
+
+  if (!formData.email) {
+    console.warn(`[hire-forms] ${trigger}: no driver email on record for ${assignmentId}; PDF stored but not emailed`);
+    return;
+  }
+
+  const emailResult = await emailService.send('hire_form', {
+    to: formData.email,
+    variables: {
+      driverName: formData.driverName,
+      vehicleReg: formData.vehicleReg || 'TBC',
+      vehicleModel: formData.vehicleModel || 'TBC',
+      hireStart: fmtDate(formData.hireStartDate),
+      hireEnd: fmtDate(formData.hireEndDate),
+    },
+    attachments: [{
+      filename,
+      content: Buffer.from(pdfBytes),
+      contentType: 'application/pdf',
+    }],
+  });
+
+  if (emailResult.success) {
+    await query(
+      `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
+      [assignmentId]
+    );
+    console.log(`[hire-forms] ${trigger}: email sent to ${formData.email} for ${assignmentId}`);
+  } else {
+    console.warn(`[hire-forms] ${trigger}: email failed for ${assignmentId}:`, emailResult);
+  }
+}
 
 // ── Helper: load full data for PDF generation ──
 

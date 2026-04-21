@@ -951,6 +951,41 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  vehicle_checked_in: {
+    variant: 'client',
+    preheader: 'Your van is back with us',
+    subject: 'Van returned — {{vehicleReg}} ({{jobName}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Van Returned</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{clientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Just to confirm that <strong>{{vehicleReg}}</strong> has been checked back in
+        at our warehouse — thanks for hiring with us.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Job</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Vehicle</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{vehicleReg}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Returned</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{returnedAt}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        If anything was left in the van or you've got feedback for us, drop us a line
+        at <a href="mailto:info@oooshtours.co.uk" style="color:#7B5EA7;">info@oooshtours.co.uk</a>.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        Thanks again, and see you next time!
+      </p>
+    `,
+  },
 };
 
 export default templates;

@@ -450,6 +450,11 @@ function RequirementSlots({
   saving: boolean
 }) {
   const [showPicker, setShowPicker] = useState(false)
+  // Inline picker state keyed by allocation id — used when a hire-form-
+  // created slot has a driver attached but no vehicle yet, letting staff
+  // pick a van for that specific driver card without leaving the page.
+  const [linkPickerForId, setLinkPickerForId] = useState<string | null>(null)
+  const [linking, setLinking] = useState(false)
 
   const label = formatVanType(requirement.simpleType, requirement.gearbox)
   const slotsNeeded = requirement.quantity
@@ -462,6 +467,30 @@ function RequirementSlots({
     () => findMatchingVehicles(vehicles, requirement, allAllocations),
     [vehicles, requirement, allAllocations],
   )
+
+  async function linkVehicleToHireForm(allocationId: string, vehicle: Vehicle) {
+    try {
+      setLinking(true)
+      const { apiFetch } = await import('../config/api-config')
+      const resp = await apiFetch(`/api/hire-forms/${encodeURIComponent(allocationId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vehicle_id: vehicle.id }),
+      })
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => 'Unknown error')
+        throw new Error(`PATCH failed: ${resp.status} ${txt}`)
+      }
+      // Reload by soft-refreshing the page — parent pulls allocations on mount
+      window.location.reload()
+    } catch (err) {
+      console.error('[allocations] Link vehicle to hire form failed:', err)
+      alert(err instanceof Error ? err.message : 'Failed to link vehicle')
+    } finally {
+      setLinking(false)
+      setLinkPickerForId(null)
+    }
+  }
 
   return (
     <div className="mt-3 first:mt-0">
@@ -485,7 +514,11 @@ function RequirementSlots({
           >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5">
-                <span className="font-mono text-sm font-bold text-ooosh-navy">{allocation.vehicleReg}</span>
+                {allocation.vehicleReg ? (
+                  <span className="font-mono text-sm font-bold text-ooosh-navy">{allocation.vehicleReg}</span>
+                ) : (
+                  <span className="text-xs italic text-gray-500">No van selected yet</span>
+                )}
                 <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
                   allocation.status === 'confirmed'
                     ? 'bg-green-100 text-green-700'
@@ -493,18 +526,22 @@ function RequirementSlots({
                 }`}>
                   {allocation.status === 'confirmed' ? 'Confirmed' : 'Soft'}
                 </span>
-                {/* Hire status badge */}
-                <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-                  hireStatus === 'Available'
-                    ? 'bg-green-100 text-green-700'
-                    : hireStatus === 'On Hire'
-                      ? 'bg-blue-100 text-blue-700'
-                      : hireStatus === 'Not Ready'
-                        ? 'bg-red-100 text-red-700'
-                        : 'bg-amber-100 text-amber-700'
-                }`}>
-                  {hireStatus || 'Unknown'}
-                </span>
+                {/* Hire status badge — suppressed when no vehicle picked
+                    (the "Unknown" label was confusing on hire-form cards
+                    awaiting vehicle assignment). */}
+                {allocation.vehicleReg && (
+                  <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                    hireStatus === 'Available'
+                      ? 'bg-green-100 text-green-700'
+                      : hireStatus === 'On Hire'
+                        ? 'bg-blue-100 text-blue-700'
+                        : hireStatus === 'Not Ready'
+                          ? 'bg-red-100 text-red-700'
+                          : 'bg-amber-100 text-amber-700'
+                  }`}>
+                    {hireStatus || 'Unknown'}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 {allocation.readOnly && allocation.hireFormLinked && (
@@ -553,8 +590,54 @@ function RequirementSlots({
               </div>
             )}
 
-            {/* Book Out link — only for soft allocations when vehicle is available */}
-            {allocation.status === 'soft' && (
+            {/* Hire-form slot without a vehicle yet — inline van picker so
+                staff can attach a van for THIS driver without bouncing to
+                the Job Detail page. Selecting the van PATCHes the
+                assignment and refreshes. */}
+            {allocation.hireFormLinked && !allocation.vehicleReg && (
+              <div className="mt-2">
+                {linkPickerForId === allocation.id ? (
+                  <VanPicker
+                    vehicles={matchingVehicles}
+                    onSelect={(vehicle) => linkVehicleToHireForm(allocation.id, vehicle)}
+                    onCancel={() => setLinkPickerForId(null)}
+                  />
+                ) : (
+                  <button
+                    onClick={() => setLinkPickerForId(allocation.id)}
+                    disabled={linking}
+                    className="w-full rounded-lg border-2 border-dashed border-ooosh-navy/30 bg-ooosh-navy/5 py-2 text-xs font-medium text-ooosh-navy active:bg-ooosh-navy/10 disabled:opacity-50"
+                  >
+                    + Select Van for this driver ({matchingVehicles.length} matching{
+                      (() => {
+                        const ready = matchingVehicles.filter(v => v.hireStatus === 'Available').length
+                        return ready < matchingVehicles.length ? `, ${ready} ready` : ''
+                      })()
+                    })
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Book Out link — soft allocations with a real vehicle selected. */}
+            {allocation.status === 'soft' && allocation.vehicleId && (
+              <Link
+                to={vmPath(`/book-out?vehicle=${allocation.vehicleId}&job=${job.id}`)}
+                className={`mt-2 block w-full rounded-lg py-2 text-center text-xs font-medium transition-colors ${
+                  hireStatus === 'Available'
+                    ? 'bg-ooosh-navy text-white active:bg-opacity-90'
+                    : 'border border-gray-200 bg-gray-50 text-gray-500'
+                }`}
+              >
+                {hireStatus === 'Available' ? 'Book Out' : 'Book Out (not prepped)'}
+              </Link>
+            )}
+
+            {/* Book Out link — confirmed hire-form allocations that now have
+                a vehicle linked. Previously the button only showed for
+                status='soft' which excluded hire-form-created rows (always
+                'confirmed') — staff ended up with no path to book out. */}
+            {allocation.status === 'confirmed' && allocation.hireFormLinked && allocation.vehicleId && (
               <Link
                 to={vmPath(`/book-out?vehicle=${allocation.vehicleId}&job=${job.id}`)}
                 className={`mt-2 block w-full rounded-lg py-2 text-center text-xs font-medium transition-colors ${
