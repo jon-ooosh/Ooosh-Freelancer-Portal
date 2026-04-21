@@ -108,13 +108,30 @@ function encodeJotformUrl(url: string): string {
   return url.replace(/ /g, '%20');
 }
 
-async function downloadBuffer(url: string): Promise<Buffer> {
-  const res = await fetch(encodeJotformUrl(url));
-  if (!res.ok) {
+const DOWNLOAD_DELAY_MS = 1200;       // between successful downloads
+const RETRY_BACKOFF_MS = [3000, 8000, 20000]; // on 429
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function downloadBuffer(url: string, log: (m: string) => void): Promise<Buffer> {
+  const target = encodeJotformUrl(url);
+  for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt++) {
+    const res = await fetch(target);
+    if (res.ok) {
+      const arr = await res.arrayBuffer();
+      return Buffer.from(arr);
+    }
+    if (res.status === 429 && attempt < RETRY_BACKOFF_MS.length) {
+      const wait = RETRY_BACKOFF_MS[attempt];
+      log(`      429 rate-limited, waiting ${wait}ms then retry ${attempt + 1}/${RETRY_BACKOFF_MS.length}`);
+      await sleep(wait);
+      continue;
+    }
     throw new Error(`HTTP ${res.status} for ${url}`);
   }
-  const arr = await res.arrayBuffer();
-  return Buffer.from(arr);
+  throw new Error(`retries exhausted for ${url}`);
 }
 
 type PersonRow = { id: string; email: string; files: unknown };
@@ -159,10 +176,12 @@ async function processFreelancer(
   }
 
   // 1. Download everything first (fail fast on any missing URL)
-  for (const item of toUpload) {
+  for (let i = 0; i < toUpload.length; i++) {
+    const item = toUpload[i];
     log(`    ↓ download: ${item.file.r2_filename}`);
     if (!commit) continue;
-    item.buffer = await downloadBuffer(item.file.url);
+    item.buffer = await downloadBuffer(item.file.url, log);
+    if (i < toUpload.length - 1) await sleep(DOWNLOAD_DELAY_MS);
   }
 
   if (!commit) return { uploaded: toUpload.length, skipped: f.files.length - toUpload.length };
