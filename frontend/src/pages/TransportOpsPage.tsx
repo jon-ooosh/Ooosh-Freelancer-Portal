@@ -128,20 +128,157 @@ interface PersonOption {
   current_organisations?: Array<{ organisation_name: string; role: string }> | null;
 }
 
+// ── Filter + sort helpers ────────────────────────────────────────────
+
+type DateWindow = 'all' | 'overdue' | 'today_tomorrow' | 'this_week' | 'next_week' | 'upcoming';
+type SortKey = 'date' | 'client' | 'freelancer' | 'status';
+
+/** Calendar-day precision, timezone-local. Today at midnight. */
+function startOfToday(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/** Start of this ISO week (Monday 00:00). */
+function startOfIsoWeek(): Date {
+  const d = startOfToday();
+  const day = d.getDay() || 7; // Sun → 7
+  if (day !== 1) d.setDate(d.getDate() - (day - 1));
+  return d;
+}
+
+function addDays(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+
+/** Extract a Date (or null) from a quote's job_date which may be string | Date | null. */
+function quoteDate(q: OpsQuote): Date | null {
+  if (!q.job_date) return null;
+  const d = q.job_date instanceof Date ? new Date(q.job_date) : new Date(q.job_date);
+  if (Number.isNaN(d.getTime())) return null;
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/** Does the quote fall inside the named window? "all" always true. */
+function inDateWindow(q: OpsQuote, win: DateWindow): boolean {
+  if (win === 'all') return true;
+  const jd = quoteDate(q);
+  if (!jd) return false; // unscheduled quotes only show in the "all" window
+  const today = startOfToday();
+  if (win === 'overdue') {
+    return jd < today && q.ops_status !== 'completed' && q.ops_status !== 'cancelled';
+  }
+  if (win === 'today_tomorrow') {
+    const tomorrow = addDays(today, 1);
+    return jd.getTime() === today.getTime() || jd.getTime() === tomorrow.getTime();
+  }
+  if (win === 'this_week') {
+    const start = startOfIsoWeek();
+    const end = addDays(start, 7);
+    return jd >= start && jd < end;
+  }
+  if (win === 'next_week') {
+    const start = addDays(startOfIsoWeek(), 7);
+    const end = addDays(start, 7);
+    return jd >= start && jd < end;
+  }
+  if (win === 'upcoming') return jd >= today;
+  return true;
+}
+
+/** Case-insensitive substring match across the fields staff typically look
+ *  for: HH number, client, venue (linked or free text), job name, and any
+ *  assigned crew member's name. */
+function matchesSearch(q: OpsQuote, term: string): boolean {
+  if (!term) return true;
+  const needle = term.toLowerCase().trim();
+  if (!needle) return true;
+  const haystack: string[] = [
+    q.hh_job_number != null ? String(q.hh_job_number) : '',
+    q.client_name || '',
+    q.job_name || '',
+    q.linked_venue_name || '',
+    q.venue_name || '',
+    q.venue_address || '',
+    q.venue_city || '',
+    q.work_description || '',
+  ];
+  for (const a of q.assignments || []) {
+    if (a.is_ooosh_crew) haystack.push('ooosh crew');
+    else haystack.push(`${a.first_name || ''} ${a.last_name || ''}`.trim());
+  }
+  return haystack.some((h) => h && h.toLowerCase().includes(needle));
+}
+
+function sortQuotes(list: OpsQuote[], sortBy: SortKey): OpsQuote[] {
+  const arr = [...list];
+  if (sortBy === 'date') {
+    arr.sort((a, b) => {
+      const ad = quoteDate(a); const bd = quoteDate(b);
+      if (!ad && !bd) return 0;
+      if (!ad) return 1;
+      if (!bd) return -1;
+      return ad.getTime() - bd.getTime() || (a.arrival_time || '').localeCompare(b.arrival_time || '');
+    });
+  } else if (sortBy === 'client') {
+    arr.sort((a, b) => (a.client_name || '').localeCompare(b.client_name || ''));
+  } else if (sortBy === 'freelancer') {
+    const nameOf = (q: OpsQuote) => {
+      const a = (q.assignments || [])[0];
+      if (!a) return '~~~unassigned';
+      if (a.is_ooosh_crew) return '~~ooosh';
+      return `${a.first_name || ''} ${a.last_name || ''}`.trim() || '~~~unknown';
+    };
+    arr.sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+  } else if (sortBy === 'status') {
+    const rank = (s: string) => OPS_STATUSES.indexOf(s as typeof OPS_STATUSES[number]);
+    arr.sort((a, b) => rank(a.ops_status) - rank(b.ops_status));
+  }
+  return arr;
+}
+
 // ── Main Page ────────────────────────────────────────────────────────
 
 export default function TransportOpsPage() {
+  // Read URL params once at mount so reload / bookmarked links preserve state.
+  const initialParams = typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search)
+    : new URLSearchParams();
+
   const [quotes, setQuotes] = useState<OpsQuote[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [filter, setFilter] = useState<'all' | 'transport' | 'crewed'>('all');
-  const [needsCrewOnly, setNeedsCrewOnly] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('needs_crew') === '1';
+  const [filter, setFilter] = useState<'all' | 'transport' | 'crewed'>(
+    (initialParams.get('type') as 'all' | 'transport' | 'crewed') || 'all'
+  );
+  const [needsCrewOnly, setNeedsCrewOnly] = useState(() => initialParams.get('needs_crew') === '1');
+  const [viewMode, setViewMode] = useState<'table' | 'calendar'>(
+    initialParams.get('view') === 'calendar' ? 'calendar' : 'table'
+  );
+  const [showCompleted, setShowCompleted] = useState(initialParams.get('completed') === '1');
+  const [showCancelled, setShowCancelled] = useState(initialParams.get('cancelled') === '1');
+
+  // New filter controls — date window, free-text search, sort, person/venue pins.
+  const [dateWindow, setDateWindow] = useState<DateWindow>(
+    (initialParams.get('when') as DateWindow) || 'all'
+  );
+  const [searchTerm, setSearchTerm] = useState(initialParams.get('q') || '');
+  const [sortBy, setSortBy] = useState<SortKey>((initialParams.get('sort') as SortKey) || 'date');
+  // When the user clicks a driver / venue in a row, pin the page to just
+  // that entity. null means no pin.
+  const [personPin, setPersonPin] = useState<{ id: string; name: string } | null>(() => {
+    const id = initialParams.get('person_id');
+    const name = initialParams.get('person_name');
+    return id && name ? { id, name } : null;
   });
-  const [viewMode, setViewMode] = useState<'table' | 'calendar'>('table');
-  const [showCompleted, setShowCompleted] = useState(false);
-  const [showCancelled, setShowCancelled] = useState(false);
+  const [venuePin, setVenuePin] = useState<{ name: string } | null>(() => {
+    const name = initialParams.get('venue_name');
+    return name ? { name } : null;
+  });
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [assignRole, setAssignRole] = useState('driver');
@@ -152,6 +289,32 @@ export default function TransportOpsPage() {
   useEffect(() => {
     loadOps();
   }, [filter]);
+
+  // Keep the URL in sync with the current filter state so refresh / share
+  // preserves what the user was looking at. Debounce the search string so
+  // every keystroke doesn't thrash history.
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (filter !== 'all') params.set('type', filter);
+    if (viewMode !== 'table') params.set('view', viewMode);
+    if (showCompleted) params.set('completed', '1');
+    if (showCancelled) params.set('cancelled', '1');
+    if (needsCrewOnly) params.set('needs_crew', '1');
+    if (dateWindow !== 'all') params.set('when', dateWindow);
+    if (searchTerm) params.set('q', searchTerm);
+    if (sortBy !== 'date') params.set('sort', sortBy);
+    if (personPin) {
+      params.set('person_id', personPin.id);
+      params.set('person_name', personPin.name);
+    }
+    if (venuePin) params.set('venue_name', venuePin.name);
+    const qs = params.toString();
+    const newUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
+    const timer = window.setTimeout(() => {
+      window.history.replaceState({}, '', newUrl);
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [filter, viewMode, showCompleted, showCancelled, needsCrewOnly, dateWindow, searchTerm, sortBy, personPin, venuePin]);
 
   // Escape key to close assign modal
   useEffect(() => {
@@ -304,27 +467,52 @@ export default function TransportOpsPage() {
     }
   }
 
+  // Filtered pool — pre-grouping, pre-sort. Applies every active filter.
+  const filteredQuotes = useMemo(() => {
+    let out = quotes;
+    if (needsCrewOnly) {
+      out = out.filter((q) => (q.assignments || []).filter((a) => a.status !== 'cancelled').length === 0);
+    }
+    if (dateWindow !== 'all') {
+      out = out.filter((q) => inDateWindow(q, dateWindow));
+    }
+    if (personPin) {
+      out = out.filter((q) => (q.assignments || []).some((a) => a.person_id === personPin.id));
+    }
+    if (venuePin) {
+      const pinLower = venuePin.name.toLowerCase();
+      out = out.filter((q) => {
+        const name = (q.linked_venue_name || q.venue_name || '').toLowerCase();
+        return name === pinLower;
+      });
+    }
+    if (searchTerm.trim()) {
+      out = out.filter((q) => matchesSearch(q, searchTerm));
+    }
+    return out;
+  }, [quotes, needsCrewOnly, dateWindow, personPin, venuePin, searchTerm]);
+
   // Group quotes by ops_status for table view
   const grouped = useMemo(() => {
     const groups: Record<string, OpsQuote[]> = {};
-    for (const status of OPS_STATUSES) {
-      groups[status] = [];
-    }
-    const source = needsCrewOnly
-      ? quotes.filter((q) => (q.assignments || []).filter((a) => a.status !== 'cancelled').length === 0)
-      : quotes;
-    for (const q of source) {
+    for (const status of OPS_STATUSES) groups[status] = [];
+    for (const q of filteredQuotes) {
       const status = q.ops_status || 'todo';
       if (!groups[status]) groups[status] = [];
       groups[status].push(q);
     }
+    // Apply the sort within each ops_status bucket so the ladder ordering
+    // stays intact across the page.
+    for (const status of Object.keys(groups)) {
+      groups[status] = sortQuotes(groups[status], sortBy);
+    }
     return groups;
-  }, [quotes, needsCrewOnly]);
+  }, [filteredQuotes, sortBy]);
 
   // Calendar data: group by date (respects completed/cancelled toggles)
   const calendarData = useMemo(() => {
     const byDate: Record<string, OpsQuote[]> = {};
-    for (const q of quotes) {
+    for (const q of filteredQuotes) {
       if (q.ops_status === 'completed' && !showCompleted) continue;
       if (q.ops_status === 'cancelled' && !showCancelled) continue;
       const dateKey = normaliseDateKey(q.job_date) || 'unscheduled';
@@ -332,7 +520,25 @@ export default function TransportOpsPage() {
       byDate[dateKey].push(q);
     }
     return byDate;
-  }, [quotes, showCompleted, showCancelled]);
+  }, [filteredQuotes, showCompleted, showCancelled]);
+
+  // Top-of-page summary counts, computed against the raw quotes (not
+  // filteredQuotes) so clicking a chip doesn't then change the chip count.
+  // Respects the job-type pill though — these counts are about the stream
+  // you're looking at.
+  const summary = useMemo(() => {
+    const today = startOfToday();
+    let overdue = 0, todayCount = 0, thisWeek = 0, needsCrew = 0;
+    for (const q of quotes) {
+      const jd = quoteDate(q);
+      const active = q.ops_status !== 'completed' && q.ops_status !== 'cancelled';
+      if (active && jd && jd < today) overdue++;
+      if (jd && jd.getTime() === today.getTime()) todayCount++;
+      if (active && jd && inDateWindow(q, 'this_week')) thisWeek++;
+      if (active && (q.assignments || []).filter((a) => a.status !== 'cancelled').length === 0) needsCrew++;
+    }
+    return { overdue, todayCount, thisWeek, needsCrew };
+  }, [quotes]);
 
   if (loading) {
     return (
@@ -349,12 +555,12 @@ export default function TransportOpsPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Crew & Transport</h1>
           <p className="text-sm text-gray-500">
-            {quotes.length} item{quotes.length !== 1 ? 's' : ''} total
+            {filteredQuotes.length} of {quotes.length} shown
           </p>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Filter pills */}
+          {/* Job type pills */}
           <div className="flex rounded-lg border border-gray-300 overflow-hidden text-sm">
             {(['all', 'transport', 'crewed'] as const).map((f) => (
               <button
@@ -405,16 +611,149 @@ export default function TransportOpsPage() {
         </div>
       </div>
 
+      {/* Summary chips — click any count to jump to that view */}
+      <div className="flex flex-wrap gap-2">
+        <button
+          onClick={() => setDateWindow(dateWindow === 'overdue' ? 'all' : 'overdue')}
+          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            summary.overdue === 0
+              ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-default'
+              : dateWindow === 'overdue'
+              ? 'bg-red-600 text-white border-red-700'
+              : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+          }`}
+          disabled={summary.overdue === 0}
+          title="Active quotes whose job date has passed"
+        >
+          {summary.overdue} overdue
+        </button>
+        <button
+          onClick={() => setDateWindow(dateWindow === 'today_tomorrow' ? 'all' : 'today_tomorrow')}
+          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            dateWindow === 'today_tomorrow'
+              ? 'bg-blue-600 text-white border-blue-700'
+              : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+          }`}
+          title="Any job with today's date"
+        >
+          {summary.todayCount} today
+        </button>
+        <button
+          onClick={() => setDateWindow(dateWindow === 'this_week' ? 'all' : 'this_week')}
+          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            dateWindow === 'this_week'
+              ? 'bg-purple-600 text-white border-purple-700'
+              : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
+          }`}
+          title="Active quotes with a job date this ISO week"
+        >
+          {summary.thisWeek} this week
+        </button>
+        <button
+          onClick={() => setNeedsCrewOnly(!needsCrewOnly)}
+          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            needsCrewOnly
+              ? 'bg-amber-600 text-white border-amber-700'
+              : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+          }`}
+          title="Quotes with no crew assigned"
+        >
+          {summary.needsCrew} needing crew
+        </button>
+      </div>
+
+      {/* Filter bar — search + date window pills + sort */}
+      <div className="flex flex-col lg:flex-row gap-3 bg-white rounded-lg border border-gray-200 p-3">
+        {/* Search */}
+        <div className="relative flex-1 min-w-[240px]">
+          <input
+            type="search"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            placeholder="Search HH#, client, venue, driver…"
+            className="w-full border border-gray-300 rounded-lg px-3 py-1.5 pr-8 text-sm focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
+          />
+          {searchTerm && (
+            <button
+              onClick={() => setSearchTerm('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
+              title="Clear search"
+              aria-label="Clear search"
+            >
+              &times;
+            </button>
+          )}
+        </div>
+
+        {/* Date window pills */}
+        <div className="flex rounded-lg border border-gray-300 overflow-hidden text-sm flex-wrap">
+          {([
+            ['all', 'All dates'],
+            ['overdue', 'Overdue'],
+            ['today_tomorrow', 'Today & tomorrow'],
+            ['this_week', 'This week'],
+            ['next_week', 'Next week'],
+            ['upcoming', 'All upcoming'],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setDateWindow(key)}
+              className={`px-3 py-1.5 border-r border-gray-300 last:border-r-0 ${
+                dateWindow === key ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Sort */}
+        <div className="flex items-center gap-2 text-sm">
+          <label className="text-gray-500">Sort</label>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as SortKey)}
+            className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm bg-white"
+          >
+            <option value="date">Date</option>
+            <option value="client">Client</option>
+            <option value="freelancer">Freelancer</option>
+            <option value="status">Status</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Active-pin banners — person / venue pinned by clicking a name in a row */}
+      {(personPin || venuePin) && (
+        <div className="flex flex-wrap gap-2">
+          {personPin && (
+            <div className="inline-flex items-center gap-2 bg-ooosh-50 border border-ooosh-200 rounded-full px-3 py-1 text-xs text-ooosh-700">
+              <span className="font-medium">Driver:</span> {personPin.name}
+              <button
+                onClick={() => setPersonPin(null)}
+                className="text-ooosh-500 hover:text-ooosh-800"
+                aria-label="Clear driver filter"
+              >&times;</button>
+            </div>
+          )}
+          {venuePin && (
+            <div className="inline-flex items-center gap-2 bg-teal-50 border border-teal-200 rounded-full px-3 py-1 text-xs text-teal-700">
+              <span className="font-medium">Venue:</span> {venuePin.name}
+              <button
+                onClick={() => setVenuePin(null)}
+                className="text-teal-500 hover:text-teal-800"
+                aria-label="Clear venue filter"
+              >&times;</button>
+            </div>
+          )}
+        </div>
+      )}
+
       {needsCrewOnly && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800 flex items-center justify-between">
           <span>Showing quotes without crew assigned.</span>
           <button
-            onClick={() => {
-              setNeedsCrewOnly(false);
-              const url = new URL(window.location.href);
-              url.searchParams.delete('needs_crew');
-              window.history.replaceState({}, '', url.toString());
-            }}
+            onClick={() => setNeedsCrewOnly(false)}
             className="text-amber-700 hover:text-amber-900 font-medium"
           >
             Clear filter &times;
@@ -467,6 +806,8 @@ export default function TransportOpsPage() {
                         onUpdateDetails={updateOpsDetails}
                         onEdit={openEditModal}
                         onUpdateRunGroup={updateRunGroup}
+                        onPinPerson={(id, name) => setPersonPin({ id, name })}
+                        onPinVenue={(name) => setVenuePin({ name })}
                         allQuotes={quotes}
                       />
                     ))}
@@ -673,6 +1014,8 @@ function QuoteRow({
   onUpdateDetails,
   onEdit,
   onUpdateRunGroup,
+  onPinPerson,
+  onPinVenue,
   allQuotes,
 }: {
   quote: OpsQuote;
@@ -684,12 +1027,23 @@ function QuoteRow({
   onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
   onEdit: (quote: OpsQuote) => void;
   onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
+  onPinPerson: (personId: string, name: string) => void;
+  onPinVenue: (name: string) => void;
   allQuotes: OpsQuote[];
 }) {
   const assignments = Array.isArray(q.assignments) ? q.assignments : [];
-  const crewNames = assignments
-    .map((a) => a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim())
-    .filter(Boolean);
+
+  // Overdue = active quote whose job date has passed (calendar-day).
+  // Takes priority over run-group border colour so the red flag is visible.
+  const isOverdue = (() => {
+    if (q.ops_status === 'completed' || q.ops_status === 'cancelled') return false;
+    if (!q.job_date) return false;
+    const d = q.job_date instanceof Date ? new Date(q.job_date) : new Date(q.job_date);
+    if (Number.isNaN(d.getTime())) return false;
+    d.setHours(0, 0, 0, 0);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    return d < today;
+  })();
 
   // Compute run letter and colour index for display (runs match by date, not job)
   const qDate = normaliseDateKey(q.job_date);
@@ -706,10 +1060,19 @@ function QuoteRow({
     return { letter: RUN_LETTERS[idx] || String(idx + 1), colourIdx: idx % RUN_PILL_STYLES.length };
   }, [q.run_group, qDate, allQuotes]);
 
+  const venueName = q.linked_venue_name || q.venue_name || '';
+
+  // Left-border precedence: overdue > run group > none.
+  const leftBorderClass = isOverdue
+    ? 'border-l-4 border-l-red-500'
+    : runInfo
+      ? `border-l-4 ${RUN_PILL_STYLES[runInfo.colourIdx].border}`
+      : '';
+
   return (
     <div>
       <div
-        className={`px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${runInfo ? `border-l-4 ${RUN_PILL_STYLES[runInfo.colourIdx].border}` : ''}`}
+        className={`px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${leftBorderClass}`}
         onClick={onToggle}
       >
         {/* Expand chevron */}
@@ -745,15 +1108,28 @@ function QuoteRow({
         {/* Job / Venue name + badges */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
-            {q.linked_venue_name || q.venue_name ? (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); onEdit(q); }}
-                className="text-sm font-medium text-gray-900 truncate hover:text-ooosh-600 hover:underline text-left"
-                title="Edit venue / quote details"
-              >
-                {q.linked_venue_name || q.venue_name}
-              </button>
+            {venueName ? (
+              <>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onEdit(q); }}
+                  className="text-sm font-medium text-gray-900 truncate hover:text-ooosh-600 hover:underline text-left"
+                  title="Edit venue / quote details"
+                >
+                  {venueName}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onPinVenue(venueName); }}
+                  className="flex-shrink-0 text-gray-400 hover:text-ooosh-600"
+                  title={`Show all quotes for ${venueName}`}
+                  aria-label="Pin venue filter"
+                >
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </>
             ) : (
               <button
                 type="button"
@@ -775,6 +1151,9 @@ function QuoteRow({
             {q.hh_job_number && (
               <span className="text-xs text-gray-400 flex-shrink-0">HH#{q.hh_job_number}</span>
             )}
+            {isOverdue && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold flex-shrink-0">Overdue</span>
+            )}
           </div>
           <div className="text-xs text-gray-500 truncate">
             {q.client_name || q.job_name || ''}
@@ -783,13 +1162,38 @@ function QuoteRow({
 
         {/* Crew */}
         <div className="w-44 flex-shrink-0 hidden lg:block" onClick={(e) => e.stopPropagation()}>
-          {crewNames.length > 0 ? (
+          {assignments.length > 0 ? (
             <div className="text-sm text-gray-700">
-              <div className="truncate">{crewNames.join(', ')}</div>
+              <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
+                {assignments.map((a, i) => {
+                  const label = a.is_ooosh_crew
+                    ? 'Ooosh Crew'
+                    : `${a.first_name || ''} ${a.last_name || ''}`.trim() || 'Unknown';
+                  // Ooosh Crew can't be pinned (no person_id); plain text.
+                  if (a.is_ooosh_crew || !a.person_id) {
+                    return (
+                      <span key={a.id} className="truncate">
+                        {label}{i < assignments.length - 1 ? ',' : ''}
+                      </span>
+                    );
+                  }
+                  return (
+                    <button
+                      key={a.id}
+                      type="button"
+                      onClick={() => onPinPerson(a.person_id!, label)}
+                      className="truncate hover:text-ooosh-600 hover:underline"
+                      title={`Show all quotes for ${label}`}
+                    >
+                      {label}{i < assignments.length - 1 ? ',' : ''}
+                    </button>
+                  );
+                })}
+              </div>
               <div className="flex items-center gap-1.5">
                 {(q.crew_count || 1) > 1 && (
-                  <span className={`text-xs font-medium ${crewNames.length >= (q.crew_count || 1) ? 'text-green-600' : 'text-amber-600'}`}>
-                    {crewNames.length}/{q.crew_count} assigned
+                  <span className={`text-xs font-medium ${assignments.length >= (q.crew_count || 1) ? 'text-green-600' : 'text-amber-600'}`}>
+                    {assignments.length}/{q.crew_count} assigned
                   </span>
                 )}
                 <button

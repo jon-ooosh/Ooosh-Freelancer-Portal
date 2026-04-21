@@ -288,7 +288,25 @@ router.post(
         [jobId]
       );
 
-      // 5. Cancel crew assignments + send emails
+      // 5a. Cancel the transport/crew quotes themselves. Without this the
+      // Transport Ops page keeps showing them in their pre-existing ops
+      // bucket (Arranging/Arranged/…) because effective_ops_status only
+      // reads q.status/q.ops_status — not the parent job's state.
+      await query(
+        `UPDATE quotes
+           SET status = 'cancelled',
+               ops_status = 'cancelled',
+               status_changed_at = NOW(),
+               status_changed_by = $2,
+               cancelled_reason = COALESCE(cancelled_reason, 'Parent job cancelled'),
+               updated_at = NOW()
+         WHERE job_id = $1
+           AND is_deleted = false
+           AND status NOT IN ('cancelled', 'completed')`,
+        [jobId, userId]
+      );
+
+      // 5b. Cancel crew assignments + send emails
       const crewResult = await query(
         `SELECT qa.id, qa.role, qa.status, p.first_name, p.last_name, p.email
          FROM quote_assignments qa

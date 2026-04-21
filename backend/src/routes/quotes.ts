@@ -18,7 +18,7 @@ router.use(authenticate);
 
 router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
   try {
-    const { job_type, ops_status, date_from, date_to } = req.query;
+    const { job_type, ops_status, date_from, date_to, show_all } = req.query;
 
     let whereClause = 'WHERE q.is_deleted = false';
     const params: unknown[] = [];
@@ -36,9 +36,14 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
       whereClause += ` AND q.ops_status = $${params.length}`;
     }
 
+    // Default window: last 14 days → forward. Keeps the payload small
+    // as migrated history grows. Caller can override with ?date_from /
+    // ?date_to, or ask for everything with ?show_all=1.
     if (date_from) {
       params.push(date_from);
       whereClause += ` AND q.job_date >= $${params.length}`;
+    } else if (!show_all) {
+      whereClause += ` AND q.job_date >= CURRENT_DATE - INTERVAL '14 days'`;
     }
 
     if (date_to) {
