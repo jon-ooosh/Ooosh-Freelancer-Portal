@@ -90,6 +90,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '053_portal_shared_account.sql',
         '054_venue_default_tolls.sql',
         '055_hire_form_fallback_events.sql',
+        '056_arranging_reminders.sql',
       ];
 
       for (const migration of migrations) {

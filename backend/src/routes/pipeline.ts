@@ -729,6 +729,76 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       })();
     }
 
+    // Lost cascade — mirror the cancellation flow. Without this the
+    // transport/crew quotes + assignments keep showing as active work on
+    // Transport Ops even though the parent job is dead. We skip the
+    // freelancer email for past-dated jobs (backfill / historical data
+    // import) so cleaning up old records doesn't spam anyone.
+    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
+      try {
+        // Pull crew before we cancel assignments so we still have the data
+        const crewResult = await query(
+          `SELECT qa.role, p.first_name, p.last_name, p.email
+             FROM quote_assignments qa
+             JOIN people p ON p.id = qa.person_id
+             WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
+               AND qa.status NOT IN ('cancelled', 'declined')
+               AND qa.is_ooosh_crew = false
+               AND p.email IS NOT NULL`,
+          [jobId]
+        );
+
+        await query(
+          `UPDATE quotes
+             SET status = 'cancelled',
+                 ops_status = 'cancelled',
+                 status_changed_at = NOW(),
+                 status_changed_by = $2,
+                 cancelled_reason = COALESCE(cancelled_reason, 'Parent job marked lost'),
+                 updated_at = NOW()
+           WHERE job_id = $1
+             AND is_deleted = false
+             AND status NOT IN ('cancelled', 'completed')`,
+          [jobId, req.user!.id]
+        );
+
+        await query(
+          `UPDATE quote_assignments SET status = 'cancelled', updated_at = NOW()
+           WHERE quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
+             AND status NOT IN ('cancelled', 'declined')`,
+          [jobId]
+        );
+
+        // Email only for future-dated jobs. currentJob.job_date is a Date
+        // or ISO string; compare on calendar-day to be friendly to TZ.
+        const rawJobDate = currentJob.job_date ? new Date(currentJob.job_date as string | Date) : null;
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const isFuture = !!rawJobDate && !Number.isNaN(rawJobDate.getTime()) && rawJobDate >= today;
+
+        if (isFuture && crewResult.rows.length > 0) {
+          const jobNumber = currentJob.hh_job_number ? `J-${currentJob.hh_job_number}` : 'NEW';
+          const jobName = currentJob.job_name || 'Untitled';
+          const jobDates = [currentJob.job_date, currentJob.job_end].filter(Boolean).map(
+            (d: string | Date) => new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+          ).join(' — ');
+          for (const crew of crewResult.rows) {
+            emailService.send('job_cancelled_crew', {
+              to: crew.email,
+              variables: {
+                crewName: `${crew.first_name || ''} ${crew.last_name || ''}`.trim() || 'there',
+                jobName,
+                jobNumber,
+                jobDates,
+                crewRole: crew.role || 'Crew',
+              },
+            }).catch(err => console.error(`[Pipeline lost cascade] Email failed for ${crew.email}:`, err));
+          }
+        }
+      } catch (cascadeErr) {
+        console.error('[Pipeline] Lost cascade failed:', cascadeErr);
+      }
+    }
+
     // Write back to HireHop (async, non-blocking — don't fail the response if HH is down)
     writeBackStatusToHireHop(jobId, pipeline_status, req.user!.email || req.user!.id)
       .then(wb => {

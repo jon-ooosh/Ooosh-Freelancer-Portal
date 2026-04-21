@@ -651,6 +651,42 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  arranging_reminder: {
+    variant: 'internal',
+    subject: '{{jobTypeLabel}}: {{jobName}} — {{levelHeadline}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">{{levelHeadline}}</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+        Morning,
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{jobTypeSummary}}</strong> for <strong>{{jobName}}</strong>
+        ({{jobLabel}}) on <strong>{{jobDateFormatted}}</strong> is still in
+        the "To Be Arranged" column — that's
+        <strong>{{daysUntilLabel}}</strong> away and needs picking up.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef3c7;border-radius:8px;border:1px solid #fcd34d;">
+            <p style="margin:0 0 4px;font-size:12px;color:#92400e;">Venue</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{venue}}</p>
+            <p style="margin:8px 0 0;font-size:12px;color:#92400e;">{{clientLine}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;">
+        <a href="{{opLink}}" style="display:inline-block;padding:12px 24px;background-color:#7B5EA7;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600;font-size:15px;">Open the job</a>
+        &nbsp;
+        <a href="{{transportOpsLink}}" style="display:inline-block;padding:12px 24px;background-color:#ffffff;color:#7B5EA7;text-decoration:none;border:1px solid #7B5EA7;border-radius:6px;font-weight:600;font-size:15px;">Transport Ops</a>
+      </p>
+      <p style="margin:0;font-size:12px;color:#64748b;line-height:1.5;">
+        Whoever gets to it first — assign a driver / update the time, address
+        and any key points, and move the job out of To Be Arranged. Reminders
+        stop automatically once that happens.
+      </p>
+    `,
+  },
+
   job_cancelled_crew: {
     variant: 'internal',
     subject: 'Job Cancelled — {{jobName}} ({{jobNumber}})',

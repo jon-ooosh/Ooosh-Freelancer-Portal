@@ -517,4 +517,25 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Completion chaser scheduled every 30 minutes');
+
+  // ── Transport/crew arranging chaser ──────────────────────────────────
+  // Daily at 08:30 — nudge STAFF (info@oooshtours.co.uk) about transport
+  // quotes still sat in ops_status='todo' as the job date approaches.
+  // Levels: T-5 days / T-3 days / T-1 day. Business-hours-gated inside
+  // the service. Runs once a day because bumping multiple levels in one
+  // morning is fine, but sending the same level twice isn't.
+  cron.schedule('30 8 * * *', async () => {
+    try {
+      const { runArrangingChase } = await import('../services/arranging-chaser');
+      const result = await runArrangingChase();
+      if (result.scanned > 0 || result.sent > 0) {
+        console.log(
+          `Scheduler: Arranging chase — scanned ${result.scanned}, sent ${result.sent}, skipped ${result.skipped}`
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Arranging chaser failed:', err);
+    }
+  });
+  console.log('Scheduler: Arranging chaser scheduled daily at 08:30');
 }
