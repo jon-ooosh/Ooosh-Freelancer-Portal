@@ -648,25 +648,60 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
       ]
     );
 
-    // Also create an excess record
+    // Also create an excess record.
+    //
+    // Quick-assign is a STAFF action — it defaults to the £1,200 floor per
+    // driver, same as the HH derivation engine. We explicitly DO NOT read
+    // the excess_rules table here: that table holds points-tier surcharges
+    // which are applied by the hire form app during the DVLA flow, not by
+    // manual staff assignments. The principle from CLAUDE.md:
+    //   "£1,200 is the FLOOR — any DVLA points/referral surcharge gets added
+    //    on top, never replaces."
+    //
+    // Absorption: if the HH derivation engine has already created an unlinked
+    // £1,200 record for this job (assignment_id IS NULL, status in needed/
+    // pending/pre_auth), we LINK that existing record to this driver's new
+    // assignment rather than creating a duplicate. Mirrors the pattern in
+    // POST /api/hire-forms. Second+ drivers on the same job get fresh rows.
     const assignment = result.rows[0];
-    const driverResult = await query(`SELECT licence_points FROM drivers WHERE id = $1`, [f.driver_id]);
-    const points = driverResult.rows[0]?.licence_points || 0;
+    const STANDARD_EXCESS_PER_DRIVER = 1200;
+    const calcBasis = `Standard £${STANDARD_EXCESS_PER_DRIVER.toLocaleString()} floor (quick-assign)`;
 
-    const tierResult = await query(
-      `SELECT * FROM excess_rules WHERE is_active = true AND rule_type = 'points_tier'
-       AND condition_min <= $1 AND condition_max >= $1 ORDER BY sort_order LIMIT 1`,
-      [points]
-    );
-    const excessAmount = tierResult.rows[0]?.excess_amount ? parseFloat(tierResult.rows[0].excess_amount) : null;
-
-    await query(
-      `INSERT INTO job_excess (assignment_id, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, created_by)
-       VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
-      [assignment.id, f.job_id, hhJobId, excessAmount, `${points} points`, req.user!.id]
+    const orphanExcess = await query(
+      `SELECT id, excess_amount_taken, excess_status
+       FROM job_excess
+       WHERE job_id = $1 AND assignment_id IS NULL
+         AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required')
+       ORDER BY created_at ASC LIMIT 1`,
+      [f.job_id]
     );
 
-    console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id} on job ${f.job_id})`);
+    if (orphanExcess.rows.length > 0) {
+      const orphan = orphanExcess.rows[0];
+      await query(
+        `UPDATE job_excess SET
+          assignment_id = $1,
+          excess_amount_required = $2,
+          excess_calculation_basis = $3,
+          excess_status = CASE
+            WHEN excess_status IN ('taken', 'pre_auth', 'partially_paid') THEN excess_status
+            ELSE 'pending'
+          END,
+          notes = COALESCE(notes, '') || E'\nAbsorbed by quick-assign for driver ' || $4::TEXT,
+          updated_at = NOW()
+        WHERE id = $5`,
+        [assignment.id, STANDARD_EXCESS_PER_DRIVER, calcBasis, f.driver_id, orphan.id]
+      );
+      console.log(`[hire-forms] Quick-assign absorbed orphan excess ${orphan.id} into assignment ${assignment.id}`);
+    } else {
+      await query(
+        `INSERT INTO job_excess (assignment_id, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, created_by)
+         VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
+        [assignment.id, f.job_id, hhJobId, STANDARD_EXCESS_PER_DRIVER, calcBasis, req.user!.id]
+      );
+    }
+
+    console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id || 'unassigned'} on job ${f.job_id}, excess £${STANDARD_EXCESS_PER_DRIVER})`);
     res.status(201).json({ data: assignment });
   } catch (error) {
     console.error('[hire-forms] Quick assign error:', error);

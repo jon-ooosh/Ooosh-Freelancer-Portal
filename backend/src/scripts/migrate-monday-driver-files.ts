@@ -62,11 +62,14 @@ if (!isR2Configured()) { console.error('R2 not configured (R2_ACCOUNT_ID / R2_AC
 
 type FileTag = 'licence-front' | 'licence-back' | 'poa1' | 'poa2' | 'dvla' | 'passport' | 'signature';
 
+// Labels must match the fileLabels array in DriverDetailPage DOCUMENT_CATEGORIES
+// (case-insensitive exact match — that's how the UI routes files to slots).
+// Keep in sync with frontend/src/pages/DriverDetailPage.tsx line ~302.
 const FILE_COLUMNS: { columnId: string; tag: FileTag; label: string }[] = [
   { columnId: 'file_mktrypb7', tag: 'licence-front', label: 'Licence Front' },
   { columnId: 'file_mktr76g6', tag: 'licence-back',  label: 'Licence Back' },
-  { columnId: 'file_mktrf9jv', tag: 'poa1',          label: 'POA 1 Document' },
-  { columnId: 'file_mktr3fdw', tag: 'poa2',          label: 'POA 2 Document' },
+  { columnId: 'file_mktrf9jv', tag: 'poa1',          label: 'POA 1' },
+  { columnId: 'file_mktr3fdw', tag: 'poa2',          label: 'POA 2' },
   { columnId: 'file_mktrwhn8', tag: 'dvla',          label: 'DVLA Check' },
   { columnId: 'file_mktr56t0', tag: 'passport',      label: 'Passport' },
   { columnId: 'file_mktrfanc', tag: 'signature',     label: 'Signature' },
