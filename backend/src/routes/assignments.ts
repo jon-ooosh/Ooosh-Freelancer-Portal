@@ -720,6 +720,11 @@ router.get('/compat/allocations', async (_req: AuthRequest, res: Response) => {
       driverName: row.driver_name || row.notes || null,
       driverId: row.driver_id || null,
       status: row.status === 'soft' ? 'soft' : 'confirmed',
+      // Expose the underlying assignment status so the UI can distinguish
+      // booked_out/active from confirmed — the narrowed `status` above
+      // collapses them for backwards compatibility with the old
+      // VanAllocation shape.
+      rawStatus: row.status,
       allocatedAt: row.created_at,
       allocatedBy: row.allocated_by_name || 'Unknown',
       confirmedAt: row.status !== 'soft' ? row.status_changed_at : null,

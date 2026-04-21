@@ -612,8 +612,10 @@ function RequirementSlots({
                 {/* Unlink van — available on hire-form cards that have a
                     van linked but aren't yet booked out. Cascades the
                     clear to every driver sharing this van on this slot
-                    (per van/driver model — 1 van, N drivers). */}
-                {allocation.hireFormLinked && allocation.vehicleReg && allocation.status !== 'booked_out' && (
+                    (per van/driver model — 1 van, N drivers).
+                    Uses rawStatus because the narrowed `status` field
+                    collapses booked_out/active/returned into 'confirmed'. */}
+                {allocation.hireFormLinked && allocation.vehicleReg && allocation.rawStatus !== 'booked_out' && allocation.rawStatus !== 'active' && (
                   <button
                     onClick={() => unlinkVehicleFromHireForm(allocation.id)}
                     disabled={linking}
