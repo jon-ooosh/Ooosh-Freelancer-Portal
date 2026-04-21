@@ -770,7 +770,13 @@ async function refreshCostings(): Promise<void> {
   const items = await fetchBoardItems(DC_BOARD_ID!, cols);
   console.log(`Fetched ${items.length} D&C items from Monday`);
 
-  let scanned = 0, matched = 0, updated = 0, noQuote = 0, ambiguous = 0, skipped = 0, nothingToSet = 0;
+  let scanned = 0, matched = 0, updated = 0, noQuote = 0, ambiguous = 0, skipped = 0;
+  // Separate reasons an item ends up doing nothing — far more useful than
+  // a single "nothingToSet" bucket because Monday-blank and already-filled
+  // are very different diagnostic signals.
+  let noDataOnMonday = 0;      // Monday item had no costings or breakdown at all
+  let alreadyFilled = 0;       // OP quote already has values in all non-blank columns
+  let totalFieldsFilled = 0;   // across all updated quotes (dry-run + commit)
 
   for (const item of items) {
     if (cvText(item, DC_COLS.tracking).toLowerCase() !== 'yes') continue;
@@ -791,7 +797,7 @@ async function refreshCostings(): Promise<void> {
     const expensesBreakdown = cvText(item, DC_COLS.expensesBreakdown) || null;
 
     if (clientCharge == null && expensesIncluded == null && expensesNotIncluded == null && !expensesBreakdown) {
-      nothingToSet++;
+      noDataOnMonday++;
       continue;
     }
 
@@ -838,9 +844,12 @@ async function refreshCostings(): Promise<void> {
     }
 
     if (updates.length === 0) {
-      nothingToSet++;
+      alreadyFilled++;
       continue;
     }
+
+    totalFieldsFilled += updates.length;
+    updated++; // counts the quote once, regardless of how many fields it gets
 
     if (!COMMIT) continue;
 
@@ -849,14 +858,17 @@ async function refreshCostings(): Promise<void> {
       `UPDATE quotes SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`,
       params
     );
-    updated++;
   }
 
   console.log('\n=== Costings refresh summary ===');
-  console.log(`scanned (tracking=yes):     ${scanned}`);
-  console.log(`  matched to OP quote:        ${matched}`);
-  console.log(`  ${COMMIT ? 'updated' : 'would update'}:                ${COMMIT ? updated : matched - nothingToSet}`);
-  console.log(`  nothing to set / unchanged: ${nothingToSet}`);
+  console.log(`scanned (tracking=yes):       ${scanned}`);
+  console.log(`  matched to OP quote:          ${matched}`);
+  console.log(`  ${COMMIT ? 'updated' : 'would update'}:                  ${updated} quotes (${totalFieldsFilled} field writes)`);
+  console.log(`  already filled (no change):   ${alreadyFilled}`);
+  console.log(`  Monday has no costings:       ${noDataOnMonday}`);
+  console.log(`  no matching OP quote:         ${noQuote}`);
+  console.log(`  ambiguous (>1 match):         ${ambiguous}  (manual review needed)`);
+  console.log(`  data-insufficient:            ${skipped}`);
   console.log(`  no matching OP quote:       ${noQuote}`);
   console.log(`  ambiguous (>1 match):       ${ambiguous}`);
   console.log(`  data-insufficient:          ${skipped}`);
