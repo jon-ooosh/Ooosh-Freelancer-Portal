@@ -23,9 +23,18 @@
  *   npx tsx src/scripts/migrate-monday-upcoming.ts --commit
  *
  * Optional flags:
- *   --only-dc      migrate only the D&C board
- *   --only-crew    migrate only the Crewed Jobs board
+ *   --only-dc           migrate only the D&C board
+ *   --only-crew         migrate only the Crewed Jobs board
  *   --since 2026-01-01  override the "upcoming" cutoff (default: today)
+ *   --refresh-venues    back-fill venue_id on already-migrated quotes
+ *                       (looks up Monday venue board → external_id_map)
+ *   --refresh-costings  back-fill client_charge / expenses / breakdown text
+ *                       on already-migrated quotes (only fills blanks)
+ *
+ * Diagnostics (read-only — no --commit needed):
+ *   --dump-board-cols          print every column on the D&C board
+ *   --dump-item <mondayItemId> print full column_values for one item
+ *                              (use this to debug venue / costing parsing)
  *
  * Required env vars (alongside DATABASE_URL):
  *   MONDAY_API_TOKEN
@@ -50,6 +59,10 @@ const COMMIT = args.includes('--commit');
 const ONLY_DC = args.includes('--only-dc');
 const ONLY_CREW = args.includes('--only-crew');
 const REFRESH_VENUES = args.includes('--refresh-venues');
+const REFRESH_COSTINGS = args.includes('--refresh-costings');
+const DUMP_ITEM_IDX = args.indexOf('--dump-item');
+const DUMP_ITEM_ID = DUMP_ITEM_IDX >= 0 ? args[DUMP_ITEM_IDX + 1] : null;
+const DUMP_BOARD_COLS = args.includes('--dump-board-cols');
 const SINCE_IDX = args.indexOf('--since');
 const SINCE = SINCE_IDX >= 0 ? args[SINCE_IDX + 1] : new Date().toISOString().slice(0, 10);
 
@@ -87,13 +100,17 @@ const DC_COLS = {
   whatIsIt: 'status4',                 // "Equipment" / "A vehicle"
   date: 'date4',
   timeToArrive: 'hour',
-  venueConnect: 'connect_boards6',
+  venueConnect: 'connect_boards6',     // → venues board 2406443142
   driverEmailGC: 'driver_email__gc_',
   status: 'status90',
   keyPoints: 'key_points___summary',
   runGroup: 'color_mkxvwn11',
   driverPayMirror: 'lookup_mkzsfkg2',
-  driverPayDirect: 'numeric_mm0688f9',
+  driverPayDirect: 'numeric_mm0688f9', // freelancer fee (driver pay)
+  clientCharge: 'numeric_mm06wq2n',    // fee to charge client
+  expensesIncluded: 'numeric_mm08av8f',     // expenses included in client charge
+  expensesNotIncluded: 'numeric_mm08jhcw',  // expenses freelancer claims back
+  expensesBreakdown: 'long_text_mm08cpst',  // free-text breakdown — appended to internal_notes
   clientEmail: 'email',
   tracking: 'text_mm2krnzm',           // OP migration status
 } as const;
@@ -138,7 +155,14 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
   return body.data as T;
 }
 
-interface MondayColumn { id: string; text: string | null; value: string | null }
+interface MondayColumn {
+  id: string;
+  text: string | null;
+  value: string | null;
+  /** Typed field for board_relation / connect_boards columns. Populated
+   *  via the GraphQL union fragment `... on BoardRelationValue`. */
+  linked_item_ids?: string[];
+}
 interface MondayItem {
   id: string;
   name: string;
@@ -159,6 +183,11 @@ async function fetchBoardItems(boardId: string, cols: string[]): Promise<MondayI
   const all: MondayItem[] = [];
   let cursor: string | null = null;
   do {
+    // Use the typed BoardRelationValue fragment so connect_boards / board_relation
+    // columns return linked_item_ids directly. Bypasses guessing the value JSON
+    // shape (Monday's API has changed it across versions: linkedPulseIds vs
+    // linked_pulse_ids vs ids[]). The base { id text value } still works for
+    // all other column types.
     const query = `
       query ($boardId: ID!, $cursor: String) {
         boards(ids: [$boardId]) {
@@ -172,6 +201,9 @@ async function fetchBoardItems(boardId: string, cols: string[]): Promise<MondayI
                 id
                 text
                 value
+                ... on BoardRelationValue {
+                  linked_item_ids
+                }
               }
             }
           }
@@ -214,6 +246,51 @@ function cv(item: MondayItem, columnId: string): MondayColumn | undefined {
 
 function cvText(item: MondayItem, columnId: string): string {
   return cv(item, columnId)?.text?.trim() || '';
+}
+
+/**
+ * Extract the FIRST linked Monday item id from a board_relation /
+ * connect_boards column. Tries in order:
+ *   1. The typed `linked_item_ids` field (Monday API 2024-01 canonical)
+ *   2. Multiple historical JSON shapes (linkedPulseIds / linked_pulse_ids / ids)
+ * Returns null if nothing usable is present.
+ */
+function extractLinkedMondayId(item: MondayItem, columnId: string): string | null {
+  const col = cv(item, columnId);
+  if (!col) return null;
+
+  // 1. Typed field (Monday API 2024-01)
+  if (Array.isArray(col.linked_item_ids) && col.linked_item_ids.length > 0) {
+    const first = col.linked_item_ids[0];
+    if (first != null && String(first).trim() !== '') return String(first);
+  }
+
+  // 2. JSON fallbacks — try every shape Monday has used.
+  if (col.value) {
+    try {
+      const parsed = JSON.parse(col.value) as Record<string, unknown>;
+
+      // Shape A: { linkedPulseIds: [{ linkedPulseId: 123 }] }
+      const a = (parsed.linkedPulseIds as Array<{ linkedPulseId?: number | string }> | undefined)?.[0]?.linkedPulseId;
+      if (a != null) return String(a);
+
+      // Shape B: { linked_pulse_ids: [{ linked_pulse_id: 123 }] }
+      const b = (parsed.linked_pulse_ids as Array<{ linked_pulse_id?: number | string }> | undefined)?.[0]?.linked_pulse_id;
+      if (b != null) return String(b);
+
+      // Shape C: { ids: [123, 456] }
+      const c = (parsed.ids as Array<number | string> | undefined)?.[0];
+      if (c != null) return String(c);
+
+      // Shape D: { item_ids: [123] }
+      const d = (parsed.item_ids as Array<number | string> | undefined)?.[0];
+      if (d != null) return String(d);
+    } catch {
+      /* fall through */
+    }
+  }
+
+  return null;
 }
 
 // ── DB ───────────────────────────────────────────────────────────────
@@ -341,32 +418,37 @@ async function migrateDC(): Promise<void> {
     const driverPay = Number(cvText(item, DC_COLS.driverPayDirect)) || Number(cvText(item, DC_COLS.driverPayMirror)) || null;
     const clientEmail = cvText(item, DC_COLS.clientEmail) || null;
 
-    // Venue link
+    // Venue link — use typed Monday field first, JSON fallback for older shapes.
     let venueId: string | null = null;
-    const venueRaw = cv(item, DC_COLS.venueConnect)?.value;
-    if (venueRaw) {
-      try {
-        const parsed = JSON.parse(venueRaw) as { linkedPulseIds?: Array<{ linkedPulseId: number }> };
-        const mondayVenueId = parsed.linkedPulseIds?.[0]?.linkedPulseId;
-        if (mondayVenueId) {
-          const venue = await findVenueByMondayId(String(mondayVenueId));
-          if (venue) venueId = venue.id;
-        }
-      } catch { /* ignore parse */ }
+    const mondayVenueId = extractLinkedMondayId(item, DC_COLS.venueConnect);
+    if (mondayVenueId) {
+      const venue = await findVenueByMondayId(mondayVenueId);
+      if (venue) venueId = venue.id;
     }
+
+    // Costings: client charge, expenses, breakdown text
+    const clientCharge = Number(cvText(item, DC_COLS.clientCharge)) || null;
+    const expensesIncluded = Number(cvText(item, DC_COLS.expensesIncluded)) || null;
+    const expensesNotIncluded = Number(cvText(item, DC_COLS.expensesNotIncluded)) || null;
+    const expensesBreakdown = cvText(item, DC_COLS.expensesBreakdown) || null;
+    const internalNotesFromMonday = expensesBreakdown
+      ? `Expenses breakdown (from Monday):\n${expensesBreakdown}`
+      : null;
 
     const driverSummary = person
       ? `driver ${freelancerEmail} (${person.id})`
       : `UNASSIGNED (group ${DC_UNASSIGNED_GROUP_ID})`;
 
     if (!COMMIT) {
+      const venueLabel = venueId ? `venue ✓` : (mondayVenueId ? `venue NOT in OP (mid=${mondayVenueId})` : 'no venue link');
+      const charge = clientCharge ? `£${clientCharge} client / £${driverPay || 0} driver` : `£${driverPay || 0} driver`;
       outcomes.push({
         itemId: item.id,
         itemName: item.name,
         board: 'dc',
         hhRef,
         status: 'ok',
-        reason: `would insert: ${jobType}/${whatIsItNorm} @ ${dateStr || 'TBC'} ${arrivalTime || ''} — ${driverSummary} @ £${driverPay || '?'}`,
+        reason: `would insert: ${jobType}/${whatIsItNorm} @ ${dateStr || 'TBC'} ${arrivalTime || ''} — ${driverSummary} — ${charge} — ${venueLabel}`,
       });
       continue;
     }
@@ -381,6 +463,9 @@ async function migrateDC(): Promise<void> {
            job_date, arrival_time,
            key_points, run_group,
            freelancer_fee, freelancer_fee_rounded,
+           client_charge_total, client_charge_rounded,
+           expenses_included, expenses_not_included,
+           internal_notes,
            is_local, status, ops_status,
            created_by
          ) VALUES (
@@ -389,6 +474,9 @@ async function migrateDC(): Promise<void> {
            $6, $7,
            $8, $9,
            $10, $10,
+           $11, $11,
+           $12, $13,
+           $14,
            false, 'confirmed', 'arranging',
            NULL
          )
@@ -404,6 +492,10 @@ async function migrateDC(): Promise<void> {
           keyPoints,
           runGroup,
           driverPay,
+          clientCharge,
+          expensesIncluded,
+          expensesNotIncluded,
+          internalNotesFromMonday,
         ]
       );
       const quoteId = quoteInsert.rows[0].id;
@@ -495,16 +587,10 @@ async function migrateCrew(): Promise<void> {
     const arrivalTime = timeRaw?.hour != null ? `${String(timeRaw.hour).padStart(2, '0')}:${String(timeRaw.minute || 0).padStart(2, '0')}` : null;
 
     let venueId: string | null = null;
-    const venueRaw = cv(item, CREW_COLS.venueLink)?.value;
-    if (venueRaw) {
-      try {
-        const parsed = JSON.parse(venueRaw) as { linkedPulseIds?: Array<{ linkedPulseId: number }> };
-        const mondayVenueId = parsed.linkedPulseIds?.[0]?.linkedPulseId;
-        if (mondayVenueId) {
-          const venue = await findVenueByMondayId(String(mondayVenueId));
-          if (venue) venueId = venue.id;
-        }
-      } catch { /* ignore parse */ }
+    const mondayVenueId = extractLinkedMondayId(item, CREW_COLS.venueLink);
+    if (mondayVenueId) {
+      const venue = await findVenueByMondayId(mondayVenueId);
+      if (venue) venueId = venue.id;
     }
 
     if (!COMMIT) {
@@ -617,18 +703,12 @@ async function refreshVenueLinks(): Promise<void> {
     }
     scanned++;
 
-    // Parse the Monday venue id off the connect column
-    const venueRaw = cv(item, DC_COLS.venueConnect)?.value;
-    let mondayVenueId: number | null = null;
-    if (venueRaw) {
-      try {
-        const parsed = JSON.parse(venueRaw) as { linkedPulseIds?: Array<{ linkedPulseId: number }> };
-        mondayVenueId = parsed.linkedPulseIds?.[0]?.linkedPulseId ?? null;
-      } catch { /* ignore */ }
-    }
+    // Use the typed Monday field (with JSON fallbacks) — handles every shape
+    // Monday has used for board_relation columns across API versions.
+    const mondayVenueId = extractLinkedMondayId(item, DC_COLS.venueConnect);
     if (!mondayVenueId) { noMondayVenue++; continue; }
 
-    const opVenue = await findVenueByMondayId(String(mondayVenueId));
+    const opVenue = await findVenueByMondayId(mondayVenueId);
     if (!opVenue) { noOpVenue++; continue; }
 
     // Heuristic match to OP quote: HH → job_id, plus job_type + job_date
@@ -673,7 +753,209 @@ async function refreshVenueLinks(): Promise<void> {
   console.log(`  data-insufficient:      ${skipped}`);
 }
 
+// ── Refresh costings on already-migrated D&C quotes ────────────────
+// Initial migration only pulled the freelancer fee. This pass walks
+// every D&C item with tracking="yes" and back-fills:
+//   - client_charge_total / client_charge_rounded (fee to charge client)
+//   - expenses_included / expenses_not_included
+//   - internal_notes (appends the Monday "expenses breakdown" free text)
+// Only updates the OP quote where the corresponding fields are NULL/blank,
+// so any staff edits since migration are preserved. Matches Monday → OP
+// quote via (hh_job_number → job_id, job_type, job_date) — same heuristic
+// as refreshVenueLinks.
+
+async function refreshCostings(): Promise<void> {
+  console.log('\n=== D&C costings refresh ===');
+  const cols = Object.values(DC_COLS);
+  const items = await fetchBoardItems(DC_BOARD_ID!, cols);
+  console.log(`Fetched ${items.length} D&C items from Monday`);
+
+  let scanned = 0, matched = 0, updated = 0, noQuote = 0, ambiguous = 0, skipped = 0, nothingToSet = 0;
+
+  for (const item of items) {
+    if (cvText(item, DC_COLS.tracking).toLowerCase() !== 'yes') continue;
+    scanned++;
+
+    const hhRef = cvText(item, DC_COLS.hhRef);
+    const dateStr = cvText(item, DC_COLS.date);
+    const deliverCollect = cvText(item, DC_COLS.deliverCollect).toLowerCase();
+    const jobType = deliverCollect === 'collection' ? 'collection' : 'delivery';
+    if (!hhRef || !dateStr) { skipped++; continue; }
+
+    const opJob = await findOpJobByHhNumber(hhRef);
+    if (!opJob) { skipped++; continue; }
+
+    const clientCharge = Number(cvText(item, DC_COLS.clientCharge)) || null;
+    const expensesIncluded = Number(cvText(item, DC_COLS.expensesIncluded)) || null;
+    const expensesNotIncluded = Number(cvText(item, DC_COLS.expensesNotIncluded)) || null;
+    const expensesBreakdown = cvText(item, DC_COLS.expensesBreakdown) || null;
+
+    if (clientCharge == null && expensesIncluded == null && expensesNotIncluded == null && !expensesBreakdown) {
+      nothingToSet++;
+      continue;
+    }
+
+    // Match the OP quote — narrow to the same job/type/date (mirrors the
+    // venue refresh). Don't filter on venue_id NULL here, costings should
+    // backfill regardless of venue state.
+    const matchRes = await pool.query(
+      `SELECT id, client_charge_total, expenses_included, expenses_not_included, internal_notes
+       FROM quotes
+       WHERE job_id = $1 AND job_type = $2 AND job_date = $3
+         AND is_deleted = false`,
+      [opJob.id, jobType, dateStr]
+    );
+    if (matchRes.rows.length === 0) { noQuote++; continue; }
+    if (matchRes.rows.length > 1) { ambiguous++; continue; }
+    matched++;
+
+    const existing = matchRes.rows[0];
+    const updates: string[] = [];
+    const params: unknown[] = [];
+
+    // Only fill blanks — preserve staff edits.
+    if (clientCharge != null && (existing.client_charge_total == null || Number(existing.client_charge_total) === 0)) {
+      params.push(clientCharge);
+      updates.push(`client_charge_total = $${params.length}, client_charge_rounded = $${params.length}`);
+    }
+    if (expensesIncluded != null && (existing.expenses_included == null || Number(existing.expenses_included) === 0)) {
+      params.push(expensesIncluded);
+      updates.push(`expenses_included = $${params.length}`);
+    }
+    if (expensesNotIncluded != null && (existing.expenses_not_included == null || Number(existing.expenses_not_included) === 0)) {
+      params.push(expensesNotIncluded);
+      updates.push(`expenses_not_included = $${params.length}`);
+    }
+    if (expensesBreakdown) {
+      const block = `Expenses breakdown (from Monday):\n${expensesBreakdown}`;
+      const current = (existing.internal_notes || '').toString();
+      // Skip if the block is already present (idempotent re-run).
+      if (!current.includes('Expenses breakdown (from Monday):')) {
+        const newNotes = current.trim() ? `${current.trim()}\n\n${block}` : block;
+        params.push(newNotes);
+        updates.push(`internal_notes = $${params.length}`);
+      }
+    }
+
+    if (updates.length === 0) {
+      nothingToSet++;
+      continue;
+    }
+
+    if (!COMMIT) continue;
+
+    params.push(existing.id);
+    await pool.query(
+      `UPDATE quotes SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`,
+      params
+    );
+    updated++;
+  }
+
+  console.log('\n=== Costings refresh summary ===');
+  console.log(`scanned (tracking=yes):     ${scanned}`);
+  console.log(`  matched to OP quote:        ${matched}`);
+  console.log(`  ${COMMIT ? 'updated' : 'would update'}:                ${COMMIT ? updated : matched - nothingToSet}`);
+  console.log(`  nothing to set / unchanged: ${nothingToSet}`);
+  console.log(`  no matching OP quote:       ${noQuote}`);
+  console.log(`  ambiguous (>1 match):       ${ambiguous}`);
+  console.log(`  data-insufficient:          ${skipped}`);
+}
+
+// ── Diagnostic: dump every column on the D&C board ──────────────────
+
+async function dumpBoardColumns(boardId: string): Promise<void> {
+  interface ColDef { id: string; title: string; type: string }
+  interface Result { boards: Array<{ columns: ColDef[] }> }
+  const data = await mondayQuery<Result>(`
+    query ($boardId: ID!) {
+      boards(ids: [$boardId]) {
+        columns { id title type }
+      }
+    }
+  `, { boardId });
+  const cols = data.boards?.[0]?.columns || [];
+  console.log(`\nBoard ${boardId} — ${cols.length} columns:`);
+  for (const c of cols) {
+    console.log(`  ${c.id.padEnd(34)} | ${c.type.padEnd(18)} | ${c.title}`);
+  }
+}
+
+// ── Diagnostic: dump full column_values for one item ────────────────
+
+async function dumpItem(itemId: string): Promise<void> {
+  interface Result {
+    items: Array<{
+      id: string;
+      name: string;
+      board: { id: string; name: string };
+      group: { id: string; title: string };
+      column_values: Array<{
+        id: string;
+        type: string;
+        text: string | null;
+        value: string | null;
+        linked_item_ids?: string[];
+      }>;
+    }>;
+  }
+  const data = await mondayQuery<Result>(`
+    query ($itemId: ID!) {
+      items(ids: [$itemId]) {
+        id
+        name
+        board { id name }
+        group { id title }
+        column_values {
+          id
+          type
+          text
+          value
+          ... on BoardRelationValue { linked_item_ids }
+        }
+      }
+    }
+  `, { itemId });
+  const it = data.items?.[0];
+  if (!it) {
+    console.log(`No Monday item with id ${itemId}`);
+    return;
+  }
+  console.log(`\nItem ${it.id} "${it.name}"`);
+  console.log(`  board: ${it.board.id} "${it.board.name}"`);
+  console.log(`  group: ${it.group.id} "${it.group.title}"`);
+  console.log(`  ${it.column_values.length} column values:\n`);
+  for (const c of it.column_values) {
+    console.log(`  ${c.id.padEnd(34)} | ${c.type.padEnd(18)} | text="${(c.text || '').slice(0, 60)}"`);
+    if (c.value) console.log(`    value: ${c.value}`);
+    if (c.linked_item_ids && c.linked_item_ids.length > 0) {
+      console.log(`    linked_item_ids: ${JSON.stringify(c.linked_item_ids)}`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
+  if (DUMP_BOARD_COLS) {
+    requireDcBoard();
+    await dumpBoardColumns(DC_BOARD_ID!);
+    await pool.end();
+    return;
+  }
+
+  if (DUMP_ITEM_ID) {
+    await dumpItem(DUMP_ITEM_ID);
+    await pool.end();
+    return;
+  }
+
+  if (REFRESH_COSTINGS) {
+    console.log(`Costings refresh ${COMMIT ? '(COMMIT MODE)' : '(DRY RUN)'}`);
+    requireDcBoard();
+    await refreshCostings();
+    await pool.end();
+    return;
+  }
+
   if (REFRESH_VENUES) {
     console.log(`Venue-link refresh ${COMMIT ? '(COMMIT MODE)' : '(DRY RUN)'}`);
     requireDcBoard();
