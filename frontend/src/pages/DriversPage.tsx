@@ -81,17 +81,18 @@ function deriveDriverStatus(driver: DriverListItem): { label: string; colour: st
     return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
   }
 
-  // Signed — check for expired docs or missing data
+  // Signed — check for expired docs
+  // "Expired" fires only when we have an actual date in hand AND it's in
+  // the past. Missing dates are NOT treated as expired (iDenfy doesn't
+  // always extract licence_valid_to / dvla_valid_until, so a null there
+  // just means "not captured", not "invalid"). Staff can still spot
+  // gaps via the per-doc validity pills on the driver detail page.
   const expiredDocs: string[] = [];
   if (isDateExpired(driver.licence_valid_to)) expiredDocs.push('Licence');
   if (isDateExpired(driver.dvla_valid_until)) expiredDocs.push('DVLA');
   if (isDateExpired(driver.poa1_valid_until)) expiredDocs.push('POA');
 
   if (expiredDocs.length > 0) {
-    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
-  }
-
-  if (!driver.dvla_valid_until && !driver.licence_valid_to) {
     return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
   }
 

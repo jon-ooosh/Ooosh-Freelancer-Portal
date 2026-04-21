@@ -257,10 +257,10 @@ function deriveDriverStatus(driver: { requires_referral: boolean; referral_statu
   if (!driver.signature_date) {
     return { label: 'In Progress', colour: 'bg-blue-100 text-blue-700' };
   }
+  // "Expired" fires only when a date is present AND in the past. Missing
+  // dates (iDenfy often doesn't extract licence_valid_to, for instance)
+  // are NOT treated as expired — per-doc pills below surface the gaps.
   if (isDateExpired(driver.licence_valid_to) || isDateExpired(driver.poa1_valid_until)) {
-    return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
-  }
-  if (!driver.licence_valid_to) {
     return { label: 'Expired', colour: 'bg-amber-100 text-amber-700' };
   }
   return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
