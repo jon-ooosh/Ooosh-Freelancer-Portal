@@ -418,7 +418,7 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
 
 router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { mileage_in, fuel_level_in, has_damage } = req.body;
 
     // Capture pre-update state so we can tell whether this is the first
