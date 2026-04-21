@@ -418,7 +418,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
           xero_contact_id = COALESCE($5, xero_contact_id),
           xero_contact_name = COALESCE($6, xero_contact_name),
           client_name = COALESCE($7, client_name),
-          notes = COALESCE(notes, '') || E'\nHire form submitted — excess updated from £' || COALESCE(excess_amount_required, 0)::TEXT || ' to £' || $2::TEXT,
+          notes = COALESCE(notes, '') || E'\nHire form submitted — excess updated from £' || COALESCE(excess_amount_required, 0)::TEXT || ' to £' || $9::TEXT,
           updated_at = NOW()
         WHERE id = $8
         RETURNING *`,
@@ -427,6 +427,7 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
           newStatus,
           f.xero_contact_id || null, f.xero_contact_name || null, f.client_name || null,
           portalRecord.id,
+          String(newRequired),      // $9 — same value as $2 but cast to text for notes concat
         ]
       );
       console.log(`[hire-forms] Absorbed portal excess ${portalRecord.id}: required £${newRequired}, already taken £${alreadyTaken}, status=${newStatus}`);
