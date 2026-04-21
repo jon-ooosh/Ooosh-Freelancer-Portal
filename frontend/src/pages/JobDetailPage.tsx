@@ -2559,7 +2559,13 @@ export default function JobDetailPage() {
                             <span className="text-xs font-medium text-gray-500 uppercase">Driver</span>
                             {a.driver_name ? (
                               <p className="text-sm font-medium text-gray-900">
-                                {a.driver_name}
+                                {a.driver_id ? (
+                                  <Link to={`/drivers/${a.driver_id}`} className="text-ooosh-700 hover:text-ooosh-900 hover:underline">
+                                    {a.driver_name}
+                                  </Link>
+                                ) : (
+                                  a.driver_name
+                                )}
                                 {a.driver_email && <span className="text-gray-400 font-normal ml-2">{a.driver_email}</span>}
                               </p>
                             ) : (
