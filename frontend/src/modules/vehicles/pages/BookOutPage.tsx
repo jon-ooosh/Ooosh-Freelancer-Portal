@@ -62,6 +62,7 @@ const INITIAL_FORM: BookOutFormState = {
   vehicleType: '',
   vehicleSimpleType: '',
   driverName: '',
+  selectedHireFormId: null,
   clientEmail: '',
   hireHopJob: '',
   mileage: '',
@@ -1431,10 +1432,14 @@ function StepDriverHire({
     setShowJobPicker(false)
   }
 
-  function handleSelectDriver(driverName: string) {
+  function handleSelectDriver(driverName: string, hireFormId: string) {
+    // Track the specific hire form by id, not just the name. Multiple
+    // drivers on the same job can share a name (seen in the 22 Apr test
+    // case: three "Mr Jonathan Mark Wood" rows with different emails)
+    // and selecting by name alone highlighted all matching siblings.
+    onUpdate('selectedHireFormId', hireFormId)
     onUpdate('driverName', driverName)
-    // Also update client email to match the selected driver
-    const selectedForm = hireForms?.find(hf => hf.driverName === driverName)
+    const selectedForm = hireForms?.find(hf => hf.id === hireFormId)
     if (selectedForm?.clientEmail) {
       onUpdate('clientEmail', selectedForm.clientEmail)
     }
@@ -1606,7 +1611,23 @@ function StepDriverHire({
             <>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-600">Start Time</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-medium text-gray-600">
+                      Start Time
+                      {form.hireStartDate && (
+                        <span className="ml-1.5 font-normal text-gray-400">
+                          {formatShortDate(form.hireStartDate)}
+                        </span>
+                      )}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => onUpdate('hireStartTime', nowHHmm())}
+                      className="text-[10px] font-medium text-ooosh-navy hover:underline"
+                    >
+                      Now
+                    </button>
+                  </div>
                   <input
                     type="time"
                     value={form.hireStartTime || '09:00'}
@@ -1615,7 +1636,23 @@ function StepDriverHire({
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-gray-600">End Time</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-medium text-gray-600">
+                      End Time
+                      {form.hireEndDate && (
+                        <span className="ml-1.5 font-normal text-gray-400">
+                          {formatShortDate(form.hireEndDate)}
+                        </span>
+                      )}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => onUpdate('hireEndTime', nowHHmm())}
+                      className="text-[10px] font-medium text-ooosh-navy hover:underline"
+                    >
+                      Now
+                    </button>
+                  </div>
                   <input
                     type="time"
                     value={form.hireEndTime || '09:00'}
@@ -1671,7 +1708,7 @@ function DriverSelection({
   form: BookOutFormState
   hireForms: import('../lib/driver-hire-api').DriverHireForm[] | null
   hireFormsLoading: boolean
-  onSelectDriver: (name: string) => void
+  onSelectDriver: (name: string, hireFormId: string) => void
   onUpdate: <K extends keyof BookOutFormState>(key: K, value: BookOutFormState[K]) => void
 }) {
   // Determine if we need cross-job fallback
@@ -1709,12 +1746,16 @@ function DriverSelection({
             Who is collecting? <span className="text-red-500">*</span>
           </label>
           <div className="space-y-1.5">
-            {jobDrivers.map(hf => (
+            {jobDrivers.map(hf => {
+              const isSelected = form.selectedHireFormId
+                ? form.selectedHireFormId === hf.id
+                : false
+              return (
               <button
                 key={hf.id}
-                onClick={() => onSelectDriver(hf.driverName)}
+                onClick={() => onSelectDriver(hf.driverName, hf.id)}
                 className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
-                  form.driverName === hf.driverName
+                  isSelected
                     ? 'border-green-400 bg-green-50 font-medium text-green-800 ring-1 ring-green-400'
                     : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
                 }`}
@@ -1725,13 +1766,14 @@ function DriverSelection({
                     <span className="ml-2 text-xs text-gray-400">{hf.clientEmail}</span>
                   )}
                 </div>
-                {form.driverName === hf.driverName && (
+                {isSelected && (
                   <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
                 )}
               </button>
-            ))}
+              )
+            })}
           </div>
         </div>
 
@@ -1793,15 +1835,17 @@ function DriverSelection({
             Select from other jobs <span className="text-red-500">*</span>
           </label>
           <div className="max-h-48 space-y-1.5 overflow-y-auto">
-            {uniqueDrivers.map(hf => (
+            {uniqueDrivers.map(hf => {
+              const isSelected = form.selectedHireFormId === hf.id
+              return (
               <button
                 key={hf.id}
                 onClick={() => {
-                  onSelectDriver(hf.driverName)
+                  onSelectDriver(hf.driverName, hf.id)
                   if (hf.clientEmail) onUpdate('clientEmail', hf.clientEmail)
                 }}
                 className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
-                  form.driverName === hf.driverName
+                  isSelected
                     ? 'border-green-400 bg-green-50 font-medium text-green-800 ring-1 ring-green-400'
                     : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
                 }`}
@@ -1812,13 +1856,14 @@ function DriverSelection({
                     <span className="ml-2 text-xs text-gray-400">Job #{hf.hireHopJob}</span>
                   )}
                 </div>
-                {form.driverName === hf.driverName && (
+                {isSelected && (
                   <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
                 )}
               </button>
-            ))}
+              )
+            })}
           </div>
 
           {/* Client email */}
@@ -2226,4 +2271,10 @@ function formatShortDate(dateStr: string): string {
   } catch {
     return dateStr
   }
+}
+
+/** Current local time as "HH:mm" — for the Start Time / End Time "Now" buttons. */
+function nowHHmm(): string {
+  const d = new Date()
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }

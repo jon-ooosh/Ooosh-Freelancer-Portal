@@ -115,6 +115,7 @@ export interface BookOutFormState {
 
   // Step 2: Driver & Hire details
   driverName: string
+  selectedHireFormId?: string | null  // assignment id of the lead-driver hire form (disambiguates when multiple drivers share a name)
   clientEmail: string
   hireHopJob: string
 
