@@ -44,6 +44,9 @@ export interface SendEmailOptions {
   subjectOverride?: string;
   /** Optional file attachments */
   attachments?: EmailAttachment[];
+  /** Optional HTML snippet prepended to the body (after the test-mode banner if in test mode).
+   *  Used by senders to inject contextual banners like "no client email on file — redirected to info@". */
+  prependBanner?: string;
 }
 
 export interface SendEmailResult {
@@ -140,6 +143,9 @@ class EmailService {
       ? config.testRedirect
       : options.to;
 
+    if (options.prependBanner) {
+      bodyHtml = options.prependBanner + bodyHtml;
+    }
     if (isTestMode) {
       bodyHtml = testModeBanner(options.to) + bodyHtml;
     }
