@@ -418,22 +418,21 @@ function wrapText(text: string, font: PDFFont, fontSize: number, maxWidth: numbe
 export async function generateHireFormPdf(data: HireFormData): Promise<GeneratePdfResult> {
   const pdfDoc = await PDFDocument.create();
 
-  // Load fonts (custom Roboto with fallback to standard)
+  // Load Roboto. No StandardFonts fallback — if the TTFs aren't bundled
+  // into dist/services/fonts/ (see package.json build script) we want the
+  // generation to FAIL LOUDLY rather than silently degrade to a WinAnsi
+  // font that can't encode "'", "—", "…", "✓" etc. A degraded PDF emailed
+  // to a driver is worse than no PDF at all.
   const fontFiles = loadRobotoFonts();
-  let mainFont: PDFFont;
-  let boldFont: PDFFont;
-
-  if (fontFiles) {
-    pdfDoc.registerFontkit(fontkit);
-    mainFont = await pdfDoc.embedFont(fontFiles.regular);
-    boldFont = await pdfDoc.embedFont(fontFiles.bold);
-    console.log('[hire-form-pdf] Custom fonts loaded (Roboto)');
-  } else {
-    const { StandardFonts } = await import('pdf-lib');
-    mainFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    boldFont = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-    console.log('[hire-form-pdf] Using fallback StandardFonts');
+  if (!fontFiles) {
+    throw new Error(
+      '[hire-form-pdf] Roboto fonts not found in dist/services/fonts/. ' +
+      'Rebuild with `npm run build` so the postbuild step copies them.',
+    );
   }
+  pdfDoc.registerFontkit(fontkit);
+  const mainFont: PDFFont = await pdfDoc.embedFont(fontFiles.regular);
+  const boldFont: PDFFont = await pdfDoc.embedFont(fontFiles.bold);
 
   // Extract and format data
   const driverName = data.driverName || '';
