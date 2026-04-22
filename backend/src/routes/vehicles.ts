@@ -22,6 +22,7 @@ import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured } fr
 import { emailService } from '../services/email-service';
 import { sendVehicleCheckedInEmail } from '../services/vehicle-emails';
 import { loadRobotoFonts } from '../services/pdf-fonts';
+import { fetchLogo } from '../services/hire-form-pdf';
 
 const router = Router();
 router.use(authenticate);
@@ -1759,6 +1760,41 @@ router.get('/get-events', async (req: AuthRequest, res: Response) => {
     // Sort by createdAt/eventDate descending
     events.sort((a: any, b: any) => (b.createdAt || b.eventDate || '').localeCompare(a.createdAt || a.eventDate || ''));
 
+    // Enrich with opJobId so the Event History UI can deep-link straight
+    // into the OP job detail page (alongside the HireHop link). Single
+    // round-trip: collect distinct HH job numbers, resolve in one query.
+    const hhNums = Array.from(
+      new Set(
+        events
+          .map((e: any) => e.hireHopJob)
+          .filter((n: any) => n != null && n !== '')
+          .map((n: any) => parseInt(String(n), 10))
+          .filter((n: number) => !isNaN(n))
+      )
+    );
+    if (hhNums.length > 0) {
+      try {
+        const jobsRes = await query(
+          'SELECT id, hh_job_number FROM jobs WHERE hh_job_number = ANY($1::int[]) AND is_deleted = false',
+          [hhNums]
+        );
+        const hhToOp = new Map<number, string>();
+        for (const row of jobsRes.rows) {
+          hhToOp.set(Number(row.hh_job_number), row.id);
+        }
+        events = events.map((e: any) => {
+          const hh = e.hireHopJob != null ? parseInt(String(e.hireHopJob), 10) : NaN;
+          return {
+            ...e,
+            opJobId: !isNaN(hh) ? hhToOp.get(hh) || null : null,
+          };
+        });
+      } catch (err) {
+        // Don't fail the whole request if the lookup errors — just omit opJobId.
+        console.warn('[vehicles/events] opJobId resolution failed:', err);
+      }
+    }
+
     res.json({ events });
   } catch (error) {
     console.error('[vehicles/events] Failed to query events:', error);
@@ -1774,7 +1810,7 @@ router.get('/get-events', async (req: AuthRequest, res: Response) => {
  * and POST /events/:eventId/regenerate-pdf (backfill / mis-fire rebuilds).
  */
 async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Array; filename: string }> {
-  const { PDFDocument, rgb, StandardFonts } = await import('pdf-lib');
+  const { PDFDocument, rgb, StandardFonts, PDFString, PDFName } = await import('pdf-lib');
   const pdfDoc = await PDFDocument.create();
 
   // Embed Roboto so non-WinAnsi chars (✓, em-dash, curly quotes, ellipses,
@@ -1797,177 +1833,357 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
 
   const isCheckIn = data.isCheckIn === true;
   const title = isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Book-Out Report';
+  const subtitle = isCheckIn ? 'Return Record' : 'Book-Out Record';
 
-  let page = pdfDoc.addPage([595, 842]); // A4
-  let y = 800;
-  const leftMargin = 50;
-  const pageWidth = 595 - 100; // 50px margins
+  // Branding — match the email header colour (#7B5EA7) and hire agreement look
+  const PURPLE = rgb(0x7B / 255, 0x5E / 255, 0xA7 / 255);
+  const DARK_TEXT = rgb(0.12, 0.12, 0.12);
+  const MUTED_TEXT = rgb(0.42, 0.42, 0.42);
+  const SUBTLE_LINE = rgb(0.85, 0.85, 0.85);
 
-  const drawText = (text: string, x: number, yPos: number, size: number, f = font) => {
-    page.drawText(text, { x, y: yPos, size, font: f, color: rgb(0.1, 0.1, 0.1) });
+  const PAGE_W = 595;
+  const PAGE_H = 842;
+  const MARGIN = 48;
+  const HEADER_H = 70;
+  const CONTENT_W = PAGE_W - MARGIN * 2;
+
+  // Logo (async fetch, cached in the hire-form-pdf service)
+  let logoImage: Awaited<ReturnType<typeof pdfDoc.embedPng>> | null = null;
+  try {
+    const logoBuf = await fetchLogo();
+    if (logoBuf) {
+      try { logoImage = await pdfDoc.embedPng(logoBuf); }
+      catch { logoImage = await pdfDoc.embedJpg(logoBuf); }
+    }
+  } catch (err) {
+    console.warn('[vehicles/pdf] Logo fetch failed:', err instanceof Error ? err.message : err);
+  }
+
+  let page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+  let y = PAGE_H - HEADER_H - 16;
+
+  // Draw the branded header on every page.
+  const drawHeader = () => {
+    page.drawRectangle({ x: 0, y: PAGE_H - HEADER_H, width: PAGE_W, height: HEADER_H, color: PURPLE });
+    page.drawText(title, { x: MARGIN, y: PAGE_H - 34, size: 18, font: fontBold, color: rgb(1, 1, 1) });
+    page.drawText(subtitle, { x: MARGIN, y: PAGE_H - 54, size: 10, font, color: rgb(0.92, 0.88, 0.98) });
+    if (logoImage) {
+      const maxH = 36;
+      const scale = maxH / logoImage.height;
+      const w = logoImage.width * scale;
+      page.drawImage(logoImage, { x: PAGE_W - MARGIN - w, y: PAGE_H - HEADER_H / 2 - maxH / 2, width: w, height: maxH });
+    }
   };
+  drawHeader();
+
+  // "Generated on …" strip under the header
+  const genText = `Generated: ${formatGeneratedStamp(data.eventDateTime || data.eventDate)}`;
+  page.drawText(genText, { x: MARGIN, y, size: 9, font, color: MUTED_TEXT });
+  y -= 18;
 
   const addPageIfNeeded = (neededSpace: number) => {
-    if (y < neededSpace) {
-      page = pdfDoc.addPage([595, 842]);
-      y = 800;
+    if (y < neededSpace + MARGIN) {
+      page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+      y = PAGE_H - HEADER_H - 16;
+      drawHeader();
+      y -= 10;
     }
   };
 
-  // Header
-  drawText(title, leftMargin, y, 18, fontBold);
-  y -= 25;
-  drawText(`Generated: ${data.eventDateTime || data.eventDate || new Date().toISOString()}`, leftMargin, y, 9);
-  y -= 20;
+  const sectionTitle = (label: string) => {
+    addPageIfNeeded(40);
+    page.drawText(label, { x: MARGIN, y, size: 11, font: fontBold, color: PURPLE });
+    y -= 6;
+    page.drawLine({
+      start: { x: MARGIN, y }, end: { x: MARGIN + CONTENT_W, y },
+      thickness: 0.5, color: PURPLE,
+    });
+    y -= 14;
+  };
 
-  // Divider
-  page.drawLine({ start: { x: leftMargin, y }, end: { x: leftMargin + pageWidth, y }, thickness: 1, color: rgb(0.8, 0.8, 0.8) });
-  y -= 20;
+  // Key-value row drawer with bold label in muted colour + regular value
+  const kvRow = (label: string, value: string) => {
+    addPageIfNeeded(18);
+    page.drawText(label, { x: MARGIN, y, size: 9, font: fontBold, color: MUTED_TEXT });
+    page.drawText(value, { x: MARGIN + 110, y, size: 10, font, color: DARK_TEXT });
+    y -= 15;
+  };
 
-  // Vehicle details
-  drawText('VEHICLE DETAILS', leftMargin, y, 11, fontBold); y -= 18;
-  drawText(`Registration: ${data.vehicleReg || '—'}`, leftMargin, y, 10); y -= 15;
-  drawText(`Type: ${data.vehicleType || '—'}`, leftMargin, y, 10); y -= 15;
-  if (data.vehicleMake) { drawText(`Make: ${data.vehicleMake}`, leftMargin, y, 10); y -= 15; }
-  if (data.vehicleModel) { drawText(`Model: ${data.vehicleModel}`, leftMargin, y, 10); y -= 15; }
-  if (data.vehicleColour) { drawText(`Colour: ${data.vehicleColour}`, leftMargin, y, 10); y -= 15; }
-  y -= 10;
+  // Add a clickable link annotation over a rectangular area.
+  const addLink = (rect: [number, number, number, number], url: string) => {
+    if (!url) return;
+    try {
+      const linkDict = pdfDoc.context.obj({
+        Type: 'Annot',
+        Subtype: 'Link',
+        Rect: rect,
+        Border: [0, 0, 0],
+        A: {
+          Type: 'Action',
+          S: 'URI',
+          URI: PDFString.of(url),
+        },
+      });
+      const existing = page.node.Annots()?.asArray() ?? [];
+      page.node.set(PDFName.of('Annots'), pdfDoc.context.obj([...existing, linkDict]));
+    } catch (err) {
+      console.warn('[vehicles/pdf] Failed to add link annotation:', err instanceof Error ? err.message : err);
+    }
+  };
 
-  // Hire details
-  drawText('HIRE DETAILS', leftMargin, y, 11, fontBold); y -= 18;
-  drawText(`Driver: ${data.driverName || '—'}`, leftMargin, y, 10); y -= 15;
-  if (data.clientEmail) { drawText(`Email: ${data.clientEmail}`, leftMargin, y, 10); y -= 15; }
-  if (data.hireHopJob) { drawText(`Job #: ${data.hireHopJob}`, leftMargin, y, 10); y -= 15; }
-  if (data.hireStartDate) { drawText(`Hire Start: ${data.hireStartDate}`, leftMargin, y, 10); y -= 15; }
-  if (data.hireEndDate) { drawText(`Hire End: ${data.hireEndDate}`, leftMargin, y, 10); y -= 15; }
+  // === Vehicle details ===
+  sectionTitle('VEHICLE DETAILS');
+  kvRow('Registration', data.vehicleReg || '—');
+  kvRow('Type', data.vehicleType || '—');
+  if (data.vehicleMake) kvRow('Make', data.vehicleMake);
+  if (data.vehicleModel) kvRow('Model', data.vehicleModel);
+  if (data.vehicleColour) kvRow('Colour', data.vehicleColour);
+  y -= 4;
+
+  // === Hire details ===
+  sectionTitle('HIRE DETAILS');
+  kvRow('Driver', data.driverName || '—');
+  if (data.clientEmail) kvRow('Email', data.clientEmail);
+  if (data.hireHopJob) kvRow('HireHop Job #', String(data.hireHopJob));
+  if (data.hireStartDate) kvRow('Hire Start', data.hireStartDate);
+  if (data.hireEndDate) kvRow('Hire End', data.hireEndDate);
   if (data.allDrivers && data.allDrivers.length > 1) {
-    drawText(`All Drivers: ${data.allDrivers.join(', ')}`, leftMargin, y, 10); y -= 15;
+    kvRow('All Drivers', data.allDrivers.join(', '));
   }
-  y -= 10;
+  y -= 4;
 
-  // Vehicle state
-  drawText('VEHICLE STATE', leftMargin, y, 11, fontBold); y -= 18;
-  drawText(`Mileage: ${data.mileage != null ? data.mileage.toLocaleString() : '—'}`, leftMargin, y, 10); y -= 15;
-  drawText(`Fuel Level: ${data.fuelLevel || '—'}`, leftMargin, y, 10); y -= 15;
+  // === Vehicle state ===
+  sectionTitle('VEHICLE STATE');
+  kvRow('Mileage', data.mileage != null ? Number(data.mileage).toLocaleString() : '—');
+  kvRow('Fuel Level', data.fuelLevel || '—');
 
   if (isCheckIn && data.bookOutMileage != null) {
-    y -= 5;
-    drawText('COMPARISON (vs Book-Out)', leftMargin, y, 11, fontBold); y -= 18;
-    drawText(`Book-Out Mileage: ${data.bookOutMileage.toLocaleString()}`, leftMargin, y, 10); y -= 15;
-    drawText(`Book-Out Fuel: ${data.bookOutFuelLevel || '—'}`, leftMargin, y, 10); y -= 15;
-    if (data.bookOutDate) { drawText(`Book-Out Date: ${data.bookOutDate}`, leftMargin, y, 10); y -= 15; }
+    y -= 6;
+    sectionTitle('COMPARISON (vs Book-Out)');
+    kvRow('Book-Out Mileage', Number(data.bookOutMileage).toLocaleString());
+    kvRow('Book-Out Fuel', data.bookOutFuelLevel || '—');
+    if (data.bookOutDate) kvRow('Book-Out Date', data.bookOutDate);
     const milesDriven = (data.mileage || 0) - (data.bookOutMileage || 0);
-    if (milesDriven > 0) { drawText(`Miles Driven: ${milesDriven.toLocaleString()}`, leftMargin, y, 10); y -= 15; }
+    if (milesDriven > 0) kvRow('Miles Driven', milesDriven.toLocaleString());
   }
-  y -= 10;
+  y -= 4;
 
-  // Briefing items
+  // === Briefing ===
   if (data.briefingItems && data.briefingItems.length > 0) {
-    addPageIfNeeded(100);
-    drawText('BRIEFING CHECKLIST', leftMargin, y, 11, fontBold); y -= 18;
+    sectionTitle('BRIEFING CHECKLIST');
     for (const item of data.briefingItems) {
-      addPageIfNeeded(20);
-      drawText(`  ✓ ${item}`, leftMargin, y, 9); y -= 14;
+      addPageIfNeeded(18);
+      page.drawText('✓', { x: MARGIN, y, size: 10, font: fontBold, color: PURPLE });
+      page.drawText(String(item), { x: MARGIN + 16, y, size: 10, font, color: DARK_TEXT });
+      y -= 14;
     }
-    y -= 10;
+    y -= 4;
   }
 
-  // Notes
+  // === Notes ===
   if (data.bookOutNotes) {
-    addPageIfNeeded(60);
-    drawText('NOTES', leftMargin, y, 11, fontBold); y -= 18;
-    const lines = data.bookOutNotes.split('\n');
+    sectionTitle('NOTES');
+    const lines = String(data.bookOutNotes).split('\n');
     for (const line of lines) {
-      addPageIfNeeded(20);
-      drawText(line, leftMargin, y, 9); y -= 14;
-    }
-    y -= 10;
-  }
-
-  // Damage items (check-in)
-  if (isCheckIn && data.damageItems && data.damageItems.length > 0) {
-    addPageIfNeeded(100);
-    drawText('DAMAGE REPORT', leftMargin, y, 11, fontBold); y -= 18;
-    for (const item of data.damageItems) {
-      addPageIfNeeded(50);
-      drawText(`Location: ${item.location}  |  Severity: ${item.severity}`, leftMargin, y, 10, fontBold); y -= 15;
-      drawText(`Description: ${item.description}`, leftMargin, y, 9); y -= 20;
-    }
-    y -= 10;
-  }
-
-  // Photos section (embed thumbnails if base64 provided)
-  if (data.photos && data.photos.length > 0) {
-    addPageIfNeeded(200);
-    drawText('CONDITION PHOTOS', leftMargin, y, 11, fontBold); y -= 20;
-
-    for (const photo of data.photos) {
-      try {
-        if (!photo.base64) continue;
-        addPageIfNeeded(180);
-
-        // Extract raw base64 data
-        const base64Data = photo.base64.includes(',') ? photo.base64.split(',')[1] : photo.base64;
-        const imageBuffer = Buffer.from(base64Data!, 'base64');
-
-        let image;
-        try {
-          image = await pdfDoc.embedJpg(imageBuffer);
-        } catch {
-          try {
-            image = await pdfDoc.embedPng(imageBuffer);
-          } catch {
-            drawText(`[${photo.label}] — image could not be embedded`, leftMargin, y, 9);
-            y -= 15;
-            continue;
-          }
-        }
-
-        // Scale to fit width (max 200px wide, maintain aspect ratio)
-        const maxW = 200;
-        const maxH = 150;
-        const scale = Math.min(maxW / image.width, maxH / image.height, 1);
-        const w = image.width * scale;
-        const h = image.height * scale;
-
-        drawText(photo.label || photo.angle, leftMargin, y, 9, fontBold);
-        y -= h + 5;
-        page.drawImage(image, { x: leftMargin, y, width: w, height: h });
-        y -= 15;
-      } catch (imgErr) {
-        drawText(`[${photo.label}] — failed to embed`, leftMargin, y, 9);
-        y -= 15;
+      const wrapped = wrapText(line, font, 10, CONTENT_W);
+      for (const w of wrapped) {
+        addPageIfNeeded(16);
+        page.drawText(w, { x: MARGIN, y, size: 10, font, color: DARK_TEXT });
+        y -= 14;
       }
     }
+    y -= 4;
   }
 
-  // Signature
+  // === Damage (check-in only) ===
+  if (isCheckIn && data.damageItems && data.damageItems.length > 0) {
+    sectionTitle('DAMAGE REPORT');
+    for (const item of data.damageItems) {
+      addPageIfNeeded(42);
+      page.drawText(`${item.location}`, { x: MARGIN, y, size: 10, font: fontBold, color: DARK_TEXT });
+      page.drawText(`Severity: ${item.severity}`, { x: MARGIN + 280, y, size: 9, font, color: MUTED_TEXT });
+      y -= 14;
+      const descLines = wrapText(String(item.description || ''), font, 9, CONTENT_W);
+      for (const line of descLines) {
+        addPageIfNeeded(14);
+        page.drawText(line, { x: MARGIN, y, size: 9, font, color: DARK_TEXT });
+        y -= 12;
+      }
+      y -= 6;
+    }
+  }
+
+  // === Photos (2-per-row grid with clickable full-size links) ===
+  if (data.photos && data.photos.length > 0) {
+    sectionTitle('CONDITION PHOTOS');
+    if (data.photos.some((p: any) => p.r2Url)) {
+      addPageIfNeeded(18);
+      page.drawText('Click a photo to open the full-size version.', {
+        x: MARGIN, y, size: 8, font, color: MUTED_TEXT,
+      });
+      y -= 14;
+    }
+
+    const gap = 14;
+    const colW = (CONTENT_W - gap) / 2; // two columns
+    const thumbMaxH = 140;
+
+    let col = 0; // 0 = left, 1 = right
+    let rowStartY = y;
+    let rowMaxH = 0;
+
+    for (const photo of data.photos) {
+      if (!photo.base64) continue;
+
+      // Parse + embed image
+      let image;
+      try {
+        const b64 = photo.base64.includes(',') ? photo.base64.split(',')[1] : photo.base64;
+        const buf = Buffer.from(b64!, 'base64');
+        try { image = await pdfDoc.embedJpg(buf); }
+        catch { image = await pdfDoc.embedPng(buf); }
+      } catch {
+        // Skip un-embeddable photos but still flag them
+        addPageIfNeeded(16);
+        page.drawText(`[${photo.label || photo.angle}] — image could not be embedded`, {
+          x: MARGIN, y, size: 9, font, color: MUTED_TEXT,
+        });
+        y -= 14;
+        continue;
+      }
+
+      const scale = Math.min(colW / image.width, thumbMaxH / image.height, 1);
+      const imgW = image.width * scale;
+      const imgH = image.height * scale;
+      const labelH = 14;
+      const blockH = labelH + imgH + 4;
+
+      // New row: ensure enough room on page
+      if (col === 0) {
+        addPageIfNeeded(blockH + 6);
+        rowStartY = y;
+        rowMaxH = 0;
+      }
+
+      const x = MARGIN + col * (colW + gap);
+      // Label: purple if clickable, dark otherwise
+      const label = photo.label || photo.angle || 'Photo';
+      const linkable = !!photo.r2Url;
+      page.drawText(label, {
+        x, y: rowStartY - 12,
+        size: 9, font: fontBold,
+        color: linkable ? PURPLE : DARK_TEXT,
+      });
+
+      const imgY = rowStartY - labelH - imgH;
+      page.drawImage(image, { x, y: imgY, width: imgW, height: imgH });
+
+      if (linkable) {
+        // Rect: [x1, y1, x2, y2] in PDF user-space (origin bottom-left).
+        // Cover the image; label text is a separate annotation above for
+        // bigger tap target on print previews.
+        addLink([x, imgY, x + imgW, imgY + imgH], photo.r2Url);
+        addLink([x, rowStartY - labelH, x + imgW, rowStartY], photo.r2Url);
+        // Underline the label so it reads like a hyperlink in print
+        page.drawLine({
+          start: { x, y: rowStartY - 13 },
+          end:   { x: x + fontBold.widthOfTextAtSize(label, 9), y: rowStartY - 13 },
+          thickness: 0.4, color: PURPLE,
+        });
+      }
+
+      rowMaxH = Math.max(rowMaxH, blockH);
+
+      if (col === 1) {
+        // End of row — move cursor down by tallest block + padding
+        y = rowStartY - rowMaxH - 10;
+        col = 0;
+      } else {
+        col = 1;
+      }
+    }
+    // If we finished on the left column, drop y past the row
+    if (col === 1) {
+      y = rowStartY - rowMaxH - 10;
+    }
+    y -= 4;
+  }
+
+  // === Signature ===
   if (data.signatureBase64) {
     try {
-      addPageIfNeeded(120);
-      drawText('DRIVER SIGNATURE', leftMargin, y, 11, fontBold); y -= 20;
-      const sigBase64 = data.signatureBase64.includes(',') ? data.signatureBase64.split(',')[1] : data.signatureBase64;
-      const sigBuffer = Buffer.from(sigBase64!, 'base64');
-      const sigImage = await pdfDoc.embedPng(sigBuffer);
-      const scale = Math.min(200 / sigImage.width, 80 / sigImage.height, 1);
+      addPageIfNeeded(110);
+      sectionTitle('DRIVER SIGNATURE');
+      const b64 = data.signatureBase64.includes(',') ? data.signatureBase64.split(',')[1] : data.signatureBase64;
+      const sigBuf = Buffer.from(b64!, 'base64');
+      const sigImage = await pdfDoc.embedPng(sigBuf);
+      const scale = Math.min(220 / sigImage.width, 70 / sigImage.height, 1);
       const w = sigImage.width * scale;
       const h = sigImage.height * scale;
       y -= h;
-      page.drawImage(sigImage, { x: leftMargin, y, width: w, height: h });
-      y -= 15;
+      page.drawImage(sigImage, { x: MARGIN, y, width: w, height: h });
+      page.drawLine({
+        start: { x: MARGIN, y: y - 4 }, end: { x: MARGIN + Math.max(w, 220), y: y - 4 },
+        thickness: 0.4, color: SUBTLE_LINE,
+      });
+      y -= 18;
+      if (data.driverName) {
+        page.drawText(data.driverName, { x: MARGIN, y, size: 9, font, color: MUTED_TEXT });
+        y -= 14;
+      }
     } catch {
-      drawText('[Signature could not be embedded]', leftMargin, y, 9);
-      y -= 15;
+      addPageIfNeeded(24);
+      page.drawText('[Signature could not be embedded]', { x: MARGIN, y, size: 9, font, color: MUTED_TEXT });
+      y -= 14;
     }
   } else if (data.signatureMissing) {
     addPageIfNeeded(40);
-    drawText('DRIVER SIGNATURE', leftMargin, y, 11, fontBold); y -= 18;
-    drawText('Signed in person at book-out (signature not retained).', leftMargin, y, 9); y -= 15;
+    sectionTitle('DRIVER SIGNATURE');
+    page.drawText('Signed in person at book-out (signature not retained on this record).',
+      { x: MARGIN, y, size: 9, font, color: MUTED_TEXT });
+    y -= 14;
   }
+
+  // Footer on last page
+  const footerY = 28;
+  page.drawLine({
+    start: { x: MARGIN, y: footerY + 16 }, end: { x: PAGE_W - MARGIN, y: footerY + 16 },
+    thickness: 0.4, color: SUBTLE_LINE,
+  });
+  page.drawText('Ooosh Tours Ltd · +44 (0) 1273 911382 · info@oooshtours.co.uk',
+    { x: MARGIN, y: footerY, size: 8, font, color: MUTED_TEXT });
 
   const pdfBytes = await pdfDoc.save();
   const filename = `${isCheckIn ? 'check-in' : 'book-out'}_${data.vehicleReg || 'unknown'}_${new Date().toISOString().slice(0, 10)}.pdf`;
   return { pdfBytes, filename };
+}
+
+function formatGeneratedStamp(v?: string): string {
+  if (!v) return new Date().toLocaleString('en-GB');
+  const d = new Date(v);
+  if (isNaN(d.getTime())) return v;
+  return d.toLocaleString('en-GB', {
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+}
+
+function wrapText(text: string, font: { widthOfTextAtSize: (s: string, size: number) => number }, size: number, maxWidth: number): string[] {
+  if (!text) return [''];
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const test = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(test, size) <= maxWidth) {
+      current = test;
+    } else {
+      if (current) lines.push(current);
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.length ? lines : [''];
 }
 
 /**

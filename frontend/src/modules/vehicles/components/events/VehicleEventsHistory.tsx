@@ -100,6 +100,14 @@ function EventRow({ event, vehicleReg }: { event: EventIndexEntry; vehicleReg: s
                 HH #{event.hireHopJob}
               </a>
             )}
+            {event.opJobId && (
+              <a
+                href={`/jobs/${event.opJobId}`}
+                className="text-xs text-purple-700 hover:underline"
+              >
+                OP Job
+              </a>
+            )}
           </div>
           <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-500">
             {event.mileage != null && (
