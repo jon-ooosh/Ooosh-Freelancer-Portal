@@ -1,4 +1,5 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
+import { AuthImage } from './AuthImage'
 
 interface PhotoLightboxProps {
   src: string
@@ -191,7 +192,7 @@ export function PhotoLightbox({ src, alt, onClose }: PhotoLightboxProps) {
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
       >
-        <img
+        <AuthImage
           src={src}
           alt={alt}
           className="max-h-[90vh] max-w-[95vw] object-contain select-none"

@@ -22,6 +22,7 @@ import { saveIssue } from '../lib/issues-r2-api'
 import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoComparison } from '../components/check-in/PhotoComparison'
 import { PhotoLightbox } from '../components/shared/PhotoLightbox'
+import { AuthImage } from '../components/shared/AuthImage'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
 import type { SignatureCaptureHandle } from '../components/book-out/SignatureCapture'
 import type { Vehicle } from '../types/vehicle'
@@ -1373,7 +1374,7 @@ function StepReviewBookOut({
           <p className="mb-2 text-xs font-medium text-gray-500">Book-Out Photos</p>
           <div className="flex flex-wrap gap-2">
             {Array.from(form.bookOutPhotos.entries()).map(([angle, url]) => (
-              <img
+              <AuthImage
                 key={angle}
                 src={url}
                 alt={angle}

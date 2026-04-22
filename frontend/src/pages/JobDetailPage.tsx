@@ -353,13 +353,22 @@ function SwapVehicleButton({ assignmentId, currentVehicleReg, onSwapped }: {
 }
 
 // ── Hire Form PDF Actions (per assignment, in Drivers & Vehicles tab) ────────
-function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt }: {
+function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
   assignmentId: string;
   pdfKey?: string | null;
   pdfGeneratedAt?: string | null;
+  vehicleId?: string | null;
 }) {
   const [generating, setGenerating] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  // Can only generate a meaningful PDF once a vehicle is linked — the PDF
+  // needs the reg + model. Before book-out, these buttons are dimmed and
+  // disabled with a tooltip so they read as "safety nets for later" rather
+  // than "this is the next action". Book-out generates + emails the
+  // definitive PDF automatically.
+  const hasVehicle = !!vehicleId;
+  const disabledReason = hasVehicle ? null : 'Assign a vehicle first — the PDF needs the van reg';
 
   async function generatePdf(sendEmail: boolean) {
     setGenerating(true);
@@ -429,15 +438,17 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt }: {
         <div className="flex items-center gap-1.5">
           <button
             onClick={() => generatePdf(false)}
-            disabled={generating}
-            className="text-xs px-2.5 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-50"
+            disabled={generating || !hasVehicle}
+            title={disabledReason || undefined}
+            className="text-xs px-2.5 py-1.5 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {generating ? '...' : pdfKey ? 'Regenerate PDF' : 'Generate PDF'}
           </button>
           <button
             onClick={() => generatePdf(true)}
-            disabled={generating}
-            className="text-xs px-2.5 py-1.5 bg-ooosh-100 text-ooosh-700 rounded hover:bg-ooosh-200 disabled:opacity-50"
+            disabled={generating || !hasVehicle}
+            title={disabledReason || undefined}
+            className="text-xs px-2.5 py-1.5 bg-ooosh-100 text-ooosh-700 rounded hover:bg-ooosh-200 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {generating ? '...' : 'Generate + Email'}
           </button>
@@ -2684,7 +2695,7 @@ export default function JobDetailPage() {
                     <div className="mt-3 flex flex-wrap gap-2">
                       {/* Hire Form PDF actions */}
                       {a.assignment_type === 'self_drive' && (
-                        <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} />
+                        <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} vehicleId={a.vehicle_id} />
                       )}
 
                       {/* Swap Vehicle button — only for active/confirmed assignments */}

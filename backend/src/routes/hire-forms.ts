@@ -461,6 +461,31 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
 
     console.log(`[hire-forms] Created: driver=${driverId}, assignment=${assignment.id}, vehicle=${vehicleId || 'none'}, job=${f.hirehop_job_id || 'none'}, excess=${excessAmount || 'none'}`);
 
+    // Advance the hire_forms requirement on successful submission so the
+    // Job Requirements view reflects "forms in" without waiting for book-
+    // out. If this submission triggers a referral, we step the card back
+    // to 'in_progress' (amber) so staff see it needs attention. The flip
+    // happens in setImmediate so it doesn't slow the hire form response.
+    const advanceJobId: string | undefined = assignment.job_id;
+    if (advanceJobId) {
+      const targetStatus = requiresReferral ? 'in_progress' : 'done';
+      setImmediate(async () => {
+        try {
+          await query(
+            `UPDATE job_requirements
+             SET status = $1, updated_at = NOW()
+             WHERE job_id = $2
+               AND requirement_type = 'hire_forms'
+               AND phase = 'pre_hire'
+               AND status <> $1`,
+            [targetStatus, advanceJobId]
+          );
+        } catch (err) {
+          console.warn(`[hire-forms] hire_forms requirement advance failed for job ${advanceJobId}:`, err);
+        }
+      });
+    }
+
     // Send referral notification email (non-blocking — don't fail the request)
     if (requiresReferral) {
       sendReferralNotification(driverId, f.full_name, f.email || '', referralReason, f.hirehop_job_id || null)
@@ -904,6 +929,31 @@ router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthReques
 
     const updated = result.rows[0];
     console.log(`[hire-forms] Updated assignment ${id}:`, Object.keys(updates).join(', '));
+
+    // Vehicle linked (not necessarily booked out yet) — advance the
+    // `vehicle` pre-hire requirement to 'done' so the Job Requirements
+    // counter ticks up and the left-border goes green as soon as staff
+    // picks a van. Happens in addition to the book-out transition below,
+    // which advances hire_forms + excess too.
+    const vehicleJustLinked = updates.vehicle_id !== undefined && updates.vehicle_id !== null && updated.vehicle_id && updated.job_id;
+    if (vehicleJustLinked) {
+      const jobId: string = updated.job_id;
+      setImmediate(async () => {
+        try {
+          await query(
+            `UPDATE job_requirements
+             SET status = 'done', updated_at = NOW()
+             WHERE job_id = $1
+               AND requirement_type = 'vehicle'
+               AND phase = 'pre_hire'
+               AND status IN ('not_started', 'in_progress')`,
+            [jobId]
+          );
+        } catch (err) {
+          console.warn(`[hire-forms] Vehicle requirement advance failed for job ${jobId}:`, err);
+        }
+      });
+    }
 
     // Post-update side effects on book-out transition.
     //
@@ -1637,14 +1687,27 @@ async function processAdditionalDriverCharge(hhJobId: number, jobId: string | nu
   const { getHireHopConfig } = await import('../config/hirehop');
   const config = getHireHopConfig();
 
-  // Fetch job items
-  const itemsResponse = await hhBroker.get<unknown[]>(
+  // Fetch job items. The broker wraps responses in { success, data, error },
+  // so `itemsResponse` is never a raw array — checking Array.isArray(itemsResponse)
+  // was always false, `items` stayed empty, `vehicleCount` was always 0, and
+  // every hire form submission added another charge regardless of van count
+  // (observed on Desmond Magee's single-driver job, 22 Apr 2026). Unwrap the
+  // data envelope and handle both plain-array and { items: [] } / { rows: [] }
+  // shapes that different HH endpoints return, same pattern as quotes.ts
+  // findOrCreateHeader.
+  const itemsResponse = await hhBroker.get<unknown>(
     '/frames/items_to_supply_list.php',
     { job: hhJobId },
     { priority: 'high', cacheTTL: 30 }
   );
 
-  const items = Array.isArray(itemsResponse) ? itemsResponse : [];
+  const rawItems: unknown = itemsResponse?.data;
+  const items: unknown[] = Array.isArray(rawItems)
+    ? rawItems
+    : ((rawItems as { items?: unknown[]; rows?: unknown[] } | undefined)?.items
+       || (rawItems as { items?: unknown[]; rows?: unknown[] } | undefined)?.rows
+       || []);
+  console.log(`[processAdditionalDriverCharge] HH job ${hhJobId}: broker success=${itemsResponse?.success}, items resolved=${items.length}`);
   let vehicleCount = 0;
   let existingCharges = 0;
 
@@ -1671,6 +1734,7 @@ async function processAdditionalDriverCharge(hhJobId: number, jobId: string | nu
   const freeDrivers = vehicleCount * DRIVERS_PER_VEHICLE;
   const chargeableDrivers = Math.max(0, driverCount - freeDrivers);
   const newChargesNeeded = Math.max(0, chargeableDrivers - existingCharges);
+  console.log(`[processAdditionalDriverCharge] HH job ${hhJobId}: drivers=${driverCount}, vehicles=${vehicleCount}, free=${freeDrivers}, chargeable=${chargeableDrivers}, existing=${existingCharges}, new=${newChargesNeeded}`);
 
   if (newChargesNeeded <= 0) {
     return { driverCount, vehicleCount, freeDrivers, existingCharges, chargesAdded: 0, message: 'No additional charges needed' };

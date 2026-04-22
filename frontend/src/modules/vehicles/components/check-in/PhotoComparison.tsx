@@ -2,6 +2,7 @@ import { useState, useRef, useCallback } from 'react'
 import { REQUIRED_PHOTOS } from '../../types/vehicle-event'
 import { compressImage } from '../../lib/image-utils'
 import { PhotoLightbox } from '../shared/PhotoLightbox'
+import { AuthImage } from '../shared/AuthImage'
 import type { CapturedPhoto, PhotoAngle } from '../../types/vehicle-event'
 
 interface PhotoComparisonProps {
@@ -115,7 +116,7 @@ export function PhotoComparison({
                     className="aspect-[4/3] cursor-pointer overflow-hidden rounded border border-gray-200"
                     onClick={() => setLightbox({ src: bookOutUrl, alt: `Book-out ${label}` })}
                   >
-                    <img
+                    <AuthImage
                       src={bookOutUrl}
                       alt={`Book-out ${label}`}
                       className="h-full w-full object-cover"
