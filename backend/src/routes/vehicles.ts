@@ -1555,21 +1555,32 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Check-in side effects: when CheckInPage.tsx fires a 'check-in' event via
-    // save-event, flip the matching hire assignment(s) to 'returned' and
-    // dispatch the client confirmation email. Idempotent — skips if any
-    // matching assignment has already been checked in.
-    if (event.eventType === 'check-in' && event.hireHopJob) {
+    // Check-in side effects: when CheckInPage.tsx fires a check-in event
+    // via save-event, flip the matching hire assignment(s) to 'returned'
+    // and dispatch the client confirmation email. Idempotent — skips if
+    // any matching assignment has already been checked in.
+    //
+    // Normalise the eventType so both 'check-in' (hyphen, our convention)
+    // and 'Check In' (space, capitalised — actually sent by CheckInPage)
+    // both match. Original strict match silently failed for every live
+    // check-in and was only caught in testing on 22 Apr 2026.
+    const normalisedEventType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
+    if (normalisedEventType === 'check-in' && event.hireHopJob) {
       try {
         const hhJob = parseInt(String(event.hireHopJob), 10);
         if (!isNaN(hhJob)) {
+          // Match any non-terminal out-of-warehouse status so a check-in
+          // correctly closes the loop even on 'active' (mid-hire state)
+          // assignments. 'confirmed' is NOT matched — that indicates
+          // allocated-but-never-booked-out, which a check-in shouldn't
+          // silently close (signals a staff error to investigate).
           const matched = await query(
             `SELECT vha.id, vha.checked_in_at
              FROM vehicle_hire_assignments vha
              JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
              WHERE fv.reg = $1
                AND vha.hirehop_job_id = $2
-               AND vha.status = 'booked_out'
+               AND vha.status IN ('booked_out', 'active')
              ORDER BY vha.booked_out_at DESC NULLS LAST`,
             [reg, hhJob]
           );
