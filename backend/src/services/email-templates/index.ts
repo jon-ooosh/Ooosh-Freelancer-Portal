@@ -952,6 +952,36 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  platform_issue_reported: {
+    variant: 'internal',
+    subject: '[OP Issue] {{severityLabel}}{{categoryLabel}}: {{title}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">New Issue Logged</h2>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>{{reporterName}}</strong> has logged a new issue on the Operations Platform.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Title</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{title}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Category / Severity</p>
+            <p style="margin:0 0 12px;font-size:14px;color:#1e293b;">{{categoryLabel}} &bull; {{severityLabel}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Area</p>
+            <p style="margin:0 0 12px;font-size:14px;color:#1e293b;">{{area}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Page / Context</p>
+            <p style="margin:0 0 12px;font-size:13px;color:#1e293b;word-break:break-all;">{{pageUrl}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Description</p>
+            <p style="margin:0;font-size:14px;color:#1e293b;line-height:1.5;white-space:pre-wrap;">{{description}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{issueUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View issue in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
+
   vehicle_checked_in: {
     variant: 'client',
     preheader: 'Your van is back with us',

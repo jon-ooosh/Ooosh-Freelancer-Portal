@@ -20,6 +20,7 @@ import DriversPage from './pages/DriversPage';
 import DriverDetailPage from './pages/DriverDetailPage';
 import TransportOpsPage from './pages/TransportOpsPage';
 import BacklinePage from './pages/BacklinePage';
+import IssuesPage from './pages/IssuesPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
@@ -69,6 +70,8 @@ export default function App() {
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />
                 <Route path="/operations/backline" element={<BacklinePage />} />
+                <Route path="/operations/issues" element={<IssuesPage />} />
+                <Route path="/operations/issues/:id" element={<IssuesPage />} />
                 <Route path="/drivers" element={<DriversPage />} />
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />

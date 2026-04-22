@@ -30,6 +30,7 @@ import moneyRouter from './money';
 import ve103bRouter from './ve103b';
 import backlineRouter from './backline';
 import cancellationsRouter from './cancellations';
+import issuesRouter from './issues';
 
 const router = Router();
 
@@ -58,6 +59,7 @@ router.use('/money', moneyRouter);
 router.use('/ve103b', ve103bRouter);
 router.use('/backline', backlineRouter);
 router.use('/cancellations', cancellationsRouter);
+router.use('/issues', issuesRouter);
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
