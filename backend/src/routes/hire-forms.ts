@@ -231,7 +231,9 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
           address_line1 = $5, address_line2 = $6, city = $7, postcode = $8,
           licence_number = $9, licence_type = $10, licence_valid_from = $11, licence_valid_to = $12,
           licence_issue_country = $13, licence_points = $14, licence_endorsements = $15,
-          licence_restrictions = $16, dvla_check_code = $17, dvla_check_date = $18,
+          licence_restrictions = $16,
+          dvla_check_code = COALESCE($17, dvla_check_code),
+          dvla_check_date = COALESCE($18, dvla_check_date),
           updated_at = NOW()
         WHERE id = $19`,
         [
