@@ -349,7 +349,12 @@ export function CheckInPage() {
         return true
       }
       case 'Photos':
-        return TESTING_MODE || form.photos.length >= REQUIRED_PHOTOS.length
+        // Photos on check-in are OPTIONAL — staff only take them when
+        // spotting new damage, and the act of capturing a photo flows
+        // into the damage report. Previously we gated Next on all
+        // REQUIRED_PHOTOS being captured, which blocked every clean
+        // return (hit 22 Apr 2026, test check-in on RX24SZC).
+        return true
       case 'Damage Report':
         return true // Optional step
       case 'Confirm':
