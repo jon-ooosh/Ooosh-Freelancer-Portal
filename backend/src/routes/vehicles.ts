@@ -18,7 +18,7 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import { query } from '../config/database';
 import { isHireHopConfigured } from '../config/hirehop';
 import { hhBroker } from '../services/hirehop-broker';
-import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured } from '../config/r2';
+import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured, uploadToPublicR2, getFromPublicR2, listPublicR2Objects } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { sendVehicleCheckedInEmail } from '../services/vehicle-emails';
 import { fetchLogo } from '../services/hire-form-pdf';
@@ -2352,22 +2352,19 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     }
 
     // List photos stored under events/{eventId}/{REG}/*.jpg and base64 them.
-    // Only load if R2 is configured; bail gracefully otherwise.
-    // Each photo also gets an `r2Url` built from R2_PUBLIC_URL so the jsPDF
-    // `textWithLink` "View full size" hyperlinks point somewhere useful.
-    // NOTE: photos currently upload to the private `ooosh-operations` R2
-    // bucket (see save-event). Until they're moved to the public
-    // `ooosh-vehicle-photos` bucket the links will 404 — see CLAUDE.md
-    // "Photo clickability — photos in private bucket" follow-up.
+    // Load condition photos from the PUBLIC bucket (`ooosh-vehicle-photos`)
+    // where `/upload-photo` writes them. Each photo gets an `r2Url` built
+    // from R2_PUBLIC_URL so the jsPDF `textWithLink` "View full size"
+    // hyperlinks resolve to publicly-readable objects in clients' browsers.
     const r2PublicBase = process.env.R2_PUBLIC_URL || '';
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = [];
     if (isR2Configured()) {
       const photoPrefix = `events/${eventId}/${reg}/`;
-      const photoObjects = await listR2Objects(photoPrefix);
+      const photoObjects = await listPublicR2Objects(photoPrefix);
       for (const obj of photoObjects) {
         if (!obj.Key) continue;
         try {
-          const photoResp = await getFromR2(obj.Key);
+          const photoResp = await getFromPublicR2(obj.Key);
           const stream = photoResp.Body as NodeJS.ReadableStream;
           const chunks: Buffer[] = [];
           for await (const chunk of stream) {
@@ -2580,12 +2577,26 @@ router.post('/upload-photo', (req: AuthRequest, res: Response) => {
       // Sanitise key — prevent path traversal
       const sanitisedKey = key.replace(/\.\./g, '').replace(/^\/+/, '');
 
-      await uploadToR2(sanitisedKey, req.file.buffer, req.file.mimetype);
+      // Route condition-report photos to the PUBLIC bucket
+      // (`ooosh-vehicle-photos`) so they can be opened via the "View full
+      // size" hyperlinks embedded in the condition report PDFs sent to
+      // clients. Anything else (non-event-photo uploads) still goes to the
+      // private bucket.
+      //
+      // The key pattern the frontend sends for condition photos is
+      // `events/{eventId}/{REG}/{angle}.jpg` — everything else we keep
+      // private by default.
+      const isEventPhoto = /^events\//.test(sanitisedKey);
+      if (isEventPhoto) {
+        await uploadToPublicR2(sanitisedKey, req.file.buffer, req.file.mimetype);
+      } else {
+        await uploadToR2(sanitisedKey, req.file.buffer, req.file.mimetype);
+      }
 
       res.json({
         url: sanitisedKey,
         key: sanitisedKey,
-        bucket: 'operations',
+        bucket: isEventPhoto ? 'ooosh-vehicle-photos' : 'operations',
       });
     } catch (error) {
       console.error('[vehicles/photos] Upload error:', error);
@@ -2596,7 +2607,9 @@ router.post('/upload-photo', (req: AuthRequest, res: Response) => {
 
 /**
  * GET /api/vehicles/list-photos?prefix=events/xxx/REG/
- * List photos in R2 under a given prefix.
+ * List photos in R2 under a given prefix. Reads from the public bucket
+ * (where `/upload-photo` writes condition photos) when the prefix starts
+ * with `events/`; private bucket otherwise.
  */
 router.get('/list-photos', async (req: AuthRequest, res: Response) => {
   try {
@@ -2606,7 +2619,10 @@ router.get('/list-photos', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const objects = await listR2Objects(prefix);
+    const isEventPhotoPrefix = /^events\//.test(prefix);
+    const objects = isEventPhotoPrefix
+      ? await listPublicR2Objects(prefix)
+      : await listR2Objects(prefix);
     const photos = (objects || [])
       .filter(obj => obj.Key && /\.(jpg|jpeg|png|webp)$/i.test(obj.Key))
       .map(obj => {
@@ -2624,7 +2640,8 @@ router.get('/list-photos', async (req: AuthRequest, res: Response) => {
 
 /**
  * GET /api/vehicles/photo/:key
- * Serve a photo from R2 (streaming proxy).
+ * Serve a photo from R2 (streaming proxy). Reads from the public bucket
+ * for `events/` keys, private bucket otherwise.
  */
 router.get('/photo/*', async (req: AuthRequest, res: Response) => {
   try {
@@ -2634,7 +2651,8 @@ router.get('/photo/*', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const obj = await getFromR2(key);
+    const isEventPhoto = /^events\//.test(key);
+    const obj = isEventPhoto ? await getFromPublicR2(key) : await getFromR2(key);
     if (!obj.Body) {
       res.status(404).json({ error: 'Photo not found' });
       return;

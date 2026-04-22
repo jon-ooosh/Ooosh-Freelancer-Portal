@@ -9,6 +9,12 @@ const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || '';
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || '';
 const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || 'ooosh-operations';
 
+// Second bucket, public-read. Used for vehicle book-out / check-in condition
+// photos which are embedded in client-facing PDFs as clickable "View full
+// size" hyperlinks. Signatures + event JSON + everything else stays in the
+// private bucket above.
+const R2_PUBLIC_BUCKET_NAME = process.env.R2_PUBLIC_BUCKET_NAME || 'ooosh-vehicle-photos';
+
 const s3 = new S3Client({
   region: 'auto',
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -78,4 +84,38 @@ export async function listR2Objects(prefix: string) {
   return response.Contents || [];
 }
 
-export { R2_BUCKET_NAME };
+// ─── Public bucket helpers ────────────────────────────────────────────────
+// Same S3 client, same credentials — just a different bucket. The public
+// bucket is configured on Cloudflare with Public Access enabled, so objects
+// are readable via `${R2_PUBLIC_URL}/${key}` (e.g. `https://pub-<hash>.r2.dev/events/...`).
+
+export async function uploadToPublicR2(
+  key: string,
+  body: Buffer,
+  contentType: string,
+): Promise<string> {
+  await s3.send(new PutObjectCommand({
+    Bucket: R2_PUBLIC_BUCKET_NAME,
+    Key: key,
+    Body: body,
+    ContentType: contentType,
+  }));
+  return key;
+}
+
+export async function getFromPublicR2(key: string) {
+  return s3.send(new GetObjectCommand({
+    Bucket: R2_PUBLIC_BUCKET_NAME,
+    Key: key,
+  }));
+}
+
+export async function listPublicR2Objects(prefix: string) {
+  const response = await s3.send(new ListObjectsV2Command({
+    Bucket: R2_PUBLIC_BUCKET_NAME,
+    Prefix: prefix,
+  }));
+  return response.Contents || [];
+}
+
+export { R2_BUCKET_NAME, R2_PUBLIC_BUCKET_NAME };
