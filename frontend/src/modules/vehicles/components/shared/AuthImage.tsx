@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { apiFetch } from '../../config/api-config'
+import { useAuthStore } from '../../../../hooks/useAuthStore'
 
 /**
  * Image component that handles authenticated OP endpoints.
@@ -7,9 +7,14 @@ import { apiFetch } from '../../config/api-config'
  * The `<img src>` attribute does NOT carry Authorization headers — so a
  * straight `<img src="/api/vehicles/photo/...">` hits the OP backend with
  * no auth token and gets a 401. We detect `/api/` URLs, fetch them via
- * the authenticated apiFetch (which attaches the bearer token + handles
- * refresh), and expose the result as a blob: URL. All other sources
+ * native fetch with an explicit Bearer token from the main OP auth
+ * store, and expose the result as a blob: URL. All other sources
  * (blob:, data:, absolute https:) pass straight through.
+ *
+ * NB: we deliberately do NOT use the vehicle module's apiFetch here —
+ * that wrapper prepends its configured baseUrl (`/api/vehicles`), and
+ * photo URLs already include the full `/api/vehicles/photo/...` path,
+ * which would produce `/api/vehicles/api/vehicles/photo/...` (404).
  *
  * Cleans up its own object URLs on unmount / src change so long lists of
  * photos don't leak memory.
@@ -37,7 +42,13 @@ export function AuthImage(
     let objectUrl: string | null = null
     setError(false)
 
-    apiFetch(src, { method: 'GET' })
+    const { accessToken } = useAuthStore.getState()
+    const headers: Record<string, string> = {}
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`
+    }
+
+    fetch(src, { headers })
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`)
