@@ -102,7 +102,9 @@ const verifySchema = z.object({
 
 router.post('/auth/verify', async (req: Request, res: Response) => {
   try {
-    const { email, verification_secret } = verifySchema.parse(req.body);
+    const parsed = verifySchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const { verification_secret } = parsed;
 
     // Verify the shared secret (set in both Netlify and OP env vars)
     const expectedSecret = process.env.HIRE_FORM_VERIFICATION_SECRET;
@@ -152,7 +154,8 @@ router.post('/auth/verify', async (req: Request, res: Response) => {
 
 router.get('/status', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
   try {
-    const email = (req.query.email as string) || req.hireFormUser!.email;
+    const rawEmail = (req.query.email as string) || req.hireFormUser!.email;
+    const email = (rawEmail || '').trim().toLowerCase();
 
     const result = await query(
       `SELECT d.* FROM drivers d WHERE d.email = $1 AND d.is_active = true ORDER BY d.updated_at DESC LIMIT 1`,
@@ -186,7 +189,9 @@ const nextStepSchema = z.object({
 
 router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
   try {
-    const { email, currentStep, addressMismatch } = nextStepSchema.parse(req.body);
+    const parsed = nextStepSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const { currentStep, addressMismatch } = parsed;
 
     const result = await query(
       `SELECT d.* FROM drivers d WHERE d.email = $1 AND d.is_active = true ORDER BY d.updated_at DESC LIMIT 1`,
@@ -226,7 +231,9 @@ const updateSchema = z.object({
 
 router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
   try {
-    const { email, updates } = updateSchema.parse(req.body);
+    const parsed = updateSchema.parse(req.body);
+    const email = parsed.email.trim().toLowerCase();
+    const { updates } = parsed;
 
     console.log(`[driver-verification] UPDATE for ${email} — incoming fields:`, Object.keys(updates));
     console.log(`[driver-verification] UPDATE values:`, JSON.stringify(updates, null, 2));
@@ -420,7 +427,8 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
 
 router.get('/check-hire-form', authenticateHireForm, async (req: HireFormRequest, res: Response) => {
   try {
-    const email = req.query.email as string;
+    const rawEmail = req.query.email as string;
+    const email = (rawEmail || '').trim().toLowerCase();
     const jobNumber = req.query.jobNumber as string;
 
     if (!email || !jobNumber) {
@@ -615,7 +623,8 @@ router.post('/upload', authenticateHireForm, hireFormUpload.single('file'), asyn
     }
 
     const { entity_id, label, comment, tag } = req.body;
-    const email = req.body.email || req.hireFormUser?.email;
+    const rawEmail = req.body.email || req.hireFormUser?.email;
+    const email = rawEmail ? String(rawEmail).trim().toLowerCase() : '';
 
     // Look up driver by email or entity_id
     let driverId = entity_id;
@@ -721,27 +730,12 @@ async function fireReferralNotification(
 
     console.log(`[driver-verification] Bell notifications sent to ${adminUsers.rows.length} admin/manager users`);
 
-    // 2. Send email alert to info@oooshtours.co.uk (matches existing hire form behaviour)
-    try {
-      const { emailService } = await import('../services/email-service');
-      const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
-
-      await emailService.send('referral_alert', {
-        to: 'info@oooshtours.co.uk',
-        variables: {
-          driverName,
-          driverEmail,
-          referralReasons: reasonsText,
-          linkedJobs: jobsText,
-          driverUrl: `${frontendUrl}/vehicles/drivers/${driverId}`,
-        },
-      });
-
-      console.log(`[driver-verification] Referral email sent to info@oooshtours.co.uk`);
-    } catch (emailErr) {
-      // Email failure shouldn't block the update — bell notification already sent
-      console.error('[driver-verification] Failed to send referral email (bell notification still sent):', emailErr);
-    }
+    // NOTE: No email alert fired here. The referral flag is set mid-flow
+    // (e.g. during the insurance questionnaire, before POA/DVLA/signature),
+    // so we can't yet refer to insurers with a complete picture. The
+    // referral_alert email is fired from hire-forms.ts when the full form
+    // is submitted (with snapshot PDF attached). Bell notifications above
+    // give staff early visibility without spamming info@ mid-form.
   } catch (error) {
     // Don't fail the update if notification fails
     console.error('[driver-verification] Failed to send referral notification:', error);
