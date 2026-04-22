@@ -1092,8 +1092,19 @@ async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string
 // ── Helper: load full data for PDF generation ──
 
 async function loadHireFormData(assignmentId: string): Promise<HireFormData | null> {
+  // Date/time resolution: vehicle_hire_assignments.hire_start/hire_end/
+  // start_time/end_time are treated as OVERRIDES. If any are null, fall
+  // back to the parent job's job_date/return_date (and 09:00 for times,
+  // per Ooosh T&Cs: "rental period starts at 9am on the first date of
+  // hire and concludes at 9am the morning after the final hired day").
+  // Prevents blank dates/times appearing on the hire agreement email +
+  // PDF when assignment dates weren't populated upstream.
   const result = await query(
     `SELECT vha.*,
+      COALESCE(vha.hire_start, j.job_date) AS resolved_hire_start,
+      COALESCE(vha.hire_end, j.return_date) AS resolved_hire_end,
+      COALESCE(vha.start_time, '09:00') AS resolved_start_time,
+      COALESCE(vha.end_time, '09:00') AS resolved_end_time,
       fv.reg AS vehicle_reg,
       fv.vehicle_type AS vehicle_model,
       d.full_name AS driver_name,
@@ -1119,6 +1130,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
     LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
     LEFT JOIN drivers d ON d.id = vha.driver_id
     LEFT JOIN job_excess je ON je.assignment_id = vha.id
+    LEFT JOIN jobs j ON j.id = vha.job_id
     WHERE vha.id = $1`,
     [assignmentId]
   );
@@ -1213,10 +1225,10 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
     datePassedTest: toISODate(row.driver_date_passed_test),
     vehicleReg: row.vehicle_reg || '',
     vehicleModel: row.vehicle_model || '',
-    hireStartDate: toISODate(row.hire_start),
-    hireStartTime: row.start_time ? String(row.start_time) : undefined,
-    hireEndDate: toISODate(row.hire_end),
-    hireEndTime: row.end_time ? String(row.end_time) : undefined,
+    hireStartDate: toISODate(row.resolved_hire_start),
+    hireStartTime: row.resolved_start_time ? String(row.resolved_start_time) : undefined,
+    hireEndDate: toISODate(row.resolved_hire_end),
+    hireEndTime: row.resolved_end_time ? String(row.resolved_end_time) : undefined,
     insuranceExcess: excessStr || undefined,
     hireFormNumber: `OT-HF-${assignmentId.substring(0, 8).toUpperCase()}`,
     contractNumber: row.hirehop_job_id ? String(row.hirehop_job_id) : '',
@@ -1329,13 +1341,19 @@ router.post('/:id/send-email', authenticateOrApiKey, async (req: AuthRequest, re
   try {
     const { id } = req.params;
 
-    // Get assignment with PDF key
+    // Get assignment with PDF key. Same hire_start/end fallback to parent
+    // job as loadHireFormData — keeps the email body consistent regardless
+    // of which endpoint generated the PDF.
     const assignment = await query(
-      `SELECT vha.*, d.full_name AS driver_name, d.email AS driver_email,
+      `SELECT vha.*,
+        COALESCE(vha.hire_start, j.job_date) AS resolved_hire_start,
+        COALESCE(vha.hire_end, j.return_date) AS resolved_hire_end,
+        d.full_name AS driver_name, d.email AS driver_email,
         fv.reg AS vehicle_reg, fv.vehicle_type AS vehicle_model
       FROM vehicle_hire_assignments vha
       LEFT JOIN drivers d ON d.id = vha.driver_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN jobs j ON j.id = vha.job_id
       WHERE vha.id = $1`,
       [id]
     );
@@ -1371,8 +1389,8 @@ router.post('/:id/send-email', authenticateOrApiKey, async (req: AuthRequest, re
         driverName: row.driver_name || 'Driver',
         vehicleReg: row.vehicle_reg || 'TBC',
         vehicleModel: row.vehicle_model || 'TBC',
-        hireStart: fmtDate(row.hire_start),
-        hireEnd: fmtDate(row.hire_end),
+        hireStart: fmtDate(row.resolved_hire_start),
+        hireEnd: fmtDate(row.resolved_hire_end),
       },
       attachments: [{
         filename,
