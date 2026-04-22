@@ -8,9 +8,8 @@
  */
 import { PDFDocument, rgb, PDFPage, PDFFont } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
 import { getFromR2, uploadToR2 } from '../config/r2';
+import { loadRobotoFonts } from './pdf-fonts';
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -290,25 +289,7 @@ BULLET Any changes mid-hire will be notified to you as soon as practically possi
 BULLET The most current version is always available on request or on our website.`;
 
 // ── Font Handling ────────────────────────────────────────────────────────
-
-let cachedFonts: { regular: Buffer; bold: Buffer } | null = null;
-
-function loadFontFiles(): { regular: Buffer; bold: Buffer } | null {
-  if (cachedFonts) return cachedFonts;
-
-  const fontsDir = join(__dirname, 'fonts');
-  const regularPath = join(fontsDir, 'Roboto-Regular.ttf');
-  const boldPath = join(fontsDir, 'Roboto-Bold.ttf');
-
-  if (existsSync(regularPath) && existsSync(boldPath)) {
-    cachedFonts = {
-      regular: readFileSync(regularPath),
-      bold: readFileSync(boldPath),
-    };
-    return cachedFonts;
-  }
-  return null;
-}
+// Shared loader lives in ./pdf-fonts so /generate-pdf uses the same path.
 
 // ── Logo Handling ────────────────────────────────────────────────────────
 
@@ -438,7 +419,7 @@ export async function generateHireFormPdf(data: HireFormData): Promise<GenerateP
   const pdfDoc = await PDFDocument.create();
 
   // Load fonts (custom Roboto with fallback to standard)
-  const fontFiles = loadFontFiles();
+  const fontFiles = loadRobotoFonts();
   let mainFont: PDFFont;
   let boldFont: PDFFont;
 

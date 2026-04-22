@@ -374,6 +374,22 @@ export function BookOutPage() {
     const results: OpResult[] = []
     const mileageNum = parseInt(form.mileage, 10)
 
+    // Grab the signature up-front so it can be attached to the event.
+    // The event record becomes the canonical source for regenerate-pdf
+    // backfills later — we persist signature, briefing ticks, driver
+    // name and raw notes as first-class fields (not just stuffed into
+    // the `details` blob).
+    let earlySignatureBase64: string | undefined
+    try {
+      const sigBlob = await signatureRef.current?.getBlob()
+      if (sigBlob) earlySignatureBase64 = await blobToBase64(sigBlob)
+    } catch {
+      console.warn('Failed to capture signature for event save')
+    }
+    const tickedBriefingItems = briefingItems
+      .filter(item => form.briefingChecked[item.name])
+      .map(item => item.name)
+
     // ── Step 1: Create vehicle event (with retry) ──
     setUploadProgress('Creating event...')
     const eventResult = await withRetry(
@@ -395,6 +411,10 @@ export function BookOutPage() {
           hireHopJob: form.hireHopJob || null,
           clientEmail: form.clientEmail || null,
           hireStatus: 'On Hire',
+          driverName: form.driverName || null,
+          notes: form.notes || null,
+          briefingItems: tickedBriefingItems,
+          signatureBase64: earlySignatureBase64 || null,
         }),
       'R2 event creation',
     )
@@ -491,16 +511,9 @@ export function BookOutPage() {
       })
     }
 
-    // Grab signature directly from the canvas at submit time (no confirm step needed)
-    let signatureBase64: string | undefined
-    try {
-      const sigBlob = await signatureRef.current?.getBlob()
-      if (sigBlob) {
-        signatureBase64 = await blobToBase64(sigBlob)
-      }
-    } catch {
-      console.warn('Failed to convert signature to base64')
-    }
+    // Reuse the signature we captured before the event was saved.
+    // (Previously this re-read the canvas here — duplicate work.)
+    const signatureBase64 = earlySignatureBase64
 
     // ── Run PDF/email and backend operations in parallel for speed ──
     // PDF+email chain depends on itself (PDF must finish before email sends).

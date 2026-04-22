@@ -26,6 +26,19 @@ export async function createVehicleEvent(params: {
   clientEmail?: string | null
   photoFolderUrl?: string | null
   hireStatus?: 'Available' | 'On Hire' | 'Collected' | 'Prep Needed' | 'Not Ready' | null
+  // Driver name stored as a first-class field so regenerate-pdf doesn't
+  // have to parse it out of `details`.
+  driverName?: string | null
+  // Raw notes (not the joined `details` blob) — regenerate-pdf can render
+  // them cleanly when re-building a PDF later.
+  notes?: string | null
+  // Per-item briefing checklist ticks captured at book-out. Array of
+  // the item names that were ticked. Used when regenerating a mis-fired
+  // book-out PDF after the fact.
+  briefingItems?: string[] | null
+  // Driver signature as base64 data URI. Persisted on the server as a
+  // separate R2 object (stripped from the event JSON before storage).
+  signatureBase64?: string | null
 }): Promise<{ id: string; error?: string }> {
   const dateStr = params.eventDate || new Date().toISOString().split('T')[0]!
   const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -42,6 +55,10 @@ export async function createVehicleEvent(params: {
     clientEmail: params.clientEmail ?? null,
     photoFolderUrl: params.photoFolderUrl ?? null,
     hireStatus: params.hireStatus ?? null,
+    driverName: params.driverName ?? null,
+    notes: params.notes ?? null,
+    briefingItems: params.briefingItems ?? null,
+    signatureBase64: params.signatureBase64 ?? null,
     createdAt: new Date().toISOString(),
   }
 
