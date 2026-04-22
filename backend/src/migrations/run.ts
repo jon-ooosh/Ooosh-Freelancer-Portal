@@ -92,6 +92,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '055_hire_form_fallback_events.sql',
         '056_arranging_reminders.sql',
         '057_platform_issues.sql',
+        '058_drivers_email_lower_index.sql',
       ];
 
       for (const migration of migrations) {

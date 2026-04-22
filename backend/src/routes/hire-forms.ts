@@ -200,6 +200,13 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
 
   try {
     const f = req.body;
+    // Normalise email to lowercase so case variations don't create duplicate drivers
+    if (typeof f.email === 'string') {
+      f.email = f.email.trim().toLowerCase();
+    }
+    if (typeof f.client_email === 'string') {
+      f.client_email = f.client_email.trim().toLowerCase();
+    }
     await client.query('BEGIN');
 
     // 1. Create or update driver
