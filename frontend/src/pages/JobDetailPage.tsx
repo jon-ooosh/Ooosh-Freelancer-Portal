@@ -123,6 +123,7 @@ interface JobDetail {
   cancellation_tier: string | null;
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
+  has_client_email?: boolean;
 }
 
 interface Interaction {
@@ -1668,6 +1669,22 @@ export default function JobDetailPage() {
                 Re-open as New Booking
               </button>
             ) : null}
+          </div>
+        </div>
+      )}
+
+      {/* No client email warning — automated emails for this job will be redirected to info@ */}
+      {job.has_client_email === false && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <p className="text-sm font-bold text-amber-800">
+                &#9888; No client email on file
+              </p>
+              <p className="text-xs text-amber-700 mt-1">
+                Automated emails for this job (payment confirmations, excess receipts, etc.) will be redirected to <strong>info@oooshtours.co.uk</strong> with a banner asking the team to forward manually. Add an email to the client organisation or a linked contact to enable direct comms.
+              </p>
+            </div>
           </div>
         </div>
       )}

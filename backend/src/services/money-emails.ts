@@ -104,6 +104,110 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   };
 }
 
+/** Resolve an email target for a job, falling back to info@oooshtours.co.uk
+ *  when no client contact is reachable via the address book.
+ *
+ *  Callers get a guaranteed recipient and a flag telling them whether the
+ *  message is being redirected. Use `buildFallbackBanner` + `logFallbackToTimeline`
+ *  to alert staff and leave an audit trail when `isFallback` is true. */
+export async function resolveClientEmailTarget(jobId: string): Promise<{
+  primaryEmail: string;
+  primaryFirstName: string;
+  ccEmails: string[];
+  isFallback: boolean;
+  clientName: string | null;
+  jobNumber: string | null;
+  jobName: string | null;
+}> {
+  const recipients = await getJobEmailRecipients(jobId);
+  if (recipients.primaryEmail) {
+    return {
+      primaryEmail: recipients.primaryEmail,
+      primaryFirstName: recipients.primaryFirstName || 'there',
+      ccEmails: recipients.ccEmails,
+      isFallback: false,
+      clientName: null,
+      jobNumber: null,
+      jobName: null,
+    };
+  }
+
+  const jobResult = await query(
+    `SELECT hh_job_number, job_name, client_name, company_name FROM jobs WHERE id = $1`,
+    [jobId]
+  );
+  const job = jobResult.rows[0];
+  return {
+    primaryEmail: 'info@oooshtours.co.uk',
+    primaryFirstName: 'team',
+    ccEmails: [],
+    isFallback: true,
+    clientName: job?.client_name || job?.company_name || null,
+    jobNumber: job?.hh_job_number ? String(job.hh_job_number) : null,
+    jobName: job?.job_name || null,
+  };
+}
+
+/** Build the amber "no client email on file" banner that prepends a fallback email body. */
+export function buildFallbackBanner(opts: {
+  jobId: string;
+  clientName: string | null;
+  jobNumber: string | null;
+  jobName: string | null;
+}): string {
+  const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+  const jobUrl = `${frontendUrl}/jobs/${opts.jobId}`;
+  const ref = [opts.jobNumber ? `Job #${opts.jobNumber}` : null, opts.jobName]
+    .filter(Boolean)
+    .join(' — ') || 'this job';
+  const client = opts.clientName || 'the client';
+  return `
+    <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+      <tr>
+        <td style="padding:14px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fde68a;">
+          <p style="margin:0 0 6px;font-size:14px;color:#92400e;font-weight:600;">
+            &#9888; No client email on file
+          </p>
+          <p style="margin:0 0 8px;font-size:13px;color:#78350f;line-height:1.5;">
+            This automated message could not be addressed to a specific client contact for <strong>${escapeHtml(client)}</strong> (${escapeHtml(ref)}).
+            It has been routed to info@ so the team can forward it manually and update the address book.
+          </p>
+          <p style="margin:0;font-size:13px;">
+            <a href="${jobUrl}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in Ooosh &rarr;</a>
+          </p>
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+/** Log an `email` interaction on the job's timeline recording that an automated
+ *  message was redirected to info@ because no client contact was on file. */
+export async function logFallbackToTimeline(opts: {
+  jobId: string;
+  templateId: string;
+  amount?: number;
+}): Promise<void> {
+  const amountPart = opts.amount != null ? ` Amount: £${opts.amount.toFixed(2)}.` : '';
+  const content = `Automated email (${opts.templateId}) could not be addressed — no client email on file. Redirected to info@ so the team can forward manually and update the address book.${amountPart}`;
+  try {
+    await query(
+      `INSERT INTO interactions (type, content, job_id) VALUES ('email', $1, $2)`,
+      [content, opts.jobId]
+    );
+  } catch (err) {
+    console.error('[money-emails] Failed to log fallback to timeline:', err instanceof Error ? err.message : err);
+  }
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 /** Get driver email from OP address book */
 export async function getDriverEmail(driverId: string): Promise<{
   email: string | null;
@@ -150,10 +254,9 @@ export async function sendPaymentEmail(opts: {
   isConfirmingBooking: boolean;
   balanceOutstanding?: number;
   hireDates?: string;
-}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string }> {
+}): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean }> {
   const { jobId, amount, bankName, paymentType, isConfirmingBooking, balanceOutstanding, hireDates } = opts;
-  const recipients = await getJobEmailRecipients(jobId);
-  if (!recipients.primaryEmail) return { sent: false, reason: 'no_recipient' };
+  const target = await resolveClientEmailTarget(jobId);
 
   const templateId = isConfirmingBooking ? 'booking_confirmed_deposit' : 'payment_received';
   const jobResult = await query(
@@ -183,10 +286,18 @@ export async function sendPaymentEmail(opts: {
 
   try {
     const res = await emailService.send(templateId, {
-      to: recipients.primaryEmail,
-      cc: recipients.ccEmails.length > 0 ? recipients.ccEmails : undefined,
+      to: target.primaryEmail,
+      cc: target.ccEmails.length > 0 ? target.ccEmails : undefined,
+      prependBanner: target.isFallback
+        ? buildFallbackBanner({
+            jobId,
+            clientName: target.clientName,
+            jobNumber: target.jobNumber,
+            jobName: target.jobName,
+          })
+        : undefined,
       variables: {
-        firstName: recipients.primaryFirstName || 'there',
+        firstName: target.primaryFirstName,
         amount: `\u00A3${amount.toFixed(2)}`,
         bankName: bankName || 'card',
         jobName,
@@ -195,10 +306,13 @@ export async function sendPaymentEmail(opts: {
         statusMessage,
       },
     });
-    if (!res.success) return { sent: false, reason: 'error', error: res.error };
-    return { sent: true };
+    if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback: target.isFallback };
+    if (target.isFallback) {
+      await logFallbackToTimeline({ jobId, templateId, amount });
+    }
+    return { sent: true, isFallback: target.isFallback };
   } catch (err) {
-    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err) };
+    return { sent: false, reason: 'error', error: err instanceof Error ? err.message : String(err), isFallback: target.isFallback };
   }
 }
 
@@ -244,25 +358,24 @@ export async function sendExcessEmail(opts: {
     recipientFirstName = driver.firstName;
   }
 
-  // Fall back to job contacts if no driver email
-  const jobRecipients = await getJobEmailRecipients(jobId);
+  // Fall back to job client contacts if no driver email.
+  // If nothing is reachable, resolveClientEmailTarget returns info@ with isFallback=true
+  // so the message still lands somewhere and staff get an amber banner + timeline entry.
+  const target = await resolveClientEmailTarget(jobId);
+  let isFallback = false;
   if (!recipientEmail) {
-    if (jobRecipients.primaryEmail) {
-      recipientEmail = jobRecipients.primaryEmail;
-      recipientFirstName = jobRecipients.primaryFirstName;
-    }
+    recipientEmail = target.primaryEmail;
+    recipientFirstName = target.primaryFirstName;
+    isFallback = target.isFallback;
   }
 
-  if (!recipientEmail) {
-    console.log(`[excess-email] No client recipient found for excess ${excessId} on job ${jobId} — skipping email (no client contact linked)`);
-    return;
-  }
-
-  // CC list: include job contacts that aren't the primary recipient
-  const ccList = [
-    ...(jobRecipients.primaryEmail && jobRecipients.primaryEmail !== recipientEmail ? [jobRecipients.primaryEmail] : []),
-    ...jobRecipients.ccEmails,
-  ].filter(e => e !== recipientEmail);
+  // CC list: include job contacts that aren't the primary recipient (only when not falling back)
+  const ccList = isFallback
+    ? []
+    : [
+        ...(target.primaryEmail && target.primaryEmail !== recipientEmail ? [target.primaryEmail] : []),
+        ...target.ccEmails,
+      ].filter(e => e !== recipientEmail);
 
   // Format dates — use future tense for payment receipt, past tense for reimbursement
   const fmtDate = (d: any) => d ? new Date(d).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : '';
@@ -279,6 +392,14 @@ export async function sendExcessEmail(opts: {
   await emailService.send(templateId, {
     to: recipientEmail,
     cc: ccList.length > 0 ? ccList : undefined,
+    prependBanner: isFallback
+      ? buildFallbackBanner({
+          jobId,
+          clientName: target.clientName,
+          jobNumber: target.jobNumber,
+          jobName: target.jobName,
+        })
+      : undefined,
     variables: {
       firstName: recipientFirstName || 'there',
       amount: `\u00A3${amount.toFixed(2)}`,
@@ -296,6 +417,10 @@ export async function sendExcessEmail(opts: {
       claimAmount: `\u00A3${amount.toFixed(2)}`,
     },
   });
+
+  if (isFallback) {
+    await logFallbackToTimeline({ jobId, templateId, amount });
+  }
 }
 
 /** Send last-minute booking alert to info@ */
