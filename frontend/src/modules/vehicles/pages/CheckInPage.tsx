@@ -32,7 +32,7 @@ import type {
   CapturedPhoto,
   DamageItem,
 } from '../types/vehicle-event'
-import { FUEL_LEVELS, DAMAGE_LOCATIONS, REQUIRED_PHOTOS } from '../types/vehicle-event'
+import { FUEL_LEVELS, DAMAGE_LOCATIONS } from '../types/vehicle-event'
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
@@ -42,8 +42,6 @@ interface OpResult {
   success: boolean
   detail?: string
 }
-
-const TESTING_MODE = false
 
 const STEPS = [
   'Select Vehicle',
