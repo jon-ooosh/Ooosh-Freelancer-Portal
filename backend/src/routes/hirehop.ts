@@ -174,7 +174,42 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    res.json(result.rows[0]);
+    // Compute has_client_email: true if we can reach the client via OP's address book
+    // (direct people linked to client org, or the client org's own email column).
+    // Mirrors getJobEmailRecipients exactly so the Job Detail banner matches send behaviour.
+    const reachable = await query(
+      `SELECT 1
+       FROM jobs j
+       WHERE j.id = $1
+         AND (
+           EXISTS (
+             SELECT 1 FROM people p
+             JOIN person_organisation_roles por ON por.person_id = p.id AND por.status = 'active'
+             WHERE p.email IS NOT NULL AND p.email <> ''
+               AND (
+                 por.organisation_id = j.client_id
+                 OR por.organisation_id IN (SELECT organisation_id FROM job_organisations WHERE job_id = j.id)
+               )
+           )
+           OR EXISTS (
+             SELECT 1 FROM organisations o
+             WHERE o.id = j.client_id AND o.email IS NOT NULL AND o.email <> ''
+           )
+           OR EXISTS (
+             SELECT 1 FROM organisations o
+             JOIN job_organisations jo ON jo.organisation_id = o.id
+             WHERE jo.job_id = j.id AND jo.role = 'client'
+               AND o.email IS NOT NULL AND o.email <> ''
+           )
+         )
+       LIMIT 1`,
+      [id]
+    );
+
+    res.json({
+      ...result.rows[0],
+      has_client_email: reachable.rows.length > 0,
+    });
   } catch (error) {
     console.error('Job detail error:', error);
     res.status(500).json({ error: 'Failed to load job' });
