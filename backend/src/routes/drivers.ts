@@ -92,9 +92,18 @@ const updateDriverSchema = createDriverSchema.partial();
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { search, page = '1', limit = '50', is_active, has_referral } = req.query;
+    const { search, page = '1', limit = '50', is_active, has_referral, sort = 'last_activity' } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
     const pageLimit = parseInt(limit as string);
+
+    // Status filter accepts ?status=a&status=b or ?status=a,b
+    const rawStatus = req.query.status;
+    const statuses: string[] = (() => {
+      if (!rawStatus) return [];
+      if (Array.isArray(rawStatus)) return rawStatus.map(String);
+      const s = String(rawStatus);
+      return s.includes(',') ? s.split(',').map(x => x.trim()).filter(Boolean) : [s];
+    })();
 
     let where = 'WHERE 1=1';
     const params: unknown[] = [];
@@ -110,11 +119,53 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       where += ' AND d.requires_referral = true';
     }
 
-    if (search) {
-      params.push(`%${search}%`);
+    // Search — auto-detect all-digit queries as HH job numbers
+    const searchStr = search ? String(search).trim() : '';
+    const isJobNumberSearch = /^\d{3,}$/.test(searchStr);
+    if (searchStr) {
+      params.push(`%${searchStr}%`);
       const si = params.length;
-      where += ` AND (d.full_name ILIKE $${si} OR d.email ILIKE $${si} OR d.licence_number ILIKE $${si} OR d.postcode ILIKE $${si})`;
+      const clauses = [
+        `d.full_name ILIKE $${si}`,
+        `d.email ILIKE $${si}`,
+        `d.licence_number ILIKE $${si}`,
+        `d.postcode ILIKE $${si}`,
+      ];
+      if (isJobNumberSearch) {
+        params.push(parseInt(searchStr, 10));
+        const ji = params.length;
+        clauses.push(
+          `EXISTS (SELECT 1 FROM vehicle_hire_assignments vha WHERE vha.driver_id = d.id AND vha.hirehop_job_id = $${ji})`
+        );
+      }
+      where += ` AND (${clauses.join(' OR ')})`;
     }
+
+    // Status filter — SQL mirror of the frontend deriveDriverStatus so
+    // a single set of pills filters server-side. Keep this in sync with
+    // DriversPage.tsx/DriverDetailPage.tsx if the status rules change.
+    const statusCase = `
+      CASE
+        WHEN d.requires_referral = true AND d.referral_status = 'approved' THEN 'approved'
+        WHEN d.requires_referral = true AND d.referral_status = 'declined' THEN 'not_approved'
+        WHEN d.requires_referral = true AND d.referral_status = 'pending' THEN 'referred_waiting'
+        WHEN d.requires_referral = true THEN 'refer_insurers'
+        WHEN d.signature_date IS NULL THEN 'in_progress'
+        WHEN d.licence_valid_to < CURRENT_DATE
+          OR d.dvla_valid_until < CURRENT_DATE
+          OR d.poa1_valid_until < CURRENT_DATE THEN 'expired'
+        ELSE 'approved'
+      END`;
+    if (statuses.length > 0) {
+      params.push(statuses);
+      where += ` AND (${statusCase}) = ANY($${params.length}::text[])`;
+    }
+
+    // Sort — default most-recently-active first
+    let orderBy = 'd.updated_at DESC NULLS LAST';
+    if (sort === 'name') orderBy = 'd.full_name ASC';
+    else if (sort === 'dvla_expiring') orderBy = 'd.dvla_valid_until ASC NULLS LAST, d.full_name ASC';
+    else if (sort === 'points_desc') orderBy = 'd.licence_points DESC NULLS LAST, d.updated_at DESC';
 
     const countResult = await query(
       `SELECT COUNT(*) FROM drivers d ${where}`,
@@ -130,7 +181,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
       FROM drivers d
       LEFT JOIN people p ON p.id = d.person_id
       ${where}
-      ORDER BY d.full_name ASC
+      ORDER BY ${orderBy}
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
       dataParams
     );
@@ -142,6 +193,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         limit: pageLimit,
         total,
         totalPages: Math.ceil(total / pageLimit),
+      },
+      meta: {
+        searched_as_job_number: isJobNumberSearch ? searchStr : null,
       },
     });
   } catch (error) {
