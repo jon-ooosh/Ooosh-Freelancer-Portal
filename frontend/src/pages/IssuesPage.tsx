@@ -563,12 +563,32 @@ export default function IssuesPage() {
             Log bugs, feature requests and questions about the Operations Platform. Jon gets an email alert on each new issue, and you can track its status here.
           </p>
         </div>
-        <button
-          onClick={() => setShowNew(true)}
-          className="px-4 py-2 bg-ooosh-600 text-white rounded hover:bg-ooosh-700 font-medium text-sm"
-        >
-          + Log an issue
-        </button>
+        <div className="flex items-center gap-2">
+          {user?.role === 'admin' && (
+            <button
+              onClick={async () => {
+                if (!confirm('Seed the tracker with known roadmap items + bugs from CLAUDE.md? Idempotent — safe to run multiple times.')) return;
+                try {
+                  const res = await api.post<{ inserted: number; skipped: number; total: number }>(`/issues/admin/seed`, {});
+                  alert(`Seeded: ${res.inserted} inserted, ${res.skipped} already existed.`);
+                  load();
+                } catch (err) {
+                  alert('Seed failed: ' + (err instanceof Error ? err.message : String(err)));
+                }
+              }}
+              className="px-3 py-2 text-sm border border-ooosh-600 text-ooosh-700 rounded hover:bg-ooosh-50"
+              title="Admin only — pre-populate the tracker with known roadmap items"
+            >
+              Seed known issues
+            </button>
+          )}
+          <button
+            onClick={() => setShowNew(true)}
+            className="px-4 py-2 bg-ooosh-600 text-white rounded hover:bg-ooosh-700 font-medium text-sm"
+          >
+            + Log an issue
+          </button>
+        </div>
       </div>
 
       {/* Stats strip */}
