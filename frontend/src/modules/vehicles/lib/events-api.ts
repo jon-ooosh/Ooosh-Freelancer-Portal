@@ -84,3 +84,58 @@ export async function createVehicleEvent(params: {
     return { id: eventId, error: errMsg }
   }
 }
+
+/**
+ * Rebuild a condition report PDF for an existing event and optionally
+ * email it. Used to patch up mis-fires (e.g. original PDF crashed) or
+ * resend to a different address later for damage disputes.
+ */
+export async function regenerateEventPdf(params: {
+  eventId: string
+  vehicleReg: string
+  email?: string
+  skipEmail?: boolean
+}): Promise<{
+  success: boolean
+  pdf?: string
+  filename?: string
+  size?: number
+  photoCount?: number
+  signatureFound?: boolean
+  emailSent?: boolean
+  emailedTo?: string | null
+  error?: string
+}> {
+  try {
+    const response = await apiFetch(
+      `/events/${encodeURIComponent(params.eventId)}/regenerate-pdf`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vehicleReg: params.vehicleReg,
+          email: params.email,
+          skipEmail: params.skipEmail,
+        }),
+      },
+    )
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({})) as { error?: string }
+      return { success: false, error: errorData.error || `HTTP ${response.status}` }
+    }
+
+    const data = await response.json() as {
+      pdf: string
+      filename: string
+      size: number
+      photoCount: number
+      signatureFound: boolean
+      emailSent: boolean
+      emailedTo: string | null
+    }
+    return { success: true, ...data }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : 'Regenerate failed' }
+  }
+}

@@ -10,6 +10,7 @@ import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import FuelHistoryTab from '../components/fuel/FuelHistoryTab'
+import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
 import { updateVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import { getAuthHeaders } from '../config/api-config'
@@ -542,13 +543,9 @@ export function VehicleDetailPage() {
       {/* Vehicle Files */}
       <VehicleFilesSection vehicleId={vehicle.id} files={vehicle.files || []} />
 
-      {/* Event History placeholder */}
-      <div className="rounded-lg border border-gray-200 bg-white p-4">
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Event History</h3>
-        <p className="text-sm text-gray-400 text-center py-4">
-          Event history will appear here once book-outs, check-ins, and prep events are recorded.
-        </p>
-      </div>
+      {/* Event History — lists book-outs, check-ins, preps etc. with
+          inline "Regenerate PDF" action on condition-report events. */}
+      <VehicleEventsHistory vehicleReg={vehicle.reg} />
 
       {/* Issues */}
       <VehicleIssuesSection

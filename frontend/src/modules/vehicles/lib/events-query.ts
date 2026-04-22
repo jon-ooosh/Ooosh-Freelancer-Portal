@@ -23,7 +23,7 @@ export interface BookOutEventData {
   notes: string | null
 }
 
-interface EventIndexEntry {
+export interface EventIndexEntry {
   id: string
   vehicleReg: string
   eventType: string
@@ -38,7 +38,7 @@ interface EventIndexEntry {
 /**
  * Fetch events for a vehicle from R2, optionally filtered by type.
  */
-async function fetchVehicleEvents(
+export async function fetchVehicleEvents(
   vehicleReg: string,
   eventType?: string,
 ): Promise<EventIndexEntry[]> {
