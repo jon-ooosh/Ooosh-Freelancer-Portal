@@ -521,6 +521,24 @@ export default function DriverDetailPage() {
               </Link>
             )}
           </div>
+          {/* Activity strip — the three timestamps a staff member actually wants
+              when diagnosing a driver mid-flow. updated_at bumps on any hire
+              form app write; idenfy_check_date reflects the last successful
+              licence verification; signature_date is set at form submission. */}
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-500">
+            <span title={driver.updated_at || ''}>
+              <span className="text-gray-400">Last activity:</span>{' '}
+              <span className="text-gray-700">{formatDateTime(driver.updated_at)}</span>
+            </span>
+            <span>
+              <span className="text-gray-400">Idenfy completed:</span>{' '}
+              <span className="text-gray-700">{formatDate(driver.idenfy_check_date)}</span>
+            </span>
+            <span>
+              <span className="text-gray-400">Last signed:</span>{' '}
+              <span className="text-gray-700">{formatDate(driver.signature_date)}</span>
+            </span>
+          </div>
         </div>
         <div className="flex gap-2">
           {!editing && canEdit && (
