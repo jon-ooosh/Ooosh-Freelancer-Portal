@@ -29,6 +29,99 @@ const HH_JOB_STATUS_MAP: Record<number, string> = {
 // Active statuses worth syncing (not dead/done)
 const HH_ACTIVE_STATUSES = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
+/**
+ * Link a matching Person to a freshly-created shell client org.
+ *
+ * HireHop doesn't distinguish between a company and a sole trader — both
+ * arrive as `job.COMPANY`. When the COMPANY happens to be a person's name
+ * (e.g. "Danny Stevens"), the job sync creates a shell org with no email,
+ * and automated emails to the client then silently skip because there's
+ * no linked contact.
+ *
+ * Closes the loop by matching the new org's name against active People
+ * and creating a `person_organisation_roles` link when unambiguous.
+ * Ambiguous matches (multiple Person candidates) go to the sync review queue.
+ * Returns { linked, flagged } for sync result reporting.
+ *
+ * Only runs against "shell" orgs — type='client', no email, no existing
+ * linked people — to avoid touching manually-curated band/management structures.
+ */
+async function linkMatchingPersonToShellOrg(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  dbClient: any,
+  orgId: string,
+  orgName: string,
+  externalId: string
+): Promise<{ linked: boolean; flagged: boolean }> {
+  // Bail if the org isn't a shell (has email, already has linked people, wrong type, or not sync-created)
+  const shellCheck = await dbClient.query(
+    `SELECT 1
+     FROM organisations o
+     WHERE o.id = $1
+       AND o.type = 'client'
+       AND (o.email IS NULL OR o.email = '')
+       AND o.created_by = 'hirehop_sync'
+       AND NOT EXISTS (
+         SELECT 1 FROM person_organisation_roles
+         WHERE organisation_id = o.id AND status = 'active'
+       )
+     LIMIT 1`,
+    [orgId]
+  );
+  if (shellCheck.rows.length === 0) return { linked: false, flagged: false };
+
+  // Match active, non-deleted people by full name (case-insensitive, trimmed)
+  const matches = await dbClient.query(
+    `SELECT id, first_name, last_name, email
+     FROM people
+     WHERE is_deleted = false
+       AND first_name IS NOT NULL
+       AND last_name IS NOT NULL
+       AND lower(trim(concat(first_name, ' ', last_name))) = lower(trim($1))`,
+    [orgName]
+  );
+
+  if (matches.rows.length === 0) return { linked: false, flagged: false };
+
+  if (matches.rows.length === 1) {
+    const person = matches.rows[0];
+    await dbClient.query(
+      `INSERT INTO person_organisation_roles (person_id, organisation_id, role, status, is_primary)
+       VALUES ($1, $2, 'Main Contact', 'active', true)`,
+      [person.id, orgId]
+    );
+    return { linked: true, flagged: false };
+  }
+
+  // Multiple candidates — flag for review, don't auto-link
+  const existingReview = await dbClient.query(
+    `SELECT 1 FROM sync_review_queue
+     WHERE entity_type = 'organisation' AND entity_id = $1
+       AND review_type = 'person_link_ambiguous' AND status = 'pending'`,
+    [orgId]
+  );
+  if (existingReview.rows.length > 0) return { linked: false, flagged: false };
+
+  await dbClient.query(
+    `INSERT INTO sync_review_queue (entity_type, entity_id, external_id, review_type, summary, details)
+     VALUES ('organisation', $1, $2, 'person_link_ambiguous', $3, $4)`,
+    [
+      orgId,
+      externalId,
+      `Shell org "${orgName}" matches ${matches.rows.length} people — pick one to link as Main Contact.`,
+      JSON.stringify({
+        org_name: orgName,
+        candidates: matches.rows.map((p: { id: string; first_name: string; last_name: string; email: string | null }) => ({
+          person_id: p.id,
+          name: `${p.first_name} ${p.last_name}`,
+          email: p.email,
+        })),
+      }),
+    ]
+  );
+  return { linked: false, flagged: true };
+}
+
 // ── HireHop search_list response types ───────────────────────────────────
 
 interface HHJobRow {
@@ -118,6 +211,8 @@ export interface JobSyncResult {
   clientsLinked: number;
   clientsCreated: number;
   venuesLinked: number;
+  personLinksCreated: number;      // auto-linked Person ↔ shell org via name match
+  personLinksFlagged: number;      // ambiguous matches queued for review
   errors: string[];
   total: number;
 }
@@ -129,6 +224,8 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
     clientsLinked: 0,
     clientsCreated: 0,
     venuesLinked: 0,
+    personLinksCreated: 0,
+    personLinksFlagged: 0,
     errors: [],
     total: 0,
   };
@@ -199,6 +296,18 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
           );
           clientOrgId = newOrg.rows[0].id;
           result.clientsCreated++;
+
+          // Solo-trader bridge: if the new shell org's name matches an
+          // existing Person, link them so email recipient lookup can find
+          // the contact. Ambiguous matches get queued for manual review.
+          const linkResult = await linkMatchingPersonToShellOrg(
+            client,
+            clientOrgId!,
+            companyName,
+            String(jobNumber)
+          );
+          if (linkResult.linked) result.personLinksCreated++;
+          if (linkResult.flagged) result.personLinksFlagged++;
         }
       }
 

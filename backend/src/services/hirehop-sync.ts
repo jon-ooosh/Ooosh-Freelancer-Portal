@@ -429,22 +429,51 @@ export async function syncContactsFromHireHop(userId: string): Promise<SyncResul
           const fullName = `${first_name} ${last_name}`.trim();
           if (fullName.length > 2) {
             const nameMatchOrg = await client.query(
-              `SELECT id, name, type FROM organisations
+              `SELECT id, name, type, email, created_by FROM organisations
                WHERE lower(name) = lower($1) AND is_deleted = false
                LIMIT 1`,
               [fullName]
             );
             if (nameMatchOrg.rows.length > 0) {
               const matchedOrg = nameMatchOrg.rows[0];
-              const flagged = await flagForReview(client, {
-                entity_type: 'person',
-                entity_id: personId,
-                external_id: String(contact.ID),
-                review_type: 'name_conflict',
-                summary: `New person "${fullName}" has same name as org "${matchedOrg.name}" (${matchedOrg.type}). May be a duplicate or misclassified.`,
-                details: { person_name: fullName, matching_org_id: matchedOrg.id, matching_org_name: matchedOrg.name, matching_org_type: matchedOrg.type },
-              });
-              if (flagged) result.reviewsFlagged++;
+
+              // Is this a "shell" org — a sole-trader stub created by the
+              // earlier job sync with no email and no one linked yet? If so,
+              // just auto-link the new Person to it as Main Contact instead
+              // of flagging for review. That closes the Danny Stevens case
+              // without human intervention.
+              const isShell =
+                matchedOrg.type === 'client' &&
+                (!matchedOrg.email || matchedOrg.email === '') &&
+                matchedOrg.created_by === 'hirehop_sync';
+              const hasLinkedPeople = isShell
+                ? (await client.query(
+                    `SELECT 1 FROM person_organisation_roles
+                     WHERE organisation_id = $1 AND status = 'active' LIMIT 1`,
+                    [matchedOrg.id]
+                  )).rows.length > 0
+                : true;
+
+              if (isShell && !hasLinkedPeople) {
+                await client.query(
+                  `INSERT INTO person_organisation_roles (person_id, organisation_id, role, status, is_primary)
+                   VALUES ($1, $2, 'Main Contact', 'active', true)
+                   ON CONFLICT DO NOTHING`,
+                  [personId, matchedOrg.id]
+                );
+                result.rolesCreated++;
+              } else {
+                // Not a shell (real band/agency/etc.) — flag for staff to decide
+                const flagged = await flagForReview(client, {
+                  entity_type: 'person',
+                  entity_id: personId,
+                  external_id: String(contact.ID),
+                  review_type: 'name_conflict',
+                  summary: `New person "${fullName}" has same name as org "${matchedOrg.name}" (${matchedOrg.type}). May be a duplicate or misclassified.`,
+                  details: { person_name: fullName, matching_org_id: matchedOrg.id, matching_org_name: matchedOrg.name, matching_org_type: matchedOrg.type },
+                });
+                if (flagged) result.reviewsFlagged++;
+              }
             }
           }
         }
