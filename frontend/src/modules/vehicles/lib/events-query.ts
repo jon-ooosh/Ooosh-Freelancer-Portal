@@ -33,6 +33,10 @@ export interface EventIndexEntry {
   hireHopJob: string | null
   hireStatus: string | null
   createdAt: string
+  /** Resolved by the backend from `jobs.hh_job_number` → `jobs.id` so the
+   *  Event History UI can deep-link to the OP job detail page as well as
+   *  the HireHop job page. Null when no matching OP job exists. */
+  opJobId?: string | null
 }
 
 /**
