@@ -1,5 +1,5 @@
 import { useState, FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { api } from '../services/api';
 
@@ -23,6 +23,23 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const login = useAuthStore((s) => s.login);
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Figure out where to send the user after login. Two sources:
+  //  - React Router redirect: state.from.pathname (when ProtectedRoute bounced us here)
+  //  - Hard navigation: ?redirect=... (when refresh failed and api.ts did window.location.href)
+  function getRedirectTarget(): string {
+    const stateFrom = (location.state as { from?: { pathname?: string; search?: string } } | null)?.from;
+    if (stateFrom?.pathname && stateFrom.pathname !== '/login') {
+      return `${stateFrom.pathname}${stateFrom.search || ''}`;
+    }
+    const params = new URLSearchParams(location.search);
+    const redirect = params.get('redirect');
+    if (redirect && redirect.startsWith('/') && !redirect.startsWith('/login')) {
+      return redirect;
+    }
+    return '/';
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -32,7 +49,7 @@ export default function LoginPage() {
     try {
       const data = await api.post<LoginResponse>('/auth/login', { email, password });
       login(data.user, data.accessToken, data.refreshToken);
-      navigate('/');
+      navigate(getRedirectTarget(), { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
     } finally {

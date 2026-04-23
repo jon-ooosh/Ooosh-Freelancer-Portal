@@ -621,7 +621,7 @@ function NewEnquiryModal({
   const [bandName, setBandName] = useState('');
   const [bandId, setBandId] = useState<string | null>(null);
   const [bandSearch, setBandSearch] = useState('');
-  const [bandResults, setBandResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
+  const [bandResults, setBandResults] = useState<Array<{ id: string; name: string; type: string; email?: string | null }>>([]);
 
   // Person-picked-as-client prompt. Clients must be organisations; if the
   // user selects a person, we show their orgs as quick-picks rather than
@@ -708,7 +708,7 @@ function NewEnquiryModal({
     if (bandSearch.length < 2) { setBandResults([]); return; }
     const timeout = setTimeout(async () => {
       try {
-        const data = await api.get<{ data: Array<{ id: string; name: string; type: string }> }>(
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string; email?: string | null }> }>(
           `/organisations?search=${encodeURIComponent(bandSearch)}&limit=8`
         );
         setBandResults(data.data);
@@ -1137,8 +1137,13 @@ function NewEnquiryModal({
                         }}
                         className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
                       >
-                        <span className="font-medium">{o.name}</span>
-                        <span className="text-xs text-gray-400">{o.type}</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium truncate">{o.name}</span>
+                            <span className="text-xs text-gray-400">{o.type}</span>
+                          </div>
+                          {o.email && <div className="text-xs text-gray-400 truncate">{o.email}</div>}
+                        </div>
                       </button>
                     ))}
                   </div>

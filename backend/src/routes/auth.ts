@@ -214,11 +214,17 @@ router.post('/refresh', refreshLimiter, async (req: Request, res: Response) => {
     }
 
     const user = result.rows[0];
-    const tokens = generateTokens(user);
 
-    await query('UPDATE users SET refresh_token = $1 WHERE id = $2', [tokens.refreshToken, user.id]);
+    // Don't rotate the refresh token on refresh — rotation races between open
+    // tabs. Refresh tokens still rotate on login + are cleared on logout +
+    // nulled when a user is deactivated, so exposure stays bounded.
+    const accessToken = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions
+    );
 
-    res.json(tokens);
+    res.json({ accessToken, refreshToken });
   } catch {
     res.status(401).json({ error: 'Invalid or expired refresh token' });
   }

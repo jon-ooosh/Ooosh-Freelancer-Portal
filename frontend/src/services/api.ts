@@ -26,7 +26,11 @@ async function refreshAccessToken(): Promise<{ accessToken: string; refreshToken
 
       if (!response.ok) {
         logout();
-        window.location.href = '/login';
+        const current = window.location.pathname + window.location.search;
+        const target = current && current !== '/login'
+          ? `/login?redirect=${encodeURIComponent(current)}`
+          : '/login';
+        window.location.href = target;
         throw new Error('Session expired');
       }
 

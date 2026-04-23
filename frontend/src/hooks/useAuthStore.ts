@@ -56,3 +56,24 @@ export const useAuthStore = create<AuthState>((set) => ({
     });
   },
 }));
+
+// Cross-tab sync: `storage` fires in OTHER tabs when a key is written here.
+// Keeps every tab on the same token pair so one tab's refresh doesn't
+// invalidate another tab's session via the server's refresh-token rotation.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.storageArea !== localStorage) return;
+    if (e.key === 'ooosh_access_token' || e.key === 'ooosh_refresh_token' || e.key === 'ooosh_user') {
+      const accessToken = localStorage.getItem('ooosh_access_token');
+      const refreshToken = localStorage.getItem('ooosh_refresh_token');
+      const userRaw = localStorage.getItem('ooosh_user');
+      const user = userRaw ? JSON.parse(userRaw) : null;
+      useAuthStore.setState({
+        user,
+        accessToken,
+        refreshToken,
+        isAuthenticated: !!accessToken,
+      });
+    }
+  });
+}
