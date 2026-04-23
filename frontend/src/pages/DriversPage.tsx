@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import type { JobExcess } from '../../../shared/types';
 
 interface DriverListItem {
   id: string;
@@ -24,6 +26,12 @@ interface DriverListItem {
   updated_at: string;
   person_first_name: string | null;
   person_last_name: string | null;
+  // Latest excess_amount_required on any of this driver's job_excess records,
+  // driven off the most-recently-updated record. Overrides made via the
+  // ExcessPaymentModal surface here immediately.
+  latest_excess_id: string | null;
+  latest_excess_required: number | string | null;
+  latest_excess_status: string | null;
 }
 
 interface DriversResponse {
@@ -130,7 +138,21 @@ export default function DriversPage() {
   const [statusFilter, setStatusFilter] = useState<StatusKey[]>([]);
   const [sort, setSort] = useState<SortKey>('last_activity');
   const [jobSearchDetected, setJobSearchDetected] = useState<string | null>(null);
+  const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
+  const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
   const navigate = useNavigate();
+
+  async function openExcessModal(excessId: string) {
+    setExcessModalLoadingId(excessId);
+    try {
+      const res = await api.get<{ data: JobExcess }>(`/excess/${excessId}`);
+      setExcessModalRecord(res.data);
+    } catch (err) {
+      console.error('Failed to load excess record:', err);
+    } finally {
+      setExcessModalLoadingId(null);
+    }
+  }
 
   useEffect(() => {
     loadDrivers();
@@ -254,6 +276,7 @@ export default function DriversPage() {
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Licence</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Points</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Excess</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
             </tr>
@@ -261,17 +284,18 @@ export default function DriversPage() {
           <tbody className="bg-white divide-y divide-gray-200">
             {loading ? (
               <tr>
-                <td colSpan={6} className="px-6 py-8 text-center text-sm text-gray-500">Loading...</td>
+                <td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">Loading...</td>
               </tr>
             ) : drivers.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-6 py-8 text-center text-sm text-gray-500">
+                <td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">
                   {filtersActive ? 'No drivers match your filters.' : 'No drivers yet. Drivers appear here after completing the hire form.'}
                 </td>
               </tr>
             ) : (
               drivers.map((driver) => {
                 const status = deriveDriverStatus(driver);
+                const rowLoading = excessModalLoadingId === driver.latest_excess_id;
                 return (
                   <tr
                     key={driver.id}
@@ -292,6 +316,25 @@ export default function DriversPage() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       {pointsBadge(driver.licence_points)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm">
+                      {driver.latest_excess_id && driver.latest_excess_required != null ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (driver.latest_excess_id) openExcessModal(driver.latest_excess_id);
+                          }}
+                          disabled={rowLoading}
+                          title="Edit required excess"
+                          className="text-gray-900 font-medium hover:text-ooosh-700 hover:underline disabled:opacity-50"
+                        >
+                          £{Number(driver.latest_excess_required).toFixed(2)}
+                          <span className="ml-1 text-xs text-gray-400">✎</span>
+                        </button>
+                      ) : (
+                        <span className="text-gray-400">—</span>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" title={driver.updated_at || ''}>
                       {relativeTime(driver.updated_at)}
@@ -332,6 +375,16 @@ export default function DriversPage() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* Quick-edit excess modal, opened from the Excess column */}
+      {excessModalRecord && (
+        <ExcessPaymentModal
+          excess={excessModalRecord}
+          initialAction="edit_required"
+          onClose={() => setExcessModalRecord(null)}
+          onUpdated={() => loadDrivers(pagination.page)}
+        />
       )}
     </div>
   );
