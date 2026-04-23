@@ -10,6 +10,7 @@
 
 import { query } from '../config/database';
 import emailService from './email-service';
+import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from './money-emails';
 
 export interface AutoEmailResult {
   initialSent: number;
@@ -145,16 +146,24 @@ export async function sendHireFormEmailForJob(
     }
   }
 
-  if (contacts.length === 0) {
-    console.log(`[Hire Form Auto-Email] No contacts for job ${job.hh_job_number} — skipping`);
-    return 0;
-  }
-
   const hireFormUrl = `https://hireforms.oooshtours.co.uk/?job=${job.hh_job_number}`;
   const jobDate = job.job_date ? new Date(job.job_date) : null;
   const startDay = jobDate ? jobDate.toLocaleDateString('en-GB', { weekday: 'long' }) : '';
   const startDate = jobDate ? jobDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
   const templateId = isChase ? 'hire_form_chase' : 'hire_form_request';
+
+  // Safety net: if we couldn't find any client contacts, route the email to
+  // info@ once (with the amber "no client email on file" banner + timeline
+  // entry) so staff can forward and update the address book. Otherwise the
+  // hire form would never go out at all and no one would know.
+  let sentToFallback = false;
+  if (contacts.length === 0) {
+    const target = await resolveClientEmailTarget(job.id);
+    if (target.isFallback) {
+      contacts.push({ email: target.primaryEmail, name: target.primaryFirstName });
+      sentToFallback = true;
+    }
+  }
 
   let sent = 0;
   for (const contact of contacts) {
@@ -169,11 +178,23 @@ export async function sendHireFormEmailForJob(
           startDate,
           hireFormUrl,
         },
+        prependBanner: sentToFallback
+          ? buildFallbackBanner({
+              jobId: job.id,
+              clientName: job.client_name || job.company_name || null,
+              jobNumber: String(job.hh_job_number),
+              jobName: job.job_name || null,
+            })
+          : undefined,
       });
       sent++;
     } catch (err) {
       console.warn(`[Hire Form Auto-Email] Failed to send to ${contact.email}:`, err);
     }
+  }
+
+  if (sentToFallback && sent > 0) {
+    await logFallbackToTimeline({ jobId: job.id, templateId });
   }
 
   // Update the requirement notes
