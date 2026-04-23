@@ -15,6 +15,10 @@ import multer from 'multer';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import {
+  verifyFreelancerBookoutToken,
+  mintFreelancerBookoutSession,
+} from '../middleware/freelancer-bookout-auth';
 import { query } from '../config/database';
 import { isHireHopConfigured } from '../config/hirehop';
 import { hhBroker } from '../services/hirehop-broker';
@@ -23,6 +27,134 @@ import { emailService } from '../services/email-service';
 import { fetchLogo } from '../services/hire-form-pdf';
 
 const router = Router();
+
+// ── Public: Freelancer book-out token redemption ────────────────────
+//
+// The portal deep-links freelancers here with an HMAC token. This
+// endpoint validates the token, checks the freelancer is assigned to
+// the quote, resolves (or creates) the vehicle_hire_assignment that
+// represents their allocated van, and mints a narrow-scoped session
+// JWT they can use for the subsequent book-out event submissions.
+//
+// Mounted BEFORE `router.use(authenticate)` — the HMAC token is the
+// authentication here; staff JWT is not required (and indeed not
+// available on the freelancer's browser in this flow).
+router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) => {
+  try {
+    const token = (req.body?.token || req.query?.token) as string | undefined;
+    if (!token) {
+      res.status(400).json({ error: 'Missing token' });
+      return;
+    }
+
+    const verified = verifyFreelancerBookoutToken(token);
+    if (!verified) {
+      res.status(401).json({ error: 'Invalid or expired token' });
+      return;
+    }
+    const { quoteId, freelancerEmail } = verified;
+
+    // Check the freelancer is actually assigned to this quote.
+    const personResult = await query(
+      `SELECT id, first_name, last_name FROM people WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+      [freelancerEmail]
+    );
+    if (personResult.rows.length === 0) {
+      res.status(403).json({ error: 'Freelancer not recognised' });
+      return;
+    }
+    const person = personResult.rows[0];
+
+    const assignmentCheck = await query(
+      `SELECT qa.id AS quote_assignment_id, q.job_id, q.job_type, q.venue_name, j.hh_job_number
+         FROM quote_assignments qa
+         JOIN quotes q ON q.id = qa.quote_id
+         LEFT JOIN jobs j ON j.id = q.job_id
+         WHERE qa.quote_id = $1
+           AND qa.person_id = $2
+           AND q.is_deleted = false
+         LIMIT 1`,
+      [quoteId, person.id]
+    );
+    if (assignmentCheck.rows.length === 0) {
+      res.status(403).json({ error: 'You are not assigned to this job' });
+      return;
+    }
+    const { job_id: jobId, hh_job_number: hhJobNumber, venue_name: venueName } = assignmentCheck.rows[0];
+
+    // Find the vehicle_hire_assignment for this job and freelancer.
+    // Staff allocates vans on AllocationsPage; we don't auto-create.
+    // Match priority:
+    //   1. Exact link via drivers.person_id = freelancer (rare — most
+    //      D&C freelancers don't have a drivers row)
+    //   2. D&C assignment with no driver_id (the usual case — staff
+    //      allocate a van to a quote, driver isn't strictly tracked
+    //      in vehicle_hire_assignments for D&C until book-out happens)
+    // A real driver-person linkage still needs firming up (see Phase D3
+    // / freelancer-vehicle allocation in CLAUDE.md). Until then, this
+    // query picks the single D&C allocation on the job.
+    const vhaResult = await query(
+      `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status, vha.assignment_type,
+              fv.registration, fv.make, fv.model
+         FROM vehicle_hire_assignments vha
+         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+         LEFT JOIN drivers d ON d.id = vha.driver_id
+         WHERE vha.job_id = $1
+           AND (
+             d.person_id = $2
+             OR (vha.driver_id IS NULL AND vha.assignment_type IN ('delivery', 'collection', 'driven'))
+           )
+           AND vha.status IN ('soft', 'allocated', 'active', 'booked_out')
+         ORDER BY
+           CASE WHEN d.person_id = $2 THEN 0 ELSE 1 END,
+           vha.created_at DESC
+         LIMIT 1`,
+      [jobId, person.id]
+    );
+
+    if (vhaResult.rows.length === 0 || !vhaResult.rows[0].vehicle_id) {
+      res.status(409).json({
+        error: 'No vehicle allocated for this job yet',
+        code: 'no_allocation',
+        hint: 'Staff needs to allocate a van on the OP Allocations page before you can book out.',
+      });
+      return;
+    }
+    const vha = vhaResult.rows[0];
+
+    const sessionToken = mintFreelancerBookoutSession({
+      assignmentId: vha.assignment_id,
+      quoteId,
+      freelancerEmail,
+      freelancerPersonId: person.id,
+    });
+
+    res.json({
+      success: true,
+      sessionToken,
+      assignment: {
+        id: vha.assignment_id,
+        vehicleId: vha.vehicle_id,
+        registration: vha.registration,
+        makeModel: [vha.make, vha.model].filter(Boolean).join(' '),
+        status: vha.status,
+      },
+      job: {
+        id: jobId,
+        hhJobNumber,
+        venueName,
+      },
+      driver: {
+        name: `${person.first_name} ${person.last_name}`.trim(),
+        email: freelancerEmail,
+      },
+    });
+  } catch (err) {
+    console.error('Freelancer bookout resolve error:', err);
+    res.status(500).json({ error: 'Failed to resolve book-out token' });
+  }
+});
+
 router.use(authenticate);
 
 // ═══════════════════════════════════════════════════════════════════════════
