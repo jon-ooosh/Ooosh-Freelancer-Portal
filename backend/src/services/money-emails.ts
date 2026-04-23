@@ -63,16 +63,29 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   );
 
   if (result.rows.length === 0) {
-    // Fallback: try the client organisation's email directly
+    // Fallback: try the client organisation's email directly, then any other
+    // org linked via job_organisations (client role first, then band/promoter/
+    // etc.). Priority keeps the "billed to" org ahead of a band with an email.
     const orgResult = await query(
-      `SELECT o.email, o.name FROM organisations o
-       WHERE o.id = (SELECT client_id FROM jobs WHERE id = $1)
-         AND o.email IS NOT NULL AND o.email != ''
-       UNION ALL
-       SELECT o.email, o.name FROM organisations o
-       JOIN job_organisations jo ON jo.organisation_id = o.id
-       WHERE jo.job_id = $1 AND jo.role = 'client'
-         AND o.email IS NOT NULL AND o.email != ''
+      `SELECT email, name FROM (
+         SELECT o.email, o.name, 1 AS priority
+         FROM organisations o
+         WHERE o.id = (SELECT client_id FROM jobs WHERE id = $1)
+           AND o.email IS NOT NULL AND o.email != ''
+         UNION ALL
+         SELECT o.email, o.name, 2 AS priority
+         FROM organisations o
+         JOIN job_organisations jo ON jo.organisation_id = o.id
+         WHERE jo.job_id = $1 AND jo.role = 'client'
+           AND o.email IS NOT NULL AND o.email != ''
+         UNION ALL
+         SELECT o.email, o.name, 3 AS priority
+         FROM organisations o
+         JOIN job_organisations jo ON jo.organisation_id = o.id
+         WHERE jo.job_id = $1 AND jo.role <> 'client'
+           AND o.email IS NOT NULL AND o.email != ''
+       ) candidates
+       ORDER BY priority ASC
        LIMIT 1`,
       [jobId]
     );
