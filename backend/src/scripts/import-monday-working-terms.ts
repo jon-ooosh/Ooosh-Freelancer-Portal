@@ -133,9 +133,12 @@ function findColumn(headerRow: Record<string, unknown>, patterns: RegExp[]): str
 /**
  * Clean a phone value pulled from Excel:
  *   - trim whitespace
- *   - if it's scientific notation (e.g. "4.47767E+11"), expand to a plain int
- *   - if it's 10 digits starting with 7, prepend 0 (Excel strips leading zeros
- *     on UK mobiles: 07740947440 → 7740947440)
+ *   - expand scientific notation (e.g. "4.47767E+11") to a plain int
+ *   - prepend 0 to 10-digit UK numbers starting with 1, 2 or 7 — Excel strips
+ *     leading zeros when the cell is formatted as a number
+ *       07740947440 → 7740947440  (mobile)
+ *       01273647103 → 1273647103  (Brighton landline)
+ *       02071129325 → 2071129325  (London landline)
  */
 function cleanPhone(raw: unknown): string | null {
   let s = String(raw ?? '').trim();
@@ -147,8 +150,8 @@ function cleanPhone(raw: unknown): string | null {
     if (Number.isFinite(n)) s = String(Math.round(n));
   }
 
-  // UK mobile: 10 digits starting with 7 → prepend missing 0
-  if (/^7\d{9}$/.test(s)) return '0' + s;
+  // UK mobile + UK landlines: 10 digits starting with 1, 2 or 7 → prepend missing 0
+  if (/^[127]\d{9}$/.test(s)) return '0' + s;
 
   return s;
 }
@@ -278,15 +281,15 @@ async function main(): Promise<void> {
             if (commit) {
               await pool.query(
                 `UPDATE people
-                   SET working_terms_type = $2,
-                       working_terms_credit_days = COALESCE($3, working_terms_credit_days),
-                       do_not_hire = $4,
-                       do_not_hire_reason = CASE WHEN $4 AND do_not_hire_reason IS NULL
+                   SET working_terms_type = $2::text,
+                       working_terms_credit_days = COALESCE($3::integer, working_terms_credit_days),
+                       do_not_hire = $4::boolean,
+                       do_not_hire_reason = CASE WHEN $4::boolean AND do_not_hire_reason IS NULL
                                                   THEN 'Imported from Monday "DO NOT HIRE" tag'
                                                   ELSE do_not_hire_reason END,
-                       do_not_hire_set_at = CASE WHEN $4 AND do_not_hire_set_at IS NULL
+                       do_not_hire_set_at = CASE WHEN $4::boolean AND do_not_hire_set_at IS NULL
                                                   THEN NOW() ELSE do_not_hire_set_at END,
-                       do_not_hire_set_by = CASE WHEN $4 AND do_not_hire_set_by IS NULL
+                       do_not_hire_set_by = CASE WHEN $4::boolean AND do_not_hire_set_by IS NULL
                                                   THEN 'monday-import' ELSE do_not_hire_set_by END,
                        updated_at = NOW()
                  WHERE id = $1`,
@@ -296,7 +299,9 @@ async function main(): Promise<void> {
           }
         }
 
-        // Phone backfill — only if OP is NULL/empty
+        // Phone backfill — only if OP is NULL/empty. Build a dynamic SET so we
+        // only touch the columns that actually need writing (and don't have to
+        // pass NULL params, which Postgres can't always type-infer).
         const wantPhone = phone1 && (!p.phone || p.phone.trim() === '');
         const wantMobile = phone2 && (!p.mobile || p.mobile.trim() === '');
         if (wantPhone || wantMobile) {
@@ -306,15 +311,14 @@ async function main(): Promise<void> {
           changes.push(phoneParts.join(', '));
           stats.phoneBackfilled++;
           if (commit) {
+            const sets: string[] = [];
+            const params: unknown[] = [p.id];
+            if (wantPhone) { params.push(phone1); sets.push(`phone = $${params.length}`); }
+            if (wantMobile) { params.push(phone2); sets.push(`mobile = $${params.length}`); }
+            sets.push('updated_at = NOW()');
             await pool.query(
-              `UPDATE people
-                 SET phone = CASE WHEN (phone IS NULL OR phone = '') AND $2 IS NOT NULL
-                                  THEN $2 ELSE phone END,
-                     mobile = CASE WHEN (mobile IS NULL OR mobile = '') AND $3 IS NOT NULL
-                                   THEN $3 ELSE mobile END,
-                     updated_at = NOW()
-               WHERE id = $1`,
-              [p.id, wantPhone ? phone1 : null, wantMobile ? phone2 : null]
+              `UPDATE people SET ${sets.join(', ')} WHERE id = $1`,
+              params
             );
           }
         }
@@ -342,15 +346,15 @@ async function main(): Promise<void> {
             if (commit) {
               await pool.query(
                 `UPDATE organisations
-                   SET working_terms_type = $2,
-                       working_terms_credit_days = COALESCE($3, working_terms_credit_days),
-                       do_not_hire = $4,
-                       do_not_hire_reason = CASE WHEN $4 AND do_not_hire_reason IS NULL
+                   SET working_terms_type = $2::text,
+                       working_terms_credit_days = COALESCE($3::integer, working_terms_credit_days),
+                       do_not_hire = $4::boolean,
+                       do_not_hire_reason = CASE WHEN $4::boolean AND do_not_hire_reason IS NULL
                                                   THEN 'Imported from Monday "DO NOT HIRE" tag'
                                                   ELSE do_not_hire_reason END,
-                       do_not_hire_set_at = CASE WHEN $4 AND do_not_hire_set_at IS NULL
+                       do_not_hire_set_at = CASE WHEN $4::boolean AND do_not_hire_set_at IS NULL
                                                   THEN NOW() ELSE do_not_hire_set_at END,
-                       do_not_hire_set_by = CASE WHEN $4 AND do_not_hire_set_by IS NULL
+                       do_not_hire_set_by = CASE WHEN $4::boolean AND do_not_hire_set_by IS NULL
                                                   THEN 'monday-import' ELSE do_not_hire_set_by END,
                        updated_at = NOW()
                  WHERE id = $1`,
@@ -368,10 +372,7 @@ async function main(): Promise<void> {
           stats.phoneBackfilled++;
           if (commit) {
             await pool.query(
-              `UPDATE organisations
-                 SET phone = CASE WHEN (phone IS NULL OR phone = '') THEN $2 ELSE phone END,
-                     updated_at = NOW()
-               WHERE id = $1`,
+              `UPDATE organisations SET phone = $2, updated_at = NOW() WHERE id = $1`,
               [o.id, orgPhoneValue]
             );
           }
