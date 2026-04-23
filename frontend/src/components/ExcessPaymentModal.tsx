@@ -7,7 +7,7 @@ import { useState, useRef } from 'react';
 import { api } from '../services/api';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
-type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'move';
+type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'move' | 'edit_required';
 
 interface ExcessPaymentModalProps {
   excess: JobExcess;
@@ -103,6 +103,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   // Waive form
   const [waiveReason, setWaiveReason] = useState('');
 
+  // Edit required form
+  const [editRequiredAmount, setEditRequiredAmount] = useState(
+    excess.excess_amount_required != null ? Number(excess.excess_amount_required).toFixed(2) : ''
+  );
+  const [editRequiredReason, setEditRequiredReason] = useState(excess.excess_calculation_basis || '');
+
   // Move form
   const [moveXeroId, setMoveXeroId] = useState('');
   const [moveXeroName, setMoveXeroName] = useState('');
@@ -153,6 +159,17 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             reason: moveReason || undefined,
           });
           break;
+        case 'edit_required': {
+          const parsed = parseFloat(editRequiredAmount);
+          if (isNaN(parsed) || parsed < 0) {
+            throw new Error('Please enter a valid amount');
+          }
+          await api.put(`/excess/${excess.id}`, {
+            excess_amount_required: parsed,
+            excess_calculation_basis: editRequiredReason.trim() || null,
+          });
+          break;
+        }
       }
       onUpdated();
       onClose();
@@ -177,6 +194,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   }
   if ((s === 'fully_claimed' || s === 'claimed' || s === 'partially_reimbursed') && amountHeld > 0) {
     availableActions.push({ action: 'reimburse', label: 'Reimburse Remainder', icon: '<' });
+  }
+  // Amend the required excess figure — available whenever the record isn't in a
+  // terminal state. Primary case: insurance referral comes back with a revised
+  // excess after the hire form has already been submitted.
+  if (s !== 'waived' && s !== 'reimbursed' && s !== 'rolled_over' && s !== 'not_required') {
+    availableActions.push({ action: 'edit_required', label: 'Edit Required Amount', icon: '✎' });
   }
   if (s === 'needed' || s === 'pending') {
     availableActions.push({ action: 'waive', label: 'Waive Excess', icon: '~' });
@@ -402,6 +425,51 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
+              </div>
+            )}
+
+            {action === 'edit_required' && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900">Edit Required Amount</h3>
+                <p className="text-xs text-gray-500">
+                  Use this when an insurance referral returns a revised excess, or to correct the required figure on this record.
+                  The amount already collected is not changed.
+                </p>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Required Amount</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={editRequiredAmount}
+                      onChange={(e) => setEditRequiredAmount(e.target.value)}
+                      className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Reason / Calculation Basis</label>
+                  <textarea
+                    value={editRequiredReason}
+                    onChange={(e) => setEditRequiredReason(e.target.value)}
+                    placeholder="e.g. Insurer referral — 6 pts, SP30 + IN10, excess raised to £1,800"
+                    rows={3}
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    Stored on this excess record as the calculation basis — helps later staff understand why.
+                  </p>
+                </div>
+                {excess.excess_amount_taken != null && Number(excess.excess_amount_taken) > 0 && (
+                  <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded-md">
+                    <p className="text-xs text-blue-700">
+                      £{Number(excess.excess_amount_taken).toFixed(2)} has already been collected against this record —
+                      adjusting the required amount may surface a new outstanding balance.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
