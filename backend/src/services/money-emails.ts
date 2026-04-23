@@ -86,6 +86,34 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
       };
     }
 
+    // Fallback: match jobs.client_name as a plain string against the People
+    // table. Covers the HireHop "CLIENT set, COMPANY blank" sole-trader case
+    // where no org is created at all (jobs.client_id IS NULL) — e.g. job
+    // 15617 "Danny Stevens". Only an exact case-insensitive full-name match
+    // with a valid email counts; anything fuzzier would risk routing a
+    // stranger's confirmation to the wrong person.
+    const clientNameMatch = await query(
+      `SELECT p.email, p.first_name
+       FROM jobs j
+       JOIN people p
+         ON p.is_deleted = false
+        AND p.first_name IS NOT NULL
+        AND p.last_name IS NOT NULL
+        AND p.email IS NOT NULL AND p.email <> ''
+        AND lower(trim(concat(p.first_name, ' ', p.last_name))) = lower(trim(j.client_name))
+       WHERE j.id = $1
+       LIMIT 1`,
+      [jobId]
+    );
+    if (clientNameMatch.rows.length > 0) {
+      const person = clientNameMatch.rows[0];
+      return {
+        primaryEmail: person.email,
+        primaryFirstName: person.first_name,
+        ccEmails: [],
+      };
+    }
+
     // Last fallback: no email available
     const jobResult = await query(
       `SELECT client_name, company_name FROM jobs WHERE id = $1`,

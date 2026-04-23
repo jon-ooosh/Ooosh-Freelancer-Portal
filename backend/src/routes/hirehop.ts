@@ -174,9 +174,10 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // Compute has_client_email: true if we can reach the client via OP's address book
-    // (direct people linked to client org, or the client org's own email column).
+    // Compute has_client_email: true if we can reach the client via OP's address book.
     // Mirrors getJobEmailRecipients exactly so the Job Detail banner matches send behaviour.
+    // Three levels: (1) people linked via roles to client org, (2) client org's own email,
+    // (3) jobs.client_name string matching a Person's first+last name.
     const reachable = await query(
       `SELECT 1
        FROM jobs j
@@ -200,6 +201,13 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
              JOIN job_organisations jo ON jo.organisation_id = o.id
              WHERE jo.job_id = j.id AND jo.role = 'client'
                AND o.email IS NOT NULL AND o.email <> ''
+           )
+           OR EXISTS (
+             SELECT 1 FROM people p
+             WHERE p.is_deleted = false
+               AND p.first_name IS NOT NULL AND p.last_name IS NOT NULL
+               AND p.email IS NOT NULL AND p.email <> ''
+               AND lower(trim(concat(p.first_name, ' ', p.last_name))) = lower(trim(j.client_name))
            )
          )
        LIMIT 1`,
