@@ -1,5 +1,6 @@
 import { query } from '../config/database';
 import emailService from './email-service';
+import { frontendLink } from '../config/app-urls';
 
 /**
  * Notification escalation service.
@@ -134,7 +135,7 @@ export async function runNotificationEscalation(): Promise<{
 
         const subject = `${priorityLabel}${title}`;
         const actionLink = actionUrl
-          ? `<p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}${actionUrl}" style="color: #7B5EA7; text-decoration: underline;">View in Ooosh</a></p>`
+          ? `<p><a href="${frontendLink(actionUrl)}" style="color: #7B5EA7; text-decoration: underline;">View in Ooosh</a></p>`
           : '';
         const fromLine = senderName ? `<p style="color: #666; font-size: 13px;">From: ${senderName}</p>` : '';
 

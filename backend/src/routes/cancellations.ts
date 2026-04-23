@@ -19,6 +19,7 @@ import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { calculatePreHireCancellation, calculateEarlyReturn } from '../services/cancellation-calculator';
 import emailService from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
+import { getFrontendUrl } from '../config/app-urls';
 
 const router = Router();
 router.use(authenticate);
@@ -255,7 +256,7 @@ router.post(
                   html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
                          <p>Your reminder "<strong>${rem.custom_label || 'Reminder'}</strong>" has been triggered because the job <strong>${jobName}</strong> has been <strong>cancelled</strong>.</p>
                          ${rem.notes ? `<p>Notes: ${rem.notes}</p>` : ''}
-                         <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
+                         <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
                 });
               }
             } catch (emailErr) {
@@ -374,7 +375,7 @@ router.post(
       }
 
       // 9. Send internal notification email
-      const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+      const frontendUrl = getFrontendUrl();
       emailService.send('job_cancelled_internal', {
         to: 'info@oooshtours.co.uk',
         variables: {

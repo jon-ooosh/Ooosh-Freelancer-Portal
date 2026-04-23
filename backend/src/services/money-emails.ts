@@ -4,6 +4,7 @@
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';
+import { getFrontendUrl } from '../config/app-urls';
 
 /** Refund timescale based on payment method */
 export function getRefundTimescale(paymentMethod: string): string {
@@ -196,7 +197,7 @@ export function buildFallbackBanner(opts: {
   jobNumber: string | null;
   jobName: string | null;
 }): string {
-  const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+  const frontendUrl = getFrontendUrl();
   const jobUrl = `${frontendUrl}/jobs/${opts.jobId}`;
   const ref = [opts.jobNumber ? `Job #${opts.jobNumber}` : null, opts.jobName]
     .filter(Boolean)
@@ -499,7 +500,7 @@ export async function sendLastMinuteAlert(jobId: string) {
     urgencyBadge = 'TOMORROW';
   }
 
-  const jobUrl = `https://staff.oooshtours.co.uk/jobs/${jobId}`;
+  const jobUrl = `${getFrontendUrl()}/jobs/${jobId}`;
 
   await emailService.send('last_minute_booking', {
     to: 'info@oooshtours.co.uk',

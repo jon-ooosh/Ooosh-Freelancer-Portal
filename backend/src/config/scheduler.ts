@@ -7,6 +7,7 @@ import { runComplianceCheck } from '../services/compliance-checker';
 import { query } from './database';
 import { generateBVRLACSV } from '../routes/ve103b';
 import emailService from '../services/email-service';
+import { getFrontendUrl } from './app-urls';
 
 /**
  * Starts the backup and sync schedulers.
@@ -364,7 +365,7 @@ export function startScheduler() {
                   html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
                          <p><strong>${label}</strong> for job <strong>${jobName}</strong> was due ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} ago.</p>
                          ${req.notes ? `<p>Notes: ${req.notes}</p>` : ''}
-                         <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${req.job_id}?tab=overview">View Job</a></p>`,
+                         <p><a href="${getFrontendUrl()}/jobs/${req.job_id}?tab=overview">View Job</a></p>`,
                 });
               }
             } catch (emailErr) {
@@ -476,7 +477,7 @@ export function startScheduler() {
                 html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
                        <p>Reminder: <strong>${label}</strong> for <strong>${jobName}</strong>.</p>
                        ${rem.notes && rem.notes !== rem.custom_label ? `<p>Notes: ${rem.notes}</p>` : ''}
-                       <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
+                       <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
               });
               await query(
                 `UPDATE notifications SET email_sent_at = NOW() WHERE id = $1`,
