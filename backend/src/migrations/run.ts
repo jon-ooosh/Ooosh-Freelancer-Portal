@@ -95,6 +95,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '058_drivers_email_lower_index.sql',
         '059_default_working_terms_usual.sql',
         '060_fix_unlinked_excess_ledger_name.sql',
+        '061_job_chase_alert_delivery.sql',
       ];
 
       for (const migration of migrations) {
