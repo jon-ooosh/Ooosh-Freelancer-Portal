@@ -110,13 +110,19 @@ function parseWorkingTerms(raw: unknown): TermsResult {
 
 // ── Header detection ─────────────────────────────────────────────────────
 
-/** Find the column letter (A, B, C…) whose header matches any of the given patterns */
+/**
+ * Find the column letter (A, B, C…) whose header cell matches any of the
+ * given patterns. Headers are short strings (≤ 50 chars) — this guards
+ * against instruction-blob rows where a keyword appears inside a longer
+ * sentence.
+ */
 function findColumn(headerRow: Record<string, unknown>, patterns: RegExp[]): string | null {
   for (const [col, cell] of Object.entries(headerRow)) {
-    const label = String(cell ?? '').trim().toLowerCase();
-    if (!label) continue;
+    const label = String(cell ?? '').trim();
+    if (!label || label.length > 50) continue;
+    const norm = label.replace(/^<+\s*/, '').trim().toLowerCase();
     for (const pattern of patterns) {
-      if (pattern.test(label)) return col;
+      if (pattern.test(norm)) return col;
     }
   }
   return null;
@@ -124,9 +130,26 @@ function findColumn(headerRow: Record<string, unknown>, patterns: RegExp[]): str
 
 // ── Phone tidying ────────────────────────────────────────────────────────
 
+/**
+ * Clean a phone value pulled from Excel:
+ *   - trim whitespace
+ *   - if it's scientific notation (e.g. "4.47767E+11"), expand to a plain int
+ *   - if it's 10 digits starting with 7, prepend 0 (Excel strips leading zeros
+ *     on UK mobiles: 07740947440 → 7740947440)
+ */
 function cleanPhone(raw: unknown): string | null {
-  const s = String(raw ?? '').trim();
+  let s = String(raw ?? '').trim();
   if (!s) return null;
+
+  // Scientific notation (from numeric Excel cells)
+  if (/^-?\d+(\.\d+)?e[+-]?\d+$/i.test(s)) {
+    const n = Number(s);
+    if (Number.isFinite(n)) s = String(Math.round(n));
+  }
+
+  // UK mobile: 10 digits starting with 7 → prepend missing 0
+  if (/^7\d{9}$/.test(s)) return '0' + s;
+
   return s;
 }
 
@@ -148,27 +171,33 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Detect header row — the first row whose cells include something that
-  // looks like "email".
+  // Detect header row — look for a row where we can resolve BOTH email and
+  // working-terms columns via strict (short-cell) matching. This skips
+  // instruction blobs / section banners that happen to contain keywords.
+  const emailPatterns = [/^e-?mail$/i];
+  const termsPatterns = [/^working\s*terms$/i, /^payment\s*terms$/i];
+  const phone1Patterns = [/^phone(\s*1)?$/i];
+  const phone2Patterns = [/^phone\s*2$/i, /^mobile$/i];
+
   let headerRowIdx = -1;
   for (let i = 0; i < Math.min(rows.length, 30); i++) {
-    const hasEmail = Object.values(rows[i]).some((v) =>
-      typeof v === 'string' && /e-?mail/i.test(v.trim())
-    );
-    if (hasEmail) { headerRowIdx = i; break; }
+    const hasEmail = findColumn(rows[i], emailPatterns);
+    const hasTerms = findColumn(rows[i], termsPatterns);
+    if (hasEmail && hasTerms) { headerRowIdx = i; break; }
   }
   if (headerRowIdx < 0) {
-    console.error('Could not find a header row with an "Email" column in the first 30 rows.');
+    console.error('Could not find a header row with both "Email" and "Working terms" columns in the first 30 rows.');
+    console.error('Check that the CSV/XLSX has a row with short header cells matching those labels.');
     process.exit(1);
   }
 
   const headerRow = rows[headerRowIdx];
   const dataRows = rows.slice(headerRowIdx + 1);
 
-  const emailCol = findColumn(headerRow, [/^e-?mail$/i, /email/i]);
-  const termsCol = findColumn(headerRow, [/working\s*terms/i, /payment\s*terms/i]);
-  const phone1Col = findColumn(headerRow, [/^phone(\s*1)?$/i]);
-  const phone2Col = findColumn(headerRow, [/^phone\s*2$/i, /^mobile$/i]);
+  const emailCol = findColumn(headerRow, emailPatterns);
+  const termsCol = findColumn(headerRow, termsPatterns);
+  const phone1Col = findColumn(headerRow, phone1Patterns);
+  const phone2Col = findColumn(headerRow, phone2Patterns);
 
   console.log(`Header row: ${headerRowIdx + 1}`);
   console.log(`  Email column:       ${emailCol ?? '(not found — cannot proceed)'}`);
