@@ -34,6 +34,13 @@ const PIPELINE_LABELS: Record<string, string> = {
   paused: 'Paused Enquiry',
   provisional: 'Provisional',
   confirmed: 'Confirmed',
+  prepping: 'Prepping',
+  prepped: 'Prepped',
+  dispatched: 'On Hire',
+  returned_incomplete: 'Checking In',
+  returned: 'Returned',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
   lost: 'Lost',
 };
 

@@ -10,8 +10,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
   try {
     const results = await Promise.all([
       // 1. Today's schedule — going out
-      // Jobs with out_date or job_date = today, NOT yet dispatched.
-      // Status 2 (Booked) and 3 (Prepped) only — once dispatched (4+), it's "Out Now".
+      // Jobs with out_date or job_date = today, NOT yet actually on hire.
+      // HH statuses 2 (Booked), 3 (Prepped), 4 (Part Dispatched) are all pre-dispatch.
+      // HH 5 (Dispatched) is included only if OP pipeline_status = 'prepped' — HH jumps to 5
+      // on checkout but OP treats that as "prepped in yard" until staff clicks "On Hire".
+      // Exclude once pipeline_status = 'dispatched' (OP says actually on hire).
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.status, j.pipeline_status,
                j.client_name, j.company_name, j.venue_name,
@@ -19,7 +22,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
                j.out_time, j.return_time, j.end_time
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (2, 3)
+          AND (
+            j.status IN (2, 3, 4)
+            OR (j.status = 5 AND j.pipeline_status = 'prepped')
+          )
           AND (
             COALESCE(j.out_date, j.job_date)::date = CURRENT_DATE
           )
@@ -50,12 +56,15 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LIMIT 20
       `),
 
-      // 3. Tomorrow's counts — going out (not yet dispatched)
+      // 3. Tomorrow's counts — going out (same pre-dispatch logic as query 1, shifted +1 day)
       query(`
         SELECT COUNT(*) as count
         FROM jobs
         WHERE is_deleted = false
-          AND status IN (2, 3)
+          AND (
+            status IN (2, 3, 4)
+            OR (status = 5 AND pipeline_status = 'prepped')
+          )
           AND COALESCE(out_date, job_date)::date = CURRENT_DATE + 1
       `),
 

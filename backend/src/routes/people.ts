@@ -309,7 +309,11 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
       is_freelancer, freelancer_joined_date, freelancer_next_review_date,
       skills, is_insured_on_vehicles, is_approved, has_tshirt,
       emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
+      working_terms_type, working_terms_credit_days, working_terms_notes,
     } = req.body;
+
+    // Default working terms to 'usual' when not explicitly set
+    const effectiveWorkingTerms = working_terms_type ?? 'usual';
 
     const result = await query(
       `INSERT INTO people (
@@ -318,8 +322,9 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
         is_freelancer, freelancer_joined_date, freelancer_next_review_date,
         skills, is_insured_on_vehicles, is_approved, has_tshirt,
         emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
+        working_terms_type, working_terms_credit_days, working_terms_notes,
         created_by
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
        RETURNING *`,
       [
         first_name, last_name, email?.toLowerCase(), phone, mobile, international_phone,
@@ -327,6 +332,7 @@ router.post('/', validate(createPersonSchema), async (req: AuthRequest, res: Res
         is_freelancer, freelancer_joined_date || null, freelancer_next_review_date || null,
         skills, is_insured_on_vehicles, is_approved, has_tshirt,
         emergency_contact_name, emergency_contact_phone, licence_details, freelancer_references,
+        effectiveWorkingTerms, working_terms_credit_days ?? null, working_terms_notes ?? null,
         req.user!.id,
       ]
     );

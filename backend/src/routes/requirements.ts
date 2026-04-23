@@ -4,6 +4,7 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
+import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 
 const router = Router();
 router.use(authenticate);
@@ -392,6 +393,45 @@ router.patch('/:id', validate(updateRequirementSchema), async (req: AuthRequest,
              AND status IN ('not_started', 'in_progress')`,
           [updated.job_id]
         );
+      }
+    }
+
+    // ── Auto-transition confirmed → prepping ────────────────────────────────
+    // When a physical prep requirement (vehicle/backline/rehearsal) moves to "Working On It"
+    // and the job is still marked Confirmed, bump the job into Prepping. This mirrors the
+    // reality that staff have started work on the job. One-way — never auto-reverts.
+    // Crew/transport/hire_forms/excess/etc. don't count — they're people/paperwork, not prep.
+    const PREP_TRIGGER_TYPES = ['vehicle', 'backline', 'rehearsal'];
+    if (
+      updated.phase === 'pre_hire'
+      && updates.status === 'in_progress'
+      && PREP_TRIGGER_TYPES.includes(updated.requirement_type)
+    ) {
+      const jobRes = await query(
+        `SELECT id, pipeline_status, hh_job_number FROM jobs WHERE id = $1 AND is_deleted = false`,
+        [updated.job_id]
+      );
+      if (jobRes.rows.length > 0 && jobRes.rows[0].pipeline_status === 'confirmed') {
+        await query(
+          `UPDATE jobs
+             SET pipeline_status = 'prepping',
+                 pipeline_status_changed_at = NOW(),
+                 updated_at = NOW()
+           WHERE id = $1`,
+          [updated.job_id]
+        );
+        await query(
+          `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+           VALUES ('status_transition', $1, $2, $3, 'confirmed')`,
+          [
+            `Status changed: Confirmed → Prepping (auto — ${updated.requirement_type} marked Working On It)`,
+            updated.job_id,
+            req.user!.id,
+          ]
+        );
+        // Push to HireHop (fire-and-forget — don't block the response)
+        writeBackStatusToHireHop(updated.job_id, 'prepping', req.user!.email || req.user!.id)
+          .catch((err) => console.error('[auto-transition] HH write-back failed:', err));
       }
     }
 

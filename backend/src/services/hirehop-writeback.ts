@@ -26,6 +26,7 @@ const PIPELINE_TO_HH: Record<string, number> = {
   lost: 10,        // Not Interested
   cancelled: 9,    // Cancelled (distinct from lost)
   // Operational statuses
+  prepping: 4,     // Part Dispatched — prep in progress (some items scanned)
   prepped: 3,
   // dispatched (On Hire) is OP-only — HH is already at 5 when prepped, no push needed
   returned_incomplete: 6,
@@ -39,6 +40,7 @@ export const HH_TO_PIPELINE: Record<number, string> = {
   1: 'provisional',
   2: 'confirmed',
   3: 'prepped',
+  4: 'prepping',   // Part Dispatched → Prepping (some items scanned, prep in progress)
   5: 'prepped',    // HH skips to Dispatched(5) on checkout — OP treats as Prepped, staff clicks "On Hire" separately
   6: 'returned_incomplete',
   7: 'returned',

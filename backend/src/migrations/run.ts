@@ -93,6 +93,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '056_arranging_reminders.sql',
         '057_platform_issues.sql',
         '058_drivers_email_lower_index.sql',
+        '059_default_working_terms_usual.sql',
       ];
 
       for (const migration of migrations) {

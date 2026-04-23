@@ -205,13 +205,25 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 // POST /api/organisations
 router.post('/', validate(createOrgSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { name, type, parent_id, website, email, phone, address, location, notes, tags, files } = req.body;
+    const {
+      name, type, parent_id, website, email, phone, address, location, notes, tags, files,
+      working_terms_type, working_terms_credit_days, working_terms_notes,
+    } = req.body;
+
+    // Default working terms to 'usual' when not explicitly set
+    const effectiveWorkingTerms = working_terms_type ?? 'usual';
 
     const result = await query(
-      `INSERT INTO organisations (name, type, parent_id, website, email, phone, address, location, notes, tags, files, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `INSERT INTO organisations (
+        name, type, parent_id, website, email, phone, address, location, notes, tags, files,
+        working_terms_type, working_terms_credit_days, working_terms_notes, created_by
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
        RETURNING *`,
-      [name, type, parent_id, website, email?.toLowerCase(), phone, address, location, notes, tags, JSON.stringify(files), req.user!.id]
+      [
+        name, type, parent_id, website, email?.toLowerCase(), phone, address, location, notes, tags, JSON.stringify(files),
+        effectiveWorkingTerms, working_terms_credit_days ?? null, working_terms_notes ?? null,
+        req.user!.id,
+      ]
     );
 
     await logAudit(req.user!.id, 'organisations', result.rows[0].id, 'create', null, result.rows[0]);

@@ -90,7 +90,7 @@ const emptyForm: PersonFormData = {
   emergency_contact_phone: '',
   licence_details: '',
   freelancer_references: '',
-  working_terms_type: '',
+  working_terms_type: 'usual',
   working_terms_credit_days: '',
   working_terms_notes: '',
 };

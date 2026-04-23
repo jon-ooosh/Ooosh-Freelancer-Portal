@@ -1579,6 +1579,7 @@ export default function JobDetailPage() {
 
   // Pipeline or operational status for display
   const OPS_DISPLAY: Record<string, { label: string; colour: string }> = {
+    prepping: { label: 'Prepping', colour: '#A78BFA' },
     prepped: { label: 'Prepped', colour: '#8B5CF6' },
     dispatched: { label: 'On Hire', colour: '#6366F1' },
     returned_incomplete: { label: 'Checking In', colour: '#F59E0B' },
@@ -1598,7 +1599,7 @@ export default function JobDetailPage() {
   // Contextual status transitions based on current status
   const ENQUIRY_STATUSES: PipelineStatus[] = ['new_enquiry', 'chasing', 'provisional', 'paused'];
   const PIPELINE_STATUSES: PipelineStatus[] = [...ENQUIRY_STATUSES, 'confirmed', 'lost'];
-  const OPERATIONAL_STATUSES: string[] = ['prepped', 'dispatched', 'returned_incomplete', 'returned', 'completed'];
+  const OPERATIONAL_STATUSES: string[] = ['prepping', 'prepped', 'dispatched', 'returned_incomplete', 'returned', 'completed'];
   const isOperational = OPERATIONAL_STATUSES.includes(job.pipeline_status || '');
   const isConfirmed = job.pipeline_status === 'confirmed';
   // After confirmation: show operational progression + enquiry stages (backwards) + cancelled/lost
@@ -1767,6 +1768,8 @@ export default function JobDetailPage() {
                     <div className="absolute left-0 top-full mt-1 z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px]">
                       {availableStatuses.map((s) => {
                         const OPS_CONFIG: Record<string, { label: string; colour: string }> = {
+                          prepping: { label: 'Prepping', colour: '#A78BFA' },
+                          prepped: { label: 'Prepped', colour: '#8B5CF6' },
                           dispatched: { label: 'Dispatched', colour: '#6366F1' },
                           returned_incomplete: { label: 'Checking In', colour: '#F59E0B' },
                           returned: { label: 'Returned', colour: '#8B5CF6' },

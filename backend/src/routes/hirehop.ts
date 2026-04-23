@@ -282,7 +282,7 @@ router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Res
           const PIPELINE_TO_HH: Record<string, number> = {
             new_enquiry: 0, quoting: 0, chasing: 0, paused: 0,
             provisional: 1, confirmed: 2,
-            prepped: 3, dispatched: 5,
+            prepping: 4, prepped: 3, dispatched: 5,
             returned_incomplete: 6, returned: 7,
             completed: 11, cancelled: 9, lost: 10,
           };
@@ -293,7 +293,12 @@ router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Res
             10: 'Not Interested', 11: 'Completed',
           };
           const expectedHH = PIPELINE_TO_HH[job.pipeline_status || ''];
-          if (expectedHH !== undefined && expectedHH !== actualHHStatus) {
+          // Suppress the banner for expected-state pairs where OP and HH intentionally differ:
+          // OP=prepped + HH=5 (Dispatched): HH has no distinct "prepped" state; HH jumps to 5 on checkout
+          //   while the van still sits prepped in the yard. The mismatch is expected, not drift.
+          const isExpectedPair =
+            (job.pipeline_status === 'prepped' && actualHHStatus === 5);
+          if (expectedHH !== undefined && expectedHH !== actualHHStatus && !isExpectedPair) {
             statusMismatch = {
               op_status: job.pipeline_status,
               hh_status: actualHHStatus,
