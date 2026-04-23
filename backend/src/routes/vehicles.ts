@@ -20,7 +20,6 @@ import { isHireHopConfigured } from '../config/hirehop';
 import { hhBroker } from '../services/hirehop-broker';
 import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured, uploadToPublicR2, getFromPublicR2, listPublicR2Objects } from '../config/r2';
 import { emailService } from '../services/email-service';
-import { sendVehicleCheckedInEmail } from '../services/vehicle-emails';
 import { fetchLogo } from '../services/hire-form-pdf';
 
 const router = Router();
@@ -1652,9 +1651,7 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
     }
 
     // Check-in side effects: when CheckInPage.tsx fires a check-in event
-    // via save-event, flip the matching hire assignment(s) to 'returned'
-    // and dispatch the client confirmation email. Idempotent — skips if
-    // any matching assignment has already been checked in.
+    // via save-event, flip the matching hire assignment(s) to 'returned'.
     //
     // Normalise the eventType so both 'check-in' (hyphen, our convention)
     // and 'Check In' (space, capitalised — actually sent by CheckInPage)
@@ -1685,7 +1682,6 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
             const mileageIn = event.mileage ? Number(event.mileage) : null;
             const fuelIn = event.fuelLevel || null;
             const hasDamage = event.hasDamage === true;
-            const anyAlreadyCheckedIn = matched.rows.some((r: any) => r.checked_in_at !== null);
             for (const row of matched.rows) {
               await query(
                 `UPDATE vehicle_hire_assignments
@@ -1701,18 +1697,8 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
                 [userId, mileageIn, fuelIn, hasDamage, row.id]
               );
             }
-            // Only email once per (van, job) check-in — keyed on whether
-            // any of the matching assignments was already checked-in.
-            if (!anyAlreadyCheckedIn) {
-              const leadAssignmentId = matched.rows[0].id;
-              setImmediate(() => {
-                sendVehicleCheckedInEmail(leadAssignmentId).catch((err) => {
-                  console.error('[vehicles/events] vehicle_checked_in email dispatch failed:', err);
-                });
-              });
-            }
           } else {
-            console.log(`[vehicles/events] check-in: no matching booked_out assignment for ${reg} / HH#${hhJob} — no assignment state flip or client email`);
+            console.log(`[vehicles/events] check-in: no matching booked_out assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
           }
         }
       } catch (err) {
