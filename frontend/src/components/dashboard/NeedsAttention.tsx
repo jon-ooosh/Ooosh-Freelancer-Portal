@@ -73,7 +73,7 @@ export default function NeedsAttention({
             </div>
             <div className="space-y-2">
               {referrals.slice(0, 3).map((r) => (
-                <Link key={r.id} to={`/vehicles/drivers/${r.id}`} className="block hover:bg-orange-50 -mx-1 px-1 py-1 rounded transition-colors">
+                <Link key={r.id} to={`/drivers/${r.id}`} className="block hover:bg-orange-50 -mx-1 px-1 py-1 rounded transition-colors">
                   <div className="text-xs font-medium text-gray-900 truncate">
                     {r.full_name}
                     {r.licence_points != null && r.licence_points > 0 && (
@@ -91,7 +91,7 @@ export default function NeedsAttention({
               ))}
             </div>
             {referralCount > 3 && (
-              <Link to="/vehicles/drivers" className="text-[11px] text-orange-600 hover:text-orange-700 font-medium mt-2 block">
+              <Link to="/drivers" className="text-[11px] text-orange-600 hover:text-orange-700 font-medium mt-2 block">
                 View all {referralCount}
               </Link>
             )}
