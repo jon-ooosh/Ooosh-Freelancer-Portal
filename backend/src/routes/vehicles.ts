@@ -1478,6 +1478,77 @@ router.post('/record-stock-transaction', async (req: AuthRequest, res: Response)
 // ── Vehicle Events ──
 
 /**
+ * GET /api/vehicles/check-in-eligibility?vehicleReg=<reg>
+ *
+ * DB-backed gate for the check-in flow. Replaces the old R2 event-history
+ * comparison, which was fooled by same-day book-out + check-in pairs once
+ * `eventDate` got stored as a date-only string.
+ *
+ * Source of truth: `vehicle_hire_assignments.status`. If any active row
+ * for this vehicle is `booked_out` (or legacy `active`), the van is
+ * currently out and can be checked in. Otherwise we block with a reason.
+ */
+router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicleReg = typeof req.query.vehicleReg === 'string' ? req.query.vehicleReg.trim().toUpperCase() : '';
+    if (!vehicleReg) {
+      res.status(400).json({ error: 'vehicleReg is required' });
+      return;
+    }
+
+    const result = await query(
+      `SELECT vha.id, vha.status, vha.checked_in_at, vha.booked_out_at,
+              vha.status_changed_at, vha.hirehop_job_id, vha.updated_at
+       FROM vehicle_hire_assignments vha
+       JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+       WHERE fv.reg = $1
+         AND vha.status IN ('booked_out', 'active', 'returned')
+       ORDER BY vha.updated_at DESC
+       LIMIT 1`,
+      [vehicleReg]
+    );
+
+    if (result.rows.length === 0) {
+      res.json({
+        eligible: false,
+        reason: 'never_booked_out',
+        checkInDate: null,
+        assignmentId: null,
+        hirehopJob: null,
+      });
+      return;
+    }
+
+    const row = result.rows[0];
+    if (row.status === 'booked_out' || row.status === 'active') {
+      res.json({
+        eligible: true,
+        reason: null,
+        checkInDate: null,
+        assignmentId: row.id,
+        hirehopJob: row.hirehop_job_id,
+      });
+      return;
+    }
+
+    // status === 'returned'
+    const checkInDate = row.checked_in_at
+      ? new Date(row.checked_in_at).toISOString().slice(0, 10)
+      : null;
+    res.json({
+      eligible: false,
+      reason: 'already_checked_in',
+      checkInDate,
+      assignmentId: row.id,
+      hirehopJob: row.hirehop_job_id,
+    });
+  } catch (err) {
+    console.error('[vehicles/check-in-eligibility] Error:', err);
+    res.status(500).json({ error: 'Failed to determine check-in eligibility' });
+  }
+});
+
+/**
  * POST /api/vehicles/save-event
  * Save a vehicle event to R2.
  * Writes event JSON + updates per-vehicle index.

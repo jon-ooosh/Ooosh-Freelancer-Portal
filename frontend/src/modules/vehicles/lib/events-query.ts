@@ -124,48 +124,50 @@ export async function fetchBookOutForVehicle(
 }
 
 export interface CheckInStatus {
+  /** True when the van CANNOT be checked in right now. */
   alreadyCheckedIn: boolean
+  /** Date (YYYY-MM-DD) of the prior check-in, only set when reason is already_checked_in. */
   checkInDate?: string
+  /** Specific reason the gate is blocking, so the UI can show a sensible message. */
+  reason?: 'already_checked_in' | 'never_booked_out'
 }
 
 /**
- * Check whether a vehicle has already been checked in after its most recent book-out.
- * Used to prevent double check-ins.
+ * Ask the backend whether this vehicle is currently eligible for check-in.
+ *
+ * Source of truth is `vehicle_hire_assignments.status` in the DB — we don't
+ * try to derive it from R2 event history any more (that comparison was
+ * fooled by same-day book-out + check-in pairs once `eventDate` was stored
+ * as a date-only string, and blocked real check-ins).
  */
 export async function checkAlreadyCheckedIn(
   vehicleReg: string,
 ): Promise<CheckInStatus> {
   try {
-    const events = await fetchVehicleEvents(vehicleReg)
+    const params = new URLSearchParams({ vehicleReg })
+    const response = await apiFetch(`/check-in-eligibility?${params}`)
+    if (!response.ok) {
+      throw new Error(`Eligibility check failed: HTTP ${response.status}`)
+    }
+    const data = await response.json() as {
+      eligible: boolean
+      reason: 'already_checked_in' | 'never_booked_out' | null
+      checkInDate: string | null
+    }
 
-    // Filter to Book Out and Check In events, already sorted by date desc
-    const relevant = events.filter(
-      e => e.eventType === 'Book Out' || e.eventType === 'Check In',
-    )
-
-    if (relevant.length === 0) {
+    if (data.eligible) {
       return { alreadyCheckedIn: false }
     }
 
-    // If the most recent relevant event is a Check In, already checked in
-    const mostRecent = relevant[0]!
-    if (mostRecent.eventType === 'Check In') {
-      return { alreadyCheckedIn: true, checkInDate: mostRecent.eventDate }
+    return {
+      alreadyCheckedIn: true,
+      reason: data.reason ?? undefined,
+      checkInDate: data.checkInDate ?? undefined,
     }
-
-    // Most recent is a Book Out — check if there's a Check In after it
-    const checkInAfter = relevant.find(
-      e => e.eventType === 'Check In' && e.eventDate >= mostRecent.eventDate,
-    )
-
-    if (checkInAfter) {
-      return { alreadyCheckedIn: true, checkInDate: checkInAfter.eventDate }
-    }
-
-    return { alreadyCheckedIn: false }
   } catch (err) {
     console.error('[events-query] Failed to check check-in status:', err)
-    // On error, don't block the flow
+    // On error, don't block the flow — the backend save-event handler is
+    // idempotent and will reject a second check-in on its own.
     return { alreadyCheckedIn: false }
   }
 }

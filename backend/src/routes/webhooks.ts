@@ -11,6 +11,7 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../config/database';
 import { HH_TO_PIPELINE } from '../services/hirehop-writeback';
+import { alertReturnedWithStillBookedOutVans } from '../services/vehicle-emails';
 
 const router = Router();
 
@@ -220,6 +221,15 @@ async function handleJobStatusChange(
     );
 
     statusChanges.pipeline_status = { from: job.pipeline_status, to: newPipelineStatus };
+
+    // Safety net: flag if the job just moved INTO 'returned' but vans on the
+    // job are still booked out. Non-blocking — emails info@ so staff spot it.
+    if (newPipelineStatus === 'returned' && job.pipeline_status !== 'returned') {
+      void alertReturnedWithStillBookedOutVans({
+        jobId: job.id,
+        triggerSource: `HireHop webhook (HH status ${oldHHStatus} → ${newHHStatus})`,
+      });
+    }
 
     return {
       success: true,
