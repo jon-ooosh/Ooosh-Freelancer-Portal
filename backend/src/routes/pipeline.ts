@@ -819,6 +819,8 @@ const updatePipelineSchema = z.object({
   likelihood: z.enum(['hot', 'warm', 'cold']).optional().nullable(),
   next_chase_date: z.string().optional().nullable(),
   chase_interval_days: z.number().min(1).max(90).optional(),
+  chase_alert_user_id: z.string().uuid().optional().nullable(),
+  chase_alert_delivery: z.enum(['bell', 'bell_email']).optional().nullable(),
   job_value: z.number().optional().nullable(),
   quote_status: z.enum(['not_quoted', 'quoted', 'revised', 'accepted']).optional().nullable(),
   enquiry_source: z.enum(['phone', 'email', 'web_form', 'referral', 'cold_lead', 'forum', 'repeat', 'other']).optional().nullable(),
@@ -847,6 +849,7 @@ router.patch('/:id', validate(updatePipelineSchema), async (req: AuthRequest, re
 
     const allowedFields = [
       'likelihood', 'next_chase_date', 'chase_interval_days',
+      'chase_alert_user_id', 'chase_alert_delivery',
       'job_value', 'quote_status', 'enquiry_source', 'notes',
     ];
 

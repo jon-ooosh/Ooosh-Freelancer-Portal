@@ -3362,7 +3362,16 @@ export default function JobDetailPage() {
       {/* Chase Modal */}
       <ChaseModal
         isOpen={showChaseModal}
-        job={job ? { id: job.id, job_name: job.job_name, client_name: job.client_name, company_name: job.company_name, chase_count: (job as unknown as { chase_count?: number }).chase_count || 0, next_chase_date: job.next_chase_date } : null}
+        job={job ? {
+          id: job.id,
+          job_name: job.job_name,
+          client_name: job.client_name,
+          company_name: job.company_name,
+          chase_count: (job as unknown as { chase_count?: number }).chase_count || 0,
+          next_chase_date: job.next_chase_date,
+          chase_alert_user_id: (job as unknown as { chase_alert_user_id?: string | null }).chase_alert_user_id || null,
+          chase_alert_delivery: (job as unknown as { chase_alert_delivery?: 'bell' | 'bell_email' | null }).chase_alert_delivery || null,
+        } : null}
         onClose={() => setShowChaseModal(false)}
         onChaseLogged={() => { loadJob(); loadInteractions(); }}
       />

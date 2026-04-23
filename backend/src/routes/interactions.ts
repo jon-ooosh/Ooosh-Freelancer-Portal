@@ -27,6 +27,7 @@ const createInteractionSchema = z.object({
   next_chase_date: z.string().optional().nullable(),
   // Chase alert: notify a user when chase is due
   chase_alert_user_id: z.string().uuid().optional().nullable(),
+  chase_alert_delivery: z.enum(['bell', 'bell_email']).optional().nullable(),
 });
 
 // GET /api/interactions — timeline for an entity
@@ -86,7 +87,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     const {
       type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
       mentioned_user_ids, mention_priority, chase_method, chase_response, next_chase_date,
-      chase_alert_user_id,
+      chase_alert_user_id, chase_alert_delivery,
     } = req.body;
 
     // If linked to a job, snapshot current status for tracking
@@ -121,6 +122,11 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     // The auto-mover will bring it back to Chasing when the chase date arrives
     if (type === 'chase' && job_id) {
       const chaseDate = next_chase_date || null;
+      // Persist the chase alert preference on the job too, so it survives
+      // across chase events and the auto-mover scheduler can read it when
+      // the chase date arrives. Only overwrite if the client supplied a value
+      // (avoids clearing an existing assignment when the modal is submitted
+      // without touching those fields).
       await query(
         `UPDATE jobs SET
           chase_count = chase_count + 1,
@@ -129,6 +135,8 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
             WHEN $1::date IS NOT NULL THEN $1::date
             ELSE (CURRENT_DATE + (COALESCE(chase_interval_days, 3) || ' days')::interval)::date
           END,
+          chase_alert_user_id = COALESCE($3, chase_alert_user_id),
+          chase_alert_delivery = COALESCE($4, chase_alert_delivery),
           pipeline_status = CASE
             WHEN pipeline_status = 'chasing' THEN 'new_enquiry'
             ELSE pipeline_status
@@ -139,7 +147,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
           END,
           updated_at = NOW()
         WHERE id = $2`,
-        [chaseDate, job_id]
+        [chaseDate, job_id, chase_alert_user_id || null, chase_alert_delivery || null]
       );
 
       // Create chase alert notification if requested

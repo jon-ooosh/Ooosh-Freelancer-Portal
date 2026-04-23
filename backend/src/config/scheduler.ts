@@ -90,7 +90,8 @@ export function startScheduler() {
          WHERE next_chase_date <= CURRENT_DATE
            AND next_chase_date IS NOT NULL
            AND pipeline_status IN ('new_enquiry', 'quoting', 'provisional', 'paused')
-         RETURNING id, job_name, hh_job_number, next_chase_date`
+         RETURNING id, job_name, hh_job_number, next_chase_date,
+                   chase_alert_user_id, chase_alert_delivery`
       );
 
       if (result.rows.length > 0) {
@@ -114,29 +115,44 @@ export function startScheduler() {
               ]
             );
 
-            // Find most recent chase_alert_user_id for this job (if anyone was assigned)
-            const lastChase = await query(
-              `SELECT chase_alert_user_id FROM interactions
-               WHERE job_id = $1 AND type = 'chase' AND chase_alert_user_id IS NOT NULL
-               ORDER BY created_at DESC LIMIT 1`,
-              [job.id]
-            );
-            const targetUsers = lastChase.rows.length > 0 && lastChase.rows[0].chase_alert_user_id
-              ? [lastChase.rows[0].chase_alert_user_id as string]
-              : adminIds;
+            // Chase alert recipient + delivery preference: prefer what's
+            // persisted on the job itself (set via the ChaseModal). Fall back
+            // to the most-recent interaction's chase_alert_user_id if nothing
+            // is stored on the job (legacy data), then to admins as last resort.
+            let targetUsers: string[] = [];
+            if (job.chase_alert_user_id) {
+              targetUsers = [job.chase_alert_user_id as string];
+            } else {
+              const lastChase = await query(
+                `SELECT chase_alert_user_id FROM interactions
+                 WHERE job_id = $1 AND type = 'chase' AND chase_alert_user_id IS NOT NULL
+                 ORDER BY created_at DESC LIMIT 1`,
+                [job.id]
+              );
+              targetUsers = lastChase.rows.length > 0 && lastChase.rows[0].chase_alert_user_id
+                ? [lastChase.rows[0].chase_alert_user_id as string]
+                : adminIds;
+            }
+
+            // Delivery preference → notification priority. 'bell_email' becomes
+            // 'urgent' so the escalation scheduler emails it immediately.
+            // 'bell' (or unspecified) is 'normal' — bell shows, email follows
+            // after 4h if still unread per the user's notification prefs.
+            const priority = job.chase_alert_delivery === 'bell_email' ? 'urgent' : 'normal';
 
             const jobName = job.job_name || `Job ${job.hh_job_number || ''}`;
             for (const userId of targetUsers) {
               try {
                 await query(
                   `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-                   VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, 'normal')`,
+                   VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, $6)`,
                   [
                     userId,
                     `Chase due: ${jobName}`,
                     `Chase date reached for ${jobName} — needs follow-up`,
                     job.id,
                     `/jobs/${job.id}?tab=timeline`,
+                    priority,
                   ]
                 );
               } catch { /* dedup or other error — non-critical */ }

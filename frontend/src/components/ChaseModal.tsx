@@ -9,9 +9,12 @@ interface ChaseableJob {
   company_name: string | null;
   chase_count: number;
   next_chase_date?: string | null;
+  chase_alert_user_id?: string | null;
+  chase_alert_delivery?: 'bell' | 'bell_email' | null;
 }
 
 type Mode = 'reschedule' | 'log';
+type Delivery = 'bell' | 'bell_email';
 
 function addHoursToNow(hours: number): string {
   const d = new Date();
@@ -36,39 +39,37 @@ export default function ChaseModal({
   onClose: () => void;
   onChaseLogged: () => void;
 }) {
-  // Default to 'reschedule' when a chase date already exists — that's the
-  // common case ("I just want to shift it by a few days"). If there's no
-  // date yet, default to 'log' because logging the first chase is the
-  // natural way to set the schedule going.
-  const [mode, setMode] = useState<Mode>('reschedule');
+  // Default to 'log' — the common case is "I just chased them, record it".
+  // Users switch to 'reschedule' via the tab when they only want to shift
+  // the next-chase date without logging an interaction.
+  const [mode, setMode] = useState<Mode>('log');
   const [chaseMethod, setChaseMethod] = useState<string>('phone');
   const [content, setContent] = useState('');
   const [chaseResponse, setChaseResponse] = useState('');
   const [nextChaseDate, setNextChaseDate] = useState('');
   const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>(null);
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
+  const [delivery, setDelivery] = useState<Delivery>('bell');
   const [teamUsers, setTeamUsers] = useState<{ id: string; email: string; first_name: string; last_name: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (isOpen && job) {
-      // If the job already has a chase date, pre-fill with it (so editing is
-      // a true nudge rather than a jump to today+5). Otherwise default to 5d.
       const existing = job.next_chase_date;
       if (existing) {
         setNextChaseDate(existing.slice(0, 10));
         setSelectedChasePreset(null);
-        setMode('reschedule');
       } else {
         setNextChaseDate(addDaysToDate(5));
         setSelectedChasePreset('5 days');
-        setMode('log');
       }
+      setMode('log');
       setContent('');
       setChaseResponse('');
       setChaseMethod('phone');
-      setChaseAlertUserId('');
+      setChaseAlertUserId(job.chase_alert_user_id || '');
+      setDelivery(job.chase_alert_delivery || 'bell');
       setError('');
     }
   }, [isOpen, job]);
@@ -99,9 +100,10 @@ export default function ChaseModal({
     setError('');
     try {
       if (mode === 'reschedule') {
-        // Just shift the chase date — no interaction, no chase_count bump.
         await api.patch(`/pipeline/${job.id}`, {
           next_chase_date: nextChaseDate || null,
+          chase_alert_user_id: chaseAlertUserId || null,
+          chase_alert_delivery: delivery,
         });
       } else {
         await api.post('/interactions', {
@@ -112,6 +114,7 @@ export default function ChaseModal({
           chase_response: chaseResponse || undefined,
           next_chase_date: nextChaseDate || undefined,
           chase_alert_user_id: chaseAlertUserId || undefined,
+          chase_alert_delivery: delivery,
         });
       }
       onChaseLogged();
@@ -141,15 +144,6 @@ export default function ChaseModal({
         <div className="inline-flex p-0.5 mb-4 bg-gray-100 rounded-lg text-xs">
           <button
             type="button"
-            onClick={() => setMode('reschedule')}
-            className={`px-3 py-1.5 rounded-md transition-colors ${
-              isReschedule ? 'bg-white shadow-sm text-gray-900 font-medium' : 'text-gray-600 hover:text-gray-800'
-            }`}
-          >
-            Just reschedule
-          </button>
-          <button
-            type="button"
             onClick={() => setMode('log')}
             className={`px-3 py-1.5 rounded-md transition-colors ${
               !isReschedule ? 'bg-white shadow-sm text-gray-900 font-medium' : 'text-gray-600 hover:text-gray-800'
@@ -157,13 +151,23 @@ export default function ChaseModal({
           >
             Log a chase
           </button>
+          <button
+            type="button"
+            onClick={() => setMode('reschedule')}
+            className={`px-3 py-1.5 rounded-md transition-colors ${
+              isReschedule ? 'bg-white shadow-sm text-gray-900 font-medium' : 'text-gray-600 hover:text-gray-800'
+            }`}
+          >
+            Just reschedule
+          </button>
         </div>
 
         {error && (
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
         )}
 
-        <div className="space-y-4">
+        {/* Fixed min-height prevents the dialog jumping when switching modes */}
+        <div className="space-y-4 min-h-[360px]">
           {!isReschedule && (
             <>
               <div>
@@ -245,7 +249,7 @@ export default function ChaseModal({
                 onChange={(e) => setChaseAlertUserId(e.target.value)}
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               >
-                <option value="">No alert</option>
+                <option value="">No one specific</option>
                 {teamUsers.map(u => (
                   <option key={u.id} value={u.id}>
                     Alert: {u.first_name} {u.last_name}
@@ -253,6 +257,42 @@ export default function ChaseModal({
                 ))}
               </select>
             </div>
+          </div>
+
+          {/* Delivery preference — how the chase-due alert gets delivered */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">When chase is due, send</label>
+            <div className="inline-flex p-0.5 bg-gray-100 rounded-lg text-xs">
+              <button
+                type="button"
+                onClick={() => setDelivery('bell')}
+                className={`px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 ${
+                  delivery === 'bell' ? 'bg-white shadow-sm text-gray-900 font-medium' : 'text-gray-600 hover:text-gray-800'
+                }`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+                </svg>
+                Bell only
+              </button>
+              <button
+                type="button"
+                onClick={() => setDelivery('bell_email')}
+                className={`px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 ${
+                  delivery === 'bell_email' ? 'bg-white shadow-sm text-gray-900 font-medium' : 'text-gray-600 hover:text-gray-800'
+                }`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+                Bell + email
+              </button>
+            </div>
+            <p className="text-[11px] text-gray-500 mt-1.5">
+              {delivery === 'bell'
+                ? 'Bell notification only. Email may still follow after 4 hours if unread.'
+                : 'Bell plus immediate email when the chase date arrives.'}
+            </p>
           </div>
         </div>
 
