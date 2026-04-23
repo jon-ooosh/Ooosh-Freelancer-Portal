@@ -13,7 +13,6 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
-import { sendVehicleCheckedInEmail } from '../services/vehicle-emails';
 
 const router = Router();
 router.use(authenticate);
@@ -421,14 +420,6 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
     const id = req.params.id as string;
     const { mileage_in, fuel_level_in, has_damage } = req.body;
 
-    // Capture pre-update state so we can tell whether this is the first
-    // check-in (and therefore whether to fire the client email).
-    const preResult = await query(
-      `SELECT checked_in_at FROM vehicle_hire_assignments WHERE id = $1`,
-      [id]
-    );
-    const alreadyCheckedIn = preResult.rows.length > 0 && preResult.rows[0].checked_in_at !== null;
-
     const result = await query(
       `UPDATE vehicle_hire_assignments
        SET status = 'returned',
@@ -509,17 +500,6 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
       } catch (dmgErr) {
         console.warn('[assignments] Damage requirement auto-creation failed:', dmgErr);
       }
-    }
-
-    // Fire "vehicle checked in" client email on first check-in only —
-    // avoids double-sends if staff re-submits the check-in form. Runs
-    // after the response so the UI stays snappy.
-    if (!alreadyCheckedIn) {
-      setImmediate(() => {
-        sendVehicleCheckedInEmail(id).catch((err) => {
-          console.error('[assignments] vehicle_checked_in email dispatch failed:', err);
-        });
-      });
     }
 
     res.json({ data: assignment });
