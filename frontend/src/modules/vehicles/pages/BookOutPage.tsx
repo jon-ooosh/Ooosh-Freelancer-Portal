@@ -577,6 +577,7 @@ export function BookOutPage() {
               eventDate,
               pdfBase64: pdfResult.data!.pdf,
               pdfFilename: pdfResult.data!.filename,
+              hireHopJob: form.hireHopJob || null,
             }),
           'Email sending',
         )
@@ -627,6 +628,7 @@ export function BookOutPage() {
                   eventDate,
                   pdfBase64: driverPdfResult.data!.pdf,
                   pdfFilename: driverPdfResult.data!.filename,
+                  hireHopJob: form.hireHopJob || null,
                 }),
               `Email to ${driver.driverName}`,
             )

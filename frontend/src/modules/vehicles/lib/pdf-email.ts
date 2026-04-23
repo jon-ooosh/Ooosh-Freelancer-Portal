@@ -129,6 +129,7 @@ export async function sendConditionReportEmail(params: {
   pdfFilename: string
   isCheckIn?: boolean
   driverPresent?: boolean
+  hireHopJob?: string | null
   // Check-in alert data
   damageCount?: number
   fuelDifference?: string | null  // e.g. "Full -> 3/8"
@@ -137,7 +138,8 @@ export async function sendConditionReportEmail(params: {
   console.log('[pdf-email] Calling send-email function to:', params.to)
   // Use ASCII-safe subject line (no em-dashes)
   const reportType = params.isCheckIn ? 'Check-In Report' : 'Condition Report'
-  const subject = `Vehicle ${reportType} - ${params.vehicleReg} - ${formatDateShort(params.eventDate)}`
+  const jobPart = params.hireHopJob ? ` ${params.hireHopJob}` : ''
+  const subject = `Vehicle ${reportType}${jobPart} - ${params.vehicleReg} - ${formatDateShort(params.eventDate)}`
   const response = await apiFetch('/send-email', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -179,6 +181,7 @@ function buildEmailHtml(params: {
   eventDate: string
   isCheckIn?: boolean
   driverPresent?: boolean
+  hireHopJob?: string | null
   damageCount?: number
   fuelDifference?: string | null
   milesDriven?: number | null
@@ -259,7 +262,7 @@ function buildEmailHtml(params: {
           Hi ${params.driverName},
         </p>
         <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
-          Please find attached the vehicle condition report for <strong>${params.vehicleReg}</strong>,
+          Please find attached the vehicle condition report for <strong>${params.vehicleReg}</strong>${params.hireHopJob ? ` on job number <strong>${params.hireHopJob}</strong>` : ''},
           recorded on <strong>${date}</strong>.
         </p>
         <p style="margin: 0 0 16px; font-size: 14px; color: #374151;">
