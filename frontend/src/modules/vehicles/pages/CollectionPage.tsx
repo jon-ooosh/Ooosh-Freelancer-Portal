@@ -458,6 +458,7 @@ export function CollectionPage() {
               eventDate,
               pdfBase64: pdfResult.data!.pdf,
               pdfFilename: pdfResult.data!.filename,
+              hireHopJob: form.hireHopJob || null,
             }),
           'Client email',
         )
@@ -482,6 +483,7 @@ export function CollectionPage() {
               eventDate,
               pdfBase64: pdfResult.data!.pdf,
               pdfFilename: pdfResult.data!.filename,
+              hireHopJob: form.hireHopJob || null,
             }),
           'Driver email',
         )

@@ -144,6 +144,7 @@ export async function processBookOutSubmission(
             eventDate,
             pdfBase64: pdfResult.data!.pdf,
             pdfFilename: pdfResult.data!.filename,
+            hireHopJob: hireHopJob || null,
           }),
         'Offline sync: Email',
       )
@@ -291,6 +292,7 @@ export async function processCollectionSubmission(
             eventDate,
             pdfBase64: pdfResult.data!.pdf,
             pdfFilename: pdfResult.data!.filename,
+            hireHopJob: hireHopJob || null,
           }),
         'Offline sync: Collection email',
       )
@@ -417,6 +419,7 @@ export async function processCheckInSubmission(
             eventDate,
             pdfBase64: pdfResult.data!.pdf,
             pdfFilename: pdfResult.data!.filename,
+            hireHopJob: (formData.bookOutHireHopJob as string) || null,
           }),
         'Offline sync: Check-in email',
       )

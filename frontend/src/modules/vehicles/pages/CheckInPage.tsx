@@ -697,6 +697,7 @@ export function CheckInPage() {
             damageCount: form.damageItems.length,
             fuelDifference: fuelDiff,
             milesDriven: clientMilesDriven,
+            hireHopJob: form.bookOutHireHopJob || null,
           }),
         'Email sending',
       )
