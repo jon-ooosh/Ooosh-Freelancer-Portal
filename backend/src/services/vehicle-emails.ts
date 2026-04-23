@@ -7,7 +7,7 @@
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';
-import { getJobEmailRecipients } from './money-emails';
+import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from './money-emails';
 
 /**
  * Send the "vehicle checked in" confirmation to the client contacts on a job.
@@ -55,11 +55,7 @@ export async function sendVehicleCheckedInEmail(assignmentId: string): Promise<v
       return;
     }
 
-    const recipients = await getJobEmailRecipients(jobId);
-    if (!recipients.primaryEmail) {
-      console.warn(`[vehicle-emails] check-in: no client recipient resolvable for job ${jobId}; skipping`);
-      return;
-    }
+    const target = await resolveClientEmailTarget(jobId);
 
     const returnedAt = new Date().toLocaleString('en-GB', {
       dateStyle: 'long',
@@ -67,17 +63,28 @@ export async function sendVehicleCheckedInEmail(assignmentId: string): Promise<v
     });
 
     const result = await emailService.send('vehicle_checked_in', {
-      to: recipients.primaryEmail,
-      cc: recipients.ccEmails.length > 0 ? recipients.ccEmails : undefined,
+      to: target.primaryEmail,
+      cc: target.ccEmails.length > 0 ? target.ccEmails : undefined,
+      prependBanner: target.isFallback
+        ? buildFallbackBanner({
+            jobId,
+            clientName: target.clientName,
+            jobNumber: target.jobNumber,
+            jobName: target.jobName,
+          })
+        : undefined,
       variables: {
-        clientName: recipients.primaryFirstName || 'there',
+        clientName: target.primaryFirstName,
         vehicleReg,
         jobName: job.job_name || `#${job.hh_job_number || ''}`.trim(),
         returnedAt,
       },
     });
     if (result.success) {
-      console.log(`[vehicle-emails] check-in: email sent to ${recipients.primaryEmail} for assignment ${assignmentId}`);
+      console.log(`[vehicle-emails] check-in: email sent to ${target.primaryEmail} for assignment ${assignmentId}${target.isFallback ? ' (fallback to info@)' : ''}`);
+      if (target.isFallback) {
+        await logFallbackToTimeline({ jobId, templateId: 'vehicle_checked_in' });
+      }
     } else {
       console.warn(`[vehicle-emails] check-in: email send failed for assignment ${assignmentId}:`, result);
     }

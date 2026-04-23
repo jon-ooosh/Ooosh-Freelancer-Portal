@@ -18,6 +18,7 @@ import crypto from 'crypto';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
 import { emailService } from '../services/email-service';
+import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
 
@@ -1232,6 +1233,24 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       }
       if (ctx.client_email) recipients.add(ctx.client_email);
 
+      // Safety net: if the freelancer didn't enter any client emails AND the
+      // client org has none on file, route the completion email to info@ with
+      // an amber banner so the team can forward to the right person and update
+      // the address book. Without this the delivery note silently disappears.
+      let completionFallback: { jobId: string; clientName: string | null; jobNumber: string | null; jobName: string | null } | null = null;
+      if (recipients.size === 0 && ctx.job_id) {
+        const target = await resolveClientEmailTarget(ctx.job_id);
+        if (target.isFallback) {
+          recipients.add(target.primaryEmail);
+          completionFallback = {
+            jobId: ctx.job_id,
+            clientName: target.clientName,
+            jobNumber: target.jobNumber,
+            jobName: target.jobName,
+          };
+        }
+      }
+
       // Send delivery-note PDF for deliveries
       if (isDelivery && recipients.size > 0 && ctx.hirehop_id) {
         try {
@@ -1306,6 +1325,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
                   driverName: completionName,
                   completedAt: completedDateTime,
                 },
+                prependBanner: completionFallback ? buildFallbackBanner(completionFallback) : undefined,
                 attachments: [{
                   filename: `delivery-note-${ctx.hirehop_id}.pdf`,
                   content: pdfBuffer,
@@ -1315,6 +1335,9 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
             } catch (emailErr) {
               console.error(`[portal completion] Failed to email delivery note to ${to}:`, emailErr);
             }
+          }
+          if (completionFallback) {
+            await logFallbackToTimeline({ jobId: completionFallback.jobId, templateId: 'delivery_note' });
           }
         } catch (err) {
           console.error('[portal completion] Delivery note PDF/email failed:', err);
@@ -1335,10 +1358,14 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
                 completedDate,
                 completedAt: completedDateTime,
               },
+              prependBanner: completionFallback ? buildFallbackBanner(completionFallback) : undefined,
             });
           } catch (emailErr) {
             console.error(`[portal completion] Failed to email collection confirmation to ${to}:`, emailErr);
           }
+        }
+        if (completionFallback) {
+          await logFallbackToTimeline({ jobId: completionFallback.jobId, templateId: 'collection_confirmation' });
         }
       }
 

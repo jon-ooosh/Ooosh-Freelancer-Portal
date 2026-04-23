@@ -18,7 +18,7 @@ import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { calculatePreHireCancellation, calculateEarlyReturn } from '../services/cancellation-calculator';
 import emailService from '../services/email-service';
-import { getJobEmailRecipients } from '../services/money-emails';
+import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 
 const router = Router();
 router.use(authenticate);
@@ -391,11 +391,7 @@ router.post(
       // 10. Send client cancellation email
       (async () => {
         try {
-          const { primaryEmail, primaryFirstName, ccEmails } = await getJobEmailRecipients(jobId);
-          if (!primaryEmail) {
-            console.warn('[Cancellation] No client email found — skipping client notification');
-            return;
-          }
+          const target = await resolveClientEmailTarget(jobId);
 
           const refundSection = cancellation_refund > 0
             ? `<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Refund</p>
@@ -406,10 +402,18 @@ router.post(
             : '';
 
           await emailService.send('job_cancelled_client', {
-            to: primaryEmail,
-            cc: ccEmails,
+            to: target.primaryEmail,
+            cc: target.ccEmails.length > 0 ? target.ccEmails : undefined,
+            prependBanner: target.isFallback
+              ? buildFallbackBanner({
+                  jobId,
+                  clientName: target.clientName,
+                  jobNumber: target.jobNumber,
+                  jobName: target.jobName,
+                })
+              : undefined,
             variables: {
-              clientName: primaryFirstName || 'there',
+              clientName: target.primaryFirstName,
               jobNumber,
               jobName,
               jobDates,
@@ -417,6 +421,9 @@ router.post(
               invoiceNote,
             },
           });
+          if (target.isFallback) {
+            await logFallbackToTimeline({ jobId, templateId: 'job_cancelled_client' });
+          }
         } catch (err) {
           console.error('[Cancellation] Client email failed:', err);
         }
