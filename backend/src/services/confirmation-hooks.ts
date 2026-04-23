@@ -20,6 +20,7 @@
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';
+import { getFrontendUrl } from '../config/app-urls';
 
 export type HireFormTriggerReason =
   | 'sent'
@@ -195,7 +196,7 @@ export async function sendConfirmationSilentSkipAlert(opts: {
   if (opts.issues.length === 0) return;
 
   try {
-    const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+    const frontendUrl = getFrontendUrl();
     const jobUrl = `${frontendUrl}/jobs/${opts.jobId}`;
     const issuesList = opts.issues
       .map(

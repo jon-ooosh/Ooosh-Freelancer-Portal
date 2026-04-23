@@ -7,6 +7,7 @@ import { runComplianceCheck } from '../services/compliance-checker';
 import { query } from './database';
 import { generateBVRLACSV } from '../routes/ve103b';
 import emailService from '../services/email-service';
+import { getFrontendUrl } from './app-urls';
 
 /**
  * Starts the backup and sync schedulers.
@@ -91,7 +92,7 @@ export function startScheduler() {
            AND next_chase_date IS NOT NULL
            AND pipeline_status IN ('new_enquiry', 'quoting', 'provisional', 'paused')
          RETURNING id, job_name, hh_job_number, next_chase_date,
-                   chase_alert_user_id, chase_alert_delivery`
+                   client_name, chase_alert_user_id, chase_alert_delivery`
       );
 
       if (result.rows.length > 0) {
@@ -120,6 +121,7 @@ export function startScheduler() {
             // to the most-recent interaction's chase_alert_user_id if nothing
             // is stored on the job (legacy data), then to admins as last resort.
             let targetUsers: string[] = [];
+            let isAdminFallback = false;
             if (job.chase_alert_user_id) {
               targetUsers = [job.chase_alert_user_id as string];
             } else {
@@ -129,9 +131,14 @@ export function startScheduler() {
                  ORDER BY created_at DESC LIMIT 1`,
                 [job.id]
               );
-              targetUsers = lastChase.rows.length > 0 && lastChase.rows[0].chase_alert_user_id
-                ? [lastChase.rows[0].chase_alert_user_id as string]
-                : adminIds;
+              if (lastChase.rows.length > 0 && lastChase.rows[0].chase_alert_user_id) {
+                targetUsers = [lastChase.rows[0].chase_alert_user_id as string];
+              } else {
+                // Unassigned chase: spray admin/manager bells AND send an email
+                // copy to info@ so the shared inbox has a paper trail.
+                targetUsers = adminIds;
+                isAdminFallback = true;
+              }
             }
 
             // Delivery preference → notification priority. 'bell_email' becomes
@@ -156,6 +163,34 @@ export function startScheduler() {
                   ]
                 );
               } catch { /* dedup or other error — non-critical */ }
+            }
+
+            // If nobody was explicitly assigned, also email info@ so the
+            // shared inbox sees it alongside the admin/manager bells.
+            if (isAdminFallback) {
+              try {
+                const lastChased = await query(
+                  `SELECT MAX(created_at) AS last_chased_at
+                   FROM interactions
+                   WHERE job_id = $1 AND type = 'chase'`,
+                  [job.id]
+                );
+                const lastChaseDate = lastChased.rows[0]?.last_chased_at
+                  ? new Date(lastChased.rows[0].last_chased_at as string).toISOString().split('T')[0]
+                  : '—';
+                await emailService.send('chase_reminder', {
+                  to: 'info@oooshtours.co.uk',
+                  variables: {
+                    jobName,
+                    jobNumber: job.hh_job_number ? String(job.hh_job_number) : '—',
+                    clientName: job.client_name || '—',
+                    lastChaseDate,
+                    jobUrl: `${getFrontendUrl()}/jobs/${job.id}?tab=timeline`,
+                  },
+                });
+              } catch (err) {
+                console.error('Scheduler: info@ chase email failed:', err);
+              }
             }
           } catch {
             // Non-critical — don't block other jobs
@@ -364,7 +399,7 @@ export function startScheduler() {
                   html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
                          <p><strong>${label}</strong> for job <strong>${jobName}</strong> was due ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} ago.</p>
                          ${req.notes ? `<p>Notes: ${req.notes}</p>` : ''}
-                         <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${req.job_id}?tab=overview">View Job</a></p>`,
+                         <p><a href="${getFrontendUrl()}/jobs/${req.job_id}?tab=overview">View Job</a></p>`,
                 });
               }
             } catch (emailErr) {
@@ -476,7 +511,7 @@ export function startScheduler() {
                 html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
                        <p>Reminder: <strong>${label}</strong> for <strong>${jobName}</strong>.</p>
                        ${rem.notes && rem.notes !== rem.custom_label ? `<p>Notes: ${rem.notes}</p>` : ''}
-                       <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
+                       <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
               });
               await query(
                 `UPDATE notifications SET email_sent_at = NOW() WHERE id = $1`,

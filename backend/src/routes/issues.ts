@@ -13,6 +13,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { emailService } from '../services/email-service';
+import { getFrontendUrl } from '../config/app-urls';
 
 const router = Router();
 router.use(authenticate);
@@ -254,7 +255,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
 
     // Fire-and-forget email alert
     const reporterName = req.user!.email; // name may not be on the JWT — use email for identification
-    const frontendBase = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+    const frontendBase = getFrontendUrl();
     emailService
       .send('platform_issue_reported', {
         to: ALERT_RECIPIENT,

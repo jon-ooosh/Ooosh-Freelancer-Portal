@@ -22,6 +22,7 @@
  */
 import { query } from '../config/database';
 import { emailService } from './email-service';
+import { getFrontendUrl } from '../config/app-urls';
 
 const BUSINESS_START_HOUR = 7;
 const BUSINESS_END_HOUR = 22;
@@ -139,7 +140,7 @@ export async function runArrangingChase(): Promise<{ scanned: number; sent: numb
       weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
     });
     const jobLabel = row.hh_job_number ? `#${row.hh_job_number}` : '(no HH ref)';
-    const frontendBase = (process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk').replace(/\/$/, '');
+    const frontendBase = getFrontendUrl();
     const opLink = row.job_id ? `${frontendBase}/jobs/${row.job_id}` : `${frontendBase}/operations/transport`;
     const typeLabel = humanisedJobType(row.job_type);
     const whatPart = humanisedWhatIsIt(row.what_is_it);

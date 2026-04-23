@@ -8,6 +8,7 @@
 import { query } from '../config/database';
 import { emailService } from './email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from './money-emails';
+import { getFrontendUrl } from '../config/app-urls';
 
 /**
  * Send the "vehicle checked in" confirmation to the client contacts on a job.
@@ -131,7 +132,7 @@ export async function alertReturnedWithStillBookedOutVans(opts: {
     const regs = openAssignments.rows
       .map(r => r.vehicle_reg || '(unassigned)')
       .join(', ');
-    const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+    const frontendUrl = getFrontendUrl();
 
     const result = await emailService.send('job_returned_vans_still_out', {
       to: 'info@oooshtours.co.uk',

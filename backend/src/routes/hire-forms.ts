@@ -14,6 +14,7 @@ import { validate } from '../middleware/validate';
 import { generateHireFormPdf, fetchLogo, type HireFormData } from '../services/hire-form-pdf';
 import { uploadToR2, getFromR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
+import { getFrontendUrl } from '../config/app-urls';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -1496,7 +1497,7 @@ async function sendReferralNotification(
     }
     if (reasons.length === 0) reasons.push('Flagged by hire form verification process');
 
-    const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+    const frontendUrl = getFrontendUrl();
 
     // Try to generate snapshot PDF for attachment
     let attachments: Array<{ filename: string; content: Buffer; contentType: string }> | undefined;
@@ -1621,7 +1622,7 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
             );
 
             // Send notification to team
-            const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+            const frontendUrl = getFrontendUrl();
             try {
               // Bell notification to admins/managers
               const adminUsers = await query(`SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`);

@@ -8,6 +8,7 @@ import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 import { hhBroker } from '../services/hirehop-broker';
 import { sendLastMinuteAlert } from '../services/money-emails';
 import emailService from '../services/email-service';
+import { getFrontendUrl } from '../config/app-urls';
 import {
   triggerHireFormEmailOnConfirmation,
   hireFormResultIsAnomaly,
@@ -686,7 +687,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
                   html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
                          <p>Your reminder "<strong>${rem.custom_label || 'Reminder'}</strong>" has been triggered because the job <strong>${jobName}</strong> is now <strong>${pipeline_status}</strong>.</p>
                          ${rem.notes ? `<p>Notes: ${rem.notes}</p>` : ''}
-                         <p><a href="${process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk'}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
+                         <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
                 });
               }
             } catch (emailErr) {
