@@ -1289,22 +1289,7 @@ function StepReviewBookOut({
     return (
       <div className="space-y-4">
         <h3 className="text-sm font-semibold text-gray-800">Book-Out Data</h3>
-        {checkInStatus?.alreadyCheckedIn && (
-          <div className="rounded-lg border border-red-200 bg-red-50 p-3">
-            <div className="flex gap-2">
-              <svg className="h-5 w-5 shrink-0 text-red-500 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-              </svg>
-              <div>
-                <p className="text-sm font-medium text-red-800">Already checked in</p>
-                <p className="mt-0.5 text-xs text-red-600">
-                  This vehicle was checked in on {checkInStatus.checkInDate || 'a recent date'}.
-                  It cannot be checked in again until it is booked out.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
+        {checkInStatus?.alreadyCheckedIn && <BlockedBanner status={checkInStatus} />}
         <div className="rounded-lg bg-amber-50 p-4 text-center">
           <p className="text-sm font-medium text-amber-800">No book-out record found</p>
           <p className="mt-1 text-xs text-amber-600">
@@ -1319,23 +1304,8 @@ function StepReviewBookOut({
     <div className="space-y-4">
       <h3 className="text-sm font-semibold text-gray-800">Book-Out Summary</h3>
 
-      {/* Already checked in — blocking error */}
-      {checkInStatus?.alreadyCheckedIn && (
-        <div className="rounded-lg border border-red-200 bg-red-50 p-3">
-          <div className="flex gap-2">
-            <svg className="h-5 w-5 shrink-0 text-red-500 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-            </svg>
-            <div>
-              <p className="text-sm font-medium text-red-800">Already checked in</p>
-              <p className="mt-0.5 text-xs text-red-600">
-                This vehicle was checked in on {checkInStatus.checkInDate || 'a recent date'}.
-                It cannot be checked in again until it is booked out.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Already checked in / not booked out — blocking error */}
+      {checkInStatus?.alreadyCheckedIn && <BlockedBanner status={checkInStatus} />}
 
       {!checkInStatus?.alreadyCheckedIn && (
         <div className="rounded-lg bg-blue-50 p-3">
@@ -1859,6 +1829,28 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
     <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
       <span className="text-xs font-medium text-gray-500">{label}</span>
       <span className="text-sm font-medium text-gray-800">{value}</span>
+    </div>
+  )
+}
+
+function BlockedBanner({ status }: { status: CheckInStatus }) {
+  const isNeverBookedOut = status.reason === 'never_booked_out'
+  const title = isNeverBookedOut ? 'Not currently booked out' : 'Already checked in'
+  const body = isNeverBookedOut
+    ? `This vehicle is not currently out on hire. There's nothing to check in — book it out first.`
+    : `This vehicle was checked in on ${status.checkInDate || 'a recent date'}. It cannot be checked in again until it is booked out.`
+
+  return (
+    <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+      <div className="flex gap-2">
+        <svg className="h-5 w-5 shrink-0 text-red-500 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+        </svg>
+        <div>
+          <p className="text-sm font-medium text-red-800">{title}</p>
+          <p className="mt-0.5 text-xs text-red-600">{body}</p>
+        </div>
+      </div>
     </div>
   )
 }

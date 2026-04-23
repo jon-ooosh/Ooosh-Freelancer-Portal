@@ -1016,6 +1016,35 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  job_returned_vans_still_out: {
+    variant: 'internal',
+    subject: 'Job #{{jobNumber}} marked Returned — {{vanCount}} van(s) still booked out',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job marked Returned — vans still booked out</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Job <strong>#{{jobNumber}}</strong> ({{jobName}}) has just flipped to <strong>Returned</strong>,
+        but {{vanCount}} vehicle hire assignment(s) are still <strong>booked out</strong> in the OP.
+      </p>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Either the vans still need physically checking in, or the job's status was flipped too early.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;">
+            <p style="margin:0 0 4px;font-size:12px;color:#991b1b;">Still booked out</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{vanList}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px;font-size:13px;color:#64748b;">
+        Triggered by: {{triggerSource}}
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in Ooosh &rarr;</a>
+      </p>
+    `,
+  },
 };
 
 export default templates;

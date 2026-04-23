@@ -13,6 +13,7 @@ import {
   hireFormResultIsAnomaly,
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
+import { alertReturnedWithStillBookedOutVans } from '../services/vehicle-emails';
 
 const router = Router();
 router.use(authenticate);
@@ -607,6 +608,15 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
     }
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
+
+    // Safety net: flag if the job just moved INTO 'returned' but vans on the
+    // job are still booked out. Non-blocking — emails info@ so staff spot it.
+    if (pipeline_status === 'returned' && fromStatus !== 'returned') {
+      void alertReturnedWithStillBookedOutVans({
+        jobId,
+        triggerSource: `Manual UI (user ${req.user!.email || req.user!.id})`,
+      });
+    }
 
     // Cancel reminders the user ticked in the Lost / Cancelled modal (if any).
     // Done before event triggers fire so event-triggered reminders the user
