@@ -26,7 +26,10 @@ CREATE TABLE IF NOT EXISTS run_groups (
 );
 
 -- Backfill: ensure every existing quotes.run_group UUID has a matching
--- run_groups row, with run_date inferred from the first quote in the group.
+-- run_groups row, with run_date inferred from the first quote in the
+-- group. Includes soft-deleted quotes — the FK constraint added below
+-- covers every row in quotes regardless of is_deleted, so every UUID
+-- needs a parent or the ALTER TABLE fails.
 INSERT INTO run_groups (id, run_date, created_at)
 SELECT
   q.run_group                                  AS id,
@@ -34,7 +37,6 @@ SELECT
   MIN(q.created_at)                            AS created_at
 FROM quotes q
 WHERE q.run_group IS NOT NULL
-  AND q.is_deleted = false
 GROUP BY q.run_group
 ON CONFLICT (id) DO NOTHING;
 
