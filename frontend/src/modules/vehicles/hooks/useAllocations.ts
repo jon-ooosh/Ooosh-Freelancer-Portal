@@ -10,12 +10,13 @@ import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import type { VanAllocation } from '../types/hirehop'
 
 /** Fetch all active van allocations */
-export function useAllocations() {
+export function useAllocations(options?: { enabled?: boolean }) {
   return useQuery<VanAllocation[]>({
     queryKey: ['allocations'],
     queryFn: getAllocations,
     staleTime: 30 * 1000,       // 30 seconds — allocations change frequently
     gcTime: 5 * 60 * 1000,      // 5 minutes GC
+    enabled: options?.enabled ?? true,
   })
 }
 

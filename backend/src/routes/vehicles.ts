@@ -18,6 +18,9 @@ import { authenticate, AuthRequest } from '../middleware/auth';
 import {
   verifyFreelancerBookoutToken,
   mintFreelancerBookoutSession,
+  authenticateVehicleFlexible,
+  isFreelancerBookout,
+  type FlexibleVehicleRequest,
 } from '../middleware/freelancer-bookout-auth';
 import { query } from '../config/database';
 import { isHireHopConfigured } from '../config/hirehop';
@@ -155,7 +158,87 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
   }
 });
 
-router.use(authenticate);
+// Vehicle routes accept EITHER a staff JWT or a freelancer book-out
+// session JWT. The flexible middleware populates req.user (staff) XOR
+// req.bookoutSession (freelancer). A follow-up gate restricts freelancer
+// sessions to the subset of endpoints they need for a D&C book-out;
+// staff keep access to everything.
+router.use(authenticateVehicleFlexible as unknown as typeof authenticate);
+
+/**
+ * Paths a freelancer-scoped session JWT is allowed to reach. Anything
+ * else → 403. Each handler downstream still does its own scope-check to
+ * make sure the freelancer is only touching THEIR assignment.
+ *
+ * Matching is done against `req.path` (no query string) and the HTTP
+ * method, to avoid surprises from substring tricks.
+ */
+const FREELANCER_BOOKOUT_ALLOW: Array<{ method: string; pattern: RegExp }> = [
+  { method: 'GET',   pattern: /^\/fleet$/ },
+  { method: 'GET',   pattern: /^\/fleet\/[^/]+$/ },
+  { method: 'PATCH', pattern: /^\/fleet\/by-reg\/[^/]+\/hire-status$/ },
+  { method: 'POST',  pattern: /^\/upload-photo$/ },
+  { method: 'POST',  pattern: /^\/save-event$/ },
+  { method: 'POST',  pattern: /^\/generate-pdf$/ },
+  { method: 'POST',  pattern: /^\/send-email$/ },
+  { method: 'GET',   pattern: /^\/jobs\/[^/]+$/ },
+];
+
+router.use((req: FlexibleVehicleRequest, res: Response, next) => {
+  if (!isFreelancerBookout(req)) {
+    next();
+    return;
+  }
+  const match = FREELANCER_BOOKOUT_ALLOW.some(
+    rule => rule.method === req.method && rule.pattern.test(req.path)
+  );
+  if (!match) {
+    res.status(403).json({ error: 'Not available to freelancer session' });
+    return;
+  }
+  next();
+});
+
+/**
+ * Helper: for a freelancer session, load the assignment's vehicle reg +
+ * job number so handlers can check callers are only touching their own
+ * scope. Cached on the request so repeat calls in the same handler are
+ * free.
+ */
+async function getBookoutScope(req: FlexibleVehicleRequest): Promise<{
+  assignmentId: string;
+  vehicleId: string;
+  registration: string;
+  hhJobNumber: number | null;
+} | null> {
+  if (!req.bookoutSession) return null;
+  const cache = (req as FlexibleVehicleRequest & { _bookoutScope?: unknown })._bookoutScope;
+  if (cache) return cache as {
+    assignmentId: string;
+    vehicleId: string;
+    registration: string;
+    hhJobNumber: number | null;
+  };
+
+  const result = await query(
+    `SELECT vha.id, vha.vehicle_id, fv.reg, vha.hirehop_job_id
+       FROM vehicle_hire_assignments vha
+       JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      WHERE vha.id = $1
+      LIMIT 1`,
+    [req.bookoutSession.assignmentId]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  const scope = {
+    assignmentId: req.bookoutSession.assignmentId,
+    vehicleId: row.vehicle_id as string,
+    registration: (row.reg as string).toUpperCase(),
+    hhJobNumber: row.hirehop_job_id as number | null,
+  };
+  (req as FlexibleVehicleRequest & { _bookoutScope?: unknown })._bookoutScope = scope;
+  return scope;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. FLEET CRUD — /api/vehicles/fleet/*
@@ -166,8 +249,21 @@ router.use(authenticate);
  * List all fleet vehicles. Supports filtering by fleet_group, hire_status, simple_type.
  * Returns data in the shape the VM's Vehicle interface expects.
  */
-router.get('/fleet', async (req: AuthRequest, res: Response) => {
+router.get('/fleet', async (req: FlexibleVehicleRequest, res: Response) => {
   try {
+    // Freelancer scope: return only the vehicle assigned to this session.
+    // Filters (group/hire_status/etc.) are ignored — staff-only concerns.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope) {
+        res.status(404).json({ error: 'Assignment not found' });
+        return;
+      }
+      const r = await query('SELECT * FROM fleet_vehicles WHERE id = $1', [scope.vehicleId]);
+      res.json({ data: r.rows.map(mapDbRowToVehicle) });
+      return;
+    }
+
     const { group, hire_status, simple_type, include_inactive } = req.query;
 
     let where = 'WHERE 1=1';
@@ -212,9 +308,23 @@ router.get('/fleet', async (req: AuthRequest, res: Response) => {
  * GET /api/vehicles/fleet/:id
  * Get a single vehicle by ID or registration.
  */
-router.get('/fleet/:idOrReg', async (req: AuthRequest, res: Response) => {
+router.get('/fleet/:idOrReg', async (req: FlexibleVehicleRequest, res: Response) => {
   try {
     const idOrReg = req.params.idOrReg as string;
+
+    // Freelancer: only allow lookup of their own assigned vehicle.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope) {
+        res.status(404).json({ error: 'Assignment not found' });
+        return;
+      }
+      const asked = idOrReg.toUpperCase();
+      if (asked !== scope.vehicleId.toUpperCase() && asked !== scope.registration) {
+        res.status(403).json({ error: 'Not your vehicle' });
+        return;
+      }
+    }
 
     // Try UUID first, then registration
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrReg);
@@ -409,7 +519,7 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
  * Quick hire status update by registration plate.
  * Used by book-out (→ "On Hire") and check-in (→ "Prep Needed").
  */
-router.patch('/fleet/by-reg/:reg/hire-status', async (req: AuthRequest, res: Response) => {
+router.patch('/fleet/by-reg/:reg/hire-status', async (req: FlexibleVehicleRequest, res: Response) => {
   try {
     const reg = (req.params.reg as string).toUpperCase();
     const { status } = req.body;
@@ -417,6 +527,20 @@ router.patch('/fleet/by-reg/:reg/hire-status', async (req: AuthRequest, res: Res
     if (!status) {
       res.status(400).json({ error: 'status is required' });
       return;
+    }
+
+    // Freelancer: only allowed to flip THEIR vehicle to 'On Hire' (book-out
+    // completion). All other transitions require staff.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope || reg !== scope.registration) {
+        res.status(403).json({ error: 'Not your vehicle' });
+        return;
+      }
+      if (status !== 'On Hire') {
+        res.status(403).json({ error: 'Freelancer session can only set status to On Hire' });
+        return;
+      }
     }
 
     const result = await query(
@@ -1246,12 +1370,21 @@ router.post('/jobs/refresh-items', async (req: AuthRequest, res: Response) => {
  * GET /api/vehicles/jobs/:jobNumber
  * Get a single job by HireHop job number.
  */
-router.get('/jobs/:jobNumber', async (req: AuthRequest, res: Response) => {
+router.get('/jobs/:jobNumber', async (req: FlexibleVehicleRequest, res: Response) => {
   try {
     const jobNumber = parseInt(req.params.jobNumber as string);
     if (isNaN(jobNumber)) {
       res.status(400).json({ error: 'Invalid job number' });
       return;
+    }
+
+    // Freelancer: only allowed to look up their own assignment's job.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope || scope.hhJobNumber !== jobNumber) {
+        res.status(403).json({ error: 'Not your job' });
+        return;
+      }
     }
 
     const result = await query(
@@ -1684,7 +1817,7 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
  * Save a vehicle event to R2.
  * Writes event JSON + updates per-vehicle index.
  */
-router.post('/save-event', async (req: AuthRequest, res: Response) => {
+router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) => {
   try {
     const { event } = req.body;
     if (!event?.id || !event?.vehicleReg) {
@@ -1693,6 +1826,30 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
     }
 
     const reg = (event.vehicleReg as string).toUpperCase();
+
+    // Freelancer: event MUST target their assignment. Allow only book-out
+    // events (check-in is a separate future flow and isn't enabled yet).
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope) {
+        res.status(403).json({ error: 'Assignment not found' });
+        return;
+      }
+      if (reg !== scope.registration) {
+        res.status(403).json({ error: 'Event does not target your vehicle' });
+        return;
+      }
+      const askedJob = event.hireHopJob != null ? parseInt(String(event.hireHopJob), 10) : null;
+      if (scope.hhJobNumber != null && askedJob !== scope.hhJobNumber) {
+        res.status(403).json({ error: 'Event does not target your job' });
+        return;
+      }
+      const et = String(event.eventType || '').toLowerCase();
+      if (et !== 'book-out' && et !== 'book out' && et !== 'bookout') {
+        res.status(403).json({ error: 'Only book-out events allowed for freelancer session' });
+        return;
+      }
+    }
 
     // If the caller included a signature as base64, persist it alongside
     // the event as a separate R2 object and strip it from the JSON blob
@@ -1782,6 +1939,62 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Book-out side effects: when BookOutPage (staff or freelancer) fires
+    // a book-out event, flip the matching allocated assignment to
+    // 'booked_out'. This is equivalent to POST /api/assignments/:id/book-out
+    // but keyed off the event payload (reg + hh job) since BookOutPage
+    // doesn't know the assignment UUID directly.
+    const normalisedEventType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
+    if (normalisedEventType === 'book-out' && event.hireHopJob) {
+      try {
+        const hhJob = parseInt(String(event.hireHopJob), 10);
+        if (!isNaN(hhJob)) {
+          const mileageOut = event.mileage ? Number(event.mileage) : null;
+          const fuelOut = event.fuelLevel || null;
+          // Prefer scoped assignment id when a freelancer session is
+          // present — the safest targeting for the D&C case where a job
+          // can have multiple allocations. Staff path falls back to the
+          // reg+job match used before this change.
+          let matchedIds: string[] = [];
+          if (req.bookoutSession?.assignmentId) {
+            matchedIds = [req.bookoutSession.assignmentId];
+          } else {
+            const m = await query(
+              `SELECT vha.id
+                 FROM vehicle_hire_assignments vha
+                 JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+                WHERE fv.reg = $1
+                  AND vha.hirehop_job_id = $2
+                  AND vha.status IN ('soft', 'allocated', 'confirmed')
+                ORDER BY vha.created_at DESC`,
+              [reg, hhJob]
+            );
+            matchedIds = m.rows.map(r => r.id as string);
+          }
+          const userId = req.user?.id || null;
+          for (const id of matchedIds) {
+            await query(
+              `UPDATE vehicle_hire_assignments
+                  SET status = 'booked_out',
+                      status_changed_at = NOW(),
+                      booked_out_at = COALESCE(booked_out_at, NOW()),
+                      booked_out_by = COALESCE(booked_out_by, $1),
+                      mileage_out = COALESCE(mileage_out, $2),
+                      fuel_level_out = COALESCE(fuel_level_out, $3),
+                      updated_at = NOW()
+                WHERE id = $4`,
+              [userId, mileageOut, fuelOut, id]
+            );
+          }
+          if (matchedIds.length === 0) {
+            console.log(`[vehicles/events] book-out: no matching allocated assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
+          }
+        }
+      } catch (err) {
+        console.warn('[vehicles/events] book-out side-effect failed:', err);
+      }
+    }
+
     // Check-in side effects: when CheckInPage.tsx fires a check-in event
     // via save-event, flip the matching hire assignment(s) to 'returned'.
     //
@@ -1789,7 +2002,6 @@ router.post('/save-event', async (req: AuthRequest, res: Response) => {
     // and 'Check In' (space, capitalised — actually sent by CheckInPage)
     // both match. Original strict match silently failed for every live
     // check-in and was only caught in testing on 22 Apr 2026.
-    const normalisedEventType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
     if (normalisedEventType === 'check-in' && event.hireHopJob) {
       try {
         const hhJob = parseInt(String(event.hireHopJob), 10);
@@ -2478,8 +2690,20 @@ function formatDayDate(dateStr: string): string {
  * Generate a vehicle condition report PDF (book-out / check-in).
  * Returns base64-encoded PDF + filename.
  */
-router.post('/generate-pdf', async (req: AuthRequest, res: Response) => {
+router.post('/generate-pdf', async (req: FlexibleVehicleRequest, res: Response) => {
   try {
+    // Freelancer: the PDF template includes vehicleReg — require it to
+    // match the session to stop anyone piggy-backing PDF generation on
+    // an unrelated vehicle.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      const regInBody = typeof req.body?.vehicleReg === 'string' ? req.body.vehicleReg.toUpperCase() : '';
+      if (!scope || !regInBody || regInBody !== scope.registration) {
+        res.status(403).json({ error: 'PDF target does not match your vehicle' });
+        return;
+      }
+    }
+
     const { pdfBytes, filename } = await buildConditionReportPdf(req.body);
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
     res.json({
@@ -2670,13 +2894,33 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
  * Send an email with optional PDF attachment.
  * Used by book-out/check-in flows to email condition reports.
  */
-router.post('/send-email', async (req: AuthRequest, res: Response) => {
+router.post('/send-email', async (req: FlexibleVehicleRequest, res: Response) => {
   try {
     const { to, subject, html, pdfBase64, pdfFilename } = req.body;
 
     if (!to || !subject) {
       res.status(400).json({ error: 'to and subject are required' });
       return;
+    }
+
+    // Freelancer: the condition-report subject and filename always include
+    // the vehicle reg (format `Vehicle Condition Report - RX24SZC - ...`
+    // and `report-RX24SZC-*.pdf`). Require the session reg to appear in
+    // at least one of those before sending — it's a cheap guard against a
+    // compromised session being used to broadcast unrelated emails.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope) {
+        res.status(403).json({ error: 'Assignment not found' });
+        return;
+      }
+      const reg = scope.registration;
+      const subjectHasReg = typeof subject === 'string' && subject.toUpperCase().includes(reg);
+      const filenameHasReg = typeof pdfFilename === 'string' && pdfFilename.toUpperCase().includes(reg);
+      if (!subjectHasReg && !filenameHasReg) {
+        res.status(403).json({ error: 'Email target does not reference your vehicle' });
+        return;
+      }
     }
 
     const attachments = pdfBase64 && pdfFilename ? [{
@@ -2743,7 +2987,7 @@ const photoUpload = multer({
   },
 });
 
-router.post('/upload-photo', (req: AuthRequest, res: Response) => {
+router.post('/upload-photo', (req: FlexibleVehicleRequest, res: Response) => {
   photoUpload.single('file')(req, res, async (err) => {
     if (err) {
       console.error('[vehicles/photos] Multer error:', err);
@@ -2765,6 +3009,27 @@ router.post('/upload-photo', (req: AuthRequest, res: Response) => {
 
       // Sanitise key — prevent path traversal
       const sanitisedKey = key.replace(/\.\./g, '').replace(/^\/+/, '');
+
+      // Freelancer: key must sit under events/{eventId}/{their-reg}/... — the
+      // frontend builds keys of shape `events/{eventId}/{REG}/{angle}.jpg`
+      // OR `vehicle-events/{REG}/{event-id}_signature.png`. Reject anything
+      // that doesn't target their assigned vehicle.
+      if (isFreelancerBookout(req)) {
+        const scope = await getBookoutScope(req);
+        if (!scope) {
+          res.status(403).json({ error: 'Assignment not found' });
+          return;
+        }
+        const lower = sanitisedKey.toLowerCase();
+        const regLower = scope.registration.toLowerCase();
+        const acceptable =
+          lower.startsWith(`events/`) && lower.includes(`/${regLower}/`) ||
+          lower.startsWith(`vehicle-events/${regLower}/`);
+        if (!acceptable) {
+          res.status(403).json({ error: 'Upload key does not target your vehicle' });
+          return;
+        }
+      }
 
       // Route condition-report photos to the PUBLIC bucket
       // (`ooosh-vehicle-photos`) so they can be opened via the "View full

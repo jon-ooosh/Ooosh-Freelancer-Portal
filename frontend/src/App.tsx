@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuthStore } from './hooks/useAuthStore';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
@@ -25,19 +25,47 @@ import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import LostCancelledPage from './pages/LostCancelledPage';
+import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
+import { BookOutPage as StaffBookOutPage } from './modules/vehicles/pages/BookOutPage';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { sharedRefreshToken } from './services/api';
+import { getFreelancerSession, isFreelancerSessionActive } from './modules/vehicles/adapters/freelancer-session';
 
-// Initialize Vehicle Module with OP auth and API config
+const staffBookOutQueryClient = new QueryClient({
+  defaultOptions: { queries: { staleTime: 1000 * 60 * 2, retry: 1 } },
+});
+
+// Initialize Vehicle Module with OP auth and API config.
+//
+// getAuthHeaders picks the right token for the current mode:
+//   - Staff logged in → staff JWT (even if a stale freelancer session is
+//     also present in localStorage; staff session wins)
+//   - Else freelancer session present → scoped freelancer JWT
+//   - Else → no auth header
+// This ordering stops a lingering freelancer session (up to 4h old) from
+// accidentally piggy-backing on a staff user's API calls in the same
+// browser.
 initVehicleModule({
   apiBaseUrl: '/api/vehicles',
   getAuthHeaders: (): Record<string, string> => {
-    const token = useAuthStore.getState().accessToken;
-    return token ? { Authorization: `Bearer ${token}` } : {};
+    const staffToken = useAuthStore.getState().accessToken;
+    if (staffToken) return { Authorization: `Bearer ${staffToken}` };
+    const freelancer = getFreelancerSession();
+    if (freelancer) return { Authorization: `Bearer ${freelancer.token}` };
+    return {};
   },
   authStoreGetter: () => useAuthStore.getState(),
-  sharedRefreshToken,
+  sharedRefreshToken: async () => {
+    // Freelancer sessions don't refresh — they're one-shot, 4h TTL.
+    // If a freelancer's JWT 401s, they have to go back to the portal
+    // and get a new HMAC token. Skip the staff refresh path entirely.
+    if (!useAuthStore.getState().accessToken && isFreelancerSessionActive()) {
+      throw new Error('Freelancer session expired');
+    }
+    return sharedRefreshToken();
+  },
 });
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -49,10 +77,41 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Book-out entry point that decides between freelancer mode (portal
+ * handoff, no staff JWT needed) and staff mode (normal protected route).
+ * Freelancer mode is triggered by `?freelancerToken=` on the URL OR an
+ * already-active freelancer session in localStorage.
+ *
+ * Staff mode renders BookOutPage directly (with its own QueryClient)
+ * rather than going through VehicleRoutes, because this component is
+ * the TERMINAL match for `/vehicles/book-out` — nesting VehicleRoutes
+ * here would leave no remaining path for its internal Routes to match,
+ * and we'd render HomePage by mistake.
+ */
+function BookOutEntry() {
+  const [params] = useSearchParams();
+  const hasFreelancerToken = params.has('freelancerToken') || isFreelancerSessionActive();
+  if (hasFreelancerToken) {
+    return <FreelancerBookoutShell />;
+  }
+  return (
+    <ProtectedRoute>
+      <Layout>
+        <QueryClientProvider client={staffBookOutQueryClient}>
+          <StaffBookOutPage />
+        </QueryClientProvider>
+      </Layout>
+    </ProtectedRoute>
+  );
+}
+
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Public freelancer book-out entry — bypasses ProtectedRoute */}
+      <Route path="/vehicles/book-out" element={<BookOutEntry />} />
       <Route
         path="/*"
         element={

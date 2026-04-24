@@ -32,7 +32,23 @@
  * The OP's api service adds Authorization: Bearer <token> to every request automatically.
  */
 
+import { getFreelancerSession, clearFreelancerSession } from './freelancer-session'
+import type { FreelancerBookoutContext } from './freelancer-session'
+
 export type SessionScope = 'staff' | 'freelancer'
+
+/** Context passed to BookOutPage when running in freelancer scope. */
+export interface FreelancerContext {
+  /** HireHop job number as string (preferred) or OP job UUID (fallback) */
+  jobId: string
+  driverEmail: string
+  driverName: string
+  vehicleId: string
+  vehicleReg: string
+  vehicleMakeModel: string
+  assignmentId: string
+  returnUrl: string | null
+}
 
 export interface AuthAdapterState {
   isAuthenticated: boolean
@@ -46,6 +62,8 @@ export interface AuthAdapterState {
   userRole: string | null
   /** Session token (VM standalone) or access token (OP embedded) */
   token: string | null
+  /** Present only when scope === 'freelancer' */
+  freelancerContext: FreelancerContext | null
   logout: () => void
 }
 
@@ -82,9 +100,31 @@ export function isEmbeddedMode(): boolean {
 /**
  * Get auth state from the OP store (embedded mode only).
  * Returns null if not in embedded mode.
+ *
+ * If a freelancer book-out session is active (localStorage has
+ * `ooosh_freelancer_bookout_session`), that takes precedence over the
+ * staff store — the embedded vehicle module then runs in freelancer scope
+ * and BookOutPage gets the scoped context. Logout clears the freelancer
+ * session (not the staff session, which may well be valid in another tab).
  */
 export function getOpAuthState(): AuthAdapterState | null {
   if (!opAuthStoreGetter) return null
+
+  // Freelancer session takes precedence when present.
+  const fs = getFreelancerSession()
+  if (fs) {
+    return {
+      isAuthenticated: true,
+      isLoading: false,
+      scope: 'freelancer',
+      userName: fs.context.driverName,
+      userEmail: fs.context.driverEmail,
+      userRole: null,
+      token: fs.token,
+      freelancerContext: freelancerContextFromStorage(fs.context),
+      logout: clearFreelancerSession,
+    }
+  }
 
   const state = opAuthStoreGetter()
   return {
@@ -95,6 +135,20 @@ export function getOpAuthState(): AuthAdapterState | null {
     userEmail: state.user?.email ?? null,
     userRole: state.user?.role ?? null,
     token: state.accessToken,
+    freelancerContext: null,
     logout: state.logout,
+  }
+}
+
+function freelancerContextFromStorage(ctx: FreelancerBookoutContext): FreelancerContext {
+  return {
+    jobId: ctx.hhJobNumber ?? ctx.opJobId,
+    driverEmail: ctx.driverEmail,
+    driverName: ctx.driverName,
+    vehicleId: ctx.vehicleId,
+    vehicleReg: ctx.vehicleReg,
+    vehicleMakeModel: ctx.vehicleMakeModel,
+    assignmentId: ctx.assignmentId,
+    returnUrl: ctx.returnUrl,
   }
 }
