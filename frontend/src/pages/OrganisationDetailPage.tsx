@@ -110,6 +110,21 @@ export default function OrganisationDetailPage() {
   const [relDirection, setRelDirection] = useState<'forward' | 'reverse'>('forward');
   const [relSaving, setRelSaving] = useState(false);
 
+  // Add person
+  const [showAddPerson, setShowAddPerson] = useState(false);
+  const [personMode, setPersonMode] = useState<'search' | 'new'>('search');
+  const [personSearch, setPersonSearch] = useState('');
+  const [personResults, setPersonResults] = useState<Array<{ id: string; first_name: string; last_name: string; email: string | null }>>([]);
+  const [personSelected, setPersonSelected] = useState<{ id: string; name: string } | null>(null);
+  const [newPersonFirst, setNewPersonFirst] = useState('');
+  const [newPersonLast, setNewPersonLast] = useState('');
+  const [newPersonEmail, setNewPersonEmail] = useState('');
+  const [newPersonMobile, setNewPersonMobile] = useState('');
+  const [personRole, setPersonRole] = useState('');
+  const [personIsPrimary, setPersonIsPrimary] = useState(false);
+  const [personSaving, setPersonSaving] = useState(false);
+  const [personError, setPersonError] = useState('');
+
   useEffect(() => {
     if (id) {
       loadOrg();
@@ -159,6 +174,78 @@ export default function OrganisationDetailPage() {
     }, 250);
     return () => clearTimeout(timeout);
   }, [relOrgSearch, id]);
+
+  useEffect(() => {
+    if (personSearch.length < 2) { setPersonResults([]); return; }
+    const timeout = setTimeout(async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; first_name: string; last_name: string; email: string | null }> }>(
+          `/people?search=${encodeURIComponent(personSearch)}&limit=8`
+        );
+        const linkedPersonIds = new Set((org?.people || []).filter(p => p.status === 'active').map(p => p.person_id));
+        setPersonResults(data.data.filter(p => !linkedPersonIds.has(p.id)));
+      } catch { /* ignore */ }
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [personSearch, org?.people]);
+
+  function resetAddPersonForm() {
+    setShowAddPerson(false);
+    setPersonMode('search');
+    setPersonSearch('');
+    setPersonResults([]);
+    setPersonSelected(null);
+    setNewPersonFirst('');
+    setNewPersonLast('');
+    setNewPersonEmail('');
+    setNewPersonMobile('');
+    setPersonRole('');
+    setPersonIsPrimary(false);
+    setPersonError('');
+  }
+
+  async function handleAddPerson(e: React.FormEvent) {
+    e.preventDefault();
+    if (!id || personSaving) return;
+    if (!personRole.trim()) {
+      setPersonError('Pick a role');
+      return;
+    }
+    if (personMode === 'search' && !personSelected) {
+      setPersonError('Pick a person or switch to "Create new"');
+      return;
+    }
+    if (personMode === 'new' && (!newPersonFirst.trim() || !newPersonLast.trim())) {
+      setPersonError('First and last name are required for a new person');
+      return;
+    }
+    setPersonSaving(true);
+    setPersonError('');
+    try {
+      const body: Record<string, unknown> = {
+        role: personRole.trim(),
+        is_primary: personIsPrimary,
+      };
+      if (personMode === 'search') {
+        body.person_id = personSelected!.id;
+      } else {
+        body.new_person = {
+          first_name: newPersonFirst.trim(),
+          last_name: newPersonLast.trim(),
+          email: newPersonEmail.trim() || undefined,
+          mobile: newPersonMobile.trim() || undefined,
+        };
+      }
+      await api.post(`/organisations/${id}/people`, body);
+      resetAddPersonForm();
+      loadOrg();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to add person';
+      setPersonError(msg);
+    } finally {
+      setPersonSaving(false);
+    }
+  }
 
   async function handleAddRelationship() {
     if (!relSelectedOrg || !id) return;
@@ -415,6 +502,181 @@ export default function OrganisationDetailPage() {
 
       {activeTab === 'people' && (
         <div className="space-y-6">
+          {/* Add person */}
+          {!showAddPerson ? (
+            <button
+              onClick={() => setShowAddPerson(true)}
+              className="bg-ooosh-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors"
+            >
+              + Add Person
+            </button>
+          ) : (
+            <form onSubmit={handleAddPerson} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-gray-700">Add Person to {org.name}</h3>
+                <div className="flex items-center gap-1 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => { setPersonMode('search'); setPersonError(''); }}
+                    className={`px-2 py-1 rounded ${personMode === 'search' ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    Search existing
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setPersonMode('new'); setPersonSelected(null); setPersonError(''); }}
+                    className={`px-2 py-1 rounded ${personMode === 'new' ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
+                  >
+                    Create new
+                  </button>
+                </div>
+              </div>
+
+              {personError && (
+                <div className="mb-3 bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-xs">{personError}</div>
+              )}
+
+              {personMode === 'search' ? (
+                !personSelected ? (
+                  <div className="relative">
+                    <input
+                      value={personSearch}
+                      onChange={e => setPersonSearch(e.target.value)}
+                      placeholder="Search for a person..."
+                      autoFocus
+                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                    {personResults.length > 0 && (
+                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded shadow-lg max-h-48 overflow-y-auto z-10">
+                        {personResults.map(p => (
+                          <button
+                            key={p.id}
+                            type="button"
+                            onClick={() => {
+                              setPersonSelected({ id: p.id, name: `${p.first_name} ${p.last_name}`.trim() });
+                              setPersonResults([]);
+                              setPersonSearch('');
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 flex items-center justify-between gap-2"
+                          >
+                            <span className="font-medium">{p.first_name} {p.last_name}</span>
+                            {p.email && <span className="text-xs text-gray-400 truncate">{p.email}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {personSearch.length >= 2 && personResults.length === 0 && (
+                      <p className="mt-1 text-xs text-gray-400">
+                        No matches. Switch to <button type="button" onClick={() => { setPersonMode('new'); setNewPersonFirst(personSearch); }} className="text-ooosh-600 hover:underline">Create new</button>?
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-gray-900 bg-ooosh-50 px-2 py-1 rounded">{personSelected.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => { setPersonSelected(null); setPersonSearch(''); }}
+                      className="text-xs text-gray-400 hover:text-gray-600"
+                    >
+                      Change
+                    </button>
+                  </div>
+                )
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">First Name *</label>
+                    <input
+                      value={newPersonFirst}
+                      onChange={e => setNewPersonFirst(e.target.value)}
+                      autoFocus
+                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Last Name *</label>
+                    <input
+                      value={newPersonLast}
+                      onChange={e => setNewPersonLast(e.target.value)}
+                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Email</label>
+                    <input
+                      type="email"
+                      value={newPersonEmail}
+                      onChange={e => setNewPersonEmail(e.target.value)}
+                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Mobile</label>
+                    <input
+                      value={newPersonMobile}
+                      onChange={e => setNewPersonMobile(e.target.value)}
+                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-4">
+                <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Role / Title *</label>
+                <select
+                  value={personRole}
+                  onChange={e => setPersonRole(e.target.value)}
+                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                >
+                  <option value="">Select a role...</option>
+                  <option value="Main Contact">Main Contact</option>
+                  <option value="Tour Manager">Tour Manager</option>
+                  <option value="Manager">Manager</option>
+                  <option value="Production Manager">Production Manager</option>
+                  <option value="Engineer">Engineer</option>
+                  <option value="Accountant">Accountant</option>
+                  <option value="Promoter">Promoter</option>
+                  <option value="Crew">Crew</option>
+                  <option value="Band Member">Band Member</option>
+                  <option value="Driver">Driver</option>
+                  <option value="Agent">Agent</option>
+                  <option value="Site Contact">Site Contact</option>
+                  <option value="Owner">Owner</option>
+                  <option value="General Contact">General Contact</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+
+              <label className="flex items-center gap-2 mt-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={personIsPrimary}
+                  onChange={e => setPersonIsPrimary(e.target.checked)}
+                  className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+                />
+                <span className="text-sm text-gray-700">Primary contact at this organisation</span>
+              </label>
+
+              <div className="flex gap-2 mt-4">
+                <button
+                  type="submit"
+                  disabled={personSaving}
+                  className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+                >
+                  {personSaving ? 'Saving...' : 'Add Person'}
+                </button>
+                <button
+                  type="button"
+                  onClick={resetAddPersonForm}
+                  className="px-4 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          )}
+
           {activePeople.length > 0 && (
             <div>
               <h3 className="text-sm font-semibold text-gray-700 mb-3">Current</h3>
@@ -481,7 +743,7 @@ export default function OrganisationDetailPage() {
             </div>
           )}
 
-          {!org.people?.length && (
+          {!org.people?.length && !showAddPerson && (
             <p className="text-center text-sm text-gray-400 py-8">No people associated with this organisation.</p>
           )}
 

@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { query } from '../config/database';
+import { query, getClient } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
@@ -304,6 +304,25 @@ const updateRelationshipSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
+// Person added to this org — either link an existing person by id, or
+// create a new lightweight person record in the same request.
+const orgPersonLinkSchema = z.object({
+  person_id: z.string().uuid().optional(),
+  new_person: z.object({
+    first_name: z.string().min(1).max(255),
+    last_name: z.string().min(1).max(255),
+    email: z.string().email().optional().nullable(),
+    mobile: z.string().max(50).optional().nullable(),
+    phone: z.string().max(50).optional().nullable(),
+  }).optional(),
+  role: z.string().min(1).max(255),
+  is_primary: z.boolean().optional().default(false),
+  start_date: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+}).refine(d => (!!d.person_id) !== (!!d.new_person), {
+  message: 'Provide exactly one of person_id or new_person',
+});
+
 // GET /api/organisations/:id/relationships
 router.get('/:id/relationships', async (req: AuthRequest, res: Response) => {
   try {
@@ -430,6 +449,77 @@ router.delete('/:orgId/relationships/:relId', async (req: AuthRequest, res: Resp
   } catch (error) {
     console.error('Delete org relationship error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/organisations/:id/people — attach a person to this org
+// Mirror of POST /api/people/:id/roles but driven from the org side, so
+// you can add a contact without leaving the org detail page. Accepts
+// either person_id (existing) or new_person (creates + links atomically).
+router.post('/:id/people', validate(orgPersonLinkSchema), async (req: AuthRequest, res: Response) => {
+  const orgId = req.params.id as string;
+  const { person_id, new_person, role, is_primary, start_date, notes } = req.body;
+
+  const orgCheck = await query(
+    'SELECT id FROM organisations WHERE id = $1 AND is_deleted = false',
+    [orgId]
+  );
+  if (orgCheck.rows.length === 0) {
+    res.status(404).json({ error: 'Organisation not found' });
+    return;
+  }
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    let resolvedPersonId: string;
+    let createdPerson: Record<string, unknown> | null = null;
+
+    if (person_id) {
+      const exists = await client.query(
+        'SELECT id FROM people WHERE id = $1 AND is_deleted = false',
+        [person_id]
+      );
+      if (exists.rows.length === 0) {
+        await client.query('ROLLBACK');
+        res.status(404).json({ error: 'Person not found' });
+        return;
+      }
+      resolvedPersonId = person_id;
+    } else {
+      const np = new_person as { first_name: string; last_name: string; email?: string | null; mobile?: string | null; phone?: string | null };
+      const personResult = await client.query(
+        `INSERT INTO people (first_name, last_name, email, mobile, phone, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [np.first_name, np.last_name, np.email?.toLowerCase() || null, np.mobile || null, np.phone || null, req.user!.id]
+      );
+      createdPerson = personResult.rows[0];
+      resolvedPersonId = personResult.rows[0].id;
+    }
+
+    const roleResult = await client.query(
+      `INSERT INTO person_organisation_roles (person_id, organisation_id, role, is_primary, start_date, notes)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING *`,
+      [resolvedPersonId, orgId, role, is_primary, start_date || new Date().toISOString(), notes || null]
+    );
+
+    await client.query('COMMIT');
+
+    if (createdPerson) {
+      await logAudit(req.user!.id, 'people', resolvedPersonId, 'create', null, createdPerson);
+    }
+    await logAudit(req.user!.id, 'person_organisation_roles', roleResult.rows[0].id, 'create', null, roleResult.rows[0]);
+
+    res.status(201).json({ role: roleResult.rows[0], person: createdPerson });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Add person to org error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });
 
