@@ -7,6 +7,8 @@ import TransportCalculator from '../components/TransportCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
+import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
 import CancelRemindersSection from '../components/CancelRemindersSection';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -822,6 +824,9 @@ export default function JobDetailPage() {
 
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
+  const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
+  const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | undefined>(undefined);
+  const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
 
@@ -1565,6 +1570,19 @@ export default function JobDetailPage() {
       console.error('Failed to load vehicle assignments');
     } finally {
       setVehicleAssignmentsLoading(false);
+    }
+  }
+
+  async function openExcessModal(excessId: string, initialAction?: 'edit_required') {
+    setExcessModalLoadingId(excessId);
+    try {
+      const res = await api.get<{ data: JobExcess }>(`/excess/${excessId}`);
+      setExcessModalInitialAction(initialAction);
+      setExcessModalRecord(res.data);
+    } catch (err) {
+      console.error('Failed to load excess record:', err);
+    } finally {
+      setExcessModalLoadingId(null);
     }
   }
 
@@ -2653,7 +2671,7 @@ export default function JobDetailPage() {
                             <div className="flex items-center justify-between text-xs">
                               <span className="text-gray-500">Insurance Excess</span>
                               <div className="flex items-center gap-2">
-                                {a.excess.excess_amount_required && (
+                                {a.excess.excess_amount_required != null && (
                                   <span className="font-medium text-gray-700">
                                     £{Number(a.excess.excess_amount_required).toFixed(2)}
                                   </span>
@@ -2679,6 +2697,23 @@ export default function JobDetailPage() {
                                    a.excess.excess_status === 'partially_paid' || a.excess.excess_status === 'partial' ? 'Part Paid' :
                                    a.excess.excess_status}
                                 </span>
+                                <button
+                                  type="button"
+                                  onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
+                                  disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                  title="Edit required excess amount"
+                                  className="text-xs font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
+                                >
+                                  {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => a.excess && openExcessModal(a.excess.id)}
+                                  disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                  className="text-xs font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
+                                >
+                                  Manage
+                                </button>
                               </div>
                             </div>
                           </div>
@@ -3390,6 +3425,16 @@ export default function JobDetailPage() {
       )}
 
       {/* Chase Modal */}
+      {/* Excess Payment / Edit Modal — opened from Drivers & Vehicles strip */}
+      {excessModalRecord && (
+        <ExcessPaymentModal
+          excess={excessModalRecord}
+          initialAction={excessModalInitialAction}
+          onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
+          onUpdated={() => { loadVehicleAssignments(); }}
+        />
+      )}
+
       <ChaseModal
         isOpen={showChaseModal}
         job={job ? {

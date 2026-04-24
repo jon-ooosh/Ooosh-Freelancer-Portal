@@ -270,7 +270,11 @@ function JobAllocationCard({
   const requirements = extractVanRequirements(job)
   const jobAllocations = allocations.filter(a => a.hireHopJobId === job.id)
   const totalNeeded = requirements.reduce((sum, r) => sum + r.quantity, 0)
-  const assignedCount = jobAllocations.length
+  // Count unique vans actually picked — not hire-form placeholders waiting
+  // for a van. Multiple drivers on the same van still count as 1 assignment.
+  const assignedCount = new Set(
+    jobAllocations.filter(a => a.vehicleId).map(a => a.vehicleId),
+  ).size
 
   // Fetch driver hire forms for this job (only when expanded to save API calls)
   const { data: hireForms } = useDriverHireForms(expanded ? String(job.id) : null)
