@@ -1,0 +1,148 @@
+diff --git a/backend/src/routes/excess.ts b/backend/src/routes/excess.ts
+index 4bc7060..6e21909 100644
+--- a/backend/src/routes/excess.ts
++++ b/backend/src/routes/excess.ts
+@@ -955,19 +955,46 @@ router.post('/:id/link-deposit', authorize('admin', 'manager'), validate(linkDep
+ });
+ 
+ // ── POST /api/excess/:id/unlink-deposit — Remove the HH deposit link ──
++//
++// Used when a HireHop deposit was wrongly linked to this excess record (e.g.
++// the classifier picked it up as excess but it was actually a hire payment,
++// such as a Stripe URL containing "xs" in its path). "Undoes" the
++// reconciliation: zeroes amount_taken + payment metadata, and recomputes
++// status via deriveExcessStatus so a fresh `needed`/`not_required` surface
++// is presented to staff and the portal.
+ 
+ router.post('/:id/unlink-deposit', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+   try {
+     const { id } = req.params;
+ 
++    const current = await query(
++      `SELECT excess_amount_required, excess_status FROM job_excess WHERE id = $1`,
++      [id]
++    );
++    if (current.rows.length === 0) {
++      res.status(404).json({ error: 'Excess record not found' });
++      return;
++    }
++    const row = current.rows[0];
++    const newStatus = deriveExcessStatus(
++      row.excess_status,
++      Number(row.excess_amount_required || 0),
++      0 // taken is being zeroed
++    );
++
+     const result = await query(
+       `UPDATE job_excess SET
+         hh_deposit_id = NULL,
+         hh_reconciled_at = NULL,
+         hh_reconcile_source = NULL,
++        excess_amount_taken = 0,
++        payment_method = NULL,
++        payment_reference = NULL,
++        payment_date = NULL,
++        excess_status = $2,
+         updated_at = NOW()
+       WHERE id = $1 RETURNING *`,
+-      [id]
++      [id, newStatus]
+     );
+ 
+     if (result.rows.length === 0) {
+@@ -975,7 +1002,7 @@ router.post('/:id/unlink-deposit', authorize('admin', 'manager'), async (req: Au
+       return;
+     }
+ 
+-    console.log(`[excess] Unlinked HH deposit from excess ${id} (by user ${req.user!.id})`);
++    console.log(`[excess] Unlinked HH deposit from excess ${id} (by user ${req.user!.id}) — reset taken to 0, status → ${newStatus}`);
+     res.json({ data: result.rows[0] });
+   } catch (error) {
+     console.error('[excess] Unlink deposit error:', error);
+diff --git a/backend/src/routes/money.ts b/backend/src/routes/money.ts
+index 0aab436..69d1fe9 100644
+--- a/backend/src/routes/money.ts
++++ b/backend/src/routes/money.ts
+@@ -1457,10 +1457,13 @@ function getHHBankId(paymentMethod: string): number {
+ /**
+  * Detect if a deposit description/memo indicates an excess payment.
+  * Matches the same keywords as the Payment Portal's isExcessPayment().
++ *
++ * Uses word boundaries to avoid false positives from URLs and longer tokens
++ * (e.g. a Stripe URL like pi_...dNxs3kl must NOT trigger on "xs").
+  */
+ function isExcessPayment(text: string): boolean {
+   const lower = text.toLowerCase();
+-  return /excess|insurance|xs|top.?up/.test(lower);
++  return /\bexcess\b|\binsurance\b|\bxs\b|\btop[- ]?up\b/.test(lower);
+ }
+ 
+ /**
+diff --git a/frontend/src/components/ExcessPaymentModal.tsx b/frontend/src/components/ExcessPaymentModal.tsx
+index 7bf46f9..da28eb2 100644
+--- a/frontend/src/components/ExcessPaymentModal.tsx
++++ b/frontend/src/components/ExcessPaymentModal.tsx
+@@ -7,7 +7,7 @@ import { useState, useRef } from 'react';
+ import { api } from '../services/api';
+ import type { JobExcess, ExcessStatus } from '../../../shared/types';
+ 
+-type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'move' | 'edit_required';
++type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'move' | 'edit_required' | 'unlink_deposit';
+ 
+ interface ExcessPaymentModalProps {
+   excess: JobExcess;
+@@ -170,6 +170,9 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
+           });
+           break;
+         }
++        case 'unlink_deposit':
++          await api.post(`/excess/${excess.id}/unlink-deposit`, {});
++          break;
+       }
+       onUpdated();
+       onClose();
+@@ -206,6 +209,14 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
+   }
+   availableActions.push({ action: 'move', label: 'Move to Different Entity', icon: '>' });
+ 
++  // Unlink HH deposit — only when a record is linked. Covers the case where
++  // a HireHop deposit was wrongly classified as excess (e.g. Stripe URL with
++  // "xs" in its path triggered the keyword match) and staff need to undo it.
++  // Backend resets amount_taken to 0 and recomputes status.
++  if (excess.hh_deposit_id) {
++    availableActions.push({ action: 'unlink_deposit', label: 'Unlink HireHop Deposit', icon: '⊘' });
++  }
++
+   return (
+     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+       <div
+@@ -569,6 +580,29 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
+               </div>
+             )}
+ 
++            {action === 'unlink_deposit' && (
++              <div className="space-y-3">
++                <h3 className="text-sm font-semibold text-gray-900">Unlink HireHop Deposit</h3>
++                <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800 space-y-1">
++                  <p>
++                    This record is linked to HireHop deposit <strong>#{excess.hh_deposit_id}</strong>.
++                    Use this when the deposit was wrongly classified as excess (e.g. a Stripe URL containing "xs" in its path).
++                  </p>
++                  <p className="mt-2">
++                    Unlinking will:
++                  </p>
++                  <ul className="list-disc list-inside ml-2 space-y-0.5">
++                    <li>Clear the HireHop link on this record</li>
++                    <li>Reset Collected to £0.00 on this record</li>
++                    <li>Recompute the status (likely back to Needed)</li>
++                  </ul>
++                  <p className="mt-2">
++                    The HireHop deposit itself is <strong>not touched</strong> — it stays in HireHop as a hire payment. You may still want to fix its description/memo on the HireHop side so the classifier doesn't re-match it on the next Money tab load.
++                  </p>
++                </div>
++              </div>
++            )}
++
+             {error && (
+               <p className="mt-3 text-xs text-red-600">{error}</p>
+             )}
