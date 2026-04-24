@@ -58,6 +58,9 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
         CASE WHEN q.status = 'cancelled' THEN 'cancelled' ELSE COALESCE(q.ops_status, 'todo') END as effective_ops_status,
         j.job_name, j.hh_job_number, j.client_name, j.out_date, j.return_date,
         v.name as linked_venue_name, v.address as venue_address, v.city as venue_city,
+        rg.combined_freelancer_fee as run_combined_freelancer_fee,
+        rg.combined_client_fee as run_combined_client_fee,
+        rg.notes as run_notes,
         COALESCE(
           (SELECT json_agg(json_build_object(
             'id', qa.id,
@@ -81,6 +84,7 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
        FROM quotes q
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
+       LEFT JOIN run_groups rg ON rg.id = q.run_group
        ${whereClause}
        ORDER BY
          CASE WHEN q.status = 'cancelled' THEN 7
@@ -359,6 +363,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     params.push(offset);
     const result = await query(
       `SELECT q.*,
+        rg.combined_freelancer_fee as run_combined_freelancer_fee,
+        rg.combined_client_fee as run_combined_client_fee,
+        rg.notes as run_notes,
         CONCAT(p.first_name, ' ', p.last_name) as created_by_name,
         COALESCE(
           (SELECT json_agg(json_build_object(
@@ -378,6 +385,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
        FROM quotes q
        LEFT JOIN users u ON u.id = q.created_by
        LEFT JOIN people p ON p.id = u.person_id
+       LEFT JOIN run_groups rg ON rg.id = q.run_group
        ${whereClause}
        ORDER BY q.created_at DESC
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -1158,7 +1166,13 @@ router.post('/local', validate(localQuoteSchema), async (req: AuthRequest, res: 
   }
 });
 
-// ── PUT /api/quotes/:id/run-group — manage run grouping ─────────────
+// ── PUT /api/quotes/:id/run-group — attach/detach a quote to a run ───
+//
+// Accepts an existing run_groups.id OR null (to ungroup). If the UUID
+// doesn't exist yet (legacy clients mint their own and PUT it), we
+// upsert a blank run_groups row so the FK resolves — this keeps
+// backward compat with the existing Transport Ops UI that calls
+// crypto.randomUUID() client-side.
 
 const runGroupSchema = z.object({
   run_group: z.string().uuid().nullable(),
@@ -1169,6 +1183,16 @@ const runGroupSchema = z.object({
 router.put('/:id/run-group', validate(runGroupSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { run_group, run_order, run_group_fee } = req.body;
+
+    if (run_group) {
+      await query(
+        `INSERT INTO run_groups (id, run_date)
+         SELECT $1, job_date::date FROM quotes WHERE id = $2
+         ON CONFLICT (id) DO NOTHING`,
+        [run_group, req.params.id]
+      );
+    }
+
     const result = await query(
       `UPDATE quotes SET run_group = $1, run_order = $2, run_group_fee = $3, updated_at = NOW()
        WHERE id = $4 AND is_deleted = false RETURNING id, run_group, run_order, run_group_fee`,
@@ -1182,6 +1206,152 @@ router.put('/:id/run-group', validate(runGroupSchema), async (req: AuthRequest, 
   } catch (error) {
     console.error('Update run group error:', error);
     res.status(500).json({ error: 'Failed to update run group' });
+  }
+});
+
+// ── Run groups CRUD ─────────────────────────────────────────────────
+//
+// A run_group is a first-class entity with an optional combined fee
+// that overrides the sum of per-quote fees. Grouping/ungrouping is
+// non-destructive — individual quotes.freelancer_fee is never touched.
+
+const createRunSchema = z.object({
+  run_date: z.string().optional().nullable(),
+  combined_freelancer_fee: z.number().optional().nullable(),
+  combined_client_fee: z.number().optional().nullable(),
+  notes: z.string().optional().nullable(),
+  quote_ids: z.array(z.string().uuid()).optional(),
+});
+
+router.post('/runs', validate(createRunSchema), async (req: AuthRequest, res: Response) => {
+  const client = await (await import('../config/database')).getClient();
+  try {
+    await client.query('BEGIN');
+    const { run_date, combined_freelancer_fee, combined_client_fee, notes, quote_ids } = req.body;
+
+    const runResult = await client.query(
+      `INSERT INTO run_groups (run_date, combined_freelancer_fee, combined_client_fee, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, run_date, combined_freelancer_fee, combined_client_fee, notes, created_at`,
+      [run_date || null, combined_freelancer_fee ?? null, combined_client_fee ?? null, notes || null, req.user!.id]
+    );
+    const run = runResult.rows[0];
+
+    if (quote_ids && quote_ids.length > 0) {
+      await client.query(
+        `UPDATE quotes SET run_group = $1, updated_at = NOW()
+         WHERE id = ANY($2::uuid[]) AND is_deleted = false`,
+        [run.id, quote_ids]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json(run);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Create run group error:', error);
+    res.status(500).json({ error: 'Failed to create run group' });
+  } finally {
+    client.release();
+  }
+});
+
+const updateRunSchema = z.object({
+  run_date: z.string().optional().nullable(),
+  combined_freelancer_fee: z.number().optional().nullable(),
+  combined_client_fee: z.number().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
+router.patch('/runs/:runId', validate(updateRunSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const fields: string[] = [];
+    const params: unknown[] = [];
+    for (const key of ['run_date', 'combined_freelancer_fee', 'combined_client_fee', 'notes']) {
+      if (key in req.body) {
+        params.push(req.body[key] ?? null);
+        fields.push(`${key} = $${params.length}`);
+      }
+    }
+    if (fields.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+    params.push(req.params.runId);
+    const result = await query(
+      `UPDATE run_groups SET ${fields.join(', ')}, updated_at = NOW()
+       WHERE id = $${params.length}
+       RETURNING id, run_date, combined_freelancer_fee, combined_client_fee, notes, updated_at`,
+      params
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update run group error:', error);
+    res.status(500).json({ error: 'Failed to update run group' });
+  }
+});
+
+// Delete (ungroup): FK is ON DELETE SET NULL, so member quotes are
+// ungrouped automatically and their standalone freelancer_fee values
+// become visible again — non-destructive.
+router.delete('/runs/:runId', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `DELETE FROM run_groups WHERE id = $1 RETURNING id`,
+      [req.params.runId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete run group error:', error);
+    res.status(500).json({ error: 'Failed to delete run group' });
+  }
+});
+
+// Returns the run with its member quotes' standalone fees, so the UI
+// can show "individual total would be £X, combined is £Y".
+router.get('/runs/:runId', async (req: AuthRequest, res: Response) => {
+  try {
+    const runResult = await query(
+      `SELECT id, run_date, combined_freelancer_fee, combined_client_fee, notes, created_at, updated_at
+       FROM run_groups WHERE id = $1`,
+      [req.params.runId]
+    );
+    if (runResult.rows.length === 0) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+    const quotesResult = await query(
+      `SELECT id, job_id, job_type, job_date, arrival_time, run_order,
+              freelancer_fee, freelancer_fee_rounded,
+              client_charge_total, client_charge_rounded,
+              venue_name
+       FROM quotes WHERE run_group = $1 AND is_deleted = false
+       ORDER BY run_order NULLS LAST, arrival_time NULLS LAST, created_at`,
+      [req.params.runId]
+    );
+    const run = runResult.rows[0];
+    const quotes = quotesResult.rows;
+    const standaloneFreelancerTotal = quotes.reduce((s: number, q: Record<string, unknown>) =>
+      s + Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0), 0);
+    const standaloneClientTotal = quotes.reduce((s: number, q: Record<string, unknown>) =>
+      s + Number(q.client_charge_rounded ?? q.client_charge_total ?? 0), 0);
+    res.json({
+      ...run,
+      quotes,
+      standalone_freelancer_total: standaloneFreelancerTotal,
+      standalone_client_total: standaloneClientTotal,
+    });
+  } catch (error) {
+    console.error('Get run group error:', error);
+    res.status(500).json({ error: 'Failed to load run group' });
   }
 });
 

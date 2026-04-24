@@ -99,7 +99,13 @@ async function exchangeHubToken(hubToken: string): Promise<{
 }
 
 /**
- * Exchange a freelancerToken from the freelancer portal for a scoped session.
+ * Exchange a freelancerToken from the freelancer portal for a scoped
+ * book-out session. Hits OP's /api/vehicles/freelancer-bookout/resolve
+ * (replaces the legacy Netlify /validate-freelancer-token when the
+ * vehicle module is embedded in OP).
+ *
+ * The OP endpoint returns the already-allocated assignment + vehicle
+ * so the book-out flow can skip the "pick a van" step entirely.
  */
 async function exchangeFreelancerToken(freelancerToken: string): Promise<{
   sessionToken: string
@@ -108,31 +114,48 @@ async function exchangeFreelancerToken(freelancerToken: string): Promise<{
   driverEmail: string
 } | { error: string }> {
   try {
-    const response = await apiFetch('/validate-freelancer-token', {
+    const response = await apiFetch('/freelancer-bookout/resolve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ freelancerToken }),
+      body: JSON.stringify({ token: freelancerToken }),
     })
 
     const data = (await response.json()) as {
-      valid: boolean
+      success?: boolean
       sessionToken?: string
-      expiresAt?: string
-      jobId?: string
-      driverEmail?: string
+      assignment?: { id: string; vehicleId: string; registration: string; makeModel: string; status: string }
+      job?: { id: string; hhJobNumber: number | string | null; venueName: string | null }
+      driver?: { name: string; email: string }
       error?: string
+      code?: string
+      hint?: string
     }
 
-    if (data.valid && data.sessionToken && data.expiresAt && data.jobId && data.driverEmail) {
+    if (data.success && data.sessionToken && data.job && data.driver?.email) {
+      // Session JWT lives 4h server-side — expose an expiresAt in the
+      // same shape the local storage helpers already use.
+      const expiresAt = new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString()
+      // BookOutPage expects jobId as a numeric HireHop job number
+      // (parseInt). Fall back to the OP UUID if no HH number is
+      // linked yet — downstream code handles both shapes in its
+      // job-lookup paths.
+      const jobIdForPage = data.job.hhJobNumber != null
+        ? String(data.job.hhJobNumber)
+        : data.job.id
       return {
         sessionToken: data.sessionToken,
-        expiresAt: data.expiresAt,
-        jobId: data.jobId,
-        driverEmail: data.driverEmail,
+        expiresAt,
+        jobId: jobIdForPage,
+        driverEmail: data.driver.email,
       }
     }
 
-    return { error: data.error || `Token validation failed (HTTP ${response.status})` }
+    // Surface hint if the allocation hasn't happened yet — more useful
+    // than a generic "Token validation failed".
+    const errorMsg = data.error
+      ? data.hint ? `${data.error}. ${data.hint}` : data.error
+      : `Token validation failed (HTTP ${response.status})`
+    return { error: errorMsg }
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'Network error connecting to server' }
   }

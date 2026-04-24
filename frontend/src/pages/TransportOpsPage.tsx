@@ -50,6 +50,9 @@ interface OpsQuote {
   run_group: string | null;
   run_order: number | null;
   run_group_fee: number | null;
+  run_combined_freelancer_fee: number | null;
+  run_combined_client_fee: number | null;
+  run_notes: string | null;
   is_local: boolean;
   tolls_status: string;
   accommodation_status: string;
@@ -457,6 +460,22 @@ export default function TransportOpsPage() {
     }
   }
 
+  // Update the run's combined fee (applies across all member quotes).
+  // Leaves individual freelancer_fee values intact — purely an override.
+  async function updateRunCombinedFee(
+    runGroupId: string,
+    fields: { combined_freelancer_fee?: number | null; combined_client_fee?: number | null; notes?: string | null }
+  ) {
+    try {
+      await api.patch(`/quotes/runs/${runGroupId}`, fields);
+      const params = filter !== 'all' ? `?job_type=${filter}` : '';
+      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${params}`);
+      setQuotes(mapEffectiveOpsStatus(res.data));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update combined fee');
+    }
+  }
+
   async function saveQuoteEdit(quoteId: string, fields: Record<string, unknown>) {
     try {
       await api.put(`/quotes/${quoteId}`, fields);
@@ -806,6 +825,7 @@ export default function TransportOpsPage() {
                         onUpdateDetails={updateOpsDetails}
                         onEdit={openEditModal}
                         onUpdateRunGroup={updateRunGroup}
+                        onUpdateRunCombinedFee={updateRunCombinedFee}
                         onPinPerson={(id, name) => setPersonPin({ id, name })}
                         onPinVenue={(name) => setVenuePin({ name })}
                         allQuotes={quotes}
@@ -830,6 +850,7 @@ export default function TransportOpsPage() {
           onUpdateDetails={updateOpsDetails}
           onEdit={openEditModal}
           onUpdateRunGroup={updateRunGroup}
+          onUpdateRunCombinedFee={updateRunCombinedFee}
         />
       )}
 
@@ -1014,6 +1035,7 @@ function QuoteRow({
   onUpdateDetails,
   onEdit,
   onUpdateRunGroup,
+  onUpdateRunCombinedFee,
   onPinPerson,
   onPinVenue,
   allQuotes,
@@ -1027,6 +1049,7 @@ function QuoteRow({
   onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
   onEdit: (quote: OpsQuote) => void;
   onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
+  onUpdateRunCombinedFee: (runGroupId: string, fields: { combined_freelancer_fee?: number | null; combined_client_fee?: number | null; notes?: string | null }) => Promise<void>;
   onPinPerson: (personId: string, name: string) => void;
   onPinVenue: (name: string) => void;
   allQuotes: OpsQuote[];
@@ -1214,10 +1237,21 @@ function QuoteRow({
         </div>
 
         {/* Fee */}
-        <div className="w-16 text-right flex-shrink-0 hidden md:block">
-          <span className="text-sm font-medium text-gray-700">
-            {q.client_charge_rounded ? `£${q.client_charge_rounded}` : '—'}
-          </span>
+        <div className="w-16 text-right flex-shrink-0 hidden md:block" title={
+          q.run_group && q.run_combined_client_fee != null
+            ? `Combined run charge (individual £${q.client_charge_rounded ?? 0})`
+            : undefined
+        }>
+          {q.run_group && q.run_combined_client_fee != null ? (
+            <span className="text-sm font-medium text-gray-700">
+              £{Number(q.run_combined_client_fee).toFixed(0)}
+              <span className="text-[9px] text-gray-400 ml-0.5">run</span>
+            </span>
+          ) : (
+            <span className="text-sm font-medium text-gray-700">
+              {q.client_charge_rounded ? `£${q.client_charge_rounded}` : '—'}
+            </span>
+          )}
         </div>
 
         {/* Status dropdown */}
@@ -1239,6 +1273,7 @@ function QuoteRow({
           onUpdateDetails={onUpdateDetails}
           onEdit={onEdit}
           onUpdateRunGroup={onUpdateRunGroup}
+          onUpdateRunCombinedFee={onUpdateRunCombinedFee}
           allQuotes={allQuotes}
         />
       )}
@@ -1469,6 +1504,102 @@ function CompletionImageThumb({ refString, alt, filename, thumbClassName }: {
   );
 }
 
+// Run combined fee editor — shown when a quote is part of a run.
+// Inline-edit combined freelancer + client fees; displays the standalone
+// sum alongside so staff can see what the run "would" cost individually.
+// Individual quote freelancer_fee values are never touched.
+function RunCombinedFeeEditor({
+  runGroupId,
+  currentCombinedFreelancerFee,
+  currentCombinedClientFee,
+  siblingQuotes,
+  onUpdate,
+}: {
+  runGroupId: string;
+  currentCombinedFreelancerFee: number | null;
+  currentCombinedClientFee: number | null;
+  siblingQuotes: OpsQuote[];
+  onUpdate: (runGroupId: string, fields: { combined_freelancer_fee?: number | null; combined_client_fee?: number | null; notes?: string | null }) => Promise<void>;
+}) {
+  const [freelancerDraft, setFreelancerDraft] = useState<string>(
+    currentCombinedFreelancerFee != null ? String(currentCombinedFreelancerFee) : ''
+  );
+  const [clientDraft, setClientDraft] = useState<string>(
+    currentCombinedClientFee != null ? String(currentCombinedClientFee) : ''
+  );
+  const [saving, setSaving] = useState(false);
+
+  // Standalone totals — sum of individual per-quote fees (read-only reference).
+  const standaloneFreelancerTotal = siblingQuotes.reduce(
+    (s, q) => s + Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0),
+    0
+  );
+  const standaloneClientTotal = siblingQuotes.reduce(
+    (s, q) => s + Number(q.client_charge_rounded ?? q.client_charge_total ?? 0),
+    0
+  );
+
+  async function save(field: 'combined_freelancer_fee' | 'combined_client_fee', raw: string) {
+    const trimmed = raw.trim();
+    const value = trimmed === '' ? null : Number(trimmed);
+    if (trimmed !== '' && Number.isNaN(value)) return;
+    setSaving(true);
+    try {
+      await onUpdate(runGroupId, { [field]: value });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 pt-2 border-t border-dashed border-gray-200 space-y-1.5">
+      <div className="flex items-center gap-2">
+        <label className="text-xs text-gray-500 w-24">Combined freelancer fee</label>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-400">£</span>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={freelancerDraft}
+            onChange={(e) => setFreelancerDraft(e.target.value)}
+            onBlur={(e) => save('combined_freelancer_fee', e.target.value)}
+            placeholder={`sum: ${standaloneFreelancerTotal.toFixed(0)}`}
+            disabled={saving}
+            className="w-20 text-xs px-1.5 py-0.5 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+        </div>
+        <span className="text-xs text-gray-400">
+          standalone: <span className="line-through">£{standaloneFreelancerTotal.toFixed(0)}</span>
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <label className="text-xs text-gray-500 w-24">Combined client charge</label>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-400">£</span>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            value={clientDraft}
+            onChange={(e) => setClientDraft(e.target.value)}
+            onBlur={(e) => save('combined_client_fee', e.target.value)}
+            placeholder={`sum: ${standaloneClientTotal.toFixed(0)}`}
+            disabled={saving}
+            className="w-20 text-xs px-1.5 py-0.5 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+        </div>
+        <span className="text-xs text-gray-400">
+          standalone: <span className="line-through">£{standaloneClientTotal.toFixed(0)}</span>
+        </span>
+      </div>
+      <p className="text-[10px] text-gray-400 italic">
+        Combined fee overrides the sum. Leave blank to fall back to the standalone total. Individual quote prices are preserved.
+      </p>
+    </div>
+  );
+}
+
 function ExpandedDetail({
   q,
   assignments,
@@ -1477,6 +1608,7 @@ function ExpandedDetail({
   onUpdateDetails,
   onEdit,
   onUpdateRunGroup,
+  onUpdateRunCombinedFee,
   allQuotes,
 }: {
   q: OpsQuote;
@@ -1486,6 +1618,7 @@ function ExpandedDetail({
   onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
   onEdit: (quote: OpsQuote) => void;
   onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
+  onUpdateRunCombinedFee: (runGroupId: string, fields: { combined_freelancer_fee?: number | null; combined_client_fee?: number | null; notes?: string | null }) => Promise<void>;
   allQuotes: OpsQuote[];
 }) {
   const [editingField, setEditingField] = useState<string | null>(null);
@@ -1649,6 +1782,16 @@ function ExpandedDetail({
                   </button>
                 )}
               </div>
+
+              {q.run_group && (
+                <RunCombinedFeeEditor
+                  runGroupId={q.run_group}
+                  currentCombinedFreelancerFee={q.run_combined_freelancer_fee}
+                  currentCombinedClientFee={q.run_combined_client_fee}
+                  siblingQuotes={allQuotes.filter((s) => s.run_group === q.run_group)}
+                  onUpdate={onUpdateRunCombinedFee}
+                />
+              )}
             </div>
           )}
         </div>
@@ -1770,11 +1913,27 @@ function ExpandedDetail({
           <div className="border-t border-gray-200 pt-1 mt-1">
             <div className="flex justify-between text-xs">
               <span className="text-gray-500">Client charge</span>
-              <span className="font-medium">{q.client_charge_rounded ? `£${q.client_charge_rounded}` : '—'}</span>
+              {q.run_group && q.run_combined_client_fee != null ? (
+                <span className="font-medium">
+                  <span className="line-through text-gray-400 mr-1">£{q.client_charge_rounded ?? 0}</span>
+                  £{Number(q.run_combined_client_fee).toFixed(0)}
+                  <span className="ml-1 text-[10px] text-gray-400">(run)</span>
+                </span>
+              ) : (
+                <span className="font-medium">{q.client_charge_rounded ? `£${q.client_charge_rounded}` : '—'}</span>
+              )}
             </div>
             <div className="flex justify-between text-xs">
               <span className="text-gray-500">Freelancer cost</span>
-              <span className="font-medium">{q.freelancer_fee_rounded ? `£${q.freelancer_fee_rounded}` : '—'}</span>
+              {q.run_group && q.run_combined_freelancer_fee != null ? (
+                <span className="font-medium">
+                  <span className="line-through text-gray-400 mr-1">£{q.freelancer_fee_rounded ?? 0}</span>
+                  £{Number(q.run_combined_freelancer_fee).toFixed(0)}
+                  <span className="ml-1 text-[10px] text-gray-400">(run)</span>
+                </span>
+              ) : (
+                <span className="font-medium">{q.freelancer_fee_rounded ? `£${q.freelancer_fee_rounded}` : '—'}</span>
+              )}
             </div>
             {(q.expenses_included != null && q.expenses_included > 0) && (
               <div className="flex justify-between text-xs">
@@ -2286,6 +2445,7 @@ function CalendarView({
   onUpdateDetails,
   onEdit,
   onUpdateRunGroup,
+  onUpdateRunCombinedFee,
 }: {
   data: Record<string, OpsQuote[]>;
   allQuotes: OpsQuote[];
@@ -2295,6 +2455,7 @@ function CalendarView({
   onUpdateDetails: (quoteId: string, fields: Record<string, unknown>) => Promise<void>;
   onEdit: (quote: OpsQuote) => void;
   onUpdateRunGroup: (quoteId: string, runGroup: string | null, runOrder: number | null) => Promise<void>;
+  onUpdateRunCombinedFee: (runGroupId: string, fields: { combined_freelancer_fee?: number | null; combined_client_fee?: number | null; notes?: string | null }) => Promise<void>;
 }) {
   type CalViewMode = 'month' | 'week' | 'day';
   const [calView, setCalView] = useState<CalViewMode>('month');
@@ -2402,6 +2563,7 @@ function CalendarView({
             onUpdateDetails={onUpdateDetails}
             onEdit={onEdit}
             onUpdateRunGroup={onUpdateRunGroup}
+            onUpdateRunCombinedFee={onUpdateRunCombinedFee}
             allQuotes={allQuotes}
           />
         </div>

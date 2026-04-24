@@ -189,6 +189,12 @@ interface SavedQuote {
   status: string;
   status_changed_at: string | null;
   cancelled_reason: string | null;
+  // Run grouping
+  run_group: string | null;
+  run_order: number | null;
+  run_combined_freelancer_fee: number | null;
+  run_combined_client_fee: number | null;
+  run_notes: string | null;
   // Assignments
   assignments: QuoteAssignment[];
   // Notes
@@ -2911,6 +2917,14 @@ export default function JobDetailPage() {
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
                           {sc.label}
                         </span>
+                        {q.run_group && (
+                          <span
+                            className="text-xs px-2 py-0.5 rounded-full font-medium bg-violet-100 text-violet-700"
+                            title={q.run_notes || 'Part of a multi-drop run — see Transport Ops for full run detail.'}
+                          >
+                            🔗 Part of a run
+                          </span>
+                        )}
                       </div>
 
                       {/* Date, time, venue — top line */}
@@ -2939,16 +2953,32 @@ export default function JobDetailPage() {
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                         <div>
                           <span className="text-gray-500">Client Charge</span>
-                          <p className="font-bold text-green-700">
-                            &pound;{clientCharge.toFixed(2)}
-                            {q.add_collection && <span className="text-xs font-normal text-gray-400"> (&times;2 = &pound;{(clientCharge * 2).toFixed(2)})</span>}
-                          </p>
+                          {q.run_group && q.run_combined_client_fee != null ? (
+                            <p className="font-bold text-green-700">
+                              <span className="line-through text-gray-400 font-normal mr-1">&pound;{clientCharge.toFixed(2)}</span>
+                              &pound;{Number(q.run_combined_client_fee).toFixed(2)}
+                              <span className="block text-[10px] font-normal text-violet-600">run combined</span>
+                            </p>
+                          ) : (
+                            <p className="font-bold text-green-700">
+                              &pound;{clientCharge.toFixed(2)}
+                              {q.add_collection && <span className="text-xs font-normal text-gray-400"> (&times;2 = &pound;{(clientCharge * 2).toFixed(2)})</span>}
+                            </p>
+                          )}
                         </div>
                         <div>
                           <span className="text-gray-500">Freelancer Fee</span>
-                          <p className="font-bold text-blue-700">
-                            &pound;{freelancerFee.toFixed(2)}
-                          </p>
+                          {q.run_group && q.run_combined_freelancer_fee != null ? (
+                            <p className="font-bold text-blue-700">
+                              <span className="line-through text-gray-400 font-normal mr-1">&pound;{freelancerFee.toFixed(2)}</span>
+                              &pound;{Number(q.run_combined_freelancer_fee).toFixed(2)}
+                              <span className="block text-[10px] font-normal text-violet-600">run combined</span>
+                            </p>
+                          ) : (
+                            <p className="font-bold text-blue-700">
+                              &pound;{freelancerFee.toFixed(2)}
+                            </p>
+                          )}
                         </div>
                         <div>
                           <span className="text-gray-500">Our Margin</span>

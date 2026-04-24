@@ -14,6 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobsForFreelancer, getVenueById, JobRecord, VenueRecord } from '@/lib/monday'
+import { isOpMode, getJobsFromOP, getJobDetailFromOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
 
 /**
  * Check if a date is within 48 hours of now (before or after)
@@ -111,7 +112,7 @@ export async function GET(request: NextRequest) {
 
     // Check session
     const session = await getSessionUser()
-    
+
     if (!session) {
       return NextResponse.json(
         { success: false, error: 'Not authenticated' },
@@ -120,6 +121,103 @@ export async function GET(request: NextRequest) {
     }
 
     console.log('Run API: Fetching jobs for run group', runGroup, 'on', date, 'for', session.email)
+
+    // ── OP backend path ─────────────────────────────────────────
+    // In OP mode, runGroup is a UUID (not a letter). We fetch the
+    // freelancer's jobs, filter to matching runGroup + date, and hit
+    // the single-job endpoint for full venue detail per stop.
+    if (isOpMode()) {
+      const sessionToken = request.cookies.get('session')?.value
+      if (!sessionToken) {
+        return NextResponse.json(
+          { success: false, error: 'Session token missing' },
+          { status: 401 }
+        )
+      }
+
+      try {
+        const opData = await getJobsFromOP(sessionToken)
+        const allBuckets = [
+          ...(opData.today || []),
+          ...(opData.upcoming || []),
+          ...(opData.completed || []),
+          ...(opData.cancelled || []),
+        ]
+        const matches = allBuckets.filter((j) => {
+          const jDate = j.date?.split('T')[0]
+          return j.runGroup === runGroup && jDate === date
+        })
+
+        if (matches.length === 0) {
+          return NextResponse.json(
+            { success: false, error: 'No jobs found for this run' },
+            { status: 404 }
+          )
+        }
+
+        // Combined fee lives on every sibling — take the first non-null.
+        const combinedFee = matches.find((j) => j.runCombinedFreelancerFee != null)?.runCombinedFreelancerFee ?? null
+        const standaloneTotal = matches.reduce((s, j) => s + (j.driverPay || 0), 0)
+        const totalFee = combinedFee != null ? combinedFee : standaloneTotal
+        const runNotes = matches.find((j) => j.runNotes)?.runNotes ?? null
+
+        // Fetch full detail (including venue) for each stop.
+        const contactsVisible = isWithin48Hours(date)
+        const contactVisibleFrom = !contactsVisible ? getContactVisibleDate(date) : null
+
+        const jobsWithVenues = await Promise.all(
+          matches.map(async (j) => {
+            let venue: { id: string; name: string; address?: string; whatThreeWords?: string; email?: string; accessNotes?: string; phone?: string | null; phoneHidden?: boolean; phoneVisibleFrom?: string | null } | null = null
+            try {
+              const detail = await getJobDetailFromOP(sessionToken, j.id)
+              if (detail.venue) {
+                venue = {
+                  id: detail.venue.id,
+                  name: detail.venue.name,
+                  address: detail.venue.address,
+                  whatThreeWords: detail.venue.whatThreeWords,
+                  email: detail.venue.email,
+                  accessNotes: detail.venue.accessNotes,
+                  phone: contactsVisible ? (detail.venue.phone ?? null) : null,
+                  phoneHidden: !contactsVisible,
+                  phoneVisibleFrom: contactVisibleFrom,
+                }
+              }
+            } catch (detailErr) {
+              console.error(`Failed to fetch detail for ${j.id}:`, detailErr)
+            }
+            return { ...j, venue }
+          })
+        )
+
+        // Sort by time
+        jobsWithVenues.sort((a, b) => parseTimeToMinutes(a.time ?? undefined) - parseTimeToMinutes(b.time ?? undefined))
+
+        return NextResponse.json({
+          success: true,
+          runGroup,
+          date,
+          jobs: jobsWithVenues,
+          jobCount: jobsWithVenues.length,
+          totalFee,
+          standaloneTotalFee: standaloneTotal,
+          hasCombinedFee: combinedFee != null,
+          runNotes,
+          contactsVisible,
+        })
+      } catch (opError) {
+        console.error('OP run API error:', opError)
+        reportFallback('run-detail', opError, { email: session.email, runGroup, date })
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { success: false, error: 'Unable to load run detail. Please refresh and try again.' },
+            { status: 502 }
+          )
+        }
+        console.log('Run API: Falling back to Monday.com')
+      }
+    }
+    // ── End OP backend path ─────────────────────────────────────
 
     // Fetch all jobs for this freelancer
     const allJobs = await getJobsForFreelancer(session.email)
