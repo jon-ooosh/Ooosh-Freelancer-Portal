@@ -1,0 +1,332 @@
+diff --git a/backend/src/routes/drivers.ts b/backend/src/routes/drivers.ts
+index fa5968e..7fdc073 100644
+--- a/backend/src/routes/drivers.ts
++++ b/backend/src/routes/drivers.ts
+@@ -177,9 +177,22 @@ router.get('/', async (req: AuthRequest, res: Response) => {
+     const result = await query(
+       `SELECT d.*,
+         p.first_name AS person_first_name,
+-        p.last_name AS person_last_name
++        p.last_name AS person_last_name,
++        latest_excess.excess_id AS latest_excess_id,
++        latest_excess.excess_amount_required AS latest_excess_required,
++        latest_excess.excess_status AS latest_excess_status
+       FROM drivers d
+       LEFT JOIN people p ON p.id = d.person_id
++      LEFT JOIN LATERAL (
++        SELECT je.id AS excess_id,
++               je.excess_amount_required,
++               je.excess_status
++        FROM job_excess je
++        JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
++        WHERE vha.driver_id = d.id
++        ORDER BY je.updated_at DESC
++        LIMIT 1
++      ) latest_excess ON true
+       ${where}
+       ORDER BY ${orderBy}
+       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
+@@ -312,10 +325,15 @@ router.get('/:id/excess-history', async (req: AuthRequest, res: Response) => {
+         vha.vehicle_id,
+         fv.reg AS vehicle_reg,
+         vha.hire_start,
+-        vha.hire_end
++        vha.hire_end,
++        vha.hirehop_job_name,
++        d.full_name AS driver_name,
++        j.job_name
+       FROM job_excess je
+       JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
++      LEFT JOIN drivers d ON d.id = vha.driver_id
++      LEFT JOIN jobs j ON j.id = je.job_id
+       WHERE vha.driver_id = $1
+       ORDER BY je.created_at DESC`,
+       [id]
+diff --git a/frontend/src/components/MoneyTab.tsx b/frontend/src/components/MoneyTab.tsx
+index 7d1f76a..053f58b 100644
+--- a/frontend/src/components/MoneyTab.tsx
++++ b/frontend/src/components/MoneyTab.tsx
+@@ -461,7 +461,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
+                 <div key={dep.hh_deposit_id} className="flex items-center justify-between p-2 bg-amber-50 border border-amber-200 rounded-lg">
+                   <div>
+                     <p className="text-sm text-gray-800">
+-                      £{dep.amount.toFixed(2)}
++                      £{Number(dep.amount).toFixed(2)}
+                       {dep.bank_name && <span className="text-gray-500"> via {dep.bank_name}</span>}
+                     </p>
+                     <p className="text-xs text-gray-500">
+@@ -501,7 +501,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
+           <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6" onClick={(e) => e.stopPropagation()}>
+             <h3 className="text-lg font-semibold text-gray-900 mb-2">Link HH Deposit to Excess Record</h3>
+             <p className="text-sm text-gray-600 mb-4">
+-              HireHop deposit <strong>#{linkingDeposit.hh_deposit_id}</strong> for <strong>£{linkingDeposit.amount.toFixed(2)}</strong>.
++              HireHop deposit <strong>#{linkingDeposit.hh_deposit_id}</strong> for <strong>£{Number(linkingDeposit.amount).toFixed(2)}</strong>.
+               Select which excess record to link it to:
+             </p>
+             <div className="space-y-2 mb-4">
+@@ -532,7 +532,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
+               >
+                 <p className="text-sm font-medium text-ooosh-700">+ Create new excess record</p>
+                 <p className="text-xs text-gray-500">
+-                  Creates an OP record for £{linkingDeposit.amount.toFixed(2)} linked to this HireHop deposit
++                  Creates an OP record for £{Number(linkingDeposit.amount).toFixed(2)} linked to this HireHop deposit
+                 </p>
+               </button>
+             </div>
+@@ -580,7 +580,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
+                     )}
+                   </div>
+                   <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
+-                    {dep.is_refund ? '-' : ''}£{dep.amount.toFixed(2)}
++                    {dep.is_refund ? '-' : ''}£{Number(dep.amount).toFixed(2)}
+                   </p>
+                 </div>
+               ))}
+diff --git a/frontend/src/pages/DriverDetailPage.tsx b/frontend/src/pages/DriverDetailPage.tsx
+index 64c70ee..12cb181 100644
+--- a/frontend/src/pages/DriverDetailPage.tsx
++++ b/frontend/src/pages/DriverDetailPage.tsx
+@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
+ import { useParams, useNavigate, Link } from 'react-router-dom';
+ import { api } from '../services/api';
+ import { useAuthStore } from '../hooks/useAuthStore';
++import ExcessPaymentModal from '../components/ExcessPaymentModal';
++import type { JobExcess } from '../../../shared/types';
+ 
+ interface FileAttachment {
+   name: string;
+@@ -336,6 +338,9 @@ export default function DriverDetailPage() {
+   const [driver, setDriver] = useState<DriverDetail | null>(null);
+   const [hireHistory, setHireHistory] = useState<HireHistoryItem[]>([]);
+   const [excessHistory, setExcessHistory] = useState<ExcessHistoryItem[]>([]);
++  const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
++  const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
++  const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | undefined>(undefined);
+   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
+   const [loading, setLoading] = useState(true);
+   const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess'>('details');
+@@ -388,6 +393,19 @@ export default function DriverDetailPage() {
+     }
+   }
+ 
++  async function openExcessModal(excessId: string, initialAction?: 'edit_required') {
++    setExcessModalLoadingId(excessId);
++    try {
++      const res = await api.get<{ data: JobExcess }>(`/excess/${excessId}`);
++      setExcessModalInitialAction(initialAction);
++      setExcessModalRecord(res.data);
++    } catch (err) {
++      console.error('Failed to load excess record:', err);
++    } finally {
++      setExcessModalLoadingId(null);
++    }
++  }
++
+   async function loadAuditLog() {
+     try {
+       const data = await api.get<{ data: AuditLogEntry[] }>(`/drivers/${id}/audit-log`);
+@@ -625,7 +643,22 @@ export default function DriverDetailPage() {
+           />
+         )}
+         {activeTab === 'hires' && <HireHistoryTab history={hireHistory} />}
+-        {activeTab === 'excess' && <ExcessHistoryTab history={excessHistory} />}
++        {activeTab === 'excess' && (
++          <ExcessHistoryTab
++            history={excessHistory}
++            loadingId={excessModalLoadingId}
++            onManage={(excessId, initialAction) => openExcessModal(excessId, initialAction)}
++          />
++        )}
++
++        {excessModalRecord && (
++          <ExcessPaymentModal
++            excess={excessModalRecord}
++            initialAction={excessModalInitialAction}
++            onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
++            onUpdated={() => { loadExcessHistory(); }}
++          />
++        )}
+       </div>
+     </div>
+   );
+@@ -1549,14 +1582,24 @@ function HireHistoryTab({ history }: { history: HireHistoryItem[] }) {
+ 
+ // ── Excess History Tab ──
+ 
+-function ExcessHistoryTab({ history }: { history: ExcessHistoryItem[] }) {
++function ExcessHistoryTab({
++  history,
++  loadingId,
++  onManage,
++}: {
++  history: ExcessHistoryItem[];
++  loadingId: string | null;
++  onManage: (excessId: string, initialAction?: 'edit_required') => void;
++}) {
+   if (history.length === 0) {
+     return <p className="text-sm text-gray-500 py-8 text-center">No excess history yet.</p>;
+   }
+ 
+-  const totalTaken = history.reduce((sum, h) => sum + (h.excess_amount_taken || 0), 0);
+-  const totalClaimed = history.reduce((sum, h) => sum + (h.claim_amount || 0), 0);
+-  const totalReimbursed = history.reduce((sum, h) => sum + (h.reimbursement_amount || 0), 0);
++  // Postgres DECIMAL columns serialise as strings via node-postgres; coerce each
++  // addend to Number before summing so "0" + "1200.00" doesn't concatenate.
++  const totalTaken = history.reduce((sum, h) => sum + Number(h.excess_amount_taken || 0), 0);
++  const totalClaimed = history.reduce((sum, h) => sum + Number(h.claim_amount || 0), 0);
++  const totalReimbursed = history.reduce((sum, h) => sum + Number(h.reimbursement_amount || 0), 0);
+ 
+   return (
+     <div className="space-y-4">
+@@ -1585,21 +1628,45 @@ function ExcessHistoryTab({ history }: { history: ExcessHistoryItem[] }) {
+               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Taken</th>
+               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Payment</th>
++              <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase"></th>
+             </tr>
+           </thead>
+           <tbody className="divide-y divide-gray-200">
+-            {history.map((h) => (
+-              <tr key={h.id} className="hover:bg-gray-50">
+-                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{h.vehicle_reg}</td>
+-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(h.hire_start)} — {formatDate(h.hire_end)}</td>
+-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+-                  {h.excess_amount_required != null ? `£${Number(h.excess_amount_required).toFixed(2)}` : '—'}
+-                </td>
+-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">&pound;{Number(h.excess_amount_taken).toFixed(2)}</td>
+-                <td className="px-6 py-4 whitespace-nowrap">{excessStatusBadge(h.excess_status)}</td>
+-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{h.payment_method?.replace('_', ' ') || '—'}</td>
+-              </tr>
+-            ))}
++            {history.map((h) => {
++              const rowLoading = loadingId === h.id;
++              return (
++                <tr key={h.id} className="hover:bg-gray-50">
++                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{h.vehicle_reg}</td>
++                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatDate(h.hire_start)} — {formatDate(h.hire_end)}</td>
++                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
++                    {h.excess_amount_required != null ? `£${Number(h.excess_amount_required).toFixed(2)}` : '—'}
++                  </td>
++                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">&pound;{Number(h.excess_amount_taken).toFixed(2)}</td>
++                  <td className="px-6 py-4 whitespace-nowrap">{excessStatusBadge(h.excess_status)}</td>
++                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{h.payment_method?.replace('_', ' ') || '—'}</td>
++                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
++                    <div className="flex justify-end gap-3">
++                      <button
++                        type="button"
++                        onClick={() => onManage(h.id, 'edit_required')}
++                        disabled={rowLoading}
++                        className="text-ooosh-700 hover:text-ooosh-900 hover:underline font-medium disabled:opacity-50"
++                      >
++                        {rowLoading ? '…' : 'Edit'}
++                      </button>
++                      <button
++                        type="button"
++                        onClick={() => onManage(h.id)}
++                        disabled={rowLoading}
++                        className="text-gray-600 hover:text-gray-900 hover:underline font-medium disabled:opacity-50"
++                      >
++                        Manage
++                      </button>
++                    </div>
++                  </td>
++                </tr>
++              );
++            })}
+           </tbody>
+         </table>
+       </div>
+diff --git a/frontend/src/pages/JobDetailPage.tsx b/frontend/src/pages/JobDetailPage.tsx
+index f69fa2c..70e333c 100644
+--- a/frontend/src/pages/JobDetailPage.tsx
++++ b/frontend/src/pages/JobDetailPage.tsx
+@@ -7,6 +7,8 @@ import TransportCalculator from '../components/TransportCalculator';
+ import RequirementCard from '../components/RequirementCard';
+ import type { JobRequirement } from '../components/RequirementCard';
+ import ExcessGateBanner from '../components/ExcessGateBanner';
++import ExcessPaymentModal from '../components/ExcessPaymentModal';
++import type { JobExcess } from '../../../shared/types';
+ import CancellationModal from '../components/CancellationModal';
+ import CancelRemindersSection from '../components/CancelRemindersSection';
+ import { useAuthStore } from '../hooks/useAuthStore';
+@@ -816,6 +818,9 @@ export default function JobDetailPage() {
+ 
+   // Drivers & Vehicles state
+   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
++  const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
++  const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | undefined>(undefined);
++  const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
+   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
+   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
+ 
+@@ -1562,6 +1567,19 @@ export default function JobDetailPage() {
+     }
+   }
+ 
++  async function openExcessModal(excessId: string, initialAction?: 'edit_required') {
++    setExcessModalLoadingId(excessId);
++    try {
++      const res = await api.get<{ data: JobExcess }>(`/excess/${excessId}`);
++      setExcessModalInitialAction(initialAction);
++      setExcessModalRecord(res.data);
++    } catch (err) {
++      console.error('Failed to load excess record:', err);
++    } finally {
++      setExcessModalLoadingId(null);
++    }
++  }
++
+   function formatDate(dateStr: string | null) {
+     if (!dateStr) return '—';
+     return new Date(dateStr).toLocaleDateString('en-GB', {
+@@ -2647,7 +2665,7 @@ export default function JobDetailPage() {
+                             <div className="flex items-center justify-between text-xs">
+                               <span className="text-gray-500">Insurance Excess</span>
+                               <div className="flex items-center gap-2">
+-                                {a.excess.excess_amount_required && (
++                                {a.excess.excess_amount_required != null && (
+                                   <span className="font-medium text-gray-700">
+                                     £{Number(a.excess.excess_amount_required).toFixed(2)}
+                                   </span>
+@@ -2673,6 +2691,23 @@ export default function JobDetailPage() {
+                                    a.excess.excess_status === 'partially_paid' || a.excess.excess_status === 'partial' ? 'Part Paid' :
+                                    a.excess.excess_status}
+                                 </span>
++                                <button
++                                  type="button"
++                                  onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
++                                  disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
++                                  title="Edit required excess amount"
++                                  className="text-xs font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
++                                >
++                                  {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
++                                </button>
++                                <button
++                                  type="button"
++                                  onClick={() => a.excess && openExcessModal(a.excess.id)}
++                                  disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
++                                  className="text-xs font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
++                                >
++                                  Manage
++                                </button>
+                               </div>
+                             </div>
+                           </div>
+@@ -3360,6 +3395,16 @@ export default function JobDetailPage() {
+       )}
+ 
+       {/* Chase Modal */}
++      {/* Excess Payment / Edit Modal — opened from Drivers & Vehicles strip */}
++      {excessModalRecord && (
++        <ExcessPaymentModal
++          excess={excessModalRecord}
++          initialAction={excessModalInitialAction}
++          onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
++          onUpdated={() => { loadVehicleAssignments(); }}
++        />
++      )}
++
+       <ChaseModal
+         isOpen={showChaseModal}
+         job={job ? {
