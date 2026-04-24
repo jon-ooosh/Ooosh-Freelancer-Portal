@@ -1283,6 +1283,12 @@ router.get('/jobs/upcoming', async (req: AuthRequest, res: Response) => {
 /**
  * GET /api/vehicles/jobs/upcoming-due-back?days=7
  * Upcoming due-back jobs for the next N days.
+ *
+ * Includes jobs with booked_out/active assignments in OP even if their HH
+ * status is stale (e.g. HH status still at 2 Booked when the van is
+ * physically out). Prevents vans disappearing from Due Back when the
+ * OP→HH status auto-push is deferred and staff haven't advanced HH
+ * manually.
  */
 router.get('/jobs/upcoming-due-back', async (req: AuthRequest, res: Response) => {
   try {
@@ -1291,14 +1297,18 @@ router.get('/jobs/upcoming-due-back', async (req: AuthRequest, res: Response) =>
     const endDate = new Date(Date.now() + days * 86400000).toISOString().split('T')[0];
 
     const result = await query(
-      `SELECT * FROM jobs
-       WHERE is_deleted = false
-         AND status = ANY($1)
+      `SELECT DISTINCT j.* FROM jobs j
+       LEFT JOIN vehicle_hire_assignments vha ON vha.job_id = j.id
+       WHERE j.is_deleted = false
          AND (
-           (return_date IS NOT NULL AND return_date::date >= $2::date AND return_date::date <= $3::date)
-           OR (return_date IS NULL AND job_end IS NOT NULL AND job_end::date >= $2::date AND job_end::date <= $3::date)
+           j.status = ANY($1)
+           OR vha.status IN ('booked_out', 'active')
          )
-       ORDER BY return_date ASC NULLS LAST, job_end ASC NULLS LAST`,
+         AND (
+           (j.return_date IS NOT NULL AND j.return_date::date >= $2::date AND j.return_date::date <= $3::date)
+           OR (j.return_date IS NULL AND j.job_end IS NOT NULL AND j.job_end::date >= $2::date AND j.job_end::date <= $3::date)
+         )
+       ORDER BY j.return_date ASC NULLS LAST, j.job_end ASC NULLS LAST`,
       [RETURN_STATUSES, today, endDate]
     );
 
