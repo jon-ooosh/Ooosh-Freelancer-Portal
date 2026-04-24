@@ -461,7 +461,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                 <div key={dep.hh_deposit_id} className="flex items-center justify-between p-2 bg-amber-50 border border-amber-200 rounded-lg">
                   <div>
                     <p className="text-sm text-gray-800">
-                      £{dep.amount.toFixed(2)}
+                      £{Number(dep.amount).toFixed(2)}
                       {dep.bank_name && <span className="text-gray-500"> via {dep.bank_name}</span>}
                     </p>
                     <p className="text-xs text-gray-500">
@@ -501,7 +501,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-gray-900 mb-2">Link HH Deposit to Excess Record</h3>
             <p className="text-sm text-gray-600 mb-4">
-              HireHop deposit <strong>#{linkingDeposit.hh_deposit_id}</strong> for <strong>£{linkingDeposit.amount.toFixed(2)}</strong>.
+              HireHop deposit <strong>#{linkingDeposit.hh_deposit_id}</strong> for <strong>£{Number(linkingDeposit.amount).toFixed(2)}</strong>.
               Select which excess record to link it to:
             </p>
             <div className="space-y-2 mb-4">
@@ -532,7 +532,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
               >
                 <p className="text-sm font-medium text-ooosh-700">+ Create new excess record</p>
                 <p className="text-xs text-gray-500">
-                  Creates an OP record for £{linkingDeposit.amount.toFixed(2)} linked to this HireHop deposit
+                  Creates an OP record for £{Number(linkingDeposit.amount).toFixed(2)} linked to this HireHop deposit
                 </p>
               </button>
             </div>
@@ -580,7 +580,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     )}
                   </div>
                   <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
-                    {dep.is_refund ? '-' : ''}£{dep.amount.toFixed(2)}
+                    {dep.is_refund ? '-' : ''}£{Number(dep.amount).toFixed(2)}
                   </p>
                 </div>
               ))}
