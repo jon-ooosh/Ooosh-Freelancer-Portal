@@ -135,3 +135,84 @@ export function authenticateFreelancerBookout(
     res.status(401).json({ error: 'Invalid or expired session' });
   }
 }
+
+/**
+ * Flexible auth for vehicle routes that need to accept BOTH staff and
+ * freelancer sessions. Tries the staff-JWT shape first (regular `AuthUser`
+ * payload); on failure falls back to the freelancer bookout session.
+ *
+ * Attaches `req.user` for staff or `req.bookoutSession` for freelancers —
+ * NEVER both. Endpoints can branch on which one is present to enforce
+ * scope (e.g. a freelancer can only touch their own assignment's vehicle,
+ * staff can do anything).
+ *
+ * Import type as:
+ *   import type { FlexibleVehicleRequest } from '...freelancer-bookout-auth';
+ */
+export interface FlexibleVehicleRequest extends Request {
+  user?: {
+    id: string;
+    email: string;
+    role: string;
+  };
+  bookoutSession?: FreelancerBookoutSession;
+}
+
+export function authenticateVehicleFlexible(
+  req: FlexibleVehicleRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+
+  const token = authHeader.slice(7);
+
+  let decoded: { scope?: string; [k: string]: unknown };
+  try {
+    decoded = jwt.verify(token, JWT_SECRET) as { scope?: string; [k: string]: unknown };
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+    return;
+  }
+
+  // Freelancer bookout session — narrow scope, assignment-bound.
+  if (decoded.scope === 'freelancer_bookout') {
+    const fb = decoded as unknown as FreelancerBookoutSession;
+    if (!fb.assignmentId) {
+      res.status(401).json({ error: 'Invalid session scope' });
+      return;
+    }
+    req.bookoutSession = {
+      scope: 'freelancer_bookout',
+      assignmentId: fb.assignmentId,
+      quoteId: fb.quoteId,
+      freelancerEmail: fb.freelancerEmail,
+      freelancerPersonId: fb.freelancerPersonId,
+    };
+    next();
+    return;
+  }
+
+  // Staff JWT — shape: { id, email, role }
+  const staff = decoded as { id?: string; email?: string; role?: string };
+  if (staff.id && staff.email && staff.role) {
+    req.user = { id: staff.id, email: staff.email, role: staff.role };
+    next();
+    return;
+  }
+
+  res.status(401).json({ error: 'Invalid token' });
+}
+
+/**
+ * True if the request is authenticated as a freelancer book-out session
+ * (as opposed to a staff user). Use inside handlers to branch behaviour
+ * for scope enforcement.
+ */
+export function isFreelancerBookout(req: FlexibleVehicleRequest): req is FlexibleVehicleRequest & { bookoutSession: FreelancerBookoutSession } {
+  return !!req.bookoutSession && !req.user;
+}

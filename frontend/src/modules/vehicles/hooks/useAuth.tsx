@@ -15,6 +15,13 @@ interface FreelancerContext {
   jobId: string
   driverEmail: string
   returnUrl: string | null
+  // Optional fields populated in embedded mode (OP-issued scoped session).
+  // BookOutPage uses these to pre-fill vehicle + skip the select-vehicle step.
+  driverName?: string
+  vehicleId?: string
+  vehicleReg?: string
+  vehicleMakeModel?: string
+  assignmentId?: string
 }
 
 interface AuthState {
@@ -293,8 +300,19 @@ export function useAuth(): AuthState {
         isAuthenticated: opState.isAuthenticated,
         isLoading: false,
         sessionToken: opState.token,
-        scope: 'staff',
-        freelancerContext: null,
+        scope: opState.scope,
+        freelancerContext: opState.freelancerContext
+          ? {
+              jobId: opState.freelancerContext.jobId,
+              driverEmail: opState.freelancerContext.driverEmail,
+              returnUrl: opState.freelancerContext.returnUrl,
+              driverName: opState.freelancerContext.driverName,
+              vehicleId: opState.freelancerContext.vehicleId,
+              vehicleReg: opState.freelancerContext.vehicleReg,
+              vehicleMakeModel: opState.freelancerContext.vehicleMakeModel,
+              assignmentId: opState.freelancerContext.assignmentId,
+            }
+          : null,
         freelancerError: null,
         login: () => { /* no-op in embedded mode */ },
         logout: opState.logout,

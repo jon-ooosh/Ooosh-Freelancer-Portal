@@ -16,11 +16,14 @@ import type { DriverHireForm } from '../lib/driver-hire-api'
  * Returns all matching entries (may be multiple drivers for multi-van jobs).
  * Enabled only when a valid job number is provided.
  */
-export function useDriverHireForms(hireHopJobNumber: string | null) {
+export function useDriverHireForms(
+  hireHopJobNumber: string | null,
+  options?: { enabled?: boolean },
+) {
   return useQuery<DriverHireForm[]>({
     queryKey: ['driver-hire-forms', hireHopJobNumber],
     queryFn: () => fetchHireFormsByJobNumber(hireHopJobNumber!),
-    enabled: !!hireHopJobNumber,
+    enabled: !!hireHopJobNumber && (options?.enabled ?? true),
     staleTime: 5 * 60 * 1000,    // 5 minutes
     gcTime: 15 * 60 * 1000,      // 15 minutes
   })
