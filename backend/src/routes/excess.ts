@@ -955,19 +955,46 @@ router.post('/:id/link-deposit', authorize('admin', 'manager'), validate(linkDep
 });
 
 // ── POST /api/excess/:id/unlink-deposit — Remove the HH deposit link ──
+//
+// Used when a HireHop deposit was wrongly linked to this excess record (e.g.
+// the classifier picked it up as excess but it was actually a hire payment,
+// such as a Stripe URL containing "xs" in its path). "Undoes" the
+// reconciliation: zeroes amount_taken + payment metadata, and recomputes
+// status via deriveExcessStatus so a fresh `needed`/`not_required` surface
+// is presented to staff and the portal.
 
 router.post('/:id/unlink-deposit', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+
+    const current = await query(
+      `SELECT excess_amount_required, excess_status FROM job_excess WHERE id = $1`,
+      [id]
+    );
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const row = current.rows[0];
+    const newStatus = deriveExcessStatus(
+      row.excess_status,
+      Number(row.excess_amount_required || 0),
+      0 // taken is being zeroed
+    );
 
     const result = await query(
       `UPDATE job_excess SET
         hh_deposit_id = NULL,
         hh_reconciled_at = NULL,
         hh_reconcile_source = NULL,
+        excess_amount_taken = 0,
+        payment_method = NULL,
+        payment_reference = NULL,
+        payment_date = NULL,
+        excess_status = $2,
         updated_at = NOW()
       WHERE id = $1 RETURNING *`,
-      [id]
+      [id, newStatus]
     );
 
     if (result.rows.length === 0) {
@@ -975,7 +1002,7 @@ router.post('/:id/unlink-deposit', authorize('admin', 'manager'), async (req: Au
       return;
     }
 
-    console.log(`[excess] Unlinked HH deposit from excess ${id} (by user ${req.user!.id})`);
+    console.log(`[excess] Unlinked HH deposit from excess ${id} (by user ${req.user!.id}) — reset taken to 0, status → ${newStatus}`);
     res.json({ data: result.rows[0] });
   } catch (error) {
     console.error('[excess] Unlink deposit error:', error);

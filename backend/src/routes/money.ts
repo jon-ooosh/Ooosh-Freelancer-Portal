@@ -1457,10 +1457,13 @@ function getHHBankId(paymentMethod: string): number {
 /**
  * Detect if a deposit description/memo indicates an excess payment.
  * Matches the same keywords as the Payment Portal's isExcessPayment().
+ *
+ * Uses word boundaries to avoid false positives from URLs and longer tokens
+ * (e.g. a Stripe URL like pi_...dNxs3kl must NOT trigger on "xs").
  */
 function isExcessPayment(text: string): boolean {
   const lower = text.toLowerCase();
-  return /excess|insurance|xs|top.?up/.test(lower);
+  return /\bexcess\b|\binsurance\b|\bxs\b|\btop[- ]?up\b/.test(lower);
 }
 
 /**

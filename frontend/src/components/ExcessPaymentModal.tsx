@@ -7,7 +7,7 @@ import { useState, useRef } from 'react';
 import { api } from '../services/api';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
-type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'move' | 'edit_required';
+type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'move' | 'edit_required' | 'unlink_deposit';
 
 interface ExcessPaymentModalProps {
   excess: JobExcess;
@@ -170,6 +170,9 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           });
           break;
         }
+        case 'unlink_deposit':
+          await api.post(`/excess/${excess.id}/unlink-deposit`, {});
+          break;
       }
       onUpdated();
       onClose();
@@ -205,6 +208,14 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
     availableActions.push({ action: 'waive', label: 'Waive Excess', icon: '~' });
   }
   availableActions.push({ action: 'move', label: 'Move to Different Entity', icon: '>' });
+
+  // Unlink HH deposit — only when a record is linked. Covers the case where
+  // a HireHop deposit was wrongly classified as excess (e.g. Stripe URL with
+  // "xs" in its path triggered the keyword match) and staff need to undo it.
+  // Backend resets amount_taken to 0 and recomputes status.
+  if (excess.hh_deposit_id) {
+    availableActions.push({ action: 'unlink_deposit', label: 'Unlink HireHop Deposit', icon: '⊘' });
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
@@ -565,6 +576,29 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     placeholder="Why is this being moved?"
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
+                </div>
+              </div>
+            )}
+
+            {action === 'unlink_deposit' && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900">Unlink HireHop Deposit</h3>
+                <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800 space-y-1">
+                  <p>
+                    This record is linked to HireHop deposit <strong>#{excess.hh_deposit_id}</strong>.
+                    Use this when the deposit was wrongly classified as excess (e.g. a Stripe URL containing "xs" in its path).
+                  </p>
+                  <p className="mt-2">
+                    Unlinking will:
+                  </p>
+                  <ul className="list-disc list-inside ml-2 space-y-0.5">
+                    <li>Clear the HireHop link on this record</li>
+                    <li>Reset Collected to £0.00 on this record</li>
+                    <li>Recompute the status (likely back to Needed)</li>
+                  </ul>
+                  <p className="mt-2">
+                    The HireHop deposit itself is <strong>not touched</strong> — it stays in HireHop as a hire payment. You may still want to fix its description/memo on the HireHop side so the classifier doesn't re-match it on the next Money tab load.
+                  </p>
                 </div>
               </div>
             )}
