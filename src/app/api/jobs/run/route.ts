@@ -207,7 +207,12 @@ export async function GET(request: NextRequest) {
         })
       } catch (opError) {
         console.error('OP run API error:', opError)
-        reportFallback('run-detail', opError, { email: session.email, runGroup, date })
+        // Embed run context in the error message since reportFallback's
+        // context shape is email-only.
+        const wrapped = opError instanceof Error
+          ? new Error(`${opError.message} (runGroup: ${runGroup}, date: ${date})`)
+          : new Error(`OP run API error (runGroup: ${runGroup}, date: ${date}): ${String(opError)}`)
+        reportFallback('run-detail', wrapped, { email: session.email })
         if (!mondayFallbackAllowed()) {
           return NextResponse.json(
             { success: false, error: 'Unable to load run detail. Please refresh and try again.' },
