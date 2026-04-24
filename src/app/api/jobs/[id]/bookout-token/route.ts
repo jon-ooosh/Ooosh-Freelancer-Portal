@@ -107,7 +107,7 @@ export async function POST(
 
     // Legacy Monday path — only reachable when DATA_BACKEND != 'op'.
     if (!mondayFallbackAllowed()) {
-      reportFallback('bookout-token', new Error('OP mode disabled but Monday fallback blocked'), { email: session.email, jobId })
+      reportFallback('bookout-token', new Error(`OP mode disabled but Monday fallback blocked (jobId: ${jobId})`), { email: session.email })
       return NextResponse.json(
         { success: false, error: 'Book-out is currently unavailable. Please refresh and try again.' },
         { status: 502 }
