@@ -26,11 +26,31 @@ export async function getAllocations(): Promise<VanAllocation[]> {
   }
 }
 
+/** Per-allocation conflict returned by the compat endpoint when a van
+ *  would overlap an existing assignment on a different job. The allocation
+ *  is NOT persisted — staff need to pick a different van. */
+export type AllocationConflict = {
+  allocationId: string
+  vehicleReg: string | null
+  conflict: {
+    id: string
+    status: string
+    jobId: string | null
+    hirehopJobId: number | null
+    jobName: string | null
+    hhJobNumber: number | null
+    effectiveStart: string | null
+    effectiveEnd: string | null
+    driverName: string | null
+    vehicleReg: string | null
+  }
+}
+
 /** Save the full allocations array (syncs to vehicle_hire_assignments table) */
 export async function saveAllocations(
   allocations: VanAllocation[],
   managedJobIds?: number[],
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; conflicts?: AllocationConflict[] }> {
   try {
     const resp = await apiFetch(COMPAT_PATH, {
       method: 'POST',
@@ -43,7 +63,11 @@ export async function saveAllocations(
       return { success: false, error: data.error || `HTTP ${resp.status}` }
     }
 
-    return { success: true }
+    const data = await resp.json().catch(() => ({})) as {
+      success?: boolean
+      conflicts?: AllocationConflict[]
+    }
+    return { success: true, conflicts: data.conflicts || [] }
   } catch (err) {
     return {
       success: false,

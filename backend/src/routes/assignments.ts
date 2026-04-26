@@ -13,6 +13,10 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import {
+  findOverlappingAssignments,
+  buildConflictPayload,
+} from '../services/assignment-overlap';
 
 const router = Router();
 router.use(authenticate);
@@ -161,6 +165,79 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/assignments/availability — Find occupied vans for a window ──
+//
+// Returns one row per occupied vehicle, with its conflicting assignment.
+// Used by the Allocations page to grey out / label vans that are already
+// committed to another hire over the same date range. The backend is still
+// the source of truth (write-path checks will reject a conflict) — this
+// endpoint is for UX so staff don't have to discover conflicts by trial.
+
+router.get('/availability', async (req: AuthRequest, res: Response) => {
+  try {
+    const startParam = (req.query.start || req.query.hire_start) as string | undefined;
+    const endParam = (req.query.end || req.query.hire_end) as string | undefined;
+    const excludeHhJobId = req.query.exclude_hh_job_id
+      ? parseInt(req.query.exclude_hh_job_id as string, 10)
+      : null;
+    const excludeJobId = (req.query.exclude_job_id as string) || null;
+
+    if (!startParam || !endParam) {
+      return res.status(400).json({ error: 'start and end dates required (YYYY-MM-DD)' });
+    }
+
+    const result = await query(
+      `SELECT DISTINCT ON (vha.vehicle_id)
+         vha.vehicle_id,
+         vha.id AS assignment_id,
+         vha.status,
+         vha.job_id,
+         vha.hirehop_job_id,
+         j.job_name,
+         j.hh_job_number,
+         COALESCE(vha.hire_start, j.job_date::DATE) AS effective_start,
+         COALESCE(vha.hire_end, j.job_end::DATE) AS effective_end,
+         d.full_name AS driver_name,
+         fv.reg AS vehicle_reg
+       FROM vehicle_hire_assignments vha
+       LEFT JOIN jobs j ON j.id = vha.job_id
+       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+       LEFT JOIN drivers d ON d.id = vha.driver_id
+       WHERE vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
+         AND vha.vehicle_id IS NOT NULL
+         AND ($3::integer IS NULL OR vha.hirehop_job_id IS DISTINCT FROM $3::integer)
+         AND ($4::uuid IS NULL OR vha.job_id IS DISTINCT FROM $4::uuid)
+         AND COALESCE(vha.hire_start, j.job_date::DATE) <= $2::DATE
+         AND COALESCE(vha.hire_end, j.job_end::DATE) >= $1::DATE
+       ORDER BY vha.vehicle_id, vha.hire_start DESC NULLS LAST`,
+      [startParam, endParam, excludeHhJobId, excludeJobId],
+    );
+
+    res.json({
+      data: {
+        start: startParam,
+        end: endParam,
+        unavailable: result.rows.map((r: any) => ({
+          vehicleId: r.vehicle_id,
+          vehicleReg: r.vehicle_reg,
+          assignmentId: r.assignment_id,
+          status: r.status,
+          jobId: r.job_id,
+          hirehopJobId: r.hirehop_job_id,
+          jobName: r.job_name,
+          hhJobNumber: r.hh_job_number,
+          effectiveStart: r.effective_start ? new Date(r.effective_start).toISOString().slice(0, 10) : null,
+          effectiveEnd: r.effective_end ? new Date(r.effective_end).toISOString().slice(0, 10) : null,
+          driverName: r.driver_name,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error('[assignments] Availability error:', error);
+    res.status(500).json({ error: 'Failed to load availability' });
+  }
+});
+
 // ── GET /api/assignments/:id — Single assignment with driver + excess ──
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {
@@ -200,6 +277,21 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 router.post('/', validate(createAssignmentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const a = req.body;
+
+    // Block if this vehicle is already occupying an overlapping window on a
+    // different job. Same-job rows are excluded (multi-driver single-van
+    // allocations don't self-conflict). returned/cancelled/swapped rows do
+    // not occupy the van.
+    const conflicts = await findOverlappingAssignments({
+      vehicleId: a.vehicle_id,
+      hireStart: a.hire_start,
+      hireEnd: a.hire_end,
+      jobId: a.job_id || null,
+      hirehopJobId: a.hirehop_job_id || null,
+    });
+    if (conflicts.length > 0) {
+      return res.status(409).json(buildConflictPayload(conflicts));
+    }
 
     const result = await query(
       `INSERT INTO vehicle_hire_assignments (
@@ -544,6 +636,66 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 // is per-driver: a specific driver can't be booked out until their referral
 // is approved and excess is resolved.
 
+// ── GET /api/assignments/allocation-conflicts/:jobId — Per-assignment overlap ──
+//
+// For each active assignment on this job, detect whether its vehicle is also
+// committed to an overlapping hire on a DIFFERENT job. Used by the amber
+// banner on Job Detail > Drivers & Vehicles to flag "dates moved — reassign
+// one or the other" scenarios.
+
+router.get('/allocation-conflicts/:jobId', async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId } = req.params;
+
+    const assignments = await query(
+      `SELECT vha.id, vha.vehicle_id, vha.hirehop_job_id,
+              vha.hire_start, vha.hire_end,
+              fv.reg AS vehicle_reg,
+              d.full_name AS driver_name
+       FROM vehicle_hire_assignments vha
+       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+       LEFT JOIN drivers d ON d.id = vha.driver_id
+       WHERE vha.job_id = $1
+         AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
+         AND vha.vehicle_id IS NOT NULL`,
+      [jobId]
+    );
+
+    const conflicts: Array<{
+      assignmentId: string;
+      vehicleId: string;
+      vehicleReg: string | null;
+      driverName: string | null;
+      conflict: Awaited<ReturnType<typeof findOverlappingAssignments>>[number];
+    }> = [];
+
+    for (const a of assignments.rows) {
+      const overlaps = await findOverlappingAssignments({
+        vehicleId: a.vehicle_id,
+        hireStart: a.hire_start,
+        hireEnd: a.hire_end,
+        jobId,
+        hirehopJobId: a.hirehop_job_id,
+        excludeAssignmentId: a.id,
+      });
+      if (overlaps.length > 0) {
+        conflicts.push({
+          assignmentId: a.id,
+          vehicleId: a.vehicle_id,
+          vehicleReg: a.vehicle_reg,
+          driverName: a.driver_name,
+          conflict: overlaps[0],
+        });
+      }
+    }
+
+    res.json({ data: { conflicts } });
+  } catch (error) {
+    console.error('[assignments] Allocation conflicts error:', error);
+    res.status(500).json({ error: 'Failed to load allocation conflicts' });
+  }
+});
+
 router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
@@ -774,6 +926,14 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
 
     // Track which existing rows are still referenced by the incoming data
     const touchedIds = new Set<string>();
+    // Collect per-allocation conflicts so the UI can surface them to staff.
+    // We skip conflicting allocations rather than failing the whole batch —
+    // the frontend can then remove/reassign the offending slot.
+    const conflictResults: Array<{
+      allocationId: string;
+      vehicleReg: string | null;
+      conflict: Awaited<ReturnType<typeof findOverlappingAssignments>>[number];
+    }> = [];
 
     for (const alloc of allocations) {
       // Skip readOnly allocations — booked_out/active are not managed here
@@ -800,6 +960,25 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
             [alloc.vehicleReg?.toUpperCase()]
           );
           vehicleId = vResult.rows[0]?.id || existingRow.vehicle_id;
+        }
+
+        // If the vehicle is actually changing, check it's not already taken
+        // for overlapping dates on a different job. Exclude this assignment
+        // from the conflict search so a no-op update doesn't self-block.
+        if (vehicleId && vehicleId !== existingRow.vehicle_id) {
+          const existingConflicts = await findOverlappingAssignments({
+            vehicleId,
+            hirehopJobId: alloc.hireHopJobId,
+            excludeAssignmentId: existingRow.id,
+          });
+          if (existingConflicts.length > 0) {
+            conflictResults.push({
+              allocationId: alloc.id,
+              vehicleReg: alloc.vehicleReg || null,
+              conflict: existingConflicts[0],
+            });
+            continue;
+          }
         }
 
         // Resolve driver
@@ -848,6 +1027,20 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
         if (existingDupe) {
           // Already assigned — don't create duplicate, just mark as touched
           touchedIds.add(existingDupe.id);
+          continue;
+        }
+
+        // Overlap check on the target vehicle against other jobs' assignments.
+        const newConflicts = await findOverlappingAssignments({
+          vehicleId,
+          hirehopJobId: alloc.hireHopJobId,
+        });
+        if (newConflicts.length > 0) {
+          conflictResults.push({
+            allocationId: alloc.id,
+            vehicleReg: alloc.vehicleReg || null,
+            conflict: newConflicts[0],
+          });
           continue;
         }
 
@@ -904,7 +1097,7 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    res.json({ success: true });
+    res.json({ success: true, conflicts: conflictResults });
   } catch (error) {
     console.error('[assignments/compat] Save allocations error:', error);
     res.status(500).json({ error: 'Failed to save allocations' });
@@ -944,6 +1137,20 @@ router.post('/:id/swap-vehicle', validate(swapSchema), async (req: AuthRequest, 
       return res.status(400).json({ error: 'Replacement vehicle not found' });
     }
     const newVehicle = newVehicleResult.rows[0];
+
+    // Overlap check on the replacement vehicle. The original stays on the
+    // swapped slot (about to be marked 'swapped' = non-occupying), so we
+    // only care about other jobs' assignments colliding with the new van.
+    const swapConflicts = await findOverlappingAssignments({
+      vehicleId: new_vehicle_id,
+      hireStart: orig.hire_start,
+      hireEnd: orig.hire_end,
+      jobId: orig.job_id,
+      hirehopJobId: orig.hirehop_job_id,
+    });
+    if (swapConflicts.length > 0) {
+      return res.status(409).json(buildConflictPayload(swapConflicts, newVehicle.reg));
+    }
 
     // 3. Create new assignment for replacement vehicle (same driver, job, dates)
     const newResult = await query(

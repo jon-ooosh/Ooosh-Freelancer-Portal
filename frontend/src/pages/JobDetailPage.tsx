@@ -829,6 +829,27 @@ export default function JobDetailPage() {
   const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
+  // Cross-job allocation conflicts — van also booked on another job over
+  // overlapping dates. Populated from /assignments/allocation-conflicts/:jobId
+  // whenever the Drivers & Vehicles tab loads.
+  type AllocationConflict = {
+    assignmentId: string;
+    vehicleId: string;
+    vehicleReg: string | null;
+    driverName: string | null;
+    conflict: {
+      id: string;
+      status: string;
+      jobId: string | null;
+      hirehopJobId: number | null;
+      jobName: string | null;
+      hhJobNumber: number | null;
+      effectiveStart: string | null;
+      effectiveEnd: string | null;
+      driverName: string | null;
+    };
+  };
+  const [allocationConflicts, setAllocationConflicts] = useState<AllocationConflict[]>([]);
 
   // ── Inline editing state ──────────────────────────────────────────────────
   const [editingName, setEditingName] = useState(false);
@@ -1566,6 +1587,17 @@ export default function JobDetailPage() {
       // Also load dispatch check
       const check = await api.get<DispatchCheckResult>(`/assignments/dispatch-check/${id}`);
       setDispatchCheck(check);
+
+      // Cross-job allocation conflicts — surface the amber banner when a van
+      // on this job has an overlapping assignment on a different job.
+      try {
+        const conflictsResp = await api.get<{ data: { conflicts: AllocationConflict[] } }>(
+          `/assignments/allocation-conflicts/${id}`
+        );
+        setAllocationConflicts(conflictsResp.data?.conflicts || []);
+      } catch {
+        setAllocationConflicts([]);
+      }
     } catch {
       console.error('Failed to load vehicle assignments');
     } finally {
@@ -2540,6 +2572,34 @@ export default function JobDetailPage() {
             <h3 className="text-lg font-semibold text-gray-900">Drivers & Vehicles</h3>
             {id && <QuickAssignButton jobId={id} jobDate={job.job_date || undefined} returnDate={job.return_date || undefined} onCreated={loadVehicleAssignments} />}
           </div>
+
+          {/* Allocation overlap warnings — van committed to another hire on overlapping dates */}
+          {allocationConflicts.length > 0 && (
+            <div className="space-y-2">
+              {allocationConflicts.map((c) => {
+                const reg = c.vehicleReg || 'Van';
+                const otherJob = c.conflict.hhJobNumber
+                  ? `job #${c.conflict.hhJobNumber}`
+                  : c.conflict.jobName || 'another hire';
+                const window =
+                  c.conflict.effectiveStart && c.conflict.effectiveEnd
+                    ? `${c.conflict.effectiveStart} → ${c.conflict.effectiveEnd}`
+                    : 'overlapping dates';
+                return (
+                  <div
+                    key={c.assignmentId}
+                    className="flex items-start gap-2 px-4 py-3 rounded-lg text-sm bg-amber-50 border border-amber-200 text-amber-900"
+                  >
+                    <span aria-hidden>⚠️</span>
+                    <span>
+                      <strong>{reg}</strong> is also allocated to <strong>{otherJob}</strong> ({window}).
+                      {' '}Dates overlap — reassign one of the hires.
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Referral warnings */}
           {dispatchCheck && dispatchCheck.blockers.filter(b => b.type === 'referral_pending').length > 0 && (

@@ -74,37 +74,62 @@ export function vehicleNeedsPrepWarning(vehicle: Vehicle): boolean {
 }
 
 /**
- * Find vehicles matching a requirement, excluding already-allocated ones.
- * Returns ALL matching vehicles (including On Hire for planning ahead),
- * sorted by availability: Available first, then Prep Needed, then On Hire.
+ * IDs of vehicles that are occupied for the hire window being filled.
+ * Opaque to the matcher — resolved by the caller from the availability
+ * endpoint (`GET /api/assignments/availability`). Empty set = no date
+ * window known, fall back to showing all non-old/sold matching vans.
+ */
+export type UnavailableVehicleIds = Set<string>
+
+/**
+ * Find vehicles matching a requirement.
+ *
+ * Historically this excluded any vehicle already allocated to ANY other job,
+ * which broke forward-planning: a van currently on hire 10–20 April was
+ * invisible even when picking for a hire starting 23 April. The fix is to
+ * filter by overlapping DATE WINDOWS, not by "allocated somewhere".
  *
  * Filters:
  * - Not old/sold
- * - Not already allocated to another job
+ * - Not occupied for THIS hire's date window (pass in `unavailableVehicleIds`)
  * - Matches the type + gearbox requirement
  *
  * Does NOT filter by hire status — the UI shows warnings for non-Available vehicles.
+ *
+ * @param unavailableVehicleIds IDs of vehicles with an overlapping assignment
+ *   on a different job. Pass an empty set to skip the overlap filter (e.g.
+ *   when the hire window is unknown).
  */
 export function findMatchingVehicles(
   vehicles: Vehicle[],
   requirement: VanRequirement,
-  existingAllocations: VanAllocation[],
+  unavailableVehicleIds: UnavailableVehicleIds,
 ): Vehicle[] {
-  // Build set of already-allocated vehicle IDs
-  const allocatedVehicleIds = new Set(
-    existingAllocations.map(a => a.vehicleId),
-  )
-
   return vehicles
     .filter(v => {
       // Must not be old/sold
       if (v.isOldSold) return false
-      // Must not already be allocated
-      if (allocatedVehicleIds.has(v.id)) return false
+      // Must not be occupied for this hire's date window
+      if (unavailableVehicleIds.has(v.id)) return false
       // Must match the requirement (type + gearbox)
       return vehicleMatchesRequirement(v, requirement)
     })
     .sort((a, b) => getStatusPriority(a.hireStatus) - getStatusPriority(b.hireStatus))
+}
+
+/**
+ * Legacy signature — retained so callers that still pass `VanAllocation[]`
+ * can migrate gradually. Extracts vehicle IDs and delegates. Prefer
+ * `findMatchingVehicles` with an `UnavailableVehicleIds` set, sourced from
+ * the availability endpoint.
+ */
+export function findMatchingVehiclesLegacy(
+  vehicles: Vehicle[],
+  requirement: VanRequirement,
+  existingAllocations: VanAllocation[],
+): Vehicle[] {
+  const ids = new Set(existingAllocations.map(a => a.vehicleId))
+  return findMatchingVehicles(vehicles, requirement, ids)
 }
 
 /**
