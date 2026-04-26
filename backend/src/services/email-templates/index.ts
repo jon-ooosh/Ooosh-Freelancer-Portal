@@ -300,14 +300,14 @@ const templates: Record<string, EmailTemplate> = {
   booking_confirmed_deposit: {
     variant: 'client',
     preheader: 'Your booking with Ooosh Tours is confirmed',
-    subject: 'Booking Confirmed - {{jobName}}',
+    subject: 'Booking Confirmed — {{jobName}} (#{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Booking Confirmed</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        Thank you for your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong>. Your booking is now confirmed.
+        Thank you for your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>). Your booking is now confirmed.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
         <tr>
@@ -327,14 +327,14 @@ const templates: Record<string, EmailTemplate> = {
   payment_received: {
     variant: 'client',
     preheader: 'Payment received for your booking',
-    subject: 'Payment Received - {{jobName}}',
+    subject: 'Payment Received — {{jobName}} (#{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Payment Received</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We have received your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong>.
+        We have received your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
         {{statusMessage}}
@@ -483,6 +483,30 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  excess_rolled_over_applied: {
+    variant: 'client',
+    preheader: 'Your insurance excess has been rolled over to this hire',
+    subject: 'Insurance Excess Rolled Over — {{jobName}} (#{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Insurance Excess Rolled Over</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{firstName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've applied <strong>{{amount}}</strong> from your previous hire{{previousJobRef}} to your upcoming hire <strong>#{{jobNumber}}</strong>{{hireStart}}.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        No further action needed — your insurance excess for this hire is covered. No new payment has been taken.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        All being well on return, we aim to reimburse your excess within ten days of the end of your hire{{hireEnd}}, unless you'd like us to roll it over again.
+      </p>
+      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+        We hope you have a great hire!
+      </p>
+    `,
+  },
+
   // ── Internal alerts ──────────────────────────────────────────────────
 
   last_minute_booking: {
@@ -532,7 +556,7 @@ const templates: Record<string, EmailTemplate> = {
         Hi {{clientName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        You have an upcoming vehicle hire booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong>.
+        You have an upcoming vehicle hire (job <strong>#{{jobNumber}}</strong>) booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong>.
       </p>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Each driver must complete and sign a hire agreement, which must be filled out online through the link at the bottom of this email.
@@ -580,7 +604,7 @@ const templates: Record<string, EmailTemplate> = {
         Hi {{clientName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        A reminder that you have an upcoming vehicle hire booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong> and we haven't yet received any hire forms for you.
+        A reminder that you have an upcoming vehicle hire (job <strong>#{{jobNumber}}</strong>) booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong> and we haven't yet received any hire forms for you.
       </p>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Each driver must complete and sign a hire agreement, which must be filled out online through the link at the bottom of this email.

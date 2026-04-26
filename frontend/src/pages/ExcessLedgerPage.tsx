@@ -75,7 +75,7 @@ export default function ExcessLedgerPage() {
     setViewMode('client-detail');
     setClientLoading(true);
     try {
-      const data = await api.get<{ summary: any; history: JobExcess[] }>(`/excess/ledger/${client.xero_contact_id}`);
+      const data = await api.get<{ summary: any; history: JobExcess[] }>(`/excess/ledger/${encodeURIComponent(client.xero_contact_id)}`);
       setClientHistory(data.history);
     } catch (err) {
       console.error('Failed to load client history:', err);
