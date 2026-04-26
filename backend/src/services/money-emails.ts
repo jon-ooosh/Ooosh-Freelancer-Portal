@@ -343,6 +343,7 @@ export async function sendPaymentEmail(opts: {
         amount: `\u00A3${amount.toFixed(2)}`,
         bankName: bankName || 'card',
         jobName,
+        jobNumber: String(job?.hh_job_number || ''),
         hireDates: hireDatesStr,
         balanceSection,
         statusMessage,
@@ -369,8 +370,9 @@ export async function sendExcessEmail(opts: {
   refundAmount?: number;
   originalAmount?: number;
   retainedAmount?: number;
+  previousJobNumber?: string;
 }) {
-  const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount } = opts;
+  const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount, previousJobNumber } = opts;
 
   // Get excess record + optional driver info (LEFT JOIN — assignment may be NULL for Money tab records)
   const excessResult = await query(
@@ -456,6 +458,8 @@ export async function sendExcessEmail(opts: {
       retainedAmount: retainedAmount != null ? `\u00A3${retainedAmount.toFixed(2)}` : '',
       reason: reason || '',
       reasonSection,
+      previousJobNumber: previousJobNumber || '',
+      previousJobRef: previousJobNumber ? ` #${previousJobNumber}` : '',
       claimAmount: `\u00A3${amount.toFixed(2)}`,
     },
   });

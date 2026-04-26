@@ -97,6 +97,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '060_fix_unlinked_excess_ledger_name.sql',
         '061_job_chase_alert_delivery.sql',
         '062_run_groups.sql',
+        '063_excess_ledger_group_by_client_name.sql',
       ];
 
       for (const migration of migrations) {

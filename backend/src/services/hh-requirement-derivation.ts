@@ -272,7 +272,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
   // Load job with line items
   const jobResult = await query(
-    `SELECT id, hh_job_number, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes
+    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes
      FROM jobs WHERE id = $1 AND is_deleted = false`,
     [jobId]
   );
@@ -353,7 +353,12 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
             job.hh_job_number,
             expectedExcess,
             `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.self_drive_count} self-drive vehicle(s)`,
-            null, // client_name populated later
+            // Populate client_name so the ledger view can group this record
+            // under the real client (via the 'name:' prefix added in migration
+            // 063) instead of dumping it into the catch-all UNLINKED bucket.
+            // Proper fix is still adding xero_contact_id on organisations —
+            // see CLAUDE.md Step 3 Phase A follow-ups.
+            job.client_name || null,
             `Auto-created: ${flags.self_drive_count} self-drive vehicle(s) detected`,
             '00000000-0000-0000-0000-000000000000',
           ]
