@@ -1,0 +1,159 @@
+diff --git a/backend/src/services/email-templates/index.ts b/backend/src/services/email-templates/index.ts
+index eeb8fd2..84dc6f2 100644
+--- a/backend/src/services/email-templates/index.ts
++++ b/backend/src/services/email-templates/index.ts
+@@ -300,14 +300,14 @@ const templates: Record<string, EmailTemplate> = {
+   booking_confirmed_deposit: {
+     variant: 'client',
+     preheader: 'Your booking with Ooosh Tours is confirmed',
+-    subject: 'Booking Confirmed - {{jobName}}',
++    subject: 'Booking Confirmed — {{jobName}} (#{{jobNumber}})',
+     body: `
+       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Booking Confirmed</h2>
+       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+         Hi {{firstName}},
+       </p>
+       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+-        Thank you for your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong>. Your booking is now confirmed.
++        Thank you for your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>). Your booking is now confirmed.
+       </p>
+       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+         <tr>
+@@ -327,14 +327,14 @@ const templates: Record<string, EmailTemplate> = {
+   payment_received: {
+     variant: 'client',
+     preheader: 'Payment received for your booking',
+-    subject: 'Payment Received - {{jobName}}',
++    subject: 'Payment Received — {{jobName}} (#{{jobNumber}})',
+     body: `
+       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Payment Received</h2>
+       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+         Hi {{firstName}},
+       </p>
+       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+-        We have received your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong>.
++        We have received your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
+       </p>
+       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
+         {{statusMessage}}
+@@ -483,6 +483,30 @@ const templates: Record<string, EmailTemplate> = {
+     `,
+   },
+ 
++  excess_rolled_over_applied: {
++    variant: 'client',
++    preheader: 'Your insurance excess has been rolled over to this hire',
++    subject: 'Insurance Excess Rolled Over — {{jobName}} (#{{jobNumber}})',
++    body: `
++      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Insurance Excess Rolled Over</h2>
++      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
++        Hi {{firstName}},
++      </p>
++      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
++        We've applied <strong>{{amount}}</strong> from your previous hire{{previousJobRef}} to your upcoming hire <strong>#{{jobNumber}}</strong>{{hireStart}}.
++      </p>
++      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
++        No further action needed — your insurance excess for this hire is covered. No new payment has been taken.
++      </p>
++      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
++        All being well on return, we aim to reimburse your excess within ten days of the end of your hire{{hireEnd}}, unless you'd like us to roll it over again.
++      </p>
++      <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
++        We hope you have a great hire!
++      </p>
++    `,
++  },
++
+   // ── Internal alerts ──────────────────────────────────────────────────
+ 
+   last_minute_booking: {
+@@ -532,7 +556,7 @@ const templates: Record<string, EmailTemplate> = {
+         Hi {{clientName}},
+       </p>
+       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+-        You have an upcoming vehicle hire booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong>.
++        You have an upcoming vehicle hire (job <strong>#{{jobNumber}}</strong>) booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong>.
+       </p>
+       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+         Each driver must complete and sign a hire agreement, which must be filled out online through the link at the bottom of this email.
+@@ -580,7 +604,7 @@ const templates: Record<string, EmailTemplate> = {
+         Hi {{clientName}},
+       </p>
+       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+-        A reminder that you have an upcoming vehicle hire booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong> and we haven't yet received any hire forms for you.
++        A reminder that you have an upcoming vehicle hire (job <strong>#{{jobNumber}}</strong>) booked through Ooosh Tours, starting <strong>{{startDay}} {{startDate}}</strong> and we haven't yet received any hire forms for you.
+       </p>
+       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+         Each driver must complete and sign a hire agreement, which must be filled out online through the link at the bottom of this email.
+diff --git a/backend/src/services/hh-requirement-derivation.ts b/backend/src/services/hh-requirement-derivation.ts
+index 4f7e1f2..d16b4af 100644
+--- a/backend/src/services/hh-requirement-derivation.ts
++++ b/backend/src/services/hh-requirement-derivation.ts
+@@ -272,7 +272,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
+ 
+   // Load job with line items
+   const jobResult = await query(
+-    `SELECT id, hh_job_number, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes
++    `SELECT id, hh_job_number, client_name, line_items, hh_derived_flags, is_van_and_driver, vehicle_slot_modes
+      FROM jobs WHERE id = $1 AND is_deleted = false`,
+     [jobId]
+   );
+@@ -353,7 +353,12 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
+             job.hh_job_number,
+             expectedExcess,
+             `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.self_drive_count} self-drive vehicle(s)`,
+-            null, // client_name populated later
++            // Populate client_name so the ledger view can group this record
++            // under the real client (via the 'name:' prefix added in migration
++            // 063) instead of dumping it into the catch-all UNLINKED bucket.
++            // Proper fix is still adding xero_contact_id on organisations —
++            // see CLAUDE.md Step 3 Phase A follow-ups.
++            job.client_name || null,
+             `Auto-created: ${flags.self_drive_count} self-drive vehicle(s) detected`,
+             '00000000-0000-0000-0000-000000000000',
+           ]
+diff --git a/backend/src/services/money-emails.ts b/backend/src/services/money-emails.ts
+index bfaac9d..885e88c 100644
+--- a/backend/src/services/money-emails.ts
++++ b/backend/src/services/money-emails.ts
+@@ -343,6 +343,7 @@ export async function sendPaymentEmail(opts: {
+         amount: `\\u00A3${amount.toFixed(2)}`,
+         bankName: bankName || 'card',
+         jobName,
++        jobNumber: String(job?.hh_job_number || ''),
+         hireDates: hireDatesStr,
+         balanceSection,
+         statusMessage,
+@@ -369,8 +370,9 @@ export async function sendExcessEmail(opts: {
+   refundAmount?: number;
+   originalAmount?: number;
+   retainedAmount?: number;
++  previousJobNumber?: string;
+ }) {
+-  const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount } = opts;
++  const { templateId, excessId, jobId, amount, paymentMethod, reason, refundAmount, originalAmount, retainedAmount, previousJobNumber } = opts;
+ 
+   // Get excess record + optional driver info (LEFT JOIN — assignment may be NULL for Money tab records)
+   const excessResult = await query(
+@@ -456,6 +458,8 @@ export async function sendExcessEmail(opts: {
+       retainedAmount: retainedAmount != null ? `\\u00A3${retainedAmount.toFixed(2)}` : '',
+       reason: reason || '',
+       reasonSection,
++      previousJobNumber: previousJobNumber || '',
++      previousJobRef: previousJobNumber ? ` #${previousJobNumber}` : '',
+       claimAmount: `\\u00A3${amount.toFixed(2)}`,
+     },
+   });
+diff --git a/frontend/src/pages/ExcessLedgerPage.tsx b/frontend/src/pages/ExcessLedgerPage.tsx
+index 722bd89..1a25616 100644
+--- a/frontend/src/pages/ExcessLedgerPage.tsx
++++ b/frontend/src/pages/ExcessLedgerPage.tsx
+@@ -75,7 +75,7 @@ export default function ExcessLedgerPage() {
+     setViewMode('client-detail');
+     setClientLoading(true);
+     try {
+-      const data = await api.get<{ summary: any; history: JobExcess[] }>(`/excess/ledger/${client.xero_contact_id}`);
++      const data = await api.get<{ summary: any; history: JobExcess[] }>(`/excess/ledger/${encodeURIComponent(client.xero_contact_id)}`);
+       setClientHistory(data.history);
+     } catch (err) {
+       console.error('Failed to load client history:', err);
