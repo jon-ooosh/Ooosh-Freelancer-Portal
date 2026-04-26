@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
@@ -18,7 +18,7 @@ import { alertReturnedWithStillBookedOutVans } from '../services/vehicle-emails'
 
 const router = Router();
 router.use(authenticate);
-router.use(authorize('admin', 'manager', 'staff'));
+router.use(authorize(...STAFF_ROLES));
 
 // Pipeline status labels for transition logging
 const PIPELINE_LABELS: Record<string, string> = {

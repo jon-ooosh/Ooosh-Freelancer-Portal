@@ -1,14 +1,14 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
 import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
 
 const router = Router();
 router.use(authenticate);
-router.use(authorize('admin', 'manager', 'staff'));
+router.use(authorize(...STAFF_ROLES));
 
 // ── Valid statuses (non-linear — any to any) ─────────────────────────────
 

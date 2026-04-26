@@ -1,5 +1,5 @@
 import { Router, Response } from 'express';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { isHireHopConfigured } from '../config/hirehop';
 import { previewHireHopSync, syncContactsFromHireHop } from '../services/hirehop-sync';
 import { previewHireHopJobSync, syncJobsFromHireHop } from '../services/hirehop-job-sync';
@@ -8,7 +8,7 @@ import { hhBroker } from '../services/hirehop-broker';
 
 const router = Router();
 router.use(authenticate);
-router.use(authorize('admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'));
+router.use(authorize(...STAFF_ROLES));
 
 // GET /api/hirehop/status — check if HireHop is configured
 router.get('/status', async (_req: AuthRequest, res: Response) => {

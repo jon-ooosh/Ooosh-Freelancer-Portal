@@ -10,11 +10,11 @@
 
 import { Router, Response } from 'express';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 
 const router = Router();
 router.use(authenticate);
-router.use(authorize('admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'));
+router.use(authorize(...STAFF_ROLES));
 
 // HH statuses: 0=Enquiry, 1=Provisional, 2=Booked, 3=Prepped, 5=Dispatched,
 //              6=Returned Incomplete, 7=Returned, 11=Completed

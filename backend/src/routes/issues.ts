@@ -11,7 +11,7 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../config/database';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
 
@@ -19,10 +19,6 @@ const router = Router();
 router.use(authenticate);
 
 const ALERT_RECIPIENT = 'jon@oooshtours.co.uk';
-
-// Staff roles (everyone who isn't a freelancer) — the whole team needs to
-// log and see issues during bedding-in.
-const STAFF_ROLES = ['admin', 'manager', 'staff', 'general_assistant', 'weekend_manager'] as const;
 
 // Only admin/manager can change workflow fields
 const TRIAGE_ROLES = ['admin', 'manager'] as const;
