@@ -11,6 +11,16 @@ export interface AuthRequest extends Request {
   user?: AuthUser;
 }
 
+// Everyone on the team — used to gate routes the whole staff needs.
+// Excludes 'freelancer', who authenticate via the portal route, not these.
+export const STAFF_ROLES = [
+  'admin',
+  'manager',
+  'staff',
+  'general_assistant',
+  'weekend_manager',
+] as const satisfies readonly AuthUser['role'][];
+
 if (!process.env.JWT_SECRET) {
   throw new Error('FATAL: JWT_SECRET environment variable is required');
 }
