@@ -1844,7 +1844,7 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 **Authentication & Authorization:**
 - [x] JWT access tokens (15 min) + refresh tokens (7 days)
 - [x] Bcrypt password hashing (12 salt rounds)
-- [x] RBAC middleware (`authorize()`) on sensitive routes — 6 roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, `freelancer`
+- [x] RBAC middleware (`authorize()`) on sensitive routes — 6 roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, `freelancer`. **For staff-wide gates** (anything the whole non-freelancer team needs), use the shared `STAFF_ROLES` constant from `middleware/auth.ts` and spread it: `router.use(authorize(...STAFF_ROLES))`. Do NOT hardcode `authorize('admin', 'manager', 'staff')` — it silently locks out `weekend_manager` and `general_assistant` (this caused a live bug on `/pipeline` + `/requirements` post-go-live, fixed 26 Apr 2026). For narrower gates (e.g. only admin/manager can waive excess), keep the explicit role list — `STAFF_ROLES` is only for "everyone except freelancer".
 - [x] Account locking — `is_active = false` nulls refresh token via DB trigger, locks user out within 15 min (access token expiry)
 - [x] Optimistic locking — `version` column on people, organisations, venues, jobs tables. PUT requests can send `version` to detect concurrent edits (409 Conflict if stale). Backwards compatible — omitting `version` skips the check.
 - [x] JWT_SECRET required via env var (no default fallback) — app won't start without it
