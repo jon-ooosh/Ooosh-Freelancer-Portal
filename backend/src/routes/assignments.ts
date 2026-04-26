@@ -645,7 +645,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 
 router.get('/allocation-conflicts/:jobId', async (req: AuthRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = req.params.jobId as string;
 
     const assignments = await query(
       `SELECT vha.id, vha.vehicle_id, vha.hirehop_job_id,
