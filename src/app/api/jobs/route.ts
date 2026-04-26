@@ -35,6 +35,12 @@ interface OrganisedJob {
   venueName?: string
   driverPay?: number
   runGroup?: string
+  // Combined run fees from OP. When set, groupJobs uses these instead
+  // of summing individual driverPay values — the combined fee is what
+  // the freelancer is actually being paid for the whole run.
+  runCombinedFreelancerFee?: number | null
+  runCombinedClientFee?: number | null
+  runNotes?: string | null
   hhRef?: string
   keyNotes?: string
   completedAtDate?: string
@@ -50,7 +56,17 @@ interface GroupedRun {
   runGroup: string
   date: string
   jobs: OrganisedJob[]
+  // totalFee is what the freelancer is being paid for the entire run.
+  // Prefers runCombinedFreelancerFee (single contractual figure agreed
+  // with staff) over the sum of individual driverPay values.
   totalFee: number
+  // True when totalFee came from the OP combined fee override rather
+  // than summing individual fees — used by the UI to hint "combined".
+  hasCombinedFee?: boolean
+  // Sum of individual driverPay values, so the UI can show the
+  // standalone total struck through next to the combined fee.
+  standaloneTotalFee?: number
+  runNotes?: string | null
   jobCount: number
 }
 
@@ -273,21 +289,30 @@ function groupJobs(jobs: OrganisedJob[]): DisplayItem[] {
     } else {
       // Multiple jobs - create a grouped run
       const [date, runGroup] = key.split('|')
-      const totalFee = groupedJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0)
-      
+      const standaloneTotalFee = groupedJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0)
+      // Prefer the OP combined fee when set (it's what the freelancer
+      // was actually offered for the run — e.g. "£50 all-in" instead
+      // of £30 + £30). Every sibling carries the same combined fee.
+      const combinedFee = groupedJobs.find((j) => j.runCombinedFreelancerFee != null)?.runCombinedFreelancerFee
+      const totalFee = combinedFee != null ? combinedFee : standaloneTotalFee
+      const runNotes = groupedJobs.find((j) => j.runNotes)?.runNotes ?? null
+
       // Sort jobs within the group by time
       groupedJobs.sort((a, b) => {
         if (!a.time) return 1
         if (!b.time) return -1
         return a.time.localeCompare(b.time)
       })
-      
+
       result.push({
         isGrouped: true,
         runGroup,
         date,
         jobs: groupedJobs,
         totalFee,
+        hasCombinedFee: combinedFee != null,
+        standaloneTotalFee,
+        runNotes,
         jobCount: groupedJobs.length,
       })
     }

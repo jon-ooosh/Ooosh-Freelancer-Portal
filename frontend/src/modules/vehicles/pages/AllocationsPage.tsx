@@ -21,6 +21,7 @@ import { useAllocations, useSaveAllocations } from '../hooks/useAllocations'
 import { useDriverHireForms } from '../hooks/useDriverHireForms'
 import { extractVanRequirements } from '../lib/hirehop-api'
 import { findMatchingVehicles, formatVanType, getVehicleGearboxLabel, vehicleNeedsPrepWarning } from '../lib/van-matching'
+import { useAvailability } from '../hooks/useAvailability'
 import type { HireHopJob, VanAllocation, VanRequirement } from '../types/hirehop'
 import type { Vehicle } from '../types/vehicle'
 
@@ -270,7 +271,11 @@ function JobAllocationCard({
   const requirements = extractVanRequirements(job)
   const jobAllocations = allocations.filter(a => a.hireHopJobId === job.id)
   const totalNeeded = requirements.reduce((sum, r) => sum + r.quantity, 0)
-  const assignedCount = jobAllocations.length
+  // Count unique vans actually picked — not hire-form placeholders waiting
+  // for a van. Multiple drivers on the same van still count as 1 assignment.
+  const assignedCount = new Set(
+    jobAllocations.filter(a => a.vehicleId).map(a => a.vehicleId),
+  ).size
 
   // Fetch driver hire forms for this job (only when expanded to save API calls)
   const { data: hireForms } = useDriverHireForms(expanded ? String(job.id) : null)
@@ -377,7 +382,6 @@ function JobAllocationCard({
               requirement={req}
               requirementIndex={reqIndex}
               allocations={jobAllocations}
-              allAllocations={allocations}
               vehicles={vehicles}
               onAllocate={onAllocate}
               onRemove={onRemove}
@@ -434,7 +438,6 @@ function RequirementSlots({
   requirement,
   requirementIndex,
   allocations: jobAllocations,
-  allAllocations,
   vehicles,
   onAllocate,
   onRemove,
@@ -444,7 +447,6 @@ function RequirementSlots({
   requirement: VanRequirement
   requirementIndex: number
   allocations: VanAllocation[]
-  allAllocations: VanAllocation[]
   vehicles: Vehicle[]
   onAllocate: (job: HireHopJob, reqIndex: number, vehicle: Vehicle, staffName: string) => void
   onRemove: (allocationId: string) => void
@@ -469,10 +471,23 @@ function RequirementSlots({
   // Allocations for this specific requirement index
   const slotAllocations = jobAllocations.filter(a => a.vanRequirementIndex === requirementIndex)
 
-  // Available vehicles that match this requirement (excluding all already-allocated)
+  // Ask the backend which vehicles are occupied for this job's date window.
+  // Uses Job Finish (jobEndDate) rather than Returning — the +1-day
+  // turnaround buffer is intentionally ignored until we make it
+  // configurable. Excludes this job so multi-driver single-van rows don't
+  // mark themselves unavailable.
+  const { data: availability } = useAvailability({
+    start: job.jobDate || job.outDate,
+    end: job.jobEndDate || job.returnDate,
+    excludeHhJobId: job.id,
+  })
+  const unavailableIds = availability?.unavailableIds ?? new Set<string>()
+
+  // Vehicles that match this requirement AND aren't already occupied for
+  // this job's date window on a different job.
   const matchingVehicles = useMemo(
-    () => findMatchingVehicles(vehicles, requirement, allAllocations),
-    [vehicles, requirement, allAllocations],
+    () => findMatchingVehicles(vehicles, requirement, unavailableIds),
+    [vehicles, requirement, unavailableIds],
   )
 
   /**
@@ -703,8 +718,21 @@ function RequirementSlots({
               </div>
             )}
 
+            {/* Already booked out — swap Book Out for a status pill.
+                rawStatus preserves the true DB status (the narrowed `status`
+                collapses booked_out/active to 'confirmed'). Without this,
+                AllocationsPage kept offering Book Out on vans that were
+                already physically out. */}
+            {(allocation.rawStatus === 'booked_out' || allocation.rawStatus === 'active') && (
+              <div className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-50 border border-indigo-200 py-2 text-xs font-medium text-indigo-700">
+                <span aria-hidden>🚐</span>
+                <span>{allocation.rawStatus === 'active' ? 'On Hire' : 'Booked Out'}</span>
+              </div>
+            )}
+
             {/* Book Out link — soft allocations with a real vehicle selected. */}
-            {allocation.status === 'soft' && allocation.vehicleId && (
+            {allocation.status === 'soft' && allocation.vehicleId &&
+              allocation.rawStatus !== 'booked_out' && allocation.rawStatus !== 'active' && (
               <Link
                 to={vmPath(`/book-out?vehicle=${allocation.vehicleId}&job=${job.id}`)}
                 className={`mt-2 block w-full rounded-lg py-2 text-center text-xs font-medium transition-colors ${
@@ -721,7 +749,8 @@ function RequirementSlots({
                 a vehicle linked. Previously the button only showed for
                 status='soft' which excluded hire-form-created rows (always
                 'confirmed') — staff ended up with no path to book out. */}
-            {allocation.status === 'confirmed' && allocation.hireFormLinked && allocation.vehicleId && (
+            {allocation.status === 'confirmed' && allocation.hireFormLinked && allocation.vehicleId &&
+              allocation.rawStatus !== 'booked_out' && allocation.rawStatus !== 'active' && (
               <Link
                 to={vmPath(`/book-out?vehicle=${allocation.vehicleId}&job=${job.id}`)}
                 className={`mt-2 block w-full rounded-lg py-2 text-center text-xs font-medium transition-colors ${

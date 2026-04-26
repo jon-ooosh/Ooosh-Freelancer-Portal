@@ -1018,6 +1018,12 @@ export default function JobDetailsPage() {
   const [runVenues, setRunVenues] = useState<Map<string, Venue>>(new Map())
   const [expandedStops, setExpandedStops] = useState<Set<string>>(new Set())
   const [loadingRun, setLoadingRun] = useState(false)
+  // Combined fee for the run (from OP). When set, overrides the sum
+  // of individual driverPay values — the single contractually-agreed
+  // fee for the whole run.
+  const [runCombinedFee, setRunCombinedFee] = useState<number | null>(null)
+  const [runStandaloneFee, setRunStandaloneFee] = useState<number>(0)
+  const [runNotes, setRunNotes] = useState<string | null>(null)
 
   // Fetch primary job — pass board type to API
   useEffect(() => {
@@ -1076,6 +1082,10 @@ export default function JobDetailsPage() {
         if (data.venues) {
           setRunVenues(new Map(Object.entries(data.venues)))
         }
+        // Capture combined-fee fields (OP mode only; Monday path omits these).
+        setRunCombinedFee(data.hasCombinedFee ? Number(data.totalFee) : null)
+        setRunStandaloneFee(Number(data.standaloneTotalFee ?? data.totalFee ?? 0))
+        setRunNotes(data.runNotes ?? null)
       }
     } catch (err) {
       console.error('Error fetching run jobs:', err)
@@ -1613,13 +1623,31 @@ export default function JobDetailsPage() {
                   )
                 })}
                 
-                {/* Total fee for run */}
+                {/* Total fee for run. Prefer combined fee when set —
+                    that's the single contractual fee for the whole run;
+                    the per-stop driverPay sum is shown struck through as
+                    a reference. */}
                 {runJobs.length > 0 && (
                   <div className="bg-white rounded-xl shadow-sm p-4 flex items-center justify-between">
-                    <span className="text-gray-600">Total agreed fee</span>
-                    <span className="font-bold text-green-600">
-                      £{runJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0).toFixed(0)}
-                    </span>
+                    <div>
+                      <span className="text-gray-600">Total agreed fee</span>
+                      {runNotes && (
+                        <p className="text-xs text-gray-500 mt-0.5">{runNotes}</p>
+                      )}
+                    </div>
+                    {runCombinedFee != null ? (
+                      <div className="text-right">
+                        <div>
+                          <span className="text-xs text-gray-400 line-through mr-2">£{runStandaloneFee.toFixed(0)}</span>
+                          <span className="font-bold text-green-600 text-lg">£{runCombinedFee.toFixed(0)}</span>
+                        </div>
+                        <div className="text-[10px] text-violet-600 font-medium">combined run fee</div>
+                      </div>
+                    ) : (
+                      <span className="font-bold text-green-600">
+                        £{runJobs.reduce((sum, j) => sum + (j.driverPay || 0), 0).toFixed(0)}
+                      </span>
+                    )}
                   </div>
                 )}
               </div>

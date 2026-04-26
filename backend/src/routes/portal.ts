@@ -739,6 +739,9 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         q.work_type, q.work_type_other, q.work_description,
         q.freelancer_notes, q.freelancer_fee, q.freelancer_fee_rounded,
         q.run_group, q.run_order, q.run_group_fee,
+        rg.combined_freelancer_fee as run_combined_freelancer_fee,
+        rg.combined_client_fee as run_combined_client_fee,
+        rg.notes as run_notes,
         q.is_local, q.completed_at, q.completion_notes,
         q.client_name,
         q.tolls_status, q.accommodation_status, q.flight_status,
@@ -753,6 +756,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
+       LEFT JOIN run_groups rg ON rg.id = q.run_group
        WHERE ${assignmentFilter}
          AND q.is_deleted = false
          AND q.status IN ('confirmed', 'completed')
@@ -839,6 +843,9 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
     const result = await query(
       `SELECT
         q.*,
+        rg.combined_freelancer_fee as run_combined_freelancer_fee,
+        rg.combined_client_fee as run_combined_client_fee,
+        rg.notes as run_notes,
         qa.id as assignment_id, qa.role as assignment_role,
         qa.agreed_rate, qa.rate_type,
         qa.expected_expenses as assignment_expected_expenses,
@@ -852,6 +859,7 @@ router.get('/jobs/:quoteId', async (req: PortalRequest, res: Response) => {
        JOIN quotes q ON q.id = qa.quote_id
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
+       LEFT JOIN run_groups rg ON rg.id = q.run_group
        WHERE qa.quote_id = $1 AND (qa.person_id = $2 OR (qa.is_ooosh_crew = true AND $3 = true))
          AND q.is_deleted = false`,
       [quoteId, personId, isStaffShared]
@@ -1555,11 +1563,21 @@ function formatJobForPortal(row: Record<string, unknown>) {
     completedAtDate: row.completed_at ? new Date(row.completed_at as string).toISOString().split('T')[0] : null,
     completionNotes: row.completion_notes as string | null,
     isLocal: row.is_local as boolean,
-    // Run grouping (D&C only)
+    // Run grouping (D&C only). When the run has a combined_freelancer_fee,
+    // that's the one figure the freelancer is being offered for the whole
+    // run — individual per-quote fees are preserved on each quote row
+    // for audit but ignored for display/payment.
     runGroup: row.run_group as string | null,
     runOrder: row.run_order as number | null,
     runGroupFee: row.run_group_fee as number | null,
-    // Fee info
+    runCombinedFreelancerFee: row.run_combined_freelancer_fee != null
+      ? Number(row.run_combined_freelancer_fee) : null,
+    runCombinedClientFee: row.run_combined_client_fee != null
+      ? Number(row.run_combined_client_fee) : null,
+    runNotes: row.run_notes as string | null,
+    // Fee info — individual quote fee, NOT the run combined fee. The
+    // portal consumer (Next.js) sums driverPay across siblings and
+    // replaces with runCombinedFreelancerFee at display time when set.
     driverPay: Number(row.agreed_rate || row.freelancer_fee_rounded || row.freelancer_fee || 0),
     // Freelancer notes
     freelancerNotes: row.freelancer_notes as string | null,

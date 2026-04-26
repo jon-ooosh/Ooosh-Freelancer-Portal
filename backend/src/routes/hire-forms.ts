@@ -15,6 +15,10 @@ import { generateHireFormPdf, fetchLogo, type HireFormData } from '../services/h
 import { uploadToR2, getFromR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import {
+  findOverlappingAssignments,
+  buildConflictPayload,
+} from '../services/assignment-overlap';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -363,6 +367,24 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       });
     }
 
+    // Overlap check — only when a vehicle is actually assigned. Hire forms
+    // submitted without a van (vehicle_id NULL) don't occupy a slot yet; the
+    // overlap check runs again if/when a van is linked later.
+    if (vehicleId) {
+      const conflicts = await findOverlappingAssignments({
+        vehicleId,
+        hireStart: f.hire_start,
+        hireEnd: f.hire_end,
+        jobId: jobId,
+        hirehopJobId: f.hirehop_job_id || null,
+      });
+      if (conflicts.length > 0) {
+        await client.query('ROLLBACK');
+        client.release();
+        return res.status(409).json(buildConflictPayload(conflicts));
+      }
+    }
+
     // 7. Create vehicle hire assignment
     const assignmentResult = await client.query(
       `INSERT INTO vehicle_hire_assignments (
@@ -671,6 +693,20 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     const hhJobId = jobResult.rows[0]?.hh_job_number || null;
     const hhJobName = jobResult.rows[0]?.job_name || null;
 
+    // Overlap check — only when a vehicle is being assigned at quick-assign time.
+    if (f.vehicle_id) {
+      const conflicts = await findOverlappingAssignments({
+        vehicleId: f.vehicle_id,
+        hireStart: f.hire_start,
+        hireEnd: f.hire_end,
+        jobId: f.job_id,
+        hirehopJobId: hhJobId,
+      });
+      if (conflicts.length > 0) {
+        return res.status(409).json(buildConflictPayload(conflicts));
+      }
+    }
+
     // Create assignment (vehicle_id may be null — DB column is nullable)
     const result = await query(
       `INSERT INTO vehicle_hire_assignments (
@@ -889,6 +925,35 @@ router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthReques
   try {
     const id = req.params.id as string;
     const updates = req.body;
+
+    // Overlap check when a vehicle is being linked/changed. We only run the
+    // check if vehicle_id is being SET to a non-null value; unlinking (null)
+    // is always allowed. Self-assignment (same vehicle) is excluded via the
+    // excludeAssignmentId filter in findOverlappingAssignments.
+    if (updates.vehicle_id !== undefined && updates.vehicle_id !== null) {
+      const existingAssignment = await query(
+        `SELECT vehicle_id, job_id, hirehop_job_id, hire_start, hire_end
+         FROM vehicle_hire_assignments WHERE id = $1`,
+        [id]
+      );
+      if (existingAssignment.rows.length === 0) {
+        return res.status(404).json({ error: 'Hire form not found' });
+      }
+      const existing = existingAssignment.rows[0];
+      if (existing.vehicle_id !== updates.vehicle_id) {
+        const conflicts = await findOverlappingAssignments({
+          vehicleId: updates.vehicle_id,
+          hireStart: existing.hire_start,
+          hireEnd: existing.hire_end,
+          jobId: existing.job_id,
+          hirehopJobId: existing.hirehop_job_id,
+          excludeAssignmentId: id,
+        });
+        if (conflicts.length > 0) {
+          return res.status(409).json(buildConflictPayload(conflicts));
+        }
+      }
+    }
 
     // Build dynamic SET clause
     const setClauses: string[] = [];

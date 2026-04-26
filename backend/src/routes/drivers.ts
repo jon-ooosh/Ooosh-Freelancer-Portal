@@ -177,9 +177,22 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT d.*,
         p.first_name AS person_first_name,
-        p.last_name AS person_last_name
+        p.last_name AS person_last_name,
+        latest_excess.excess_id AS latest_excess_id,
+        latest_excess.excess_amount_required AS latest_excess_required,
+        latest_excess.excess_status AS latest_excess_status
       FROM drivers d
       LEFT JOIN people p ON p.id = d.person_id
+      LEFT JOIN LATERAL (
+        SELECT je.id AS excess_id,
+               je.excess_amount_required,
+               je.excess_status
+        FROM job_excess je
+        JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+        WHERE vha.driver_id = d.id
+        ORDER BY je.updated_at DESC
+        LIMIT 1
+      ) latest_excess ON true
       ${where}
       ORDER BY ${orderBy}
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}`,
@@ -312,10 +325,15 @@ router.get('/:id/excess-history', async (req: AuthRequest, res: Response) => {
         vha.vehicle_id,
         fv.reg AS vehicle_reg,
         vha.hire_start,
-        vha.hire_end
+        vha.hire_end,
+        vha.hirehop_job_name,
+        d.full_name AS driver_name,
+        j.job_name
       FROM job_excess je
       JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      LEFT JOIN drivers d ON d.id = vha.driver_id
+      LEFT JOIN jobs j ON j.id = je.job_id
       WHERE vha.driver_id = $1
       ORDER BY je.created_at DESC`,
       [id]

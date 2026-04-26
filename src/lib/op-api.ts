@@ -42,6 +42,11 @@ export interface PortalJob {
   runGroup: string | null
   runOrder: number | null
   runGroupFee: number | null
+  // When set, this is the combined fee the freelancer is offered for
+  // the whole run (overrides summing individual driverPay values).
+  runCombinedFreelancerFee: number | null
+  runCombinedClientFee: number | null
+  runNotes: string | null
   hhRef: string | null
   status: string
   opsStatus: string

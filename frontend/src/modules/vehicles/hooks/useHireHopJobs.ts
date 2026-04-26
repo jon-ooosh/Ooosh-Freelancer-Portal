@@ -41,12 +41,13 @@ async function fetchJobsWithItems(endpoint: string): Promise<HireHopJob[]> {
 /**
  * Fetch jobs going out today and tomorrow.
  */
-export function useGoingOutJobs() {
+export function useGoingOutJobs(options?: { enabled?: boolean }) {
   return useQuery<HireHopJob[]>({
     queryKey: ['hirehop-going-out'],
     queryFn: () => fetchJobsFromOP('/jobs/going-out'),
     staleTime: 2 * 60 * 1000,
     gcTime: 15 * 60 * 1000,
+    enabled: options?.enabled ?? true,
   })
 }
 

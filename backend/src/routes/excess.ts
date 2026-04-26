@@ -406,10 +406,81 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
 
 // ── PUT /api/excess/:id — Update excess record ──
 
+/**
+ * Recompute excess_status from (required, taken) when amounts change.
+ *
+ * Intent: keep the status a live reflection of reality vs expectation. If staff
+ * edits the required amount up, the portal/UI should immediately see the new
+ * shortfall; if an earlier payment now covers the new required, status promotes.
+ *
+ * Protected statuses (not auto-touched): `waived`, `reimbursed`, `rolled_over`,
+ * `fully_claimed`, `partially_reimbursed`, `pre_auth`. These represent explicit
+ * manual or webhook-driven states where the status carries meaning beyond just
+ * coverage (e.g. pre_auth = card hold, not a completed charge). Staff can
+ * still transition them explicitly via the dedicated actions on the modal.
+ *
+ * Also skipped when `excess_status` is explicitly present in the update payload
+ * — the caller has taken responsibility for status.
+ */
+function deriveExcessStatus(currentStatus: string, required: number, taken: number): string {
+  const PROTECTED = new Set([
+    'waived',
+    'reimbursed',
+    'rolled_over',
+    'fully_claimed',
+    'partially_reimbursed',
+    'pre_auth',
+  ]);
+  if (PROTECTED.has(currentStatus)) return currentStatus;
+
+  // Required = 0 (or not set) means nothing needed — but only flip TO
+  // not_required if we're not already in a collected state. An explicit
+  // not_required record is the "rollover covers it" surface.
+  if (!required || required <= 0) {
+    if (taken > 0) return currentStatus; // keep taken/partially_paid as-is
+    return 'not_required';
+  }
+
+  // Required > 0 — derive from coverage
+  if (taken >= required) return 'taken';
+  if (taken > 0) return 'partially_paid';
+  return 'needed';
+}
+
 router.put('/:id', validate(updateExcessSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
+    const updates = { ...req.body };
+
+    // If the update changes either amount but doesn't set status explicitly,
+    // auto-derive the status so callers (edit modal, hire-form writes, etc.)
+    // don't get stuck on a stale `not_required` / `taken` when the numbers
+    // no longer support it.
+    const touchesRequired = Object.prototype.hasOwnProperty.call(updates, 'excess_amount_required');
+    const touchesTaken = Object.prototype.hasOwnProperty.call(updates, 'excess_amount_taken');
+    const statusExplicitlySet = Object.prototype.hasOwnProperty.call(updates, 'excess_status');
+
+    if ((touchesRequired || touchesTaken) && !statusExplicitlySet) {
+      const currentResult = await query(
+        `SELECT excess_amount_required, excess_amount_taken, excess_status FROM job_excess WHERE id = $1`,
+        [id]
+      );
+      if (currentResult.rows.length === 0) {
+        res.status(404).json({ error: 'Excess record not found' });
+        return;
+      }
+      const row = currentResult.rows[0];
+      const newRequired = touchesRequired
+        ? Number(updates.excess_amount_required ?? 0)
+        : Number(row.excess_amount_required ?? 0);
+      const newTaken = touchesTaken
+        ? Number(updates.excess_amount_taken ?? 0)
+        : Number(row.excess_amount_taken ?? 0);
+      const derived = deriveExcessStatus(row.excess_status, newRequired, newTaken);
+      if (derived !== row.excess_status) {
+        updates.excess_status = derived;
+      }
+    }
 
     const setClauses: string[] = [];
     const params: unknown[] = [];
@@ -884,19 +955,46 @@ router.post('/:id/link-deposit', authorize('admin', 'manager'), validate(linkDep
 });
 
 // ── POST /api/excess/:id/unlink-deposit — Remove the HH deposit link ──
+//
+// Used when a HireHop deposit was wrongly linked to this excess record (e.g.
+// the classifier picked it up as excess but it was actually a hire payment,
+// such as a Stripe URL containing "xs" in its path). "Undoes" the
+// reconciliation: zeroes amount_taken + payment metadata, and recomputes
+// status via deriveExcessStatus so a fresh `needed`/`not_required` surface
+// is presented to staff and the portal.
 
 router.post('/:id/unlink-deposit', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+
+    const current = await query(
+      `SELECT excess_amount_required, excess_status FROM job_excess WHERE id = $1`,
+      [id]
+    );
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const row = current.rows[0];
+    const newStatus = deriveExcessStatus(
+      row.excess_status,
+      Number(row.excess_amount_required || 0),
+      0 // taken is being zeroed
+    );
 
     const result = await query(
       `UPDATE job_excess SET
         hh_deposit_id = NULL,
         hh_reconciled_at = NULL,
         hh_reconcile_source = NULL,
+        excess_amount_taken = 0,
+        payment_method = NULL,
+        payment_reference = NULL,
+        payment_date = NULL,
+        excess_status = $2,
         updated_at = NOW()
       WHERE id = $1 RETURNING *`,
-      [id]
+      [id, newStatus]
     );
 
     if (result.rows.length === 0) {
@@ -904,7 +1002,7 @@ router.post('/:id/unlink-deposit', authorize('admin', 'manager'), async (req: Au
       return;
     }
 
-    console.log(`[excess] Unlinked HH deposit from excess ${id} (by user ${req.user!.id})`);
+    console.log(`[excess] Unlinked HH deposit from excess ${id} (by user ${req.user!.id}) — reset taken to 0, status → ${newStatus}`);
     res.json({ data: result.rows[0] });
   } catch (error) {
     console.error('[excess] Unlink deposit error:', error);

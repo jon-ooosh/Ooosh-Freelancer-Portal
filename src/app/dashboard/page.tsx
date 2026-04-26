@@ -35,6 +35,11 @@ interface GroupedRun {
   date: string
   jobs: OrganisedJob[]
   totalFee: number
+  // When true, totalFee is the agreed combined fee for the run
+  // (overrides summing individual per-stop fees).
+  hasCombinedFee?: boolean
+  standaloneTotalFee?: number
+  runNotes?: string | null
   jobCount: number
 }
 
@@ -203,9 +208,23 @@ function JobCard({ item, showStartButton = true }: { item: DisplayItem; showStar
             </div>
           </div>
           {item.totalFee > 0 && (
-            <span className="text-sm font-medium text-green-600">
-              {formatFee(item.totalFee)}
-            </span>
+            <div className="text-right">
+              {item.hasCombinedFee && item.standaloneTotalFee && item.standaloneTotalFee !== item.totalFee ? (
+                <>
+                  <span className="text-xs text-gray-400 line-through mr-1">
+                    {formatFee(item.standaloneTotalFee)}
+                  </span>
+                  <span className="text-sm font-medium text-green-600">
+                    {formatFee(item.totalFee)}
+                  </span>
+                  <div className="text-[10px] text-violet-600 font-medium">combined run fee</div>
+                </>
+              ) : (
+                <span className="text-sm font-medium text-green-600">
+                  {formatFee(item.totalFee)}
+                </span>
+              )}
+            </div>
           )}
         </div>
         

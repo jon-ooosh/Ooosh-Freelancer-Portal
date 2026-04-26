@@ -7,6 +7,8 @@ import TransportCalculator from '../components/TransportCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
+import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
 import CancelRemindersSection from '../components/CancelRemindersSection';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -187,6 +189,12 @@ interface SavedQuote {
   status: string;
   status_changed_at: string | null;
   cancelled_reason: string | null;
+  // Run grouping
+  run_group: string | null;
+  run_order: number | null;
+  run_combined_freelancer_fee: number | null;
+  run_combined_client_fee: number | null;
+  run_notes: string | null;
   // Assignments
   assignments: QuoteAssignment[];
   // Notes
@@ -816,8 +824,32 @@ export default function JobDetailPage() {
 
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
+  const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
+  const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | undefined>(undefined);
+  const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
+  // Cross-job allocation conflicts — van also booked on another job over
+  // overlapping dates. Populated from /assignments/allocation-conflicts/:jobId
+  // whenever the Drivers & Vehicles tab loads.
+  type AllocationConflict = {
+    assignmentId: string;
+    vehicleId: string;
+    vehicleReg: string | null;
+    driverName: string | null;
+    conflict: {
+      id: string;
+      status: string;
+      jobId: string | null;
+      hirehopJobId: number | null;
+      jobName: string | null;
+      hhJobNumber: number | null;
+      effectiveStart: string | null;
+      effectiveEnd: string | null;
+      driverName: string | null;
+    };
+  };
+  const [allocationConflicts, setAllocationConflicts] = useState<AllocationConflict[]>([]);
 
   // ── Inline editing state ──────────────────────────────────────────────────
   const [editingName, setEditingName] = useState(false);
@@ -1555,10 +1587,34 @@ export default function JobDetailPage() {
       // Also load dispatch check
       const check = await api.get<DispatchCheckResult>(`/assignments/dispatch-check/${id}`);
       setDispatchCheck(check);
+
+      // Cross-job allocation conflicts — surface the amber banner when a van
+      // on this job has an overlapping assignment on a different job.
+      try {
+        const conflictsResp = await api.get<{ data: { conflicts: AllocationConflict[] } }>(
+          `/assignments/allocation-conflicts/${id}`
+        );
+        setAllocationConflicts(conflictsResp.data?.conflicts || []);
+      } catch {
+        setAllocationConflicts([]);
+      }
     } catch {
       console.error('Failed to load vehicle assignments');
     } finally {
       setVehicleAssignmentsLoading(false);
+    }
+  }
+
+  async function openExcessModal(excessId: string, initialAction?: 'edit_required') {
+    setExcessModalLoadingId(excessId);
+    try {
+      const res = await api.get<{ data: JobExcess }>(`/excess/${excessId}`);
+      setExcessModalInitialAction(initialAction);
+      setExcessModalRecord(res.data);
+    } catch (err) {
+      console.error('Failed to load excess record:', err);
+    } finally {
+      setExcessModalLoadingId(null);
     }
   }
 
@@ -2517,6 +2573,34 @@ export default function JobDetailPage() {
             {id && <QuickAssignButton jobId={id} jobDate={job.job_date || undefined} returnDate={job.return_date || undefined} onCreated={loadVehicleAssignments} />}
           </div>
 
+          {/* Allocation overlap warnings — van committed to another hire on overlapping dates */}
+          {allocationConflicts.length > 0 && (
+            <div className="space-y-2">
+              {allocationConflicts.map((c) => {
+                const reg = c.vehicleReg || 'Van';
+                const otherJob = c.conflict.hhJobNumber
+                  ? `job #${c.conflict.hhJobNumber}`
+                  : c.conflict.jobName || 'another hire';
+                const window =
+                  c.conflict.effectiveStart && c.conflict.effectiveEnd
+                    ? `${c.conflict.effectiveStart} → ${c.conflict.effectiveEnd}`
+                    : 'overlapping dates';
+                return (
+                  <div
+                    key={c.assignmentId}
+                    className="flex items-start gap-2 px-4 py-3 rounded-lg text-sm bg-amber-50 border border-amber-200 text-amber-900"
+                  >
+                    <span aria-hidden>⚠️</span>
+                    <span>
+                      <strong>{reg}</strong> is also allocated to <strong>{otherJob}</strong> ({window}).
+                      {' '}Dates overlap — reassign one of the hires.
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* Referral warnings */}
           {dispatchCheck && dispatchCheck.blockers.filter(b => b.type === 'referral_pending').length > 0 && (
             <div className="space-y-2">
@@ -2647,7 +2731,7 @@ export default function JobDetailPage() {
                             <div className="flex items-center justify-between text-xs">
                               <span className="text-gray-500">Insurance Excess</span>
                               <div className="flex items-center gap-2">
-                                {a.excess.excess_amount_required && (
+                                {a.excess.excess_amount_required != null && (
                                   <span className="font-medium text-gray-700">
                                     £{Number(a.excess.excess_amount_required).toFixed(2)}
                                   </span>
@@ -2673,6 +2757,23 @@ export default function JobDetailPage() {
                                    a.excess.excess_status === 'partially_paid' || a.excess.excess_status === 'partial' ? 'Part Paid' :
                                    a.excess.excess_status}
                                 </span>
+                                <button
+                                  type="button"
+                                  onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
+                                  disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                  title="Edit required excess amount"
+                                  className="text-xs font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
+                                >
+                                  {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => a.excess && openExcessModal(a.excess.id)}
+                                  disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                  className="text-xs font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
+                                >
+                                  Manage
+                                </button>
                               </div>
                             </div>
                           </div>
@@ -2876,6 +2977,14 @@ export default function JobDetailPage() {
                         <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>
                           {sc.label}
                         </span>
+                        {q.run_group && (
+                          <span
+                            className="text-xs px-2 py-0.5 rounded-full font-medium bg-violet-100 text-violet-700"
+                            title={q.run_notes || 'Part of a multi-drop run — see Transport Ops for full run detail.'}
+                          >
+                            🔗 Part of a run
+                          </span>
+                        )}
                       </div>
 
                       {/* Date, time, venue — top line */}
@@ -2904,16 +3013,32 @@ export default function JobDetailPage() {
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                         <div>
                           <span className="text-gray-500">Client Charge</span>
-                          <p className="font-bold text-green-700">
-                            &pound;{clientCharge.toFixed(2)}
-                            {q.add_collection && <span className="text-xs font-normal text-gray-400"> (&times;2 = &pound;{(clientCharge * 2).toFixed(2)})</span>}
-                          </p>
+                          {q.run_group && q.run_combined_client_fee != null ? (
+                            <p className="font-bold text-green-700">
+                              <span className="line-through text-gray-400 font-normal mr-1">&pound;{clientCharge.toFixed(2)}</span>
+                              &pound;{Number(q.run_combined_client_fee).toFixed(2)}
+                              <span className="block text-[10px] font-normal text-violet-600">run combined</span>
+                            </p>
+                          ) : (
+                            <p className="font-bold text-green-700">
+                              &pound;{clientCharge.toFixed(2)}
+                              {q.add_collection && <span className="text-xs font-normal text-gray-400"> (&times;2 = &pound;{(clientCharge * 2).toFixed(2)})</span>}
+                            </p>
+                          )}
                         </div>
                         <div>
                           <span className="text-gray-500">Freelancer Fee</span>
-                          <p className="font-bold text-blue-700">
-                            &pound;{freelancerFee.toFixed(2)}
-                          </p>
+                          {q.run_group && q.run_combined_freelancer_fee != null ? (
+                            <p className="font-bold text-blue-700">
+                              <span className="line-through text-gray-400 font-normal mr-1">&pound;{freelancerFee.toFixed(2)}</span>
+                              &pound;{Number(q.run_combined_freelancer_fee).toFixed(2)}
+                              <span className="block text-[10px] font-normal text-violet-600">run combined</span>
+                            </p>
+                          ) : (
+                            <p className="font-bold text-blue-700">
+                              &pound;{freelancerFee.toFixed(2)}
+                            </p>
+                          )}
                         </div>
                         <div>
                           <span className="text-gray-500">Our Margin</span>
@@ -3360,6 +3485,16 @@ export default function JobDetailPage() {
       )}
 
       {/* Chase Modal */}
+      {/* Excess Payment / Edit Modal — opened from Drivers & Vehicles strip */}
+      {excessModalRecord && (
+        <ExcessPaymentModal
+          excess={excessModalRecord}
+          initialAction={excessModalInitialAction}
+          onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
+          onUpdated={() => { loadVehicleAssignments(); }}
+        />
+      )}
+
       <ChaseModal
         isOpen={showChaseModal}
         job={job ? {

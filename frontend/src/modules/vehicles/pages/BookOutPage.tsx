@@ -30,6 +30,7 @@ import { extractVanRequirements } from '../lib/hirehop-api'
 import { fetchLastEventForVehicle } from '../lib/events-query'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { useFormAutosave } from '../hooks/useFormAutosave'
+import { clearFreelancerSession } from '../adapters/freelancer-session'
 import { vehicleMatchesRequirement, getGearbox } from '../lib/van-matching'
 import { getChecklistItems } from '../lib/settings-api'
 import { queueSubmission } from '../lib/offline-queue'
@@ -178,6 +179,25 @@ export function BookOutPage() {
     }).catch(() => setLastKnownMileage(null))
   }, [form.vehicleReg])
 
+  // Freelancer auto-redirect after clean submit: hands them back to the
+  // portal completion page once all submit tracks succeeded. Any failure
+  // keeps them on the success screen so they can see what went wrong and
+  // decide whether to hit Return to Portal manually. Session is cleared
+  // before the hop so the browser doesn't carry a stale freelancer token.
+  useEffect(() => {
+    if (!submitSuccess) return
+    if (!isFreelancer) return
+    if (!freelancerContext?.returnUrl) return
+    const allOk = opResults.length > 0 && opResults.every(r => r.success)
+    if (!allOk) return
+    const returnUrl = freelancerContext.returnUrl
+    const t = window.setTimeout(() => {
+      clearFreelancerSession()
+      window.location.href = returnUrl
+    }, 3000)
+    return () => window.clearTimeout(t)
+  }, [submitSuccess, isFreelancer, freelancerContext, opResults])
+
   // Filter to active fleet only (no old/sold)
   const vehicles = useMemo(
     () => (allVehicles || []).filter(v => !v.isOldSold),
@@ -205,56 +225,98 @@ export function BookOutPage() {
     }
   }
 
-  // Allocations data — used for pre-selection from allocations page
-  const { data: allAllocations } = useAllocations()
+  // Allocations data — used for pre-selection from allocations page.
+  // Disabled in freelancer mode: freelancer session has no access to the
+  // allocations list and doesn't need it (the session JWT already scopes
+  // us to a specific allocated vehicle — freelancerContext.vehicleId).
+  const { data: allAllocations } = useAllocations({ enabled: !isFreelancer })
 
   // Track whether we've already auto-selected for the freelancer (prevent re-runs)
   const freelancerAutoSelectedRef = useRef(false)
   // Track whether we've already filled job data from pre-selected job
   const jobDataFilledRef = useRef(false)
+  // Freelancer mode: driver must tap "yes this is my van" before we advance
+  // past the pre-check. Pre-fills vehicle + driver + job from freelancerContext
+  // so the wizard jumps straight to Vehicle State (mileage / fuel).
+  const [freelancerVanConfirmed, setFreelancerVanConfirmed] = useState(false)
 
-  // If pre-selected job data arrived, auto-fill the HireHop job fields
+  // Freelancer auto-fill from context (no allocations lookup needed — the
+  // resolve endpoint already told us the vehicle + job). Waits for the
+  // vehicles query to populate so we can pick up vehicleType / simpleType
+  // (needed by the briefing checklist).
+  useEffect(() => {
+    if (!isFreelancer) return
+    if (!freelancerContext?.vehicleId || !freelancerContext?.vehicleReg) return
+    if (freelancerAutoSelectedRef.current) return
+    const ctxVehicle = vehicles.find(v => v.id === freelancerContext.vehicleId)
+    if (!ctxVehicle) return // wait for vehicles list
+    freelancerAutoSelectedRef.current = true
+    setForm(f => ({
+      ...f,
+      vehicleId: ctxVehicle.id,
+      vehicleReg: ctxVehicle.reg,
+      vehicleType: ctxVehicle.vehicleType,
+      vehicleSimpleType: ctxVehicle.simpleType,
+      driverName: freelancerContext.driverName || f.driverName,
+      hireHopJob: freelancerContext.jobId || f.hireHopJob,
+      allDrivers: [freelancerContext.driverName || f.driverName].filter(Boolean),
+    }))
+  }, [isFreelancer, freelancerContext, vehicles])
+
+  // If pre-selected job data arrived, auto-fill the HireHop job fields.
+  // In freelancer mode the allocations lookup is disabled (we already have
+  // vehicle + driver from freelancerContext), so we only pull the job
+  // data itself (hireHopJob, hireHopJobData, clientEmail for the
+  // condition-report email).
   if (preSelectedJobData && !jobDataFilledRef.current && preSelectedJobId) {
     jobDataFilledRef.current = true
 
-    // Find allocation for this job — first try matching pre-selected vehicle, then any vehicle
-    let matchingAlloc = preSelectedVehicle
-      ? (allAllocations || []).find(
-          a => a.hireHopJobId === preSelectedJobData.id && a.vehicleId === preSelectedVehicle.id,
-        )
-      : null
+    if (isFreelancer) {
+      setForm(f => ({
+        ...f,
+        hireHopJob: String(preSelectedJobData.id),
+        hireHopJobData: preSelectedJobData,
+        clientEmail: preSelectedJobData.contactEmail || f.clientEmail,
+      }))
+    } else {
+      // Find allocation for this job — first try matching pre-selected vehicle, then any vehicle
+      let matchingAlloc = preSelectedVehicle
+        ? (allAllocations || []).find(
+            a => a.hireHopJobId === preSelectedJobData.id && a.vehicleId === preSelectedVehicle.id,
+          )
+        : null
 
-    // For freelancers (or when no vehicle pre-selected): find ANY allocation for this job
-    if (!matchingAlloc && !preSelectedVehicle) {
-      matchingAlloc = (allAllocations || []).find(
-        a => a.hireHopJobId === preSelectedJobData.id,
-      ) ?? null
-    }
-
-    // If we found an allocation with a vehicle, auto-select that vehicle
-    if (matchingAlloc && !form.vehicleId && !freelancerAutoSelectedRef.current) {
-      const allocatedVehicle = vehicles.find(v => v.id === matchingAlloc!.vehicleId)
-      if (allocatedVehicle) {
-        freelancerAutoSelectedRef.current = true
-        selectVehicle(allocatedVehicle)
-        // Skip to step 2 (Driver & Hire) — vehicle is already chosen
-        setStep(1)
+      if (!matchingAlloc && !preSelectedVehicle) {
+        matchingAlloc = (allAllocations || []).find(
+          a => a.hireHopJobId === preSelectedJobData.id,
+        ) ?? null
       }
-    }
 
-    setForm(f => ({
-      ...f,
-      hireHopJob: String(preSelectedJobData.id),
-      hireHopJobData: preSelectedJobData,
-      clientEmail: preSelectedJobData.contactEmail || f.clientEmail,
-      allocationId: matchingAlloc?.id ?? f.allocationId,
-      driverName: matchingAlloc?.driverName || f.driverName,
-    }))
+      // If we found an allocation with a vehicle, auto-select that vehicle
+      if (matchingAlloc && !form.vehicleId && !freelancerAutoSelectedRef.current) {
+        const allocatedVehicle = vehicles.find(v => v.id === matchingAlloc!.vehicleId)
+        if (allocatedVehicle) {
+          freelancerAutoSelectedRef.current = true
+          selectVehicle(allocatedVehicle)
+          setStep(1)
+        }
+      }
+
+      setForm(f => ({
+        ...f,
+        hireHopJob: String(preSelectedJobData.id),
+        hireHopJobData: preSelectedJobData,
+        clientEmail: preSelectedJobData.contactEmail || f.clientEmail,
+        allocationId: matchingAlloc?.id ?? f.allocationId,
+        driverName: matchingAlloc?.driverName || f.driverName,
+      }))
+    }
   }
 
   // Separate effect: auto-select vehicle from allocation when allocations arrive later
   // (handles race condition where job data loads before allocations)
   useEffect(() => {
+    if (isFreelancer) return // Freelancer flow pre-fills from context, not allocations
     if (freelancerAutoSelectedRef.current) return // Already auto-selected
     if (!form.hireHopJobData || form.vehicleId) return // No job data yet, or vehicle already selected
     if (!allAllocations || allAllocations.length === 0) return // Allocations not loaded yet
@@ -276,7 +338,7 @@ export function BookOutPage() {
       allocationId: matchingAlloc.id,
       driverName: matchingAlloc.driverName || f.driverName,
     }))
-  }, [allAllocations, form.hireHopJobData, form.vehicleId, vehicles, preSelectedVehicle])
+  }, [isFreelancer, allAllocations, form.hireHopJobData, form.vehicleId, vehicles, preSelectedVehicle])
 
   function selectVehicle(v: Vehicle) {
     setForm(f => ({
@@ -577,6 +639,7 @@ export function BookOutPage() {
               eventDate,
               pdfBase64: pdfResult.data!.pdf,
               pdfFilename: pdfResult.data!.filename,
+              hireHopJob: form.hireHopJob || null,
             }),
           'Email sending',
         )
@@ -627,6 +690,7 @@ export function BookOutPage() {
                   eventDate,
                   pdfBase64: driverPdfResult.data!.pdf,
                   pdfFilename: driverPdfResult.data!.filename,
+                  hireHopJob: form.hireHopJob || null,
                 }),
               `Email to ${driver.driverName}`,
             )
@@ -814,6 +878,28 @@ export function BookOutPage() {
     }
   }
 
+  // Freelancer mode: van-confirm gate. Driver must tap "yes this is my van"
+  // before the wizard reveals itself. Protects against a stale token
+  // pointing at a reallocated assignment, and gives them a cheap escape
+  // hatch back to the portal if something looks wrong. Only renders
+  // before a successful submit — after that the success screen takes over.
+  if (isFreelancer && freelancerContext && !freelancerVanConfirmed && !submitSuccess && !queuedOffline) {
+    return (
+      <FreelancerVanConfirmScreen
+        context={freelancerContext}
+        onConfirm={() => {
+          setFreelancerVanConfirmed(true)
+          // Jump past the Select Vehicle + Driver & Hire steps — for D&C
+          // deliveries the driver is the freelancer themselves and there
+          // are no hire forms to pick. Vehicle State (mileage / fuel) is
+          // the first thing they actually need to enter.
+          const vehicleStateIdx = STEPS.indexOf('Vehicle State')
+          setStep(vehicleStateIdx >= 0 ? vehicleStateIdx : 1)
+        }}
+      />
+    )
+  }
+
   // Queued offline screen
   if (queuedOffline) {
     return (
@@ -950,12 +1036,16 @@ export function BookOutPage() {
         )}
         <div className="flex gap-3">
           {isFreelancer && freelancerContext?.returnUrl ? (
-            <a
-              href={freelancerContext.returnUrl}
+            <button
+              type="button"
+              onClick={() => {
+                clearFreelancerSession()
+                window.location.href = freelancerContext.returnUrl!
+              }}
               className="flex-1 rounded-lg bg-ooosh-navy py-2.5 text-center text-sm font-medium text-white"
             >
               Return to Portal
-            </a>
+            </button>
           ) : (
             <>
               <button
@@ -1328,8 +1418,11 @@ function StepDriverHire({
   const [showJobPicker, setShowJobPicker] = useState(false)
   const [localJobNum, setLocalJobNum] = useState(form.hireHopJob)
   const jobNumTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const { data: goingOutJobs } = useGoingOutJobs()
-  const { data: allocations } = useAllocations()
+  // Freelancer sessions are scoped to one assignment + job — they don't
+  // need (and aren't allowed) the going-out list or the full allocations
+  // view. Disable those queries to avoid 403 noise.
+  const { data: goingOutJobs } = useGoingOutJobs({ enabled: !isFreelancer })
+  const { data: allocations } = useAllocations({ enabled: !isFreelancer })
 
   // Filter job list to only show jobs that need the selected vehicle type
   const filteredJobs = useMemo(() => {
@@ -1349,8 +1442,13 @@ function StepDriverHire({
   }, [goingOutJobs, form.vehicleSimpleType, form.vehicleType])
 
   // Fetch driver hire forms when a job number is entered
+  // In freelancer mode, the freelancer portal route doesn't grant access
+  // to the hire-forms router — disable the query instead of letting it
+  // 401 and muddy the flow. Freelancer D&C book-outs have no hire forms
+  // to populate from anyway.
   const { data: hireForms, isLoading: hireFormsLoading } = useDriverHireForms(
     form.hireHopJob || null,
+    { enabled: !isFreelancer },
   )
 
   // Find allocation for this vehicle + selected job
@@ -2290,4 +2388,75 @@ function formatShortDate(dateStr: string): string {
 function nowHHmm(): string {
   const d = new Date()
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/* ──────────────────────────────────────────────
+ * Freelancer van-confirmation screen
+ *
+ * Shown on arrival from the portal, before the book-out wizard itself.
+ * Surfaces the allocated van reg + make/model + job number so the driver
+ * can sanity-check before starting the walkaround. Wrong van → "back to
+ * portal" kicks them out to re-click the delivery card, which will mint
+ * a fresh token (giving staff a chance to fix the allocation).
+ * ────────────────────────────────────────────── */
+
+function FreelancerVanConfirmScreen({
+  context,
+  onConfirm,
+}: {
+  context: {
+    vehicleReg?: string
+    vehicleMakeModel?: string
+    jobId: string
+    driverName?: string
+    returnUrl: string | null
+  }
+  onConfirm: () => void
+}) {
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center bg-gray-50 px-4 py-8">
+      <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+          Book-out · Confirm vehicle
+        </p>
+        <h1 className="mt-2 text-3xl font-bold text-ooosh-navy">
+          {context.vehicleReg || 'Loading…'}
+        </h1>
+        {context.vehicleMakeModel && (
+          <p className="mt-1 text-sm text-gray-700">{context.vehicleMakeModel}</p>
+        )}
+        <dl className="mt-5 space-y-2 border-t border-gray-100 pt-4 text-sm">
+          {context.driverName && (
+            <div className="flex justify-between gap-4">
+              <dt className="text-gray-500">Driver</dt>
+              <dd className="text-gray-900">{context.driverName}</dd>
+            </div>
+          )}
+          <div className="flex justify-between gap-4">
+            <dt className="text-gray-500">HireHop job</dt>
+            <dd className="font-mono text-gray-900">#{context.jobId}</dd>
+          </div>
+        </dl>
+        <p className="mt-5 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Check the reg matches the van you&apos;re taking. If it doesn&apos;t, go back to
+          the portal &mdash; someone&apos;s mis-allocated and we can fix it.
+        </p>
+        <button
+          type="button"
+          onClick={onConfirm}
+          className="mt-5 w-full rounded-lg bg-ooosh-navy py-3 text-base font-semibold text-white active:bg-opacity-90"
+        >
+          Yes, start book-out
+        </button>
+        {context.returnUrl && (
+          <a
+            href={context.returnUrl}
+            className="mt-3 block w-full rounded-lg border border-gray-200 py-3 text-center text-sm font-medium text-gray-700"
+          >
+            Wrong van — back to portal
+          </a>
+        )}
+      </div>
+    </div>
+  )
 }
