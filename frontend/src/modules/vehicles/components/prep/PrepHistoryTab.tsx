@@ -7,7 +7,7 @@
 
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { apiUrl } from '../../config/api-config'
+import { apiFetch } from '../../config/api-config'
 import type { PrepHistorySession } from '../../lib/prep-history'
 
 interface PrepHistoryTabProps {
@@ -18,8 +18,11 @@ async function fetchPrepHistory(vehicleReg: string, limit: number): Promise<{
   sessions: PrepHistorySession[]
   total: number
 }> {
-  const resp = await fetch(
-    `${apiUrl('/get-prep-history')}?vehicleReg=${encodeURIComponent(vehicleReg)}&limit=${limit}`,
+  // apiFetch attaches the OP staff JWT — raw fetch() leaks past auth
+  // middleware and 401s. The endpoint then falls through to the Netlify
+  // Vehicle Module proxy.
+  const resp = await apiFetch(
+    `/get-prep-history?vehicleReg=${encodeURIComponent(vehicleReg)}&limit=${limit}`,
   )
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return resp.json() as Promise<{ sessions: PrepHistorySession[]; total: number }>
