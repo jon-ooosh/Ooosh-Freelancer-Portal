@@ -1108,6 +1108,46 @@ export function BookOutPage() {
         <div className="mt-1.5 flex items-center justify-between">
           <p className="text-xs font-medium text-gray-500">{STEPS[step]}</p>
           <div className="flex gap-2">
+            {/* Swap vehicle — staff-only escape hatch for last-minute issues
+                discovered mid-walkaround (cracked windscreen, won't start, etc).
+                Discards photos / mileage / fuel / briefing for THIS van and
+                returns to step 0 to pick a different van. Driver, hire form,
+                hireHop job stay attached because the hire is unchanged.
+                Not exposed to freelancer remote book-outs. */}
+            {!isFreelancer && step > 0 && form.vehicleReg && (
+              <button
+                onClick={() => {
+                  const ok = confirm(
+                    `Swap from ${form.vehicleReg}?\n\nThis discards the walkaround in progress (photos, mileage, fuel, briefing). The driver and hire details stay attached — you'll just pick a different van.`
+                  )
+                  if (!ok) return
+                  // Clear the autosaved draft so a refresh / re-entry
+                  // doesn't restore the abandoned book-out for the old van.
+                  clearAutosave()
+                  // Reset van-specific fields. Keep driver / hire form /
+                  // hireHop job / clientEmail since the hire itself isn't
+                  // changing.
+                  setForm(f => ({
+                    ...f,
+                    vehicleId: null,
+                    vehicleReg: '',
+                    vehicleType: '',
+                    vehicleSimpleType: '',
+                    mileage: '',
+                    fuelLevel: null,
+                    photos: [],
+                    briefingChecked: {},
+                    notes: '',
+                    signatureBlob: null,
+                  }))
+                  setStep(0)
+                }}
+                className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 active:bg-amber-100"
+                title="Swap to a different vehicle (discards walkaround data for this van)"
+              >
+                Swap vehicle
+              </button>
+            )}
             {step > 0 && (
               <button
                 onClick={() => setStep(s => s - 1)}

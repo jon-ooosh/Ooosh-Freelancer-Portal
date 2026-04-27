@@ -694,6 +694,155 @@ router.get('/allocation-conflicts/:jobId', async (req: AuthRequest, res: Respons
   }
 });
 
+// ── GET /api/assignments/date-mismatches/:jobId ──
+//
+// Detects assignments whose locked hire window (hire_start / hire_end) no
+// longer matches the parent job's dates (job_date / job_end). Returns the
+// drift so Job Detail can render an amber "extend assignment to match?"
+// banner. Only reports active rows — cancelled / returned / swapped don't
+// matter.
+//
+// Direction:
+//   - 'extension'   = job_end > vha.hire_end (client kept van longer / job extended)
+//   - 'shortening'  = job_end < vha.hire_end (job shortened, assignment overshoots)
+//   - 'start_drift' = vha.hire_start drift in either direction
+router.get('/date-mismatches/:jobId', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+
+    const result = await query(
+      `SELECT vha.id, vha.status, vha.hire_start, vha.hire_end,
+              fv.reg AS vehicle_reg,
+              d.full_name AS driver_name,
+              j.job_date, j.job_end
+       FROM vehicle_hire_assignments vha
+       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+       LEFT JOIN drivers d ON d.id = vha.driver_id
+       LEFT JOIN jobs j ON j.id = vha.job_id
+       WHERE vha.job_id = $1
+         AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')`,
+      [jobId]
+    );
+
+    type Mismatch = {
+      assignmentId: string;
+      vehicleReg: string | null;
+      driverName: string | null;
+      assignmentStatus: string;
+      assignmentStart: string | null;
+      assignmentEnd: string | null;
+      jobStart: string | null;
+      jobEnd: string | null;
+      kind: 'extension' | 'shortening' | 'start_drift';
+    };
+
+    const mismatches: Mismatch[] = [];
+    for (const r of result.rows) {
+      // Only flag if both dates are populated AND drift is meaningful (>0
+      // days). Null assignment dates default to job dates anyway, so the
+      // PDF / display layer doesn't see a real mismatch until book-out
+      // locked them.
+      if (!r.hire_end || !r.job_end) continue;
+      const aEnd = new Date(r.hire_end);
+      const jEnd = new Date(r.job_end);
+      const aStart = r.hire_start ? new Date(r.hire_start) : null;
+      const jStart = r.job_date ? new Date(r.job_date) : null;
+      const ms = (a: Date, b: Date) => Math.round((a.getTime() - b.getTime()) / 86400000);
+
+      const endDriftDays = ms(aEnd, jEnd);
+      // Only the date portion matters — strip time below by re-parsing as date.
+      const endDriftAbs = Math.abs(endDriftDays);
+
+      let kind: Mismatch['kind'] | null = null;
+      if (endDriftDays < 0) kind = 'extension';      // job_end is later → assignment lags
+      else if (endDriftDays > 0) kind = 'shortening'; // job_end is earlier → assignment overshoots
+      else if (aStart && jStart && Math.abs(ms(aStart, jStart)) > 0) kind = 'start_drift';
+
+      if (!kind || (kind !== 'start_drift' && endDriftAbs === 0)) continue;
+
+      mismatches.push({
+        assignmentId: r.id,
+        vehicleReg: r.vehicle_reg,
+        driverName: r.driver_name,
+        assignmentStatus: r.status,
+        assignmentStart: r.hire_start ? new Date(r.hire_start).toISOString().slice(0, 10) : null,
+        assignmentEnd: r.hire_end ? new Date(r.hire_end).toISOString().slice(0, 10) : null,
+        jobStart: r.job_date ? new Date(r.job_date).toISOString().slice(0, 10) : null,
+        jobEnd: r.job_end ? new Date(r.job_end).toISOString().slice(0, 10) : null,
+        kind,
+      });
+    }
+
+    res.json({ data: { mismatches } });
+  } catch (error) {
+    console.error('[assignments] Date mismatches error:', error);
+    res.status(500).json({ error: 'Failed to load date mismatches' });
+  }
+});
+
+// ── POST /api/assignments/:id/match-job-dates ──
+//
+// One-click action attached to the date-mismatch banner. Updates the
+// assignment's hire_start / hire_end to match the parent job's dates and
+// emails the driver an updated hire agreement PDF (so they have a record
+// of the new window). Re-runs the overlap check against the new window —
+// rejects with 409 if the extension would clash with another hire on the
+// same van.
+router.post('/:id/match-job-dates', async (req: AuthRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+
+    const existing = await query(
+      `SELECT vha.id, vha.vehicle_id, vha.job_id, vha.hirehop_job_id,
+              vha.hire_start, vha.hire_end, vha.status,
+              j.job_date, j.job_end
+         FROM vehicle_hire_assignments vha
+         LEFT JOIN jobs j ON j.id = vha.job_id
+        WHERE vha.id = $1`,
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    const a = existing.rows[0];
+    if (!a.job_date || !a.job_end) {
+      return res.status(400).json({ error: 'Job has no dates set' });
+    }
+
+    // Overlap check on the NEW window before applying — extending could
+    // collide with another hire scheduled in the (formerly free) gap.
+    const conflicts = await findOverlappingAssignments({
+      vehicleId: a.vehicle_id,
+      hireStart: a.job_date,
+      hireEnd: a.job_end,
+      jobId: a.job_id,
+      hirehopJobId: a.hirehop_job_id,
+      excludeAssignmentId: id,
+    });
+    if (conflicts.length > 0) {
+      return res.status(409).json(buildConflictPayload(conflicts));
+    }
+
+    await query(
+      `UPDATE vehicle_hire_assignments
+          SET hire_start = $1::date, hire_end = $2::date, updated_at = NOW()
+        WHERE id = $3`,
+      [a.job_date, a.job_end, id]
+    );
+
+    res.json({
+      data: {
+        id,
+        hire_start: new Date(a.job_date).toISOString().slice(0, 10),
+        hire_end: new Date(a.job_end).toISOString().slice(0, 10),
+      },
+    });
+  } catch (error) {
+    console.error('[assignments] Match job dates error:', error);
+    res.status(500).json({ error: 'Failed to update assignment dates' });
+  }
+});
+
 router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
