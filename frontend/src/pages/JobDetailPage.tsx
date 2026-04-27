@@ -494,6 +494,107 @@ function HireFormActions({ assignmentId, pdfKey, pdfGeneratedAt, vehicleId }: {
 // Links a driver to a hire in one click — vehicle is optional so staff can
 // assign the driver up front and pick the vehicle later (vehicle choice is
 // a separate prep-side decision).
+/** Traffic-light validity state for a driver record. */
+type DriverValidity = {
+  level: 'green' | 'amber' | 'red';
+  reasons: string[];           // human-readable expiry / amber notes
+  expiredDocs: string[];       // names of expired docs (red trigger)
+};
+
+/**
+ * Compute traffic-light validity for a driver record relative to today.
+ *
+ * Rules — kept aligned with the backend gate in /api/hire-forms/quick-assign:
+ *   - Red: any required doc expired (licence_valid_to < today, dvla_valid_until
+ *     < today, OR both POAs expired); insurance referral pending / declined
+ *   - Amber: any required doc expires within the next 30 days
+ *   - Green: all docs valid with > 30 days remaining
+ *
+ * Most active drivers will be amber in practice — the DVLA check is only
+ * valid for 30 days from the date the driver pulls it, so a driver who
+ * filled out their hire form even a week before the hire is already amber.
+ * This is fine — staff can still assign amber drivers; the gate is red.
+ */
+function computeDriverValidity(d: {
+  licence_valid_to?: string | null;
+  dvla_valid_until?: string | null;
+  poa1_valid_until?: string | null;
+  poa2_valid_until?: string | null;
+  requires_referral?: boolean;
+  referral_status?: string | null;
+}): DriverValidity {
+  const reasons: string[] = [];
+  const expiredDocs: string[] = [];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const ms30 = 30 * 24 * 60 * 60 * 1000;
+
+  function check(label: string, raw: string | null | undefined): 'green' | 'amber' | 'red' {
+    if (!raw) return 'amber';
+    const exp = new Date(raw);
+    const ms = exp.getTime() - today.getTime();
+    if (ms < 0) {
+      reasons.push(`${label} expired ${exp.toLocaleDateString('en-GB')}`);
+      expiredDocs.push(label);
+      return 'red';
+    }
+    if (ms <= ms30) {
+      reasons.push(`${label} expires ${exp.toLocaleDateString('en-GB')}`);
+      return 'amber';
+    }
+    return 'green';
+  }
+
+  let level: 'green' | 'amber' | 'red' = 'green';
+  function bump(next: 'green' | 'amber' | 'red') {
+    if (next === 'red') level = 'red';
+    else if (next === 'amber' && level !== 'red') level = 'amber';
+  }
+
+  bump(check('Licence', d.licence_valid_to));
+  bump(check('DVLA check', d.dvla_valid_until));
+
+  // POA: at least one must be valid. Both expired → red.
+  const poa1 = d.poa1_valid_until ? new Date(d.poa1_valid_until) : null;
+  const poa2 = d.poa2_valid_until ? new Date(d.poa2_valid_until) : null;
+  const poa1Expired = poa1 && poa1 < today;
+  const poa2Expired = poa2 && poa2 < today;
+  if ((!poa1 && !poa2) || (poa1Expired && poa2Expired) || (!poa1 && poa2Expired) || (poa1Expired && !poa2)) {
+    reasons.push('Proof of address expired');
+    expiredDocs.push('Proof of address');
+    bump('red');
+  } else {
+    // Use the latest-expiring POA for the amber check
+    const latest = poa1 && poa2 ? (poa1 > poa2 ? poa1 : poa2) : (poa1 || poa2);
+    if (latest) {
+      const ms = latest.getTime() - today.getTime();
+      if (ms <= ms30) {
+        reasons.push(`POA expires ${latest.toLocaleDateString('en-GB')}`);
+        bump('amber');
+      }
+    }
+  }
+
+  if (d.requires_referral && d.referral_status !== 'approved') {
+    reasons.push(`Insurance referral ${d.referral_status || 'pending'}`);
+    bump('red');
+  }
+
+  return { level, reasons, expiredDocs };
+}
+
+function ValidityPill({ level }: { level: 'green' | 'amber' | 'red' }) {
+  const styles = {
+    green: 'bg-green-100 text-green-700',
+    amber: 'bg-amber-100 text-amber-700',
+    red:   'bg-red-100 text-red-700',
+  }[level];
+  const label = { green: 'OK', amber: 'Expiring', red: 'Expired' }[level];
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${styles}`}>{label}</span>
+  );
+}
+
 function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: string; jobDate?: string; returnDate?: string; onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [drivers, setDrivers] = useState<any[]>([]);
@@ -547,15 +648,19 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
   }
 
   const selectedDriver = drivers.find(d => d.id === driverId);
+  const selectedDriverValidity = selectedDriver ? computeDriverValidity(selectedDriver) : null;
   const selectedVehicle = vehicles.find(v => v.id === vehicleId);
 
-  // Simple case-insensitive substring filter. 150+ drivers so limit to 20 results.
-  const filteredDrivers = driverSearch.trim() === ''
-    ? drivers.slice(0, 20)
+  // Annotate every driver with computed validity. Red drivers can't be
+  // selected — staff sees them in the list (for transparency) but the
+  // row is disabled with a "Send hire form" hint.
+  const filteredDrivers = (driverSearch.trim() === ''
+    ? drivers.slice(0, 50)
     : drivers.filter(d =>
         (d.full_name || '').toLowerCase().includes(driverSearch.toLowerCase()) ||
         (d.email || '').toLowerCase().includes(driverSearch.toLowerCase())
-      ).slice(0, 20);
+      ).slice(0, 50)
+  ).map(d => ({ ...d, _validity: computeDriverValidity(d) }));
 
   const filteredVehicles = vehicleSearch.trim() === ''
     ? vehicles
@@ -584,17 +689,27 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
             {error && <div className="text-xs text-red-600 bg-red-50 px-3 py-2 rounded mb-3">{error}</div>}
 
             <div className="space-y-3">
-              {/* Driver picker — searchable */}
+              {/* Driver picker — searchable, with traffic-light validity */}
               <div className="relative">
                 <label className="block text-sm font-medium text-gray-700 mb-1">Driver <span className="text-red-500">*</span></label>
-                {selectedDriver ? (
-                  <div className="flex items-center justify-between border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50">
-                    <span>
-                      <span className="font-medium">{selectedDriver.full_name}</span>
-                      <span className="text-gray-500"> ({selectedDriver.email || 'no email'}) — {selectedDriver.licence_points || 0} pts</span>
-                    </span>
-                    <button type="button" onClick={() => { setDriverId(''); setDriverSearch(''); }}
-                      className="text-gray-400 hover:text-gray-600 ml-2" aria-label="Clear driver">&times;</button>
+                {selectedDriver && selectedDriverValidity ? (
+                  <div>
+                    <div className="flex items-center justify-between border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-50">
+                      <span className="flex items-center gap-2">
+                        <ValidityPill level={selectedDriverValidity.level} />
+                        <span>
+                          <span className="font-medium">{selectedDriver.full_name}</span>
+                          <span className="text-gray-500"> ({selectedDriver.email || 'no email'}) — {selectedDriver.licence_points || 0} pts</span>
+                        </span>
+                      </span>
+                      <button type="button" onClick={() => { setDriverId(''); setDriverSearch(''); }}
+                        className="text-gray-400 hover:text-gray-600 ml-2" aria-label="Clear driver">&times;</button>
+                    </div>
+                    {selectedDriverValidity.reasons.length > 0 && (
+                      <div className={`mt-1 text-xs ${selectedDriverValidity.level === 'red' ? 'text-red-600' : 'text-amber-700'}`}>
+                        {selectedDriverValidity.reasons.join(' · ')}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <>
@@ -609,17 +724,36 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
                     />
                     {driverFocus && filteredDrivers.length > 0 && (
                       <div className="absolute z-10 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-64 overflow-y-auto">
-                        {filteredDrivers.map(d => (
-                          <button
-                            key={d.id}
-                            type="button"
-                            onClick={() => { setDriverId(d.id); setDriverSearch(''); }}
-                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
-                          >
-                            <div className="font-medium text-gray-900">{d.full_name}</div>
-                            <div className="text-xs text-gray-500">{d.email || 'no email'} — {d.licence_points || 0} pts</div>
-                          </button>
-                        ))}
+                        {filteredDrivers.map(d => {
+                          const v = d._validity as DriverValidity;
+                          const blocked = v.level === 'red';
+                          return (
+                            <button
+                              key={d.id}
+                              type="button"
+                              disabled={blocked}
+                              title={blocked ? `Cannot assign — ${v.reasons.join(', ')}. Send a fresh hire form to refresh.` : v.reasons.join(', ')}
+                              onClick={() => { if (!blocked) { setDriverId(d.id); setDriverSearch(''); } }}
+                              className={`w-full text-left px-3 py-2 text-sm border-b border-gray-100 last:border-b-0 ${
+                                blocked ? 'bg-gray-50 cursor-not-allowed opacity-60' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="font-medium text-gray-900 flex items-center gap-2">
+                                  <ValidityPill level={v.level} />
+                                  {d.full_name}
+                                </div>
+                                {blocked && <span className="text-[10px] text-red-600">Send hire form</span>}
+                              </div>
+                              <div className="text-xs text-gray-500">{d.email || 'no email'} — {d.licence_points || 0} pts</div>
+                              {v.reasons.length > 0 && (
+                                <div className={`text-[11px] mt-0.5 ${v.level === 'red' ? 'text-red-600' : 'text-amber-600'}`}>
+                                  {v.reasons.slice(0, 2).join(' · ')}
+                                </div>
+                              )}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                     {driverFocus && filteredDrivers.length === 0 && driverSearch.trim() !== '' && (
@@ -688,7 +822,10 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
 
             <div className="flex justify-end gap-2 mt-5">
               <button onClick={() => { setOpen(false); resetForm(); }} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
-              <button onClick={handleSubmit} disabled={saving || !driverId}
+              <button
+                onClick={handleSubmit}
+                disabled={saving || !driverId || selectedDriverValidity?.level === 'red'}
+                title={selectedDriverValidity?.level === 'red' ? selectedDriverValidity.reasons.join(', ') : ''}
                 className="px-4 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium disabled:opacity-50">
                 {saving ? 'Creating...' : (vehicleId ? 'Assign Driver & Vehicle' : 'Assign Driver')}
               </button>
@@ -850,6 +987,23 @@ export default function JobDetailPage() {
     };
   };
   const [allocationConflicts, setAllocationConflicts] = useState<AllocationConflict[]>([]);
+  // Date drift between job_date/job_end and an active assignment's hire_start
+  // /hire_end. Populated from /assignments/date-mismatches/:jobId. Banner on
+  // Drivers & Vehicles tab offers one-click "match dates" to push the
+  // assignment back in line with the job — uses the overlap helper to refuse
+  // if the new window collides with another hire on the same van.
+  type DateMismatch = {
+    assignmentId: string;
+    vehicleReg: string | null;
+    driverName: string | null;
+    assignmentStatus: string;
+    assignmentStart: string | null;
+    assignmentEnd: string | null;
+    jobStart: string | null;
+    jobEnd: string | null;
+    kind: 'extension' | 'shortening' | 'start_drift';
+  };
+  const [dateMismatches, setDateMismatches] = useState<DateMismatch[]>([]);
 
   // ── Inline editing state ──────────────────────────────────────────────────
   const [editingName, setEditingName] = useState(false);
@@ -1598,10 +1752,35 @@ export default function JobDetailPage() {
       } catch {
         setAllocationConflicts([]);
       }
+
+      // Date mismatch detection — surface "extend assignment to match job?"
+      // banner when job_end has shifted past the assignment's locked hire_end.
+      try {
+        const mismatchResp = await api.get<{ data: { mismatches: DateMismatch[] } }>(
+          `/assignments/date-mismatches/${id}`
+        );
+        setDateMismatches(mismatchResp.data?.mismatches || []);
+      } catch {
+        setDateMismatches([]);
+      }
     } catch {
       console.error('Failed to load vehicle assignments');
     } finally {
       setVehicleAssignmentsLoading(false);
+    }
+  }
+
+  async function matchAssignmentDatesToJob(assignmentId: string, vehicleReg: string | null) {
+    const ok = confirm(
+      `Update ${vehicleReg || 'assignment'} dates to match the current job dates?\n\nThis adjusts the assignment's hire window. If the new window clashes with another hire on the same van you'll get an error and need to reassign one of them.`
+    );
+    if (!ok) return;
+    try {
+      await api.post(`/assignments/${assignmentId}/match-job-dates`, {});
+      loadVehicleAssignments();
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || 'Failed to match dates';
+      alert(msg);
     }
   }
 
@@ -2572,6 +2751,41 @@ export default function JobDetailPage() {
             <h3 className="text-lg font-semibold text-gray-900">Drivers & Vehicles</h3>
             {id && <QuickAssignButton jobId={id} jobDate={job.job_date || undefined} returnDate={job.return_date || undefined} onCreated={loadVehicleAssignments} />}
           </div>
+
+          {/* Hire date drift — job dates moved post-book-out, assignment now disagrees */}
+          {dateMismatches.length > 0 && (
+            <div className="space-y-2">
+              {dateMismatches.map((m) => {
+                const reg = m.vehicleReg || 'Assignment';
+                const headline =
+                  m.kind === 'extension'
+                    ? `Job extended to ${m.jobEnd}, but ${reg} hire ends ${m.assignmentEnd}.`
+                    : m.kind === 'shortening'
+                      ? `Job shortened to ${m.jobEnd}, but ${reg} hire ends ${m.assignmentEnd}.`
+                      : `${reg} hire start (${m.assignmentStart}) no longer matches job start (${m.jobStart}).`;
+                const action =
+                  m.kind === 'extension' ? 'Extend assignment'
+                  : m.kind === 'shortening' ? 'Shorten assignment'
+                  : 'Match job dates';
+                return (
+                  <div
+                    key={m.assignmentId}
+                    className="flex flex-wrap items-center gap-2 px-4 py-3 rounded-lg text-sm bg-amber-50 border border-amber-200 text-amber-900"
+                  >
+                    <span aria-hidden>📅</span>
+                    <span className="flex-1">{headline}</span>
+                    <button
+                      type="button"
+                      onClick={() => matchAssignmentDatesToJob(m.assignmentId, m.vehicleReg)}
+                      className="px-3 py-1 rounded-md bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-medium border border-amber-300"
+                    >
+                      {action}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           {/* Allocation overlap warnings — van committed to another hire on overlapping dates */}
           {allocationConflicts.length > 0 && (

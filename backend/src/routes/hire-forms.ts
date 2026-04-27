@@ -689,6 +689,49 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
   try {
     const f = req.body;
 
+    // Driver document validity gate. The frontend traffic-light filter is
+    // a UX hint; this is the authoritative check. A driver with any expired
+    // document (licence / DVLA / POA) cannot be assigned — staff must send
+    // a fresh hire form to refresh the data first. Drivers requiring
+    // insurance referral with status 'pending' or 'declined' are also
+    // blocked.
+    const driverCheck = await query(
+      `SELECT licence_valid_to, dvla_valid_until,
+              poa1_valid_until, poa2_valid_until,
+              requires_referral, referral_status, full_name
+         FROM drivers WHERE id = $1`,
+      [f.driver_id]
+    );
+    if (driverCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver not found' });
+    }
+    const dr = driverCheck.rows[0];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const isExpired = (d: string | null | undefined) => d ? new Date(d) < today : false;
+
+    const expiredDocs: string[] = [];
+    if (isExpired(dr.licence_valid_to)) expiredDocs.push('Licence');
+    if (isExpired(dr.dvla_valid_until)) expiredDocs.push('DVLA check');
+    // POA: at least one needs to be valid (matches the existing validator).
+    const poa1Expired = isExpired(dr.poa1_valid_until);
+    const poa2Expired = isExpired(dr.poa2_valid_until);
+    if (poa1Expired && poa2Expired) expiredDocs.push('Proof of address');
+
+    if (expiredDocs.length > 0) {
+      return res.status(400).json({
+        error: `Cannot assign ${dr.full_name} — expired documents: ${expiredDocs.join(', ')}. Send a fresh hire form to refresh.`,
+        code: 'driver_documents_expired',
+        expiredDocs,
+      });
+    }
+    if (dr.requires_referral && dr.referral_status !== 'approved') {
+      return res.status(400).json({
+        error: `Cannot assign ${dr.full_name} — insurance referral is ${dr.referral_status || 'pending'}. Resolve the referral on the driver detail page first.`,
+        code: 'driver_referral_unresolved',
+      });
+    }
+
     // Look up the HireHop job number from the jobs table
     const jobResult = await query(`SELECT hh_job_number, job_name FROM jobs WHERE id = $1`, [f.job_id]);
     const hhJobId = jobResult.rows[0]?.hh_job_number || null;
@@ -832,8 +875,17 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
 
 router.get('/options/lists', authenticate, async (_req: AuthRequest, res: Response) => {
   try {
+    // Driver options include the doc-validity dates so the assign-driver
+    // picker on Job Detail can render traffic-light validity (green / amber
+    // / red) and block selection of expired drivers without an extra round-
+    // trip to the drivers endpoint.
     const drivers = await query(
-      `SELECT id, full_name, email, licence_points FROM drivers WHERE is_active = true ORDER BY full_name`
+      `SELECT id, full_name, email, licence_points,
+              licence_valid_to, dvla_valid_until, poa1_valid_until, poa2_valid_until,
+              requires_referral, referral_status, is_active
+         FROM drivers
+        WHERE is_active = true
+        ORDER BY full_name`
     );
     // Active fleet only — matches the canonical filter used elsewhere
     // (dashboard.ts, compliance-checker.ts, vehicles.ts fleet overview).
