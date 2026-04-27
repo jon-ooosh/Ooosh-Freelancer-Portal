@@ -446,24 +446,27 @@ export default function RequirementCard({
                 ) : (
                   <div className="text-xs text-gray-400">No hire forms submitted yet</div>
                 )}
-                {/* Chase / re-send button — only shown once at least one form
-                    has been received. Initial invites are handled by the
-                    auto-email scheduler (10 days before hire start, then 5
-                    days as a chase). When zero forms are in, surfacing a
-                    manual "Send hire form" button just creates ambiguity
-                    around what staff should be doing. The chase button only
-                    appears when there's an actual hire form to chase. */}
-                {hireFormDrivers.length > 0 && (
-                  <button
-                    onClick={openEmailPicker}
-                    className="inline-flex items-center gap-1.5 mt-1 px-3 py-1 text-xs font-semibold text-white bg-ooosh-600 rounded-md shadow-sm hover:bg-ooosh-700 active:bg-ooosh-800 transition-colors"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                    </svg>
-                    Send again / Chase
-                  </button>
-                )}
+                {/* Always available — staff legitimately need this when:
+                    - 0 received: original email went to spam, wrong contact,
+                      need to send to a different person, etc.
+                    - ≥1 received: send to additional drivers (multi-driver
+                      hire) or chase missing drivers.
+                    The auto-email scheduler handles the standard 10-day-out
+                    invite + 5-day chase, but it's not the only path —
+                    staff need manual control too.
+                    Tooltip clarifies what the button actually does, since
+                    'send hire form' previously read as 'send the agreement
+                    PDF' to staff who hadn't seen the underlying flow. */}
+                <button
+                  onClick={openEmailPicker}
+                  title="Sends an email with a link for the driver to complete their DVLA check, licence + signature. The hire agreement PDF (with van + dates) is generated separately at book-out."
+                  className="inline-flex items-center gap-1.5 mt-1 px-3 py-1 text-xs font-semibold text-white bg-ooosh-600 rounded-md shadow-sm hover:bg-ooosh-700 active:bg-ooosh-800 transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                  {hireFormDrivers.length > 0 ? 'Send again / Chase' : 'Send hire form'}
+                </button>
               </div>
             )}
 
