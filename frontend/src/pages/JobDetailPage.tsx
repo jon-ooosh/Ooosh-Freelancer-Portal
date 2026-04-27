@@ -1004,6 +1004,11 @@ export default function JobDetailPage() {
     kind: 'extension' | 'shortening' | 'start_drift';
   };
   const [dateMismatches, setDateMismatches] = useState<DateMismatch[]>([]);
+  // Per-session dismissal of date-mismatch banners. Staff can hide a
+  // mismatch they don't want to act on right now (e.g. comms about it
+  // are in flight, or the dates will be reverted shortly). Refreshing
+  // the page brings the banner back so it's not lost permanently.
+  const [dismissedMismatches, setDismissedMismatches] = useState<Set<string>>(new Set());
 
   // ── Inline editing state ──────────────────────────────────────────────────
   const [editingName, setEditingName] = useState(false);
@@ -1772,7 +1777,7 @@ export default function JobDetailPage() {
 
   async function matchAssignmentDatesToJob(assignmentId: string, vehicleReg: string | null) {
     const ok = confirm(
-      `Update ${vehicleReg || 'assignment'} dates to match the current job dates?\n\nThis adjusts the assignment's hire window. If the new window clashes with another hire on the same van you'll get an error and need to reassign one of them.`
+      `Update hire form dates for ${vehicleReg || 'this hire'} to match the job dates?\n\nThis adjusts the hire window. If the new window clashes with another hire on the same van you'll get an error and need to reassign one of them.`
     );
     if (!ok) return;
     try {
@@ -2752,20 +2757,21 @@ export default function JobDetailPage() {
             {id && <QuickAssignButton jobId={id} jobDate={job.job_date || undefined} returnDate={job.return_date || undefined} onCreated={loadVehicleAssignments} />}
           </div>
 
-          {/* Hire date drift — job dates moved post-book-out, assignment now disagrees */}
-          {dateMismatches.length > 0 && (
+          {/* Hire date drift — job dates moved post-book-out, hire form dates disagree */}
+          {dateMismatches.filter(m => !dismissedMismatches.has(m.assignmentId)).length > 0 && (
             <div className="space-y-2">
-              {dateMismatches.map((m) => {
-                const reg = m.vehicleReg || 'Assignment';
+              {dateMismatches.filter(m => !dismissedMismatches.has(m.assignmentId)).map((m) => {
+                const reg = m.vehicleReg || 'this hire';
+                const drv = m.driverName ? ` (${m.driverName})` : '';
                 const headline =
                   m.kind === 'extension'
-                    ? `Job extended to ${m.jobEnd}, but ${reg} hire ends ${m.assignmentEnd}.`
+                    ? `Job extended to ${m.jobEnd}, but hire form for ${reg}${drv} ends ${m.assignmentEnd}.`
                     : m.kind === 'shortening'
-                      ? `Job shortened to ${m.jobEnd}, but ${reg} hire ends ${m.assignmentEnd}.`
-                      : `${reg} hire start (${m.assignmentStart}) no longer matches job start (${m.jobStart}).`;
+                      ? `Job shortened to ${m.jobEnd}, but hire form for ${reg}${drv} ends ${m.assignmentEnd}.`
+                      : `Hire form start for ${reg}${drv} (${m.assignmentStart}) no longer matches job start (${m.jobStart}).`;
                 const action =
-                  m.kind === 'extension' ? 'Extend assignment'
-                  : m.kind === 'shortening' ? 'Shorten assignment'
+                  m.kind === 'extension' ? 'Extend hire form'
+                  : m.kind === 'shortening' ? 'Shorten hire form'
                   : 'Match job dates';
                 return (
                   <div
@@ -2780,6 +2786,15 @@ export default function JobDetailPage() {
                       className="px-3 py-1 rounded-md bg-amber-100 hover:bg-amber-200 text-amber-900 text-xs font-medium border border-amber-300"
                     >
                       {action}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDismissedMismatches(s => new Set(s).add(m.assignmentId))}
+                      title="Hide this warning until next refresh"
+                      className="px-2 py-1 rounded-md hover:bg-amber-100 text-amber-700 text-xs"
+                      aria-label="Dismiss"
+                    >
+                      ✕
                     </button>
                   </div>
                 );
