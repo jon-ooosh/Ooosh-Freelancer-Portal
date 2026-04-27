@@ -2082,6 +2082,127 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. PREP SESSIONS — native R2-backed endpoints
+//    Replaces the legacy Netlify functions (save-prep, get-prep-history) that
+//    proxied to https://ooosh-vehicles.netlify.app. The Netlify site was
+//    retired without `VEHICLE_MODULE_URL` ever being set on the OP server,
+//    so all prep saves were silently 404ing and prep history failed to load.
+//
+//    R2 layout:
+//      prep-sessions/{REG}/{eventId}.json   — full session document
+//      prep-sessions/{REG}/_index.json      — lightweight index for listing
+//
+//    The PrepHistoryTab extracts problems / notes from session sections, so
+//    persisting full sessions also persists per-vehicle issue history (e.g.
+//    "this door is a bit stiff") visible across future preps until resolved.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * POST /api/vehicles/save-prep
+ * Body: { vehicleReg, eventId, data }
+ * Stores the full prep session JSON in R2 and updates the per-vehicle index.
+ */
+router.post('/save-prep', async (req: AuthRequest, res: Response) => {
+  try {
+    const { vehicleReg, eventId, data } = req.body;
+    if (!vehicleReg || !eventId || !data) {
+      res.status(400).json({ error: 'vehicleReg, eventId and data are required' });
+      return;
+    }
+
+    const reg = (vehicleReg as string).toUpperCase();
+
+    // Write full session document
+    await writeR2Json(`prep-sessions/${reg}/${eventId}.json`, data);
+
+    // Update per-vehicle index for cheap listing
+    const indexKey = `prep-sessions/${reg}/_index.json`;
+    const indexData = await readR2Json<{ sessions: any[] }>(indexKey) || { sessions: [] };
+
+    const indexEntry = {
+      eventId,
+      vehicleReg: reg,
+      preparedBy: data.preparedBy || null,
+      mileage: data.mileage ?? null,
+      fuelLevel: data.fuelLevel || null,
+      date: data.date || new Date().toISOString().slice(0, 10),
+      startedAt: data.startedAt || null,
+      completedAt: data.completedAt || null,
+      durationMinutes: data.durationMinutes ?? null,
+      overallStatus: data.overallStatus || null,
+    };
+
+    const existingIdx = indexData.sessions.findIndex((s: any) => s.eventId === eventId);
+    if (existingIdx >= 0) {
+      indexData.sessions[existingIdx] = indexEntry;
+    } else {
+      indexData.sessions.push(indexEntry);
+    }
+
+    await writeR2Json(indexKey, indexData);
+
+    res.json({ success: true, eventId });
+  } catch (error) {
+    console.error('[vehicles/prep] save-prep error:', error);
+    res.status(500).json({ error: 'Failed to save prep session' });
+  }
+});
+
+/**
+ * GET /api/vehicles/get-prep-history?vehicleReg=XXX&limit=10
+ * Returns the most recent N prep sessions for a vehicle.
+ */
+router.get('/get-prep-history', async (req: AuthRequest, res: Response) => {
+  try {
+    const vehicleReg = req.query.vehicleReg as string | undefined;
+    const limit = parseInt((req.query.limit as string) || '10', 10);
+
+    if (!vehicleReg) {
+      res.status(400).json({ error: 'vehicleReg is required' });
+      return;
+    }
+
+    const reg = vehicleReg.toUpperCase();
+    const indexKey = `prep-sessions/${reg}/_index.json`;
+    const indexData = await readR2Json<{ sessions: any[] }>(indexKey);
+
+    if (!indexData || !Array.isArray(indexData.sessions)) {
+      res.json({ sessions: [], total: 0 });
+      return;
+    }
+
+    // Sort newest first
+    const sorted = [...indexData.sessions].sort((a: any, b: any) => {
+      const aT = (a.completedAt || a.startedAt || a.date || '');
+      const bT = (b.completedAt || b.startedAt || b.date || '');
+      return bT.localeCompare(aT);
+    });
+
+    const total = sorted.length;
+    const slice = sorted.slice(0, Math.max(1, Math.min(limit, 100)));
+
+    // Hydrate each from the full session document so the tab can render
+    // tyre values, problems, etc.
+    const sessions: any[] = [];
+    for (const entry of slice) {
+      const full = await readR2Json<any>(`prep-sessions/${reg}/${entry.eventId}.json`);
+      if (full) {
+        sessions.push(full);
+      } else {
+        // Index claims a session exists but the document is missing.
+        // Return the index entry so at least the date / preparer shows.
+        sessions.push({ ...entry, sections: [] });
+      }
+    }
+
+    res.json({ sessions, total });
+  } catch (error) {
+    console.error('[vehicles/prep] get-prep-history error:', error);
+    res.status(500).json({ error: 'Failed to load prep history' });
+  }
+});
+
 /**
  * GET /api/vehicles/get-recent-events?limit=10
  * Fetch recent events across all vehicles.
