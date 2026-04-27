@@ -17,6 +17,7 @@ import {
   findOverlappingAssignments,
   buildConflictPayload,
 } from '../services/assignment-overlap';
+import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 
 const router = Router();
 router.use(authenticate);
@@ -489,13 +490,11 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
       );
     }
 
-    // Flip the vehicle's fleet-level hire_status to 'On Hire' so the Fleet
-    // page reflects reality. Check-in will flip it to 'Prep Needed'.
+    // Recompute fleet hire_status from current assignment state so the Fleet
+    // page reflects reality. The helper is the single source of truth — it
+    // sees the just-flipped 'booked_out' assignment and writes 'On Hire'.
     if (assignment.vehicle_id) {
-      await query(
-        `UPDATE fleet_vehicles SET hire_status = 'On Hire', updated_at = NOW() WHERE id = $1`,
-        [assignment.vehicle_id]
-      );
+      await syncFleetHireStatus(assignment.vehicle_id);
     }
 
     res.json({ data: assignment, warnings });
@@ -551,12 +550,11 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
       );
     }
 
-    // Update vehicle hire_status to Prep Needed (only if vehicle assigned)
+    // Recompute fleet hire_status — helper sees no active assignment and
+    // transitions the row from 'On Hire' → 'Prep Needed'. The 'Prep Needed'
+    // → 'Available' transition is owned by the prep-completion flow.
     if (assignment.vehicle_id) {
-      await query(
-        `UPDATE fleet_vehicles SET hire_status = 'Prep Needed' WHERE id = $1`,
-        [assignment.vehicle_id]
-      );
+      await syncFleetHireStatus(assignment.vehicle_id);
     }
 
     // Auto-create damage_review close-out requirement if damage flagged
@@ -1196,6 +1194,14 @@ router.post('/:id/swap-vehicle', validate(swapSchema), async (req: AuthRequest, 
        FROM job_excess WHERE assignment_id = $3 LIMIT 1`,
       [newAssignment.id, req.user!.id, id]
     );
+
+    // 6. Recompute hire_status on both vehicles. Old van: assignment is now
+    // 'swapped' (not occupying), helper transitions 'On Hire' → 'Prep Needed'
+    // if the original was already booked out, otherwise preserves. New van:
+    // assignment is 'confirmed', no flip until book-out completes — helper
+    // preserves whatever value it had ('Available' usually).
+    if (orig.vehicle_id) await syncFleetHireStatus(orig.vehicle_id);
+    await syncFleetHireStatus(new_vehicle_id);
 
     console.log(`[assignments] Vehicle swapped: ${orig.vehicle_reg} → ${newVehicle.reg} (assignment ${id} → ${newAssignment.id})`);
 

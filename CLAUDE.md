@@ -1840,6 +1840,64 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 - Per-template: `backend/src/services/email-templates/{template-id}.ts` — subject + body
 - Variables injected via `{{variableName}}` substitution
 
+### Fleet Hire-Status Sync ✅ COMPLETE
+
+**File:** `backend/src/services/fleet-hire-status-sync.ts`
+
+Single source of truth for `fleet_vehicles.hire_status`. The column is a CACHED projection of assignment state — derived, not authoritative. The authoritative truth is `vehicle_hire_assignments.status`.
+
+**Why this exists:** Before centralisation, five different places (`assignments.ts` book-out + check-in + swap, `hire-forms.ts` PATCH, `vehicles.ts` save-event) each ran their own `UPDATE fleet_vehicles SET hire_status = ...`. When the frontend forgot to send `event.hireStatus` (e.g. the 22 Mar eventType case bug, the 20-22 Apr stuck-booked-out historical data), the column drifted from reality. Funnel everything through one helper and drift becomes impossible.
+
+**Decision rules:**
+- Sticky values (`'Sold'`, `'Not Ready'`) preserved — these are explicit manual overrides for damage repair, finance return, etc. The helper does not clobber them.
+- Any assignment in `('booked_out', 'active')` for the vehicle → `'On Hire'`.
+- Otherwise, if current value is `'On Hire'` (van WAS out, now no active assignment — i.e. just came back) → `'Prep Needed'`.
+- `'Prep Needed'` → `'Available'` transition is NOT handled here. That happens when prep is completed via `PATCH /api/vehicles/fleet/by-reg/:reg/hire-status`.
+- All other cases: preserve current value.
+
+**Usage pattern:**
+```typescript
+import { syncFleetHireStatus, syncFleetHireStatusByReg } from '../services/fleet-hire-status-sync';
+
+// After flipping an assignment status, recompute fleet status:
+await syncFleetHireStatus(vehicleId);
+
+// For event handlers that work with regs:
+await syncFleetHireStatusByReg(reg);
+```
+
+**Wired into:**
+- `assignments.ts` book-out (`POST /:id/book-out`)
+- `assignments.ts` check-in (`POST /:id/check-in`)
+- `assignments.ts` swap-vehicle (`POST /:id/swap-vehicle` — syncs both old + new)
+- `hire-forms.ts` PATCH on transition to `booked_out`
+- `vehicles.ts` save-event end-of-handler (after assignment status flips)
+
+**NOT wired into:** the manual override paths (`PATCH /api/vehicles/fleet/:id`, `PATCH /api/vehicles/fleet/by-reg/:reg/hire-status`, bulk import). These are explicit user actions that should stand as written.
+
+**Backfill:** `backend/src/scripts/backfill-fleet-hire-status.ts` runs the same rules across the entire fleet to clean up historical drift. Dry-run by default; `--commit` to apply.
+
+### Hire Date Resolution
+
+**Canonical hire-window source for PDFs / emails / overlap checks:**
+
+| Field | Authoritative source | Fallback |
+|---|---|---|
+| Hire start date | `vehicle_hire_assignments.hire_start` (set at book-out, optional override) | `jobs.job_date` (Job Start) |
+| Hire end date | `vehicle_hire_assignments.hire_end` (set at book-out, optional override) | `jobs.job_end` (Job Finish — the REAL end of charge) |
+
+**Important:** The fallback for hire end is `jobs.job_end`, **NOT `jobs.return_date`**. The `return_date` field is the artificial +1-day turnaround buffer used for warehouse scheduling — it's not when the hire actually ends.
+
+This was a real bug: `hire-forms.ts` PDF generation at lines 1173 + 1424 was using `j.return_date` as the fallback, while `assignment-overlap.ts` used `j.job_end`. Hire agreement PDFs would show a different end date than the overlap check expected. Fixed Apr 2026 — both now use `j.job_end`.
+
+**The four-layer date model:**
+1. `jobs.job_date / job_end / out_date / return_date` — HH-synced job dates (canonical for the JOB)
+2. `vehicle_hire_assignments.hire_start / hire_end` — per-van actual hire window (CAN drift from job dates intentionally — e.g. client picks up the night before)
+3. `vehicle_hire_assignments.booked_out_at / checked_in_at` — when book-out / check-in physically happened (event timestamps)
+4. Vehicle event history — full audit trail
+
+Book-out is the canonical moment dates get LOCKED on the assignment. Before book-out, `hire_start/hire_end` are tentative (mirror job dates if not set). At book-out, staff can adjust them on the BookOutPage form. Mid-tour drivers added after book-out get THEIR own `hire_start = NOW()`.
+
 ## Security
 
 ### Current Security Posture (as of 15 Mar 2026)
