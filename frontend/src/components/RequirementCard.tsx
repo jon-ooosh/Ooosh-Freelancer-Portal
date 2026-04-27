@@ -446,15 +446,24 @@ export default function RequirementCard({
                 ) : (
                   <div className="text-xs text-gray-400">No hire forms submitted yet</div>
                 )}
-                <button
-                  onClick={openEmailPicker}
-                  className="inline-flex items-center gap-1.5 mt-1 px-3 py-1 text-xs font-semibold text-white bg-ooosh-600 rounded-md shadow-sm hover:bg-ooosh-700 active:bg-ooosh-800 transition-colors"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                  </svg>
-                  {req.notes?.includes('Hire form email sent') ? 'Send again / Chase' : 'Send hire form'}
-                </button>
+                {/* Chase / re-send button — only shown once at least one form
+                    has been received. Initial invites are handled by the
+                    auto-email scheduler (10 days before hire start, then 5
+                    days as a chase). When zero forms are in, surfacing a
+                    manual "Send hire form" button just creates ambiguity
+                    around what staff should be doing. The chase button only
+                    appears when there's an actual hire form to chase. */}
+                {hireFormDrivers.length > 0 && (
+                  <button
+                    onClick={openEmailPicker}
+                    className="inline-flex items-center gap-1.5 mt-1 px-3 py-1 text-xs font-semibold text-white bg-ooosh-600 rounded-md shadow-sm hover:bg-ooosh-700 active:bg-ooosh-800 transition-colors"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                    </svg>
+                    Send again / Chase
+                  </button>
+                )}
               </div>
             )}
 
@@ -478,20 +487,44 @@ export default function RequirementCard({
                         </span>
                       )}
                     </div>
-                    {(excessInfo.drivers || []).map((d, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs text-gray-500">
-                        <span>{d.driver_name || 'Unknown'}:</span>
-                        <span className={EXCESS_STATUS_LABELS[d.excess_status]?.colour || 'text-gray-500'}>
-                          {EXCESS_STATUS_LABELS[d.excess_status]?.label || d.excess_status || 'Unknown'}
-                        </span>
-                        <span className="text-gray-400">
-                          £{(d.excess_amount_taken ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 2 })} / £{(d.excess_amount_required ?? 0).toLocaleString('en-GB', { minimumFractionDigits: 2 })}
-                        </span>
-                        {d.requires_referral && (
-                          <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
-                        )}
-                      </div>
-                    ))}
+                    {(excessInfo.drivers || []).map((d, i) => {
+                      // Top-N rule: drivers beyond the highest-risk N (where
+                      // N = van count) have £0 required because the top
+                      // driver(s) cover the excess for the whole hire. The
+                      // raw status is usually 'pending' on those records, but
+                      // showing "Pending £0/£0" reads as "outstanding" when
+                      // really nothing is owed. Render a muted "Covered"
+                      // pill instead — pure UI rule, no data change, no
+                      // status loops.
+                      const required = d.excess_amount_required ?? 0;
+                      const taken = d.excess_amount_taken ?? 0;
+                      const isCovered = required === 0 && taken === 0;
+                      return (
+                        <div key={i} className="flex items-center gap-2 text-xs text-gray-500">
+                          <span>{d.driver_name || 'Unknown'}:</span>
+                          {isCovered ? (
+                            <span
+                              className="text-gray-400 italic"
+                              title="Excess covered by another driver on this hire"
+                            >
+                              Covered
+                            </span>
+                          ) : (
+                            <>
+                              <span className={EXCESS_STATUS_LABELS[d.excess_status]?.colour || 'text-gray-500'}>
+                                {EXCESS_STATUS_LABELS[d.excess_status]?.label || d.excess_status || 'Unknown'}
+                              </span>
+                              <span className="text-gray-400">
+                                £{taken.toLocaleString('en-GB', { minimumFractionDigits: 2 })} / £{required.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
+                              </span>
+                            </>
+                          )}
+                          {d.requires_referral && (
+                            <span className="text-[10px] px-1 py-0.5 rounded bg-red-50 text-red-600 border border-red-200">Referral</span>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
                   <span className="text-gray-400">Insurance excess required for self-drive hire</span>
