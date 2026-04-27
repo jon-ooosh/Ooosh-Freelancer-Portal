@@ -110,9 +110,10 @@ export default function OrganisationDetailPage() {
   const [relDirection, setRelDirection] = useState<'forward' | 'reverse'>('forward');
   const [relSaving, setRelSaving] = useState(false);
 
-  // Add person
+  // Add person — search-first; if no match (or coincidental match) we let
+  // the user fall through to a "create new" inline form.
   const [showAddPerson, setShowAddPerson] = useState(false);
-  const [personMode, setPersonMode] = useState<'search' | 'new'>('search');
+  const [creatingNew, setCreatingNew] = useState(false);
   const [personSearch, setPersonSearch] = useState('');
   const [personResults, setPersonResults] = useState<Array<{ id: string; first_name: string; last_name: string; email: string | null }>>([]);
   const [personSelected, setPersonSelected] = useState<{ id: string; name: string } | null>(null);
@@ -191,7 +192,7 @@ export default function OrganisationDetailPage() {
 
   function resetAddPersonForm() {
     setShowAddPerson(false);
-    setPersonMode('search');
+    setCreatingNew(false);
     setPersonSearch('');
     setPersonResults([]);
     setPersonSelected(null);
@@ -204,6 +205,21 @@ export default function OrganisationDetailPage() {
     setPersonError('');
   }
 
+  function startCreateNew(prefill: string) {
+    const trimmed = prefill.trim();
+    const spaceIdx = trimmed.indexOf(' ');
+    if (spaceIdx > 0) {
+      setNewPersonFirst(trimmed.slice(0, spaceIdx));
+      setNewPersonLast(trimmed.slice(spaceIdx + 1).trim());
+    } else {
+      setNewPersonFirst(trimmed);
+      setNewPersonLast('');
+    }
+    setCreatingNew(true);
+    setPersonResults([]);
+    setPersonError('');
+  }
+
   async function handleAddPerson(e: React.FormEvent) {
     e.preventDefault();
     if (!id || personSaving) return;
@@ -211,11 +227,11 @@ export default function OrganisationDetailPage() {
       setPersonError('Pick a role');
       return;
     }
-    if (personMode === 'search' && !personSelected) {
-      setPersonError('Pick a person or switch to "Create new"');
+    if (!personSelected && !creatingNew) {
+      setPersonError('Pick a person or create a new one');
       return;
     }
-    if (personMode === 'new' && (!newPersonFirst.trim() || !newPersonLast.trim())) {
+    if (creatingNew && (!newPersonFirst.trim() || !newPersonLast.trim())) {
       setPersonError('First and last name are required for a new person');
       return;
     }
@@ -226,8 +242,8 @@ export default function OrganisationDetailPage() {
         role: personRole.trim(),
         is_primary: personIsPrimary,
       };
-      if (personMode === 'search') {
-        body.person_id = personSelected!.id;
+      if (personSelected) {
+        body.person_id = personSelected.id;
       } else {
         body.new_person = {
           first_name: newPersonFirst.trim(),
@@ -512,113 +528,111 @@ export default function OrganisationDetailPage() {
             </button>
           ) : (
             <form onSubmit={handleAddPerson} className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-gray-700">Add Person to {org.name}</h3>
-                <div className="flex items-center gap-1 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => { setPersonMode('search'); setPersonError(''); }}
-                    className={`px-2 py-1 rounded ${personMode === 'search' ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
-                  >
-                    Search existing
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setPersonMode('new'); setPersonSelected(null); setPersonError(''); }}
-                    className={`px-2 py-1 rounded ${personMode === 'new' ? 'bg-ooosh-100 text-ooosh-700 font-medium' : 'text-gray-500 hover:text-gray-700'}`}
-                  >
-                    Create new
-                  </button>
-                </div>
-              </div>
+              <h3 className="text-sm font-semibold text-gray-700 mb-3">Add Person to {org.name}</h3>
 
               {personError && (
                 <div className="mb-3 bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded text-xs">{personError}</div>
               )}
 
-              {personMode === 'search' ? (
-                !personSelected ? (
-                  <div className="relative">
-                    <input
-                      value={personSearch}
-                      onChange={e => setPersonSearch(e.target.value)}
-                      placeholder="Search for a person..."
-                      autoFocus
-                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                    />
-                    {personResults.length > 0 && (
-                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded shadow-lg max-h-48 overflow-y-auto z-10">
-                        {personResults.map(p => (
-                          <button
-                            key={p.id}
-                            type="button"
-                            onClick={() => {
-                              setPersonSelected({ id: p.id, name: `${p.first_name} ${p.last_name}`.trim() });
-                              setPersonResults([]);
-                              setPersonSearch('');
-                            }}
-                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 flex items-center justify-between gap-2"
-                          >
-                            <span className="font-medium">{p.first_name} {p.last_name}</span>
-                            {p.email && <span className="text-xs text-gray-400 truncate">{p.email}</span>}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {personSearch.length >= 2 && personResults.length === 0 && (
-                      <p className="mt-1 text-xs text-gray-400">
-                        No matches. Switch to <button type="button" onClick={() => { setPersonMode('new'); setNewPersonFirst(personSearch); }} className="text-ooosh-600 hover:underline">Create new</button>?
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-gray-900 bg-ooosh-50 px-2 py-1 rounded">{personSelected.name}</span>
+              {personSelected ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-900 bg-ooosh-50 px-2 py-1 rounded">{personSelected.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => { setPersonSelected(null); setPersonSearch(''); }}
+                    className="text-xs text-gray-400 hover:text-gray-600"
+                  >
+                    Change
+                  </button>
+                </div>
+              ) : creatingNew ? (
+                <>
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs text-gray-500">Creating a new person record</p>
                     <button
                       type="button"
-                      onClick={() => { setPersonSelected(null); setPersonSearch(''); }}
+                      onClick={() => { setCreatingNew(false); setNewPersonFirst(''); setNewPersonLast(''); setNewPersonEmail(''); setNewPersonMobile(''); setPersonError(''); }}
                       className="text-xs text-gray-400 hover:text-gray-600"
                     >
-                      Change
+                      Back to search
                     </button>
                   </div>
-                )
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 uppercase mb-1">First Name *</label>
+                      <input
+                        value={newPersonFirst}
+                        onChange={e => setNewPersonFirst(e.target.value)}
+                        autoFocus
+                        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Last Name *</label>
+                      <input
+                        value={newPersonLast}
+                        onChange={e => setNewPersonLast(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Email</label>
+                      <input
+                        type="email"
+                        value={newPersonEmail}
+                        onChange={e => setNewPersonEmail(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Mobile</label>
+                      <input
+                        value={newPersonMobile}
+                        onChange={e => setNewPersonMobile(e.target.value)}
+                        className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                      />
+                    </div>
+                  </div>
+                </>
               ) : (
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">First Name *</label>
-                    <input
-                      value={newPersonFirst}
-                      onChange={e => setNewPersonFirst(e.target.value)}
-                      autoFocus
-                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Last Name *</label>
-                    <input
-                      value={newPersonLast}
-                      onChange={e => setNewPersonLast(e.target.value)}
-                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Email</label>
-                    <input
-                      type="email"
-                      value={newPersonEmail}
-                      onChange={e => setNewPersonEmail(e.target.value)}
-                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Mobile</label>
-                    <input
-                      value={newPersonMobile}
-                      onChange={e => setNewPersonMobile(e.target.value)}
-                      className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                    />
-                  </div>
+                <div className="relative">
+                  <input
+                    value={personSearch}
+                    onChange={e => setPersonSearch(e.target.value)}
+                    placeholder="Search for a person..."
+                    autoFocus
+                    className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  />
+                  {personSearch.trim().length >= 2 && (
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded shadow-lg max-h-64 overflow-y-auto z-10">
+                      {personResults.map(p => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => {
+                            setPersonSelected({ id: p.id, name: `${p.first_name} ${p.last_name}`.trim() });
+                            setPersonResults([]);
+                            setPersonSearch('');
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50 flex items-center justify-between gap-2 border-b border-gray-100"
+                        >
+                          <span className="font-medium">{p.first_name} {p.last_name}</span>
+                          {p.email && <span className="text-xs text-gray-400 truncate">{p.email}</span>}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => startCreateNew(personSearch)}
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-ooosh-50 text-ooosh-600 flex items-center gap-2"
+                      >
+                        <span className="font-medium">+ Create new:</span>
+                        <span>{personSearch.trim()}</span>
+                        {personResults.length > 0 && (
+                          <span className="text-xs text-gray-400 ml-auto">use this if none of the above are right</span>
+                        )}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
