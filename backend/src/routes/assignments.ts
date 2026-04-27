@@ -18,6 +18,7 @@ import {
   buildConflictPayload,
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
+import { syncVehicleRequirementStatus } from '../services/vehicle-requirement-sync';
 
 const router = Router();
 router.use(authenticate);
@@ -335,6 +336,15 @@ router.post('/', validate(createAssignmentSchema), async (req: AuthRequest, res:
       );
     }
 
+    // Recompute pre-hire vehicle requirement now that an assignment with a
+    // vehicle exists (or doesn't, if vehicle_id was null — helper handles
+    // both cases bidirectionally).
+    if (a.job_id) {
+      syncVehicleRequirementStatus(a.job_id).catch(err => {
+        console.warn(`[assignments] Vehicle requirement sync failed:`, err);
+      });
+    }
+
     res.status(201).json({ data: assignment });
   } catch (error) {
     console.error('[assignments] Create error:', error);
@@ -496,6 +506,14 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
     if (assignment.vehicle_id) {
       await syncFleetHireStatus(assignment.vehicle_id);
     }
+    // Book-out is the canonical "vehicle confirmed" moment — if the
+    // requirement was 'in_progress' at allocation time it should now be
+    // 'done'. Helper preserves manual 'blocked' state.
+    if (assignment.job_id) {
+      syncVehicleRequirementStatus(assignment.job_id).catch(err => {
+        console.warn(`[assignments] book-out vehicle requirement sync failed:`, err);
+      });
+    }
 
     res.json({ data: assignment, warnings });
   } catch (error) {
@@ -555,6 +573,16 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
     // → 'Available' transition is owned by the prep-completion flow.
     if (assignment.vehicle_id) {
       await syncFleetHireStatus(assignment.vehicle_id);
+    }
+    // Check-in flips the assignment to 'returned', so it no longer counts
+    // toward the pre-hire vehicle requirement. The pre-hire phase is
+    // historically "done" by this point — recomputing keeps it accurate
+    // against any cancellation / removal that happens between book-out
+    // and check-in.
+    if (assignment.job_id) {
+      syncVehicleRequirementStatus(assignment.job_id).catch(err => {
+        console.warn(`[assignments] check-in vehicle requirement sync failed:`, err);
+      });
     }
 
     // Auto-create damage_review close-out requirement if damage flagged
@@ -1244,6 +1272,22 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Recompute the pre-hire vehicle requirement on every job touched in
+    // this batch — the allocation save may have added, removed, or changed
+    // vehicle linkage on multiple jobs at once. Lookup OP UUIDs from HH
+    // numbers since this endpoint speaks HH ids. Fire-and-forget per job.
+    if (incomingJobIds.size > 0) {
+      const opIdResult = await query(
+        `SELECT id, hh_job_number FROM jobs WHERE hh_job_number = ANY($1)`,
+        [Array.from(incomingJobIds)],
+      );
+      for (const r of opIdResult.rows) {
+        syncVehicleRequirementStatus(r.id as string).catch(err => {
+          console.warn(`[assignments/compat] vehicle requirement sync failed for HH#${r.hh_job_number}:`, err);
+        });
+      }
+    }
+
     res.json({ success: true, conflicts: conflictResults });
   } catch (error) {
     console.error('[assignments/compat] Save allocations error:', error);
@@ -1351,6 +1395,15 @@ router.post('/:id/swap-vehicle', validate(swapSchema), async (req: AuthRequest, 
     // preserves whatever value it had ('Available' usually).
     if (orig.vehicle_id) await syncFleetHireStatus(orig.vehicle_id);
     await syncFleetHireStatus(new_vehicle_id);
+
+    // Vehicle requirement: count is unchanged (1 swapped out, 1 swapped in)
+    // but recompute anyway for safety — handles edge cases like swapping
+    // when the new assignment can't be created for some reason.
+    if (orig.job_id) {
+      syncVehicleRequirementStatus(orig.job_id).catch(err => {
+        console.warn(`[assignments] swap-vehicle requirement sync failed:`, err);
+      });
+    }
 
     console.log(`[assignments] Vehicle swapped: ${orig.vehicle_reg} → ${newVehicle.reg} (assignment ${id} → ${newAssignment.id})`);
 

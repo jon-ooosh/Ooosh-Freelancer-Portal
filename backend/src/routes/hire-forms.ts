@@ -513,6 +513,11 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
                AND status <> $1`,
             [targetStatus, advanceJobId]
           );
+          // Hire form may also have linked a vehicle (vehicle_id on the new
+          // assignment). Recompute vehicle requirement status from the post-
+          // insert state.
+          const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+          await syncVehicleRequirementStatus(advanceJobId);
         } catch (err) {
           console.warn(`[hire-forms] hire_forms requirement advance failed for job ${advanceJobId}:`, err);
         }
@@ -864,6 +869,16 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     }
 
     console.log(`[hire-forms] Quick assignment created: ${assignment.id} (driver ${f.driver_id} → vehicle ${f.vehicle_id || 'unassigned'} on job ${f.job_id}, van_count=${vanCount})`);
+
+    // Recompute vehicle requirement — quick-assign may have linked a vehicle
+    // (or not, if vehicle_id was omitted). Helper handles both cases.
+    if (f.job_id) {
+      const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+      syncVehicleRequirementStatus(f.job_id).catch(err => {
+        console.warn(`[hire-forms] quick-assign vehicle requirement sync failed:`, err);
+      });
+    }
+
     res.status(201).json({ data: assignment });
   } catch (error) {
     console.error('[hire-forms] Quick assign error:', error);
@@ -1058,27 +1073,21 @@ router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthReques
     const updated = result.rows[0];
     console.log(`[hire-forms] Updated assignment ${id}:`, Object.keys(updates).join(', '));
 
-    // Vehicle linked (not necessarily booked out yet) — advance the
-    // `vehicle` pre-hire requirement to 'done' so the Job Requirements
-    // counter ticks up and the left-border goes green as soon as staff
-    // picks a van. Happens in addition to the book-out transition below,
-    // which advances hire_forms + excess too.
-    const vehicleJustLinked = updates.vehicle_id !== undefined && updates.vehicle_id !== null && updated.vehicle_id && updated.job_id;
-    if (vehicleJustLinked) {
+    // Recompute the pre-hire vehicle requirement status whenever vehicle_id
+    // or status changes — both add to and subtract from "vehicles assigned"
+    // count for this job. The helper handles done/in_progress/not_started
+    // bidirectionally (linking AND un-linking), respects manual 'blocked'
+    // status, and handles multi-van quantity.
+    const vehicleStateChanged =
+      updates.vehicle_id !== undefined || updates.status !== undefined;
+    if (vehicleStateChanged && updated.job_id) {
       const jobId: string = updated.job_id;
       setImmediate(async () => {
         try {
-          await query(
-            `UPDATE job_requirements
-             SET status = 'done', updated_at = NOW()
-             WHERE job_id = $1
-               AND requirement_type = 'vehicle'
-               AND phase = 'pre_hire'
-               AND status IN ('not_started', 'in_progress')`,
-            [jobId]
-          );
+          const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+          await syncVehicleRequirementStatus(jobId);
         } catch (err) {
-          console.warn(`[hire-forms] Vehicle requirement advance failed for job ${jobId}:`, err);
+          console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobId}:`, err);
         }
       });
     }
