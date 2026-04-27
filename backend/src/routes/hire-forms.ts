@@ -19,6 +19,7 @@ import {
   findOverlappingAssignments,
   buildConflictPayload,
 } from '../services/assignment-overlap';
+import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -1041,12 +1042,12 @@ router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthReques
     // assignment (idempotent — a staff PATCH retry shouldn't re-spam).
     const nowBookedOut = updates.status === 'booked_out' && updated.status === 'booked_out';
     if (nowBookedOut && updated.vehicle_id) {
-      // Flip fleet hire_status — fire-and-forget, non-blocking.
-      query(
-        `UPDATE fleet_vehicles SET hire_status = 'On Hire', updated_at = NOW() WHERE id = $1`,
-        [updated.vehicle_id]
-      ).catch((err) => {
-        console.warn(`[hire-forms] fleet_vehicles hire_status update failed for vehicle ${updated.vehicle_id}:`, err);
+      // Recompute fleet hire_status from current assignment state — single
+      // source of truth helper. Fire-and-forget, non-blocking. The just-flipped
+      // 'booked_out' assignment will be picked up and 'On Hire' written.
+      const vehicleId: string = updated.vehicle_id;
+      syncFleetHireStatus(vehicleId).catch((err) => {
+        console.warn(`[hire-forms] fleet hire_status sync failed for vehicle ${vehicleId}:`, err);
       });
 
       // Advance pre-hire requirement cards to 'done' so the Job
@@ -1162,15 +1163,20 @@ async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string
 async function loadHireFormData(assignmentId: string): Promise<HireFormData | null> {
   // Date/time resolution: vehicle_hire_assignments.hire_start/hire_end/
   // start_time/end_time are treated as OVERRIDES. If any are null, fall
-  // back to the parent job's job_date/return_date (and 09:00 for times,
+  // back to the parent job's job_date/job_end (and 09:00 for times,
   // per Ooosh T&Cs: "rental period starts at 9am on the first date of
   // hire and concludes at 9am the morning after the final hired day").
   // Prevents blank dates/times appearing on the hire agreement email +
   // PDF when assignment dates weren't populated upstream.
+  //
+  // Fallback uses j.job_end (Job Finish — the real end of the hire window)
+  // NOT j.return_date (which is the +1-day turnaround buffer for warehouse
+  // scheduling). Aligned with the overlap-check service so dates are
+  // consistent across the codebase.
   const result = await query(
     `SELECT vha.*,
       COALESCE(vha.hire_start, j.job_date) AS resolved_hire_start,
-      COALESCE(vha.hire_end, j.return_date) AS resolved_hire_end,
+      COALESCE(vha.hire_end, j.job_end) AS resolved_hire_end,
       COALESCE(vha.start_time, '09:00') AS resolved_start_time,
       COALESCE(vha.end_time, '09:00') AS resolved_end_time,
       fv.reg AS vehicle_reg,
@@ -1415,7 +1421,7 @@ router.post('/:id/send-email', authenticateOrApiKey, async (req: AuthRequest, re
     const assignment = await query(
       `SELECT vha.*,
         COALESCE(vha.hire_start, j.job_date) AS resolved_hire_start,
-        COALESCE(vha.hire_end, j.return_date) AS resolved_hire_end,
+        COALESCE(vha.hire_end, j.job_end) AS resolved_hire_end,
         d.full_name AS driver_name, d.email AS driver_email,
         fv.reg AS vehicle_reg, fv.vehicle_type AS vehicle_model
       FROM vehicle_hire_assignments vha

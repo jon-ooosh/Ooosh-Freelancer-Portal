@@ -2060,6 +2060,21 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
       }
     }
 
+    // Final reconcile — recompute fleet hire_status from current assignment
+    // state. Runs AFTER the assignment status flips above, so the helper
+    // observes the post-flip state. The earlier `event.hireStatus` direct
+    // write (kept for prep-flow compatibility — prep events write 'Available'
+    // and there's no assignment side-effect) is still respected: the helper's
+    // "preserve current value" rule means 'Available' is preserved when no
+    // active assignment exists. The helper's job is to override stale values,
+    // not to clobber legitimate ones.
+    try {
+      const { syncFleetHireStatusByReg } = await import('../services/fleet-hire-status-sync');
+      await syncFleetHireStatusByReg(reg);
+    } catch (err) {
+      console.warn('[vehicles/events] hire_status sync failed:', err);
+    }
+
     res.json({ success: true, id: event.id });
   } catch (error) {
     console.error('[vehicles/events] Failed to save event:', error);
