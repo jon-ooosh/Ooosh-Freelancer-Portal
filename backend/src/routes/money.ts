@@ -885,7 +885,15 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
     }
 
     // Status transition: deposit payment on enquiry/provisional → Booked
-    // A deposit (or full payment) means the job is confirmed
+    // A deposit (or full payment) means the job is confirmed.
+    //
+    // INVARIANT: `statusChanged` is true ONLY when THIS payment moved the job
+    // from a pre-confirmed status into 'confirmed'. Once a job is confirmed,
+    // any subsequent payment is just a receipt — it must NOT re-trigger
+    // booking-confirmation behaviour (booking_confirmed_deposit email,
+    // last-minute alert, hire-form auto-send). Use `statusChanged`, never
+    // "is currently confirmed", to gate those side effects.
+    let statusChanged = false;
     if ((payment_type === 'deposit' || payment_type === 'balance') && amount > 0) {
       try {
         const statusResult = await query(
@@ -901,6 +909,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
             `UPDATE jobs SET pipeline_status = 'confirmed', pipeline_status_changed_at = NOW(), updated_at = NOW() WHERE id = $1`,
             [job.id]
           );
+          statusChanged = true;
           console.log(`[money] Job ${job.id} moved to confirmed (deposit received)`);
 
           // Push status to HireHop (status 2 = Booked)
@@ -927,25 +936,28 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
       }
 
       // Hire form email: if job has self-drive vehicle and starts within 10 days, send now.
-      // Runs HH-derivation inline. Silent skips alert info@oooshtours.co.uk.
-      (async () => {
-        try {
-          const hfResult = await triggerHireFormEmailOnConfirmationShared(job.id);
-          const anomaly = hireFormResultIsAnomaly(hfResult);
-          if (anomaly) {
-            await sendConfirmationSilentSkipAlert({
-              jobId: job.id,
-              jobNumber: job.hh_job_number,
-              jobName: job.job_name ?? null,
-              clientName: job.client_name,
-              triggerSource: 'status_change',
-              issues: [anomaly],
-            });
+      // Only fires when this payment actually confirmed the booking — subsequent
+      // payments on an already-confirmed job must not re-send the hire form email.
+      if (statusChanged) {
+        (async () => {
+          try {
+            const hfResult = await triggerHireFormEmailOnConfirmationShared(job.id);
+            const anomaly = hireFormResultIsAnomaly(hfResult);
+            if (anomaly) {
+              await sendConfirmationSilentSkipAlert({
+                jobId: job.id,
+                jobNumber: job.hh_job_number,
+                jobName: job.job_name ?? null,
+                clientName: job.client_name,
+                triggerSource: 'status_change',
+                issues: [anomaly],
+              });
+            }
+          } catch (err) {
+            console.error('[money] Hire form email on confirmation failed (record-payment):', err);
           }
-        } catch (err) {
-          console.error('[money] Hire form email on confirmation failed (record-payment):', err);
-        }
-      })();
+        })();
+      }
     }
 
     // Push to HireHop as deposit (if requested and job has HH number)
@@ -1059,16 +1071,16 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         }
         // Excess payments never trigger booking confirmation or last-minute alerts
       } else {
-        // Hire payment email
-        const currentStatus = (await query(`SELECT pipeline_status FROM jobs WHERE id = $1`, [job.id])).rows[0]?.pipeline_status;
-        const isConfirming = currentStatus === 'confirmed';
-
+        // Hire payment email — see invariant comment on `statusChanged` above.
+        // `isConfirmingBooking` must reflect "did THIS payment confirm the
+        // booking?", not "is the booking currently confirmed?". Subsequent
+        // payments on already-confirmed jobs are receipts, not confirmations.
         const payResult = await sendPaymentEmail({
           jobId: job.id,
           amount,
           bankName: bankLabel,
           paymentType: payment_type,
-          isConfirmingBooking: isConfirming,
+          isConfirmingBooking: statusChanged,
         });
         if (!payResult.sent) {
           console.error(
@@ -1090,8 +1102,9 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
           }).catch(e => console.error('[money] Silent-skip alert failed (record-payment):', e));
         }
 
-        // Last-minute alert if job starts within 3 days
-        if (isConfirming) {
+        // Last-minute alert: only fires when this payment actually confirmed
+        // the booking. Receipts on already-confirmed jobs must not re-alert.
+        if (statusChanged) {
           sendLastMinuteAlert(job.id).catch(e => console.error('[money] Last-minute alert failed:', e));
         }
       }

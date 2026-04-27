@@ -293,11 +293,15 @@ export async function sendPaymentEmail(opts: {
   amount: number;
   bankName: string;
   paymentType: string;
+  /**
+   * MUST reflect "did THIS payment confirm the booking?", not "is the booking
+   * currently confirmed?". Subsequent payments on an already-confirmed job
+   * are receipts and must use the `payment_received` template — see the
+   * matching invariant comment in routes/money.ts.
+   */
   isConfirmingBooking: boolean;
-  balanceOutstanding?: number;
-  hireDates?: string;
 }): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean }> {
-  const { jobId, amount, bankName, paymentType, isConfirmingBooking, balanceOutstanding, hireDates } = opts;
+  const { jobId, amount, bankName, isConfirmingBooking } = opts;
   const target = await resolveClientEmailTarget(jobId);
 
   const templateId = isConfirmingBooking ? 'booking_confirmed_deposit' : 'payment_received';
@@ -308,9 +312,9 @@ export async function sendPaymentEmail(opts: {
   const job = jobResult.rows[0];
   const jobName = job?.job_name || `Job #${job?.hh_job_number || ''}`;
 
-  // Build hire dates string
-  let hireDatesStr = hireDates || '';
-  if (!hireDatesStr && job) {
+  // Hire-dates string used by the booking-confirmation template only.
+  let hireDatesStr = '';
+  if (job) {
     const start = job.job_date || job.out_date;
     const end = job.job_end || job.return_date;
     const fmt = (d: string) => new Date(d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
@@ -318,13 +322,11 @@ export async function sendPaymentEmail(opts: {
     else if (start) hireDatesStr = fmt(start);
   }
 
-  const balanceSection = balanceOutstanding && balanceOutstanding > 0
-    ? `<p style="margin:8px 0 0;font-size:13px;color:#166534;">Remaining balance</p><p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">&pound;${balanceOutstanding.toFixed(2)}</p>`
-    : '';
-
-  const statusMessage = balanceOutstanding != null && balanceOutstanding <= 0
-    ? 'Your hire is now fully paid. Thank you!'
-    : `Remaining balance: \u00A3${(balanceOutstanding || 0).toFixed(2)}.`;
+  // Payment date = now. The email goes out at the moment we record the
+  // payment, so "today" is when the client transacted.
+  const paymentDate = new Date().toLocaleDateString('en-GB', {
+    weekday: 'short', day: 'numeric', month: 'long', year: 'numeric',
+  });
 
   try {
     const res = await emailService.send(templateId, {
@@ -345,8 +347,12 @@ export async function sendPaymentEmail(opts: {
         jobName,
         jobNumber: String(job?.hh_job_number || ''),
         hireDates: hireDatesStr,
-        balanceSection,
-        statusMessage,
+        paymentDate,
+        // Empty by design — the booking-confirmation template references
+        // {{balanceSection}}; we intentionally render nothing rather than
+        // invent a balance figure (VAT adjustments make any computed figure
+        // misleading without a full HH billing read).
+        balanceSection: '',
       },
     });
     if (!res.success) return { sent: false, reason: 'error', error: res.error, isFallback: target.isFallback };
