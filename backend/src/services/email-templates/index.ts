@@ -334,12 +334,9 @@ const templates: Record<string, EmailTemplate> = {
         Hi {{firstName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We have received your payment of <strong>{{amount}}</strong> via {{bankName}} for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
+        We have received your payment of <strong>{{amount}}</strong> via {{bankName}} on <strong>{{paymentDate}}</strong> for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
       </p>
       <p style="margin:0;font-size:15px;color:#334155;line-height:1.6;">
-        {{statusMessage}}
-      </p>
-      <p style="margin:16px 0 0;font-size:15px;color:#334155;line-height:1.6;">
         If you have any questions, just reply to this email or call us on <strong>+44 (0) 1273 911382</strong>.
       </p>
     `,
