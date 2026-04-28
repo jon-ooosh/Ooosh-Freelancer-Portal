@@ -10,7 +10,6 @@ import type { CheckInStatus } from '../lib/events-query'
 import { fetchBookOutPhotos } from '../lib/photo-retrieval'
 import { uploadAllPhotos, uploadDamagePhotos } from '../lib/photo-upload'
 import { updateFleetHireStatus } from '../lib/fleet-status'
-import { barcodeCheckin } from '../lib/hirehop-api'
 import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { getCollection } from '../lib/collection-api'
 import type { CollectionData } from '../types/vehicle-event'
@@ -738,18 +737,13 @@ export function CheckInPage() {
     }
 
     // ── Step 7: Return vehicle in HireHop (barcode check-in) ──
-    if (form.bookOutHireHopJob) {
-      const hhJobId = parseInt(form.bookOutHireHopJob, 10)
-      if (!isNaN(hhJobId) && hhJobId > 0) {
-        setUploadProgress('Returning vehicle in HireHop...')
-        const hhResult = await barcodeCheckin(hhJobId, form.vehicleReg)
-        if (hhResult.success) {
-          results.push({ label: 'HireHop return', success: true, detail: `Vehicle returned on job #${hhJobId}` })
-        } else {
-          results.push({ label: 'HireHop return', success: false, detail: hhResult.error || 'Check-in failed' })
-        }
-      }
-    }
+    // Was previously wired here as a parallel track (push reg as barcode
+    // via items_barcode_save.php?action=2 to flip HH job → Returned).
+    // Removed 28 Apr 2026 — wasn't behaving smoothly in practice (mirrors
+    // the same call on book-out, which was deferred 21 Apr). Staff now
+    // advance HireHop status manually. Future nice-to-have: re-enable
+    // once the HireHop write-back behaviour is proven end-to-end (see
+    // CLAUDE.md "Future Enhancements").
 
     // ── Step 8: Send CO2 offset follow-up email ──
     // Sent immediately after check-in (previously used setTimeout which was
