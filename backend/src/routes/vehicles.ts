@@ -106,7 +106,7 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     // query picks the single D&C allocation on the job.
     const vhaResult = await query(
       `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status, vha.assignment_type,
-              fv.registration, fv.make, fv.model
+              fv.reg AS registration, fv.make, fv.model
          FROM vehicle_hire_assignments vha
          LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
          LEFT JOIN drivers d ON d.id = vha.driver_id
@@ -161,7 +161,10 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       },
     });
   } catch (err) {
-    console.error('Freelancer bookout resolve error:', err);
+    // Use the same [freelancer-bookout] tag as the verification logs so a
+    // single grep finds everything. Include the stack so the next 500 we
+    // hit is diagnosable from logs alone.
+    console.error('[freelancer-bookout] Resolve crashed:', err instanceof Error ? err.stack || err.message : err);
     res.status(500).json({ error: 'Failed to resolve book-out token' });
   }
 });
