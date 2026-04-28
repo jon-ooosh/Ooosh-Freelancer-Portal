@@ -93,37 +93,43 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     }
     const { job_id: jobId, hh_job_number: hhJobNumber, venue_name: venueName } = assignmentCheck.rows[0];
 
-    // Find the vehicle_hire_assignment for this job and freelancer.
-    // Staff allocates vans on AllocationsPage; we don't auto-create.
-    // Match priority:
-    //   1. Exact link via drivers.person_id = freelancer (rare — most
-    //      D&C freelancers don't have a drivers row)
-    //   2. D&C assignment with no driver_id (the usual case — staff
-    //      allocate a van to a quote, driver isn't strictly tracked
-    //      in vehicle_hire_assignments for D&C until book-out happens)
-    // A real driver-person linkage still needs firming up (see Phase D3
-    // / freelancer-vehicle allocation in CLAUDE.md). Until then, this
-    // query picks the single D&C allocation on the job.
+    // Find the vehicle_hire_assignment for this job. The trust chain for a
+    // freelancer doing a delivery is: their row on quote_assignments
+    // (verified above) → job → vehicle_hire_assignment.
+    //
+    // Important: we do NOT require the freelancer to be the registered
+    // driver of the assignment. The common D&C pattern is:
+    //   - Self-drive client gets allocated a van (assignment_type='self_drive',
+    //     driver_id = the client driver record, status often 'confirmed')
+    //   - Ooosh runs a delivery quote on the same job
+    //   - A separate freelancer is on quote_assignments to physically deliver
+    // The freelancer is authorised via the quote, not the driver record.
+    //
+    // Status filter accepts every "currently allocated, not yet returned"
+    // value: 'soft' (tentative), 'allocated' (firm), 'confirmed' (staff
+    // confirmed), 'active' (legacy mid-hire), 'booked_out' (resume case).
+    //
+    // Job match falls back to hirehop_job_id because some allocation paths
+    // populate only the HH job number, not the OP UUID.
+    //
+    // LIMIT 1 returns the most recently created assignment with a vehicle.
+    // For multi-van deliveries we'd need a quote-level vehicle linkage —
+    // tracked under "D&C allocation linkage gap" in CLAUDE.md (Step 2 D3).
     const vhaResult = await query(
       `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status, vha.assignment_type,
               fv.reg AS registration, fv.make, fv.model
          FROM vehicle_hire_assignments vha
          LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-         LEFT JOIN drivers d ON d.id = vha.driver_id
-         WHERE vha.job_id = $1
-           AND (
-             d.person_id = $2
-             OR (vha.driver_id IS NULL AND vha.assignment_type IN ('delivery', 'collection', 'driven'))
-           )
-           AND vha.status IN ('soft', 'allocated', 'active', 'booked_out')
-         ORDER BY
-           CASE WHEN d.person_id = $2 THEN 0 ELSE 1 END,
-           vha.created_at DESC
+         WHERE vha.vehicle_id IS NOT NULL
+           AND vha.status IN ('soft', 'allocated', 'confirmed', 'active', 'booked_out')
+           AND (vha.job_id = $1 OR vha.hirehop_job_id = $2)
+         ORDER BY vha.created_at DESC
          LIMIT 1`,
-      [jobId, person.id]
+      [jobId, hhJobNumber]
     );
 
-    if (vhaResult.rows.length === 0 || !vhaResult.rows[0].vehicle_id) {
+    if (vhaResult.rows.length === 0) {
+      console.warn('[freelancer-bookout] No allocated vehicle for job', { jobId, hhJobNumber });
       res.status(409).json({
         error: 'No vehicle allocated for this job yet',
         code: 'no_allocation',
@@ -131,6 +137,12 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       });
       return;
     }
+    console.log('[freelancer-bookout] Vehicle resolved', {
+      assignmentId: vhaResult.rows[0].assignment_id,
+      registration: vhaResult.rows[0].registration,
+      status: vhaResult.rows[0].status,
+      assignmentType: vhaResult.rows[0].assignment_type,
+    });
     const vha = vhaResult.rows[0];
 
     const sessionToken = mintFreelancerBookoutSession({
