@@ -449,9 +449,12 @@ const updateStatusSchema = z.object({
     priority: z.enum(['normal', 'high', 'urgent']).default('normal'),
     user_id: z.string().uuid().nullable().optional(),
   })).optional().nullable(),
-  // Reminder IDs to cancel when transitioning to lost/cancelled
-  // (user is asked in the modal which reminders are still relevant)
-  cancel_reminder_ids: z.array(z.string().uuid()).optional().nullable(),
+  // Requirement IDs the user explicitly chose to KEEP alive past lost/cancelled.
+  // Everything else open on the job is auto-cancelled by the cleanup pass below.
+  // Kept items get keep_after_close=true so background scanners (reminder
+  // scanner, hire-form auto-emailer, etc.) still fire them. See CLAUDE.md →
+  // "Lost / Cancelled cleanup pattern".
+  keep_requirement_ids: z.array(z.string().uuid()).optional().nullable(),
 });
 
 router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthRequest, res: Response) => {
@@ -461,7 +464,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       pipeline_status, hold_reason, hold_reason_detail,
       confirmed_method, lost_reason, lost_detail, transition_note,
       retro_rating, retro_notes, retro_follow_up, retro_follow_up_date,
-      retro_reminders, cancel_reminder_ids,
+      retro_reminders, keep_requirement_ids,
     } = req.body;
 
     // Get current state
@@ -619,29 +622,29 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       });
     }
 
-    // Cancel reminders the user ticked in the Lost / Cancelled modal (if any).
-    // Done before event triggers fire so event-triggered reminders the user
-    // chose to cancel don't still send notifications on the way out.
-    if (
-      Array.isArray(cancel_reminder_ids) &&
-      cancel_reminder_ids.length > 0 &&
-      ['lost', 'cancelled'].includes(pipeline_status)
-    ) {
-      try {
-        await query(
-          `UPDATE job_requirements
-           SET status = 'cancelled',
-               notes = COALESCE(notes, '') ||
-                       E'\n[Auto-cancelled: job ' || $1 || ']',
-               updated_at = NOW()
-           WHERE id = ANY($2::uuid[])
-             AND job_id = $3
-             AND requirement_type = 'reminder'
-             AND status NOT IN ('done', 'cancelled')`,
-          [pipeline_status, cancel_reminder_ids, jobId]
-        );
-      } catch (cancelErr) {
-        console.warn('[Pipeline] Failed to cancel reminders on status change:', cancelErr);
+    // Lost cleanup — flag the items the user opted to keep alive past close-out.
+    // The actual auto-cancellation pass runs AFTER the event-trigger pass below
+    // so triggered reminders get to fire & self-mark-done first.
+    // (Cancelled transitions go through cancellations.ts, which has its own
+    // equivalent pass — see CLAUDE.md → "Lost / Cancelled cleanup pattern".)
+    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
+      const keepIds = Array.isArray(keep_requirement_ids) ? keep_requirement_ids : [];
+      if (keepIds.length > 0) {
+        try {
+          await query(
+            `UPDATE job_requirements
+             SET keep_after_close = true,
+                 notes = COALESCE(notes, '') ||
+                         E'\n[Kept alive after job marked lost]',
+                 updated_at = NOW()
+             WHERE id = ANY($1::uuid[])
+               AND job_id = $2
+               AND status NOT IN ('done', 'cancelled')`,
+            [keepIds, jobId]
+          );
+        } catch (cancelErr) {
+          console.warn('[Pipeline] Failed to flag kept requirements on lost:', cancelErr);
+        }
       }
     }
 
@@ -704,6 +707,31 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
         }
       } catch (triggerErr) {
         console.warn('[Pipeline] Event trigger check failed:', triggerErr);
+      }
+    }
+
+    // Lost cleanup — second half. After the event-trigger pass has fired (and
+    // self-marked-done) any reminders set to trigger on 'lost', sweep up
+    // everything else still open and not explicitly kept.
+    if (pipeline_status === 'lost' && fromStatus !== 'lost') {
+      try {
+        const swept = await query(
+          `UPDATE job_requirements
+           SET status = 'cancelled',
+               notes = COALESCE(notes, '') ||
+                       E'\n[Auto-cancelled: job marked lost]',
+               updated_at = NOW()
+           WHERE job_id = $1
+             AND status NOT IN ('done', 'cancelled')
+             AND keep_after_close = false
+           RETURNING id`,
+          [jobId]
+        );
+        if (swept.rows.length > 0) {
+          console.log(`[Pipeline] Auto-cancelled ${swept.rows.length} open requirement(s) on lost transition for job ${jobId}`);
+        }
+      } catch (cancelErr) {
+        console.warn('[Pipeline] Failed to sweep open requirements on lost:', cancelErr);
       }
     }
 

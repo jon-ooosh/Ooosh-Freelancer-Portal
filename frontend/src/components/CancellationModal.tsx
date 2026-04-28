@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { CANCELLATION_REASON_OPTIONS } from '../../../shared/types';
 import { api } from '../services/api';
-import CancelRemindersSection from './CancelRemindersSection';
+import CancelOpenRequirementsSection from './CancelOpenRequirementsSection';
 
 interface TransportCrewData {
   quotes: Array<{ id: string; job_type: string; venue_name: string; total_cost: number; ops_status: string }>;
@@ -39,7 +39,7 @@ interface Props {
     cancellation_notice_days: number;
     transport_charges: number;
     breakdown: string;
-    cancel_reminder_ids?: string[];
+    keep_requirement_ids?: string[];
   }) => void;
   onCancel: () => void;
   saving: boolean;
@@ -57,7 +57,7 @@ export default function CancellationModal({
   const [loading, setLoading] = useState(true);
   const [manualFee, setManualFee] = useState<string>('');
   const [useManual, setUseManual] = useState(false);
-  const [cancelReminderIds, setCancelReminderIds] = useState<Set<string>>(new Set());
+  const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
 
   const canAction = userRole === 'admin' || userRole === 'manager';
 
@@ -118,7 +118,7 @@ export default function CancellationModal({
       cancellation_notice_days: calcResult?.noticeDays || 0,
       transport_charges: transportCharges,
       breakdown: calcResult?.breakdown || `Manual fee: £${effectiveFee.toFixed(2)}`,
-      cancel_reminder_ids: cancelReminderIds.size > 0 ? Array.from(cancelReminderIds) : undefined,
+      keep_requirement_ids: keepRequirementIds.size > 0 ? Array.from(keepRequirementIds) : undefined,
     });
   };
 
@@ -333,12 +333,12 @@ export default function CancellationModal({
                 />
               </div>
 
-              {/* Open reminders on this job — optionally cancel */}
-              <CancelRemindersSection
+              {/* Open requirements on this job — default to cancel, tick to keep */}
+              <CancelOpenRequirementsSection
                 jobId={jobId}
                 targetStatus="cancelled"
-                selected={cancelReminderIds}
-                onChange={setCancelReminderIds}
+                keepIds={keepRequirementIds}
+                onChange={setKeepRequirementIds}
               />
 
               {/* Summary */}

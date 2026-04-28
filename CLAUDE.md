@@ -1007,6 +1007,49 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
 - [ ] Early return calculator frontend integration (clause 7.3 — backend built, UI not yet)
 - [ ] Partial cancellation / scope reduction (deferred — noted for future)
 
+#### Lost / Cancelled cleanup pattern (28 Apr 2026)
+
+**Cross-cutting rule for ALL requirement types** — current and future. When a job moves to `lost` or `cancelled`, every open requirement on the job (reminders, hire forms, excess records, vehicle prep, backline, rehearsal, sub-hires, custom — anything in `job_requirements`) is auto-cancelled UNLESS the user has explicitly opted to keep it alive past close-out.
+
+**Why this exists:** Without this rule, requirements stranded on dead jobs keep firing scanner emails forever (orphaned reminders, hire-form chase emails for a hire that's not happening, excess pre-auth chases on a cancelled booking). Original symptom that drove the design: a test reminder on a Lost job kept emailing daily with no way to stop the chase, because the hourly reminder scanner had no `pipeline_status` filter and no way to acknowledge a notification "for good".
+
+**The contract — every requirement type follows this:**
+
+1. **Migration 064** added `keep_after_close BOOLEAN NOT NULL DEFAULT FALSE` on `job_requirements`. Any new requirement type inherits this column automatically.
+
+2. **`CancelOpenRequirementsSection.tsx`** is shown in BOTH the Lost modal (`PipelinePage`, `JobDetailPage`) and the Cancellation modal (`CancellationModal`). It loads ALL open requirements (any type, any phase) on the job and lets staff tick the ones to keep alive. Default is unchecked = cancel. Event-triggered requirements whose trigger matches the target status (e.g. `event_trigger='cancelled'` on a cancellation) are shown with a disabled checkbox + "will fire on the way out" label, since they fire then self-mark done.
+
+3. **Frontend submits `keep_requirement_ids: string[]`** (the ticked-to-keep ones). Empty/absent = cancel everything still open.
+
+4. **Backend cleanup is handled in two places** (mirroring the two transition paths):
+   - `PATCH /api/pipeline/:id/status` for `lost` transitions (`backend/src/routes/pipeline.ts`)
+   - `POST /api/cancellations/:jobId/process` for `cancelled` transitions (`backend/src/routes/cancellations.ts`)
+   Each path: (a) flags kept items with `keep_after_close = true`, (b) lets the event-trigger pass run (fires + self-marks done any reminders triggered on this status), (c) sweeps everything else still open with `status = 'cancelled'` and `notes` annotated `[Auto-cancelled: job marked lost]` / `[Cancelled]`. The order matters — flag first, fire triggers second, sweep last — so triggered requirements fire before cleanup deletes them.
+
+5. **Background scanners check the flag.** Any scheduler task that finds work to do via `job_requirements` MUST gate on `pipeline_status NOT IN ('lost', 'cancelled') OR keep_after_close = true`. Currently applied to:
+   - Reminder scanner (`config/scheduler.ts` — hourly)
+   - Close-out chase scanner (`config/scheduler.ts` — daily 09:30)
+   When adding a new scanner (hire-form reminders, excess pre-auth expiry, carnet chases, etc.), include this gate in the SQL.
+
+**Per-requirement-type expectations (current & future):**
+
+| Type | Cancel-on-close default | Notes |
+|---|---|---|
+| `reminder` | Cancel | Most common. Kept items survive (e.g. "chase the deposit refund in 2 weeks"). |
+| `hire_forms` | Cancel | Auto-emails stop. Kept rare — only if a driver still needs to sign for some retroactive reason. |
+| `excess` | Cancel | Pre-auth chases stop. Kept if money still needs collecting/refunding from cancelled job (use `keep_after_close` rather than leaving status open). |
+| `vehicle` / `backline` / `rehearsal` | Cancel | Prep work no longer needed. |
+| `transport` / `crew` | Cancel | Quote-side cancellation already handled separately by `cancellations.ts` step 5a. |
+| `invoice` / `payment_reconcile` / `excess_resolve` / `client_followup` / `freelancer_followup` / `damage_review` | Cancel by default | But these are POST-hire close-out requirements — most cancellations re-create them via the cancellation close-out auto-creation path, so the cancel-then-recreate behaviour is correct. |
+| `carnet` / `merch` / `sub_hire` / `custom` | Cancel | Kept rare. |
+| **Future types** | **Cancel by default** | Always include the `keep_after_close` gate in any background scanner/auto-emailer for the new type. |
+
+**Acknowledgement cascade:** Clicking "Done" on an inbox notification linked to a `reminder` requirement marks the underlying requirement as `done` too (`POST /api/notifications/:id/acknowledge`). Without this, hourly scanner re-creates a fresh notification 24h later because requirement status is still open. Cascade is currently `reminder`-only — other requirement types keep their full status workflow on the job page.
+
+**Cascade-on-delete:** `DELETE /api/requirements/:id` also removes any pending notifications linked to that requirement (`entity_type='job_requirements' AND entity_id=$1`). Stops orphan notifications haunting the inbox after a requirement has been hard-deleted.
+
+**Phase in `action_url`:** Notification action URLs include `&phase=pre_hire` or `&phase=post_hire` so clicking through from the inbox lands on the correct toggle. Without this, pre-hire reminders are invisible on dispatched+ jobs (which default to post-hire view) and vice versa. JobDetailPage reads `?phase=` from the URL to seed the toggle state.
+
 #### Step 5: Payment Portal Repointing
 *Merged into Step 3 Phase E (Money System).* See above for full repointing plan with `DATA_BACKEND` env var toggle.
 

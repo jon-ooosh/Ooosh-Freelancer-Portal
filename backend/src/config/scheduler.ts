@@ -324,7 +324,10 @@ export function startScheduler() {
   cron.schedule('30 9 * * *', async () => {
     console.log('Scheduler: Scanning for overdue close-out requirements...');
     try {
-      // Find post_hire requirements with overdue due_date that haven't been notified today
+      // Find post_hire requirements with overdue due_date that haven't been notified today.
+      // Skip lost/cancelled pipeline jobs unless the requirement was kept alive
+      // (keep_after_close=true) via the cleanup section in the Lost/Cancelled
+      // modal. See CLAUDE.md → "Lost / Cancelled cleanup pattern".
       const overdue = await query(`
         SELECT jr.id, jr.job_id, jr.requirement_type, jr.custom_label, jr.due_date,
                jr.assigned_to, jr.notes, jr.delivery_method,
@@ -338,6 +341,10 @@ export function startScheduler() {
           AND jr.due_date IS NOT NULL
           AND jr.due_date::date <= CURRENT_DATE
           AND j.status IN (6, 7, 8)
+          AND (
+            j.pipeline_status NOT IN ('lost', 'cancelled')
+            OR jr.keep_after_close = true
+          )
       `);
 
       if (overdue.rows.length === 0) {
@@ -378,12 +385,14 @@ export function startScheduler() {
           // notification-only → low priority (escalation scheduler skips email for low)
           const effectivePriority = deliveryMethod === 'notification' ? 'low' : basePriority;
 
+          // Close-out requirements are always post_hire — phase included in
+          // URL so the inbox link lands on the right toggle.
           await query(
             `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
              VALUES ($1, 'chase_alert', $2, $3, 'job_requirements', $4, $5, $6)`,
             [
               userId, title, content, req.id,
-              `/jobs/${req.job_id}?tab=overview`,
+              `/jobs/${req.job_id}?tab=overview&phase=post_hire`,
               effectivePriority,
             ]
           );
@@ -399,7 +408,7 @@ export function startScheduler() {
                   html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
                          <p><strong>${label}</strong> for job <strong>${jobName}</strong> was due ${daysOverdue} day${daysOverdue !== 1 ? 's' : ''} ago.</p>
                          ${req.notes ? `<p>Notes: ${req.notes}</p>` : ''}
-                         <p><a href="${getFrontendUrl()}/jobs/${req.job_id}?tab=overview">View Job</a></p>`,
+                         <p><a href="${getFrontendUrl()}/jobs/${req.job_id}?tab=overview&phase=post_hire">View Job</a></p>`,
                 });
               }
             } catch (emailErr) {
@@ -441,9 +450,13 @@ export function startScheduler() {
   // which distinguishes it from the close-out scanner.
   cron.schedule('0 * * * *', async () => {
     try {
+      // Skip lost/cancelled jobs unless the requirement was explicitly kept
+      // alive past close-out (keep_after_close=true) via the cleanup section
+      // in the Lost/Cancelled modal. See CLAUDE.md → "Lost / Cancelled
+      // cleanup pattern".
       const due = await query(`
-        SELECT jr.id, jr.job_id, jr.custom_label, jr.notes, jr.due_date,
-               jr.assigned_to, jr.created_by, jr.delivery_method,
+        SELECT jr.id, jr.job_id, jr.custom_label, jr.notes, jr.due_date, jr.phase,
+               jr.assigned_to, jr.created_by, jr.delivery_method, jr.updated_at,
                j.hh_job_number, j.job_name, j.client_name, j.pipeline_status
         FROM job_requirements jr
         JOIN jobs j ON j.id = jr.job_id AND j.is_deleted = false
@@ -451,6 +464,10 @@ export function startScheduler() {
           AND jr.status NOT IN ('done', 'blocked', 'cancelled')
           AND jr.due_date IS NOT NULL
           AND jr.due_date::date <= CURRENT_DATE
+          AND (
+            j.pipeline_status NOT IN ('lost', 'cancelled')
+            OR jr.keep_after_close = true
+          )
       `);
 
       if (due.rows.length === 0) return;
@@ -468,13 +485,23 @@ export function startScheduler() {
         const targetUserId = rem.assigned_to || rem.created_by;
         if (!targetUserId) continue;
 
-        // Dedup: don't re-create if we already notified this user for this
-        // reminder in the last 24h (cron catches up quickly after a restart).
+        // Dedup: skip if (a) we already notified this user within 24h, OR
+        // (b) any prior notification for this requirement is already
+        // acknowledged AND the requirement hasn't been edited since the
+        // acknowledgement (= user has handled it; respect that even if the
+        // requirement still has an open status). The acknowledge endpoint
+        // also cascades reminder requirements to status='done' so that
+        // primary case is already filtered out by the SQL above — this is
+        // a defence-in-depth for edge cases (e.g. status reset, snooze
+        // chains, manual DB edits).
         const existing = await query(
           `SELECT id FROM notifications
            WHERE user_id = $1 AND entity_type = 'job_requirements' AND entity_id = $2
-             AND created_at > NOW() - INTERVAL '24 hours'`,
-          [targetUserId, rem.id]
+             AND (
+               created_at > NOW() - INTERVAL '24 hours'
+               OR (acknowledged_at IS NOT NULL AND acknowledged_at >= $3)
+             )`,
+          [targetUserId, rem.id, rem.updated_at || new Date(0)]
         );
         if (existing.rows.length > 0) continue;
 
@@ -483,6 +510,10 @@ export function startScheduler() {
         // email / both → normal (so the escalator will email within a few hours).
         const priority = deliveryMethod === 'notification' ? 'low' : 'normal';
 
+        // Include phase in URL so the inbox link lands on the right toggle
+        // (otherwise pre-hire reminders are invisible when the page defaults
+        // to post-hire on dispatched+ jobs, and vice versa).
+        const phaseQs = rem.phase ? `&phase=${rem.phase}` : '';
         const inserted = await query(
           `INSERT INTO notifications
             (user_id, type, title, content, entity_type, entity_id, action_url, priority)
@@ -490,7 +521,7 @@ export function startScheduler() {
            RETURNING id`,
           [
             targetUserId, title, content, rem.id,
-            `/jobs/${rem.job_id}?tab=overview`,
+            `/jobs/${rem.job_id}?tab=overview${phaseQs}`,
             priority,
           ]
         );
@@ -511,7 +542,7 @@ export function startScheduler() {
                 html: `<p>Hi ${userResult.rows[0].first_name || ''},</p>
                        <p>Reminder: <strong>${label}</strong> for <strong>${jobName}</strong>.</p>
                        ${rem.notes && rem.notes !== rem.custom_label ? `<p>Notes: ${rem.notes}</p>` : ''}
-                       <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview">View Job</a></p>`,
+                       <p><a href="${getFrontendUrl()}/jobs/${rem.job_id}?tab=overview${phaseQs}">View Job</a></p>`,
               });
               await query(
                 `UPDATE notifications SET email_sent_at = NOW() WHERE id = $1`,

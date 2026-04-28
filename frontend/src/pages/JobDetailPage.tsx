@@ -10,7 +10,7 @@ import ExcessGateBanner from '../components/ExcessGateBanner';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
-import CancelRemindersSection from '../components/CancelRemindersSection';
+import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
@@ -4596,10 +4596,15 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
   const [localFlags, setLocalFlags] = useState<typeof derivedFlags>(derivedFlags);
   useEffect(() => { setLocalFlags(derivedFlags); }, [derivedFlags]);
   const effectiveFlags = localFlags || derivedFlags;
-  // Default to post_hire view for dispatched+ jobs (status 4+)
-  const [phase, setPhase] = useState<'pre_hire' | 'post_hire'>(
-    (jobStatus && jobStatus >= 4) ? 'post_hire' : 'pre_hire'
-  );
+  // Phase initial value: prefer ?phase= query param (so inbox links land on
+  // the toggle that actually contains the requirement they're chasing), else
+  // default to post_hire for dispatched+ jobs (status 4+), else pre_hire.
+  const phaseParam = new URLSearchParams(window.location.search).get('phase');
+  const initialPhase: 'pre_hire' | 'post_hire' =
+    phaseParam === 'pre_hire' || phaseParam === 'post_hire'
+      ? phaseParam
+      : (jobStatus && jobStatus >= 4) ? 'post_hire' : 'pre_hire';
+  const [phase, setPhase] = useState<'pre_hire' | 'post_hire'>(initialPhase);
   const addMenuRef = useRef<HTMLDivElement>(null);
 
   // Click outside to dismiss Add Requirement menu
@@ -5377,7 +5382,7 @@ function StatusTransitionModal({
   const [note, setNote] = useState('');
   const [retroRating, setRetroRating] = useState<'great' | 'ok' | 'issues'>('great');
   const [retroNotes, setRetroNotes] = useState('');
-  const [cancelReminderIds, setCancelReminderIds] = useState<Set<string>>(new Set());
+  const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
 
   // Multi-reminder system
   interface Reminder {
@@ -5460,7 +5465,7 @@ function StatusTransitionModal({
     } else if (targetStatus === 'lost') {
       data.lost_reason = lostReason;
       if (lostDetail) data.lost_detail = lostDetail;
-      if (cancelReminderIds.size > 0) data.cancel_reminder_ids = Array.from(cancelReminderIds);
+      if (keepRequirementIds.size > 0) data.keep_requirement_ids = Array.from(keepRequirementIds);
     } else if (targetStatus === 'completed') {
       data.retro_rating = retroRating;
       if (retroNotes) data.retro_notes = retroNotes;
@@ -5551,11 +5556,11 @@ function StatusTransitionModal({
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
             />
             {jobId && (
-              <CancelRemindersSection
+              <CancelOpenRequirementsSection
                 jobId={jobId}
                 targetStatus="lost"
-                selected={cancelReminderIds}
-                onChange={setCancelReminderIds}
+                keepIds={keepRequirementIds}
+                onChange={setKeepRequirementIds}
               />
             )}
           </div>

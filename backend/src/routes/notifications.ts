@@ -267,6 +267,13 @@ router.get('/sent', async (req: AuthRequest, res: Response) => {
 });
 
 // ── POST /api/notifications/:id/acknowledge ──
+// Cascade: when the notification is linked to a `reminder` requirement, also
+// mark the underlying requirement as done. The reminder is a single piece of
+// work where "I dealt with the inbox alert" effectively means "I dealt with
+// the reminder" — without this, the hourly scanner would re-spam tomorrow
+// even though the user has just clicked Done. Other requirement types
+// (hire_forms, excess, etc.) keep their own status workflow on the job page;
+// the cascade is intentionally reminder-only.
 router.post('/:id/acknowledge', async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
@@ -279,7 +286,28 @@ router.post('/:id/acknowledge', async (req: AuthRequest, res: Response) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Notification not found' });
     }
-    res.json({ data: result.rows[0] });
+    const notif = result.rows[0];
+
+    // Cascade for reminder-type requirements
+    if (notif.entity_type === 'job_requirements' && notif.entity_id) {
+      try {
+        await query(
+          `UPDATE job_requirements
+           SET status = 'done',
+               notes = COALESCE(notes, '') ||
+                       E'\n[Marked done via inbox acknowledgement]',
+               updated_at = NOW()
+           WHERE id = $1
+             AND requirement_type = 'reminder'
+             AND status NOT IN ('done', 'cancelled')`,
+          [notif.entity_id]
+        );
+      } catch (cascadeErr) {
+        console.warn('[Notifications] Reminder ack cascade failed:', cascadeErr);
+      }
+    }
+
+    res.json({ data: notif });
   } catch (error) {
     console.error('Acknowledge error:', error);
     res.status(500).json({ error: 'Internal server error' });
