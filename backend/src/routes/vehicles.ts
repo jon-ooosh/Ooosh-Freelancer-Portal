@@ -1954,6 +1954,14 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
     // 'booked_out'. This is equivalent to POST /api/assignments/:id/book-out
     // but keyed off the event payload (reg + hh job) since BookOutPage
     // doesn't know the assignment UUID directly.
+    //
+    // Two-pass match: first look for an assignment already linked to this
+    // vehicle (the normal case). If none, fall back to a null-vehicle row
+    // on this job — disambiguated by driver name when available — and
+    // backfill vehicle_id at the same time as flipping status. The
+    // fallback is the safety net for the Quick Assign → Book Out path
+    // that previously left assignments orphaned with vehicle_id NULL
+    // (28 Apr 2026 RX22SWU incident).
     const normalisedEventType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
     if (normalisedEventType === 'book-out' && event.hireHopJob) {
       try {
@@ -1961,6 +1969,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
         if (!isNaN(hhJob)) {
           const mileageOut = event.mileage ? Number(event.mileage) : null;
           const fuelOut = event.fuelLevel || null;
+          const eventDriverName = event.driverName ? String(event.driverName).trim() : null;
           // Prefer scoped assignment id when a freelancer session is
           // present — the safest targeting for the D&C case where a job
           // can have multiple allocations. Staff path falls back to the
@@ -1969,6 +1978,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           if (req.bookoutSession?.assignmentId) {
             matchedIds = [req.bookoutSession.assignmentId];
           } else {
+            // Pass 1: rows already linked to this vehicle.
             const m = await query(
               `SELECT vha.id
                  FROM vehicle_hire_assignments vha
@@ -1980,12 +1990,58 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
               [reg, hhJob]
             );
             matchedIds = m.rows.map(r => r.id as string);
+
+            // Pass 2: null-vehicle fallback. Only runs if pass 1 found
+            // nothing — we don't want to clobber a properly-linked match.
+            if (matchedIds.length === 0) {
+              if (eventDriverName) {
+                // Name-disambiguated: safe even when the job has multiple
+                // unlinked rows for different drivers.
+                const fallback = await query(
+                  `SELECT vha.id
+                     FROM vehicle_hire_assignments vha
+                     LEFT JOIN drivers d ON d.id = vha.driver_id
+                    WHERE vha.hirehop_job_id = $1
+                      AND vha.vehicle_id IS NULL
+                      AND vha.status IN ('soft', 'confirmed')
+                      AND d.full_name ILIKE $2
+                    ORDER BY vha.created_at DESC`,
+                  [hhJob, eventDriverName]
+                );
+                matchedIds = fallback.rows.map(r => r.id as string);
+                if (matchedIds.length > 0) {
+                  console.log(`[vehicles/events] book-out: null-vehicle fallback matched ${matchedIds.length} row(s) by driver name "${eventDriverName}" for ${reg} / HH#${hhJob} — backfilling vehicle_id`);
+                }
+              } else {
+                // No driver name — only flip if there's exactly one
+                // unlinked row. More than one is ambiguous; let it
+                // surface as a warning rather than risk wrong-row update.
+                const fallback = await query(
+                  `SELECT vha.id
+                     FROM vehicle_hire_assignments vha
+                    WHERE vha.hirehop_job_id = $1
+                      AND vha.vehicle_id IS NULL
+                      AND vha.status IN ('soft', 'confirmed')
+                    ORDER BY vha.created_at DESC`,
+                  [hhJob]
+                );
+                if (fallback.rows.length === 1) {
+                  matchedIds = [fallback.rows[0]!.id as string];
+                  console.log(`[vehicles/events] book-out: null-vehicle fallback matched 1 unique unlinked row for HH#${hhJob} — backfilling vehicle_id ${reg}`);
+                } else if (fallback.rows.length > 1) {
+                  console.warn(`[vehicles/events] book-out: ${fallback.rows.length} ambiguous null-vehicle rows for HH#${hhJob} (no driver name to disambiguate) — skipping fallback`);
+                }
+              }
+            }
           }
           const userId = req.user?.id || null;
           for (const id of matchedIds) {
+            // COALESCE on vehicle_id backfills the link for fallback-matched
+            // rows without disturbing rows that were already linked.
             await query(
               `UPDATE vehicle_hire_assignments
                   SET status = 'booked_out',
+                      vehicle_id = COALESCE(vehicle_id, (SELECT id FROM fleet_vehicles WHERE reg = $5)),
                       status_changed_at = NOW(),
                       booked_out_at = COALESCE(booked_out_at, NOW()),
                       booked_out_by = COALESCE(booked_out_by, $1),
@@ -1993,7 +2049,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
                       fuel_level_out = COALESCE(fuel_level_out, $3),
                       updated_at = NOW()
                 WHERE id = $4`,
-              [userId, mileageOut, fuelOut, id]
+              [userId, mileageOut, fuelOut, id, reg]
             );
           }
           if (matchedIds.length === 0) {
@@ -2021,6 +2077,13 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           // assignments. 'confirmed' is NOT matched — that indicates
           // allocated-but-never-booked-out, which a check-in shouldn't
           // silently close (signals a staff error to investigate).
+          //
+          // Pass 1 looks for rows already linked to this vehicle. Pass 2
+          // is the null-vehicle fallback: if a previous book-out left an
+          // assignment orphaned (vehicle_id NULL but status=booked_out),
+          // a check-in for the right hh_job will adopt and link it.
+          // Mirrors the book-out side-effect's two-pass match.
+          let matchedRows: Array<{ id: string }> = [];
           const matched = await query(
             `SELECT vha.id, vha.checked_in_at
              FROM vehicle_hire_assignments vha
@@ -2031,15 +2094,40 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
              ORDER BY vha.booked_out_at DESC NULLS LAST`,
             [reg, hhJob]
           );
-          if (matched.rows.length > 0) {
+          matchedRows = matched.rows.map(r => ({ id: r.id as string }));
+
+          if (matchedRows.length === 0) {
+            // CheckInPage doesn't send driverName in the event, so we
+            // can only safely flip when there's exactly one unlinked
+            // candidate. Multiple rows would be ambiguous — log it and
+            // let staff fix manually.
+            const fallback = await query(
+              `SELECT vha.id
+                 FROM vehicle_hire_assignments vha
+                WHERE vha.hirehop_job_id = $1
+                  AND vha.vehicle_id IS NULL
+                  AND vha.status IN ('booked_out', 'active')
+                ORDER BY vha.booked_out_at DESC NULLS LAST`,
+              [hhJob]
+            );
+            if (fallback.rows.length === 1) {
+              matchedRows = [{ id: fallback.rows[0]!.id as string }];
+              console.log(`[vehicles/events] check-in: null-vehicle fallback matched 1 unique unlinked row for HH#${hhJob} — backfilling vehicle_id ${reg}`);
+            } else if (fallback.rows.length > 1) {
+              console.warn(`[vehicles/events] check-in: ${fallback.rows.length} ambiguous null-vehicle rows for HH#${hhJob} — skipping fallback (manual fix required)`);
+            }
+          }
+
+          if (matchedRows.length > 0) {
             const userId = req.user?.id || null;
             const mileageIn = event.mileage ? Number(event.mileage) : null;
             const fuelIn = event.fuelLevel || null;
             const hasDamage = event.hasDamage === true;
-            for (const row of matched.rows) {
+            for (const row of matchedRows) {
               await query(
                 `UPDATE vehicle_hire_assignments
                  SET status = 'returned',
+                     vehicle_id = COALESCE(vehicle_id, (SELECT id FROM fleet_vehicles WHERE reg = $6)),
                      status_changed_at = NOW(),
                      checked_in_at = COALESCE(checked_in_at, NOW()),
                      checked_in_by = COALESCE(checked_in_by, $1),
@@ -2048,7 +2136,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
                      has_damage = COALESCE(has_damage, $4),
                      updated_at = NOW()
                  WHERE id = $5`,
-                [userId, mileageIn, fuelIn, hasDamage, row.id]
+                [userId, mileageIn, fuelIn, hasDamage, row.id, reg]
               );
             }
           } else {
