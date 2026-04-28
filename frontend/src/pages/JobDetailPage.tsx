@@ -595,7 +595,7 @@ function ValidityPill({ level }: { level: 'green' | 'amber' | 'red' }) {
   );
 }
 
-function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: string; jobDate?: string; returnDate?: string; onCreated: () => void }) {
+function QuickAssignButton({ jobId, jobDate, returnDate, onCreated, subtle }: { jobId: string; jobDate?: string; returnDate?: string; onCreated: () => void; subtle?: boolean }) {
   const [open, setOpen] = useState(false);
   const [drivers, setDrivers] = useState<any[]>([]);
   const [vehicles, setVehicles] = useState<any[]>([]);
@@ -670,14 +670,29 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated }: { jobId: s
         (v.simple_type || '').toLowerCase().includes(vehicleSearch.toLowerCase())
       );
 
+  // Subtle mode renders a low-key text link instead of the prominent primary
+  // button. The primary path for getting drivers onto a hire is the hire form
+  // URL (auto-emailed T-10 days, manually chase-able). This manual fallback
+  // exists for the "someone slipped through the net" edge case — admin/manager
+  // only at the call site.
   return (
     <>
-      <button
-        onClick={() => { setOpen(true); loadOptions(); }}
-        className="flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
-      >
-        + Assign Driver
-      </button>
+      {subtle ? (
+        <button
+          onClick={() => { setOpen(true); loadOptions(); }}
+          className="text-xs text-gray-500 hover:text-gray-800 underline underline-offset-2"
+          title="Manually add a driver to this job — use only if a driver hasn't been able to submit their hire form themselves"
+        >
+          + Add driver manually
+        </button>
+      ) : (
+        <button
+          onClick={() => { setOpen(true); loadOptions(); }}
+          className="flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
+        >
+          + Assign Driver
+        </button>
+      )}
 
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -2754,7 +2769,18 @@ export default function JobDetailPage() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold text-gray-900">Drivers & Vehicles</h3>
-            {id && <QuickAssignButton jobId={id} jobDate={job.job_date || undefined} returnDate={job.return_date || undefined} onCreated={loadVehicleAssignments} />}
+            {/* Manual driver add — admin/manager only, intentionally subtle.
+                Primary path is the hire form URL (auto-emailed + manually
+                chase-able from the Job Requirements vehicle card). */}
+            {id && (user?.role === 'admin' || user?.role === 'manager') && (
+              <QuickAssignButton
+                jobId={id}
+                jobDate={job.job_date || undefined}
+                returnDate={job.return_date || undefined}
+                onCreated={loadVehicleAssignments}
+                subtle
+              />
+            )}
           </div>
 
           {/* Hire date drift — job dates moved post-book-out, hire form dates disagree */}
@@ -3042,7 +3068,51 @@ export default function JobDetailPage() {
                     )}
 
                     {/* Actions row */}
-                    <div className="mt-3 flex flex-wrap gap-2">
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
+                      {/* Primary next-action — Allocate Van / Book Out / Check In.
+                          State-aware: drives the staff cockpit workflow from
+                          this card so they don't have to leave Job Detail to
+                          hunt down the right tool elsewhere. Self-drive only;
+                          driven/D&C lifecycles live in Crew & Transport. */}
+                      {a.assignment_type === 'self_drive' && (() => {
+                        const hhJobNum = job.hh_job_number;
+                        const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium';
+                        if (a.status === 'soft' || a.status === 'confirmed') {
+                          if (!a.vehicle_id) {
+                            return (
+                              <Link
+                                to={`/vehicles/allocations${hhJobNum ? `?job=${hhJobNum}` : ''}`}
+                                className={baseClass}
+                                title="Pick a van for this driver on the Allocations page"
+                              >
+                                🚐 Allocate Van
+                              </Link>
+                            );
+                          }
+                          return (
+                            <Link
+                              to={`/vehicles/book-out?vehicle=${a.vehicle_id}${hhJobNum ? `&job=${hhJobNum}` : ''}`}
+                              className={baseClass}
+                              title="Walkaround photos, mileage, signature — pre-filled from this assignment"
+                            >
+                              📋 Book Out
+                            </Link>
+                          );
+                        }
+                        if ((a.status === 'booked_out' || a.status === 'active') && a.vehicle_id) {
+                          return (
+                            <Link
+                              to={`/vehicles/check-in?vehicle=${a.vehicle_id}`}
+                              className={baseClass}
+                              title="Return walkaround, mileage, damage check"
+                            >
+                              ↩️ Check In
+                            </Link>
+                          );
+                        }
+                        return null;
+                      })()}
+
                       {/* Hire Form PDF actions */}
                       {a.assignment_type === 'self_drive' && (
                         <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} vehicleId={a.vehicle_id} />
