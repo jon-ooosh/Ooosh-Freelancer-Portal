@@ -58,19 +58,36 @@ export interface VerifiedHmacToken {
  */
 export function verifyFreelancerBookoutToken(token: string): VerifiedHmacToken | null {
   if (!HMAC_SECRET) {
-    console.error('FREELANCER_HUB_SECRET not set — cannot verify bookout tokens');
+    console.error('[freelancer-bookout] FREELANCER_HUB_SECRET not set — cannot verify bookout tokens');
     return null;
   }
 
+  // Token format: {expiry}.op.{quoteId}.{email}.{signature}
+  // The email contains dots ("info@oooshtours.co.uk" → two dots), so a
+  // naive split('.') produces 5 + N parts where N is the dot-count in
+  // the email. Parse positionally instead: first three parts are fixed
+  // (expiry / "op" / UUID quoteId), last part is the signature, and
+  // everything between is the email re-joined with dots.
   const parts = token.split('.');
-  // OP mode has 5 parts: {expiry}.op.{quoteId}.{email}.{sig}
-  if (parts.length !== 5 || parts[1] !== 'op') {
+  if (parts.length < 5 || parts[1] !== 'op') {
+    console.warn('[freelancer-bookout] Token rejected: bad shape', {
+      partCount: parts.length,
+      marker: parts[1],
+    });
     return null;
   }
 
-  const [expiryStr, , quoteId, freelancerEmail, signature] = parts;
+  const expiryStr = parts[0];
+  const quoteId = parts[2];
+  const signature = parts[parts.length - 1];
+  const freelancerEmail = parts.slice(3, parts.length - 1).join('.');
+
   const expiry = Number(expiryStr);
   if (!Number.isFinite(expiry) || expiry <= Date.now()) {
+    console.warn('[freelancer-bookout] Token rejected: expired or non-numeric expiry', {
+      expiryStr,
+      now: Date.now(),
+    });
     return null;
   }
 
@@ -81,12 +98,18 @@ export function verifyFreelancerBookoutToken(token: string): VerifiedHmacToken |
     .substring(0, 32);
 
   // Constant-time compare — avoid timing side-channels on signature check.
-  if (signature.length !== expectedSig.length) return null;
+  if (signature.length !== expectedSig.length) {
+    console.warn('[freelancer-bookout] Token rejected: signature length mismatch (likely secret mismatch between portal and OP)');
+    return null;
+  }
   let diff = 0;
   for (let i = 0; i < signature.length; i++) {
     diff |= signature.charCodeAt(i) ^ expectedSig.charCodeAt(i);
   }
-  if (diff !== 0) return null;
+  if (diff !== 0) {
+    console.warn('[freelancer-bookout] Token rejected: signature mismatch (FREELANCER_HUB_SECRET differs between portal and OP, or token tampered)');
+    return null;
+  }
 
   return { expiry, quoteId, freelancerEmail };
 }

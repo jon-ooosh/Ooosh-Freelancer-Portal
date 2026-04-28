@@ -46,16 +46,24 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
   try {
     const token = (req.body?.token || req.query?.token) as string | undefined;
     if (!token) {
+      console.warn('[freelancer-bookout] Resolve called with no token');
       res.status(400).json({ error: 'Missing token' });
       return;
     }
 
+    console.log('[freelancer-bookout] Resolve attempt', {
+      tokenLength: token.length,
+      tokenPreview: `${token.slice(0, 20)}...${token.slice(-8)}`,
+    });
+
     const verified = verifyFreelancerBookoutToken(token);
     if (!verified) {
+      // Detailed reason already logged inside verifyFreelancerBookoutToken.
       res.status(401).json({ error: 'Invalid or expired token' });
       return;
     }
     const { quoteId, freelancerEmail } = verified;
+    console.log('[freelancer-bookout] Token verified', { quoteId, freelancerEmail });
 
     // Check the freelancer is actually assigned to this quote.
     const personResult = await query(
