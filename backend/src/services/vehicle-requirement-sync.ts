@@ -65,23 +65,32 @@ export async function syncVehicleRequirementStatus(
   if (currentStatus === 'blocked') return 'unchanged';
 
   const jobResult = await run(
-    `SELECT hh_derived_flags FROM jobs WHERE id = $1`,
+    `SELECT hh_derived_flags, hh_job_number FROM jobs WHERE id = $1`,
     [jobId],
   );
   const flags: DerivedFlags = (jobResult.rows[0]?.hh_derived_flags as DerivedFlags) || {};
+  const hhJobNumber = (jobResult.rows[0]?.hh_job_number as number | null) ?? null;
   const totalNeeded = Math.max(
     flags.vehicle_slots?.length ?? 1,
     1,
   );
 
   // Count DISTINCT vehicles assigned (multi-driver-on-one-van counts as one).
+  //
+  // Match by `job_id` (hire-form-driven rows always carry the OP UUID) OR
+  // by `hirehop_job_id` (staff allocations created via the Allocations page
+  // are inserted with `hirehop_job_id` only — no OP UUID until book-out
+  // cements the link). Same blind-spot the Job Detail tab had until the
+  // 28 Apr 2026 sibling-aware fix; this is the backend half so the prep
+  // checklist progress matches the cockpit UI.
   const assignedResult = await run(
     `SELECT COUNT(DISTINCT vehicle_id) AS c
        FROM vehicle_hire_assignments
-      WHERE job_id = $1
+      WHERE (job_id = $1
+             OR ($2::integer IS NOT NULL AND hirehop_job_id = $2::integer))
         AND vehicle_id IS NOT NULL
         AND status IN ('soft', 'confirmed', 'booked_out', 'active')`,
-    [jobId],
+    [jobId, hhJobNumber],
   );
   const assignedCount = parseInt(assignedResult.rows[0].c as string, 10) || 0;
 
