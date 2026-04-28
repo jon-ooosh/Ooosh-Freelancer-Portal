@@ -970,8 +970,11 @@ function NewEnquiryModal({
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
       setNextChaseDate(addDaysToDate(5)); setSelectedChasePreset('5 days'); setChaseAlertUserId('');
-      onCreated(created.id);
+      // Close first (clears `?newEnquiry=1` search param via setSearchParams)
+      // before navigating away — otherwise the relative `setSearchParams` call
+      // can race with the navigate and bounce us back to /pipeline.
       onClose();
+      onCreated(created.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create enquiry');
     } finally {

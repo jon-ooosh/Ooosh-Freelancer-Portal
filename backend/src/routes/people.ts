@@ -420,11 +420,14 @@ router.post('/:id/roles', validate(personOrgRoleSchema), async (req: AuthRequest
   try {
     const { organisation_id, role, is_primary, start_date, notes } = req.body;
 
-    // If setting as primary, unset other primaries
+    // If setting as primary, unset any other primary on the SAME organisation
+    // (org-scoped exclusivity — at most one primary contact per org).
     if (is_primary) {
       await query(
-        'UPDATE person_organisation_roles SET is_primary = false WHERE person_id = $1 AND status = $2',
-        [req.params.id, 'active']
+        `UPDATE person_organisation_roles
+         SET is_primary = false, updated_at = NOW()
+         WHERE organisation_id = $1 AND status = 'active' AND is_primary = true`,
+        [organisation_id]
       );
     }
 
