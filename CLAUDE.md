@@ -1867,16 +1867,27 @@ await emailService.send('compliance_reminder', {
   - Client-facing: Polished, Ooosh-branded (logo, colours, professional footer)
   - Internal/operational: Simpler but consistent styling
 - **Test mode:** Global `EMAIL_MODE` setting (`test` | `live`)
-  - In test mode: ALL emails redirect to `EMAIL_TEST_REDIRECT` address
+  - In test mode: emails redirect to `EMAIL_TEST_REDIRECT` address by default
   - Test emails include banner: "TEST MODE — would have been sent to: client@example.com"
   - One-click admin toggle in Settings page to switch to live
+- **Per-template allowlist** (`EMAIL_LIVE_TEMPLATES`): comma-separated template
+  IDs that bypass the test-mode redirect even while `EMAIL_MODE=test`. Lets us
+  release individual templates to real recipients (no banner, no `[TEST]`
+  prefix, CCs honoured) without flipping the whole system live. Ignored when
+  `EMAIL_MODE=live`. `sendRaw()` is NOT covered (no template ID to match) —
+  raw sends always honour the global mode.
+  - `email_log.mode` stores the **per-message effective** routing (`live` if it
+    went to the real recipient, `test` if it was redirected), not the env mode.
 - **Audit trail:** Every email logged to `email_log` table (recipient, template, sent_at, status)
 - **No unsubscribe:** These are transactional/operational emails, not marketing
 
 **Environment variables:**
 ```
 EMAIL_MODE=test                           # 'test' or 'live'
-EMAIL_TEST_REDIRECT=jon@oooshtours.co.uk  # Where test emails go
+EMAIL_TEST_REDIRECT=jon@oooshtours.co.uk  # Where redirected test emails go
+EMAIL_LIVE_TEMPLATES=                     # Comma-separated template IDs to release
+                                          # while in test mode (e.g.
+                                          # booking_confirmed_deposit,payment_received)
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=notifications@oooshtours.co.uk
