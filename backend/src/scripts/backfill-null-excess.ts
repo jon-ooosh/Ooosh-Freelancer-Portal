@@ -139,14 +139,26 @@ async function main() {
           console.log(`  [${position}/${vanCount}] ${rec.driver_name || '?'}: NULL → £${STANDARD_EXCESS_PER_DRIVER} (within top-N)`);
 
           if (commit) {
+            // $1 used as both numeric (excess_amount_required) and inside
+            // a string concat (notes); Postgres can't deduce a single type.
+            // Pass the value twice — once numeric, once explicitly cast to
+            // text — and explicitly ::TEXT-cast the integer params used in
+            // the notes concat too.
             await client.query(
               `UPDATE job_excess SET
                 excess_amount_required = $1,
                 excess_calculation_basis = COALESCE(NULLIF(excess_calculation_basis, ''), $2),
-                notes = COALESCE(notes, '') || E'\nBackfilled to £' || $1 || ' (standard floor, position ' || $3 || '/' || $4 || ')',
+                notes = COALESCE(notes, '') || E'\nBackfilled to £' || $3::TEXT || ' (standard floor, position ' || $4::TEXT || '/' || $5::TEXT || ')',
                 updated_at = NOW()
-              WHERE id = $5`,
-              [STANDARD_EXCESS_PER_DRIVER, `Standard £${STANDARD_EXCESS_PER_DRIVER.toLocaleString()} floor (backfilled)`, position, vanCount, rec.id]
+              WHERE id = $6`,
+              [
+                STANDARD_EXCESS_PER_DRIVER,
+                `Standard £${STANDARD_EXCESS_PER_DRIVER.toLocaleString()} floor (backfilled)`,
+                String(STANDARD_EXCESS_PER_DRIVER),
+                String(position),
+                String(vanCount),
+                rec.id,
+              ]
             );
           }
         } else {
@@ -161,15 +173,23 @@ async function main() {
           console.log(`  [${position}/${vanCount}] ${rec.driver_name || '?'}: NULL → £0 not_required (covered)`);
 
           if (commit) {
+            // Cast integer params to ::TEXT explicitly to match the
+            // string-concat context in `notes` (matches the within-top-N
+            // path's defensive casting).
             await client.query(
               `UPDATE job_excess SET
                 excess_amount_required = 0,
                 excess_status = 'not_required',
                 excess_calculation_basis = COALESCE(NULLIF(excess_calculation_basis, ''), $1),
-                notes = COALESCE(notes, '') || E'\nBackfilled to not_required (additional driver ' || $2 || ' on ' || $3 || '-van job)',
+                notes = COALESCE(notes, '') || E'\nBackfilled to not_required (additional driver ' || $2::TEXT || ' on ' || $3::TEXT || '-van job)',
                 updated_at = NOW()
               WHERE id = $4`,
-              [`Additional driver ${position} on ${vanCount}-van job — covered by another driver's excess`, position, vanCount, rec.id]
+              [
+                `Additional driver ${position} on ${vanCount}-van job — covered by another driver's excess`,
+                String(position),
+                String(vanCount),
+                rec.id,
+              ]
             );
           }
         }
