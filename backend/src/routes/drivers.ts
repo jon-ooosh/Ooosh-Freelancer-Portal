@@ -517,6 +517,82 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
   }
 });
 
+// ── PATCH /api/drivers/:id/calculated-excess — Edit driver's individual liability ──
+//
+// The driver's individual excess liability lives on drivers.calculated_excess_amount
+// and is the SOURCE OF TRUTH for the /drivers display + the input to the
+// per-job excess calculation. This endpoint is the only "manual override"
+// path — hire form submissions also write this column but skip it when
+// excess_locked=true.
+//
+// We deliberately do NOT propagate edits to live job_excess records here.
+// If staff want to bump an in-flight job's excess (e.g. insurer post-incident
+// surcharge), they edit the per-job record on /money/excess. Driver-level
+// edits affect the NEXT job linkage.
+const editExcessSchema = z.object({
+  calculated_excess_amount: z.number().min(0).max(100000).nullable(),
+  calculated_excess_basis: z.string().max(500).optional().default(''),
+  excess_locked: z.boolean().optional().default(false),
+});
+
+router.patch('/:id/calculated-excess', authorize('admin', 'manager'), validate(editExcessSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { calculated_excess_amount, calculated_excess_basis, excess_locked } = req.body;
+
+    const previous = await query(
+      `SELECT calculated_excess_amount, calculated_excess_basis, excess_locked FROM drivers WHERE id = $1`,
+      [id]
+    );
+    if (previous.rows.length === 0) {
+      res.status(404).json({ error: 'Driver not found' });
+      return;
+    }
+    const prev = previous.rows[0];
+
+    const result = await query(
+      `UPDATE drivers
+       SET calculated_excess_amount = $1,
+           calculated_excess_basis  = $2,
+           excess_locked            = $3,
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING *`,
+      [calculated_excess_amount, calculated_excess_basis || null, excess_locked, id]
+    );
+
+    // Audit — only record fields that actually changed.
+    const changed: Record<string, { old: unknown; new: unknown }> = {};
+    if (String(prev.calculated_excess_amount ?? '') !== String(calculated_excess_amount ?? '')) {
+      changed.calculated_excess_amount = { old: prev.calculated_excess_amount, new: calculated_excess_amount };
+    }
+    if ((prev.calculated_excess_basis || '') !== (calculated_excess_basis || '')) {
+      changed.calculated_excess_basis = { old: prev.calculated_excess_basis, new: calculated_excess_basis };
+    }
+    if (prev.excess_locked !== excess_locked) {
+      changed.excess_locked = { old: prev.excess_locked, new: excess_locked };
+    }
+    if (Object.keys(changed).length > 0) {
+      const oldVals: Record<string, unknown> = {};
+      const newVals: Record<string, unknown> = {};
+      for (const [k, { old: o, new: n }] of Object.entries(changed)) {
+        oldVals[k] = o;
+        newVals[k] = n;
+      }
+      await query(
+        `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+         VALUES ($1, 'driver', $2, 'edit_calculated_excess', $3, $4)`,
+        [req.user!.id, id, JSON.stringify(oldVals), JSON.stringify(newVals)]
+      );
+    }
+
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    console.error('[drivers] Edit calculated excess error:', error);
+    res.status(500).json({ error: 'Failed to edit calculated excess' });
+  }
+});
+
 // ── POST /api/drivers/:id/resolve-referral — Resolve insurance referral ──
 
 const resolveReferralSchema = z.object({

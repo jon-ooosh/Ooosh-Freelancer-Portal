@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 import type { JobExcess } from '../../../shared/types';
 
 interface FileAttachment {
@@ -79,6 +80,12 @@ interface DriverDetail {
   person_first_name: string | null;
   person_last_name: string | null;
   person_email: string | null;
+  // Driver-level individual liability — source of truth for /drivers
+  // display + per-job excess calculation. Set by hire form submission,
+  // editable via CalculatedExcessEditModal.
+  calculated_excess_amount: number | string | null;
+  calculated_excess_basis: string | null;
+  excess_locked: boolean;
 }
 
 interface HireHistoryItem {
@@ -341,6 +348,7 @@ export default function DriverDetailPage() {
   const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
   const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
   const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | undefined>(undefined);
+  const [editingCalcExcess, setEditingCalcExcess] = useState(false);
   const [auditLog, setAuditLog] = useState<AuditLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'details' | 'hires' | 'excess'>('details');
@@ -596,6 +604,32 @@ export default function DriverDetailPage() {
         </div>
       )}
 
+      {/* Calculated excess (driver-level liability) */}
+      <div className="mt-4 bg-white border rounded-lg px-4 py-3 flex items-center justify-between">
+        <div>
+          <div className="text-sm font-medium text-gray-900">
+            Calculated Excess (individual liability)
+            {driver.excess_locked && (
+              <span className="ml-2 text-xs text-amber-700" title="Locked against auto-update">
+                🔒 Locked
+              </span>
+            )}
+          </div>
+          <div className="text-xs text-gray-500 mt-0.5">
+            {driver.calculated_excess_amount != null
+              ? <>£{Number(driver.calculated_excess_amount).toFixed(2)} — {driver.calculated_excess_basis || 'No reason recorded'}</>
+              : 'Not yet set. Defaults to £1,200 on hire form completion.'}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setEditingCalcExcess(true)}
+          className="text-sm text-ooosh-700 hover:underline"
+        >
+          Edit
+        </button>
+      </div>
+
       {/* DVLA stale warning */}
       {dvlaCheckStale && (
         <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-700">
@@ -657,6 +691,27 @@ export default function DriverDetailPage() {
             initialAction={excessModalInitialAction}
             onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
             onUpdated={() => { loadExcessHistory(); }}
+          />
+        )}
+
+        {editingCalcExcess && driver && (
+          <CalculatedExcessEditModal
+            driver={{
+              id: driver.id,
+              full_name: driver.full_name,
+              calculated_excess_amount: driver.calculated_excess_amount,
+              calculated_excess_basis: driver.calculated_excess_basis,
+              excess_locked: driver.excess_locked,
+            }}
+            onClose={() => setEditingCalcExcess(false)}
+            onSaved={(updated) => {
+              setDriver((prev) => prev ? {
+                ...prev,
+                calculated_excess_amount: updated.calculated_excess_amount,
+                calculated_excess_basis: updated.calculated_excess_basis,
+                excess_locked: updated.excess_locked,
+              } : prev);
+            }}
           />
         )}
       </div>

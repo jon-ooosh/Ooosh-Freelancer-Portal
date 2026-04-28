@@ -393,6 +393,31 @@ tends to get this wrong on first pass, so it's pinned here:
 with the SAME `vehicle_id`. The Allocations UI cascades van picks
 across siblings so staff only picks once per van slot.
 
+##### Driver-level liability model (migration 065, Apr 2026)
+
+**Two distinct concepts, separated:**
+
+| Layer | Where it lives | What it represents |
+|---|---|---|
+| **Driver liability** | `drivers.calculated_excess_amount` | Individual liability of THIS person. £1,200 floor, higher with referral. Set by hire form submission, editable from `/drivers`. Never goes to £0. The SOURCE OF TRUTH for the `/drivers` display. |
+| **Job-level excess record** | `job_excess` (one per assignment) | Realisation of the liability for a specific hire. Carries payment state, claims, reimbursements, top-N "covered" status. |
+| **Money / payer linkage** | `job_excess.xero_contact_id` + `client_excess_ledger` view | Who paid, for refund / rollover routing. Already in place. |
+
+The driver liability **flows in** to the per-job calculation (top-N drivers' liabilities, where N = van count). The per-job record is the **realisation**. Editing a driver's individual liability does NOT auto-propagate to live job_excess records — staff bump per-job excess on `/money/excess` if needed. This was a deliberate design decision (Apr 2026, jon agreed): bulk auto-propagation is too edge-case-risky for the value it provides.
+
+**`drivers.excess_locked` flag:** When `true`, hire form re-submissions and the driver-verification signature side-effect will NOT auto-overwrite `calculated_excess_amount`. Use for insurer-imposed manual overrides (e.g. post-incident bump that should survive a future hire form re-fetch).
+
+**Three write paths:**
+1. **`POST /api/hire-forms`** — writes `calculated_excess_amount = max(hireFormCalculated, £1,200)` on the driver, alongside creating the per-job excess record. Skipped if `excess_locked = true`.
+2. **`POST /api/driver-verification/update`** — when `signature_date` is set in the update and the driver has no calculated_excess_amount yet, seed it with £1,200. Covers the case where the SignaturePage chain doesn't reach `POST /api/hire-forms` (a known intermittent gap).
+3. **`PATCH /api/drivers/:id/calculated-excess`** — staff-edit endpoint (admin/manager only). Audit-logged.
+
+**For "In Progress" drivers (no `signature_date` yet):** display shows "—" (their actual liability hasn't been determined — might land on referral and need higher). The edit affordance is still present — staff can pre-set if needed.
+
+**Why this matters:** Before migration 065, the `/drivers` EXCESS column LATERAL-joined `job_excess` via `vehicle_hire_assignments.driver_id`. Drivers without an assignment row (e.g. signed but POST /api/hire-forms didn't fire, or migrated from Monday with no assignment) showed "—" with no edit affordance. Drivers WITH a `not_required` per-job record showed "£0 / Covered" — misleading because their personal liability is £1,200, just covered by another driver on that specific hire. The new model separates "what is this person liable for individually" from "what's the per-job realisation", so the Drivers page always shows the personal liability (£1,200+ for approved + non-referral, higher for referrals).
+
+Backfill: `backend/src/scripts/backfill-driver-calculated-excess.ts` (dry-run / `--commit`). Sets approved + non-referral + signed drivers to £1,200. Referrals are skipped — manual review required for insurer-imposed amounts.
+
 **Phase A — Database + API** ✅ COMPLETE
 - [x] Migration 017: `drivers`, `vehicle_hire_assignments`, `job_excess`, `excess_rules`, `client_excess_ledger` view
 - [x] Migration 018: `webhook_log`, `api_keys` tables
