@@ -31,6 +31,43 @@ interface SearchResult {
 
 type SortMode = 'chase_date' | 'job_date_nearest' | 'job_date_furthest' | 'value_high' | 'value_low' | 'newest';
 
+// ── View/filter persistence ────────────────────────────────────────────────
+// Pipeline page remembers each user's preferred view, sort, and filter
+// toggles across sessions. Search box is intentionally NOT persisted —
+// users expect a fresh search each visit.
+
+const PIPELINE_PREFS_KEY = 'ooosh.pipeline.prefs';
+
+interface PipelinePrefs {
+  view: 'kanban' | 'list';
+  sortMode: SortMode;
+  filterLikelihood: string;
+  filterChase: string;
+  showConfirmed: boolean;
+  showLost: boolean;
+}
+
+const PIPELINE_PREFS_DEFAULTS: PipelinePrefs = {
+  view: 'kanban',
+  sortMode: 'chase_date',
+  filterLikelihood: '',
+  filterChase: '',
+  showConfirmed: false,
+  showLost: false,
+};
+
+function loadPipelinePrefs(): PipelinePrefs {
+  if (typeof window === 'undefined') return PIPELINE_PREFS_DEFAULTS;
+  try {
+    const raw = window.localStorage.getItem(PIPELINE_PREFS_KEY);
+    if (!raw) return PIPELINE_PREFS_DEFAULTS;
+    const parsed = JSON.parse(raw) as Partial<PipelinePrefs>;
+    return { ...PIPELINE_PREFS_DEFAULTS, ...parsed };
+  } catch {
+    return PIPELINE_PREFS_DEFAULTS;
+  }
+}
+
 // ── Column order ───────────────────────────────────────────────────────────
 
 const COLUMN_ORDER: PipelineStatus[] = [
@@ -1735,17 +1772,29 @@ export default function PipelinePage() {
   const [stats, setStats] = useState<PipelineStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
-  const [view, setView] = useState<'kanban' | 'list'>('kanban');
+  // Persisted view/sort/filter prefs (from localStorage)
+  const initialPrefs = loadPipelinePrefs();
+  const [view, setView] = useState<'kanban' | 'list'>(initialPrefs.view);
 
   // Sort
-  const [sortMode, setSortMode] = useState<SortMode>('chase_date');
+  const [sortMode, setSortMode] = useState<SortMode>(initialPrefs.sortMode);
 
   // Filters
-  const [filterLikelihood, setFilterLikelihood] = useState<string>('');
-  const [filterChase, setFilterChase] = useState<string>('');
+  const [filterLikelihood, setFilterLikelihood] = useState<string>(initialPrefs.filterLikelihood);
+  const [filterChase, setFilterChase] = useState<string>(initialPrefs.filterChase);
   const [filterSearch, setFilterSearch] = useState<string>('');
-  const [showConfirmed, setShowConfirmed] = useState(false);
-  const [showLost, setShowLost] = useState(false);
+  const [showConfirmed, setShowConfirmed] = useState(initialPrefs.showConfirmed);
+  const [showLost, setShowLost] = useState(initialPrefs.showLost);
+
+  // Persist preferences whenever they change
+  useEffect(() => {
+    try {
+      const prefs: PipelinePrefs = { view, sortMode, filterLikelihood, filterChase, showConfirmed, showLost };
+      window.localStorage.setItem(PIPELINE_PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+      // Ignore quota / private mode errors
+    }
+  }, [view, sortMode, filterLikelihood, filterChase, showConfirmed, showLost]);
 
   // Modals
   const [showNewEnquiry, setShowNewEnquiry] = useState(false);
