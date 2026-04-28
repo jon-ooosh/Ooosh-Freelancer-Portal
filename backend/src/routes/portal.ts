@@ -1037,6 +1037,12 @@ const completionSchema = z.object({
   equipmentChecklist: z.string().optional(), // JSON string of {itemId: boolean}
   clientEmails: z.string().optional(), // comma-separated
   staffName: z.string().optional(), // For Ooosh staff completing on behalf of system account
+  // Van-only deliveries are completed via the OP book-out flow (which
+  // emits its own vehicle condition report). The portal completion call
+  // still fires to flip quote/assignment status, but we skip the
+  // equipment delivery note PDF + client email since there's no
+  // equipment changing hands.
+  vanOnly: z.preprocess((v) => v === 'true' || v === true, z.boolean()).default(false),
 });
 
 router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next: NextFunction) => {
@@ -1094,7 +1100,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       return;
     }
 
-    const { notes, customerPresent, equipmentChecklist, clientEmails, staffName } = parsed.data;
+    const { notes, customerPresent, equipmentChecklist, clientEmails, staffName, vanOnly } = parsed.data;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
 
     // ── Upload photos + signature to R2 (preferred storage) ────────
@@ -1259,8 +1265,11 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         }
       }
 
-      // Send delivery-note PDF for deliveries
-      if (isDelivery && recipients.size > 0 && ctx.hirehop_id) {
+      // Send delivery-note PDF for deliveries.
+      // Skip for van-only book-outs — there's no equipment to acknowledge,
+      // and the OP book-out flow emits its own vehicle condition report
+      // which IS the relevant artefact.
+      if (isDelivery && !vanOnly && recipients.size > 0 && ctx.hirehop_id) {
         try {
           // Pull equipment from HireHop via broker.
           // Line items live on /frames/items_to_supply_list.php (not job_data.php).
