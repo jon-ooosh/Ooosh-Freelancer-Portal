@@ -126,8 +126,11 @@ const processSchema = z.object({
   cancellation_notice_days: z.number().min(0),
   transport_charges: z.number().min(0).optional(),
   breakdown: z.string().optional(),
-  // Reminder IDs to cancel when cancelling the job
-  cancel_reminder_ids: z.array(z.string().uuid()).optional().nullable(),
+  // Requirement IDs the user explicitly chose to KEEP alive past cancellation.
+  // Everything else open on the job is auto-cancelled below. Kept items get
+  // keep_after_close=true so background scanners still fire them. See
+  // CLAUDE.md → "Lost / Cancelled cleanup pattern".
+  keep_requirement_ids: z.array(z.string().uuid()).optional().nullable(),
 });
 
 router.post(
@@ -142,7 +145,7 @@ router.post(
         cancellation_reason, cancellation_notes,
         cancellation_fee, cancellation_refund,
         cancellation_tier, cancellation_notice_days,
-        breakdown, cancel_reminder_ids,
+        breakdown, keep_requirement_ids,
       } = req.body;
 
       // Verify job exists and is in a cancellable state (confirmed+)
@@ -198,25 +201,26 @@ router.post(
         [timelineContent, jobId, userId]
       );
 
-      // 2a. Cancel reminders the user ticked in the modal (if any) — must run
-      // before event triggers so event-triggered reminders the user cancelled
-      // don't still fire notifications on the way out.
-      if (Array.isArray(cancel_reminder_ids) && cancel_reminder_ids.length > 0) {
+      // 2a. Flag the requirements the user explicitly chose to KEEP alive.
+      // The blanket cancel pass below skips items with keep_after_close=true,
+      // so flagging happens first. Background scanners (reminder scanner,
+      // hire-form auto-emailer, etc.) check this flag and keep firing kept
+      // items even though the parent job is now in a terminal status.
+      if (Array.isArray(keep_requirement_ids) && keep_requirement_ids.length > 0) {
         try {
           await query(
             `UPDATE job_requirements
-             SET status = 'cancelled',
+             SET keep_after_close = true,
                  notes = COALESCE(notes, '') ||
-                         E'\n[Auto-cancelled: job cancelled]',
+                         E'\n[Kept alive after job cancelled]',
                  updated_at = NOW()
              WHERE id = ANY($1::uuid[])
                AND job_id = $2
-               AND requirement_type = 'reminder'
                AND status NOT IN ('done', 'cancelled')`,
-            [cancel_reminder_ids, jobId]
+            [keep_requirement_ids, jobId]
           );
         } catch (cancelErr) {
-          console.warn('[Cancellation] Failed to cancel reminders:', cancelErr);
+          console.warn('[Cancellation] Failed to flag kept requirements:', cancelErr);
         }
       }
 
@@ -275,10 +279,17 @@ router.post(
         console.warn('[Cancellation] Event trigger check failed:', triggerErr);
       }
 
-      // 3. Mark all job requirements as not needed
+      // 3. Cancel all remaining open requirements EXCEPT those the user
+      // explicitly chose to keep (flagged keep_after_close=true in step 2a).
+      // See CLAUDE.md → "Lost / Cancelled cleanup pattern".
       await query(
-        `UPDATE job_requirements SET status = 'done', notes = COALESCE(notes, '') || ' [Cancelled]', updated_at = NOW()
-         WHERE job_id = $1 AND status NOT IN ('done')`,
+        `UPDATE job_requirements
+         SET status = 'cancelled',
+             notes = COALESCE(notes, '') || ' [Cancelled]',
+             updated_at = NOW()
+         WHERE job_id = $1
+           AND status NOT IN ('done', 'cancelled')
+           AND keep_after_close = false`,
         [jobId]
       );
 

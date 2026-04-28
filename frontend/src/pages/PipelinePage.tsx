@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import DatePicker from '../components/DatePicker';
 import ChaseModal from '../components/ChaseModal';
-import CancelRemindersSection from '../components/CancelRemindersSection';
+import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
 import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
@@ -417,7 +417,7 @@ function TransitionModal({
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
   const [note, setNote] = useState('');
-  const [cancelReminderIds, setCancelReminderIds] = useState<Set<string>>(new Set());
+  const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
 
   if (!isOpen || !targetStatus) return null;
 
@@ -431,7 +431,7 @@ function TransitionModal({
     } else if (targetStatus === 'lost') {
       data.lost_reason = lostReason;
       if (lostDetail) data.lost_detail = lostDetail;
-      if (cancelReminderIds.size > 0) data.cancel_reminder_ids = Array.from(cancelReminderIds);
+      if (keepRequirementIds.size > 0) data.keep_requirement_ids = Array.from(keepRequirementIds);
     }
     if (note) data.transition_note = note;
     onConfirm(data);
@@ -508,11 +508,11 @@ function TransitionModal({
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
             />
             {jobId && (
-              <CancelRemindersSection
+              <CancelOpenRequirementsSection
                 jobId={jobId}
                 targetStatus="lost"
-                selected={cancelReminderIds}
-                onChange={setCancelReminderIds}
+                keepIds={keepRequirementIds}
+                onChange={setKeepRequirementIds}
               />
             )}
           </div>

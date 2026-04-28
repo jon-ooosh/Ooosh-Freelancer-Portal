@@ -465,6 +465,20 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
     // Delete the requirement
     await query('DELETE FROM job_requirements WHERE id = $1', [id]);
 
+    // Cascade: delete any pending inbox notifications linked to this
+    // requirement. Without this they stay in users' inboxes as ghost
+    // alerts pointing at a now-missing entity. (The escalation scheduler
+    // wouldn't re-email them, but they look broken in the UI.)
+    try {
+      await query(
+        `DELETE FROM notifications
+         WHERE entity_type = 'job_requirements' AND entity_id = $1`,
+        [id]
+      );
+    } catch (cascadeErr) {
+      console.warn('[Requirements] Failed to cascade-delete notifications:', cascadeErr);
+    }
+
     // Log to activity timeline (interactions table)
     const content = reason
       ? `Removed requirement: ${reqData.type_label || reqData.requirement_type} — Reason: ${reason}`
