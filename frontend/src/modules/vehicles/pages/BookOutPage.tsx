@@ -758,6 +758,7 @@ export function BookOutPage() {
         const isLeadDriver = entry.driverName === form.driverName
         const wbResult = await updateDriverHireForm({
           hireFormItemId: entry.id,
+          vehicleId: form.vehicleId || undefined,
           vehicleReg: form.vehicleReg,
           mileageOut: isNaN(mileageNum) ? undefined : mileageNum,
           startTime: form.hireStartTime || undefined,

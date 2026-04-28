@@ -144,10 +144,18 @@ export async function fetchActiveHireForms(): Promise<DriverHireForm[]> {
  *
  * Called after a successful book-out to record which vehicle was assigned
  * and the mileage reading. Replaces the Monday.com write-back.
+ *
+ * `vehicleId` is required for the link to the vehicle to actually persist —
+ * without it the PATCH flips status to 'booked_out' but leaves vehicle_id
+ * NULL on the assignment. That breaks the on-hire filter, the check-in
+ * eligibility query (which JOINs through vehicle_id), and the post-book-out
+ * fleet hire_status sync. This was the silent bug behind the 28 Apr 2026
+ * RX22SWU stuck-on-hire incident.
  */
 export async function updateDriverHireForm(params: {
   hireFormItemId: string
-  vehicleReg?: string
+  vehicleId?: string            // UUID of fleet_vehicles row — links the assignment
+  vehicleReg?: string           // kept for callers that only have a reg
   mileageOut?: number
   startTime?: string            // "HH:mm" format
   endTime?: string              // "HH:mm" format
@@ -156,6 +164,7 @@ export async function updateDriverHireForm(params: {
 }): Promise<{ success: boolean; error?: string }> {
   const body: Record<string, unknown> = {}
 
+  if (params.vehicleId) body.vehicle_id = params.vehicleId
   if (params.startTime) body.start_time = params.startTime
   if (params.endTime) body.end_time = params.endTime
   if (params.ve103b) body.ve103b_ref = params.ve103b

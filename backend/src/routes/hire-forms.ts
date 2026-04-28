@@ -1102,6 +1102,22 @@ router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthReques
     // reg. We skip the email if one has already been sent for this
     // assignment (idempotent — a staff PATCH retry shouldn't re-spam).
     const nowBookedOut = updates.status === 'booked_out' && updated.status === 'booked_out';
+    if (nowBookedOut && !updated.vehicle_id) {
+      // Loud warning — the assignment just transitioned to booked_out
+      // without a linked vehicle, which means the post-book-out chain
+      // below (fleet hire_status sync, requirement advance, hire
+      // agreement PDF + email) all silently no-op. The save-event
+      // book-out side-effect now backfills vehicle_id via its
+      // null-vehicle fallback, but if we're seeing this warning the
+      // front-end should also be passing vehicle_id on the PATCH
+      // (28 Apr 2026 RX22SWU incident).
+      console.warn(
+        `[hire-forms] PATCH set status=booked_out on assignment ${id} ` +
+        `but vehicle_id is NULL — post-book-out hooks skipped. ` +
+        `Caller should include vehicle_id in the PATCH body, or rely ` +
+        `on the save-event backstop to backfill it.`
+      );
+    }
     if (nowBookedOut && updated.vehicle_id) {
       // Recompute fleet hire_status from current assignment state — single
       // source of truth helper. Fire-and-forget, non-blocking. The just-flipped
