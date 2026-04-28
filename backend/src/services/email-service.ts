@@ -60,9 +60,28 @@ export interface SendEmailResult {
 // ── Configuration ────────────────────────────────────────────────────────
 
 function getEmailConfig() {
+  const liveTemplatesRaw = process.env.EMAIL_LIVE_TEMPLATES || '';
+  const liveTemplates = new Set(
+    liveTemplatesRaw
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean),
+  );
   return {
     mode: (process.env.EMAIL_MODE || 'test') as EmailMode,
     testRedirect: process.env.EMAIL_TEST_REDIRECT || '',
+    /**
+     * Per-template "go live" allowlist. Used while EMAIL_MODE=test to release
+     * specific templates to real recipients (no banner, no [TEST] subject, CCs
+     * honoured) without flipping the whole system live. Ignored when
+     * EMAIL_MODE=live (every template goes live).
+     *
+     * Set in env as a comma-separated list of template IDs, e.g.
+     *   EMAIL_LIVE_TEMPLATES=booking_confirmed_deposit,payment_received,...
+     *
+     * sendRaw() is NOT covered by this allowlist (no template ID to match).
+     */
+    liveTemplates,
     smtp: {
       host: process.env.SMTP_HOST || 'smtp.gmail.com',
       port: parseInt(process.env.SMTP_PORT || '587', 10),
@@ -71,6 +90,16 @@ function getEmailConfig() {
       from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
     },
   };
+}
+
+/**
+ * Decide whether a specific send goes out live (real recipient, no banner)
+ * vs. gets redirected to the test inbox. EMAIL_MODE=live always wins;
+ * otherwise the per-template allowlist is consulted.
+ */
+function isTemplateGoingLive(templateId: string, config: ReturnType<typeof getEmailConfig>): boolean {
+  if (config.mode === 'live') return true;
+  return config.liveTemplates.has(templateId);
 }
 
 // ── Variable Substitution ────────────────────────────────────────────────
@@ -137,16 +166,17 @@ class EmailService {
     const subject = options.subjectOverride || substituteVariables(template.subject, variables);
     let bodyHtml = substituteVariables(template.body, variables);
 
-    // In test mode, prepend the test banner
-    const isTestMode = config.mode === 'test';
-    const actualRecipient = isTestMode && config.testRedirect
-      ? config.testRedirect
-      : options.to;
+    // Decide whether THIS template is going live or being redirected.
+    // EMAIL_MODE=live → always live. EMAIL_MODE=test → live only if the
+    // template ID is on the EMAIL_LIVE_TEMPLATES allowlist.
+    const goingLive = isTemplateGoingLive(templateId, config);
+    const isRedirected = !goingLive && !!config.testRedirect;
+    const actualRecipient = isRedirected ? config.testRedirect : options.to;
 
     if (options.prependBanner) {
       bodyHtml = options.prependBanner + bodyHtml;
     }
-    if (isTestMode) {
+    if (isRedirected) {
       bodyHtml = testModeBanner(options.to) + bodyHtml;
     }
 
@@ -168,13 +198,16 @@ class EmailService {
       const result = await transporter.sendMail({
         from: config.smtp.from,
         to: actualRecipient,
-        cc: isTestMode ? undefined : options.cc,
-        subject: isTestMode ? `[TEST] ${subject}` : subject,
+        cc: isRedirected ? undefined : options.cc,
+        subject: isRedirected ? `[TEST] ${subject}` : subject,
         html,
         attachments: mailAttachments,
       });
 
-      // Log to audit trail
+      // Log per-message effective routing, not the env-level mode. A test-mode
+      // env where THIS template was allowlisted should log as 'live' so the
+      // audit trail reflects what really happened.
+      const effectiveMode: EmailMode = isRedirected ? 'test' : 'live';
       const logId = await this.logEmail({
         template_id: templateId,
         recipient: options.to,
@@ -182,16 +215,16 @@ class EmailService {
         subject,
         status: 'sent',
         message_id: result.messageId || null,
-        mode: config.mode,
+        mode: effectiveMode,
       });
 
-      console.log(`[Email] Sent "${templateId}" to ${actualRecipient}${isTestMode ? ` (test mode, intended: ${options.to})` : ''}`);
+      console.log(`[Email] Sent "${templateId}" to ${actualRecipient}${isRedirected ? ` (test mode, intended: ${options.to})` : goingLive && config.mode === 'test' ? ' (live via allowlist)' : ''}`);
 
       return {
         success: true,
         messageId: result.messageId,
         logId,
-        redirectedTo: isTestMode ? actualRecipient : undefined,
+        redirectedTo: isRedirected ? actualRecipient : undefined,
       };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -204,7 +237,7 @@ class EmailService {
         subject,
         status: 'failed',
         error_message: errorMessage,
-        mode: config.mode,
+        mode: isRedirected ? 'test' : 'live',
       });
 
       console.error(`[Email] Failed to send "${templateId}" to ${actualRecipient}:`, errorMessage);
