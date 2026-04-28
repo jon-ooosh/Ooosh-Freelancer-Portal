@@ -1760,10 +1760,11 @@ export default function JobDetailPage() {
       // allocations from the Allocations page only have hirehop_job_id.
       // Fetch both so we can see staff allocations for sibling-vehicle
       // inference, then dedupe by id.
+      const hhJobNum = job?.hh_job_number ?? null;
       const [byJobId, byHhJob] = await Promise.all([
         api.get<{ data: any[] }>(`/assignments?job_id=${id}`),
-        job.hh_job_number
-          ? api.get<{ data: any[] }>(`/assignments?hirehop_job_id=${job.hh_job_number}`)
+        hhJobNum
+          ? api.get<{ data: any[] }>(`/assignments?hirehop_job_id=${hhJobNum}`)
           : Promise.resolve({ data: [] }),
       ]);
       const merged = new Map<string, any>();
