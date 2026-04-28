@@ -112,7 +112,7 @@ export default function ExcessGateBanner({ blockers, onOverrideComplete, onNavig
                   <span className="font-medium">{blocker.driverName || 'Unknown driver'}</span>
                   {blocker.vehicleReg && <span> on {blocker.vehicleReg}</span>}
                   {blocker.amountRequired != null && (
-                    <span> — <span className="font-semibold">£{Number(blocker.amountRequired).toFixed(2)}</span> pending</span>
+                    <span> — <span className="font-semibold">£{Number(blocker.amountRequired).toFixed(2)}</span> required</span>
                   )}
                 </p>
                 <div className="flex items-center gap-2 flex-shrink-0">

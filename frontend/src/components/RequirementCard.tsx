@@ -134,9 +134,9 @@ const TYPE_STATUS_LABELS: Record<string, Record<string, string>> = {
 };
 
 const EXCESS_STATUS_LABELS: Record<string, { label: string; colour: string }> = {
-  needed:                { label: 'Needed',            colour: 'text-amber-600' },
-  not_required:          { label: 'Not Required',      colour: 'text-gray-500' },
-  pending:               { label: 'Pending',           colour: 'text-amber-600' },
+  needed:                { label: 'Required',          colour: 'text-amber-600' },
+  not_required:          { label: 'Covered',           colour: 'text-gray-500' },
+  pending:               { label: 'Required',          colour: 'text-amber-600' },
   partially_paid:        { label: 'Partially Paid',    colour: 'text-amber-600' },
   taken:                 { label: 'Taken',             colour: 'text-green-600' },
   pre_auth:              { label: 'Pre-auth Taken',    colour: 'text-blue-600' },

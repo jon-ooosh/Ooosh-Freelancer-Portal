@@ -39,9 +39,9 @@ const REIMBURSE_METHODS = [
 
 function statusLabel(status: ExcessStatus): string {
   const labels: Record<string, string> = {
-    not_required: 'Not Required',
-    needed: 'Needed',
-    pending: 'Needed',   // legacy compat
+    not_required: 'Covered',  // covered by another driver's excess on this hire
+    needed: 'Required',
+    pending: 'Required',
     taken: 'Taken',
     partially_paid: 'Partially Paid',
     partial: 'Partially Paid', // legacy compat

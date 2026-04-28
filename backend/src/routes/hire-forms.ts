@@ -470,24 +470,85 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
       );
       console.log(`[hire-forms] Absorbed portal excess ${portalRecord.id}: required £${newRequired}, already taken £${alreadyTaken}, status=${newStatus}`);
     } else {
-      // No existing portal excess — create fresh (normal flow)
-      excessResult = await client.query(
-        `INSERT INTO job_excess (
-          assignment_id, job_id, hirehop_job_id,
-          excess_amount_required, excess_calculation_basis,
-          excess_status,
-          xero_contact_id, xero_contact_name, client_name,
-          created_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        RETURNING *`,
-        [
-          assignment.id, jobId, f.hirehop_job_id || null,
-          excessAmount, calculationBasis,
-          'pending',
-          f.xero_contact_id || null, f.xero_contact_name || null, f.client_name || null,
-          req.user!.id,
-        ]
-      );
+      // No orphan to absorb — apply £1,200 floor + top-N rule, mirroring
+      // the staff quick-assign path. Without this, second-onwards drivers
+      // on a job land with whatever the hire form app sent (often null/0
+      // for clean-licence drivers who expect the OP to apply the floor),
+      // leaving the driver's individual liability invisible on /drivers
+      // and unblockable on the dispatch gate.
+      //
+      // Top-N: total excess for a job = sum of N highest-risk drivers,
+      // where N = van count. We can't sort by amount at submission time
+      // (later drivers haven't submitted yet), so we approximate as
+      // first-N-assigned. Records beyond N get excess_status='not_required'
+      // (£0) — informational, gate passes, Money tab excludes. Staff can
+      // manually flip records if a higher-excess referral lands late.
+      const STANDARD_EXCESS_PER_DRIVER = 1200;
+
+      const flagsResult = jobId ? await client.query(
+        `SELECT hh_derived_flags FROM jobs WHERE id = $1`,
+        [jobId]
+      ) : { rows: [] };
+      const flags = flagsResult.rows[0]?.hh_derived_flags as { self_drive_count?: number } | null;
+      const vanCount = Math.max(flags?.self_drive_count || 1, 1);
+
+      const countResult = jobId ? await client.query(
+        `SELECT COUNT(*)::int AS count FROM job_excess
+         WHERE job_id = $1 AND assignment_id IS NOT NULL
+           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'rolled_over', 'not_required', 'waived')`,
+        [jobId]
+      ) : { rows: [{ count: 0 }] };
+      const activeCount = countResult.rows[0].count;
+      const withinTopN = activeCount < vanCount;
+
+      if (withinTopN) {
+        // Apply £1,200 floor. Hire form app may have sent a higher figure
+        // (referral surcharge) — keep whichever is greater.
+        const hireFormCalculated = parseFloat(String(excessAmount)) || 0;
+        const finalRequired = Math.max(hireFormCalculated, STANDARD_EXCESS_PER_DRIVER);
+        const finalBasis = calculationBasis ||
+          `Standard £${STANDARD_EXCESS_PER_DRIVER.toLocaleString()} floor (driver ${activeCount + 1} of ${vanCount})`;
+
+        excessResult = await client.query(
+          `INSERT INTO job_excess (
+            assignment_id, job_id, hirehop_job_id,
+            excess_amount_required, excess_calculation_basis,
+            excess_status,
+            xero_contact_id, xero_contact_name, client_name,
+            created_by
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          RETURNING *`,
+          [
+            assignment.id, jobId, f.hirehop_job_id || null,
+            finalRequired, finalBasis,
+            'pending',
+            f.xero_contact_id || null, f.xero_contact_name || null, f.client_name || null,
+            req.user!.id,
+          ]
+        );
+        console.log(`[hire-forms] Insert path: driver ${activeCount + 1}/${vanCount}, required £${finalRequired}`);
+      } else {
+        // Additional driver beyond van count — covered by another driver's
+        // excess on this hire. On record for audit (so /drivers shows the
+        // signature), but no separate charge.
+        excessResult = await client.query(
+          `INSERT INTO job_excess (
+            assignment_id, job_id, hirehop_job_id,
+            excess_amount_required, excess_calculation_basis,
+            excess_status,
+            xero_contact_id, xero_contact_name, client_name,
+            created_by
+          ) VALUES ($1, $2, $3, 0, $4, 'not_required', $5, $6, $7, $8)
+          RETURNING *`,
+          [
+            assignment.id, jobId, f.hirehop_job_id || null,
+            `Additional driver ${activeCount + 1} on ${vanCount}-van job — covered by another driver's excess`,
+            f.xero_contact_id || null, f.xero_contact_name || null, f.client_name || null,
+            req.user!.id,
+          ]
+        );
+        console.log(`[hire-forms] Insert path: additional driver ${activeCount + 1} on ${vanCount}-van job, marked not_required`);
+      }
     }
 
     await client.query('COMMIT');
