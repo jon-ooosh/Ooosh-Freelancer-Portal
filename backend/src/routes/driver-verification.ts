@@ -387,6 +387,28 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
         await fireReferralNotification(email, driverId, updates);
       }
 
+      // If signature_date was set in this update and the driver doesn't yet
+      // have a calculated_excess_amount (and isn't locked), seed it with the
+      // £1,200 floor so /drivers shows a value even if the SignaturePage
+      // chain doesn't reach POST /api/hire-forms (a known intermittent gap).
+      // POST /api/hire-forms will refresh this with any DVLA/referral
+      // surcharge when it does run.
+      const signatureBeingSet =
+        ('signature_date' in updates && updates.signature_date) ||
+        ('signatureDate' in updates && (updates as Record<string, unknown>).signatureDate);
+      if (signatureBeingSet && driverId) {
+        await query(
+          `UPDATE drivers
+           SET calculated_excess_amount = 1200,
+               calculated_excess_basis  = 'Standard £1,200 floor (set on signature)',
+               updated_at = NOW()
+           WHERE id = $1
+             AND excess_locked = false
+             AND calculated_excess_amount IS NULL`,
+          [driverId]
+        );
+      }
+
       res.json({ success: true, driverId });
     } else {
       // Create new driver with email + whatever fields were provided

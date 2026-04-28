@@ -299,6 +299,27 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     const excessAmount: number | null = f.excess_amount ?? null;
     const calculationBasis = f.excess_calculation_basis || (requiresReferral ? `Referral required: ${referralReason}` : '');
 
+    // 3a. Driver-level liability — write the £1,200 floor (or higher if
+    //     hire form sent more) onto the drivers row itself. This is the
+    //     SOURCE OF TRUTH for the /drivers display and the input to the
+    //     per-job excess calculation. Skipped if excess_locked = true
+    //     (manual insurer-imposed override that staff have pinned).
+    //
+    //     The job_excess record below is the per-job realisation of this
+    //     liability — it carries payment state, claims, top-N "covered"
+    //     status, etc. Driver liability flows IN; per-job state flows OUT.
+    const STANDARD_EXCESS_PER_DRIVER = 1200;
+    const driverLiability = Math.max(parseFloat(String(excessAmount)) || 0, STANDARD_EXCESS_PER_DRIVER);
+    const driverLiabilityBasis = calculationBasis || `Standard £${STANDARD_EXCESS_PER_DRIVER.toLocaleString()} floor (hire form submission)`;
+    await client.query(
+      `UPDATE drivers
+       SET calculated_excess_amount = $1,
+           calculated_excess_basis  = $2,
+           updated_at = NOW()
+       WHERE id = $3 AND excess_locked = false`,
+      [driverLiability, driverLiabilityBasis, driverId]
+    );
+
     // 4. Resolve vehicle_id from vehicle_reg if needed
     let vehicleId = f.vehicle_id || null;
     if (!vehicleId && f.vehicle_reg) {

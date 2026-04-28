@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
-import ExcessPaymentModal from '../components/ExcessPaymentModal';
-import type { JobExcess } from '../../../shared/types';
+import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
 
 interface DriverListItem {
   id: string;
@@ -27,11 +26,18 @@ interface DriverListItem {
   person_first_name: string | null;
   person_last_name: string | null;
   // Latest excess_amount_required on any of this driver's job_excess records,
-  // driven off the most-recently-updated record. Overrides made via the
-  // ExcessPaymentModal surface here immediately.
+  // kept around for legacy callers but the EXCESS column now reads from
+  // calculated_excess_amount on the driver row directly (driver-level
+  // liability is the source of truth; per-job records are realisations).
   latest_excess_id: string | null;
   latest_excess_required: number | string | null;
   latest_excess_status: string | null;
+  // Driver-level individual liability — source of truth for the EXCESS
+  // column. Set by hire form submission (£1,200 floor) and editable by
+  // staff via the inline modal. NULL until a hire form has set it.
+  calculated_excess_amount: number | string | null;
+  calculated_excess_basis: string | null;
+  excess_locked: boolean;
 }
 
 interface DriversResponse {
@@ -138,21 +144,8 @@ export default function DriversPage() {
   const [statusFilter, setStatusFilter] = useState<StatusKey[]>([]);
   const [sort, setSort] = useState<SortKey>('last_activity');
   const [jobSearchDetected, setJobSearchDetected] = useState<string | null>(null);
-  const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
-  const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
+  const [editingExcessDriver, setEditingExcessDriver] = useState<DriverListItem | null>(null);
   const navigate = useNavigate();
-
-  async function openExcessModal(excessId: string) {
-    setExcessModalLoadingId(excessId);
-    try {
-      const res = await api.get<{ data: JobExcess }>(`/excess/${excessId}`);
-      setExcessModalRecord(res.data);
-    } catch (err) {
-      console.error('Failed to load excess record:', err);
-    } finally {
-      setExcessModalLoadingId(null);
-    }
-  }
 
   useEffect(() => {
     loadDrivers();
@@ -295,7 +288,6 @@ export default function DriversPage() {
             ) : (
               drivers.map((driver) => {
                 const status = deriveDriverStatus(driver);
-                const rowLoading = excessModalLoadingId === driver.latest_excess_id;
                 return (
                   <tr
                     key={driver.id}
@@ -318,23 +310,30 @@ export default function DriversPage() {
                       {pointsBadge(driver.licence_points)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm">
-                      {driver.latest_excess_id && driver.latest_excess_required != null ? (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (driver.latest_excess_id) openExcessModal(driver.latest_excess_id);
-                          }}
-                          disabled={rowLoading}
-                          title="Edit required excess"
-                          className="text-gray-900 font-medium hover:text-ooosh-700 hover:underline disabled:opacity-50"
-                        >
-                          £{Number(driver.latest_excess_required).toFixed(2)}
-                          <span className="ml-1 text-xs text-gray-400">✎</span>
-                        </button>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
+                      {/* Driver-level individual liability — always editable. */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditingExcessDriver(driver);
+                        }}
+                        title={driver.excess_locked
+                          ? 'Locked — manual override pinned. Click to edit.'
+                          : 'Edit driver’s individual liability'}
+                        className={`hover:text-ooosh-700 hover:underline ${
+                          driver.calculated_excess_amount != null
+                            ? 'text-gray-900 font-medium'
+                            : 'text-gray-400'
+                        }`}
+                      >
+                        {driver.calculated_excess_amount != null
+                          ? `£${Number(driver.calculated_excess_amount).toFixed(2)}`
+                          : '—'}
+                        {driver.excess_locked && (
+                          <span className="ml-1 text-xs text-amber-600" title="Locked against auto-update">🔒</span>
+                        )}
+                        <span className="ml-1 text-xs text-gray-400">✎</span>
+                      </button>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" title={driver.updated_at || ''}>
                       {relativeTime(driver.updated_at)}
@@ -377,15 +376,27 @@ export default function DriversPage() {
         </div>
       )}
 
-      {/* Quick-edit excess modal, opened from the Excess column */}
-      {excessModalRecord && (
-        <ExcessPaymentModal
-          excess={excessModalRecord}
-          initialAction="edit_required"
-          onClose={() => setExcessModalRecord(null)}
-          onUpdated={() => loadDrivers(pagination.page)}
+      {/* Driver-level liability edit (always available) */}
+      {editingExcessDriver && (
+        <CalculatedExcessEditModal
+          driver={editingExcessDriver}
+          onClose={() => setEditingExcessDriver(null)}
+          onSaved={(updated) => {
+            // Patch the row in place so the UI updates immediately.
+            setDrivers((prev) => prev.map((d) =>
+              d.id === updated.id
+                ? {
+                    ...d,
+                    calculated_excess_amount: updated.calculated_excess_amount,
+                    calculated_excess_basis: updated.calculated_excess_basis,
+                    excess_locked: updated.excess_locked,
+                  }
+                : d
+            ));
+          }}
         />
       )}
+
     </div>
   );
 }
