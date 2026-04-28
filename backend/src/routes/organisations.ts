@@ -499,6 +499,16 @@ router.post('/:id/people', validate(orgPersonLinkSchema), async (req: AuthReques
       resolvedPersonId = personResult.rows[0].id;
     }
 
+    if (is_primary) {
+      // Org-scoped exclusivity: at most one primary per organisation.
+      await client.query(
+        `UPDATE person_organisation_roles
+         SET is_primary = false, updated_at = NOW()
+         WHERE organisation_id = $1 AND status = 'active' AND is_primary = true`,
+        [orgId]
+      );
+    }
+
     const roleResult = await client.query(
       `INSERT INTO person_organisation_roles (person_id, organisation_id, role, is_primary, start_date, notes)
        VALUES ($1, $2, $3, $4, $5, $6)
@@ -522,6 +532,77 @@ router.post('/:id/people', validate(orgPersonLinkSchema), async (req: AuthReques
     client.release();
   }
 });
+
+// PUT /api/organisations/:id/people/:roleId/primary — toggle primary contact
+// Org-scoped exclusivity: at most one active role per organisation can be
+// `is_primary = true`. Promoting one demotes any others on the same org.
+// Demoting is allowed (zero primaries is a valid state).
+const togglePrimarySchema = z.object({
+  is_primary: z.boolean(),
+});
+
+router.put(
+  '/:id/people/:roleId/primary',
+  validate(togglePrimarySchema),
+  async (req: AuthRequest, res: Response) => {
+    const orgId = req.params.id as string;
+    const roleId = req.params.roleId as string;
+    const { is_primary } = req.body as { is_primary: boolean };
+
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+
+      const existing = await client.query(
+        `SELECT * FROM person_organisation_roles
+         WHERE id = $1 AND organisation_id = $2 AND status = 'active'`,
+        [roleId, orgId]
+      );
+      if (existing.rows.length === 0) {
+        await client.query('ROLLBACK');
+        res.status(404).json({ error: 'Role not found on this organisation' });
+        return;
+      }
+
+      if (is_primary) {
+        // Demote any other active primaries on this org first
+        await client.query(
+          `UPDATE person_organisation_roles
+           SET is_primary = false, updated_at = NOW()
+           WHERE organisation_id = $1 AND status = 'active' AND id <> $2 AND is_primary = true`,
+          [orgId, roleId]
+        );
+      }
+
+      const updated = await client.query(
+        `UPDATE person_organisation_roles
+         SET is_primary = $1, updated_at = NOW()
+         WHERE id = $2
+         RETURNING *`,
+        [is_primary, roleId]
+      );
+
+      await client.query('COMMIT');
+
+      await logAudit(
+        req.user!.id,
+        'person_organisation_roles',
+        roleId,
+        'update',
+        existing.rows[0],
+        updated.rows[0]
+      );
+
+      res.json(updated.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Toggle primary error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    } finally {
+      client.release();
+    }
+  }
+);
 
 // DELETE /api/organisations/:id — soft delete
 router.delete('/:id', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {

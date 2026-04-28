@@ -285,6 +285,17 @@ export default function OrganisationDetailPage() {
     }
   }
 
+  async function handleTogglePrimary(roleId: string, makePrimary: boolean) {
+    try {
+      await api.put(`/organisations/${id}/people/${roleId}/primary`, {
+        is_primary: makePrimary,
+      });
+      loadOrg();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to update primary contact');
+    }
+  }
+
   async function handleDeleteRelationship(relId: string) {
     if (!confirm('Remove this relationship?')) return;
     try {
@@ -716,8 +727,27 @@ export default function OrganisationDetailPage() {
                         </td>
                         <td className="px-6 py-4">
                           <span className="text-sm text-gray-700">{p.role}</span>
-                          {p.is_primary && (
-                            <span className="ml-2 text-xs bg-ooosh-100 text-ooosh-700 px-1.5 py-0.5 rounded-full">Primary</span>
+                          {p.is_primary ? (
+                            <>
+                              <span className="ml-2 text-xs bg-ooosh-100 text-ooosh-700 px-1.5 py-0.5 rounded-full">Primary</span>
+                              <button
+                                type="button"
+                                onClick={() => handleTogglePrimary(p.id, false)}
+                                className="ml-2 text-xs text-gray-500 hover:text-gray-700 underline"
+                                title="Remove primary status"
+                              >
+                                Remove primary
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleTogglePrimary(p.id, true)}
+                              className="ml-2 text-xs text-ooosh-600 hover:text-ooosh-700 underline"
+                              title="Make this the primary contact for the organisation"
+                            >
+                              Make primary
+                            </button>
                           )}
                         </td>
                         <td className="px-6 py-4 text-sm text-gray-500">
