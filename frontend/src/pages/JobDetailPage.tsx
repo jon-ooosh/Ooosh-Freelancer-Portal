@@ -252,6 +252,17 @@ interface VehicleAssignment {
     excess_amount_required: number | null;
     excess_amount_taken: number | null;
   } | null;
+  van_requirement_index?: number | null;
+  /**
+   * `vehicle_id` if directly linked, else the vehicle from a sibling staff
+   * allocation on the same `van_requirement_index` (driver_id NULL,
+   * vehicle_id set). Drives the "Allocate Van" → "Book Out" button switch
+   * even when staff has done the allocation in two steps (alloc page picks
+   * the van; cascade onto the hire form pending). At book-out time
+   * BookOutPage's PATCH writes vehicle_id to this row anyway, so the
+   * inferred link gets cemented retroactively.
+   */
+  effective_vehicle_id?: string | null;
 }
 
 interface DispatchCheckResult {
@@ -1745,17 +1756,53 @@ export default function JobDetailPage() {
     if (!id) return;
     setVehicleAssignmentsLoading(true);
     try {
-      const raw = await api.get<{ data: any[] }>(`/assignments?job_id=${id}`);
-      // Reshape flat excess columns into nested object
-      const shaped: VehicleAssignment[] = raw.data.map((r: any) => ({
-        ...r,
-        excess: r.excess_id ? {
-          id: r.excess_id,
-          excess_status: r.excess_status,
-          excess_amount_required: r.excess_amount_required,
-          excess_amount_taken: r.excess_amount_taken,
-        } : null,
-      }));
+      // Hire-form-driven rows have job_id (OP UUID) set; staff-created
+      // allocations from the Allocations page only have hirehop_job_id.
+      // Fetch both so we can see staff allocations for sibling-vehicle
+      // inference, then dedupe by id.
+      const [byJobId, byHhJob] = await Promise.all([
+        api.get<{ data: any[] }>(`/assignments?job_id=${id}`),
+        job.hh_job_number
+          ? api.get<{ data: any[] }>(`/assignments?hirehop_job_id=${job.hh_job_number}`)
+          : Promise.resolve({ data: [] }),
+      ]);
+      const merged = new Map<string, any>();
+      for (const r of (byJobId.data || [])) merged.set(r.id, r);
+      for (const r of (byHhJob.data || [])) {
+        if (!merged.has(r.id)) merged.set(r.id, r);
+      }
+      const allRows = Array.from(merged.values());
+
+      // Build slot → vehicle_id map from staff allocations (no driver_id,
+      // no freelancer_person_id, has vehicle_id). Used to infer the van
+      // for hire-form rows that haven't been cascade-linked yet.
+      const slotVehicleByIndex = new Map<number, string>();
+      for (const r of allRows) {
+        const idx = r.van_requirement_index ?? 0;
+        if (!r.driver_id && !r.freelancer_person_id && r.vehicle_id && !slotVehicleByIndex.has(idx)) {
+          slotVehicleByIndex.set(idx, r.vehicle_id);
+        }
+      }
+
+      // Display rows: keep the existing shape — driver-bearing or
+      // freelancer-bearing assignments. Staff-allocation rows are plumbing
+      // and stay hidden from the cards.
+      const displayRows = allRows.filter((r: any) => r.driver_id || r.freelancer_person_id);
+
+      const shaped: VehicleAssignment[] = displayRows.map((r: any) => {
+        const idx = r.van_requirement_index ?? 0;
+        const inferred = !r.vehicle_id ? (slotVehicleByIndex.get(idx) || null) : null;
+        return {
+          ...r,
+          excess: r.excess_id ? {
+            id: r.excess_id,
+            excess_status: r.excess_status,
+            excess_amount_required: r.excess_amount_required,
+            excess_amount_taken: r.excess_amount_taken,
+          } : null,
+          effective_vehicle_id: r.vehicle_id || inferred,
+        };
+      });
       setVehicleAssignments(shaped);
 
       // Also load dispatch check
@@ -3075,12 +3122,22 @@ export default function JobDetailPage() {
                           State-aware: drives the staff cockpit workflow from
                           this card so they don't have to leave Job Detail to
                           hunt down the right tool elsewhere. Self-drive only;
-                          driven/D&C lifecycles live in Crew & Transport. */}
+                          driven/D&C lifecycles live in Crew & Transport.
+
+                          Uses `effective_vehicle_id` rather than
+                          `vehicle_id` so that a sibling staff allocation
+                          (van picked on the Allocations page but not yet
+                          cascade-linked to this driver's hire form row)
+                          surfaces "Book Out" rather than "Allocate Van".
+                          BookOutPage's PATCH then writes vehicle_id to this
+                          row at submission, retroactively cementing the
+                          link. */}
                       {a.assignment_type === 'self_drive' && (() => {
                         const hhJobNum = job.hh_job_number;
                         const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium';
+                        const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
                         if (a.status === 'soft' || a.status === 'confirmed') {
-                          if (!a.vehicle_id) {
+                          if (!effectiveVehicleId) {
                             return (
                               <Link
                                 to={`/vehicles/allocations${hhJobNum ? `?job=${hhJobNum}` : ''}`}
@@ -3093,7 +3150,7 @@ export default function JobDetailPage() {
                           }
                           return (
                             <Link
-                              to={`/vehicles/book-out?vehicle=${a.vehicle_id}${hhJobNum ? `&job=${hhJobNum}` : ''}`}
+                              to={`/vehicles/book-out?vehicle=${effectiveVehicleId}${hhJobNum ? `&job=${hhJobNum}` : ''}`}
                               className={baseClass}
                               title="Walkaround photos, mileage, signature — pre-filled from this assignment"
                             >
@@ -3101,10 +3158,10 @@ export default function JobDetailPage() {
                             </Link>
                           );
                         }
-                        if ((a.status === 'booked_out' || a.status === 'active') && a.vehicle_id) {
+                        if ((a.status === 'booked_out' || a.status === 'active') && effectiveVehicleId) {
                           return (
                             <Link
-                              to={`/vehicles/check-in?vehicle=${a.vehicle_id}`}
+                              to={`/vehicles/check-in?vehicle=${effectiveVehicleId}`}
                               className={baseClass}
                               title="Return walkaround, mileage, damage check"
                             >
