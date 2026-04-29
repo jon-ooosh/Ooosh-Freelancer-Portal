@@ -32,6 +32,8 @@ export interface FreelancerBookoutContext {
   vehicleReg: string
   /** "Mercedes Sprinter" or similar (for display only) */
   vehicleMakeModel: string
+  /** Vehicle type label ("Premium LWB", "Basic MWB" etc.) — for the PDF */
+  vehicleType: string | null
   /** OP quote UUID (from the HMAC token) */
   quoteId: string
   /** HireHop job number as string — what BookOutPage expects for job lookup */
@@ -40,10 +42,20 @@ export interface FreelancerBookoutContext {
   opJobId: string
   /** Venue display string */
   venueName: string | null
-  /** Freelancer display name */
+  /** Freelancer display name (the DELIVERY person, not the driver) */
   driverName: string
   /** Freelancer email */
   driverEmail: string
+  /**
+   * The CUSTOMER's name (the actual driver who signs the hire agreement).
+   * Distinct from driverName which is the freelancer doing the delivery.
+   * Used for: PDF "Driver" field, signature label, hire agreement email.
+   * May be null if the customer hasn't yet submitted their hire form —
+   * caller should block book-out with a clear message.
+   */
+  customerDriverName: string | null
+  /** The customer's email — recipient for the hire agreement PDF */
+  customerDriverEmail: string | null
   /** Where to send them after book-out completes (portal completion page) */
   returnUrl: string | null
 }
@@ -133,7 +145,9 @@ export async function resolveFreelancerToken(
         vehicleId: string
         registration: string
         makeModel: string
+        vehicleType: string | null
         status: string
+        customerDriver: { name: string; email: string | null } | null
       }
       job?: { id: string; hhJobNumber: number | string | null; venueName: string | null }
       driver?: { name: string; email: string }
@@ -154,12 +168,15 @@ export async function resolveFreelancerToken(
       vehicleId: data.assignment.vehicleId,
       vehicleReg: (data.assignment.registration || '').toUpperCase(),
       vehicleMakeModel: data.assignment.makeModel || '',
+      vehicleType: data.assignment.vehicleType ?? null,
       quoteId: '', // not surfaced in resolve response; not needed client-side
       hhJobNumber: data.job.hhJobNumber != null ? String(data.job.hhJobNumber) : null,
       opJobId: data.job.id,
       venueName: data.job.venueName,
       driverName: data.driver.name,
       driverEmail: data.driver.email,
+      customerDriverName: data.assignment.customerDriver?.name ?? null,
+      customerDriverEmail: data.assignment.customerDriver?.email ?? null,
       returnUrl,
     }
 

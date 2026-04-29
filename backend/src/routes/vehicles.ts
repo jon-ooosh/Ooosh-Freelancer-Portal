@@ -115,11 +115,33 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     // LIMIT 1 returns the most recently created assignment with a vehicle.
     // For multi-van deliveries we'd need a quote-level vehicle linkage —
     // tracked under "D&C allocation linkage gap" in CLAUDE.md (Step 2 D3).
+    // Pull both the freelancer's allocated row (for vehicle_id / reg) AND
+    // the customer's hire-form row (for the driver-as-customer name + email
+    // that go on the PDF / hire agreement). They're often two separate
+    // vehicle_hire_assignments rows on the same job — the freelancer is
+    // the delivery person, the customer is the driver on the agreement.
+    //
+    // The single SELECT here joins fleet_vehicles for the freelancer-allocated
+    // row, then LEFT JOINs the customer-driver row via a sub-select so
+    // missing customer rows don't blow up the freelancer's resolve.
     const vhaResult = await query(
       `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status, vha.assignment_type,
-              fv.reg AS registration, fv.make, fv.model
+              fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
+              cust.customer_driver_name, cust.customer_driver_email
          FROM vehicle_hire_assignments vha
          LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+         LEFT JOIN LATERAL (
+           SELECT (d.first_name || ' ' || d.last_name) AS customer_driver_name,
+                  d.email AS customer_driver_email
+             FROM vehicle_hire_assignments vha_c
+             JOIN drivers d ON d.id = vha_c.driver_id
+            WHERE (vha_c.job_id = $1 OR vha_c.hirehop_job_id = $2)
+              AND vha_c.assignment_type = 'self_drive'
+              AND vha_c.status != 'cancelled'
+              AND vha_c.driver_id IS NOT NULL
+            ORDER BY vha_c.van_requirement_index ASC NULLS LAST, vha_c.created_at ASC
+            LIMIT 1
+         ) cust ON TRUE
          WHERE vha.vehicle_id IS NOT NULL
            AND vha.status IN ('soft', 'allocated', 'confirmed', 'active', 'booked_out')
            AND (vha.job_id = $1 OR vha.hirehop_job_id = $2)
@@ -160,7 +182,18 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
         vehicleId: vha.vehicle_id,
         registration: vha.registration,
         makeModel: [vha.make, vha.model].filter(Boolean).join(' '),
+        vehicleType: vha.vehicle_type || null,
         status: vha.status,
+        // The customer (real driver on the hire agreement). May be null on
+        // jobs that don't yet have a hire form submitted — caller should
+        // surface a clear "ask the customer to fill in the hire form first"
+        // message in that case.
+        customerDriver: vha.customer_driver_name
+          ? {
+              name: vha.customer_driver_name,
+              email: vha.customer_driver_email || null,
+            }
+          : null,
       },
       job: {
         id: jobId,
@@ -168,6 +201,7 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
         venueName,
       },
       driver: {
+        // The FREELANCER (delivery person). Distinct from assignment.customerDriver.
         name: `${person.first_name} ${person.last_name}`.trim(),
         email: freelancerEmail,
       },
@@ -2922,14 +2956,22 @@ async function fetchLogoDataUri(): Promise<string | null> {
   return cachedLogoDataUri;
 }
 
+// All date/time strings on the condition-report PDF are rendered in
+// Europe/London. Without an explicit timeZone, Node's toLocale*String
+// uses the server's TZ (UTC on Hetzner) — during BST that produced
+// timestamps an hour behind the wall clock on the PDF.
+const PDF_TIME_ZONE = 'Europe/London';
+
 function formatFullDateTime(isoStr?: string): string {
   if (!isoStr) return '-';
   const d = new Date(isoStr);
   if (isNaN(d.getTime())) return isoStr;
   return d.toLocaleDateString('en-GB', {
     weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+    timeZone: PDF_TIME_ZONE,
   }) + ' at ' + d.toLocaleTimeString('en-GB', {
     hour: '2-digit', minute: '2-digit',
+    timeZone: PDF_TIME_ZONE,
   });
 }
 
@@ -2939,7 +2981,52 @@ function formatDayDate(dateStr: string): string {
   if (isNaN(d.getTime())) return dateStr;
   return d.toLocaleDateString('en-GB', {
     weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+    timeZone: PDF_TIME_ZONE,
   });
+}
+
+/**
+ * Look up the canonical hire-window dates for a HireHop job number, used
+ * to fall back when the BookOutPage didn't pass hireStartDate/hireEndDate
+ * (e.g. hire-form record missing them or freelancer flow with no hire
+ * forms loaded). Mirrors the COALESCE pattern in hire-forms.ts:1337 —
+ * prefer per-assignment hire dates, fall back to job dates.
+ *
+ * Returns {start, end} as 'YYYY-MM-DD' strings (or null if no match).
+ */
+async function resolveJobHireDates(hireHopJob: string | number | null | undefined): Promise<{
+  start: string | null;
+  end: string | null;
+}> {
+  if (!hireHopJob) return { start: null, end: null };
+  const hhNum = typeof hireHopJob === 'number' ? hireHopJob : parseInt(String(hireHopJob), 10);
+  if (!hhNum || isNaN(hhNum)) return { start: null, end: null };
+  try {
+    const result = await query(
+      `SELECT
+         COALESCE(MAX(vha.hire_start), MAX(j.job_date)) AS resolved_start,
+         COALESCE(MAX(vha.hire_end),   MAX(j.job_end))  AS resolved_end
+         FROM jobs j
+         LEFT JOIN vehicle_hire_assignments vha
+                ON vha.job_id = j.id
+               AND vha.assignment_type = 'self_drive'
+               AND vha.status != 'cancelled'
+        WHERE j.hh_job_number = $1`,
+      [hhNum]
+    );
+    const row = result.rows[0];
+    if (!row) return { start: null, end: null };
+    const toIso = (v: unknown): string | null => {
+      if (!v) return null;
+      const d = new Date(v as string | Date);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().slice(0, 10);
+    };
+    return { start: toIso(row.resolved_start), end: toIso(row.resolved_end) };
+  } catch (err) {
+    console.warn('[vehicles/pdf] resolveJobHireDates failed:', err instanceof Error ? err.message : err);
+    return { start: null, end: null };
+  }
 }
 
 /**
@@ -2961,7 +3048,20 @@ router.post('/generate-pdf', async (req: FlexibleVehicleRequest, res: Response) 
       }
     }
 
-    const { pdfBytes, filename } = await buildConditionReportPdf(req.body);
+    // Backstop for missing hire dates: BookOutPage only sets hireStartDate/
+    // hireEndDate when it sees them on the loaded hire form. If no hire
+    // form is loaded (freelancer mode, mid-tour driver, or the form has
+    // those fields NULL), the PDF would print "(pending hire form)" even
+    // though the job has perfectly good dates. Fall back to the same
+    // COALESCE pattern the hire-form PDF builder uses.
+    const data = { ...(req.body || {}) };
+    if (!data.hireStartDate || !data.hireEndDate) {
+      const resolved = await resolveJobHireDates(data.hireHopJob);
+      if (!data.hireStartDate && resolved.start) data.hireStartDate = resolved.start;
+      if (!data.hireEndDate && resolved.end) data.hireEndDate = resolved.end;
+    }
+
+    const { pdfBytes, filename } = await buildConditionReportPdf(data);
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
     res.json({
       pdf: base64Pdf,
@@ -3074,6 +3174,13 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       }
     }
 
+    // Resolve hire dates from the DB (event JSON doesn't carry them; same
+    // fallback as /generate-pdf). Important for regenerating PDFs from
+    // events that were saved before this column carried hire dates, and
+    // for freelancer book-outs where the hire form data wasn't loaded
+    // client-side at PDF generation time.
+    const resolvedDates = await resolveJobHireDates(event.hireHopJob);
+
     // Build the PDF
     const { pdfBytes, filename } = await buildConditionReportPdf({
       vehicleReg: reg,
@@ -3085,6 +3192,8 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       fuelLevel: event.fuelLevel || null,
       eventDate: event.eventDate || new Date().toISOString().slice(0, 10),
       eventDateTime: event.createdAt || event.eventDate || new Date().toISOString(),
+      hireStartDate: event.hireStartDate || resolvedDates.start || undefined,
+      hireEndDate: event.hireEndDate || resolvedDates.end || undefined,
       photos: photoBase64s,
       briefingItems: Array.isArray(event.briefingItems) ? event.briefingItems : [],
       bookOutNotes: notes,
