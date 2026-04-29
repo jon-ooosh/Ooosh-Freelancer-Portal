@@ -134,6 +134,11 @@ export async function POST(
         formData.append('notes', notes || '')
         formData.append('customerPresent', String(customerPresent))
         if (staffName) formData.append('staffName', staffName)
+        // Forward vanOnly so the OP backend skips the equipment delivery
+        // note PDF + email — there's no equipment to acknowledge for a
+        // van-only book-out (the vehicle condition report is the relevant
+        // artefact and is sent separately by the OP book-out flow).
+        if (vanOnly) formData.append('vanOnly', 'true')
 
         // Convert base64 photos to blobs
         if (photos) {
