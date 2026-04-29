@@ -1700,10 +1700,13 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     let note: string;
 
     if (isLocal) {
-      // Local D/C: use pre-priced item based on time window
+      // Local D/C: use pre-priced item based on time window.
+      // The edit step in addItemToHireHop overwrites HH's default price, so we
+      // must pass the correct price explicitly from LOCAL_DC_ITEMS.
       listId = getLocalItemId(quote.job_type, quote.arrival_time);
       qty = 1;
-      price = 0; // HireHop has the price already
+      const localItem = (LOCAL_DC_ITEMS[quote.job_type] || LOCAL_DC_ITEMS['delivery']).find(i => i.id === listId);
+      price = localItem?.price ?? 40;
       note = buildItemNote(quote.job_date, null, quote.arrival_time, quote.venue_name || quote.linked_venue_name);
     } else if (isCrewed) {
       listId = LABOUR_ITEM_IDS['crew'];
