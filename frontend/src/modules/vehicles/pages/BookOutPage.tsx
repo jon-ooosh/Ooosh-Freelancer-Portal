@@ -616,6 +616,11 @@ export function BookOutPage() {
       signatureBase64,
       hireStartDate: form.hireStartDate || undefined,
       hireEndDate: form.hireEndDate || undefined,
+      // Hire start time = book-out wall time (when the hire actually
+      // begins, not the planned out_time). End time falls back via
+      // backend resolveJobHireDates to jobs.end_time.
+      hireStartTime: form.hireStartTime || undefined,
+      hireEndTime: form.hireEndTime || undefined,
       allDrivers: form.allDrivers,
     }
 

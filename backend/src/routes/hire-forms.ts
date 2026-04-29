@@ -341,18 +341,24 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     }
 
     // 6. Check for existing non-cancelled assignment (deduplication)
-    //    If the same driver+vehicle+job combo already exists and is not cancelled, return it instead of creating a duplicate.
+    //    Dedup by (driver, job) only — NOT by vehicle. The same driver
+    //    on the same job should never have two rows; whether the
+    //    vehicle_id has been linked yet is incidental. Previously this
+    //    required vehicle_id to match too, which meant a re-submission
+    //    where the staff had since linked a van between attempts could
+    //    slip through and create a duplicate. Also excludes 'returned'
+    //    rows so a driver on a follow-up hire on the same job (rare but
+    //    possible if staff clone or re-open) gets a fresh row.
     const dedup: string[] = [];
     const dedupParams: unknown[] = [];
     let dedupIdx = 1;
     dedup.push(`driver_id = $${dedupIdx++}`); dedupParams.push(driverId);
-    if (vehicleId) { dedup.push(`vehicle_id = $${dedupIdx++}`); dedupParams.push(vehicleId); }
     if (jobId) { dedup.push(`job_id = $${dedupIdx++}`); dedupParams.push(jobId); }
     else if (f.hirehop_job_id) { dedup.push(`hirehop_job_id = $${dedupIdx++}`); dedupParams.push(f.hirehop_job_id); }
 
     const existingAssignment = await client.query(
       `SELECT id FROM vehicle_hire_assignments
-       WHERE ${dedup.join(' AND ')} AND status NOT IN ('cancelled')
+       WHERE ${dedup.join(' AND ')} AND status NOT IN ('cancelled', 'returned')
        ORDER BY created_at DESC LIMIT 1`,
       dedupParams
     );
@@ -823,6 +829,39 @@ router.post('/quick-assign', authenticate, validate(quickAssignSchema), async (r
     const jobResult = await query(`SELECT hh_job_number, job_name FROM jobs WHERE id = $1`, [f.job_id]);
     const hhJobId = jobResult.rows[0]?.hh_job_number || null;
     const hhJobName = jobResult.rows[0]?.job_name || null;
+
+    // Dedup gate — block re-creating an assignment for a (job, driver) that
+    // already has a non-cancelled, non-returned row. Without this, staff
+    // hitting "+ Add driver manually" on a job where the customer's hire
+    // form is already in OP creates a DUPLICATE vehicle_hire_assignments
+    // row, and the top-N rule then flags this driver as "additional"
+    // (£0 / excess_status='not_required') because the slot is already
+    // filled. Live example: job 15852 / Mr Desmond Magee, 29 Apr 2026.
+    //
+    // Loud 409 (not silent absorb) so staff can see exactly what happened
+    // — the right action is "look at the existing assignment, don't create
+    // another". Returns the existing assignment ID so the UI could in
+    // future jump to it.
+    const existingAssignment = await query(
+      `SELECT vha.id, vha.status, vha.vehicle_id, fv.reg AS vehicle_reg
+         FROM vehicle_hire_assignments vha
+         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+        WHERE vha.driver_id = $1
+          AND (vha.job_id = $2 OR ($3::int IS NOT NULL AND vha.hirehop_job_id = $3))
+          AND vha.status NOT IN ('cancelled', 'returned')
+        LIMIT 1`,
+      [f.driver_id, f.job_id, hhJobId]
+    );
+    if (existingAssignment.rows.length > 0) {
+      const ex = existingAssignment.rows[0];
+      return res.status(409).json({
+        error: `${dr.full_name} is already assigned to this job (status: ${ex.status}${ex.vehicle_reg ? ', vehicle: ' + ex.vehicle_reg : ', no vehicle linked'}). Use the existing row on the Drivers & Vehicles tab — don't add them twice.`,
+        code: 'driver_already_assigned',
+        existing_assignment_id: ex.id,
+        existing_status: ex.status,
+        existing_vehicle_reg: ex.vehicle_reg || null,
+      });
+    }
 
     // Overlap check — only when a vehicle is being assigned at quick-assign time.
     if (f.vehicle_id) {

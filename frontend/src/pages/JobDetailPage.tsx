@@ -607,7 +607,7 @@ function ValidityPill({ level }: { level: 'green' | 'amber' | 'red' }) {
   );
 }
 
-function QuickAssignButton({ jobId, jobDate, returnDate, onCreated, subtle }: { jobId: string; jobDate?: string; returnDate?: string; onCreated: () => void; subtle?: boolean }) {
+function QuickAssignButton({ jobId, jobDate, jobEnd, onCreated, subtle }: { jobId: string; jobDate?: string; jobEnd?: string; onCreated: () => void; subtle?: boolean }) {
   const [open, setOpen] = useState(false);
   const [drivers, setDrivers] = useState<any[]>([]);
   const [vehicles, setVehicles] = useState<any[]>([]);
@@ -618,7 +618,11 @@ function QuickAssignButton({ jobId, jobDate, returnDate, onCreated, subtle }: { 
   const [vehicleSearch, setVehicleSearch] = useState('');
   const [vehicleFocus, setVehicleFocus] = useState(false);
   const [hireStart, setHireStart] = useState(jobDate ? jobDate.substring(0, 10) : new Date().toISOString().substring(0, 10));
-  const [hireEnd, setHireEnd] = useState(returnDate ? returnDate.substring(0, 10) : '');
+  // Hire end defaults to JOB END (the real end of charge), NOT return_date
+  // (the +1-day warehouse turnaround buffer). Per the CLAUDE.md "Hire Date
+  // Resolution" rule — return_date is for warehouse scheduling, never for
+  // customer-facing hire windows.
+  const [hireEnd, setHireEnd] = useState(jobEnd ? jobEnd.substring(0, 10) : '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -2933,14 +2937,20 @@ export default function JobDetailPage() {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold text-gray-900">Drivers & Vehicles</h3>
-            {/* Manual driver add — admin/manager only, intentionally subtle.
-                Primary path is the hire form URL (auto-emailed + manually
-                chase-able from the Job Requirements vehicle card). */}
-            {id && (user?.role === 'admin' || user?.role === 'manager') && (
+            {/* Manual driver add — ADMIN ONLY now (was admin/manager). The
+                primary path is the hire form URL (auto-emailed + manually
+                chase-able from the Job Requirements vehicle card). This
+                fallback exists for genuine "someone slipped through" edge
+                cases where admin needs to backfill — and was previously
+                being misused by managers, leading to duplicate assignments
+                + £0 not_required excess records via top-N rule. Tightening
+                visibility instead of weakening dedup. Backend dedup at
+                /quick-assign also rejects with 409 for the same driver+job. */}
+            {id && user?.role === 'admin' && (
               <QuickAssignButton
                 jobId={id}
                 jobDate={job.job_date || undefined}
-                returnDate={job.return_date || undefined}
+                jobEnd={job.job_end || undefined}
                 onCreated={loadVehicleAssignments}
                 subtle
               />
