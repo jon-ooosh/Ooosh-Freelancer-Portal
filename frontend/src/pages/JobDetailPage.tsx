@@ -90,6 +90,7 @@ interface JobDetail {
   job_end: string | null;
   return_date: string | null;
   out_time: string | null;
+  start_time: string | null;
   return_time: string | null;
   end_time: string | null;
   created_date: string | null;
@@ -1047,10 +1048,15 @@ export default function JobDetailPage() {
   const [editJobEnd, setEditJobEnd] = useState('');
   const [editReturnDate, setEditReturnDate] = useState('');
   const [editOutTime, setEditOutTime] = useState('09:00');
+  const [editStartTime, setEditStartTime] = useState('09:00');
   const [editReturnTime, setEditReturnTime] = useState('09:00');
-  const [editEndTime, setEditEndTime] = useState('');
+  const [editEndTime, setEditEndTime] = useState('09:00');
   const [dateOutLinked, setDateOutLinked] = useState(true);
   const [dateReturnLinked, setDateReturnLinked] = useState(true);
+  // Time chain links — Start Time mirrors Out Time, Return Time mirrors End Time
+  // unless the user explicitly unlinks them. Mirrors the date chain UX.
+  const [outTimeLinked, setOutTimeLinked] = useState(true);
+  const [endTimeLinked, setEndTimeLinked] = useState(true);
   const [editingClient, setEditingClient] = useState(false);
   const [clientSearch, setClientSearch] = useState('');
   const [clientSearchResults, setClientSearchResults] = useState<Array<{ id: string; name: string; type: string }>>([]);
@@ -1101,6 +1107,34 @@ export default function JobDetailPage() {
     if (!dateStr) return '';
     if (typeof dateStr === 'string' && dateStr.includes('T')) return dateStr.split('T')[0];
     return dateStr;
+  }
+
+  // Validate ordering of out/start/end/return datetimes. Returns a friendly
+  // error string if invalid, or null if OK / insufficient data to check.
+  // Mirrors backend validateJobDateTimes — same rules, same messages.
+  function validateDateTimeOrdering(v: {
+    out_date: string; job_date: string; job_end: string; return_date: string;
+    out_time: string; start_time: string; end_time: string; return_time: string;
+  }): string | null {
+    const ms = (date: string, time: string): number => {
+      if (!date) return NaN;
+      const t = (time || '09:00').slice(0, 5);
+      return Date.parse(`${date}T${t}:00Z`);
+    };
+    const oMs = ms(v.out_date, v.out_time);
+    const sMs = ms(v.job_date, v.start_time);
+    const eMs = ms(v.job_end, v.end_time);
+    const rMs = ms(v.return_date, v.return_time);
+    if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs) {
+      return 'Outgoing date/time must be on or before Job Start date/time.';
+    }
+    if (!isNaN(sMs) && !isNaN(eMs) && sMs > eMs) {
+      return 'Job Start date/time must be on or before Job End date/time.';
+    }
+    if (!isNaN(eMs) && !isNaN(rMs) && eMs > rMs) {
+      return 'Job End date/time must be on or before Returning date/time.';
+    }
+    return null;
   }
 
   function addDays(dateStr: string, days: number): string {
@@ -1166,12 +1200,19 @@ export default function JobDetailPage() {
     setEditJobDate(toDateInputValue(job.job_date));
     setEditJobEnd(toDateInputValue(job.job_end));
     setEditReturnDate(toDateInputValue(job.return_date));
-    setEditOutTime((job.out_time || '09:00:00').slice(0, 5));
-    setEditReturnTime((job.return_time || '09:00:00').slice(0, 5));
-    setEditEndTime(job.end_time ? job.end_time.slice(0, 5) : '');
+    const outT = (job.out_time || '09:00:00').slice(0, 5);
+    const startT = (job.start_time || job.out_time || '09:00:00').slice(0, 5);
+    const returnT = (job.return_time || '09:00:00').slice(0, 5);
+    const endT = (job.end_time || '09:00:00').slice(0, 5);
+    setEditOutTime(outT);
+    setEditStartTime(startT);
+    setEditReturnTime(returnT);
+    setEditEndTime(endT);
     // Determine link state from current values
     setDateOutLinked(toDateInputValue(job.out_date) === toDateInputValue(job.job_date));
     setDateReturnLinked(toDateInputValue(job.return_date) === toDateInputValue(job.job_end));
+    setOutTimeLinked(outT === startT);
+    setEndTimeLinked(endT === returnT);
     setEditingDates(true);
   }
 
@@ -1224,15 +1265,28 @@ export default function JobDetailPage() {
   };
 
   async function saveDates() {
+    const outT = editOutTime || '09:00';
+    const startT = outTimeLinked ? outT : (editStartTime || '09:00');
+    const endT = editEndTime || '09:00';
+    const returnT = endTimeLinked ? endT : (editReturnTime || '09:00');
+    const orderingError = validateDateTimeOrdering({
+      out_date: editOutDate, job_date: editJobDate, job_end: editJobEnd, return_date: editReturnDate,
+      out_time: outT, start_time: startT, end_time: endT, return_time: returnT,
+    });
+    if (orderingError) {
+      alert(orderingError);
+      return;
+    }
     setEditingDates(false);
     await saveInlineField({
       out_date: editOutDate || null,
       job_date: editJobDate || null,
       job_end: editJobEnd || null,
       return_date: editReturnDate || null,
-      out_time: editOutTime || '09:00',
-      return_time: editReturnTime || '09:00',
-      end_time: editEndTime || null,
+      out_time: outT,
+      start_time: startT,
+      return_time: returnT,
+      end_time: endT,
     });
     // Prompt to sync dates to HireHop if job is linked
     if (job?.hh_job_number) {
@@ -2269,7 +2323,7 @@ export default function JobDetailPage() {
                     )}
                     </>
                   )}
-                  {job.end_time && (
+                  {job.end_time && job.end_time !== job.return_time && (
                     <span className="text-purple-500 text-xs ml-1">ends {job.end_time.slice(0, 5)}</span>
                   )}
                   <button
@@ -2443,36 +2497,98 @@ export default function JobDetailPage() {
                     </button>
                   </div>
                 </div>
-                {/* Time inputs row */}
-                {(() => {
-                  const isSingleDay = !editJobEnd || editJobDate === editJobEnd;
-                  return (
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
-                      <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">Out Time</label>
-                        <input
-                          type="time"
-                          value={editOutTime}
-                          onChange={(e) => setEditOutTime(e.target.value)}
-                          className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
-                        />
-                      </div>
-                      <div />
-                      <div>
-                        <label className="block text-xs font-medium text-gray-500 mb-1">
-                          {isSingleDay ? 'End Time' : 'Job End Time'}
-                        </label>
-                        <input
-                          type="time"
-                          value={isSingleDay ? editEndTime : editReturnTime}
-                          onChange={(e) => isSingleDay ? setEditEndTime(e.target.value) : setEditReturnTime(e.target.value)}
-                          className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
-                        />
-                      </div>
-                      <div />
-                    </div>
-                  );
-                })()}
+                {/* Time inputs row — four times mirror the four dates above.
+                    Start Time is linked to Out Time by default; Return Time
+                    is linked to End Time by default. Click chain icon to
+                    unlink and edit independently. */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Out Time</label>
+                    <input
+                      type="time"
+                      value={editOutTime}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setEditOutTime(v);
+                        if (outTimeLinked) setEditStartTime(v);
+                      }}
+                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
+                    />
+                  </div>
+                  <div className="relative">
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Start Time</label>
+                    <input
+                      type="time"
+                      value={editStartTime}
+                      disabled={outTimeLinked}
+                      onChange={(e) => setEditStartTime(e.target.value)}
+                      className={`w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500 ${outTimeLinked ? 'bg-gray-50 text-gray-400' : ''}`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (outTimeLinked) {
+                          // unlinking — keep current value, just unlock
+                          setOutTimeLinked(false);
+                        } else {
+                          // re-linking — sync Start Time back to Out Time
+                          setEditStartTime(editOutTime);
+                          setOutTimeLinked(true);
+                        }
+                      }}
+                      className={`absolute -left-4 top-8 w-4 text-center text-xs ${outTimeLinked ? 'text-ooosh-600' : 'text-gray-300 hover:text-gray-500'}`}
+                      title={outTimeLinked ? 'Linked to Out Time (click to unlink)' : 'Click to link to Out Time'}
+                    >
+                      {outTimeLinked ? (
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clipRule="evenodd" /></svg>
+                      ) : (
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.172 13.828a4 4 0 015.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" /></svg>
+                      )}
+                    </button>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-500 mb-1">End Time</label>
+                    <input
+                      type="time"
+                      value={editEndTime}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setEditEndTime(v);
+                        if (endTimeLinked) setEditReturnTime(v);
+                      }}
+                      className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500"
+                    />
+                  </div>
+                  <div className="relative">
+                    <label className="block text-xs font-medium text-gray-500 mb-1">Return Time</label>
+                    <input
+                      type="time"
+                      value={editReturnTime}
+                      disabled={endTimeLinked}
+                      onChange={(e) => setEditReturnTime(e.target.value)}
+                      className={`w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500 ${endTimeLinked ? 'bg-gray-50 text-gray-400' : ''}`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (endTimeLinked) {
+                          setEndTimeLinked(false);
+                        } else {
+                          setEditReturnTime(editEndTime);
+                          setEndTimeLinked(true);
+                        }
+                      }}
+                      className={`absolute -left-4 top-8 w-4 text-center text-xs ${endTimeLinked ? 'text-ooosh-600' : 'text-gray-300 hover:text-gray-500'}`}
+                      title={endTimeLinked ? 'Linked to End Time (click to unlink)' : 'Click to link to End Time'}
+                    >
+                      {endTimeLinked ? (
+                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clipRule="evenodd" /></svg>
+                      ) : (
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.172 13.828a4 4 0 015.656 0l4-4a4 4 0 00-5.656-5.656l-1.102 1.101" /></svg>
+                      )}
+                    </button>
+                  </div>
+                </div>
                 {editJobDate && editJobEnd && (() => {
                   const start = new Date(editJobDate);
                   const end = new Date(editJobEnd);

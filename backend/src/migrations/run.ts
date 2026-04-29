@@ -100,6 +100,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '063_excess_ledger_group_by_client_name.sql',
         '064_keep_after_close.sql',
         '065_driver_calculated_excess.sql',
+        '066_job_start_time.sql',
       ];
 
       for (const migration of migrations) {

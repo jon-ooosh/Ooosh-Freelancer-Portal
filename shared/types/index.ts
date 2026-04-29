@@ -276,6 +276,11 @@ export interface Job {
   job_end: string | null;
   return_date: string | null;
   created_date: string | null;
+  // Times (HH:MM, separate from date columns — pair with the matching date)
+  out_time: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  return_time: string | null;
   // Duration
   duration_days: number | null;
   duration_hrs: number | null;
