@@ -1109,6 +1109,34 @@ export default function JobDetailPage() {
     return dateStr;
   }
 
+  // Validate ordering of out/start/end/return datetimes. Returns a friendly
+  // error string if invalid, or null if OK / insufficient data to check.
+  // Mirrors backend validateJobDateTimes — same rules, same messages.
+  function validateDateTimeOrdering(v: {
+    out_date: string; job_date: string; job_end: string; return_date: string;
+    out_time: string; start_time: string; end_time: string; return_time: string;
+  }): string | null {
+    const ms = (date: string, time: string): number => {
+      if (!date) return NaN;
+      const t = (time || '09:00').slice(0, 5);
+      return Date.parse(`${date}T${t}:00Z`);
+    };
+    const oMs = ms(v.out_date, v.out_time);
+    const sMs = ms(v.job_date, v.start_time);
+    const eMs = ms(v.job_end, v.end_time);
+    const rMs = ms(v.return_date, v.return_time);
+    if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs) {
+      return 'Outgoing date/time must be on or before Job Start date/time.';
+    }
+    if (!isNaN(sMs) && !isNaN(eMs) && sMs > eMs) {
+      return 'Job Start date/time must be on or before Job End date/time.';
+    }
+    if (!isNaN(eMs) && !isNaN(rMs) && eMs > rMs) {
+      return 'Job End date/time must be on or before Returning date/time.';
+    }
+    return null;
+  }
+
   function addDays(dateStr: string, days: number): string {
     const d = new Date(dateStr);
     d.setDate(d.getDate() + days);
@@ -1237,16 +1265,28 @@ export default function JobDetailPage() {
   };
 
   async function saveDates() {
+    const outT = editOutTime || '09:00';
+    const startT = outTimeLinked ? outT : (editStartTime || '09:00');
+    const endT = editEndTime || '09:00';
+    const returnT = endTimeLinked ? endT : (editReturnTime || '09:00');
+    const orderingError = validateDateTimeOrdering({
+      out_date: editOutDate, job_date: editJobDate, job_end: editJobEnd, return_date: editReturnDate,
+      out_time: outT, start_time: startT, end_time: endT, return_time: returnT,
+    });
+    if (orderingError) {
+      alert(orderingError);
+      return;
+    }
     setEditingDates(false);
     await saveInlineField({
       out_date: editOutDate || null,
       job_date: editJobDate || null,
       job_end: editJobEnd || null,
       return_date: editReturnDate || null,
-      out_time: editOutTime || '09:00',
-      start_time: outTimeLinked ? (editOutTime || '09:00') : (editStartTime || '09:00'),
-      return_time: endTimeLinked ? (editEndTime || '09:00') : (editReturnTime || '09:00'),
-      end_time: editEndTime || '09:00',
+      out_time: outT,
+      start_time: startT,
+      return_time: returnT,
+      end_time: endT,
     });
     // Prompt to sync dates to HireHop if job is linked
     if (job?.hh_job_number) {

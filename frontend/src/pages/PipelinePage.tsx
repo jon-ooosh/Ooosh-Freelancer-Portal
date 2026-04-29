@@ -190,9 +190,20 @@ function ClientPicker({
       const filtered = data.results.filter(r => r.type === 'person' || r.type === 'organisation');
       setResults(filtered);
       setHasSearched(true);
-      // Show dropdown if there are results OR if we can offer "create new"
-      const hasExactOrgMatch = filtered.some(r => r.type === 'organisation' && r.name.toLowerCase() === term.toLowerCase());
-      setShowDropdown(filtered.length > 0 || (!hasExactOrgMatch && onCreateNew != null));
+      // If the user typed an exact-name match for exactly one organisation,
+      // auto-link it. Avoids the "I typed the right thing but forgot to click
+      // the dropdown row" trap. Only fires for unique matches; ambiguous
+      // names (multiple orgs with the same name) still require manual pick.
+      const exactOrgMatches = filtered.filter(
+        r => r.type === 'organisation' && r.name.toLowerCase() === term.toLowerCase()
+      );
+      if (exactOrgMatches.length === 1) {
+        onSelect(exactOrgMatches[0]);
+        setShowDropdown(false);
+      } else {
+        const hasExactOrgMatch = exactOrgMatches.length > 0;
+        setShowDropdown(filtered.length > 0 || (!hasExactOrgMatch && onCreateNew != null));
+      }
     } catch {
       setResults([]);
       setHasSearched(true);
@@ -200,7 +211,7 @@ function ClientPicker({
     } finally {
       setSearching(false);
     }
-  }, [onCreateNew]);
+  }, [onCreateNew, onSelect]);
 
   const handleChange = (text: string) => {
     onChange(text);
@@ -209,8 +220,11 @@ function ClientPicker({
   };
 
   const handleSelect = (result: SearchResult) => {
+    // onSelect (handleClientSelect in the parent) sets both clientName AND
+    // clientId via the dedicated path. Calling onChange() here too would
+    // re-route through the parent's typing handler which clears clientId,
+    // wiping the link the user just made.
     onSelect(result);
-    onChange(result.name);
     setShowDropdown(false);
   };
 

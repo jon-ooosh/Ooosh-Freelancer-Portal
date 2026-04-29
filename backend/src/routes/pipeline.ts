@@ -275,6 +275,22 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
     } = req.body;
     let { details } = req.body;
 
+    // Sanity-check the date/time ordering before we persist
+    const dateTimeError = validateJobDateTimes({
+      out_date: out_date ?? null,
+      job_date: job_date ?? null,
+      job_end: job_end ?? null,
+      return_date: return_date ?? null,
+      out_time: out_time ?? null,
+      start_time: start_time ?? null,
+      return_time: return_time ?? null,
+      end_time: end_time ?? null,
+    });
+    if (dateTimeError) {
+      res.status(400).json({ error: dateTimeError });
+      return;
+    }
+
     // Service type labels
     const serviceLabels: Record<string, string> = {
       self_drive_van: 'Self-drive van',
@@ -304,6 +320,25 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       parts.push(client_name);
       if (selectionPart) parts.push(selectionPart);
       finalJobName = parts.join(' - ');
+    }
+
+    // Server-side fallback: if the form sent only client_name (no client_id)
+    // and an existing organisation has that exact name, auto-link it. Catches
+    // cases where the user typed a known client but didn't click the
+    // dropdown row, leaving the job stranded as text-only.
+    let resolvedClientId = client_id || null;
+    if (!resolvedClientId && client_name) {
+      const lookup = await query(
+        `SELECT id FROM organisations
+         WHERE LOWER(TRIM(name)) = LOWER(TRIM($1)) AND is_deleted = false
+         LIMIT 2`,
+        [client_name]
+      );
+      if (lookup.rows.length === 1) {
+        resolvedClientId = lookup.rows[0].id;
+      }
+      // 0 matches → leave null (text only — possibly a new client). 2+ matches
+      // → ambiguous, also leave null and let staff link manually.
     }
 
     // Resolve manager: use provided person_id, or look up the current user's person_id
@@ -349,7 +384,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       ) RETURNING *`,
       [
         finalJobName, details, out_date || null, job_date || null, job_end || null, return_date || null,
-        client_id || null, client_name,
+        resolvedClientId, client_name,
         venue_id || null, venue_name || null,
         enquiry_source || null, job_value || null, likelihood || 'warm', notes || null,
         managerId,
@@ -1194,6 +1229,23 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
 
     const currentJob = current.rows[0];
 
+    // Sanity-check date/time ordering — merge any incoming overrides with the
+    // current persisted values so a partial PATCH (e.g. just out_time) is
+    // checked against everything else.
+    const dateTimeKeys = ['out_date', 'job_date', 'job_end', 'return_date',
+      'out_time', 'start_time', 'return_time', 'end_time'] as const;
+    if (dateTimeKeys.some(k => k in fields)) {
+      const merged: Record<string, Date | string | null> = {};
+      for (const k of dateTimeKeys) {
+        merged[k] = (k in fields) ? (fields[k] ?? null) : currentJob[k];
+      }
+      const dateTimeError = validateJobDateTimes(merged as Parameters<typeof validateJobDateTimes>[0]);
+      if (dateTimeError) {
+        res.status(400).json({ error: dateTimeError });
+        return;
+      }
+    }
+
     // Parse hh_job_number: accept URL like https://myhirehop.com/job.php?id=15564
     if ('hh_job_number' in fields && fields.hh_job_number !== null && fields.hh_job_number !== undefined) {
       const raw = String(fields.hh_job_number).trim();
@@ -1360,6 +1412,48 @@ function calcHHDuration(
 }
 
 /**
+ * Validate that OP date+time values respect the natural ordering:
+ *   out_datetime ≤ start_datetime ≤ end_datetime ≤ return_datetime
+ *
+ * Without this, OP can push invalid combos to HireHop (e.g. Out 15:00 on
+ * day X, Start 09:00 on day X) which HH stores but its pricing engine
+ * gets confused by — visible side-effects include unstable charge-period
+ * displays and HH webhook responses bouncing the bad value back to OP,
+ * overwriting subsequent OP edits.
+ *
+ * Returns null on success; a human-readable error string on failure.
+ * Missing fields are skipped (we only validate pairs where both sides
+ * have values).
+ */
+function validateJobDateTimes(job: {
+  out_date: Date | string | null;
+  job_date: Date | string | null;
+  job_end: Date | string | null;
+  return_date: Date | string | null;
+  out_time: string | null;
+  start_time: string | null;
+  return_time: string | null;
+  end_time: string | null;
+}): string | null {
+  const out = buildHHDateTime(job.out_date, job.out_time);
+  const start = buildHHDateTime(job.job_date, job.start_time || job.out_time);
+  const end = buildHHDateTime(job.job_end, job.end_time);
+  const to = buildHHDateTime(job.return_date, job.return_time);
+  const ms = (s?: string) => (s ? Date.parse(s.replace(' ', 'T') + ':00Z') : NaN);
+  const oMs = ms(out), sMs = ms(start), eMs = ms(end), tMs = ms(to);
+  if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs) {
+    return 'Outgoing date/time must be on or before Job Start date/time.';
+  }
+  if (!isNaN(sMs) && !isNaN(eMs) && sMs > eMs) {
+    return 'Job Start date/time must be on or before Job End date/time.';
+  }
+  if (!isNaN(eMs) && !isNaN(tMs) && eMs > tMs) {
+    return 'Job End date/time must be on or before Returning date/time.';
+  }
+  return null;
+}
+
+/**
  * Build the four HireHop datetime fields (out / start / end / to) plus the
  * duration block from a job row that has the four date columns and the four
  * time columns (out_time / start_time / return_time / end_time).
@@ -1418,6 +1512,12 @@ router.post('/:id/push-dates-to-hh', async (req: AuthRequest, res: Response) => 
     const job = jobResult.rows[0];
     if (!job.hh_job_number) {
       res.status(400).json({ error: 'Job is not linked to HireHop' });
+      return;
+    }
+
+    const dateTimeError = validateJobDateTimes(job);
+    if (dateTimeError) {
+      res.status(400).json({ error: dateTimeError });
       return;
     }
 
@@ -1481,6 +1581,12 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       if (!job.job_date) missing.push('start date');
       if (!job.job_end) missing.push('end date');
       res.status(400).json({ error: `Cannot create in HireHop: ${missing.join(' and ')} required` });
+      return;
+    }
+
+    const dateTimeError = validateJobDateTimes(job);
+    if (dateTimeError) {
+      res.status(400).json({ error: dateTimeError });
       return;
     }
 
