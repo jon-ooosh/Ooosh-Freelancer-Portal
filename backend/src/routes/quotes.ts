@@ -535,7 +535,9 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       (async () => {
         try {
           const assignees = await query(
-            `SELECT qa.person_id, p.first_name, p.last_name, p.email
+            `SELECT qa.person_id, p.first_name, p.last_name, p.email,
+                    p.portal_notifications_paused_until,
+                    p.portal_muted_quote_ids
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
              WHERE qa.quote_id = $1 AND qa.status NOT IN ('declined', 'cancelled')
@@ -544,14 +546,33 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
           );
 
           const jobName = oldQuote.linked_job_name || oldQuote.job_name || 'a job';
+          const formattedDate = updatedQuote.job_date
+            ? new Date(updatedQuote.job_date).toLocaleDateString('en-GB', {
+                weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+              })
+            : 'TBC';
+          const now = new Date();
           for (const crew of assignees.rows) {
+            // Respect mute preferences: skip if globally paused or this quote is muted
+            const pausedUntil = crew.portal_notifications_paused_until
+              ? new Date(crew.portal_notifications_paused_until)
+              : null;
+            if (pausedUntil && pausedUntil > now) {
+              console.log(`Skipping job change notification for ${crew.email} — globally muted until ${pausedUntil.toISOString()}`);
+              continue;
+            }
+            const mutedIds: string[] = crew.portal_muted_quote_ids || [];
+            if (mutedIds.includes(req.params.id)) {
+              console.log(`Skipping job change notification for ${crew.email} — quote ${req.params.id} muted`);
+              continue;
+            }
             try {
               await emailService.send('job_change_notification', {
                 to: crew.email,
                 variables: {
                   freelancerName: crew.first_name || 'there',
                   jobName,
-                  jobDate: updatedQuote.job_date ? String(updatedQuote.job_date).split('T')[0] : 'TBC',
+                  jobDate: formattedDate,
                   venueName: updatedQuote.venue_name || 'TBC',
                   changeDescription: keyFieldsChanged.join('. '),
                 },

@@ -1,17 +1,28 @@
 /**
  * Notifications Settings API
- * 
- * GET /api/settings/notifications - Get current mute status
+ *
+ * GET  /api/settings/notifications - Get current mute status
  * POST /api/settings/notifications - Update mute settings
+ *
+ * In OP mode, settings are stored on the people table. Monday.com path
+ * is preserved as a fallback while DATA_BACKEND=op is rolled out.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import { cookies } from 'next/headers'
 import { getSessionUser } from '@/lib/session'
-import { 
-  findFreelancerByEmail, 
+import {
+  findFreelancerByEmail,
   updateFreelancerMuteUntil,
   updateFreelancerJobMute,
 } from '@/lib/monday'
+import {
+  isOpMode,
+  getNotificationSettingsFromOP,
+  updateNotificationSettingsOnOP,
+  reportFallback,
+  mondayFallbackAllowed,
+} from '@/lib/op-api'
 
 // =============================================================================
 // GET - Fetch current mute status
@@ -24,31 +35,49 @@ export async function GET() {
       return NextResponse.json({ success: false, error: 'Not authenticated' }, { status: 401 })
     }
 
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      const sessionToken = cookies().get('session')?.value
+      if (!sessionToken) {
+        return NextResponse.json({ success: false, error: 'Session token missing' }, { status: 401 })
+      }
+      try {
+        const opData = await getNotificationSettingsFromOP(sessionToken)
+        return NextResponse.json(opData)
+      } catch (opError) {
+        console.error('OP backend settings GET error:', opError)
+        reportFallback('settings-notifications-get', opError, { email: user.email })
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { success: false, error: 'Unable to load settings. Please refresh and try again.' },
+            { status: 502 }
+          )
+        }
+        console.log('Settings API: Falling back to Monday.com')
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
+
     const freelancer = await findFreelancerByEmail(user.email)
     if (!freelancer) {
       return NextResponse.json({ success: false, error: 'Freelancer not found' }, { status: 404 })
     }
 
-    // Check if global mute is active
-    // Monday only stores dates (no times), so we compare date-to-date
     let globalMuteActive = false
     let globalMuteUntil: string | null = null
-    
+
     if (freelancer.notificationsPausedUntil) {
       const pausedDate = new Date(freelancer.notificationsPausedUntil)
       const today = new Date()
       today.setHours(0, 0, 0, 0)
       pausedDate.setHours(0, 0, 0, 0)
-      
-      // Mute is active if paused date is today or in the future
-      // (For "end of today", we store tomorrow's date, so it will show as muted)
+
       if (pausedDate > today) {
         globalMuteActive = true
         globalMuteUntil = freelancer.notificationsPausedUntil
       }
     }
 
-    // Parse muted job IDs
     const mutedJobIds = freelancer.mutedJobIds
       ? freelancer.mutedJobIds.split(',').map(id => id.trim()).filter(Boolean)
       : []
@@ -78,10 +107,8 @@ export async function GET() {
 
 interface MuteRequest {
   action: 'mute_global' | 'unmute_global' | 'mute_job' | 'unmute_job'
-  // For mute_global:
   muteType?: '7_days' | 'end_of_today' | 'specific_date' | 'indefinite'
-  muteUntilDate?: string // For specific_date
-  // For mute_job / unmute_job:
+  muteUntilDate?: string
   jobId?: string
 }
 
@@ -93,6 +120,30 @@ export async function POST(request: NextRequest) {
     }
 
     const body: MuteRequest = await request.json()
+
+    // ── OP Backend mode ──────────────────────────────────────────
+    if (isOpMode()) {
+      const sessionToken = cookies().get('session')?.value
+      if (!sessionToken) {
+        return NextResponse.json({ success: false, error: 'Session token missing' }, { status: 401 })
+      }
+      try {
+        const opData = await updateNotificationSettingsOnOP(sessionToken, body as unknown as Record<string, unknown>)
+        return NextResponse.json(opData)
+      } catch (opError) {
+        console.error('OP backend settings POST error:', opError)
+        reportFallback('settings-notifications-post', opError, { email: user.email })
+        if (!mondayFallbackAllowed()) {
+          return NextResponse.json(
+            { success: false, error: 'Unable to update settings. Please try again.' },
+            { status: 502 }
+          )
+        }
+        console.log('Settings API: Falling back to Monday.com for write')
+      }
+    }
+    // ── End OP Backend mode ──────────────────────────────────────
+
     const { action } = body
 
     switch (action) {
@@ -102,19 +153,16 @@ export async function POST(request: NextRequest) {
 
         switch (muteType) {
           case 'end_of_today':
-            // Monday only stores DATES, not times!
-            // To mute "until end of today", we store TOMORROW's date.
-            // The check compares: is pausedDate > today? If tomorrow > today, yes = muted.
             mutedUntil = new Date()
-            mutedUntil.setDate(mutedUntil.getDate() + 1)  // Tomorrow
+            mutedUntil.setDate(mutedUntil.getDate() + 1)
             mutedUntil.setHours(0, 0, 0, 0)
             break
-          
+
           case '7_days':
             mutedUntil = new Date()
             mutedUntil.setDate(mutedUntil.getDate() + 7)
             break
-          
+
           case 'specific_date':
             if (!muteUntilDate) {
               return NextResponse.json(
@@ -122,17 +170,15 @@ export async function POST(request: NextRequest) {
                 { status: 400 }
               )
             }
-            // User picks a date - we store the day AFTER so they're muted ON that day
             mutedUntil = new Date(muteUntilDate)
-            mutedUntil.setDate(mutedUntil.getDate() + 1)  // Day after selected
+            mutedUntil.setDate(mutedUntil.getDate() + 1)
             break
-          
+
           case 'indefinite':
-            // Set to far future date (10 years)
             mutedUntil = new Date()
             mutedUntil.setFullYear(mutedUntil.getFullYear() + 10)
             break
-          
+
           default:
             return NextResponse.json(
               { success: false, error: 'Invalid mute type' },
@@ -141,7 +187,7 @@ export async function POST(request: NextRequest) {
         }
 
         await updateFreelancerMuteUntil(user.email, mutedUntil)
-        
+
         return NextResponse.json({
           success: true,
           message: 'Notifications muted',

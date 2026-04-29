@@ -713,6 +713,160 @@ router.get('/me', async (req: PortalRequest, res: Response) => {
   }
 });
 
+// ── Notification preferences (mirrors the old Monday-backed shape) ───
+//
+// GET  /api/portal/settings/notifications → current mute status
+// POST /api/portal/settings/notifications → mute_global / unmute_global /
+//                                           mute_job / unmute_job
+//
+// Storage lives on people.portal_notifications_paused_until (TIMESTAMPTZ)
+// and people.portal_muted_quote_ids (UUID[]). Date arithmetic matches the
+// Monday version: "end of today" / "specific_date" both store the day
+// AFTER, so the `paused > now` check returns true on the intended day.
+
+router.get('/settings/notifications', async (req: PortalRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT portal_notifications_paused_until, portal_muted_quote_ids
+       FROM people WHERE id = $1`,
+      [req.portalUser!.id]
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ success: false, error: 'Freelancer not found' });
+      return;
+    }
+
+    const row = result.rows[0];
+    const pausedUntil: Date | null = row.portal_notifications_paused_until
+      ? new Date(row.portal_notifications_paused_until)
+      : null;
+    const mutedJobIds: string[] = row.portal_muted_quote_ids || [];
+
+    const globalMuteActive = !!(pausedUntil && pausedUntil > new Date());
+
+    res.json({
+      success: true,
+      notifications: {
+        globalMuteActive,
+        globalMuteUntil: globalMuteActive ? pausedUntil!.toISOString() : null,
+        mutedJobIds,
+        mutedJobCount: mutedJobIds.length,
+      },
+    });
+  } catch (error) {
+    console.error('Portal settings GET error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch settings' });
+  }
+});
+
+const muteSchema = z.object({
+  action: z.enum(['mute_global', 'unmute_global', 'mute_job', 'unmute_job']),
+  muteType: z.enum(['7_days', 'end_of_today', 'specific_date', 'indefinite']).optional(),
+  muteUntilDate: z.string().optional(),
+  jobId: z.string().uuid().optional(),
+});
+
+router.post('/settings/notifications', async (req: PortalRequest, res: Response) => {
+  try {
+    const parsed = muteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, error: 'Invalid request' });
+      return;
+    }
+    const { action, muteType, muteUntilDate, jobId } = parsed.data;
+    const personId = req.portalUser!.id;
+
+    if (action === 'mute_global') {
+      let mutedUntil: Date;
+      switch (muteType) {
+        case 'end_of_today':
+          mutedUntil = new Date();
+          mutedUntil.setDate(mutedUntil.getDate() + 1);
+          mutedUntil.setHours(0, 0, 0, 0);
+          break;
+        case '7_days':
+          mutedUntil = new Date();
+          mutedUntil.setDate(mutedUntil.getDate() + 7);
+          break;
+        case 'specific_date':
+          if (!muteUntilDate) {
+            res.status(400).json({ success: false, error: 'Date required for specific_date mute' });
+            return;
+          }
+          mutedUntil = new Date(muteUntilDate);
+          if (isNaN(mutedUntil.getTime())) {
+            res.status(400).json({ success: false, error: 'Invalid date' });
+            return;
+          }
+          mutedUntil.setDate(mutedUntil.getDate() + 1);
+          break;
+        case 'indefinite':
+          mutedUntil = new Date();
+          mutedUntil.setFullYear(mutedUntil.getFullYear() + 10);
+          break;
+        default:
+          res.status(400).json({ success: false, error: 'Invalid mute type' });
+          return;
+      }
+
+      await query(
+        `UPDATE people SET portal_notifications_paused_until = $1, updated_at = NOW() WHERE id = $2`,
+        [mutedUntil, personId]
+      );
+
+      res.json({ success: true, message: 'Notifications muted', mutedUntil: mutedUntil.toISOString() });
+      return;
+    }
+
+    if (action === 'unmute_global') {
+      await query(
+        `UPDATE people SET portal_notifications_paused_until = NULL, updated_at = NOW() WHERE id = $1`,
+        [personId]
+      );
+      res.json({ success: true, message: 'Notifications enabled' });
+      return;
+    }
+
+    if (action === 'mute_job') {
+      if (!jobId) {
+        res.status(400).json({ success: false, error: 'Job ID required' });
+        return;
+      }
+      await query(
+        `UPDATE people
+         SET portal_muted_quote_ids = (
+           SELECT ARRAY(SELECT DISTINCT unnest(portal_muted_quote_ids || ARRAY[$1::uuid]))
+         ),
+         updated_at = NOW()
+         WHERE id = $2`,
+        [jobId, personId]
+      );
+      res.json({ success: true, message: 'Job notifications muted', jobId });
+      return;
+    }
+
+    if (action === 'unmute_job') {
+      if (!jobId) {
+        res.status(400).json({ success: false, error: 'Job ID required' });
+        return;
+      }
+      await query(
+        `UPDATE people
+         SET portal_muted_quote_ids = array_remove(portal_muted_quote_ids, $1::uuid),
+             updated_at = NOW()
+         WHERE id = $2`,
+        [jobId, personId]
+      );
+      res.json({ success: true, message: 'Job notifications enabled', jobId });
+      return;
+    }
+  } catch (error) {
+    console.error('Portal settings POST error:', error);
+    res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Failed to update settings' });
+  }
+});
+
 // ── GET /api/portal/jobs — freelancer's job list ─────────────────────
 
 router.get('/jobs', async (req: PortalRequest, res: Response) => {
