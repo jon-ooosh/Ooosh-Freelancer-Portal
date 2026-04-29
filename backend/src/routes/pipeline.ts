@@ -1295,6 +1295,102 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
 });
 
 // ============================================================================
+// HireHop datetime helpers (shared by push-hirehop and push-dates-to-hh)
+// ============================================================================
+
+/**
+ * Merge a TIMESTAMPTZ date column with an optional separate TIME column into
+ * HireHop's "YYYY-MM-DD HH:MM" format. The explicit time column wins over any
+ * time portion embedded in the date column. Falls back to fallbackTime when
+ * neither is set (HireHop's standard 09:00 default for date-only entries).
+ */
+function buildHHDateTime(
+  dateValue: Date | string | null | undefined,
+  timeValue: string | null | undefined,
+  fallbackTime = '09:00',
+): string | undefined {
+  if (!dateValue) return undefined;
+  const d = new Date(dateValue);
+  if (isNaN(d.getTime())) return undefined;
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  let timeStr: string;
+  if (timeValue) {
+    timeStr = String(timeValue).slice(0, 5); // PG TIME → 'HH:MM:SS', take HH:MM
+  } else {
+    const hh = d.getUTCHours();
+    const min = d.getUTCMinutes();
+    timeStr = (hh === 0 && min === 0)
+      ? fallbackTime
+      : `${String(hh).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+  }
+  return `${yyyy}-${mm}-${dd} ${timeStr}`;
+}
+
+/**
+ * Calculate HireHop duration_days, duration_hrs, duration_locked from start
+ * and end datetimes (in HH "YYYY-MM-DD HH:MM" format, UTC).
+ *
+ * HireHop stores duration_hrs as TOTAL hours of the hire (e.g. 4-day job →
+ * days=4, hrs=96), NOT the remainder after days. Sending hrs=0 alongside
+ * days=N makes the HH UI display "N days (1 hours)" — confirmed via job
+ * 15833 (4 days/96 hrs) and 15335 (6 days/144 hrs).
+ *
+ * duration_locked=0 keeps HH auto-recalculating duration on subsequent date
+ * edits.
+ */
+function calcHHDuration(
+  startDateTime: string | undefined,
+  endDateTime: string | undefined,
+): { duration_days: number; duration_hrs: number; duration_locked: 0 } | null {
+  if (!startDateTime || !endDateTime) return null;
+  const startMs = Date.parse(startDateTime.replace(' ', 'T') + ':00Z');
+  const endMs = Date.parse(endDateTime.replace(' ', 'T') + ':00Z');
+  if (isNaN(startMs) || isNaN(endMs)) return null;
+  const totalHours = Math.max(0, (endMs - startMs) / (1000 * 60 * 60));
+  return {
+    duration_days: Math.floor(totalHours / 24),
+    duration_hrs: Math.round(totalHours),
+    duration_locked: 0,
+  };
+}
+
+/**
+ * Build the four HireHop datetime fields (out / start / end / to) plus the
+ * duration block from a job row that has the date columns plus optional
+ * out_time / return_time / end_time.
+ *
+ * Time mapping (matches Ooosh business semantics):
+ *   - HH out   = out_date  + out_time     (equipment leaves the warehouse)
+ *   - HH start = job_date  + out_time     (charging starts when it leaves)
+ *   - HH end   = job_end   + end_time ?? return_time  ("Job End Time" in OP)
+ *   - HH to    = return_date + return_time
+ */
+function buildHHJobDateTimes(job: {
+  out_date: Date | string | null;
+  job_date: Date | string | null;
+  job_end: Date | string | null;
+  return_date: Date | string | null;
+  out_time: string | null;
+  return_time: string | null;
+  end_time: string | null;
+}): {
+  out?: string;
+  start?: string;
+  end?: string;
+  to?: string;
+  duration?: { duration_days: number; duration_hrs: number; duration_locked: 0 };
+} {
+  const out = buildHHDateTime(job.out_date, job.out_time);
+  const start = buildHHDateTime(job.job_date, job.out_time);
+  const end = buildHHDateTime(job.job_end, job.end_time || job.return_time);
+  const to = buildHHDateTime(job.return_date, job.return_time);
+  const duration = calcHHDuration(start, end) ?? undefined;
+  return { out, start, end, to, duration };
+}
+
+// ============================================================================
 // PUSH DATES TO HIREHOP — Sync OP dates to HireHop after editing in OP
 // ============================================================================
 
@@ -1303,7 +1399,9 @@ router.post('/:id/push-dates-to-hh', async (req: AuthRequest, res: Response) => 
     const jobId = req.params.id as string;
 
     const jobResult = await query(
-      `SELECT id, hh_job_number, out_date, job_date, job_end, return_date FROM jobs WHERE id = $1 AND is_deleted = false`,
+      `SELECT id, hh_job_number, out_date, job_date, job_end, return_date,
+              out_time, return_time, end_time
+         FROM jobs WHERE id = $1 AND is_deleted = false`,
       [jobId]
     );
     if (jobResult.rows.length === 0) {
@@ -1317,32 +1415,27 @@ router.post('/:id/push-dates-to-hh', async (req: AuthRequest, res: Response) => 
       return;
     }
 
-    // Format dates for HH: YYYY-MM-DD HH:MM
-    const fmtHH = (d: string | null): string | null => {
-      if (!d) return null;
-      const dt = new Date(d);
-      if (isNaN(dt.getTime())) return null;
-      const dateStr = dt.toISOString().split('T')[0];
-      const hours = String(dt.getHours()).padStart(2, '0');
-      const mins = String(dt.getMinutes()).padStart(2, '0');
-      // If time is midnight (00:00), default to 09:00
-      const timeStr = (hours === '00' && mins === '00') ? '09:00' : `${hours}:${mins}`;
-      return `${dateStr} ${timeStr}`;
-    };
+    const { out, start, end, to, duration } = buildHHJobDateTimes(job);
 
     const dateParams: Record<string, unknown> = {
       job: job.hh_job_number,
       no_webhook: 1,
     };
-    if (job.out_date) dateParams.out = fmtHH(job.out_date);
-    if (job.job_date) dateParams.start = fmtHH(job.job_date);
-    if (job.job_end) dateParams.end = fmtHH(job.job_end);
-    if (job.return_date) dateParams.to = fmtHH(job.return_date);
+    if (out) dateParams.out = out;
+    if (start) dateParams.start = start;
+    if (end) dateParams.end = end;
+    if (to) dateParams.to = to;
+    if (duration) {
+      dateParams.duration_days = duration.duration_days;
+      dateParams.duration_hrs = duration.duration_hrs;
+      dateParams.duration_locked = duration.duration_locked;
+    }
 
-    const hhResult = await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
+    await hhBroker.post('/api/save_job.php', dateParams, { priority: 'high' });
 
     console.log(`[Pipeline] Pushed dates to HH job ${job.hh_job_number}:`, {
-      out: dateParams.out, start: dateParams.start, end: dateParams.end, to: dateParams.to,
+      out, start, end, to,
+      duration_days: duration?.duration_days, duration_hrs: duration?.duration_hrs,
     });
 
     res.json({ success: true, hh_job_number: job.hh_job_number });
@@ -1399,26 +1492,6 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Format dates as YYYY-MM-DD hh:mm (HireHop expects this, use UTC to avoid timezone drift)
-    // Default to 09:00 if time is midnight (dates from DatePicker have no time component)
-    const formatHHDate = (d: string | null): string | undefined => {
-      if (!d) return undefined;
-      try {
-        const date = new Date(d);
-        const yyyy = date.getUTCFullYear();
-        const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
-        const dd = String(date.getUTCDate()).padStart(2, '0');
-        const hh = date.getUTCHours();
-        const min = date.getUTCMinutes();
-        // Default midnight to 09:00 (typical business start time)
-        const effectiveHH = (hh === 0 && min === 0) ? '09' : String(hh).padStart(2, '0');
-        const effectiveMin = (hh === 0 && min === 0) ? '00' : String(min).padStart(2, '0');
-        return `${yyyy}-${mm}-${dd} ${effectiveHH}:${effectiveMin}`;
-      } catch {
-        return undefined;
-      }
-    };
-
     // Look up venue name if we have a venue_id
     let venueName = job.venue_name || undefined;
     if (!venueName && job.venue_id) {
@@ -1469,33 +1542,24 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     if (orgDetails?.email) hhBody.email = orgDetails.email;
     if (orgDetails?.phone) hhBody.telephone = orgDetails.phone;
 
-    const outDate = formatHHDate(job.out_date);
-    const startDate = formatHHDate(job.job_date);
-    const endDate = formatHHDate(job.job_end);
-    const toDate = formatHHDate(job.return_date);
+    const { out, start, end, to, duration } = buildHHJobDateTimes(job);
 
     // If job_end is set but no separate out/return dates, default them
-    const effectiveOut = outDate || startDate;
-    const effectiveReturn = toDate || endDate;
+    const effectiveOut = out || start;
+    const effectiveReturn = to || end;
 
     // HireHop job_save.php date fields (per API docs):
     // out = equipment reserved from (compulsory), start = charging from (compulsory),
     // end = job ends, to = equipment available again
     if (effectiveOut) hhBody.out = effectiveOut;
-    if (startDate) hhBody.start = startDate;
-    if (endDate) hhBody.end = endDate;
+    if (start) hhBody.start = start;
+    if (end) hhBody.end = end;
     if (effectiveReturn) hhBody.to = effectiveReturn;
 
-    // duration_days / duration_hrs = chargeable period from JOB_DATE (per API docs)
-    // duration_locked = 0 so it recalculates if dates are edited in HH later
-    const dStart = new Date(job.job_date);
-    const dEnd = new Date(job.job_end);
-    if (!isNaN(dStart.getTime()) && !isNaN(dEnd.getTime())) {
-      const diffMs = dEnd.getTime() - dStart.getTime();
-      const totalHours = Math.max(0, diffMs / (1000 * 60 * 60));
-      hhBody.duration_days = Math.floor(totalHours / 24);
-      hhBody.duration_hrs = Math.round(totalHours % 24);
-      hhBody.duration_locked = 0;
+    if (duration) {
+      hhBody.duration_days = duration.duration_days;
+      hhBody.duration_hrs = duration.duration_hrs;
+      hhBody.duration_locked = duration.duration_locked;
     }
 
     console.log('[Pipeline] Creating job in HireHop:', {
