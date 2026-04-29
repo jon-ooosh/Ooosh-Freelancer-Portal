@@ -21,7 +21,15 @@ interface FreelancerContext {
   vehicleId?: string
   vehicleReg?: string
   vehicleMakeModel?: string
+  vehicleType?: string | null
   assignmentId?: string
+  // The CUSTOMER on the hire agreement (distinct from the freelancer
+  // delivery person above). These drive the PDF "Driver" / "Email" fields
+  // and the recipient of the hire agreement email. Null when the customer
+  // hasn't yet submitted their hire form — BookOutPage should block submit
+  // and ask the freelancer to chase them.
+  customerDriverName?: string | null
+  customerDriverEmail?: string | null
 }
 
 interface AuthState {
@@ -310,7 +318,10 @@ export function useAuth(): AuthState {
               vehicleId: opState.freelancerContext.vehicleId,
               vehicleReg: opState.freelancerContext.vehicleReg,
               vehicleMakeModel: opState.freelancerContext.vehicleMakeModel,
+              vehicleType: opState.freelancerContext.vehicleType,
               assignmentId: opState.freelancerContext.assignmentId,
+              customerDriverName: opState.freelancerContext.customerDriverName,
+              customerDriverEmail: opState.freelancerContext.customerDriverEmail,
             }
           : null,
         freelancerError: null,

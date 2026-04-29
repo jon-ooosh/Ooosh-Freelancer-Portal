@@ -251,15 +251,25 @@ export function BookOutPage() {
     const ctxVehicle = vehicles.find(v => v.id === freelancerContext.vehicleId)
     if (!ctxVehicle) return // wait for vehicles list
     freelancerAutoSelectedRef.current = true
+    // The freelancer is the DELIVERY person; the customer is the driver on
+    // the hire agreement and on the condition-report PDF. Pre-fill the
+    // form with the customer's name + email (from the hire form) — the
+    // freelancer's identity is recorded separately as deliveredBy on the
+    // event JSON. Falls back to freelancer name only if the customer
+    // hasn't yet submitted their hire form (caller blocks submit before
+    // the PDF goes out).
+    const customerName = freelancerContext.customerDriverName || ''
+    const customerEmail = freelancerContext.customerDriverEmail || ''
     setForm(f => ({
       ...f,
       vehicleId: ctxVehicle.id,
       vehicleReg: ctxVehicle.reg,
       vehicleType: ctxVehicle.vehicleType,
       vehicleSimpleType: ctxVehicle.simpleType,
-      driverName: freelancerContext.driverName || f.driverName,
+      driverName: customerName || f.driverName,
+      clientEmail: customerEmail || f.clientEmail,
       hireHopJob: freelancerContext.jobId || f.hireHopJob,
-      allDrivers: [freelancerContext.driverName || f.driverName].filter(Boolean),
+      allDrivers: [customerName || f.driverName].filter(Boolean),
     }))
   }, [isFreelancer, freelancerContext, vehicles])
 
@@ -477,6 +487,10 @@ export function BookOutPage() {
           notes: form.notes || null,
           briefingItems: tickedBriefingItems,
           signatureBase64: earlySignatureBase64 || null,
+          // For freelancer deliveries: record who physically did the
+          // walkaround. driverName is the customer (on the agreement);
+          // deliveredBy is the freelancer.
+          deliveredBy: isFreelancer ? freelancerContext?.driverName ?? null : null,
         }),
       'R2 event creation',
     )
@@ -1523,9 +1537,18 @@ function StepDriverHire({
     })))
 
     // Set hire dates/times and extra fields from first form entry (same per job)
+    // Fall back to the HH job's own dates when the hire form record didn't
+    // populate them — better than printing "(pending hire form)" on the
+    // condition PDF when the job clearly has dates in the system. The
+    // backend has the same fallback (resolveJobHireDates) but applying it
+    // here means the dates are visible on the form before submit.
     const firstForm = hireForms[0]!
+    const fallbackStart = form.hireHopJobData?.outDate || form.hireHopJobData?.jobDate
+    const fallbackEnd = form.hireHopJobData?.jobEndDate || form.hireHopJobData?.returnDate
     if (firstForm.hireStart) onUpdate('hireStartDate', firstForm.hireStart)
+    else if (fallbackStart) onUpdate('hireStartDate', fallbackStart)
     if (firstForm.hireEnd) onUpdate('hireEndDate', firstForm.hireEnd)
+    else if (fallbackEnd) onUpdate('hireEndDate', fallbackEnd)
     if (firstForm.startTime) onUpdate('hireStartTime', firstForm.startTime)
     if (firstForm.endTime) onUpdate('hireEndTime', firstForm.endTime)
     if (firstForm.excess) onUpdate('excess', firstForm.excess)

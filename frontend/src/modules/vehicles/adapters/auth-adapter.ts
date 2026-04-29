@@ -42,11 +42,17 @@ export interface FreelancerContext {
   /** HireHop job number as string (preferred) or OP job UUID (fallback) */
   jobId: string
   driverEmail: string
+  /** The freelancer's display name (the DELIVERY person, not the driver) */
   driverName: string
   vehicleId: string
   vehicleReg: string
   vehicleMakeModel: string
+  vehicleType: string | null
   assignmentId: string
+  /** The customer's name — drives the PDF "Driver" field + signature label */
+  customerDriverName: string | null
+  /** The customer's email — drives the hire agreement email recipient */
+  customerDriverEmail: string | null
   returnUrl: string | null
 }
 
@@ -148,7 +154,10 @@ function freelancerContextFromStorage(ctx: FreelancerBookoutContext): Freelancer
     vehicleId: ctx.vehicleId,
     vehicleReg: ctx.vehicleReg,
     vehicleMakeModel: ctx.vehicleMakeModel,
+    vehicleType: ctx.vehicleType,
     assignmentId: ctx.assignmentId,
+    customerDriverName: ctx.customerDriverName,
+    customerDriverEmail: ctx.customerDriverEmail,
     returnUrl: ctx.returnUrl,
   }
 }

@@ -39,6 +39,11 @@ export async function createVehicleEvent(params: {
   // Driver signature as base64 data URI. Persisted on the server as a
   // separate R2 object (stripped from the event JSON before storage).
   signatureBase64?: string | null
+  // For freelancer-driven deliveries: the freelancer's display name. The
+  // driverName above is the CUSTOMER (driver on the agreement); deliveredBy
+  // captures who physically did the walkaround. Doesn't appear on the PDF
+  // — kept on the event JSON for activity timeline / audit trail.
+  deliveredBy?: string | null
 }): Promise<{ id: string; error?: string }> {
   const dateStr = params.eventDate || new Date().toISOString().split('T')[0]!
   const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -59,6 +64,7 @@ export async function createVehicleEvent(params: {
     notes: params.notes ?? null,
     briefingItems: params.briefingItems ?? null,
     signatureBase64: params.signatureBase64 ?? null,
+    deliveredBy: params.deliveredBy ?? null,
     createdAt: new Date().toISOString(),
   }
 
