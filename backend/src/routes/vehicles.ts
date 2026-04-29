@@ -2600,8 +2600,18 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   if (data.hireHopJob) y = addRow('HireHop Job', '#' + data.hireHopJob, y);
   y = addRow('Date/Time', timestamp, y);
 
-  y = addRow('Hire Start', data.hireStartDate ? formatDayDate(data.hireStartDate) : '- (pending hire form)', y);
-  y = addRow('Hire End', data.hireEndDate ? formatDayDate(data.hireEndDate) : '- (pending hire form)', y);
+  // Hire Start / End — render date + time on a single line. Time is
+  // optional (some legacy data has dates only). The hire START time is
+  // the book-out wall time — it's literally when the hire began, even
+  // if that's later than the job's planned out_time. End time falls
+  // back to jobs.end_time (the real end of charge).
+  const fmtDateTime = (dateStr: string | undefined, timeStr: string | undefined): string => {
+    if (!dateStr) return '- (pending hire form)';
+    const d = formatDayDate(dateStr);
+    return timeStr ? `${d} ${timeStr}` : d;
+  };
+  y = addRow('Hire Start', fmtDateTime(data.hireStartDate, data.hireStartTime), y);
+  y = addRow('Hire End',   fmtDateTime(data.hireEndDate,   data.hireEndTime),   y);
 
   if (data.allDrivers && data.allDrivers.length > 0) {
     const driversText = data.allDrivers.join(', ');
@@ -2986,26 +2996,39 @@ function formatDayDate(dateStr: string): string {
 }
 
 /**
- * Look up the canonical hire-window dates for a HireHop job number, used
- * to fall back when the BookOutPage didn't pass hireStartDate/hireEndDate
- * (e.g. hire-form record missing them or freelancer flow with no hire
- * forms loaded). Mirrors the COALESCE pattern in hire-forms.ts:1337 —
- * prefer per-assignment hire dates, fall back to job dates.
+ * Look up the canonical hire-window dates AND times for a HireHop job
+ * number, used to fall back when the BookOutPage didn't pass them (e.g.
+ * hire-form record missing them or freelancer flow with no hire forms
+ * loaded). Mirrors the COALESCE pattern in hire-forms.ts:1337 — prefer
+ * per-assignment values, fall back to job-level values.
  *
- * Returns {start, end} as 'YYYY-MM-DD' strings (or null if no match).
+ * Important rules:
+ *   - Hire END uses job_end (the real end of charge), NOT return_date
+ *     (the +1-day warehouse turnaround buffer). Per CLAUDE.md "Hire
+ *     Date Resolution".
+ *   - End TIME falls back to jobs.end_time (also the real end of
+ *     charge), NOT jobs.return_time.
+ *
+ * Returns null if no match. start_time / end_time are 'HH:MM' or null.
  */
 async function resolveJobHireDates(hireHopJob: string | number | null | undefined): Promise<{
   start: string | null;
   end: string | null;
+  startTime: string | null;
+  endTime: string | null;
 }> {
-  if (!hireHopJob) return { start: null, end: null };
+  const empty = { start: null, end: null, startTime: null, endTime: null };
+  if (!hireHopJob) return empty;
   const hhNum = typeof hireHopJob === 'number' ? hireHopJob : parseInt(String(hireHopJob), 10);
-  if (!hhNum || isNaN(hhNum)) return { start: null, end: null };
+  if (!hhNum || isNaN(hhNum)) return empty;
   try {
     const result = await query(
       `SELECT
-         COALESCE(MAX(vha.hire_start), MAX(j.job_date)) AS resolved_start,
-         COALESCE(MAX(vha.hire_end),   MAX(j.job_end))  AS resolved_end
+         COALESCE(MAX(vha.hire_start), MAX(j.job_date))    AS resolved_start,
+         COALESCE(MAX(vha.hire_end),   MAX(j.job_end))     AS resolved_end,
+         COALESCE(MAX(vha.start_time), MAX(j.out_time),
+                                       MAX(j.start_time))  AS resolved_start_time,
+         COALESCE(MAX(vha.end_time),   MAX(j.end_time))    AS resolved_end_time
          FROM jobs j
          LEFT JOIN vehicle_hire_assignments vha
                 ON vha.job_id = j.id
@@ -3015,17 +3038,29 @@ async function resolveJobHireDates(hireHopJob: string | number | null | undefine
       [hhNum]
     );
     const row = result.rows[0];
-    if (!row) return { start: null, end: null };
+    if (!row) return empty;
     const toIso = (v: unknown): string | null => {
       if (!v) return null;
       const d = new Date(v as string | Date);
       if (isNaN(d.getTime())) return null;
       return d.toISOString().slice(0, 10);
     };
-    return { start: toIso(row.resolved_start), end: toIso(row.resolved_end) };
+    const toHHMM = (v: unknown): string | null => {
+      if (!v) return null;
+      const s = String(v);
+      // Postgres TIME returns 'HH:MM:SS' or 'HH:MM:SS.ssss'; trim to HH:MM.
+      const m = s.match(/^(\d{2}:\d{2})/);
+      return m ? m[1]! : null;
+    };
+    return {
+      start: toIso(row.resolved_start),
+      end: toIso(row.resolved_end),
+      startTime: toHHMM(row.resolved_start_time),
+      endTime: toHHMM(row.resolved_end_time),
+    };
   } catch (err) {
     console.warn('[vehicles/pdf] resolveJobHireDates failed:', err instanceof Error ? err.message : err);
-    return { start: null, end: null };
+    return empty;
   }
 }
 
@@ -3048,17 +3083,22 @@ router.post('/generate-pdf', async (req: FlexibleVehicleRequest, res: Response) 
       }
     }
 
-    // Backstop for missing hire dates: BookOutPage only sets hireStartDate/
-    // hireEndDate when it sees them on the loaded hire form. If no hire
-    // form is loaded (freelancer mode, mid-tour driver, or the form has
-    // those fields NULL), the PDF would print "(pending hire form)" even
-    // though the job has perfectly good dates. Fall back to the same
-    // COALESCE pattern the hire-form PDF builder uses.
+    // Backstop for missing hire dates / times: BookOutPage only sets
+    // hireStartDate/hireEndDate/hireStartTime/hireEndTime when it sees
+    // them on the loaded hire form. If no hire form is loaded
+    // (freelancer mode, mid-tour driver, or the form has those fields
+    // NULL), the PDF would print "(pending hire form)" or no time at
+    // all even though the job has perfectly good values. Fall back to
+    // the same COALESCE pattern the hire-form PDF builder uses.
     const data = { ...(req.body || {}) };
-    if (!data.hireStartDate || !data.hireEndDate) {
+    const needsAnyFallback = !data.hireStartDate || !data.hireEndDate
+      || !data.hireStartTime || !data.hireEndTime;
+    if (needsAnyFallback) {
       const resolved = await resolveJobHireDates(data.hireHopJob);
-      if (!data.hireStartDate && resolved.start) data.hireStartDate = resolved.start;
-      if (!data.hireEndDate && resolved.end) data.hireEndDate = resolved.end;
+      if (!data.hireStartDate && resolved.start)     data.hireStartDate = resolved.start;
+      if (!data.hireEndDate   && resolved.end)       data.hireEndDate   = resolved.end;
+      if (!data.hireStartTime && resolved.startTime) data.hireStartTime = resolved.startTime;
+      if (!data.hireEndTime   && resolved.endTime)   data.hireEndTime   = resolved.endTime;
     }
 
     const { pdfBytes, filename } = await buildConditionReportPdf(data);
@@ -3194,6 +3234,8 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       eventDateTime: event.createdAt || event.eventDate || new Date().toISOString(),
       hireStartDate: event.hireStartDate || resolvedDates.start || undefined,
       hireEndDate: event.hireEndDate || resolvedDates.end || undefined,
+      hireStartTime: event.hireStartTime || resolvedDates.startTime || undefined,
+      hireEndTime: event.hireEndTime || resolvedDates.endTime || undefined,
       photos: photoBase64s,
       briefingItems: Array.isArray(event.briefingItems) ? event.briefingItems : [],
       bookOutNotes: notes,
