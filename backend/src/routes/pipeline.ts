@@ -895,7 +895,7 @@ const updatePipelineSchema = z.object({
   next_chase_date: z.string().optional().nullable(),
   chase_interval_days: z.number().min(1).max(90).optional(),
   chase_alert_user_id: z.string().uuid().optional().nullable(),
-  chase_alert_delivery: z.enum(['bell', 'bell_email']).optional().nullable(),
+  chase_alert_delivery: z.enum(['bell', 'bell_email', 'none']).optional().nullable(),
   job_value: z.number().optional().nullable(),
   quote_status: z.enum(['not_quoted', 'quoted', 'revised', 'accepted']).optional().nullable(),
   enquiry_source: z.enum(['phone', 'email', 'web_form', 'referral', 'cold_lead', 'forum', 'repeat', 'other']).optional().nullable(),
