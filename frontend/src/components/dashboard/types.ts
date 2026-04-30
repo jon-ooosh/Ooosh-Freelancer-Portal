@@ -1,5 +1,44 @@
 /** Types for the Command Centre dashboard */
 
+export interface OverdueDeparture {
+  id: string;
+  hh_job_number: number | null;
+  job_name: string | null;
+  client_name: string | null;
+  company_name: string | null;
+  venue_name: string | null;
+  expected_date: string | null;
+  hh_status: number;
+  pipeline_status: string | null;
+  days_overdue: number;
+}
+
+export interface OverdueBacklineRow {
+  id: string;
+  hh_job_number: number | null;
+  job_name: string | null;
+  client_name: string | null;
+  company_name: string | null;
+  job_date: string | null;
+  hh_status: number;
+  backline_status: string;
+  days_overdue: number;
+}
+
+export interface OverdueTransportRow {
+  id: string;            // quote id
+  job_id: string | null; // jobs.id (UUID)
+  hh_job_number: number | null;
+  job_name: string | null;
+  client_name: string | null;
+  job_type: string;
+  job_date: string | null;
+  venue_name: string | null;
+  ops_status: string | null;
+  quote_status: string | null;
+  days_overdue: number;
+}
+
 export interface ScheduleJob {
   id: string;
   hh_job_number: number | null;
@@ -200,6 +239,10 @@ export interface OperationsData {
   upcoming_events: UpcomingEvent[];
   needs_attention: {
     overdue_returns: ScheduleJob[];
+    overdue_departures?: OverdueDeparture[];
+    overdue_backline?: OverdueBacklineRow[];
+    overdue_transport_ops?: OverdueTransportRow[];
+    total_overdue_count?: number;
     chases_due: ChaseJob[];
     referral_count: number;
     referrals: PendingReferral[];

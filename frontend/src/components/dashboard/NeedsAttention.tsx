@@ -1,10 +1,16 @@
 import { Link } from 'react-router-dom';
-import type { ScheduleJob, ChaseJob, PendingReferral, PendingExcess } from './types';
+import type {
+  ScheduleJob, ChaseJob, PendingReferral, PendingExcess,
+  OverdueDeparture, OverdueBacklineRow, OverdueTransportRow,
+} from './types';
 import { jobDisplayName, daysAgo, formatCurrency } from './helpers';
 
 interface Props {
   overdueReturns: ScheduleJob[];
   overdueTotalCount?: number;
+  overdueDepartures?: OverdueDeparture[];
+  overdueBacklineRows?: OverdueBacklineRow[];
+  overdueTransportRows?: OverdueTransportRow[];
   chasesDue: ChaseJob[];
   referralCount: number;
   referrals: PendingReferral[];
@@ -15,29 +21,41 @@ interface Props {
 }
 
 export default function NeedsAttention({
-  overdueReturns, overdueTotalCount, chasesDue, referralCount, referrals,
+  overdueReturns, overdueTotalCount,
+  overdueDepartures = [], overdueBacklineRows = [], overdueTransportRows = [],
+  chasesDue, referralCount, referrals,
   excessCount, excessItems, fleetAlerts,
 }: Props) {
   const totalFleetAlerts = (fleetAlerts?.mot || 0) + (fleetAlerts?.insurance || 0) + (fleetAlerts?.tax || 0);
-  const overdueCount = overdueTotalCount ?? overdueReturns.length;
-  const hasAnything = overdueCount > 0 || chasesDue.length > 0 || referralCount > 0 || excessCount > 0 || totalFleetAlerts > 0;
+  const overdueReturnsCount = overdueReturns.length;
+  const overdueDeparturesCount = overdueDepartures.length;
+  const overdueBacklineCount = overdueBacklineRows.length;
+  const overdueTransportCount = overdueTransportRows.length;
+  const grandOverdueCount = overdueTotalCount
+    ?? (overdueReturnsCount + overdueDeparturesCount + overdueBacklineCount + overdueTransportCount);
+  const hasAnything = grandOverdueCount > 0 || chasesDue.length > 0 || referralCount > 0 || excessCount > 0 || totalFleetAlerts > 0;
 
   if (!hasAnything) return null;
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-      <div className="px-5 py-4 border-b border-gray-100">
+      <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Needs Attention</h2>
+        {grandOverdueCount > 0 && (
+          <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-semibold">
+            {grandOverdueCount} overdue
+          </span>
+        )}
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-0 divide-y sm:divide-y-0 sm:divide-x divide-gray-100">
         {/* Overdue Returns */}
-        {overdueCount > 0 && (
+        {overdueReturnsCount > 0 && (
           <div className="p-4">
             <div className="flex items-center gap-2 mb-3">
               <span className="w-2 h-2 rounded-full bg-red-500" />
               <h3 className="text-xs font-semibold text-red-700 uppercase">Overdue Returns</h3>
               <span className="ml-auto text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-medium">
-                {overdueCount}
+                {overdueReturnsCount}
               </span>
             </div>
             <div className="space-y-2">
@@ -53,9 +71,96 @@ export default function NeedsAttention({
                 </Link>
               ))}
             </div>
-            {overdueCount > 3 && (
+            {overdueReturnsCount > 3 && (
               <Link to="/jobs/returns" className="text-[11px] text-red-600 hover:text-red-700 font-medium mt-2 block">
-                View all {overdueCount}
+                View all {overdueReturnsCount}
+              </Link>
+            )}
+          </div>
+        )}
+
+        {/* Overdue Departures — should have left but haven't */}
+        {overdueDeparturesCount > 0 && (
+          <div className="p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="w-2 h-2 rounded-full bg-red-500" />
+              <h3 className="text-xs font-semibold text-red-700 uppercase">Overdue Departures</h3>
+              <span className="ml-auto text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-medium">
+                {overdueDeparturesCount}
+              </span>
+            </div>
+            <div className="space-y-2">
+              {overdueDepartures.slice(0, 3).map((j) => (
+                <Link key={j.id} to={`/jobs/${j.id}`} className="block text-sm hover:bg-red-50 -mx-1 px-1 py-1 rounded transition-colors">
+                  <div className="font-medium text-gray-900 truncate text-xs">
+                    {j.hh_job_number && <span className="font-mono text-gray-400 mr-1">#{j.hh_job_number}</span>}
+                    {j.job_name || j.company_name || j.client_name || 'Untitled'}
+                  </div>
+                  <div className="text-[11px] text-red-600">{j.days_overdue}d overdue</div>
+                </Link>
+              ))}
+            </div>
+            {overdueDeparturesCount > 3 && (
+              <Link to="/jobs" className="text-[11px] text-red-600 hover:text-red-700 font-medium mt-2 block">
+                View all {overdueDeparturesCount}
+              </Link>
+            )}
+          </div>
+        )}
+
+        {/* Overdue Backline — pre-hire backline not done past job_date */}
+        {overdueBacklineCount > 0 && (
+          <div className="p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="w-2 h-2 rounded-full bg-red-500" />
+              <h3 className="text-xs font-semibold text-red-700 uppercase">Overdue Backline</h3>
+              <span className="ml-auto text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-medium">
+                {overdueBacklineCount}
+              </span>
+            </div>
+            <div className="space-y-2">
+              {overdueBacklineRows.slice(0, 3).map((j) => (
+                <Link key={j.id} to={`/jobs/${j.id}`} className="block text-sm hover:bg-red-50 -mx-1 px-1 py-1 rounded transition-colors">
+                  <div className="font-medium text-gray-900 truncate text-xs">
+                    {j.hh_job_number && <span className="font-mono text-gray-400 mr-1">#{j.hh_job_number}</span>}
+                    {j.job_name || j.company_name || j.client_name || 'Untitled'}
+                  </div>
+                  <div className="text-[11px] text-red-600">{j.days_overdue}d overdue</div>
+                </Link>
+              ))}
+            </div>
+            {overdueBacklineCount > 3 && (
+              <Link to="/operations/backline" className="text-[11px] text-red-600 hover:text-red-700 font-medium mt-2 block">
+                View all {overdueBacklineCount}
+              </Link>
+            )}
+          </div>
+        )}
+
+        {/* Overdue Transport Ops — quotes past their date not completed/cancelled */}
+        {overdueTransportCount > 0 && (
+          <div className="p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="w-2 h-2 rounded-full bg-red-500" />
+              <h3 className="text-xs font-semibold text-red-700 uppercase">Overdue Transport</h3>
+              <span className="ml-auto text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-medium">
+                {overdueTransportCount}
+              </span>
+            </div>
+            <div className="space-y-2">
+              {overdueTransportRows.slice(0, 3).map((q) => (
+                <Link key={q.id} to={q.job_id ? `/jobs/${q.job_id}` : '/operations/transport'} className="block text-sm hover:bg-red-50 -mx-1 px-1 py-1 rounded transition-colors">
+                  <div className="font-medium text-gray-900 truncate text-xs">
+                    {q.hh_job_number && <span className="font-mono text-gray-400 mr-1">#{q.hh_job_number}</span>}
+                    {q.job_name || q.client_name || q.venue_name || 'Untitled'}
+                  </div>
+                  <div className="text-[11px] text-red-600">{q.days_overdue}d overdue · {q.ops_status || 'todo'}</div>
+                </Link>
+              ))}
+            </div>
+            {overdueTransportCount > 3 && (
+              <Link to="/operations/transport?when=overdue" className="text-[11px] text-red-600 hover:text-red-700 font-medium mt-2 block">
+                View all {overdueTransportCount}
               </Link>
             )}
           </div>

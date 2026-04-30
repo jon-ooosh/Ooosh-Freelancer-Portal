@@ -140,6 +140,64 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LIMIT 10
       `),
 
+      // 7a. Overdue departures — should have left but haven't.
+      // Jobs with out_date or job_date in the past, still in pre-dispatch HH
+      // status (1-4), and OP pipeline doesn't say it's gone or done.
+      // Capped at 30 days lookback to avoid stale-data noise.
+      query(`
+        SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
+               COALESCE(j.out_date, j.job_date) AS expected_date, j.venue_name,
+               j.status AS hh_status, j.pipeline_status,
+               (CURRENT_DATE - COALESCE(j.out_date, j.job_date)::date) AS days_overdue
+        FROM jobs j
+        WHERE j.is_deleted = false
+          AND j.status IN (1, 2, 3, 4)
+          AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'dispatched', 'returned')
+          AND COALESCE(j.out_date, j.job_date)::date < CURRENT_DATE
+          AND COALESCE(j.out_date, j.job_date)::date >= CURRENT_DATE - INTERVAL '30 days'
+        ORDER BY COALESCE(j.out_date, j.job_date) ASC
+        LIMIT 10
+      `),
+
+      // 7b. Overdue backline — pre-hire backline not done past job_date.
+      // Mirrors backline.ts overdueOut logic; capped to 10 for the widget.
+      query(`
+        SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
+               j.job_date, j.status AS hh_status, jr.status AS backline_status,
+               (CURRENT_DATE - j.job_date::date) AS days_overdue
+        FROM jobs j
+        JOIN job_requirements jr ON jr.job_id = j.id
+          AND jr.requirement_type = 'backline'
+          AND jr.phase = 'pre_hire'
+        WHERE j.is_deleted = false
+          AND j.job_date::date < CURRENT_DATE
+          AND j.job_date::date >= CURRENT_DATE - INTERVAL '30 days'
+          AND j.status < 5
+          AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'returned')
+          AND jr.status != 'done'
+        ORDER BY j.job_date ASC
+        LIMIT 10
+      `),
+
+      // 7c. Overdue transport ops — quotes past their job_date that aren't
+      // completed or cancelled. Includes legacy "stalled" rows that have
+      // drifted past their date without anyone closing them out.
+      query(`
+        SELECT q.id, q.job_type, q.job_date, q.venue_name, q.ops_status,
+               q.status AS quote_status,
+               j.id AS job_id, j.hh_job_number, j.job_name, j.client_name,
+               (CURRENT_DATE - q.job_date::date) AS days_overdue
+        FROM quotes q
+        LEFT JOIN jobs j ON j.id = q.job_id
+        WHERE q.is_deleted = false
+          AND q.status != 'cancelled'
+          AND COALESCE(q.ops_status, 'todo') NOT IN ('completed', 'cancelled')
+          AND q.job_date::date < CURRENT_DATE
+          AND q.job_date::date >= CURRENT_DATE - INTERVAL '30 days'
+        ORDER BY q.job_date ASC
+        LIMIT 10
+      `),
+
       // 8. Pending referrals count
       query(`
         SELECT COUNT(*) as count
@@ -397,6 +455,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       tomorrowGoingOutResult, tomorrowReturningResult,
       upcomingDeparturesResult, upcomingReturnsResult,
       overdueReturnsResult, chasesDueResult,
+      overdueDeparturesResult, overdueBacklineResult, overdueTransportOpsResult,
       referralCountResult, excessCountResult,
       transportOpsResult, unassignedTransportResult,
       fleetSummaryResult, pipelineStatsResult,
@@ -479,6 +538,17 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       upcoming_events: upcomingEvents,
       needs_attention: {
         overdue_returns: overdueReturnsResult.rows,
+        overdue_departures: overdueDeparturesResult.rows,
+        overdue_backline: overdueBacklineResult.rows,
+        overdue_transport_ops: overdueTransportOpsResult.rows,
+        // Aggregate count for "X items need attention" headline. Excludes
+        // chases (separate concept) and referrals/excess counts (live in
+        // their own widgets).
+        total_overdue_count:
+          overdueReturnsResult.rows.length +
+          overdueDeparturesResult.rows.length +
+          overdueBacklineResult.rows.length +
+          overdueTransportOpsResult.rows.length,
         chases_due: chasesDueResult.rows,
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,

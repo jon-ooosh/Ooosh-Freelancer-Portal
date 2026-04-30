@@ -1058,14 +1058,17 @@ function QuoteRow({
 
   // Overdue = active quote whose job date has passed (calendar-day).
   // Takes priority over run-group border colour so the red flag is visible.
-  const isOverdue = (() => {
-    if (q.ops_status === 'completed' || q.ops_status === 'cancelled') return false;
-    if (!q.job_date) return false;
+  // daysOverdue powers the "Xd overdue" badge — undefined when not overdue.
+  const { isOverdue, daysOverdue } = (() => {
+    if (q.ops_status === 'completed' || q.ops_status === 'cancelled') return { isOverdue: false, daysOverdue: undefined };
+    if (!q.job_date) return { isOverdue: false, daysOverdue: undefined };
     const d = q.job_date instanceof Date ? new Date(q.job_date) : new Date(q.job_date);
-    if (Number.isNaN(d.getTime())) return false;
+    if (Number.isNaN(d.getTime())) return { isOverdue: false, daysOverdue: undefined };
     d.setHours(0, 0, 0, 0);
     const today = new Date(); today.setHours(0, 0, 0, 0);
-    return d < today;
+    if (d >= today) return { isOverdue: false, daysOverdue: undefined };
+    const days = Math.round((today.getTime() - d.getTime()) / 86400000);
+    return { isOverdue: true, daysOverdue: days };
   })();
 
   // Compute run letter and colour index for display (runs match by date, not job)
@@ -1175,7 +1178,9 @@ function QuoteRow({
               <span className="text-xs text-gray-400 flex-shrink-0">HH#{q.hh_job_number}</span>
             )}
             {isOverdue && (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold flex-shrink-0">Overdue</span>
+              <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold flex-shrink-0">
+                {daysOverdue ? `${daysOverdue}d overdue` : 'Overdue'}
+              </span>
             )}
           </div>
           <div className="text-xs text-gray-500 truncate">
