@@ -17,6 +17,7 @@
 import { query, getClient } from '../config/database';
 import type { HHLineItem } from './hirehop-job-sync';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
+import { hhBroker } from './hirehop-broker';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -518,10 +519,11 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // backline requirement if one doesn't exist yet and there's backline on the job.
     // Use HH status integer (more reliable than pipeline_status which can lag behind)
     const jobStatus = await client.query(
-      `SELECT status, pipeline_status FROM jobs WHERE id = $1`,
+      `SELECT status, pipeline_status, hh_job_number FROM jobs WHERE id = $1`,
       [jobId]
     );
     const hhStatus = jobStatus.rows[0]?.status;
+    const hhJobNumber = jobStatus.rows[0]?.hh_job_number;
     const isPostHirePhase = hhStatus >= 4; // 4=Part Dispatched, 5=Dispatched, 6=Returned Incomplete, 7=Returned, 11=Completed
 
     if (isPostHirePhase && flags.has_backline) {
@@ -660,6 +662,52 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       );
       if (postReturnInteraction.rows.length > 0) {
         await autoResolve('client_followup', 'done');
+      }
+
+      // Invoice + payment reconciliation: read HH billing for live status.
+      // - invoice → in_progress ("Generated") when any non-proforma invoice exists
+      // - payment_reconcile → done ("Reconciled") when all such invoices have £0 owed
+      // Only fires while requirement is still 'not_started' (autoResolve gates on that),
+      // so staff progress is never regressed. Wrapped in try/catch so a flaky HH call
+      // doesn't blow up the whole derivation transaction.
+      // NOTE: uses HH's raw OWING per invoice. For VAT-adjusted international jobs the
+      // adjusted balance can be £0 while HH still shows owing > 0 — extend with the
+      // VAT adjustment service if that bites.
+      if (hhJobNumber) {
+        try {
+          const billingRes = await hhBroker.get(
+            '/php_functions/billing_list.php',
+            { main_id: hhJobNumber, type: 1 },
+            { priority: 'low', cacheTTL: 300 }
+          );
+          if (billingRes.success && billingRes.data) {
+            const bl = billingRes.data as Record<string, any>;
+            if (Array.isArray(bl.rows)) {
+              let hasInvoice = false;
+              let allInvoicesPaid = true;
+              for (const row of bl.rows) {
+                const kind = parseInt(row.kind ?? '0');
+                if (kind !== 1) continue;
+                const data = row.data || row;
+                const invoiceStatus = parseInt(data.STATUS || data.status || '0');
+                const isProforma = invoiceStatus === 0;
+                const invoiceDesc = String(data.DESCRIPTION || row.desc || '');
+                if (isProforma || invoiceDesc.toLowerCase().includes('proforma')) continue;
+                hasInvoice = true;
+                const owing = parseFloat(data.OWING || data.owing || row.owing || '0');
+                if (owing > 0.01) allInvoicesPaid = false;
+              }
+              if (hasInvoice) {
+                await autoResolve('invoice', 'in_progress');
+                if (allInvoicesPaid) {
+                  await autoResolve('payment_reconcile', 'done');
+                }
+              }
+            }
+          }
+        } catch (billingErr) {
+          console.warn(`[HH Derive] Billing check failed for job ${jobId}:`, billingErr);
+        }
       }
     }
 
