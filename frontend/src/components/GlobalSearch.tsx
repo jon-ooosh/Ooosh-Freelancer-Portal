@@ -1,12 +1,20 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import {
+  PIPELINE_STATUS_CONFIG,
+  OPERATIONAL_STATUS_CONFIG,
+  PipelineStatus,
+  OperationalStatus,
+} from '../../../shared/types';
 
 interface SearchResult {
   id: string;
   name: string;
   subtitle: string | null;
   type: 'person' | 'organisation' | 'venue' | 'job';
+  pipeline_status?: PipelineStatus | null;
+  hh_status?: number | null;
 }
 
 const typeLabels: Record<string, string> = {
@@ -22,6 +30,29 @@ const typeColors: Record<string, string> = {
   venue: 'bg-teal-100 text-teal-700',
   job: 'bg-amber-100 text-amber-700',
 };
+
+// Map HireHop integer status → operational status key
+const HH_TO_OPERATIONAL: Record<number, OperationalStatus> = {
+  3: 'prepped',
+  4: 'prepping',
+  5: 'dispatched',
+  6: 'returned_incomplete',
+  7: 'returned',
+  11: 'completed',
+};
+
+function jobBadge(result: SearchResult): { label: string; colour: string } {
+  // Operational lifecycle takes precedence once HH has moved past Booked
+  if (result.hh_status != null && HH_TO_OPERATIONAL[result.hh_status]) {
+    const cfg = OPERATIONAL_STATUS_CONFIG[HH_TO_OPERATIONAL[result.hh_status]];
+    return { label: cfg.label, colour: cfg.colour };
+  }
+  if (result.pipeline_status && PIPELINE_STATUS_CONFIG[result.pipeline_status]) {
+    const cfg = PIPELINE_STATUS_CONFIG[result.pipeline_status];
+    return { label: cfg.label, colour: cfg.colour };
+  }
+  return { label: 'Job', colour: '#F59E0B' };
+}
 
 export default function GlobalSearch() {
   const [query, setQuery] = useState('');
@@ -137,25 +168,40 @@ export default function GlobalSearch() {
 
       {isOpen && results.length > 0 && (
         <div className="absolute top-full mt-1 w-80 lg:w-96 bg-white rounded shadow-lg border border-gray-200 max-h-80 overflow-y-auto z-50 right-0">
-          {results.map((result, index) => (
-            <button
-              key={`${result.type}-${result.id}`}
-              onClick={() => navigateToResult(result)}
-              className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors ${
-                index === selectedIndex ? 'bg-gray-50' : ''
-              } ${index > 0 ? 'border-t border-gray-100' : ''}`}
-            >
-              <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-bold ${typeColors[result.type]}`}>
-                {typeLabels[result.type]}
-              </span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-gray-900 truncate">{result.name}</p>
-                {result.subtitle && (
-                  <p className="text-xs text-gray-500 truncate">{result.subtitle}</p>
+          {results.map((result, index) => {
+            const jobBadgeData = result.type === 'job' ? jobBadge(result) : null;
+            return (
+              <button
+                key={`${result.type}-${result.id}`}
+                onClick={() => navigateToResult(result)}
+                className={`w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors ${
+                  index === selectedIndex ? 'bg-gray-50' : ''
+                } ${index > 0 ? 'border-t border-gray-100' : ''}`}
+              >
+                {jobBadgeData ? (
+                  <span
+                    className="inline-flex justify-center px-1.5 py-0.5 rounded text-[10px] font-bold text-white shrink-0"
+                    style={{ minWidth: '72px', backgroundColor: jobBadgeData.colour }}
+                  >
+                    {jobBadgeData.label}
+                  </span>
+                ) : (
+                  <span
+                    className={`inline-flex justify-center px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 ${typeColors[result.type]}`}
+                    style={{ minWidth: '72px' }}
+                  >
+                    {typeLabels[result.type]}
+                  </span>
                 )}
-              </div>
-            </button>
-          ))}
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-gray-900 truncate">{result.name}</p>
+                  {result.subtitle && (
+                    <p className="text-xs text-gray-500 truncate">{result.subtitle}</p>
+                  )}
+                </div>
+              </button>
+            );
+          })}
         </div>
       )}
 

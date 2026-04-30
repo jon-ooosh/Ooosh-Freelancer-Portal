@@ -68,7 +68,9 @@ router.get('/', async (req: AuthRequest, res: Response) => {
                    ELSE COALESCE(job_name, 'Untitled Job')
               END as name,
               company_name as subtitle,
-              'job' as type
+              'job' as type,
+              pipeline_status,
+              status as hh_status
        FROM jobs
        WHERE is_deleted = false AND (
          job_name ILIKE $1 OR company_name ILIKE $1 OR client_name ILIKE $1
