@@ -132,7 +132,7 @@ export async function POST(request: NextRequest) {
         console.log('Login: OP backend rejected credentials for:', normalizedEmail, '- falling back to Monday.com')
         if (!mondayFallbackAllowed()) {
           return NextResponse.json(
-            { error: 'Invalid email or password. If you registered before we moved systems, please use "Forgot password" to set a new one.' },
+            { error: "Sorry, those details didn't match. Please check your email and password, or use \"Forgot your password?\" below if you're not sure." },
             { status: 401 }
           )
         }
@@ -157,7 +157,7 @@ export async function POST(request: NextRequest) {
       console.log('Login: Freelancer not found in Monday.com:', normalizedEmail)
       recordFailedAttempt(normalizedEmail)
       return NextResponse.json(
-        { error: 'Invalid email or password' },
+        { error: "Sorry, those details didn't match. Please check your email and password, or use \"Forgot your password?\" below if you're not sure." },
         { status: 401 }
       )
     }
@@ -186,7 +186,7 @@ export async function POST(request: NextRequest) {
       console.log('Login: Password mismatch for:', normalizedEmail)
       recordFailedAttempt(normalizedEmail)
       return NextResponse.json(
-        { error: 'Invalid email or password' },
+        { error: "Sorry, those details didn't match. Please check your email and password, or use \"Forgot your password?\" below if you're not sure." },
         { status: 401 }
       )
     }
@@ -241,7 +241,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Login error:', error)
     return NextResponse.json(
-      { error: 'An error occurred during login' },
+      { error: "Something went wrong on our end. Please try again in a moment, or email info@oooshtours.co.uk if it keeps happening." },
       { status: 500 }
     )
   }
