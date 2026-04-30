@@ -112,8 +112,10 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     // The freelancer is authorised via the quote, not the driver record.
     //
     // Status filter accepts every "currently allocated, not yet returned"
-    // value: 'soft' (tentative), 'allocated' (firm), 'confirmed' (staff
-    // confirmed), 'active' (legacy mid-hire), 'booked_out' (resume case).
+    // value: 'soft' (tentative), 'confirmed' (firm allocation), 'active'
+    // (legacy mid-hire), 'booked_out' (resume case). The DB CHECK constraint
+    // (migration 017) only allows soft|confirmed|booked_out|active|returned|
+    // cancelled — there is no 'allocated' value.
     //
     // Job match falls back to hirehop_job_id because some allocation paths
     // populate only the HH job number, not the OP UUID.
@@ -183,7 +185,7 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
            FROM vehicle_hire_assignments vha
            LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
            LEFT JOIN drivers d ON d.id = vha.driver_id
-          WHERE vha.status IN ('soft', 'allocated', 'confirmed', 'active', 'booked_out')
+          WHERE vha.status IN ('soft', 'confirmed', 'active', 'booked_out')
             AND (vha.job_id = $1 OR vha.hirehop_job_id = $2)
           ORDER BY vha.created_at DESC`,
         [jobId, hhJobNumber]
@@ -2138,7 +2140,7 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
                  JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
                 WHERE fv.reg = $1
                   AND vha.hirehop_job_id = $2
-                  AND vha.status IN ('soft', 'allocated', 'confirmed')
+                  AND vha.status IN ('soft', 'confirmed')
                 ORDER BY vha.created_at DESC`,
               [reg, hhJob]
             );

@@ -203,6 +203,16 @@ export type ConfirmedMethod = 'deposit' | 'full_payment' | 'po' | 'manual';
 export type EnquirySource = 'phone' | 'email' | 'web_form' | 'referral' | 'cold_lead' | 'forum' | 'repeat' | 'other';
 export type ChaseMethod = 'phone' | 'email' | 'text' | 'whatsapp';
 
+// Generic requirement / checklist status. Used by job_requirements (any
+// requirement_type) and surfaced through the prep checklist + backline page.
+// Backend validation list lives in routes/requirements.ts — keep them in sync.
+export type RequirementStatus = 'not_started' | 'in_progress' | 'done' | 'blocked';
+
+// fleet_vehicles.hire_status — derived from assignment state by
+// services/fleet-hire-status-sync.ts. 'Sold' and 'Not Ready' are sticky manual
+// overrides; the others are computed.
+export type FleetHireStatus = 'Available' | 'On Hire' | 'Collected' | 'Prep Needed' | 'Not Ready' | 'Sold';
+
 // Pipeline status display config
 export const PIPELINE_STATUS_CONFIG: Record<PipelineStatus, { label: string; colour: string; order: number }> = {
   new_enquiry:  { label: 'Enquiries',       colour: '#3B82F6', order: 1 },  // Blue
@@ -706,7 +716,10 @@ export interface VehicleHireAssignment {
   freelancer_name?: string;
 }
 
-export type ExcessStatus = 'not_required' | 'needed' | 'pending' | 'taken' | 'partially_paid' | 'partial' | 'pre_auth' | 'waived' | 'fully_claimed' | 'claimed' | 'partially_reimbursed' | 'reimbursed' | 'rolled_over';
+// Excess status. Note: 'partial' and 'claimed' were renamed to 'partially_paid'
+// and 'fully_claimed' respectively in migration 038 — the DB no longer contains
+// the old values, so they're omitted from the type.
+export type ExcessStatus = 'not_required' | 'needed' | 'pending' | 'taken' | 'partially_paid' | 'pre_auth' | 'waived' | 'fully_claimed' | 'partially_reimbursed' | 'reimbursed' | 'rolled_over';
 
 export interface JobExcess {
   id: string;

@@ -187,15 +187,15 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const availableActions: { action: ModalAction; label: string; icon: string }[] = [];
   const s = excess.excess_status;
 
-  if (s === 'needed' || s === 'pending' || s === 'partially_paid' || s === 'partial') {
+  if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
     availableActions.push({ action: 'payment', label: 'Record Payment', icon: '£' });
   }
-  if (s === 'taken' || s === 'partially_paid' || s === 'partial' || s === 'pre_auth') {
+  if (s === 'taken' || s === 'partially_paid' || s === 'pre_auth') {
     availableActions.push({ action: 'claim', label: 'Claim (Damage)', icon: '!' });
     availableActions.push({ action: 'reimburse', label: 'Reimburse', icon: '<' });
     availableActions.push({ action: 'rollover', label: 'Roll Over to Next Hire', icon: '>' });
   }
-  if ((s === 'fully_claimed' || s === 'claimed' || s === 'partially_reimbursed') && amountHeld > 0) {
+  if ((s === 'fully_claimed' || s === 'partially_reimbursed') && amountHeld > 0) {
     availableActions.push({ action: 'reimburse', label: 'Reimburse Remainder', icon: '<' });
   }
   // Amend the required excess figure — available whenever the record isn't in a

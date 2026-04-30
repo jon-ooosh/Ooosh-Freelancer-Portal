@@ -83,14 +83,16 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
 
       // 5. Coming up — next 14 days, grouped by date (departures + returns)
       // Departures
+      // HH 4 (Part Dispatched / Prepping) included — prep-in-progress jobs still need to leave.
+      // Date comparison uses >= so today's departures appear (was > which hid them until gone).
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                COALESCE(j.out_date, j.job_date)::date as event_date,
                'departure' as event_type
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (1, 2, 3)
-          AND COALESCE(j.out_date, j.job_date)::date > CURRENT_DATE
+          AND j.status IN (1, 2, 3, 4)
+          AND COALESCE(j.out_date, j.job_date)::date >= CURRENT_DATE
           AND COALESCE(j.out_date, j.job_date)::date <= CURRENT_DATE + 14
         ORDER BY event_date ASC
       `),
@@ -109,13 +111,16 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         ORDER BY event_date ASC
       `),
 
-      // 6. Needs attention — overdue returns (return_date in the past = actually overdue)
+      // 6. Needs attention — overdue returns (return_date in the past = actually overdue).
+      // Includes confirmed-but-not-yet-out jobs (HH 1-3) so jobs that should have gone out
+      // but didn't, and now have a passed return_date, also surface here. HH 8 = Requires
+      // Attention (returned with problems) is included as a "still needs resolving" case.
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                j.return_date, j.venue_name
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (4, 5)
+          AND j.status IN (1, 2, 3, 4, 5, 6, 8)
           AND j.return_date IS NOT NULL
           AND j.return_date::date < CURRENT_DATE
         ORDER BY j.return_date ASC
