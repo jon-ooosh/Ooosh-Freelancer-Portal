@@ -411,6 +411,16 @@ export function BookOutPage() {
       case 'Select Vehicle':
         return !!form.vehicleId
       case 'Driver & Hire':
+        // Freelancer mode: must have at least one customer hire form on
+        // file before we let the freelancer hand the van over. The hire
+        // agreement comes from the customer's hire-form submission, not
+        // from the freelancer's flow — without it the condition PDF lacks
+        // a real driver name + email, and the post-book-out hire-form
+        // PDF chain has nothing to send.
+        if (isFreelancer) {
+          const hasHireForm = (form.hireFormEntries?.length ?? 0) > 0
+          return hasHireForm && form.driverName.trim().length > 0
+        }
         return form.driverName.trim().length > 0
       case 'Vehicle State': {
         if (form.mileage.trim().length === 0 || form.fuelLevel === null) return false
@@ -647,12 +657,17 @@ export function BookOutPage() {
         })
       }
 
-      // Send email to primary (collecting) driver
-      if (form.clientEmail && pdfResult.success && pdfResult.data) {
+      // Send email to primary (collecting) driver. We send even when
+      // form.clientEmail is empty: the backend resolves a job-level
+      // recipient via the address book and falls back to info@ with
+      // an amber banner + timeline interaction if nothing's reachable.
+      // Without the fallback, condition reports were silently dropped
+      // for HH-synced sole-trader jobs that had no contact email.
+      if (pdfResult.success && pdfResult.data) {
         const emailResult = await withRetry(
           () =>
             sendConditionReportEmail({
-              to: form.clientEmail,
+              to: form.clientEmail || null,
               vehicleReg: form.vehicleReg,
               driverName: form.driverName,
               eventDate,
@@ -664,7 +679,9 @@ export function BookOutPage() {
         )
 
         if (emailResult.success) {
-          trackResults.push({ label: `Email — ${form.driverName}`, success: true, detail: `Sent to ${form.clientEmail}` })
+          const isFallback = (emailResult.data as { isFallback?: boolean } | undefined)?.isFallback
+          const detailRecipient = isFallback ? 'info@oooshtours.co.uk (no client email on file)' : form.clientEmail || 'recipient resolved by backend'
+          trackResults.push({ label: `Email — ${form.driverName}`, success: true, detail: `Sent to ${detailRecipient}` })
         } else {
           trackResults.push({
             label: `Email — ${form.driverName}`,
@@ -672,7 +689,7 @@ export function BookOutPage() {
             detail: emailResult.error || 'Send failed after 3 attempts',
           })
         }
-      } else if (form.clientEmail && !pdfResult.success) {
+      } else if (!pdfResult.success) {
         trackResults.push({
           label: `Email — ${form.driverName}`,
           success: false,
@@ -680,9 +697,12 @@ export function BookOutPage() {
         })
       }
 
-      // Generate PDFs and send emails for additional drivers on this job
+      // Generate PDFs and send emails for additional drivers on this job.
+      // We include drivers without a clientEmail too — backend resolves
+      // the job-level fallback (info@ + amber banner) so each customer's
+      // condition report still lands somewhere staff can forward.
       const additionalDrivers = (form.hireFormEntries || []).filter(
-        entry => entry.driverName !== form.driverName && entry.clientEmail,
+        entry => entry.driverName !== form.driverName,
       )
 
       if (additionalDrivers.length > 0 && pdfResult.success) {
@@ -703,7 +723,7 @@ export function BookOutPage() {
             const driverEmailResult = await withRetry(
               () =>
                 sendConditionReportEmail({
-                  to: driver.clientEmail!,
+                  to: driver.clientEmail || null,
                   vehicleReg: form.vehicleReg,
                   driverName: driver.driverName,
                   eventDate,
@@ -715,10 +735,12 @@ export function BookOutPage() {
             )
 
             if (driverEmailResult.success) {
+              const isFallback = (driverEmailResult.data as { isFallback?: boolean } | undefined)?.isFallback
+              const detailRecipient = isFallback ? 'info@oooshtours.co.uk (no client email on file)' : driver.clientEmail || 'recipient resolved by backend'
               trackResults.push({
                 label: `Email — ${driver.driverName}`,
                 success: true,
-                detail: `Sent to ${driver.clientEmail}`,
+                detail: `Sent to ${detailRecipient}`,
               })
             } else {
               trackResults.push({
@@ -1501,14 +1523,16 @@ function StepDriverHire({
     })
   }, [goingOutJobs, form.vehicleSimpleType, form.vehicleType])
 
-  // Fetch driver hire forms when a job number is entered
-  // In freelancer mode, the freelancer portal route doesn't grant access
-  // to the hire-forms router — disable the query instead of letting it
-  // 401 and muddy the flow. Freelancer D&C book-outs have no hire forms
-  // to populate from anyway.
+  // Fetch driver hire forms when a job number is entered.
+  //
+  // Freelancer mode: enabled — the OP backend now allows the freelancer
+  // session JWT to read hire forms scoped to the freelancer's own job
+  // (see backend/src/routes/hire-forms.ts GET /by-job + PATCH + generate-pdf).
+  // We need this so the customer's hire form data flows onto the
+  // condition-report PDF + email and the post-book-out write-back +
+  // hire-agreement PDF chain can fire.
   const { data: hireForms, isLoading: hireFormsLoading } = useDriverHireForms(
     form.hireHopJob || null,
-    { enabled: !isFreelancer },
   )
 
   // Find allocation for this vehicle + selected job
@@ -1779,6 +1803,7 @@ function StepDriverHire({
         hireFormsLoading={hireFormsLoading}
         onSelectDriver={handleSelectDriver}
         onUpdate={onUpdate}
+        isFreelancer={isFreelancer}
       />
 
       {/* Hire form fields — editable, auto-populated from the linked hire form */}
@@ -1884,16 +1909,20 @@ function DriverSelection({
   hireFormsLoading,
   onSelectDriver,
   onUpdate,
+  isFreelancer,
 }: {
   form: BookOutFormState
   hireForms: import('../lib/driver-hire-api').DriverHireForm[] | null
   hireFormsLoading: boolean
   onSelectDriver: (name: string, hireFormId: string) => void
   onUpdate: <K extends keyof BookOutFormState>(key: K, value: BookOutFormState[K]) => void
+  isFreelancer: boolean
 }) {
-  // Determine if we need cross-job fallback
+  // Determine if we need cross-job fallback. Freelancers never get the
+  // cross-job fallback — their session is scoped to one job, and the
+  // hire-forms backend would 403 the cross-job query anyway.
   const jobDrivers = (hireForms || []).filter(hf => hf.driverName)
-  const needsFallback = !hireFormsLoading && hireForms !== null && jobDrivers.length === 0
+  const needsFallback = !hireFormsLoading && hireForms !== null && jobDrivers.length === 0 && !isFreelancer
 
   // Fetch active hire forms (cross-job) only when needed
   const { data: activeForms, isLoading: activeFormsLoading } = useActiveHireForms(needsFallback)
@@ -1981,6 +2010,29 @@ function DriverSelection({
           />
           <p className="mt-1 text-xs text-gray-400">For condition report email</p>
         </div>
+      </div>
+    )
+  }
+
+  // Freelancer mode + no hire forms on this job — clear "contact the
+  // office" message. Don't show the cross-job fallback (irrelevant) and
+  // don't surface a manual driver entry path (their session is scoped
+  // and they shouldn't try to bypass the customer's hire-form flow).
+  if (isFreelancer) {
+    return (
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+        <p className="text-sm font-medium text-amber-900">
+          Customer hire form not received yet
+        </p>
+        <p className="mt-2 text-sm text-amber-800 leading-relaxed">
+          The customer for job #{form.hireHopJob} hasn't completed their hire
+          form. Please contact the Ooosh office before continuing — they'll
+          chase the customer and let you know when you can proceed.
+        </p>
+        <p className="mt-2 text-xs text-amber-700">
+          The Driver &amp; Hire step can't be advanced until the hire form
+          arrives.
+        </p>
       </div>
     )
   }

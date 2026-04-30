@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { createHmac } from 'node:crypto';
+import { query } from '../config/database';
 
 // Freelancer book-out authentication.
 //
@@ -238,4 +239,56 @@ export function authenticateVehicleFlexible(
  */
 export function isFreelancerBookout(req: FlexibleVehicleRequest): req is FlexibleVehicleRequest & { bookoutSession: FreelancerBookoutSession } {
   return !!req.bookoutSession && !req.user;
+}
+
+/**
+ * For a freelancer session, load the assignment's vehicle reg + job
+ * details so handlers can verify callers are only touching their own
+ * scope. Cached on the request for the lifetime of the call.
+ *
+ * Shared between vehicles routes (book-out, photos, signature) and
+ * hire-forms routes (the freelancer-mode write-back at book-out).
+ *
+ * Returns null if the request isn't a freelancer session, or if the
+ * assignment row has been deleted/cancelled out from under the JWT.
+ */
+export interface BookoutScope {
+  assignmentId: string;
+  vehicleId: string;
+  registration: string;
+  hhJobNumber: number | null;
+  jobId: string | null;
+}
+
+export async function getBookoutScope(req: FlexibleVehicleRequest): Promise<BookoutScope | null> {
+  if (!req.bookoutSession) return null;
+  const cache = (req as FlexibleVehicleRequest & { _bookoutScope?: unknown })._bookoutScope;
+  if (cache) return cache as BookoutScope;
+
+  const result = await query(
+    `SELECT vha.id, vha.vehicle_id, fv.reg, vha.hirehop_job_id, vha.job_id
+       FROM vehicle_hire_assignments vha
+       LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+      WHERE vha.id = $1
+      LIMIT 1`,
+    [req.bookoutSession.assignmentId]
+  );
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  if (!row.vehicle_id || !row.reg) {
+    // Session JWT was minted against an assignment whose vehicle has been
+    // unlinked since. Treat as no scope — caller responds with 403 / 404
+    // rather than letting downstream handlers run with a half-resolved
+    // scope.
+    return null;
+  }
+  const scope: BookoutScope = {
+    assignmentId: req.bookoutSession.assignmentId,
+    vehicleId: row.vehicle_id as string,
+    registration: (row.reg as string).toUpperCase(),
+    hhJobNumber: row.hirehop_job_id as number | null,
+    jobId: row.job_id as string | null,
+  };
+  (req as FlexibleVehicleRequest & { _bookoutScope?: unknown })._bookoutScope = scope;
+  return scope;
 }
