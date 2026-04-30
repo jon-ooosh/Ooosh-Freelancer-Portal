@@ -121,7 +121,7 @@ export async function resizeImageForPdf(
  * Send the condition report email with PDF attachment.
  */
 export async function sendConditionReportEmail(params: {
-  to: string
+  to: string | null     // nullable so the backend's info@ fallback can fire when no customer email is on file
   vehicleReg: string
   driverName: string
   eventDate: string
@@ -134,8 +134,8 @@ export async function sendConditionReportEmail(params: {
   damageCount?: number
   fuelDifference?: string | null  // e.g. "Full -> 3/8"
   milesDriven?: number | null
-}): Promise<{ messageId: string }> {
-  console.log('[pdf-email] Calling send-email function to:', params.to)
+}): Promise<{ messageId: string; isFallback?: boolean }> {
+  console.log('[pdf-email] Calling send-email function to:', params.to || '(fallback to info@)')
   // Use ASCII-safe subject line (no em-dashes)
   const reportType = params.isCheckIn ? 'Check-In Report' : 'Condition Report'
   const jobPart = params.hireHopJob ? ` ${params.hireHopJob}` : ''
@@ -144,7 +144,11 @@ export async function sendConditionReportEmail(params: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      to: params.to,
+      // Pass `to` only when set — backend resolves a job-level fallback
+      // (info@oooshtours.co.uk + amber banner + timeline interaction) when
+      // it's missing AND `hireHopJob` is provided. Without the fallback,
+      // the email used to be silently dropped at the frontend guard.
+      to: params.to || undefined,
       subject,
       html: buildEmailHtml({
         ...params,
@@ -156,6 +160,7 @@ export async function sendConditionReportEmail(params: {
       }),
       pdfBase64: params.pdfBase64,
       pdfFilename: params.pdfFilename,
+      hireHopJob: params.hireHopJob || undefined,
     }),
   })
 
@@ -167,8 +172,8 @@ export async function sendConditionReportEmail(params: {
     throw new Error(detail ? `${errorMsg}: ${detail}` : errorMsg)
   }
 
-  const result = await response.json() as { messageId: string }
-  console.log('[pdf-email] Email sent, messageId:', result.messageId)
+  const result = await response.json() as { messageId: string; isFallback?: boolean }
+  console.log('[pdf-email] Email sent, messageId:', result.messageId, result.isFallback ? '(fallback to info@)' : '')
   return result
 }
 

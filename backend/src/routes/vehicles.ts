@@ -20,14 +20,20 @@ import {
   mintFreelancerBookoutSession,
   authenticateVehicleFlexible,
   isFreelancerBookout,
+  getBookoutScope,
   type FlexibleVehicleRequest,
 } from '../middleware/freelancer-bookout-auth';
-import { query } from '../config/database';
+import { query, getPool } from '../config/database';
 import { isHireHopConfigured } from '../config/hirehop';
 import { hhBroker } from '../services/hirehop-broker';
 import { getFromR2, uploadToR2, deleteFromR2, listR2Objects, isR2Configured, uploadToPublicR2, getFromPublicR2, listPublicR2Objects } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { fetchLogo } from '../services/hire-form-pdf';
+import {
+  resolveClientEmailTarget,
+  buildFallbackBanner,
+  logFallbackToTimeline,
+} from '../services/money-emails';
 
 const router = Router();
 
@@ -112,45 +118,167 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
     // Job match falls back to hirehop_job_id because some allocation paths
     // populate only the HH job number, not the OP UUID.
     //
-    // LIMIT 1 returns the most recently created assignment with a vehicle.
-    // For multi-van deliveries we'd need a quote-level vehicle linkage —
-    // tracked under "D&C allocation linkage gap" in CLAUDE.md (Step 2 D3).
-    // Pull both the freelancer's allocated row (for vehicle_id / reg) AND
-    // the customer's hire-form row (for the driver-as-customer name + email
-    // that go on the PDF / hire agreement). They're often two separate
-    // vehicle_hire_assignments rows on the same job — the freelancer is
-    // the delivery person, the customer is the driver on the agreement.
+    // ──────────────────────────────────────────────────────────────────────
+    // SMART RESOLVE — auto-merge dual-row D&C bookings
     //
-    // The single SELECT here joins fleet_vehicles for the freelancer-allocated
-    // row, then LEFT JOINs the customer-driver row via a sub-select so
-    // missing customer rows don't blow up the freelancer's resolve.
-    const vhaResult = await query(
-      `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.status, vha.assignment_type,
-              fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
-              cust.customer_driver_name, cust.customer_driver_email
-         FROM vehicle_hire_assignments vha
-         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-         LEFT JOIN LATERAL (
-           SELECT (d.first_name || ' ' || d.last_name) AS customer_driver_name,
-                  d.email AS customer_driver_email
-             FROM vehicle_hire_assignments vha_c
-             JOIN drivers d ON d.id = vha_c.driver_id
-            WHERE (vha_c.job_id = $1 OR vha_c.hirehop_job_id = $2)
-              AND vha_c.assignment_type = 'self_drive'
-              AND vha_c.status != 'cancelled'
-              AND vha_c.driver_id IS NOT NULL
-            ORDER BY vha_c.van_requirement_index ASC NULLS LAST, vha_c.created_at ASC
-            LIMIT 1
-         ) cust ON TRUE
-         WHERE vha.vehicle_id IS NOT NULL
-           AND vha.status IN ('soft', 'allocated', 'confirmed', 'active', 'booked_out')
-           AND (vha.job_id = $1 OR vha.hirehop_job_id = $2)
-         ORDER BY vha.created_at DESC
-         LIMIT 1`,
-      [jobId, hhJobNumber]
-    );
+    // Common scenario for D&C with self-drive client:
+    //   Row A — staff allocation row from the Allocations page
+    //           (vehicle_id set, driver_id NULL — represents "this van
+    //            is going to this delivery").
+    //   Row B — customer's hire-form row from POST /api/hire-forms
+    //           (driver_id set, vehicle_id NULL — the customer who'll
+    //            actually drive once it lands).
+    //
+    // These are the same logical hire and need to be merged before book-out
+    // so we have ONE row carrying both vehicle + customer driver. Without
+    // the merge: book-out only sees Row A (no customer name on the PDF),
+    // hire-form PDF generation skips Row B (no vehicle reg), check-in flips
+    // the wrong row, and we end up with the kind of stranded-customer-row
+    // mess we hand-fixed for jobs 15378/15793/15819/15820.
+    //
+    // Merge rule (tight on purpose, idempotent):
+    //   1. The freelancer's session would land on a row with `vehicle_id IS
+    //      NOT NULL AND driver_id IS NULL` (Row A — pure allocation).
+    //   2. There exists a separate row on the same job with `driver_id IS
+    //      NOT NULL AND vehicle_id IS NULL`, status not cancelled (Row B —
+    //      customer hire form).
+    //   3. Merge: copy vehicle_id (and reg) onto Row B, cancel Row A with
+    //      an audit note.
+    //   4. Mint the freelancer's session against Row B (the merged row).
+    //
+    // Multi-van case: scoped out for now. If the job has multiple Row A
+    // allocations or multiple Row B customer hire forms, the merge picks
+    // one (most recent allocation × earliest customer by van_requirement_index)
+    // and leaves any siblings untouched. Full N×M expansion is the "D&C
+    // allocation linkage gap" — separate round.
+    //
+    // Idempotent: re-running the resolve after the merge finds Row B
+    // directly (vehicle_id + driver_id both set) and returns it without
+    // attempting a second merge.
+    // ──────────────────────────────────────────────────────────────────────
 
-    if (vhaResult.rows.length === 0) {
+    type VhaRow = {
+      assignment_id: string;
+      vehicle_id: string | null;
+      driver_id: string | null;
+      status: string;
+      assignment_type: string;
+      registration: string | null;
+      make: string | null;
+      model: string | null;
+      vehicle_type: string | null;
+      customer_driver_name: string | null;
+      customer_driver_email: string | null;
+    };
+
+    async function fetchAllocatedVehicleRow(): Promise<VhaRow | null> {
+      // Pull all currently-active rows on the job once and pick from them
+      // in JS — we need to inspect the set as a whole to decide whether to
+      // merge, and a single result row hides that.
+      const result = await query(
+        `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.driver_id, vha.status,
+                vha.assignment_type, vha.created_at, vha.van_requirement_index,
+                fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
+                d.full_name AS customer_driver_name, d.email AS customer_driver_email
+           FROM vehicle_hire_assignments vha
+           LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+           LEFT JOIN drivers d ON d.id = vha.driver_id
+          WHERE vha.status IN ('soft', 'allocated', 'confirmed', 'active', 'booked_out')
+            AND (vha.job_id = $1 OR vha.hirehop_job_id = $2)
+          ORDER BY vha.created_at DESC`,
+        [jobId, hhJobNumber]
+      );
+      const rows = result.rows as Array<VhaRow & { created_at: string; van_requirement_index: number | null }>;
+      if (rows.length === 0) return null;
+
+      // First preference: a row that already has BOTH vehicle and driver —
+      // this is the post-merge steady state, or a job that was created the
+      // tidy way from the start. Just use it.
+      const merged = rows.find(r => r.vehicle_id && r.driver_id);
+      if (merged) return merged;
+
+      // Second preference: smart-merge candidate. Find the freelancer's
+      // allocation row (vehicle, no driver) and the customer's hire-form
+      // row (driver, no vehicle) and combine them.
+      const allocationRow = rows.find(r => r.vehicle_id && !r.driver_id);
+      const customerRow = rows
+        .filter(r => r.driver_id && !r.vehicle_id)
+        .sort((a, b) => {
+          const ai = a.van_requirement_index ?? Number.POSITIVE_INFINITY;
+          const bi = b.van_requirement_index ?? Number.POSITIVE_INFINITY;
+          if (ai !== bi) return ai - bi;
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        })[0];
+
+      if (allocationRow && customerRow) {
+        // Atomic merge: stamp vehicle onto customer row, cancel allocation
+        // row. Run inside an explicit transaction so a partial failure
+        // doesn't leave the data half-merged.
+        const client = await getPool().connect();
+        try {
+          await client.query('BEGIN');
+          await client.query(
+            `UPDATE vehicle_hire_assignments
+                SET vehicle_id = $1, updated_at = NOW()
+              WHERE id = $2`,
+            [allocationRow.vehicle_id, customerRow.assignment_id]
+          );
+          await client.query(
+            `UPDATE vehicle_hire_assignments
+                SET status = 'cancelled',
+                    status_changed_at = NOW(),
+                    updated_at = NOW(),
+                    notes = COALESCE(notes, '') ||
+                            CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n' END ||
+                            $1
+              WHERE id = $2`,
+            [
+              `[Auto-merged] Vehicle ${allocationRow.registration || allocationRow.vehicle_id} ` +
+                `transferred to customer hire-form row ${customerRow.assignment_id} ` +
+                `on freelancer book-out resolve (${new Date().toISOString()})`,
+              allocationRow.assignment_id,
+            ]
+          );
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+
+        console.log('[freelancer-bookout] Smart-merged allocation row into customer hire-form row', {
+          allocationRowId: allocationRow.assignment_id,
+          customerRowId: customerRow.assignment_id,
+          vehicleId: allocationRow.vehicle_id,
+          registration: allocationRow.registration,
+        });
+
+        // Re-read the merged customer row so the response carries the
+        // freshly-stamped vehicle fields (reg, make, model, vehicle_type).
+        const reread = await query(
+          `SELECT vha.id AS assignment_id, vha.vehicle_id, vha.driver_id, vha.status,
+                  vha.assignment_type,
+                  fv.reg AS registration, fv.make, fv.model, fv.vehicle_type,
+                  d.full_name AS customer_driver_name, d.email AS customer_driver_email
+             FROM vehicle_hire_assignments vha
+             LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+             LEFT JOIN drivers d ON d.id = vha.driver_id
+            WHERE vha.id = $1
+            LIMIT 1`,
+          [customerRow.assignment_id]
+        );
+        return (reread.rows[0] as VhaRow) || null;
+      }
+
+      // Fallback: no merge possible. Hand back the most recent row with a
+      // vehicle so book-out can still proceed (legacy behaviour). Common in
+      // staff-test scenarios where there's no customer hire form yet.
+      return rows.find(r => r.vehicle_id) || null;
+    }
+
+    const vha = await fetchAllocatedVehicleRow();
+    if (!vha) {
       console.warn('[freelancer-bookout] No allocated vehicle for job', { jobId, hhJobNumber });
       res.status(409).json({
         error: 'No vehicle allocated for this job yet',
@@ -160,12 +288,12 @@ router.post('/freelancer-bookout/resolve', async (req: Request, res: Response) =
       return;
     }
     console.log('[freelancer-bookout] Vehicle resolved', {
-      assignmentId: vhaResult.rows[0].assignment_id,
-      registration: vhaResult.rows[0].registration,
-      status: vhaResult.rows[0].status,
-      assignmentType: vhaResult.rows[0].assignment_type,
+      assignmentId: vha.assignment_id,
+      registration: vha.registration,
+      status: vha.status,
+      assignmentType: vha.assignment_type,
+      hasCustomerDriver: !!vha.customer_driver_name,
     });
-    const vha = vhaResult.rows[0];
 
     const sessionToken = mintFreelancerBookoutSession({
       assignmentId: vha.assignment_id,
@@ -239,6 +367,11 @@ const FREELANCER_BOOKOUT_ALLOW: Array<{ method: string; pattern: RegExp }> = [
   { method: 'POST',  pattern: /^\/generate-pdf$/ },
   { method: 'POST',  pattern: /^\/send-email$/ },
   { method: 'GET',   pattern: /^\/jobs\/[^/]+$/ },
+  // Walkaround / briefing UI: settings are global (no PII) so freelancer
+  // sessions read the same payload as staff. The scope-check on get-events
+  // (below) clamps the freelancer's events query to their own vehicle reg.
+  { method: 'GET',   pattern: /^\/get-checklist-settings$/ },
+  { method: 'GET',   pattern: /^\/get-events$/ },
 ];
 
 router.use((req: FlexibleVehicleRequest, res: Response, next) => {
@@ -256,46 +389,9 @@ router.use((req: FlexibleVehicleRequest, res: Response, next) => {
   next();
 });
 
-/**
- * Helper: for a freelancer session, load the assignment's vehicle reg +
- * job number so handlers can check callers are only touching their own
- * scope. Cached on the request so repeat calls in the same handler are
- * free.
- */
-async function getBookoutScope(req: FlexibleVehicleRequest): Promise<{
-  assignmentId: string;
-  vehicleId: string;
-  registration: string;
-  hhJobNumber: number | null;
-} | null> {
-  if (!req.bookoutSession) return null;
-  const cache = (req as FlexibleVehicleRequest & { _bookoutScope?: unknown })._bookoutScope;
-  if (cache) return cache as {
-    assignmentId: string;
-    vehicleId: string;
-    registration: string;
-    hhJobNumber: number | null;
-  };
-
-  const result = await query(
-    `SELECT vha.id, vha.vehicle_id, fv.reg, vha.hirehop_job_id
-       FROM vehicle_hire_assignments vha
-       JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-      WHERE vha.id = $1
-      LIMIT 1`,
-    [req.bookoutSession.assignmentId]
-  );
-  if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  const scope = {
-    assignmentId: req.bookoutSession.assignmentId,
-    vehicleId: row.vehicle_id as string,
-    registration: (row.reg as string).toUpperCase(),
-    hhJobNumber: row.hirehop_job_id as number | null,
-  };
-  (req as FlexibleVehicleRequest & { _bookoutScope?: unknown })._bookoutScope = scope;
-  return scope;
-}
+// `getBookoutScope` lives in middleware/freelancer-bookout-auth.ts now —
+// imported above. Shared between vehicles + hire-forms routes (the
+// freelancer write-back path at book-out needs the same scope checks).
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. FLEET CRUD — /api/vehicles/fleet/*
@@ -2421,7 +2517,7 @@ router.post('/save-tracker-assignments', async (req: AuthRequest, res: Response)
  * Fetch events for a specific vehicle from R2 index.
  * If eventId is provided, returns the full event detail.
  */
-router.get('/get-events', async (req: AuthRequest, res: Response) => {
+router.get('/get-events', async (req: FlexibleVehicleRequest & AuthRequest, res: Response) => {
   try {
     const vehicleReg = (req.query.vehicleReg as string || '').toUpperCase();
     const eventType = req.query.eventType as string | undefined;
@@ -2430,6 +2526,21 @@ router.get('/get-events', async (req: AuthRequest, res: Response) => {
     if (!vehicleReg) {
       res.status(400).json({ error: 'vehicleReg is required' });
       return;
+    }
+
+    // Freelancer scope: clamp to the session's allocated vehicle reg.
+    // Stops a session being used to enumerate event history across the
+    // fleet.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope) {
+        res.status(403).json({ error: 'Assignment not found' });
+        return;
+      }
+      if (scope.registration !== vehicleReg) {
+        res.status(403).json({ error: 'Events are not for your vehicle' });
+        return;
+      }
     }
 
     // If eventId provided, return full event detail
@@ -3304,11 +3415,51 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
  */
 router.post('/send-email', async (req: FlexibleVehicleRequest, res: Response) => {
   try {
-    const { to, subject, html, pdfBase64, pdfFilename } = req.body;
+    let { to } = req.body;
+    const { subject, html, pdfBase64, pdfFilename, hireHopJob } = req.body;
 
-    if (!to || !subject) {
-      res.status(400).json({ error: 'to and subject are required' });
+    if (!subject) {
+      res.status(400).json({ error: 'subject is required' });
       return;
+    }
+
+    // Email-fallback chain. The condition-report email is fired from the
+    // book-out / check-in flow with the customer's email as `to`. When
+    // no customer email is on the assignment (HH-synced sole-trader jobs,
+    // shell client orgs, freelancer flow before the customer hire form
+    // arrived) the frontend used to silently skip the email entirely.
+    //
+    // New behaviour: when `to` is missing AND `hireHopJob` is provided,
+    // resolve the job to its OP UUID, walk the address book via
+    // resolveClientEmailTarget, and fall back to info@oooshtours.co.uk
+    // with an amber banner + timeline interaction so staff can forward
+    // and update the address book.
+    let prependBanner: string | undefined;
+    let fallbackJobId: string | null = null;
+    if (!to) {
+      if (!hireHopJob) {
+        res.status(400).json({ error: 'to (or hireHopJob for fallback) is required' });
+        return;
+      }
+      const jobLookup = await query(
+        `SELECT id FROM jobs WHERE hh_job_number = $1 LIMIT 1`,
+        [parseInt(String(hireHopJob), 10)]
+      );
+      if (jobLookup.rows.length === 0) {
+        res.status(400).json({ error: 'to (or hireHopJob for fallback) is required' });
+        return;
+      }
+      fallbackJobId = jobLookup.rows[0].id;
+      const target = await resolveClientEmailTarget(fallbackJobId!);
+      to = target.primaryEmail;
+      if (target.isFallback) {
+        prependBanner = buildFallbackBanner({
+          jobId: fallbackJobId!,
+          clientName: target.clientName,
+          jobNumber: target.jobNumber,
+          jobName: target.jobName,
+        });
+      }
     }
 
     // Freelancer: the condition-report subject and filename always include
@@ -3358,18 +3509,24 @@ router.post('/send-email', async (req: FlexibleVehicleRequest, res: Response) =>
         from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
         to: actualTo,
         subject: isTestMode ? `[TEST] ${subject}` : subject,
-        html: html || '',
+        html: (prependBanner || '') + (html || ''),
         attachments,
       });
 
-      res.json({ messageId: mailResult.messageId || 'sent' });
+      if (fallbackJobId) {
+        await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
+      }
+      res.json({ messageId: mailResult.messageId || 'sent', isFallback: !!fallbackJobId });
     } else {
-      const result = await emailService.sendRaw({ to, subject, html: html || '' });
+      const result = await emailService.sendRaw({ to, subject, html: (prependBanner || '') + (html || '') });
       if (!result.success) {
         res.status(500).json({ error: result.error || 'Email send failed' });
         return;
       }
-      res.json({ messageId: result.messageId || 'sent' });
+      if (fallbackJobId) {
+        await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
+      }
+      res.json({ messageId: result.messageId || 'sent', isFallback: !!fallbackJobId });
     }
   } catch (error) {
     console.error('[vehicles/email] Send error:', error);

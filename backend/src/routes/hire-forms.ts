@@ -10,11 +10,22 @@ import { z } from 'zod';
 import crypto from 'crypto';
 import { query, getPool } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import {
+  authenticateVehicleFlexible,
+  isFreelancerBookout,
+  getBookoutScope,
+  type FlexibleVehicleRequest,
+} from '../middleware/freelancer-bookout-auth';
 import { validate } from '../middleware/validate';
 import { generateHireFormPdf, fetchLogo, type HireFormData } from '../services/hire-form-pdf';
 import { uploadToR2, getFromR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import {
+  resolveClientEmailTarget,
+  buildFallbackBanner,
+  logFallbackToTimeline,
+} from '../services/money-emails';
 import {
   findOverlappingAssignments,
   buildConflictPayload,
@@ -638,9 +649,22 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
 
 // ── GET /api/hire-forms/by-job/:hirehopJobId — Get hire forms for a job ──
 
-router.get('/by-job/:hirehopJobId', authenticate, async (req: AuthRequest, res: Response) => {
+router.get('/by-job/:hirehopJobId', authenticateVehicleFlexible, async (req: FlexibleVehicleRequest & AuthRequest, res: Response) => {
   try {
     const hirehopJobId = parseInt(req.params.hirehopJobId as string);
+
+    // Freelancer scope: caller can only read hire forms on their own job.
+    // Without this, a session for one delivery could enumerate hire forms
+    // across the whole fleet.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope) {
+        return res.status(403).json({ error: 'Assignment not found' });
+      }
+      if (scope.hhJobNumber !== hirehopJobId) {
+        return res.status(403).json({ error: 'Hire forms are not on your job' });
+      }
+    }
 
     const result = await query(
       `SELECT vha.*,
@@ -1110,10 +1134,93 @@ const patchSchema = z.object({
   notes: z.string().optional(),
 });
 
-router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthRequest, res: Response) => {
+// Fields a freelancer book-out session is allowed to write at book-out
+// time. Anything else gets silently stripped — never 403'd. Brief from
+// jon (Round 4): a freelancer must never be blocked mid-handover by a
+// "you can't change that field" error. If their client accidentally
+// includes a non-allowed field we drop it and proceed.
+//
+// Includes ve103b_ref because the existing updateDriverHireForm helper
+// always sends it (lead-driver-only flag — empty string for freelancers).
+// Excluded: client_email (would let a freelancer overwrite the customer's
+// contact email) and notes (admin field).
+const FREELANCER_PATCH_ALLOW = new Set([
+  'vehicle_id',
+  'hire_end',
+  'start_time',
+  'end_time',
+  'return_overnight',
+  'status',
+  've103b_ref',
+]);
+
+router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (req: FlexibleVehicleRequest & AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
-    const updates = req.body;
+    let updates = req.body;
+
+    // Freelancer scope + silent-strip. Done BEFORE the overlap/SQL work
+    // below so the rest of the handler can treat freelancer and staff
+    // requests identically.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope) {
+        return res.status(403).json({ error: 'Assignment not found' });
+      }
+
+      // Confirm the target row sits on the same job as the freelancer's
+      // session. Multi-driver-on-one-van: customer hire forms for sibling
+      // drivers are also accessible (same job), so the writeback loop in
+      // BookOutPage can stamp the same vehicle_id across all of them.
+      const targetRow = await query(
+        `SELECT job_id, hirehop_job_id, driver_id
+           FROM vehicle_hire_assignments WHERE id = $1`,
+        [id]
+      );
+      if (targetRow.rows.length === 0) {
+        return res.status(404).json({ error: 'Hire form not found' });
+      }
+      const target = targetRow.rows[0];
+      const onSameJob =
+        (scope.jobId && target.job_id === scope.jobId) ||
+        (scope.hhJobNumber && target.hirehop_job_id === scope.hhJobNumber);
+      if (!onSameJob) {
+        return res.status(403).json({ error: 'Hire form is not on your job' });
+      }
+
+      // If the freelancer's client tries to set vehicle_id to anything
+      // OTHER than their own allocated van, that's a bug or a tamper
+      // attempt — clamp to scope.vehicleId. Same blast radius as silent
+      // strip: don't surprise the freelancer with a 403 mid-handover.
+      if (updates.vehicle_id && updates.vehicle_id !== scope.vehicleId) {
+        console.warn('[hire-forms] Freelancer PATCH tried to set vehicle_id outside session scope; clamping', {
+          assignmentId: id,
+          attempted: updates.vehicle_id,
+          scopeVehicle: scope.vehicleId,
+        });
+        updates = { ...updates, vehicle_id: scope.vehicleId };
+      }
+
+      // Silent-strip non-whitelisted fields. We rebuild the updates object
+      // so anything the freelancer's client accidentally sends (notes,
+      // client_email, future schema additions) is dropped without
+      // disrupting the flow.
+      const filtered: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(updates)) {
+        if (FREELANCER_PATCH_ALLOW.has(k)) filtered[k] = v;
+      }
+      // Lock status to 'booked_out' — freelancers can flip out of
+      // 'soft'/'confirmed'/'allocated' but not into anything else.
+      if (filtered.status && filtered.status !== 'booked_out') {
+        delete filtered.status;
+      }
+      updates = filtered;
+      if (Object.keys(updates).length === 0) {
+        // Nothing left to write — return 200 idempotently rather than
+        // 400, so the freelancer's writeback loop registers as success.
+        return res.json({ data: { id, no_op: true } });
+      }
+    }
 
     // Overlap check when a vehicle is being linked/changed. We only run the
     // check if vehicle_id is being SET to a non-null value; unlinking (null)
@@ -1295,10 +1402,75 @@ router.patch('/:id', authenticate, validate(patchSchema), async (req: AuthReques
 });
 
 /**
+ * Look up the OP job_id for an assignment. Used by the email fallback
+ * path so we can resolve a job-level recipient (info@ + amber banner +
+ * timeline log) when the assignment's driver has no email on record.
+ */
+async function getJobIdForAssignment(assignmentId: string): Promise<string | null> {
+  const result = await query(
+    `SELECT job_id FROM vehicle_hire_assignments WHERE id = $1`,
+    [assignmentId]
+  );
+  return result.rows[0]?.job_id || null;
+}
+
+/**
+ * Resolve the recipient for a hire-agreement email. Prefer the driver's
+ * email (from the hire form). If absent, fall back to the job's client
+ * recipients via resolveClientEmailTarget — which itself falls back to
+ * info@oooshtours.co.uk with an amber banner + timeline interaction so
+ * staff can forward manually and patch the address book.
+ *
+ * Returns the bits the caller needs to send + log the fallback.
+ */
+async function resolveHireFormEmailTarget(
+  assignmentId: string,
+  driverEmail: string | null,
+): Promise<
+  | { kind: 'driver'; to: string; cc: string[]; banner: undefined; jobId: string | null }
+  | { kind: 'fallback'; to: string; cc: string[]; banner: string; jobId: string }
+  | { kind: 'none' }
+> {
+  if (driverEmail) {
+    return { kind: 'driver', to: driverEmail, cc: [], banner: undefined, jobId: await getJobIdForAssignment(assignmentId) };
+  }
+  const jobId = await getJobIdForAssignment(assignmentId);
+  if (!jobId) return { kind: 'none' };
+  const target = await resolveClientEmailTarget(jobId);
+  // resolveClientEmailTarget always returns a primaryEmail (info@ in the
+  // worst case), so we always have somewhere to send. The flag tells us
+  // whether to attach the banner + log the timeline entry.
+  return target.isFallback
+    ? {
+        kind: 'fallback',
+        to: target.primaryEmail,
+        cc: target.ccEmails,
+        banner: buildFallbackBanner({
+          jobId,
+          clientName: target.clientName,
+          jobNumber: target.jobNumber,
+          jobName: target.jobName,
+        }),
+        jobId,
+      }
+    : { kind: 'driver', to: target.primaryEmail, cc: target.ccEmails, banner: undefined, jobId };
+}
+
+/**
  * Generate the definitive hire agreement PDF for an assignment, upload to R2,
  * and email it to the driver with the PDF attached. Used by the book-out
  * transition hook in the PATCH handler above, and shared with the on-demand
  * generate-pdf endpoint below.
+ *
+ * Recipient resolution chain:
+ *   1. driver's email on the hire form (the customer who signed)
+ *   2. job-level client contacts via resolveClientEmailTarget
+ *   3. info@oooshtours.co.uk + amber banner + timeline interaction
+ *
+ * Step 3 makes sure the agreement is never silently dropped when no
+ * client email is on file — staff get a forwardable copy so the customer
+ * still receives their PDF, and the address-book gap gets surfaced for
+ * manual fixing.
  */
 async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string): Promise<void> {
   const formData = await loadHireFormData(assignmentId);
@@ -1324,13 +1496,16 @@ async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string
 
   console.log(`[hire-forms] ${trigger}: PDF generated for ${assignmentId} (${pdfBytes.length} bytes)`);
 
-  if (!formData.email) {
-    console.warn(`[hire-forms] ${trigger}: no driver email on record for ${assignmentId}; PDF stored but not emailed`);
+  const target = await resolveHireFormEmailTarget(assignmentId, formData.email);
+  if (target.kind === 'none') {
+    console.warn(`[hire-forms] ${trigger}: no email recipient resolvable for ${assignmentId}; PDF stored but not emailed`);
     return;
   }
 
   const emailResult = await emailService.send('hire_form', {
-    to: formData.email,
+    to: target.to,
+    cc: target.cc.length > 0 ? target.cc : undefined,
+    prependBanner: target.kind === 'fallback' ? target.banner : undefined,
     variables: {
       driverName: formData.driverName,
       vehicleReg: formData.vehicleReg || 'TBC',
@@ -1350,7 +1525,10 @@ async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string
       `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
       [assignmentId]
     );
-    console.log(`[hire-forms] ${trigger}: email sent to ${formData.email} for ${assignmentId}`);
+    console.log(`[hire-forms] ${trigger}: email sent to ${target.to} for ${assignmentId}${target.kind === 'fallback' ? ' (fallback to info@)' : ''}`);
+    if (target.kind === 'fallback' && target.jobId) {
+      await logFallbackToTimeline({ jobId: target.jobId, templateId: 'hire_form' });
+    }
   } else {
     console.warn(`[hire-forms] ${trigger}: email failed for ${assignmentId}:`, emailResult);
   }
@@ -1512,10 +1690,58 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
 
 // ── POST /api/hire-forms/:id/generate-pdf — Generate hire form PDF ──
 
-router.post('/:id/generate-pdf', authenticateOrApiKey, async (req: AuthRequest, res: Response) => {
+/**
+ * Auth: staff JWT, hire-form API key, OR freelancer book-out session.
+ * Tries the API key path first (so the existing Netlify hire-form app
+ * keeps working), then falls back to the flexible JWT auth which handles
+ * both staff and freelancer JWTs.
+ */
+function authenticatePdfRoute(req: FlexibleVehicleRequest & AuthRequest, res: Response, next: NextFunction): void {
+  const apiKey = req.headers['x-api-key'] as string | undefined;
+  if (apiKey && process.env.HIRE_FORM_API_KEY) {
+    try {
+      const expected = Buffer.from(process.env.HIRE_FORM_API_KEY);
+      const provided = Buffer.from(apiKey);
+      if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
+        req.user = { id: '00000000-0000-0000-0000-000000000000', email: 'hire-form@system', role: 'admin' };
+        next();
+        return;
+      }
+    } catch {
+      // Fall through.
+    }
+  }
+  authenticateVehicleFlexible(req, res, next);
+}
+
+router.post('/:id/generate-pdf', authenticatePdfRoute, async (req: FlexibleVehicleRequest & AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
     const sendEmailRequested = req.query.send_email === 'true';
+
+    // Freelancer scope: caller can only generate a PDF for a hire form on
+    // their own job. Same rule as PATCH/by-job — scope.jobId or
+    // scope.hhJobNumber must match the hire form row.
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      if (!scope) {
+        return res.status(403).json({ error: 'Assignment not found' });
+      }
+      const targetRow = await query(
+        `SELECT job_id, hirehop_job_id FROM vehicle_hire_assignments WHERE id = $1`,
+        [id]
+      );
+      if (targetRow.rows.length === 0) {
+        return res.status(404).json({ error: 'Hire form not found' });
+      }
+      const target = targetRow.rows[0];
+      const onSameJob =
+        (scope.jobId && target.job_id === scope.jobId) ||
+        (scope.hhJobNumber && target.hirehop_job_id === scope.hhJobNumber);
+      if (!onSameJob) {
+        return res.status(403).json({ error: 'Hire form is not on your job' });
+      }
+    }
 
     // Load all data
     const formData = await loadHireFormData(id);
@@ -1564,31 +1790,41 @@ router.post('/:id/generate-pdf', authenticateOrApiKey, async (req: AuthRequest, 
 
     console.log(`[hire-forms] PDF generated and stored: ${r2Key} (${pdfBytes.length} bytes)`);
 
-    // Send email if requested
+    // Send email if requested. Recipient resolution mirrors the auto-fire
+    // path in generateAndEmailHireFormPdf above: driver email → job
+    // client contacts → info@ + amber banner + timeline log.
     let emailResult = null;
-    if (sendEmail && formData.email) {
-      emailResult = await emailService.send('hire_form', {
-        to: formData.email,
-        variables: {
-          driverName: formData.driverName,
-          vehicleReg: formData.vehicleReg || 'TBC',
-          vehicleModel: formData.vehicleModel || 'TBC',
-          hireStart: fmtDate(formData.hireStartDate),
-          hireEnd: fmtDate(formData.hireEndDate),
-        },
-        attachments: [{
-          filename,
-          content: Buffer.from(pdfBytes),
-          contentType: 'application/pdf',
-        }],
-      });
+    if (sendEmail) {
+      const target = await resolveHireFormEmailTarget(id, formData.email);
+      if (target.kind !== 'none') {
+        emailResult = await emailService.send('hire_form', {
+          to: target.to,
+          cc: target.cc.length > 0 ? target.cc : undefined,
+          prependBanner: target.kind === 'fallback' ? target.banner : undefined,
+          variables: {
+            driverName: formData.driverName,
+            vehicleReg: formData.vehicleReg || 'TBC',
+            vehicleModel: formData.vehicleModel || 'TBC',
+            hireStart: fmtDate(formData.hireStartDate),
+            hireEnd: fmtDate(formData.hireEndDate),
+          },
+          attachments: [{
+            filename,
+            content: Buffer.from(pdfBytes),
+            contentType: 'application/pdf',
+          }],
+        });
 
-      if (emailResult.success) {
-        await query(
-          `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
-          [id]
-        );
-        console.log(`[hire-forms] Email sent for ${id}`);
+        if (emailResult.success) {
+          await query(
+            `UPDATE vehicle_hire_assignments SET hire_form_emailed_at = NOW() WHERE id = $1`,
+            [id]
+          );
+          console.log(`[hire-forms] Email sent for ${id} to ${target.to}${target.kind === 'fallback' ? ' (fallback to info@)' : ''}`);
+          if (target.kind === 'fallback' && target.jobId) {
+            await logFallbackToTimeline({ jobId: target.jobId, templateId: 'hire_form' });
+          }
+        }
       }
     }
 
