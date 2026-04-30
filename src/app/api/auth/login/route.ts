@@ -129,10 +129,23 @@ export async function POST(request: NextRequest) {
         // During transition, freelancers may only exist in Monday.com.
         // Note: this is a "credentials rejected" path, not a system error,
         // so we don't fire fallback telemetry here — real errors go via catch.
-        console.log('Login: OP backend rejected credentials for:', normalizedEmail, '- falling back to Monday.com')
+        // OP returned 401 — credentials definitively wrong (or account not in
+        // OP yet). Short-circuit to a clear "incorrect password" rather than
+        // falling through to Monday, which can throw and produce a misleading
+        // 500. If a freelancer genuinely only exists in Monday they should
+        // use Forgot Password to register on OP.
+        if (opResult.status === 401) {
+          recordFailedAttempt(normalizedEmail)
+          return NextResponse.json(
+            { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
+            { status: 401 }
+          )
+        }
+
+        console.log('Login: OP backend non-401 failure for:', normalizedEmail, '- falling back to Monday.com')
         if (!mondayFallbackAllowed()) {
           return NextResponse.json(
-            { error: "Sorry, those details didn't match. Please check your email and password, or use \"Forgot your password?\" below if you're not sure." },
+            { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
             { status: 401 }
           )
         }
@@ -157,7 +170,7 @@ export async function POST(request: NextRequest) {
       console.log('Login: Freelancer not found in Monday.com:', normalizedEmail)
       recordFailedAttempt(normalizedEmail)
       return NextResponse.json(
-        { error: "Sorry, those details didn't match. Please check your email and password, or use \"Forgot your password?\" below if you're not sure." },
+        { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
         { status: 401 }
       )
     }
@@ -186,7 +199,7 @@ export async function POST(request: NextRequest) {
       console.log('Login: Password mismatch for:', normalizedEmail)
       recordFailedAttempt(normalizedEmail)
       return NextResponse.json(
-        { error: "Sorry, those details didn't match. Please check your email and password, or use \"Forgot your password?\" below if you're not sure." },
+        { error: "Incorrect password — please try again, or use \"Forgot your password?\" below if you've forgotten it." },
         { status: 401 }
       )
     }

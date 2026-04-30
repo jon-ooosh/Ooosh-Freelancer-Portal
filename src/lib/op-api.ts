@@ -244,7 +244,7 @@ export async function submitCompletionToOP(
 export async function loginToOP(
   email: string,
   password: string
-): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; error?: string }> {
+): Promise<{ success: boolean; user?: { id: string; name: string; email: string }; sessionToken?: string; error?: string; status?: number }> {
   const url = `${getOpUrl()}/api/portal/auth/login`
 
   const response = await fetch(url, {
@@ -256,7 +256,7 @@ export async function loginToOP(
   const data = await response.json()
 
   if (!response.ok) {
-    return { success: false, error: data.error || 'Login failed' }
+    return { success: false, error: data.error || 'Login failed', status: response.status }
   }
 
   // Extract session cookie from response
