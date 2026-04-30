@@ -4,7 +4,7 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
-import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { writeBackStatusToHireHop, writeBackJobNameToHireHop } from '../services/hirehop-writeback';
 import { hhBroker } from '../services/hirehop-broker';
 import { sendLastMinuteAlert } from '../services/money-emails';
 import emailService from '../services/email-service';
@@ -1337,7 +1337,25 @@ router.patch('/:id/edit', validate(editJobSchema), async (req: AuthRequest, res:
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
 
-    res.json(result.rows[0]);
+    // Push job_name to HireHop if it changed — otherwise the next 30-min HH
+    // job sync will clobber the rename with HireHop's stale value.
+    let hhWritebackWarning: string | undefined;
+    if (
+      'job_name' in fields &&
+      String(currentJob.job_name ?? '') !== String(fields.job_name ?? '') &&
+      result.rows[0].hh_job_number
+    ) {
+      const wb = await writeBackJobNameToHireHop(
+        jobId,
+        String(fields.job_name ?? ''),
+        req.user!.email,
+      );
+      if (!wb.success) {
+        hhWritebackWarning = `Saved locally, but HireHop sync failed: ${wb.message}. The next HireHop sync may overwrite this rename.`;
+      }
+    }
+
+    res.json({ ...result.rows[0], ...(hhWritebackWarning ? { hh_writeback_warning: hhWritebackWarning } : {}) });
   } catch (error: any) {
     console.error('Edit job fields error:', error);
     // Surface constraint violations (e.g. duplicate hh_job_number)
