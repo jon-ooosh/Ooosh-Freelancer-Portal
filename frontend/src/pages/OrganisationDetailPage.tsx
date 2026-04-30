@@ -33,6 +33,7 @@ interface OrgDetail {
   working_terms_notes: string | null;
   ai_summary: string | null;
   ai_research: string | null;
+  dismissed_suggestions: string[] | null;
   created_at: string;
   people: Array<{
     id: string;
@@ -454,44 +455,64 @@ export default function OrganisationDetailPage() {
 
       {/* Smart suggestions */}
       {(() => {
-        const suggestions: Array<{ text: string; action: string; newType: string }> = [];
+        const suggestions: Array<{ key: string; text: string; action: string; newType: string }> = [];
         const type = org.type?.toLowerCase() || '';
         const name = org.name || '';
         const companyWords = ['ltd', 'limited', 'group', 'management', 'agency', 'inc', 'llc', 'plc', 'services', 'productions', 'consulting'];
         const looksLikeCompany = companyWords.some(w => name.toLowerCase().includes(w));
         const hasJobsAsBand = (org.linked_jobs || []).some(j => j.role === 'band');
         const peopleCount = (org.people || []).length;
+        const dismissed = new Set(org.dismissed_suggestions || []);
 
         // Suggest band if typed as client/unknown but linked as band in jobs
         if ((type === 'client' || type === 'unknown') && hasJobsAsBand) {
-          suggestions.push({ text: `This is typed as "${type}" but appears as a band on ${(org.linked_jobs || []).filter(j => j.role === 'band').length} job(s). Should it be a band?`, action: 'Change to Band', newType: 'band' });
+          suggestions.push({ key: 'band-rename-by-jobs', text: `This is typed as "${type}" but appears as a band on ${(org.linked_jobs || []).filter(j => j.role === 'band').length} job(s). Should it be a band?`, action: 'Change to Band', newType: 'band' });
         }
         // Suggest band if typed as client/unknown, no company-like words, and few/no people
         if ((type === 'client' || type === 'unknown') && !looksLikeCompany && peopleCount <= 1 && !hasJobsAsBand) {
-          suggestions.push({ text: `"${name}" is typed as "${type}" — could this be a band or artist?`, action: 'Change to Band', newType: 'band' });
+          suggestions.push({ key: 'band-rename', text: `"${name}" is typed as "${type}" — could this be a band or artist?`, action: 'Change to Band', newType: 'band' });
         }
         // Suggest management if typed as client but has "management" in name
         if (type === 'client' && name.toLowerCase().includes('management')) {
-          suggestions.push({ text: `"${name}" is typed as "client" but looks like a management company.`, action: 'Change to Management', newType: 'management' });
+          suggestions.push({ key: 'management-rename', text: `"${name}" is typed as "client" but looks like a management company.`, action: 'Change to Management', newType: 'management' });
         }
 
-        if (suggestions.length === 0) return null;
+        const visible = suggestions.filter(s => !dismissed.has(s.key));
+        if (visible.length === 0) return null;
+
         return (
           <div className="mb-4 space-y-2">
-            {suggestions.map((s, i) => (
-              <div key={i} className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-center justify-between">
-                <p className="text-sm text-amber-800">{s.text}</p>
-                <button
-                  onClick={async () => {
-                    try {
-                      await api.put(`/organisations/${id}`, { type: s.newType });
-                      loadOrg();
-                    } catch (err) { console.error(err); }
-                  }}
-                  className="ml-4 flex-shrink-0 text-xs font-medium px-3 py-1.5 bg-amber-100 text-amber-700 rounded hover:bg-amber-200"
-                >
-                  {s.action}
-                </button>
+            {visible.map((s) => (
+              <div key={s.key} className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-center justify-between gap-3">
+                <p className="text-sm text-amber-800 flex-1 min-w-0">{s.text}</p>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    onClick={async () => {
+                      try {
+                        await api.put(`/organisations/${id}`, { type: s.newType });
+                        loadOrg();
+                      } catch (err) { console.error(err); }
+                    }}
+                    className="text-xs font-medium px-3 py-1.5 bg-amber-100 text-amber-700 rounded hover:bg-amber-200"
+                  >
+                    {s.action}
+                  </button>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await api.post(`/organisations/${id}/dismiss-suggestion`, { key: s.key });
+                        loadOrg();
+                      } catch (err) { console.error(err); }
+                    }}
+                    title="Dismiss this suggestion"
+                    aria-label="Dismiss this suggestion"
+                    className="text-amber-600 hover:text-amber-800 hover:bg-amber-100 rounded p-1 leading-none"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
               </div>
             ))}
           </div>

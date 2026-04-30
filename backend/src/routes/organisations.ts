@@ -533,6 +533,52 @@ router.post('/:id/people', validate(orgPersonLinkSchema), async (req: AuthReques
   }
 });
 
+// POST /api/organisations/:id/dismiss-suggestion — hide a smart suggestion
+// banner permanently for this org (e.g. "could this be a band?"). Stable
+// keys are defined frontend-side; backend just stores them as opaque text
+// and uses array_append-with-no-duplicates so repeated dismissals are safe.
+const dismissSuggestionSchema = z.object({
+  key: z.string().min(1).max(100),
+});
+
+router.post(
+  '/:id/dismiss-suggestion',
+  validate(dismissSuggestionSchema),
+  async (req: AuthRequest, res: Response) => {
+    const orgId = req.params.id as string;
+    const { key } = req.body as { key: string };
+
+    try {
+      const result = await query(
+        `UPDATE organisations
+         SET dismissed_suggestions =
+               CASE WHEN $2 = ANY(dismissed_suggestions)
+                    THEN dismissed_suggestions
+                    ELSE array_append(dismissed_suggestions, $2)
+               END,
+             updated_at = NOW()
+         WHERE id = $1 AND is_deleted = false
+         RETURNING dismissed_suggestions`,
+        [orgId, key]
+      );
+
+      if (result.rows.length === 0) {
+        res.status(404).json({ error: 'Organisation not found' });
+        return;
+      }
+
+      await logAudit(req.user!.id, 'organisations', orgId, 'update', null, {
+        dismissed_suggestion: key,
+      });
+
+      res.json({ dismissed_suggestions: result.rows[0].dismissed_suggestions });
+    } catch (error) {
+      console.error('Dismiss suggestion error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  }
+);
+
 // PUT /api/organisations/:id/people/:roleId/primary — toggle primary contact
 // Org-scoped exclusivity: at most one active role per organisation can be
 // `is_primary = true`. Promoting one demotes any others on the same org.

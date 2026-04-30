@@ -116,6 +116,13 @@ export function startScheduler() {
               ]
             );
 
+            // 'none' delivery preference: silent move into Chasing column,
+            // no bell, no email. The Chasing pile is the queue; staff pick
+            // from it visually rather than being pinged.
+            if (job.chase_alert_delivery === 'none') {
+              continue;
+            }
+
             // Chase alert recipient + delivery preference: prefer what's
             // persisted on the job itself (set via the ChaseModal). Fall back
             // to the most-recent interaction's chase_alert_user_id if nothing

@@ -10,11 +10,11 @@ interface ChaseableJob {
   chase_count: number;
   next_chase_date?: string | null;
   chase_alert_user_id?: string | null;
-  chase_alert_delivery?: 'bell' | 'bell_email' | null;
+  chase_alert_delivery?: 'bell' | 'bell_email' | 'none' | null;
 }
 
 type Mode = 'reschedule' | 'log';
-type Delivery = 'bell' | 'bell_email';
+type Delivery = 'bell' | 'bell_email' | 'none';
 
 function addHoursToNow(hours: number): string {
   const d = new Date();
@@ -287,11 +287,25 @@ export default function ChaseModal({
                 </svg>
                 Bell + email
               </button>
+              <button
+                type="button"
+                onClick={() => setDelivery('none')}
+                className={`px-3 py-1.5 rounded-md transition-colors flex items-center gap-1.5 ${
+                  delivery === 'none' ? 'bg-white shadow-sm text-gray-900 font-medium' : 'text-gray-600 hover:text-gray-800'
+                }`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                None
+              </button>
             </div>
             <p className="text-[11px] text-gray-500 mt-1.5">
               {delivery === 'bell'
                 ? 'Bell notification only. Email may still follow after 4 hours if unread.'
-                : 'Bell plus immediate email when the chase date arrives.'}
+                : delivery === 'bell_email'
+                ? 'Bell plus immediate email when the chase date arrives.'
+                : 'No alert. Job will still move into the Chasing pile when the date arrives.'}
             </p>
           </div>
         </div>

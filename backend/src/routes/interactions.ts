@@ -27,7 +27,7 @@ const createInteractionSchema = z.object({
   next_chase_date: z.string().optional().nullable(),
   // Chase alert: notify a user when chase is due
   chase_alert_user_id: z.string().uuid().optional().nullable(),
-  chase_alert_delivery: z.enum(['bell', 'bell_email']).optional().nullable(),
+  chase_alert_delivery: z.enum(['bell', 'bell_email', 'none']).optional().nullable(),
 });
 
 // GET /api/interactions — timeline for an entity
@@ -150,24 +150,10 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         [chaseDate, job_id, chase_alert_user_id || null, chase_alert_delivery || null]
       );
 
-      // Create chase alert notification if requested
-      if (chase_alert_user_id) {
-        const jobInfo = await query(`SELECT job_name, client_name FROM jobs WHERE id = $1`, [job_id]);
-        const jobName = jobInfo.rows[0]?.job_name || 'Unknown job';
-        const clientName = jobInfo.rows[0]?.client_name || '';
-        await query(
-          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, source_user_id)
-           VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, 'normal', $5, $6)`,
-          [
-            chase_alert_user_id,
-            `Chase reminder: ${jobName}`,
-            `Chase due for ${clientName} — ${jobName}. ${content}`,
-            job_id,
-            `/jobs/${job_id}`,
-            req.user!.id,
-          ]
-        );
-      }
+      // No immediate notification on log: the auto-mover will fire one when
+      // next_chase_date arrives (subject to chase_alert_delivery preference).
+      // Chase alert preference (user + delivery method) is persisted on the
+      // job above so the scheduler can honour it then.
     }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
