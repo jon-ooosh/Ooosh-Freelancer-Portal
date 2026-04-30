@@ -22,6 +22,8 @@ import {
   updateNotificationSettingsOnOP,
   reportFallback,
   mondayFallbackAllowed,
+  isOpClientError,
+  OpApiError,
 } from '@/lib/op-api'
 
 // =============================================================================
@@ -45,6 +47,14 @@ export async function GET() {
         const opData = await getNotificationSettingsFromOP(sessionToken)
         return NextResponse.json(opData)
       } catch (opError) {
+        // 4xx = legit response, no alert
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json(
+            { success: false, error: opError.message },
+            { status }
+          )
+        }
         console.error('OP backend settings GET error:', opError)
         reportFallback('settings-notifications-get', opError, { email: user.email })
         if (!mondayFallbackAllowed()) {
@@ -131,6 +141,14 @@ export async function POST(request: NextRequest) {
         const opData = await updateNotificationSettingsOnOP(sessionToken, body as unknown as Record<string, unknown>)
         return NextResponse.json(opData)
       } catch (opError) {
+        // 4xx = legit response (validation error, etc.), no alert
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json(
+            { success: false, error: opError.message },
+            { status }
+          )
+        }
         console.error('OP backend settings POST error:', opError)
         reportFallback('settings-notifications-post', opError, { email: user.email })
         if (!mondayFallbackAllowed()) {

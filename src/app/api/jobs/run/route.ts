@@ -14,7 +14,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobsForFreelancer, getVenueById, JobRecord, VenueRecord } from '@/lib/monday'
-import { isOpMode, getJobsFromOP, getJobDetailFromOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, getJobsFromOP, getJobDetailFromOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 /**
  * Check if a date is within 48 hours of now (before or after)
@@ -206,6 +206,14 @@ export async function GET(request: NextRequest) {
           contactsVisible,
         })
       } catch (opError) {
+        // 4xx = legit negative response — propagate as-is, no alert, no fallback
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json(
+            { success: false, error: opError.message },
+            { status }
+          )
+        }
         console.error('OP run API error:', opError)
         // Embed run context in the error message since reportFallback's
         // context shape is email-only.

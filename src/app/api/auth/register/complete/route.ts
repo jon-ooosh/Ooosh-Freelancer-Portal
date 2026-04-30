@@ -11,7 +11,7 @@ import {
   updateFreelancerDateColumn,
   FREELANCER_COLUMNS
 } from '@/lib/monday'
-import { isOpMode, registerCompleteOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, registerCompleteOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 // Session secret for JWT signing
 const getSessionSecret = () => {
@@ -84,13 +84,13 @@ export async function POST(request: NextRequest) {
           return response
         }
       } catch (opError: unknown) {
-        const status = (opError as { status?: number })?.status
-        // Client-level errors (bad code, already approved, etc.) — surface
-        if (status === 400 || status === 403) {
-          const err = opError as Error
-          return NextResponse.json({ error: err.message }, { status })
+        // Any 4xx (bad code, already approved, expired, etc.) is a legit
+        // negative response — surface directly without alerting.
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json({ error: opError.message }, { status })
         }
-        // System-level error — alert + fall back
+        // 5xx / network = real failure — alert + (optionally) fall back
         console.error('Register/complete: OP backend error, falling back:', opError)
         reportFallback('register-complete', opError, { email: normalizedEmail })
         if (!mondayFallbackAllowed()) {

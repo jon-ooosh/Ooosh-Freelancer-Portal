@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { validateCode, markVerified } from '@/lib/verification'
-import { isOpMode, registerVerifyOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, registerVerifyOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -27,13 +27,13 @@ export async function POST(request: NextRequest) {
           message: 'Email verified. Please set your password.',
         })
       } catch (opError: unknown) {
-        const status = (opError as { status?: number })?.status
-        // 400/429 = code wrong / too many attempts — surface directly
-        if (status === 400 || status === 429) {
-          const err = opError as Error
-          return NextResponse.json({ error: err.message }, { status: status })
+        // Any 4xx (code wrong, expired, too many attempts) = legit
+        // negative response — surface directly without alerting.
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json({ error: opError.message }, { status })
         }
-        // System-level error — alert + fall back to Monday.com
+        // System-level error — alert + (optionally) fall back to Monday.com
         console.error('Register/verify: OP backend error, falling back:', opError)
         reportFallback('register-verify', opError, { email: normalizedEmail })
         if (!mondayFallbackAllowed()) {

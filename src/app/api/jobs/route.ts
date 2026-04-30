@@ -18,7 +18,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobsForFreelancer, JobRecord, getCrewJobsForFreelancer, CrewJobRecord } from '@/lib/monday'
-import { isOpMode, getJobsFromOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, getJobsFromOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES
@@ -390,6 +390,14 @@ export async function GET(request: NextRequest): Promise<NextResponse<JobsApiRes
           cancelled: groupedCancelled,
         })
       } catch (opError) {
+        // 4xx = legit negative response (e.g. 401 session expired) — no alert, no fallback
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json(
+            { success: false, error: opError.message },
+            { status }
+          )
+        }
         console.error('OP backend error:', opError)
         reportFallback('jobs', opError, { email: user.email })
         if (!mondayFallbackAllowed()) {

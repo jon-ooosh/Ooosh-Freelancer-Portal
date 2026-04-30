@@ -6,7 +6,7 @@ import {
   storeVerificationCode,
   checkEmailRateLimit
 } from '@/lib/verification'
-import { isOpMode, registerStartOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, registerStartOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -37,13 +37,14 @@ export async function POST(request: NextRequest) {
         const result = await registerStartOP(normalizedEmail)
         return NextResponse.json(result)
       } catch (opError: unknown) {
-        const status = (opError as { status?: number })?.status
-        // 409 = already registered — surface directly, don't fall back
-        if (status === 409) {
-          const err = opError as Error
-          return NextResponse.json({ error: err.message }, { status: 409 })
+        // Any 4xx (409 already registered, 404 not on approved list, 429
+        // rate-limited, etc.) is a legit response — surface as-is, no alert,
+        // no fallback.
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json({ error: opError.message }, { status })
         }
-        // Anything else is a real failure — alert + fall back to Monday.com
+        // 5xx / network = real failure — alert + (optionally) fall back to Monday.com
         console.error('Register/start: OP backend error, falling back:', opError)
         reportFallback('register-start', opError, { email: normalizedEmail })
         if (!mondayFallbackAllowed()) {

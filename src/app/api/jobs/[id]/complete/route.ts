@@ -31,7 +31,7 @@ import {
   mondayQuery,
   getFreelancerNameByEmail
 } from '@/lib/monday'
-import { isOpMode, submitCompletionToOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, submitCompletionToOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 // =============================================================================
 // TYPES
@@ -171,6 +171,15 @@ export async function POST(
           backgroundProcessing: false,
         })
       } catch (opError) {
+        // 4xx (already completed, validation error, not assigned to you) =
+        // legit response — propagate without alerting.
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json(
+            { success: false, error: opError.message },
+            { status }
+          )
+        }
         console.error('OP backend completion error:', opError)
         reportFallback('completion', opError, { email: session.email })
         if (!mondayFallbackAllowed()) {
