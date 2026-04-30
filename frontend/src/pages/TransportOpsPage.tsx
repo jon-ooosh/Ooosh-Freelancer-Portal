@@ -211,7 +211,7 @@ function matchesSearch(q: OpsQuote, term: string): boolean {
     q.work_description || '',
   ];
   for (const a of q.assignments || []) {
-    if (a.is_ooosh_crew) haystack.push('ooosh crew');
+    if (a.is_ooosh_crew) haystack.push('ooosh staff', 'ooosh crew');
     else haystack.push(`${a.first_name || ''} ${a.last_name || ''}`.trim());
   }
   return haystack.some((h) => h && h.toLowerCase().includes(needle));
@@ -1008,7 +1008,7 @@ export default function TransportOpsPage() {
             .map((a) => ({
               id: a.person_id,
               name: a.is_ooosh_crew
-                ? 'Ooosh Crew'
+                ? 'Ooosh Staff'
                 : `${a.first_name || ''} ${a.last_name || ''}`.trim() || 'Assigned crew',
               is_ooosh_crew: a.is_ooosh_crew === true,
             }))}
@@ -1190,9 +1190,10 @@ function QuoteRow({
               <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
                 {assignments.map((a, i) => {
                   const label = a.is_ooosh_crew
-                    ? 'Ooosh Crew'
+                    ? 'Ooosh Staff'
                     : `${a.first_name || ''} ${a.last_name || ''}`.trim() || 'Unknown';
-                  // Ooosh Crew can't be pinned (no person_id); plain text.
+                  // Ooosh Staff isn't pinnable — pinning would filter to "every
+                  // job done by Ooosh", not useful. Render as plain text.
                   if (a.is_ooosh_crew || !a.person_id) {
                     return (
                       <span key={a.id} className="truncate">
@@ -1884,7 +1885,7 @@ function ExpandedDetail({
               {assignments.map((a) => (
                 <div key={a.id} className="inline-flex items-center gap-1.5 bg-blue-50 border border-blue-200 rounded-full px-2.5 py-1 text-xs">
                   <span className="font-medium text-blue-800">
-                    {a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name} ${a.last_name}`}
+                    {a.is_ooosh_crew ? 'Ooosh Staff' : `${a.first_name} ${a.last_name}`}
                   </span>
                   <span className="text-blue-500 capitalize">({a.role})</span>
                   {a.agreed_rate != null && (
@@ -2744,7 +2745,7 @@ function CalendarView({
                         {q.hh_job_number && <Link to={`/jobs/${q.job_id}`} className="text-xs text-ooosh-600 hover:underline">Job #{q.hh_job_number}</Link>}
                         {assignments.length > 0 && (
                           <div className="text-xs text-gray-500 mt-1">
-                            {assignments.map(a => a.is_ooosh_crew ? 'Ooosh Crew' : `${a.first_name || ''} ${a.last_name || ''}`.trim()).join(', ')}
+                            {assignments.map(a => a.is_ooosh_crew ? 'Ooosh Staff' : `${a.first_name || ''} ${a.last_name || ''}`.trim()).join(', ')}
                           </div>
                         )}
                       </div>
