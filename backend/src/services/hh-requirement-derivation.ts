@@ -18,6 +18,7 @@ import { query, getClient } from '../config/database';
 import type { HHLineItem } from './hirehop-job-sync';
 import { syncExcessRequirementStatus } from './excess-requirement-sync';
 import { hhBroker } from './hirehop-broker';
+import { calculateVatAdjustment } from './vat-adjustment';
 
 // ── HH Category IDs ──────────────────────────────────────────────────────
 // Source: HireHop categories_list.php, verified 9 Apr 2026
@@ -519,11 +520,12 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     // backline requirement if one doesn't exist yet and there's backline on the job.
     // Use HH status integer (more reliable than pipeline_status which can lag behind)
     const jobStatus = await client.query(
-      `SELECT status, pipeline_status, hh_job_number FROM jobs WHERE id = $1`,
+      `SELECT status, pipeline_status, hh_job_number, job_date, out_date, job_end, return_date FROM jobs WHERE id = $1`,
       [jobId]
     );
     const hhStatus = jobStatus.rows[0]?.status;
     const hhJobNumber = jobStatus.rows[0]?.hh_job_number;
+    const jobRow = jobStatus.rows[0];
     const isPostHirePhase = hhStatus >= 4; // 4=Part Dispatched, 5=Dispatched, 6=Returned Incomplete, 7=Returned, 11=Completed
 
     if (isPostHirePhase && flags.has_backline) {
@@ -666,13 +668,11 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
 
       // Invoice + payment reconciliation: read HH billing for live status.
       // - invoice → in_progress ("Generated") when any non-proforma invoice exists
-      // - payment_reconcile → done ("Reconciled") when all such invoices have £0 owed
+      // - payment_reconcile → done ("Reconciled") when total OWING (less any VAT
+      //   relief the OP knows about but HH doesn't) is ≤ £0.01
       // Only fires while requirement is still 'not_started' (autoResolve gates on that),
       // so staff progress is never regressed. Wrapped in try/catch so a flaky HH call
       // doesn't blow up the whole derivation transaction.
-      // NOTE: uses HH's raw OWING per invoice. For VAT-adjusted international jobs the
-      // adjusted balance can be £0 while HH still shows owing > 0 — extend with the
-      // VAT adjustment service if that bites.
       if (hhJobNumber) {
         try {
           const billingRes = await hhBroker.get(
@@ -684,7 +684,7 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
             const bl = billingRes.data as Record<string, any>;
             if (Array.isArray(bl.rows)) {
               let hasInvoice = false;
-              let allInvoicesPaid = true;
+              let totalOwing = 0;
               for (const row of bl.rows) {
                 const kind = parseInt(row.kind ?? '0');
                 if (kind !== 1) continue;
@@ -694,12 +694,32 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
                 const invoiceDesc = String(data.DESCRIPTION || row.desc || '');
                 if (isProforma || invoiceDesc.toLowerCase().includes('proforma')) continue;
                 hasInvoice = true;
-                const owing = parseFloat(data.OWING || data.owing || row.owing || '0');
-                if (owing > 0.01) allInvoicesPaid = false;
+                totalOwing += parseFloat(data.OWING || data.owing || row.owing || '0');
               }
               if (hasInvoice) {
                 await autoResolve('invoice', 'in_progress');
-                if (allInvoicesPaid) {
+
+                // Subtract VAT relief the OP knows about but HH doesn't. When a
+                // client pays the OP's adjusted total via the portal, HH still
+                // shows OWING == vatSaved — without this, international jobs
+                // would never auto-reconcile. Returns null for non-international
+                // jobs (early exit, no extra HH calls), so vatSaved defaults to 0.
+                let vatSaved = 0;
+                const startDate = jobRow?.job_date || jobRow?.out_date;
+                const endDate = jobRow?.job_end || jobRow?.return_date;
+                if (startDate && endDate) {
+                  const hireDays = Math.max(1, Math.ceil(
+                    (new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)
+                  ));
+                  try {
+                    const vatAdj = await calculateVatAdjustment(hhJobNumber, hireDays);
+                    if (vatAdj) vatSaved = vatAdj.vatSaved;
+                  } catch (vatErr) {
+                    console.warn(`[HH Derive] VAT adjustment lookup failed for job ${jobId}:`, vatErr);
+                  }
+                }
+
+                if (totalOwing - vatSaved <= 0.01) {
                   await autoResolve('payment_reconcile', 'done');
                 }
               }
