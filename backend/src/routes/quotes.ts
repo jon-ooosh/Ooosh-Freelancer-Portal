@@ -532,6 +532,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
 
     if (keyFieldsChanged.length > 0 && updatedQuote.status === 'confirmed') {
       // Fire-and-forget: send notifications to assigned crew
+      const quoteId = String(req.params.id);
       (async () => {
         try {
           const assignees = await query(
@@ -542,7 +543,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
              JOIN people p ON p.id = qa.person_id
              WHERE qa.quote_id = $1 AND qa.status NOT IN ('declined', 'cancelled')
                AND p.email IS NOT NULL`,
-            [req.params.id]
+            [quoteId]
           );
 
           const jobName = oldQuote.linked_job_name || oldQuote.job_name || 'a job';
@@ -562,8 +563,8 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
               continue;
             }
             const mutedIds: string[] = crew.portal_muted_quote_ids || [];
-            if (mutedIds.includes(req.params.id)) {
-              console.log(`Skipping job change notification for ${crew.email} — quote ${req.params.id} muted`);
+            if (mutedIds.includes(quoteId)) {
+              console.log(`Skipping job change notification for ${crew.email} — quote ${quoteId} muted`);
               continue;
             }
             try {
