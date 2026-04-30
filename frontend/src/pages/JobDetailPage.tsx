@@ -3174,9 +3174,9 @@ export default function JobDetailPage() {
                                   a.excess.excess_status === 'waived' ? 'bg-blue-100 text-blue-700' :
                                   a.excess.excess_status === 'reimbursed' ? 'bg-emerald-100 text-emerald-700' :
                                   a.excess.excess_status === 'partially_reimbursed' ? 'bg-orange-100 text-orange-700' :
-                                  a.excess.excess_status === 'fully_claimed' || a.excess.excess_status === 'claimed' ? 'bg-red-100 text-red-700' :
+                                  a.excess.excess_status === 'fully_claimed' ? 'bg-red-100 text-red-700' :
                                   ['needed', 'pending'].includes(a.excess.excess_status) ? 'bg-amber-100 text-amber-700' :
-                                  a.excess.excess_status === 'partially_paid' || a.excess.excess_status === 'partial' ? 'bg-yellow-100 text-yellow-700' :
+                                  a.excess.excess_status === 'partially_paid' ? 'bg-yellow-100 text-yellow-700' :
                                   a.excess.excess_status === 'not_required' ? 'bg-gray-100 text-gray-500' :
                                   'bg-gray-100 text-gray-600'
                                 }`}>
@@ -3185,9 +3185,9 @@ export default function JobDetailPage() {
                                    a.excess.excess_status === 'waived' ? 'Waived' :
                                    a.excess.excess_status === 'reimbursed' ? 'Reimbursed' :
                                    a.excess.excess_status === 'partially_reimbursed' ? 'Part Reimbursed' :
-                                   a.excess.excess_status === 'fully_claimed' || a.excess.excess_status === 'claimed' ? 'Claimed' :
+                                   a.excess.excess_status === 'fully_claimed' ? 'Claimed' :
                                    ['needed', 'pending'].includes(a.excess.excess_status) ? 'Required' :
-                                   a.excess.excess_status === 'partially_paid' || a.excess.excess_status === 'partial' ? 'Part Paid' :
+                                   a.excess.excess_status === 'partially_paid' ? 'Part Paid' :
                                    a.excess.excess_status === 'not_required' ? 'Covered' :
                                    a.excess.excess_status}
                                 </span>

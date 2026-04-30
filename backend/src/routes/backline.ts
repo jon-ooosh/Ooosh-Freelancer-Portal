@@ -16,10 +16,10 @@ const router = Router();
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
 
-// HH statuses: 0=Enquiry, 1=Provisional, 2=Booked, 3=Prepped, 5=Dispatched,
-//              6=Returned Incomplete, 7=Returned, 11=Completed
-// For "going out" we want: Provisional(1), Booked(2), Prepped(3), Dispatched(5)
-// For "coming back" we want: Dispatched(5), Returned Incomplete(6), Returned(7), Booked(2), Prepped(3)
+// HH statuses: 0=Enquiry, 1=Provisional, 2=Booked, 3=Prepped, 4=Part Dispatched (Prepping),
+//              5=Dispatched, 6=Returned Incomplete, 7=Returned, 8=Requires Attention, 11=Completed
+// For "going out" we want: Provisional(1), Booked(2), Prepped(3), Part Dispatched(4), Dispatched(5)
+// For "coming back" we want: Dispatched(5), Returned Incomplete(6), Returned(7), Requires Attention(8)
 
 router.get('/overview', async (req: AuthRequest, res: Response) => {
   try {
@@ -30,7 +30,10 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
     const nowStr = now.toISOString().slice(0, 10);
     const endStr = endDate.toISOString().slice(0, 10);
 
-    // Jobs going out: use HH status as primary filter (more reliable than OP pipeline_status)
+    // Jobs going out: use HH status as primary filter (more reliable than OP pipeline_status).
+    // HH status 4 (Part Dispatched) and OP 'prepping' MUST be included — when staff start
+    // prepping a job, both flip to that state and were previously falling through both halves
+    // of the OR, making the job vanish from the page until marked Done.
     const goingOutResult = await query(
       `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
@@ -42,14 +45,15 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.job_date >= $1
          AND j.job_date <= $2
-         AND (j.status IN (1, 2, 3, 5)
-              OR j.pipeline_status IN ('confirmed', 'prepped', 'provisional', 'dispatched'))
+         AND (j.status IN (1, 2, 3, 4, 5)
+              OR j.pipeline_status IN ('confirmed', 'prepping', 'prepped', 'provisional', 'dispatched'))
        ORDER BY j.job_date ASC`,
       [nowStr, endStr]
     );
 
     // Jobs returning: only jobs that have actually gone out (HH status >= 5 Dispatched)
     // OR OP pipeline confirms they're out/returning. Excludes jobs still being prepped.
+    // HH status 8 (Requires Attention) is included — represents "returned with problems".
     const returningResult = await query(
       `SELECT DISTINCT ON (j.id) j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
@@ -61,7 +65,7 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.return_date >= $1
          AND j.return_date <= $2
-         AND (j.status IN (5, 6, 7)
+         AND (j.status IN (5, 6, 7, 8)
               OR j.pipeline_status IN ('dispatched', 'returned_incomplete', 'returned'))
        ORDER BY j.id, jr.phase DESC`,
       [nowStr, endStr]
@@ -150,8 +154,11 @@ interface BacklineJob {
 function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
   const flags = row.hh_derived_flags as DerivedFlags | null;
   const hhStatus = row.hh_status || 0;
-  // Consider effectively done if: explicitly marked done, OR HH shows prepped/dispatched+
-  const effectivelyDone = row.backline_status === 'done' || hhStatus >= 3;
+  // Consider effectively done if: explicitly marked done, OR HH shows dispatched+ (5+).
+  // HH 4 (Part Dispatched) means prep is IN PROGRESS, not done — must not be effectivelyDone
+  // or the page would hide its remaining prep time and treat the job as complete.
+  // HH 3 (Prepped) IS done from a prep perspective.
+  const effectivelyDone = row.backline_status === 'done' || hhStatus === 3 || hhStatus >= 5;
 
   return {
     id: row.id,

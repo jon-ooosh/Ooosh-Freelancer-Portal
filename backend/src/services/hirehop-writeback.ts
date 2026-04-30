@@ -34,7 +34,11 @@ const PIPELINE_TO_HH: Record<string, number> = {
   completed: 11,
 };
 
-// HireHop → Pipeline status mapping (for inbound webhooks)
+// HireHop → Pipeline status mapping (for inbound webhooks).
+// Note: outbound (PIPELINE_TO_HH) is intentionally less rich — OP 'dispatched'
+// doesn't push to HH because HH auto-jumps to 5 on physical checkout, and
+// 'returned_incomplete' pushes to HH 6 not 8. The HH integer is preserved in
+// jobs.status so no information is lost.
 export const HH_TO_PIPELINE: Record<number, string> = {
   0: 'new_enquiry',
   1: 'provisional',
@@ -44,6 +48,7 @@ export const HH_TO_PIPELINE: Record<number, string> = {
   5: 'prepped',    // HH skips to Dispatched(5) on checkout — OP treats as Prepped, staff clicks "On Hire" separately
   6: 'returned_incomplete',
   7: 'returned',
+  8: 'returned_incomplete', // Requires Attention — "returned with problems" semantically maps to incomplete; HH integer preserved in jobs.status for richer UI distinction if needed
   9: 'cancelled',  // HH Cancelled → OP cancelled
   10: 'lost',      // Not Interested → lost
   11: 'completed',

@@ -1210,7 +1210,7 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
         if (FREELANCER_PATCH_ALLOW.has(k)) filtered[k] = v;
       }
       // Lock status to 'booked_out' — freelancers can flip out of
-      // 'soft'/'confirmed'/'allocated' but not into anything else.
+      // 'soft'/'confirmed' but not into anything else.
       if (filtered.status && filtered.status !== 'booked_out') {
         delete filtered.status;
       }
