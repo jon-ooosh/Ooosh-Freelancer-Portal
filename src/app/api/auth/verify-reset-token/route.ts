@@ -14,7 +14,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { validateResetToken } from '@/lib/password-reset'
-import { isOpMode, verifyResetTokenOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, verifyResetTokenOP, reportFallback, mondayFallbackAllowed, isOpClientError } from '@/lib/op-api'
 
 export async function GET(request: NextRequest) {
   try {
@@ -31,6 +31,11 @@ export async function GET(request: NextRequest) {
         const result = await verifyResetTokenOP(token)
         return NextResponse.json(result)
       } catch (opError) {
+        // 4xx (token not found / expired) is a legit "no" answer — return
+        // {valid: false} cleanly without alerting or hitting Monday.
+        if (isOpClientError(opError)) {
+          return NextResponse.json({ valid: false })
+        }
         console.error('Verify-reset-token: OP backend error, falling back:', opError)
         reportFallback('verify-reset-token', opError)
         if (!mondayFallbackAllowed()) {

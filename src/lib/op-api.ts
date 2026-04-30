@@ -123,6 +123,38 @@ export interface PortalEquipmentResponse {
 // =============================================================================
 
 /**
+ * Typed error thrown by opFetch on non-2xx responses. Carries the HTTP
+ * status so callers can distinguish "the user asked for something that
+ * doesn't exist / they aren't allowed" (4xx — propagate to the user,
+ * NOT alert-worthy) from "the OP backend is broken" (5xx / network —
+ * fire a Monday-fallback alert email, and optionally fall back).
+ *
+ * Routes catching from opFetch should use `isOpClientError(err)` to
+ * branch — see helper below.
+ */
+export class OpApiError extends Error {
+  status: number
+  body: unknown
+  constructor(message: string, status: number, body: unknown) {
+    super(message)
+    this.name = 'OpApiError'
+    this.status = status
+    this.body = body
+  }
+}
+
+/**
+ * True when the error came back as an HTTP 4xx from OP. These are
+ * legitimate "your request was wrong" responses (auth failures, 404 not
+ * found, validation errors, etc.) and should NOT trigger a Monday
+ * fallback alert email — they're not OP outages, they're correct
+ * negative responses.
+ */
+export function isOpClientError(err: unknown): err is OpApiError {
+  return err instanceof OpApiError && err.status >= 400 && err.status < 500
+}
+
+/**
  * Make an authenticated request to the OP backend portal API.
  * Forwards the session cookie from the incoming request.
  */
@@ -144,7 +176,11 @@ async function opFetch<T>(
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
-    throw new Error(body.error || `OP API error: ${response.status}`)
+    throw new OpApiError(
+      (body as { error?: string })?.error || `OP API error: ${response.status}`,
+      response.status,
+      body,
+    )
   }
 
   return response.json()
@@ -283,9 +319,11 @@ async function opPostJson<T>(path: string, body: Record<string, unknown>): Promi
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const err = new Error(data.error || `HTTP ${response.status}`) as Error & { status?: number }
-    err.status = response.status
-    throw err
+    throw new OpApiError(
+      (data as { error?: string })?.error || `HTTP ${response.status}`,
+      response.status,
+      data,
+    )
   }
   return data
 }
@@ -311,9 +349,11 @@ export async function registerCompleteOP(
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const err = new Error(data.error || `HTTP ${response.status}`) as Error & { status?: number }
-    err.status = response.status
-    throw err
+    throw new OpApiError(
+      (data as { error?: string })?.error || `HTTP ${response.status}`,
+      response.status,
+      data,
+    )
   }
   let sessionToken: string | undefined
   const setCookie = response.headers.get('set-cookie')
@@ -354,9 +394,11 @@ export async function resetPasswordOP(
   })
   const data = await response.json().catch(() => ({}))
   if (!response.ok) {
-    const err = new Error(data.error || `HTTP ${response.status}`) as Error & { status?: number }
-    err.status = response.status
-    throw err
+    throw new OpApiError(
+      (data as { error?: string })?.error || `HTTP ${response.status}`,
+      response.status,
+      data,
+    )
   }
   let sessionToken: string | undefined
   const setCookie = response.headers.get('set-cookie')

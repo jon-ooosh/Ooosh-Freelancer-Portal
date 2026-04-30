@@ -15,7 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { findFreelancerByEmail } from '@/lib/monday'
 import { sendPasswordResetEmail } from '@/lib/email'
 import { createResetToken, checkResetRateLimit } from '@/lib/password-reset'
-import { isOpMode, forgotPasswordOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, forgotPasswordOP, reportFallback, mondayFallbackAllowed, isOpClientError } from '@/lib/op-api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -46,6 +46,15 @@ export async function POST(request: NextRequest) {
         const result = await forgotPasswordOP(normalizedEmail)
         return NextResponse.json(result)
       } catch (opError) {
+        // 4xx is a legit negative response from OP (e.g. rate limit) — don't
+        // alert + don't fall back to Monday. Still return the anti-enumeration
+        // generic response so we don't leak.
+        if (isOpClientError(opError)) {
+          return NextResponse.json({
+            success: true,
+            message: 'If your email is on our approved list, a reset link is on its way.',
+          })
+        }
         console.error('Forgot-password: OP backend error, falling back:', opError)
         reportFallback('forgot-password', opError, { email: normalizedEmail })
         if (!mondayFallbackAllowed()) {

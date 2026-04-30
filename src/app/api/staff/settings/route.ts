@@ -1,72 +1,48 @@
 /**
  * Staff Settings API
- * 
- * GET /api/staff/settings - Fetch costing settings from D&C Settings board
- * 
- * Reads configurable rates and thresholds used by the Crew & Transport wizard.
+ *
+ * GET /api/staff/settings — Fetch transport calculator settings.
+ *
+ * Source of truth: Ooosh Operations Platform's `calculator_settings`
+ * table, fetched via the dedicated `GET /api/portal/staff/calculator-settings`
+ * endpoint (protected by `PORTAL_STAFF_API_KEY`).
+ *
+ * History: this endpoint used to read from Monday.com's "D&C Settings"
+ * board (id 18398014955). Repointed to OP on 30 Apr 2026 — that board
+ * is now stale, OP's `calculator_settings` is the canonical source.
+ *
+ * Auth: requires the staff PIN header (`x-staff-pin`) just like before
+ * — no user-facing change in how the staff Crew & Transport page calls
+ * this. The OP API key is server-side only and never reaches the
+ * browser.
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 
-const MONDAY_API_URL = 'https://api.monday.com/v2'
-const DC_SETTINGS_BOARD_ID = process.env.MONDAY_BOARD_ID_DC_SETTINGS || '18398014955'
-
 // =============================================================================
-// COLUMN IDS - D&C Settings Board (18398014955)
-// These are the CORRECT column IDs as confirmed by Jon
-// =============================================================================
-const SETTINGS_COLUMNS = {
-  // Rates
-  hourlyRateFreelancerDay: 'numeric_mm06p0aw',
-  hourlyRateFreelancerNight: 'numeric_mm065da0',
-  hourlyRateClientDay: 'numeric_mm06saeq',
-  hourlyRateClientNight: 'numeric_mm06b0vx',
-  adminCostPerHour: 'numeric_mm06f6zw',
-  driverDayRate: 'numeric_mm06ht23',
-  
-  // Thresholds and multipliers
-  expenseMarkupPercent: 'numeric_mm06gkff',
-  minHoursThreshold: 'numeric_mm06tfv5',
-  minClientCharge: 'numeric_mm086t74',  // Minimum client charge floor
-  
-  // Time allowances (in minutes)
-  handoverTimeMinutes: 'numeric_mm06k1wq',
-  unloadTimeMinutes: 'numeric_mm062qhz',
-  
-  // These may need to be added or confirmed later
-  fuelPricePerLitre: 'numeric_mm06n1k9',  // If this doesn't exist, we'll use default
-  expenseVarianceThreshold: 'numeric_mm06v2x8',  // For expense tracking phase
-}
-
-// =============================================================================
-// DEFAULT VALUES (fallback if board not populated)
+// DEFAULT VALUES
+// Used when:
+//   - OP backend is unreachable (network error / OP down)
+//   - PORTAL_STAFF_API_KEY isn't configured (and we're degrading gracefully)
+//   - A specific key isn't yet in OP's `calculator_settings` table
+// These mirror OP's seed values in migration 007 + the legacy Monday defaults
+// for `expenseVarianceThreshold` (not currently in OP).
 // =============================================================================
 const DEFAULT_SETTINGS = {
-  // Rates (in GBP)
   hourlyRateFreelancerDay: 18,
   hourlyRateFreelancerNight: 25,
   hourlyRateClientDay: 33,
   hourlyRateClientNight: 45,
   adminCostPerHour: 5,
   driverDayRate: 180,
-  
-  // Thresholds
   expenseMarkupPercent: 10,
-  minHoursThreshold: 5,  // Minimum 5-hour call
-  minClientCharge: 0,    // No minimum by default (0 = disabled)
+  minHoursThreshold: 5,
+  minClientCharge: 0,
   expenseVarianceThreshold: 10,
-  
-  // Time allowances (minutes)
-  handoverTimeMinutes: 15,  // For vehicle handover
-  unloadTimeMinutes: 30,    // For equipment unload
-  
-  // Fuel
+  handoverTimeMinutes: 15,
+  unloadTimeMinutes: 30,
   fuelPricePerLitre: 1.45,
 }
-
-// =============================================================================
-// TYPES
-// =============================================================================
 
 interface CostingSettings {
   fuelPricePerLitre: number
@@ -84,30 +60,16 @@ interface CostingSettings {
   expenseVarianceThreshold: number
 }
 
-// =============================================================================
-// MONDAY API HELPER
-// =============================================================================
-
-async function mondayQuery<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
-  const token = process.env.MONDAY_API_TOKEN
-  if (!token) throw new Error('MONDAY_API_TOKEN not configured')
-
-  const response = await fetch(MONDAY_API_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': token,
-      'API-Version': '2024-10',
-    },
-    body: JSON.stringify({ query, variables }),
-  })
-
-  const data = await response.json()
-  if (data.errors) {
-    console.error('Monday API errors:', data.errors)
-    throw new Error(JSON.stringify(data.errors))
+/** Merge OP-supplied values with defaults — drops `undefined` from OP and
+ *  fills any missing keys from `DEFAULT_SETTINGS`. */
+function withDefaults(opSettings: Partial<Record<keyof CostingSettings, number | undefined>>): CostingSettings {
+  const out = { ...DEFAULT_SETTINGS } as unknown as Record<string, number>
+  for (const [k, v] of Object.entries(opSettings)) {
+    if (typeof v === 'number' && !Number.isNaN(v)) {
+      out[k] = v
+    }
   }
-  return data.data as T
+  return out as unknown as CostingSettings
 }
 
 // =============================================================================
@@ -116,11 +78,11 @@ async function mondayQuery<T>(query: string, variables?: Record<string, unknown>
 
 export async function GET(request: NextRequest) {
   try {
-    // Verify staff PIN (also accept hub auth marker for Staff Hub sessions) 
+    // Verify staff PIN (also accept hub auth marker for Staff Hub sessions)
     const pin = request.headers.get('x-staff-pin')
     const staffPin = process.env.STAFF_PIN
     const HUB_AUTH_MARKER = '__HUB_AUTH__'
-    
+
     if (!staffPin || (pin !== staffPin && pin !== HUB_AUTH_MARKER)) {
       return NextResponse.json(
         { success: false, error: 'Unauthorized' },
@@ -128,48 +90,11 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Build list of column IDs to fetch
-    const columnIds = Object.values(SETTINGS_COLUMNS)
+    const opUrl = process.env.OP_BACKEND_URL
+    const apiKey = process.env.PORTAL_STAFF_API_KEY
 
-    // Fetch settings from Monday board
-    const query = `
-      query ($boardId: ID!) {
-        boards(ids: [$boardId]) {
-          items_page(limit: 1) {
-            items {
-              id
-              name
-              column_values {
-                id
-                text
-                value
-              }
-            }
-          }
-        }
-      }
-    `
-
-    const result = await mondayQuery<{
-      boards: Array<{
-        items_page: {
-          items: Array<{
-            id: string
-            name: string
-            column_values: Array<{
-              id: string
-              text: string
-              value: string
-            }>
-          }>
-        }
-      }>
-    }>(query, { boardId: DC_SETTINGS_BOARD_ID })
-
-    const items = result.boards?.[0]?.items_page?.items || []
-    
-    if (items.length === 0) {
-      console.warn('Settings: No items found in D&C Settings board, using defaults')
+    if (!opUrl || !apiKey) {
+      console.warn('Staff settings: OP_BACKEND_URL or PORTAL_STAFF_API_KEY not configured — serving defaults')
       return NextResponse.json({
         success: true,
         settings: DEFAULT_SETTINGS,
@@ -177,54 +102,39 @@ export async function GET(request: NextRequest) {
       })
     }
 
-    // Parse column values into settings object
-    const item = items[0]
-    const columnMap = new Map<string, string>()
-    
-    for (const col of item.column_values) {
-      // For numeric columns, the 'text' field contains the display value
-      columnMap.set(col.id, col.text || '')
+    try {
+      const url = `${opUrl.replace(/\/$/, '')}/api/portal/staff/calculator-settings`
+      const response = await fetch(url, {
+        headers: { 'x-portal-staff-key': apiKey },
+        // Calculator settings change rarely — let Netlify cache for 60s.
+        next: { revalidate: 60 },
+      })
+      if (!response.ok) {
+        throw new Error(`OP responded ${response.status}`)
+      }
+      const data = await response.json() as {
+        success: boolean
+        settings: Partial<Record<keyof CostingSettings, number | undefined>>
+      }
+      const settings = withDefaults(data.settings || {})
+      return NextResponse.json({
+        success: true,
+        settings,
+        source: 'op',
+      })
+    } catch (err) {
+      // OP unreachable / errored — degrade to defaults so the staff
+      // Crew & Transport calculator stays usable.
+      console.error('Staff settings: OP fetch failed, using defaults:', err)
+      return NextResponse.json({
+        success: true,
+        settings: DEFAULT_SETTINGS,
+        source: 'defaults',
+        error: err instanceof Error ? err.message : 'OP fetch failed',
+      })
     }
-
-    // Helper to get numeric value with fallback
-    const getNumeric = (columnId: string, defaultValue: number): number => {
-      const text = columnMap.get(columnId)
-      if (!text) return defaultValue
-      const parsed = parseFloat(text)
-      return isNaN(parsed) ? defaultValue : parsed
-    }
-
-    // Build settings object with values from board (or defaults)
-    const settings: CostingSettings = {
-      hourlyRateFreelancerDay: getNumeric(SETTINGS_COLUMNS.hourlyRateFreelancerDay, DEFAULT_SETTINGS.hourlyRateFreelancerDay),
-      hourlyRateFreelancerNight: getNumeric(SETTINGS_COLUMNS.hourlyRateFreelancerNight, DEFAULT_SETTINGS.hourlyRateFreelancerNight),
-      hourlyRateClientDay: getNumeric(SETTINGS_COLUMNS.hourlyRateClientDay, DEFAULT_SETTINGS.hourlyRateClientDay),
-      hourlyRateClientNight: getNumeric(SETTINGS_COLUMNS.hourlyRateClientNight, DEFAULT_SETTINGS.hourlyRateClientNight),
-      adminCostPerHour: getNumeric(SETTINGS_COLUMNS.adminCostPerHour, DEFAULT_SETTINGS.adminCostPerHour),
-      driverDayRate: getNumeric(SETTINGS_COLUMNS.driverDayRate, DEFAULT_SETTINGS.driverDayRate),
-      expenseMarkupPercent: getNumeric(SETTINGS_COLUMNS.expenseMarkupPercent, DEFAULT_SETTINGS.expenseMarkupPercent),
-      minHoursThreshold: getNumeric(SETTINGS_COLUMNS.minHoursThreshold, DEFAULT_SETTINGS.minHoursThreshold),
-      minClientCharge: getNumeric(SETTINGS_COLUMNS.minClientCharge, DEFAULT_SETTINGS.minClientCharge),
-      handoverTimeMinutes: getNumeric(SETTINGS_COLUMNS.handoverTimeMinutes, DEFAULT_SETTINGS.handoverTimeMinutes),
-      unloadTimeMinutes: getNumeric(SETTINGS_COLUMNS.unloadTimeMinutes, DEFAULT_SETTINGS.unloadTimeMinutes),
-      fuelPricePerLitre: getNumeric(SETTINGS_COLUMNS.fuelPricePerLitre, DEFAULT_SETTINGS.fuelPricePerLitre),
-      expenseVarianceThreshold: getNumeric(SETTINGS_COLUMNS.expenseVarianceThreshold, DEFAULT_SETTINGS.expenseVarianceThreshold),
-    }
-
-    console.log('Settings: Loaded from D&C Settings board:', item.name)
-    console.log('Settings values:', JSON.stringify(settings, null, 2))
-
-    return NextResponse.json({
-      success: true,
-      settings,
-      source: 'board',
-      itemName: item.name,
-    })
-
   } catch (error) {
     console.error('Settings API error:', error)
-    
-    // Return defaults on error so wizard can still function
     return NextResponse.json({
       success: true,
       settings: DEFAULT_SETTINGS,

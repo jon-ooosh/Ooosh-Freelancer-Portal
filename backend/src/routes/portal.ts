@@ -676,6 +676,66 @@ router.post('/telemetry/monday-fallback', async (req: Request, res: Response) =>
   }
 });
 
+// ── GET /api/portal/staff/calculator-settings ────────────────────────
+//
+// Read-only fetch of transport calculator settings, protected by a
+// shared API key (header `x-portal-staff-key`, env `PORTAL_STAFF_API_KEY`).
+//
+// Replaces the legacy Monday.com D&C Settings board — the freelancer
+// portal's staff Crew & Transport calculator now reads from OP's
+// `calculator_settings` table (the same source the OP-side calculator
+// uses, so they can never drift).
+//
+// Returns the values in the shape the portal page expects (camelCase
+// keys matching `CostingSettings` in the portal's staff settings route).
+router.get('/staff/calculator-settings', async (req: Request, res: Response) => {
+  try {
+    const headerSecret = req.headers['x-portal-staff-key'];
+    const expected = process.env.PORTAL_STAFF_API_KEY;
+    if (!expected || headerSecret !== expected) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const result = await query(
+      `SELECT key, value FROM calculator_settings`
+    );
+    const map: Record<string, number> = {};
+    for (const row of result.rows) {
+      const v = parseFloat(row.value);
+      if (!Number.isNaN(v)) map[row.key] = v;
+    }
+
+    // Map OP's `calculator_settings` row keys to the portal's
+    // CostingSettings shape. Keep both spellings until the portal page
+    // is retired — `freelancer_hourly_day` is the canonical OP key,
+    // `hourlyRateFreelancerDay` is what the portal expects.
+    res.json({
+      success: true,
+      settings: {
+        hourlyRateFreelancerDay: map.freelancer_hourly_day,
+        hourlyRateFreelancerNight: map.freelancer_hourly_night,
+        hourlyRateClientDay: map.client_hourly_day,
+        hourlyRateClientNight: map.client_hourly_night,
+        adminCostPerHour: map.admin_cost_per_hour,
+        driverDayRate: map.driver_day_rate,
+        expenseMarkupPercent: map.expense_markup_percent,
+        minHoursThreshold: map.min_hours_threshold,
+        minClientCharge: map.min_client_charge_floor,
+        handoverTimeMinutes: map.handover_time_mins,
+        unloadTimeMinutes: map.unload_time_mins,
+        fuelPricePerLitre: map.fuel_price_per_litre,
+        // Not currently in calculator_settings — portal falls back to
+        // its default. Tracked for future migration.
+        expenseVarianceThreshold: undefined,
+      },
+    });
+  } catch (error) {
+    console.error('Portal staff calculator settings error:', error);
+    res.status(500).json({ error: 'Failed to load calculator settings' });
+  }
+});
+
 // ── All remaining routes require portal auth ─────────────────────────
 
 router.use(portalAuth);

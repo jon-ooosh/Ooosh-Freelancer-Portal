@@ -14,7 +14,7 @@ import bcrypt from 'bcryptjs'
 import { SignJWT } from 'jose'
 import { updateFreelancerTextColumn, FREELANCER_COLUMNS } from '@/lib/monday'
 import { consumeResetToken } from '@/lib/password-reset'
-import { isOpMode, resetPasswordOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, resetPasswordOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 const getSessionSecret = () => {
   const secret = process.env.SESSION_SECRET
@@ -75,10 +75,11 @@ export async function POST(request: NextRequest) {
           return response
         }
       } catch (opError: unknown) {
-        const status = (opError as { status?: number })?.status
-        if (status === 400 || status === 403) {
-          const err = opError as Error
-          return NextResponse.json({ error: err.message }, { status })
+        // Any 4xx (token expired, validation failure, forbidden) is a
+        // legit response — return it to the user without alerting.
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json({ error: opError.message }, { status })
         }
         console.error('Reset-password: OP backend error, falling back:', opError)
         reportFallback('reset-password', opError)

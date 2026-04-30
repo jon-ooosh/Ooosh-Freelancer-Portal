@@ -15,7 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionUser } from '@/lib/session'
 import { getJobById, getCrewJobById, getVenueById, VenueRecord } from '@/lib/monday'
-import { isOpMode, getJobDetailFromOP, reportFallback, mondayFallbackAllowed } from '@/lib/op-api'
+import { isOpMode, getJobDetailFromOP, reportFallback, mondayFallbackAllowed, isOpClientError, OpApiError } from '@/lib/op-api'
 
 /**
  * Check if a date is within 48 hours of now (before or after)
@@ -97,6 +97,16 @@ export async function GET(
         const opData = await getJobDetailFromOP(sessionToken, jobId)
         return NextResponse.json(opData)
       } catch (opError) {
+        // 4xx from OP = legitimate negative response (404 not found / not
+        // assigned, 401 session expired, etc.). NOT an OP outage —
+        // propagate to the user as-is, no Monday fallback, no alert.
+        if (isOpClientError(opError)) {
+          const status = (opError as OpApiError).status
+          return NextResponse.json(
+            { success: false, error: opError.message },
+            { status }
+          )
+        }
         console.error('OP backend job detail error:', opError)
         reportFallback('job-detail', opError, { email: session.email })
         if (!mondayFallbackAllowed()) {
