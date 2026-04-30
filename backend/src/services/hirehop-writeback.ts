@@ -130,3 +130,55 @@ function getHHStatusName(status: number): string {
   };
   return names[status] || `Unknown (${status})`;
 }
+
+/**
+ * Push a job name change to HireHop.
+ *
+ * Without this, the 30-min HH job sync (which unconditionally overwrites
+ * `jobs.job_name` from HireHop's JOB_NAME) clobbers any rename the user
+ * made in OP. We push to HH so both sides agree.
+ *
+ * @param jobId - Ooosh job UUID
+ * @param newJobName - the new job name (already trimmed/validated)
+ * @param triggeredBy - who triggered this (for logging)
+ * @returns success/message; non-success does NOT throw — caller decides whether to surface
+ */
+export async function writeBackJobNameToHireHop(
+  jobId: string,
+  newJobName: string,
+  triggeredBy: string,
+): Promise<{ success: boolean; message: string }> {
+  const jobResult = await query(
+    `SELECT hh_job_number FROM jobs WHERE id = $1`,
+    [jobId],
+  );
+
+  if (jobResult.rows.length === 0) {
+    return { success: false, message: 'Job not found' };
+  }
+
+  const { hh_job_number } = jobResult.rows[0];
+
+  if (!hh_job_number) {
+    return { success: true, message: 'No HireHop job linked — skipped' };
+  }
+
+  try {
+    const result = await hhBroker.post('/api/save_job.php', {
+      job: hh_job_number,
+      job_name: newJobName,
+      no_webhook: 1,
+    }, { priority: 'high' });
+
+    if (result.success) {
+      console.log(`[HH Write-back] Job ${hh_job_number}: name → "${newJobName}" triggered by ${triggeredBy}`);
+      return { success: true, message: 'HireHop job name updated' };
+    } else {
+      console.error(`[HH Write-back] Name update failed for job ${hh_job_number}:`, result.error);
+      return { success: false, message: `HireHop API error: ${result.error}` };
+    }
+  } catch (err) {
+    console.error(`[HH Write-back] Exception updating name for job ${hh_job_number}:`, err);
+    return { success: false, message: `Write-back exception: ${err}` };
+  }
+}

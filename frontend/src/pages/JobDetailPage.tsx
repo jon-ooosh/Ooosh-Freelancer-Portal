@@ -1151,8 +1151,11 @@ export default function JobDetailPage() {
     if (!job) return;
     setInlineEditSaving(true);
     try {
-      await api.patch(`/pipeline/${job.id}/edit`, patch);
+      const resp = await api.patch<{ hh_writeback_warning?: string }>(`/pipeline/${job.id}/edit`, patch);
       await loadJob();
+      if (resp?.hh_writeback_warning) {
+        alert(resp.hh_writeback_warning);
+      }
     } catch (err: any) {
       const msg = err?.message || 'Failed to save';
       console.error('Inline edit failed:', msg);
