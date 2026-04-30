@@ -101,6 +101,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '064_keep_after_close.sql',
         '065_driver_calculated_excess.sql',
         '066_job_start_time.sql',
+        '067_portal_notification_preferences.sql',
       ];
 
       for (const migration of migrations) {

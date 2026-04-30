@@ -179,6 +179,40 @@ export async function getEquipmentFromOP(
 }
 
 /**
+ * Notification settings — read.
+ * Mirrors the response shape the Settings page used to get from Monday.
+ */
+export interface PortalNotificationSettingsResponse {
+  success: boolean
+  notifications: {
+    globalMuteActive: boolean
+    globalMuteUntil: string | null
+    mutedJobIds: string[]
+    mutedJobCount: number
+  }
+}
+
+export async function getNotificationSettingsFromOP(
+  sessionToken: string
+): Promise<PortalNotificationSettingsResponse> {
+  return opFetch<PortalNotificationSettingsResponse>('/settings/notifications', sessionToken)
+}
+
+/**
+ * Notification settings — update. Same body shape as the Monday-era POST
+ * (action + optional muteType / muteUntilDate / jobId).
+ */
+export async function updateNotificationSettingsOnOP(
+  sessionToken: string,
+  body: Record<string, unknown>
+): Promise<{ success: boolean; message?: string; mutedUntil?: string; jobId?: string }> {
+  return opFetch('/settings/notifications', sessionToken, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/**
  * Submit job completion from OP backend.
  */
 export async function submitCompletionToOP(

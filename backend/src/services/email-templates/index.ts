@@ -232,9 +232,16 @@ const templates: Record<string, EmailTemplate> = {
           </td>
         </tr>
       </table>
-      <p style="margin:0;font-size:14px;color:#334155;">
-        Please check the freelancer portal for the latest details.
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;">
+        For full details, head to the freelancer portal:
       </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="background-color:#7B5EA7;border-radius:6px;">
+            <a href="https://freelancer.oooshtours.co.uk/" style="display:inline-block;padding:10px 20px;font-size:14px;color:#ffffff;text-decoration:none;font-weight:600;">Open freelancer portal &rarr;</a>
+          </td>
+        </tr>
+      </table>
     `,
   },
 
