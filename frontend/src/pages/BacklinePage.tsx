@@ -26,6 +26,7 @@ interface BacklineJob {
   effectivelyDone: boolean;
   hasMismatch: boolean;
   mismatchDetail: string | null;
+  daysOverdue?: number;
 }
 
 interface BacklineStats {
@@ -44,6 +45,8 @@ interface BacklineStats {
 interface BacklineOverview {
   goingOut: { stats: BacklineStats; jobs: BacklineJob[] };
   returning: { stats: BacklineStats; jobs: BacklineJob[] };
+  overdueOut?: { stats: BacklineStats; jobs: BacklineJob[] };
+  overdueReturning?: { stats: BacklineStats; jobs: BacklineJob[] };
 }
 
 const STATUS_CONFIG: Record<string, { label: string; colour: string; bg: string; dot: string }> = {
@@ -130,7 +133,7 @@ export default function BacklinePage() {
     return <div className="p-6 text-center text-gray-500">Failed to load backline data.</div>;
   }
 
-  const { goingOut, returning } = data;
+  const { goingOut, returning, overdueOut, overdueReturning } = data;
 
   // Apply status filter — "done" includes effectivelyDone (HH prepped/dispatched)
   function matchesStatusFilter(j: BacklineJob): boolean {
@@ -141,6 +144,8 @@ export default function BacklinePage() {
   }
   const filteredOut = goingOut.jobs.filter(matchesStatusFilter);
   const filteredReturn = returning.jobs.filter(matchesStatusFilter);
+  const filteredOverdueOut = (overdueOut?.jobs || []).filter(matchesStatusFilter);
+  const filteredOverdueReturn = (overdueReturning?.jobs || []).filter(matchesStatusFilter);
 
   async function updateStatus(reqId: string, newStatus: string) {
     try {
@@ -152,9 +157,17 @@ export default function BacklinePage() {
           jobs.map(j => j.reqId === reqId ? { ...j, backlineStatus: newStatus } : j);
         const updatedOut = update(prev.goingOut.jobs);
         const updatedReturn = update(prev.returning.jobs);
+        const updatedOverdueOut = prev.overdueOut ? update(prev.overdueOut.jobs) : undefined;
+        const updatedOverdueReturn = prev.overdueReturning ? update(prev.overdueReturning.jobs) : undefined;
         return {
           goingOut: { stats: recalcStats(updatedOut), jobs: updatedOut },
           returning: { stats: recalcStats(updatedReturn), jobs: updatedReturn },
+          overdueOut: updatedOverdueOut
+            ? { stats: recalcStats(updatedOverdueOut), jobs: updatedOverdueOut }
+            : prev.overdueOut,
+          overdueReturning: updatedOverdueReturn
+            ? { stats: recalcStats(updatedOverdueReturn), jobs: updatedOverdueReturn }
+            : prev.overdueReturning,
         };
       });
     } catch (err) {
@@ -377,6 +390,42 @@ export default function BacklinePage() {
         )}
       </div>
 
+      {/* ── Overdue — Going Out (red banner above main lists) ── */}
+      {direction !== 'return' && filteredOverdueOut.length > 0 && (
+        <div>
+          <h3 className="text-sm font-semibold text-red-700 mb-2 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-red-500" />
+            Overdue — Should Have Gone Out
+            <span className="ml-1 text-xs font-normal text-red-500">
+              ({filteredOverdueOut.length})
+            </span>
+          </h3>
+          <div className="bg-red-50 rounded-xl border border-red-200 divide-y divide-red-200">
+            {filteredOverdueOut.map(job => (
+              <JobRow key={job.id} job={job} dateField="jobDate" navigate={navigate} onStatusChange={updateStatus} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── Overdue — Returning ── */}
+      {direction !== 'out' && filteredOverdueReturn.length > 0 && (
+        <div>
+          <h3 className="text-sm font-semibold text-red-700 mb-2 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-red-500" />
+            Overdue — Should Be Back
+            <span className="ml-1 text-xs font-normal text-red-500">
+              ({filteredOverdueReturn.length})
+            </span>
+          </h3>
+          <div className="bg-red-50 rounded-xl border border-red-200 divide-y divide-red-200">
+            {filteredOverdueReturn.map(job => (
+              <JobRow key={job.id} job={job} dateField="returnDate" navigate={navigate} onStatusChange={updateStatus} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── Going Out — Job List ── */}
       {direction !== 'return' && filteredOut.length > 0 && (
         <div>
@@ -401,7 +450,7 @@ export default function BacklinePage() {
         </div>
       )}
 
-      {filteredOut.length === 0 && filteredReturn.length === 0 && (
+      {filteredOut.length === 0 && filteredReturn.length === 0 && filteredOverdueOut.length === 0 && filteredOverdueReturn.length === 0 && (
         <div className="text-center py-12 text-gray-400">
           <span className="text-4xl mb-3 block">🎸</span>
           <p className="text-lg font-medium">
@@ -473,9 +522,14 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
               </a>
             )}
           </div>
-          <div className="flex items-center gap-2 text-xs text-gray-500">
+          <div className="flex items-center gap-2 text-xs text-gray-500 flex-wrap">
             <span>{job.client}</span>
             {date && <span>· {formatDate(date)}</span>}
+            {job.daysOverdue !== undefined && job.daysOverdue > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">
+                {job.daysOverdue}d overdue
+              </span>
+            )}
             {job.itemCount > 0 && (
               <span className="text-purple-600 font-medium">{job.itemCount} items</span>
             )}

@@ -71,9 +71,59 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
       [nowStr, endStr]
     );
 
+    // Overdue going out: job_date < today AND not yet dispatched (HH < 5)
+    // AND backline not already marked done. Caps lookback at 30 days to keep
+    // payload small — anything older is probably stale data, not a live action.
+    const overdueOutResult = await query(
+      `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
+              j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
+              jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
+              jr.hh_mismatch, jr.hh_mismatch_detail,
+              j.hh_derived_flags,
+              (CURRENT_DATE - j.job_date::date) AS days_overdue
+       FROM jobs j
+       JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
+       WHERE j.is_deleted = false
+         AND j.job_date < $1
+         AND j.job_date >= $1::date - INTERVAL '30 days'
+         AND j.status < 5
+         AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'returned')
+         AND jr.status != 'done'
+       ORDER BY j.job_date ASC`,
+      [nowStr]
+    );
+
+    // Overdue returning: return_date < today AND not yet returned (HH < 7)
+    // AND backline (post_hire if exists, else pre_hire) not done.
+    const overdueReturnResult = await query(
+      `SELECT DISTINCT ON (j.id) j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
+              j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
+              jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
+              jr.hh_mismatch, jr.hh_mismatch_detail,
+              j.hh_derived_flags, jr.phase,
+              (CURRENT_DATE - j.return_date::date) AS days_overdue
+       FROM jobs j
+       JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline'
+       WHERE j.is_deleted = false
+         AND j.return_date < $1
+         AND j.return_date >= $1::date - INTERVAL '30 days'
+         AND j.status < 7
+         AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'returned')
+       ORDER BY j.id, jr.phase DESC`,
+      [nowStr]
+    );
+
     // Build job rows — sort returning by return_date (DISTINCT ON breaks ordering)
     const goingOut = goingOutResult.rows.map(row => mapJobRow(row, 'out'));
     const returning = returningResult.rows
+      .map(row => mapJobRow(row, 'return'))
+      .sort((a, b) => {
+        const da = a.returnDate ? new Date(a.returnDate).getTime() : 0;
+        const db = b.returnDate ? new Date(b.returnDate).getTime() : 0;
+        return da - db;
+      });
+    const overdueOut = overdueOutResult.rows.map(row => mapJobRow(row, 'out'));
+    const overdueReturning = overdueReturnResult.rows
       .map(row => mapJobRow(row, 'return'))
       .sort((a, b) => {
         const da = a.returnDate ? new Date(a.returnDate).getTime() : 0;
@@ -86,11 +136,15 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
     // OR where HH status is prepped(3) or dispatched(5) — work is done even if card wasn't updated
     const goingOutStats = buildStats(goingOut);
     const returningStats = buildStats(returning);
+    const overdueOutStats = buildStats(overdueOut);
+    const overdueReturnStats = buildStats(overdueReturning);
 
     res.json({
       data: {
         goingOut: { stats: goingOutStats, jobs: goingOut },
         returning: { stats: returningStats, jobs: returning },
+        overdueOut: { stats: overdueOutStats, jobs: overdueOut },
+        overdueReturning: { stats: overdueReturnStats, jobs: overdueReturning },
       },
     });
   } catch (err) {
@@ -149,6 +203,7 @@ interface BacklineJob {
   effectivelyDone: boolean; // true if backline_status=done OR HH status >= prepped
   hasMismatch: boolean;     // true if HH items changed since last action
   mismatchDetail: string | null;
+  daysOverdue?: number;     // populated for overdue lists only
 }
 
 function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
@@ -177,6 +232,9 @@ function mapJobRow(row: any, _direction: 'out' | 'return'): BacklineJob {
     effectivelyDone,
     hasMismatch: row.hh_mismatch === true,
     mismatchDetail: row.hh_mismatch_detail || null,
+    daysOverdue: row.days_overdue !== undefined && row.days_overdue !== null
+      ? Math.max(0, parseInt(String(row.days_overdue), 10) || 0)
+      : undefined,
   };
 }
 

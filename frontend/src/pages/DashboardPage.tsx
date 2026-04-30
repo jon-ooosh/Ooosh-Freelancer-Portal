@@ -209,7 +209,10 @@ export default function DashboardPage() {
       {/* Needs Attention */}
       <NeedsAttention
         overdueReturns={data.needs_attention.overdue_returns}
-        overdueTotalCount={parseInt(sc.overdue_count) || 0}
+        overdueTotalCount={data.needs_attention.total_overdue_count ?? (parseInt(sc.overdue_count) || 0)}
+        overdueDepartures={data.needs_attention.overdue_departures || []}
+        overdueBacklineRows={data.needs_attention.overdue_backline || []}
+        overdueTransportRows={data.needs_attention.overdue_transport_ops || []}
         chasesDue={data.needs_attention.chases_due}
         referralCount={data.needs_attention.referral_count}
         referrals={data.needs_attention.referrals}
