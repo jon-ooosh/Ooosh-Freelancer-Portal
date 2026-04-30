@@ -1023,7 +1023,7 @@ router.post(
         [quoteId, personId]
       );
       if (result.rows.length === 0) {
-        res.status(404).json({ error: 'Assignment not found or is Ooosh crew' });
+        res.status(404).json({ error: 'Assignment not found or is Ooosh Staff' });
         return;
       }
       const row = result.rows[0];
@@ -1381,18 +1381,24 @@ router.get('/runs/:runId', async (req: AuthRequest, res: Response) => {
 
 router.post('/:id/assignments/ooosh-crew', async (req: AuthRequest, res: Response) => {
   try {
-    // Get or create a system "Ooosh Crew" assignment (no real person)
-    // We use person_id = NULL with is_ooosh_crew = true
+    // Attach the system "Ooosh Staff" person to this quote. Using a real
+    // person_id (rather than NULL) keeps quote_assignments cleanly relational
+    // and lets the portal's shared info@ account match through person_id like
+    // any other person. ON CONFLICT for the rare case the quote already has
+    // an Ooosh Staff assignment (quote_id, person_id is UNIQUE).
+    const OOOSH_STAFF_ID = '00000000-0000-0000-0000-000000000001';
     const result = await query(
       `INSERT INTO quote_assignments (quote_id, person_id, role, is_ooosh_crew, created_by)
-       VALUES ($1, NULL, 'driver', true, $2)
+       VALUES ($1, $2, 'driver', true, $3)
+       ON CONFLICT (quote_id, person_id) DO UPDATE
+         SET is_ooosh_crew = true, updated_at = NOW()
        RETURNING id`,
-      [req.params.id, req.user!.id]
+      [req.params.id, OOOSH_STAFF_ID, req.user!.id]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
-    console.error('Assign Ooosh crew error:', error);
-    res.status(500).json({ error: 'Failed to assign Ooosh crew' });
+    console.error('Assign Ooosh staff error:', error);
+    res.status(500).json({ error: 'Failed to assign Ooosh staff' });
   }
 });
 

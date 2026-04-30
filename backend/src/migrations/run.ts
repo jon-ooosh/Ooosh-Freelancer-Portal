@@ -102,6 +102,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '065_driver_calculated_excess.sql',
         '066_job_start_time.sql',
         '067_portal_notification_preferences.sql',
+        '068_unify_ooosh_staff_assignments.sql',
       ];
 
       for (const migration of migrations) {
