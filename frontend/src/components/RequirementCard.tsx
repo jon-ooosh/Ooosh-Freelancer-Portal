@@ -760,69 +760,119 @@ export default function RequirementCard({
       )}
 
       {/* ── Delete confirmation ── */}
-      {showDeleteConfirm && (
-        <div className="mt-3 pt-3 border-t border-red-100 bg-red-50/50 -mx-4 -mb-4 px-4 pb-4 rounded-b-xl">
-          <div className="flex items-center gap-2 mb-2">
-            <svg className="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
-            </svg>
-            <span className="text-xs font-semibold text-red-700">
-              Remove {label}?
-            </span>
-          </div>
-          {requiresDeleteReason && (
-            <div className="mb-2">
-              <input
-                type="text"
-                value={deleteReason}
-                onChange={e => setDeleteReason(e.target.value)}
-                placeholder="Reason for removing (required)..."
-                className="w-full px-2 py-1.5 text-xs border border-red-200 rounded focus:ring-red-300 focus:border-red-300"
-                autoFocus
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && deleteReason.trim()) {
-                    onRemove(req.id, deleteReason.trim());
-                    setShowDeleteConfirm(false);
-                    setDeleteReason('');
-                  } else if (e.key === 'Escape') {
-                    setShowDeleteConfirm(false);
-                    setDeleteReason('');
-                  }
-                }}
-              />
+      {showDeleteConfirm && (() => {
+        // Hire-forms is the most-misclicked card type (the X sits next to
+        // the email picker dismiss). When drivers are attached to the
+        // requirement we lock down the confirmation HARD: type-to-confirm
+        // ("DELETE"), explicit list of attached drivers + their statuses,
+        // and inline copy explaining that drivers/assignments are NOT
+        // deleted by removing this card (they remain in the system, hit
+        // Sync HH to bring the card back).
+        const hasAttachedDrivers = req.requirement_type === 'hire_forms' && hireFormDrivers.length > 0;
+        const reasonOk = !requiresDeleteReason || deleteReason.trim().length > 0;
+        const typedOk = !hasAttachedDrivers || deleteReason.trim().toUpperCase().endsWith('DELETE');
+        const canRemove = reasonOk && typedOk;
+
+        const submit = () => {
+          if (!canRemove) return;
+          // Strip the "DELETE" sentinel before sending the reason — it's
+          // a UI guard, not part of the audit message.
+          const reason = hasAttachedDrivers
+            ? deleteReason.trim().replace(/\s*DELETE\s*$/i, '').trim() || undefined
+            : (deleteReason.trim() || undefined);
+          onRemove(req.id, reason);
+          setShowDeleteConfirm(false);
+          setDeleteReason('');
+        };
+
+        return (
+          <div className="mt-3 pt-3 border-t border-red-200 bg-red-50 -mx-4 -mb-4 px-4 pb-4 rounded-b-xl">
+            <div className="flex items-center gap-2 mb-2">
+              <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+              <span className="text-sm font-bold text-red-800">
+                Remove {label}?
+              </span>
             </div>
-          )}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                onRemove(req.id, deleteReason.trim() || undefined);
-                setShowDeleteConfirm(false);
-                setDeleteReason('');
-              }}
-              disabled={requiresDeleteReason && !deleteReason.trim()}
-              className="px-3 py-1 text-xs font-medium bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              Remove
-            </button>
-            <button
-              onClick={() => { setShowDeleteConfirm(false); setDeleteReason(''); }}
-              className="px-3 py-1 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded hover:bg-gray-50"
-            >
-              Cancel
-            </button>
+
+            {hasAttachedDrivers && (
+              <div className="mb-2 rounded-md bg-white border border-red-200 p-2 text-xs">
+                <div className="font-semibold text-red-700 mb-1">
+                  ⚠ This card has {hireFormDrivers.length} attached driver{hireFormDrivers.length !== 1 ? 's' : ''}:
+                </div>
+                <ul className="space-y-0.5 mb-2">
+                  {hireFormDrivers.map((d, i) => (
+                    <li key={i} className="flex items-center gap-2">
+                      <span className="font-medium text-gray-800">{d.driver_name || 'Unknown driver'}</span>
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-600">{d.status}</span>
+                    </li>
+                  ))}
+                </ul>
+                <div className="text-gray-600 leading-snug">
+                  Removing the card does <strong>not</strong> delete these drivers or
+                  cancel the hire — assignment records stay in the database. To bring
+                  the card back, hit <strong>Sync HH</strong> at the top of the job.
+                </div>
+              </div>
+            )}
+
+            {requiresDeleteReason && (
+              <div className="mb-2">
+                <input
+                  type="text"
+                  value={deleteReason}
+                  onChange={e => setDeleteReason(e.target.value)}
+                  placeholder={hasAttachedDrivers ? 'Reason — and type DELETE at the end to confirm' : 'Reason for removing (required)...'}
+                  className="w-full px-2 py-1.5 text-xs border border-red-300 rounded focus:ring-red-300 focus:border-red-400"
+                  autoFocus={!hasAttachedDrivers}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && canRemove) submit();
+                    else if (e.key === 'Escape') { setShowDeleteConfirm(false); setDeleteReason(''); }
+                  }}
+                />
+                {hasAttachedDrivers && deleteReason.trim() && !typedOk && (
+                  <div className="text-[11px] text-red-600 mt-1">
+                    Type <code className="px-1 bg-red-100 rounded">DELETE</code> at the end of the reason to enable the Remove button.
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={submit}
+                disabled={!canRemove}
+                className="px-3 py-1.5 text-xs font-semibold bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Remove
+              </button>
+              <button
+                onClick={() => { setShowDeleteConfirm(false); setDeleteReason(''); }}
+                className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50"
+                autoFocus={hasAttachedDrivers}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── Email contact picker ── */}
       {showEmailPicker && (
         <div className="mt-3 pt-3 border-t border-gray-100">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-semibold text-gray-600">Send hire form to:</span>
-            <button onClick={() => setShowEmailPicker(false)} className="text-gray-400 hover:text-gray-600">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
+            {/* Explicit text button — was previously a tiny X that looked
+                identical to the requirement-card delete X (and was easy to
+                misclick into the delete flow). */}
+            <button
+              onClick={() => setShowEmailPicker(false)}
+              className="text-xs font-medium text-gray-500 hover:text-gray-800 px-2 py-0.5 rounded hover:bg-gray-100"
+              title="Close — does not affect drivers"
+            >
+              Close
             </button>
           </div>
           {loadingContacts ? (
