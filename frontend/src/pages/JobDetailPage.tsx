@@ -1985,6 +1985,67 @@ export default function JobDetailPage() {
   const availableStatuses = isConfirmed || isOperational
     ? [...ENQUIRY_STATUSES, 'confirmed', ...OPERATIONAL_STATUSES, 'cancelled', 'lost'].filter(s => s !== job.pipeline_status)
     : PIPELINE_STATUSES.filter(s => s !== job.pipeline_status);
+
+  // ─── Date-based job alerts ───────────────────────────────────────────────
+  // Today as YYYY-MM-DD in local timezone for date-only comparisons.
+  const todayLocalISO = (() => {
+    const n = new Date();
+    return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+  })();
+  const outDay = job.out_date ? toDateInputValue(job.out_date) : null;
+  const returnDay = job.return_date ? toDateInputValue(job.return_date) : null;
+  const dayMs = 24 * 60 * 60 * 1000;
+  const daysBetween = (a: string, b: string) =>
+    Math.round((Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z')) / dayMs);
+
+  // Overdue dispatch banner — fires when a confirmed/prepped job hasn't been
+  // marked as dispatched by 16:30 on its out date (amber), or by end of out
+  // date (red, days-overdue). Hides once status moves to dispatched or beyond.
+  const PRE_DISPATCH = ['confirmed', 'prepped'];
+  const overdueDispatch: { severity: 'amber' | 'red'; daysOverdue: number; outTime: string | null } | null = (() => {
+    if (!outDay || !PRE_DISPATCH.includes(job.pipeline_status || '')) return null;
+    if (outDay < todayLocalISO) {
+      return { severity: 'red', daysOverdue: daysBetween(todayLocalISO, outDay), outTime: job.out_time };
+    }
+    if (outDay === todayLocalISO) {
+      const now = new Date();
+      const cutoff = new Date();
+      cutoff.setHours(16, 30, 0, 0);
+      if (now >= cutoff) {
+        return { severity: 'amber', daysOverdue: 0, outTime: job.out_time };
+      }
+    }
+    return null;
+  })();
+
+  // Next-suggested status — the natural progression given dates + current
+  // status. Bolded + asterisked in the status dropdown so staff can see at a
+  // glance what they're likely about to pick. Pure date-based for v1; data-
+  // aware suggestions (prep done → bold prepped, close-out done → bold
+  // completed) are deferred until we lift requirements state up.
+  const nextSuggestedStatus: string | null = (() => {
+    const status = job.pipeline_status;
+    if (!status) return null;
+    if (['new_enquiry', 'quoting', 'chasing', 'provisional', 'paused'].includes(status)) {
+      return 'confirmed';
+    }
+    if ((status === 'confirmed' || status === 'prepped') && outDay && todayLocalISO >= outDay) {
+      return 'dispatched';
+    }
+    if (status === 'dispatched' && returnDay) {
+      const dayBefore = (() => {
+        const d = new Date(returnDay + 'T00:00:00');
+        d.setDate(d.getDate() - 1);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      })();
+      if (todayLocalISO >= dayBefore) return 'returned';
+    }
+    if (status === 'returned_incomplete') return 'returned';
+    if (status === 'returned') return 'completed';
+    return null;
+  })();
+  // ─────────────────────────────────────────────────────────────────────────
+
   const fileCount = (job.files || []).length;
   const hhJobUrl = job.hh_job_number
     ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
@@ -2155,17 +2216,19 @@ export default function JobDetailPage() {
                         };
                         const cfg = PIPELINE_STATUS_CONFIG[s as PipelineStatus] || OPS_CONFIG[s];
                         if (!cfg) return null;
+                        const isNext = s === nextSuggestedStatus;
                         return (
                           <button
                             key={s}
                             onClick={() => initiateStatusChange(s as PipelineStatus)}
-                            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 flex items-center gap-2"
+                            className={`w-full text-left px-3 py-1.5 text-sm hover:bg-gray-50 flex items-center gap-2 ${isNext ? 'font-bold' : ''}`}
+                            title={isNext ? 'Suggested next step based on dates' : undefined}
                           >
                             <span
                               className="w-2 h-2 rounded-full"
                               style={{ backgroundColor: cfg.colour }}
                             />
-                            {cfg.label}
+                            {cfg.label}{isNext ? ' *' : ''}
                           </button>
                         );
                       })}
@@ -2398,6 +2461,54 @@ export default function JobDetailPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
                 Client synced to HireHop successfully.
+              </div>
+            )}
+
+            {/* Overdue dispatch banner — pre-dispatch job past its out-date */}
+            {overdueDispatch && (
+              <div
+                className={`mt-2 flex items-center gap-3 rounded-lg px-3 py-2 text-sm border ${
+                  overdueDispatch.severity === 'red'
+                    ? 'bg-red-50 border-red-200'
+                    : 'bg-amber-50 border-amber-200'
+                }`}
+              >
+                <svg
+                  className={`w-4 h-4 flex-shrink-0 ${
+                    overdueDispatch.severity === 'red' ? 'text-red-500' : 'text-amber-500'
+                  }`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
+                  />
+                </svg>
+                <span
+                  className={overdueDispatch.severity === 'red' ? 'text-red-800' : 'text-amber-800'}
+                >
+                  {overdueDispatch.severity === 'red'
+                    ? `Booked to go out ${overdueDispatch.daysOverdue} ${
+                        overdueDispatch.daysOverdue === 1 ? 'day' : 'days'
+                      } ago — not yet marked as Dispatched.`
+                    : `Booked to go out today${
+                        overdueDispatch.outTime ? ` at ${overdueDispatch.outTime.slice(0, 5)}` : ''
+                      } — not yet marked as Dispatched.`}
+                </span>
+                <button
+                  onClick={() => initiateStatusChange('dispatched' as PipelineStatus)}
+                  className={`ml-auto px-3 py-1 text-white text-xs font-medium rounded transition-colors whitespace-nowrap ${
+                    overdueDispatch.severity === 'red'
+                      ? 'bg-red-500 hover:bg-red-600'
+                      : 'bg-amber-500 hover:bg-amber-600'
+                  }`}
+                >
+                  Mark as Dispatched
+                </button>
               </div>
             )}
 
