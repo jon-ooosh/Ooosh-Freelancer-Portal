@@ -225,7 +225,14 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // Get per-driver excess records with vehicle and driver info
+    // Get per-driver excess records with vehicle and driver info.
+    //
+    // The LEFT JOIN on `previous_excess` (LATERAL) walks the rollover chain: when
+    // an excess record carries a hh_deposit_id but the deposit lives on a
+    // *different* HH job, that's a rolled-over excess. We expose the source HH
+    // job number so the payment portal can tell the client "your excess is
+    // already held from your previous hire #15676, no further excess payment
+    // needed for this hire."
     const excessResult = await query(
       `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_amount_taken,
               je.excess_status, je.excess_calculation_basis, je.payment_method,
@@ -234,11 +241,24 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
               d.id AS driver_id, d.full_name AS driver_name,
               d.licence_points, d.requires_referral,
               fv.id AS vehicle_id, fv.reg AS vehicle_reg, fv.simple_type AS vehicle_type,
-              vha.assignment_type, vha.status AS assignment_status
+              vha.assignment_type, vha.status AS assignment_status,
+              prev.hh_job_number AS rolled_over_from_hh_job
        FROM job_excess je
        LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
        LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
        LEFT JOIN drivers d ON d.id = vha.driver_id
+       LEFT JOIN LATERAL (
+         SELECT j2.hh_job_number
+         FROM job_excess je2
+         JOIN jobs j2 ON j2.id = je2.job_id
+         WHERE je2.hh_deposit_id = je.hh_deposit_id
+           AND je2.id <> je.id
+           AND je.payment_method = 'rolled_over'
+           AND COALESCE(je2.payment_method, '') <> 'rolled_over'
+           AND j2.hh_job_number IS NOT NULL
+         ORDER BY je2.created_at ASC
+         LIMIT 1
+       ) AS prev ON true
        WHERE je.job_id = $1
          AND je.excess_status != 'not_required'
        ORDER BY je.excess_amount_required DESC NULLS LAST`,
@@ -283,6 +303,14 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
         licence_points: r.licence_points,
         requires_referral: r.requires_referral,
         suggested_collection_method: r.suggested_collection_method,
+        // Rollover linkage for payment portal display: when this excess was
+        // rolled over from a previous hire, expose the source HH job number
+        // so the portal can tell the client "your £1,200 excess is held from
+        // your previous hire #15676 — no further excess payment needed."
+        is_rolled_over: r.payment_method === 'rolled_over',
+        rolled_over_from_hh_job: r.rolled_over_from_hh_job
+          ? Number(r.rolled_over_from_hh_job)
+          : null,
       };
     });
 

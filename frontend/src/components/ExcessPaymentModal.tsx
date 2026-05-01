@@ -3,9 +3,18 @@
  *
  * Supports: Record Payment, Record Claim, Reimburse, Waive, Roll Over, Move to different entity.
  */
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { api } from '../services/api';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
+
+interface OutstandingInvoice {
+  id: number;
+  number: string;
+  description: string;
+  amount: number;
+  owing: number;
+  date: string | null;
+}
 
 type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'move' | 'edit_required' | 'unlink_deposit';
 
@@ -94,6 +103,42 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   // Claim form
   const [claimAmount, setClaimAmount] = useState('');
   const [claimNotes, setClaimNotes] = useState('');
+  const [claimInvoiceId, setClaimInvoiceId] = useState<number | null>(null);
+  const [outstandingInvoices, setOutstandingInvoices] = useState<OutstandingInvoice[]>([]);
+  const [loadingInvoices, setLoadingInvoices] = useState(false);
+  const [invoicesError, setInvoicesError] = useState('');
+
+  // Lazy-load outstanding invoices when the claim action opens. We only fetch
+  // for HH-linked excess records (no point asking HH for invoices on an OP-only
+  // record). Skipping a fetch is fine — backend will validate and surface a
+  // clear error if the claim is missing the invoice picker selection.
+  const isHhLinked = Boolean(excess.hirehop_job_id);
+  useEffect(() => {
+    if (action !== 'claim' || !isHhLinked) return;
+    let cancelled = false;
+    setLoadingInvoices(true);
+    setInvoicesError('');
+    api.get<{ data: OutstandingInvoice[] }>(`/excess/${excess.id}/outstanding-invoices`)
+      .then((r) => {
+        if (cancelled) return;
+        setOutstandingInvoices(r.data);
+        // Auto-select if exactly one invoice — common case.
+        if (r.data.length === 1) setClaimInvoiceId(r.data[0]!.id);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setInvoicesError(err.message || 'Failed to load invoices');
+      })
+      .finally(() => { if (!cancelled) setLoadingInvoices(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action, isHhLinked]);
+
+  // Available balance: same formula as amountHeld below (kept in sync). Used by
+  // the claim form to show running balance and validate before submission.
+  const claimAvailable = Number(excess.excess_amount_taken || 0)
+    - Number(excess.claim_amount || 0)
+    - Number(excess.reimbursement_amount || 0);
 
   // Reimburse form
   // Default to the original payment method IF it's a real bank method we can refund
@@ -139,12 +184,24 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             reference: payReference || null,
           });
           break;
-        case 'claim':
+        case 'claim': {
+          const claimAmountNum = parseFloat(claimAmount);
+          if (isNaN(claimAmountNum) || claimAmountNum <= 0) {
+            throw new Error('Enter a valid claim amount');
+          }
+          if (claimAmountNum > claimAvailable + 0.005) {
+            throw new Error(`Claim amount exceeds available balance (£${claimAvailable.toFixed(2)})`);
+          }
+          if (isHhLinked && !claimInvoiceId) {
+            throw new Error('Pick a HireHop invoice to apply the claim against');
+          }
           await api.post(`/excess/${excess.id}/claim`, {
-            amount: parseFloat(claimAmount),
+            amount: claimAmountNum,
+            invoice_id: claimInvoiceId,
             notes: claimNotes || null,
           });
           break;
+        }
         case 'reimburse':
           await api.post(`/excess/${excess.id}/reimburse`, {
             amount: parseFloat(reimburseAmount),
@@ -199,12 +256,16 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
     availableActions.push({ action: 'payment', label: 'Record Payment', icon: '£' });
   }
-  if (s === 'taken' || s === 'partially_paid' || s === 'pre_auth') {
-    availableActions.push({ action: 'claim', label: 'Claim (Damage)', icon: '!' });
+  if ((s === 'taken' || s === 'partially_paid' || s === 'pre_auth') && amountHeld > 0) {
+    availableActions.push({ action: 'claim', label: 'Apply to Invoice (claim)', icon: '!' });
     availableActions.push({ action: 'reimburse', label: 'Reimburse', icon: '<' });
     availableActions.push({ action: 'rollover', label: 'Roll Over to Next Hire', icon: '>' });
   }
+  // Multi-event model: even after partial reimbursement, more claims can still
+  // be applied as long as held balance remains. Same for reimbursing the
+  // remainder of a partially-claimed deposit.
   if ((s === 'fully_claimed' || s === 'partially_reimbursed') && amountHeld > 0) {
+    availableActions.push({ action: 'claim', label: 'Apply to Invoice (claim)', icon: '!' });
     availableActions.push({ action: 'reimburse', label: 'Reimburse Remainder', icon: '<' });
   }
   // Amend the required excess figure — available whenever the record isn't in a
@@ -365,34 +426,79 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
 
             {action === 'claim' && (
               <div className="space-y-3">
-                <h3 className="text-sm font-semibold text-gray-900">Record Damage Claim</h3>
+                <h3 className="text-sm font-semibold text-gray-900">Apply to HireHop Invoice</h3>
                 <p className="text-xs text-gray-500">
-                  Amount currently held: £{amountHeld.toFixed(2)}
+                  Available balance: <span className="font-medium">£{claimAvailable.toFixed(2)}</span>
+                  {Number(excess.claim_amount || 0) > 0 && (
+                    <> · Already claimed: £{Number(excess.claim_amount || 0).toFixed(2)}</>
+                  )}
                 </p>
+
+                {/* Invoice picker — HH-linked records only. The deposit gets
+                    applied to the chosen invoice. The invoice's line item carries
+                    the right Xero nominal (Vehicle damage / Misc / extra hire /
+                    cleaning / etc.) so claims against different categories all
+                    route correctly without OP needing to know about nominals. */}
+                {isHhLinked && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Apply to invoice</label>
+                    {loadingInvoices ? (
+                      <div className="text-xs text-gray-500 py-2">Loading outstanding invoices...</div>
+                    ) : invoicesError ? (
+                      <div className="text-xs text-red-600 py-2">{invoicesError}</div>
+                    ) : outstandingInvoices.length === 0 ? (
+                      <div className="text-xs bg-amber-50 border border-amber-200 rounded-md p-3 text-amber-900">
+                        <strong>No outstanding invoices on this HireHop job.</strong>
+                        <br />
+                        Create the invoice in HireHop first (with the appropriate nominal — e.g. Vehicle damage, Misc income, extra hire), then come back to record the claim.
+                      </div>
+                    ) : (
+                      <select
+                        value={claimInvoiceId ?? ''}
+                        onChange={(e) => setClaimInvoiceId(e.target.value ? Number(e.target.value) : null)}
+                        className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                      >
+                        <option value="">-- Pick an invoice --</option>
+                        {outstandingInvoices.map((inv) => (
+                          <option key={inv.id} value={inv.id}>
+                            {inv.number} · £{inv.owing.toFixed(2)} owing · {inv.description.substring(0, 60)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                )}
+
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Claim Amount</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Claim amount</label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
                     <input
                       type="number"
                       step="0.01"
-                      max={amountHeld}
+                      max={claimAvailable}
                       value={claimAmount}
                       onChange={(e) => setClaimAmount(e.target.value)}
+                      placeholder="0.00"
                       className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
                     />
                   </div>
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
                   <textarea
                     value={claimNotes}
                     onChange={(e) => setClaimNotes(e.target.value)}
-                    placeholder="Describe the damage..."
-                    rows={3}
+                    placeholder="e.g. Underfuelled — full tank £120"
+                    rows={2}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
+                {isHhLinked && outstandingInvoices.length > 0 && (
+                  <p className="text-xs text-gray-500 italic">
+                    The invoice's line items determine the Xero nominal. Multiple claims are allowed — the remaining balance stays available for further nibbles or eventual reimbursement.
+                  </p>
+                )}
               </div>
             )}
 

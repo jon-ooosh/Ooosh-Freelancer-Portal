@@ -41,7 +41,8 @@ const paymentSchema = z.object({
 });
 
 const claimSchema = z.object({
-  amount: z.number().min(0),
+  amount: z.number().positive(),
+  invoice_id: z.number().int().positive().nullable().optional(), // HH invoice ID (required for HH-linked records)
   notes: z.string().nullable().optional(),
 });
 
@@ -312,6 +313,79 @@ router.get('/', async (req: AuthRequest, res: Response) => {
 // All excess calculations are done within the hire form app (Netlify).
 // The OP only stores/tracks the excess amount passed through from the hire form.
 // The excess_rules table still exists in the DB but is not used by any endpoint.
+
+// ── GET /api/excess/:id/outstanding-invoices ──────────────────────────────
+// Lists invoices on the excess record's HH job that still have an outstanding
+// balance, so staff can pick which one to apply a claim against. Reads HH live
+// (no cache) — staff just created the invoice in HH UI moments ago, we need
+// fresh data.
+//
+// Returns kind:1 (invoice) rows with `owing > 0` from billing_list.php. The
+// claim endpoint then takes the chosen invoice's HH ID, the deposit's HH ID
+// (already on the excess record), and pushes the application via
+// billing_payments_save.php.
+
+router.get('/:id/outstanding-invoices', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const result = await query(
+      `SELECT hirehop_job_id FROM job_excess WHERE id = $1`,
+      [id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const hhJobId = result.rows[0].hirehop_job_id;
+    if (!hhJobId) {
+      res.status(422).json({
+        error: 'Excess record is not linked to a HireHop job',
+        detail: 'Cannot list outstanding invoices for an OP-only excess record. Claims against this record need to be recorded manually outside HireHop.',
+      });
+      return;
+    }
+
+    // billing_list.php returns the full job billing tree. We want kind:1 (invoices).
+    // owing > 0 means the invoice still has balance to apply against.
+    const billingRes = await hhBroker.get('/php_functions/billing_list.php',
+      { main_id: hhJobId, type: 1 },
+      { priority: 'high', cacheTTL: 0 }
+    );
+
+    if (!billingRes.success || !billingRes.data) {
+      res.status(502).json({
+        error: 'Could not load HireHop billing for this job',
+        detail: billingRes.error || 'HireHop did not return billing data. Try again, or check the job status in HireHop.',
+      });
+      return;
+    }
+
+    const bl = billingRes.data as Record<string, any>;
+    const invoices: Array<{ id: number; number: string; description: string; amount: number; owing: number; date: string | null }> = [];
+    for (const row of bl.rows || []) {
+      const kind = parseInt(row.kind ?? '0');
+      if (kind !== 1) continue; // only invoices
+      const owing = Number(row.owing ?? row.data?.owing ?? 0);
+      if (owing <= 0.005) continue; // already paid
+      const invoiceId = parseInt(row.data?.ID || row.number || String(row.id).replace('b', '') || '0');
+      if (!invoiceId) continue;
+      invoices.push({
+        id: invoiceId,
+        number: String(row.data?.NUMBER || row.number || ''),
+        description: String(row.data?.DESCRIPTION || row.desc || ''),
+        amount: Number(row.data?.NET ?? row.debit ?? 0) + Number(row.data?.TAX ?? 0),
+        owing,
+        date: row.data?.TAX_POINT || row.date || null,
+      });
+    }
+
+    res.json({ data: invoices });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Outstanding invoices error:', errMsg);
+    res.status(500).json({ error: 'Failed to load outstanding invoices', detail: errMsg });
+  }
+});
 
 // ── GET /api/excess/ledger — Client excess ledger ──
 
@@ -624,6 +698,22 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
           );
           rolloverLinked = true;
           console.log(`[excess] Rollover linked: new record ${id} inherits hh_deposit_id ${prevRow.hh_deposit_id} from ${prevRow.id}; previous flipped to rolled_over`);
+
+          // Drop a note on the new HH job so HireHop staff can see the linkage
+          // without having to dig into OP. Best-effort — don't reject the
+          // rollover if HH note posting fails.
+          if (excess.hirehop_job_id && prevRow.hh_deposit_id && prevRow.hh_job_number) {
+            try {
+              const noteText = `£${amount.toFixed(2)} excess held against deposit #${prevRow.hh_deposit_id} on job #${prevRow.hh_job_number} — rolled over from previous hire. (${new Date().toLocaleDateString('en-GB')})`;
+              await hhBroker.get('/api/job_note.php', {
+                job: excess.hirehop_job_id,
+                note: noteText,
+              }, { priority: 'low' });
+              console.log(`[excess] HH job note posted on job ${excess.hirehop_job_id}: rolled-over linkage`);
+            } catch (e) {
+              console.error('[excess] HH job note post failed (non-fatal):', e);
+            }
+          }
         } else {
           console.warn(`[excess] Rollover recorded on ${id} but no previous record with hh_deposit_id found for this client. Reimbursement will fail until manually linked.`);
         }
@@ -663,31 +753,160 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
   }
 });
 
-// ── POST /api/excess/:id/claim — Record damage claim ──
+// ── POST /api/excess/:id/claim — Record damage claim (apply deposit to invoice) ──
+//
+// Applies part of the held deposit to a HireHop invoice on the current job. The
+// invoice's line items carry the Xero nominal (e.g. "Vehicle damage", "Misc
+// income") so claims against different categories route to the right place
+// without OP needing to know about nominals.
+//
+// Multi-claim support: claims accumulate. Each call adds to `claim_amount`,
+// appends to `claim_notes`. Status moves to `fully_claimed` only when the
+// accumulated claims fully consume `excess_amount_taken` AND there's no
+// reimbursement. Otherwise stays at the current (typically `taken`) status so
+// the available balance stays clear.
+//
+// Loud-fail policy:
+//   - HH-linked record without `hh_deposit_id` → 422 (linkage missing).
+//   - Claim amount > available balance → 400.
+//   - HH apply-to-invoice fails → 502, OP record untouched.
+//   - OP-only record (no `hirehop_job_id`) → claim recorded in OP only,
+//     response flagged `op_only: true`.
 
-router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/claim', authorize('admin', 'manager'), validate(claimSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { amount, notes } = req.body;
+    const { amount, invoice_id, notes } = req.body;
 
-    const result = await query(
-      `UPDATE job_excess SET
-        excess_status = 'fully_claimed',
-        claim_amount = $1,
-        claim_date = NOW(),
-        claim_notes = $2,
-        updated_at = NOW()
-      WHERE id = $3
-      RETURNING *`,
-      [amount, notes || null, id]
-    );
-
-    if (result.rows.length === 0) {
+    const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
+    if (currentResult.rows.length === 0) {
       res.status(404).json({ error: 'Excess record not found' });
       return;
     }
+    const current = currentResult.rows[0];
+    const amountTaken = parseFloat(current.excess_amount_taken || '0');
+    const alreadyClaimed = parseFloat(current.claim_amount || '0');
+    const alreadyReimbursed = parseFloat(current.reimbursement_amount || '0');
+    const available = amountTaken - alreadyClaimed - alreadyReimbursed;
 
-    // Send claim email
+    if (amount > available + 0.005) {
+      res.status(400).json({
+        error: 'Claim amount exceeds available balance',
+        detail: `Available: £${available.toFixed(2)} (taken £${amountTaken.toFixed(2)} − claimed £${alreadyClaimed.toFixed(2)} − reimbursed £${alreadyReimbursed.toFixed(2)}), requested: £${amount.toFixed(2)}`,
+      });
+      return;
+    }
+
+    const isHhLinked = Boolean(current.hirehop_job_id);
+    let hhPaymentAppId: number | null = null;
+
+    if (isHhLinked) {
+      // Need both: a deposit ID (where the cash sits) + an invoice ID (what we're applying to).
+      if (!current.hh_deposit_id) {
+        res.status(422).json({
+          error: 'Cannot locate original HireHop deposit',
+          detail: current.payment_method === 'rolled_over'
+            ? 'This excess was rolled over from a previous hire and the chain back to the original HireHop deposit is broken. Use the "Link HH Deposit" action on the Money tab to attach this record to the correct HireHop deposit before claiming.'
+            : 'No HireHop deposit ID linked to this excess record. Use the "Link HH Deposit" action on the Money tab before claiming.',
+        });
+        return;
+      }
+      if (!invoice_id) {
+        res.status(400).json({
+          error: 'Invoice required',
+          detail: 'Pick a HireHop invoice to apply the claim against. Create the invoice in HireHop first if none exists yet.',
+        });
+        return;
+      }
+
+      // ── Push the application to HireHop ──────────────────────────────
+      // bank=169 (Worldpay default) is just metadata — no real cash moves; the
+      // deposit is already in the bank, this just reallocates it from
+      // "deposit liability" → "invoice paid" (which the invoice line item's
+      // ACC_NOMINAL_ID then routes to the right Xero revenue account).
+      const currentDate = new Date().toISOString().split('T')[0];
+      const description = `${current.hirehop_job_id} - Excess applied to invoice`;
+      const memo = notes
+        ? `Excess claim — ${notes} (recorded via Ooosh OP)`
+        : `Excess claim — applied to invoice (recorded via Ooosh OP)`;
+
+      console.log(`[excess] Claim: applying £${amount} of deposit ${current.hh_deposit_id} to invoice ${invoice_id} on job ${current.hirehop_job_id}`);
+      const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
+        id: 0,
+        date: currentDate,
+        desc: description,
+        paid: amount,
+        memo: memo,
+        bank: 169, // Worldpay default — metadata only, no real bank movement
+        OWNER: invoice_id,
+        deposit: current.hh_deposit_id,
+        correction: 0,
+        no_webhook: 1,
+      }, { priority: 'high' });
+
+      if (!hhResult.success || !hhResult.data) {
+        console.error('[excess] HH claim apply failed:', hhResult.error, hhResult.data);
+        res.status(502).json({
+          error: 'HireHop application failed',
+          detail: hhResult.error || 'HireHop did not accept the deposit-to-invoice application. OP record not updated. Confirm the invoice is approved and has owing balance, then retry.',
+        });
+        return;
+      }
+
+      hhPaymentAppId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
+      console.log(`[excess] HH claim application created: ${hhPaymentAppId}`);
+
+      // Trigger Xero sync (post_payment — same as reimburse, NOT post_deposit).
+      // Best-effort: HH application already succeeded, so OP and HH are in sync;
+      // failed Xero sync just means a delay until next reconciliation pass.
+      if (hhPaymentAppId) {
+        try {
+          await hhBroker.post('/php_functions/accounting/tasks.php', {
+            hh_package_type: 1,
+            hh_acc_package_id: 3,
+            hh_task: 'post_payment',
+            hh_id: hhPaymentAppId,
+            hh_acc_id: '',
+          }, { priority: 'high' });
+          console.log('[excess] Xero sync triggered for claim application');
+        } catch (e) {
+          console.error('[excess] Xero sync for claim failed (non-fatal — application posted, sync may catch up later):', e);
+        }
+      }
+    }
+
+    // ── Update the OP record ─────────────────────────────────────────────
+    // Accumulate claim_amount; append notes with timestamp separator so multiple
+    // claim events stay traceable.
+    const newClaimTotal = alreadyClaimed + amount;
+    const fullyConsumed = (newClaimTotal + alreadyReimbursed) >= amountTaken - 0.005;
+    // Only move to fully_claimed when claims fully consume the deposit AND no
+    // reimbursement has occurred. Otherwise leave status as-is (typically
+    // 'taken') so it's clear there's still a balance to nibble or refund.
+    const newStatus = fullyConsumed && alreadyReimbursed < 0.005
+      ? 'fully_claimed'
+      : current.excess_status;
+
+    const dateStr = new Date().toISOString().split('T')[0];
+    const noteEntry = notes
+      ? `[${dateStr}] £${amount.toFixed(2)}: ${notes}`
+      : `[${dateStr}] £${amount.toFixed(2)} claim`;
+    const newNotes = current.claim_notes
+      ? `${current.claim_notes}\n${noteEntry}`
+      : noteEntry;
+
+    const result = await query(
+      `UPDATE job_excess SET
+        excess_status = $1,
+        claim_amount = $2,
+        claim_date = NOW(),
+        claim_notes = $3,
+        updated_at = NOW()
+      WHERE id = $4
+      RETURNING *`,
+      [newStatus, newClaimTotal, newNotes, id]
+    );
+
     const excess = result.rows[0];
     sendExcessEmail({
       templateId: 'excess_claimed',
@@ -703,10 +922,14 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
       );
     }
 
-    res.json({ data: result.rows[0] });
+    res.json({
+      data: { ...excess, hh_payment_application_id: hhPaymentAppId },
+      ...(isHhLinked ? {} : { op_only: true }),
+    });
   } catch (error) {
-    console.error('[excess] Claim error:', error);
-    res.status(500).json({ error: 'Failed to record claim' });
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Claim error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to record claim', detail: errMsg });
   }
 });
 
@@ -746,7 +969,10 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
       });
       return;
     }
-    const isPartial = (alreadyReimbursed + amount) < amountTaken;
+    // Partial only if there's still UNACCOUNTED-FOR balance after this reimburse.
+    // Must factor in prior claims, otherwise a £100 deposit with £40 claimed +
+    // £60 reimbursed flags as partial when it's actually fully resolved.
+    const isPartial = (alreadyReimbursed + amount + claimed) < amountTaken - 0.005;
 
     // ── Step 1: Find the original HH deposit ID (for HH-linked records) ─────
     let hhDepositId: number | null = null;
