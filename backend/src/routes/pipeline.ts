@@ -1459,8 +1459,14 @@ function validateJobDateTimes(job: {
   const to = buildHHDateTime(job.return_date, job.return_time);
   const ms = (s?: string) => (s ? Date.parse(s.replace(' ', 'T') + ':00Z') : NaN);
   const oMs = ms(out), sMs = ms(start), eMs = ms(end), tMs = ms(to);
-  if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs) {
-    return 'Outgoing date/time must be on or before Job Start date/time.';
+  // Out > Start is allowed on the same calendar day (e.g. charge starts 09:00,
+  // client collects at 15:00 — Outgoing here is the physical handover time).
+  // Cross-day Out-after-Start stays blocked: the inbound HH sync would clobber
+  // out_date back to job_date on the next pull (HH only sees the clamped value
+  // — see buildHHJobDateTimes — so OP's intended later date is unrecoverable).
+  const sameDay = out && start && out.slice(0, 10) === start.slice(0, 10);
+  if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs && !sameDay) {
+    return 'Outgoing date must be on or before Job Start date.';
   }
   if (!isNaN(sMs) && !isNaN(eMs) && sMs > eMs) {
     return 'Job Start date/time must be on or before Job End date/time.';
@@ -1483,6 +1489,13 @@ function validateJobDateTimes(job: {
  *                                          for legacy rows pre-migration 066)
  *   - HH end   = job_end     + end_time   (falls back to 09:00 if null)
  *   - HH to    = return_date + return_time
+ *
+ * Clamping rule: when OP's Out is later than Start (allowed only on the same
+ * calendar day — see validateJobDateTimes), HH receives `out = start`. HH's
+ * data model rejects out > start, and HH's chargeable period is start→end
+ * regardless, so clamping the time portion only is lossless from HH's point of
+ * view. OP retains the user's real Outgoing time in `out_time` for Dashboard
+ * widgets, prep schedules, etc.
  */
 function buildHHJobDateTimes(job: {
   out_date: Date | string | null;
@@ -1500,10 +1513,17 @@ function buildHHJobDateTimes(job: {
   to?: string;
   duration?: { duration_days: number; duration_hrs: number; duration_locked: 0 };
 } {
-  const out = buildHHDateTime(job.out_date, job.out_time);
+  let out = buildHHDateTime(job.out_date, job.out_time);
   const start = buildHHDateTime(job.job_date, job.start_time || job.out_time);
   const end = buildHHDateTime(job.job_end, job.end_time);
   const to = buildHHDateTime(job.return_date, job.return_time);
+  if (out && start) {
+    const oMs = Date.parse(out.replace(' ', 'T') + ':00Z');
+    const sMs = Date.parse(start.replace(' ', 'T') + ':00Z');
+    if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs) {
+      out = start;
+    }
+  }
   const duration = calcHHDuration(start, end) ?? undefined;
   return { out, start, end, to, duration };
 }
