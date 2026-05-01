@@ -1129,8 +1129,13 @@ export default function JobDetailPage() {
     const sMs = ms(v.job_date, v.start_time);
     const eMs = ms(v.job_end, v.end_time);
     const rMs = ms(v.return_date, v.return_time);
-    if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs) {
-      return 'Outgoing date/time must be on or before Job Start date/time.';
+    // Out > Start is allowed on the same calendar day (e.g. charge starts 09:00,
+    // client collects at 15:00 — Outgoing here means the physical handover time).
+    // Cross-day Out-after-Start stays blocked: the inbound HH sync would clobber
+    // out_date back to job_date on the next pull (HH never sees the user's
+    // intended later date because we clamp on push), so we don't expose that case.
+    if (!isNaN(oMs) && !isNaN(sMs) && oMs > sMs && v.out_date !== v.job_date) {
+      return 'Outgoing date must be on or before Job Start date.';
     }
     if (!isNaN(sMs) && !isNaN(eMs) && sMs > eMs) {
       return 'Job Start date/time must be on or before Job End date/time.';
@@ -1283,6 +1288,15 @@ export default function JobDetailPage() {
     if (orderingError) {
       alert(orderingError);
       return;
+    }
+    if (editOutDate && editJobDate && editOutDate === editJobDate && outT > startT) {
+      const ok = window.confirm(
+        `Outgoing time (${outT}) is after Job Start time (${startT}).\n\n` +
+        `HireHop will show Outgoing as ${startT} to keep the chargeable period intact. ` +
+        `Ooosh will keep your ${outT} collection time for the Dashboard, prep schedules, etc.\n\n` +
+        `Save?`
+      );
+      if (!ok) return;
     }
     setEditingDates(false);
     await saveInlineField({
