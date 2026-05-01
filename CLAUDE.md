@@ -965,12 +965,14 @@ No new tables needed — all types use existing `job_requirements` table with `p
 
 **Phase B — Auto-detection (status-reactive cards)** ✅ COMPLETE
 - [x] Vehicle check-in + backline de-prep: auto-done when HH status >= 7 (Returned)
-- [x] Invoice detection: read HH billing_list for kind:1 rows with OWING field, auto-update requirement status
-- [x] Payment reconciliation: auto-resolve when all invoices have £0 owed
+- [x] Invoice detection: read HH billing_list for kind:1 rows, auto-flip `not_started → in_progress` ("Generated") when any non-proforma invoice exists
+- [x] Payment reconciliation: auto-resolve `not_started → done` ("Reconciled") when total HH OWING minus OP-side VAT relief (`vatSaved` from `calculateVatAdjustment`) is ≤ £0.01. VAT-aware so international jobs paid through the portal at the adjusted rate reconcile correctly even though HH still shows owing == vatSaved.
 - [x] Excess resolution: read job_excess statuses, auto-resolve when all terminal
 - [x] Client follow-up: query interactions after return_date, auto-resolve when found
 - [x] Invoice "Sent" cascade: marking invoice done auto-resolves client_followup
-- [x] HH billing check rate-limited (max 10 jobs per request, 5min cache)
+- [x] Invoice + payment_reconcile auto-detection lives in `hh-requirement-derivation.ts` (per-job-live, fires from 30-min sync, on-page auto-sync, and Sync HH button) — NOT just the Returns-page bulk endpoint. The bulk endpoint at `POST /api/requirements/closeout-progress` retains its own inline check (capped at 10 jobs/req, 5 min cache) for the Returns list view.
+- [x] HH billing check rate-limited via broker (low priority, 5 min cache); both billing fetch and VAT lookup wrapped in try/catch so a flaky call leaves status at `not_started` rather than rolling back the derivation transaction
+- [x] Invoice card labels revised (1 May 2026): `in_progress="Generated"` (auto-set when invoice detected), `done="Sent"` (manual via "Mark as Sent to Client" button) — so the manual progression lands on the most-progressed state
 
 **Phase C — Invoice Sent + type rendering** ✅ MOSTLY COMPLETE
 - [x] "Mark as Sent to Client" button on invoice requirement card (in_progress → done)
