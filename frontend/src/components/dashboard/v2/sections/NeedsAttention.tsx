@@ -232,11 +232,15 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
 
   // ── Adaptive layout ───────────────────────────────────────────────────
-  // Per brief §4: when overdue total is 0, collapse to a thin "All clear" line
-  // and only show secondary buckets that have items.
+  // Cards with count = 0 are hidden entirely (in BOTH rows) so the page
+  // draws attention to what actually needs doing — staff requested over the
+  // brief's "render All Clear cards to keep layout stable".
+  // When overdue total is 0, the whole overdue row collapses to a single
+  // thin green "All clear" line and only the populated secondary cards
+  // render below.
   const allClear = overdueTotal === 0;
-  const secondaryBuckets = [referrals, excess, chases, fleetBucket];
-  const secondaryAny = secondaryBuckets.some(b => b.count > 0);
+  const overdueBuckets = [returns, departures, backline, transport].filter(b => b.count > 0);
+  const secondaryBuckets = [referrals, excess, chases, fleetBucket].filter(b => b.count > 0);
 
   return (
     <Card as="section" className="!p-0 !border-0 !bg-transparent">
@@ -261,19 +265,16 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
           <div className="text-xs text-gray-500 mb-4">
             Items that should be done but aren't. Click any card to triage.
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-            <NACard bucket={returns} />
-            <NACard bucket={departures} />
-            <NACard bucket={backline} />
-            <NACard bucket={transport} />
-          </div>
+          {overdueBuckets.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+              {overdueBuckets.map(b => <NACard key={b.key} bucket={b} />)}
+            </div>
+          )}
         </>
       )}
-      {secondaryAny && (
+      {secondaryBuckets.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {secondaryBuckets.filter(b => b.count > 0 || !allClear).map(b => (
-            <NACard key={b.key} bucket={b} />
-          ))}
+          {secondaryBuckets.map(b => <NACard key={b.key} bucket={b} />)}
         </div>
       )}
     </Card>
