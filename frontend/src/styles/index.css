@@ -28,3 +28,159 @@ body {
   -moz-osx-font-smoothing: grayscale;
   background-color: #f8fafc;
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Dashboard (Today) — design tokens.
+   Scoped to .dash-v2 to avoid colliding with the rest of the app's palette
+   (the existing Tailwind `ooosh-*` colours are blue; the Today dashboard
+   uses brand purple per Ooosh email templates and the redesign brief).
+   ────────────────────────────────────────────────────────────────────────── */
+.dash-v2 {
+  /* Brand */
+  --op-purple: #7B5EA7;
+  --op-purple-50: #f5f1fa;
+  --op-purple-100: #ebe2f5;
+  --op-purple-200: #d4c1e8;
+  --op-purple-300: #b89adb;
+  --op-purple-400: #9c75ce;
+  --op-purple-500: #7B5EA7;
+  --op-purple-600: #6a4d92;
+  --op-purple-700: #553d76;
+
+  /* Status — semantic, mirrors the rest of the app */
+  --op-red:    #dc2626;
+  --op-red-bg: #fef2f2;
+  --op-amber:  #d97706;
+  --op-amber-bg: #fef3c7;
+  --op-green:  #059669;
+  --op-green-bg: #d1fae5;
+  --op-blue:   #2563eb;
+  --op-blue-bg: #dbeafe;
+  --op-grey:   #6b7280;
+  --op-grey-bg: #f3f4f6;
+
+  /* Surface */
+  --op-bg:        #f8fafc;
+  --op-surface:   #ffffff;
+  --op-border:    #e5e7eb;
+  --op-border-2:  #d1d5db;
+  --op-text:      #111827;
+  --op-text-2:    #4b5563;
+  --op-text-3:    #9ca3af;
+
+  /* Density (regular) */
+  --op-gap:    14px;
+  --op-pad:    18px;
+  --op-row-h:  44px;
+  --op-radius: 12px;
+  --op-fs-eyebrow: 10.5px;
+  --op-fs-body:    14px;
+  --op-fs-title:   15px;
+  --op-fs-h1:      20px;
+
+  font-feature-settings: "ss01", "cv11";
+}
+
+/* Density variants — set via [data-density] on .dash-v2 root */
+.dash-v2[data-density="compact"] {
+  --op-gap: 10px;
+  --op-pad: 12px;
+  --op-row-h: 38px;
+  --op-fs-body: 13px;
+  --op-fs-title: 14px;
+}
+.dash-v2[data-density="comfy"] {
+  --op-gap: 18px;
+  --op-pad: 24px;
+  --op-row-h: 52px;
+  --op-fs-body: 15px;
+  --op-fs-title: 16px;
+}
+
+/* Dark theme (deferred — placeholder so future module can flip without
+   restructure). Activate via [data-theme="dark"] on .dash-v2 root. */
+.dash-v2[data-theme="dark"] {
+  --op-bg:       #0f172a;
+  --op-surface:  #1e293b;
+  --op-border:   #334155;
+  --op-border-2: #475569;
+  --op-text:     #f1f5f9;
+  --op-text-2:   #cbd5e1;
+  --op-text-3:   #64748b;
+  --op-grey-bg:  #334155;
+}
+
+/* Common component primitives. Tailwind handles layout; these handle the
+   tokenised look. */
+.dash-v2 .op-card {
+  background: var(--op-surface);
+  border: 1px solid var(--op-border);
+  border-radius: var(--op-radius);
+  padding: var(--op-pad);
+}
+.dash-v2 .op-eyebrow {
+  font-size: var(--op-fs-eyebrow);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--op-text-3);
+}
+.dash-v2 .op-title {
+  font-size: var(--op-fs-title);
+  font-weight: 600;
+  color: var(--op-text);
+  letter-spacing: -0.005em;
+}
+.dash-v2 .op-h1 {
+  font-size: var(--op-fs-h1);
+  font-weight: 600;
+  color: var(--op-text);
+  letter-spacing: -0.01em;
+}
+.dash-v2 .op-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status pip (used by progress strip) */
+.dash-v2 .op-pip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+.dash-v2 .op-pip-todo  { background: var(--op-grey-bg);  color: var(--op-text-2); }
+.dash-v2 .op-pip-wip   { background: var(--op-amber-bg); color: var(--op-amber); }
+.dash-v2 .op-pip-done  { background: var(--op-green-bg); color: var(--op-green); }
+.dash-v2 .op-pip-prob  { background: var(--op-red-bg);   color: var(--op-red); }
+.dash-v2 .op-pip-na    { background: transparent;        color: var(--op-text-3); border-color: var(--op-border); opacity: 0.7; }
+.dash-v2 .op-pip::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  display: inline-block;
+}
+.dash-v2 .op-pip-na::before { background: var(--op-text-3); }
+
+/* 14-day heat strip — 7 cols mobile, 14 cols ≥700px */
+.dash-v2 .op-heatstrip {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+@media (min-width: 700px) {
+  .dash-v2 .op-heatstrip {
+    grid-template-columns: repeat(14, minmax(0, 1fr));
+  }
+}
+
+/* Focus ring */
+.dash-v2 *:focus-visible {
+  outline: 2px solid var(--op-purple);
+  outline-offset: 2px;
+  border-radius: 4px;
+}

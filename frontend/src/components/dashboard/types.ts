@@ -126,6 +126,9 @@ export interface PendingExcess {
   job_uuid: string | null;
   hh_job_number: number | null;
   job_name: string | null;
+  /** New (Apr 2026): hire-end date and days-since for the unreimbursed bucket. */
+  hire_ended_at?: string | null;
+  days_since_finish?: number | null;
 }
 
 export interface PipelineStat {
@@ -225,6 +228,8 @@ export interface OperationsData {
     overdue_count: string;
     chases_due_count: string;
     open_enquiries_count: string;
+    /** Last 14 days, oldest first. Count of jobs that would have been on hire on each day. */
+    on_hire_spark: number[];
   };
   today: {
     going_out: ScheduleJob[];

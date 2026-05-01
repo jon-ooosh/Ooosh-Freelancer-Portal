@@ -2354,6 +2354,72 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 `users.force_password_change` — admin-set flag, prompts user on next login
 `users.password_changed_at` — tracks when password was last changed
 
+## Dashboard (Today) — Section registry & extension points
+
+The home dashboard (mounted at `/`, file `frontend/src/pages/DashboardPage.tsx`) is rebuilt around two extensible patterns. **All future modules that surface a "needs human action" signal or a per-job status pip should plug into these patterns rather than building a parallel surface on the dashboard.**
+
+### Section registry — `frontend/src/components/dashboard/v2/`
+
+| File | Purpose |
+|---|---|
+| `registry.ts` | The `SECTIONS` array — single source of truth for what blocks render and in what default order |
+| `sections.ts` | `applyOrder()` helper + `DashboardSection` interface |
+| `usePrefs.ts` | Density / theme / section-order persistence (localStorage now; backend column later) |
+| `primitives.tsx` | `<Card>`, `<SectionHd>`, `<StatCard>`, `<Sparkline>`, `<ProgressStrip>`, `<ProgressBar>`, `<SegBar>` |
+| `progress-strip.ts` | Frontend mirror of the per-job progress strip type contract |
+| `sections/<Name>.tsx` | One file per section (Needs / Today / ComingUp / Operations / Pipeline / Activity) |
+
+**Adding a new section** (e.g. "Carnets due", "Open damage cases"):
+
+1. Build `sections/<YourSection>.tsx` accepting `DashboardSectionProps` (`{ data, backline, refresh }`). Use `<Card>` + `<SectionHd>` for visual consistency.
+2. Add an entry to `SECTIONS` in `registry.ts` with a `defaultOrder` slot and `pinnable: true`.
+3. If the section needs new aggregate data, extend `GET /api/dashboard/operations` (`backend/src/routes/dashboard.ts`) — keep the response shape backwards-compatible.
+4. **Do not** build a separate "things to action" UI on the dashboard. Overdue / action items belong in `<NeedsAttention>` as a new bucket (see below).
+
+### Per-job progress strip — extension contract
+
+The Today block renders a 7-slot status strip per job (De-prep · Client · Excess · Freelancer · Invoicing · Payment · Vehicle). Mapping lives in `backend/src/services/job-progress-strip.ts` and is mirrored on the frontend in `frontend/src/components/dashboard/v2/progress-strip.ts`.
+
+**Phase rule:** "Going Out Today" jobs render the `pre_hire` mapping; "Returning Today" jobs render the `post_hire` mapping. Slot 0's label changes per phase (Prep / De-prep).
+
+**Status precedence (worst wins):** `prob > todo > wip > done > na`.
+
+**Adding a new module to the strip:**
+
+- **Option A — extend an existing slot.** If your new requirement type is conceptually part of an existing concept (e.g. a `damage_review` post-hire requirement → "Vehicle" slot), append the requirement_type string to the relevant slot array in `STRIP_MAPPING`. Worst-status precedence handles the merge.
+- **Option B — add a new slot.** Add a `ProgressStripCategory` key, an entry in `STRIP_CATEGORY_LABELS` (per phase), and an entry in `STRIP_MAPPING`. Update the frontend mirror, the rendering order in `<ProgressStrip>`, and add a column to the future-module checklist (CLAUDE.md §11).
+
+The slot resolves by fetching `job_requirements` rows and mapping `requirement_type → status`. To wire a new requirement type into the dashboard, you only need to (a) make sure the requirement type writes a row to `job_requirements` and (b) add it to `STRIP_MAPPING`.
+
+### NeedsAttention buckets — extension contract
+
+`<NeedsAttention>` (`sections/NeedsAttention.tsx`) is the canonical "things that need a human" surface. It has two rows:
+
+- **Overdue (red):** Returns / Departures / Backline / Transport. Empty cards still render in this row when overdue total ≥ 1 (so layout doesn't shift as items resolve).
+- **Secondary (amber/blue/purple):** Referrals / Excess (held unreimbursed) / Chases / Fleet Compliance. Cards in this row hide when count = 0 (and the whole row disappears if all four are empty).
+
+When overdue total = 0, the overdue row collapses to a thin green "All clear" line and only the populated secondary cards render.
+
+**Adding a new bucket:**
+
+1. Extend `GET /api/dashboard/operations` to return the new bucket data under `needs_attention`.
+2. Add a corresponding `NABucket` in `NeedsAttention.tsx` with the right accent (red for time-critical, amber for action-needed, blue for informational, purple for special category).
+3. Add a `viewAllHref` to deep-link into the full list view for that bucket.
+
+### Excess bucket semantics (Apr 2026)
+
+The `needs_attention.excess_*` fields now mean "**excess held unreimbursed for hires that finished 5+ days ago**" — the post-hire pinch point. Rule:
+
+- `job_excess.excess_status NOT IN (reimbursed, partially_reimbursed, rolled_over, waived, fully_claimed, not_required)`
+- `jobs.pipeline_status IN (returned_incomplete, returned, completed)` OR `jobs.status IN (6, 7, 11)`
+- `COALESCE(jobs.return_date, jobs.job_end) <= CURRENT_DATE - INTERVAL '5 days'`
+
+Sorted oldest finished first. Replaces the earlier "excess awaiting collection" rule (we're good at taking excess up front, slack at returning it). The "needs collecting" gate signal still lives on `<ExcessGateBanner>` per-job.
+
+### On-hire sparkline (14 days)
+
+`stat_cards.on_hire_spark` is a 14-element array (oldest first) computed by counting jobs where `out_date <= day AND return_date >= day` for each of the last 14 days. Cancelled / lost jobs and pre-deposit enquiries are excluded via status filter. No status-history table needed — derived from the existing date columns.
+
 ## Architecture Notes
 
 - **Frontend talks to backend** via `/api/*` — Nginx proxies API requests to Express (port 3001)
