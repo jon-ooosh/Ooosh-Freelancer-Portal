@@ -37,14 +37,17 @@ function NACard({ bucket }: { bucket: NABucket }) {
 
   return (
     <div
-      className="op-card flex flex-col gap-2 min-h-[180px]"
-      style={empty ? {} : { background: tinted, borderColor: tinted }}
+      className="op-card flex flex-col gap-2 min-h-[180px] transition-opacity"
+      style={empty
+        ? { opacity: 0.45, background: 'var(--op-surface)', borderColor: 'var(--op-border)' }
+        : { background: tinted, borderColor: tinted }
+      }
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 op-eyebrow">
           <span
             className="inline-block rounded-full"
-            style={{ width: 8, height: 8, background: dotColor }}
+            style={{ width: 8, height: 8, background: empty ? 'var(--op-text-3)' : dotColor }}
           />
           {bucket.title}
         </div>
@@ -232,15 +235,17 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
 
   // ── Adaptive layout ───────────────────────────────────────────────────
-  // Cards with count = 0 are hidden entirely (in BOTH rows) so the page
-  // draws attention to what actually needs doing — staff requested over the
-  // brief's "render All Clear cards to keep layout stable".
-  // When overdue total is 0, the whole overdue row collapses to a single
-  // thin green "All clear" line and only the populated secondary cards
-  // render below.
+  // When the whole overdue total is 0, the overdue row collapses to a thin
+  // green "All clear" line. Otherwise all 4 overdue cards render — empty
+  // ones faded to ~45% opacity (via NACard) so the row keeps a consistent
+  // shape but draws the eye to the populated cards.
+  // Same for the secondary row: when ALL secondary buckets are empty the
+  // whole row hides; otherwise empty ones render faded alongside populated
+  // ones.
   const allClear = overdueTotal === 0;
-  const overdueBuckets = [returns, departures, backline, transport].filter(b => b.count > 0);
-  const secondaryBuckets = [referrals, excess, chases, fleetBucket].filter(b => b.count > 0);
+  const overdueBuckets = [returns, departures, backline, transport];
+  const secondaryBuckets = [referrals, excess, chases, fleetBucket];
+  const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (
     <Card as="section" className="!p-0 !border-0 !bg-transparent">
@@ -265,14 +270,12 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
           <div className="text-xs text-gray-500 mb-4">
             Items that should be done but aren't. Click any card to triage.
           </div>
-          {overdueBuckets.length > 0 && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-              {overdueBuckets.map(b => <NACard key={b.key} bucket={b} />)}
-            </div>
-          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+            {overdueBuckets.map(b => <NACard key={b.key} bucket={b} />)}
+          </div>
         </>
       )}
-      {secondaryBuckets.length > 0 && (
+      {secondaryAny && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {secondaryBuckets.map(b => <NACard key={b.key} bucket={b} />)}
         </div>
