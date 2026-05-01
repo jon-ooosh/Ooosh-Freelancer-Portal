@@ -193,6 +193,9 @@ export default function RequirementCard({
   const [emailSending, setEmailSending] = useState(false);
   const [emailResult, setEmailResult] = useState<string | null>(null);
   const [loadingContacts, setLoadingContacts] = useState(false);
+  const [customEmail, setCustomEmail] = useState('');
+  const [customName, setCustomName] = useState('');
+  const [customError, setCustomError] = useState('');
 
   // Deletion confirmation state
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -230,6 +233,9 @@ export default function RequirementCard({
   async function openEmailPicker() {
     setLoadingContacts(true);
     setShowEmailPicker(true);
+    setCustomEmail('');
+    setCustomName('');
+    setCustomError('');
     try {
       const data = await api.get<{ contacts: EmailContact[] }>(`/hire-forms/email-contacts/${jobId}`);
       setEmailContacts(data.contacts);
@@ -239,6 +245,33 @@ export default function RequirementCard({
     } finally {
       setLoadingContacts(false);
     }
+  }
+
+  function addCustomEmail() {
+    const email = customEmail.trim().toLowerCase();
+    if (!email) {
+      setCustomError('Enter an email address');
+      return;
+    }
+    // Minimal email shape check — backend will Zod-validate properly
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setCustomError('That doesn’t look like a valid email');
+      return;
+    }
+    if (emailContacts.some(c => c.email.toLowerCase() === email)) {
+      // Already in the list — just select it
+      setSelectedEmails(prev => new Set(prev).add(email));
+      setCustomEmail('');
+      setCustomName('');
+      setCustomError('');
+      return;
+    }
+    const name = customName.trim() || email;
+    setEmailContacts(prev => [...prev, { email, name, source: 'manual_entry' }]);
+    setSelectedEmails(prev => new Set(prev).add(email));
+    setCustomEmail('');
+    setCustomName('');
+    setCustomError('');
   }
 
   async function sendHireFormEmail(isChase: boolean) {
@@ -401,16 +434,36 @@ export default function RequirementCard({
                     d.status === 'confirmed' || d.status === 'booked_out' || d.status === 'active'
                   ).length;
                   const referralCount = hireFormDrivers.filter(d => d.requires_referral).length;
-                  const hasSentNote = req.notes?.includes('Hire form email sent') || req.notes?.includes('Hire form reminder sent');
-                  // Extract last sent date from notes
-                  const sentMatch = req.notes?.match(/(?:Hire form (?:email|reminder) sent .+? on )(\d{2}\/\d{2}\/\d{4})/g);
-                  const lastSent = sentMatch ? sentMatch[sentMatch.length - 1].match(/(\d{2}\/\d{2}\/\d{4})/)?.[1] : null;
+                  // Parse all "sent" entries from the notes — each line was
+                  // appended by /api/hire-forms/send-email as:
+                  //   "Hire form email sent to a@x.com, b@y.com on DD/MM/YYYY"
+                  // Show the last one in the badge; full history in the tooltip.
+                  const sendRegex = /Hire form (email|reminder) sent to (.+?) on (\d{2}\/\d{2}\/\d{4})/g;
+                  const sends: { kind: string; recipients: string; date: string }[] = [];
+                  if (req.notes) {
+                    let m: RegExpExecArray | null;
+                    while ((m = sendRegex.exec(req.notes)) !== null) {
+                      sends.push({ kind: m[1], recipients: m[2], date: m[3] });
+                    }
+                  }
+                  const hasSentNote = sends.length > 0;
+                  const lastSend = hasSentNote ? sends[sends.length - 1] : null;
+                  const sendTooltip = sends.length
+                    ? sends.map(s => `${s.date} (${s.kind}) → ${s.recipients}`).join('\n')
+                    : '';
 
                   return (
                     <div className="flex items-center gap-1.5 flex-wrap text-[10px]">
-                      {hasSentNote && (
-                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">
-                          ✓ Sent{lastSent ? ` ${lastSent}` : ''}
+                      {hasSentNote && lastSend && (
+                        <span
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium max-w-full"
+                          title={sendTooltip}
+                        >
+                          <span className="shrink-0">✓ Sent {lastSend.date}</span>
+                          <span className="truncate text-blue-600/80">to {lastSend.recipients}</span>
+                          {sends.length > 1 && (
+                            <span className="shrink-0 px-1 rounded bg-blue-200/70 text-blue-800">+{sends.length - 1}</span>
+                          )}
                         </span>
                       )}
                       {received > 0 && (
@@ -774,31 +827,67 @@ export default function RequirementCard({
           </div>
           {loadingContacts ? (
             <div className="text-xs text-gray-400 py-2">Loading contacts...</div>
-          ) : emailContacts.length === 0 ? (
-            <div className="text-xs text-gray-400 py-2">No contacts with email addresses found for this job.</div>
           ) : (
             <>
-              <div className="space-y-1 max-h-40 overflow-y-auto">
-                {emailContacts.map(c => (
-                  <label key={c.email} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={selectedEmails.has(c.email)}
-                      onChange={e => {
-                        const next = new Set(selectedEmails);
-                        if (e.target.checked) next.add(c.email);
-                        else next.delete(c.email);
-                        setSelectedEmails(next);
-                      }}
-                      className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
-                    />
-                    <span className="text-xs text-gray-700">{c.name}</span>
-                    <span className="text-[10px] text-gray-400">{c.email}</span>
-                    <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 ml-auto">{c.source.replace('_', ' ')}</span>
-                  </label>
-                ))}
+              {emailContacts.length === 0 ? (
+                <div className="text-xs text-gray-400 py-2">No contacts with email addresses found for this job. Add one below.</div>
+              ) : (
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {emailContacts.map(c => (
+                    <label key={c.email} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedEmails.has(c.email)}
+                        onChange={e => {
+                          const next = new Set(selectedEmails);
+                          if (e.target.checked) next.add(c.email);
+                          else next.delete(c.email);
+                          setSelectedEmails(next);
+                        }}
+                        className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+                      />
+                      <span className="text-xs text-gray-700">{c.name}</span>
+                      <span className="text-[10px] text-gray-400">{c.email}</span>
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 ml-auto">{c.source.replace('_', ' ')}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+
+              {/* Manual entry — type any email address */}
+              <div className="mt-2 pt-2 border-t border-dashed border-gray-200">
+                <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Or send to another address</div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <input
+                    type="email"
+                    value={customEmail}
+                    onChange={e => { setCustomEmail(e.target.value); setCustomError(''); }}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomEmail(); } }}
+                    placeholder="email@example.com"
+                    className="flex-1 min-w-[180px] text-xs px-2 py-1 rounded border border-gray-200 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  />
+                  <input
+                    type="text"
+                    value={customName}
+                    onChange={e => setCustomName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomEmail(); } }}
+                    placeholder="Name (optional)"
+                    className="flex-1 min-w-[140px] text-xs px-2 py-1 rounded border border-gray-200 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={addCustomEmail}
+                    className="px-2 py-1 text-xs font-medium text-ooosh-600 border border-ooosh-300 rounded hover:bg-ooosh-50"
+                  >
+                    + Add
+                  </button>
+                </div>
+                {customError && (
+                  <div className="text-[11px] text-red-500 mt-1">{customError}</div>
+                )}
               </div>
-              <div className="flex items-center gap-2 mt-2">
+
+              <div className="flex items-center gap-2 mt-3">
                 <button
                   onClick={() => sendHireFormEmail(false)}
                   disabled={emailSending || selectedEmails.size === 0}

@@ -72,6 +72,62 @@ export function assembleDriverAddress(
     .join('\n');
 }
 
+/**
+ * Resolve a driver address to multi-line form for the VE103B.
+ *
+ * Drivers can land in the DB in two shapes:
+ *   - split: address_line1/line2/city/postcode populated separately
+ *   - single: address_full (or address_line1) carrying the whole address
+ *     as a comma-separated string (Idenfy / hire form app pattern)
+ *
+ * If two or more split columns are populated, use them. Otherwise comma-split
+ * the single-string source. Capped at MAX_ADDRESS_LINES so a pathological
+ * input (e.g. "1, Lancaster Road, Flat 2, Stoke-on-Trent, ST1 4AB, UK")
+ * doesn't overrun the form.
+ */
+const MAX_ADDRESS_LINES = 5;
+
+export function resolveDriverAddressLines(d: {
+  address_full?:  string | null;
+  address_line1?: string | null;
+  address_line2?: string | null;
+  city?:          string | null;
+  postcode?:      string | null;
+}): string[] {
+  const splitParts = [d.address_line1, d.address_line2, d.city, d.postcode]
+    .map(s => (s || '').trim())
+    .filter(Boolean);
+
+  // Prefer split columns when two or more are populated — that's a real
+  // structured address.
+  if (splitParts.length >= 2) {
+    return splitParts.slice(0, MAX_ADDRESS_LINES);
+  }
+
+  // Otherwise fall back to the single-string source: address_full first,
+  // then address_line1 (which may itself be a stuffed comma-separated string).
+  const single = (d.address_full || d.address_line1 || '').trim();
+  if (!single) return [];
+
+  // If the single string already has newlines, honour them.
+  if (single.includes('\n')) {
+    return single.split('\n').map(s => s.trim()).filter(Boolean).slice(0, MAX_ADDRESS_LINES);
+  }
+
+  // Comma-split. Trim each segment, drop empties.
+  const parts = single.split(',').map(s => s.trim()).filter(Boolean);
+
+  // No comma in a single field → render as one line as-is.
+  if (parts.length <= 1) return [single];
+
+  // Cap. If the input has more parts than the cap, fold any overflow into
+  // the last visible line so we don't lose the postcode.
+  if (parts.length <= MAX_ADDRESS_LINES) return parts;
+  const head = parts.slice(0, MAX_ADDRESS_LINES - 1);
+  const tail = parts.slice(MAX_ADDRESS_LINES - 1).join(', ');
+  return [...head, tail];
+}
+
 // ── PDF Generation ──────────────────────────────────────────────────────
 
 /**
@@ -258,14 +314,14 @@ export async function generateVE103BPDF(
     size: fontSize, font: fontBold, color: textColor,
   });
 
-  // Address — split into lines, max 4 lines, 12pt spacing
+  // Address — split into lines, max 5 lines, 12pt spacing
   const addressLines = (data.driverAddress || '')
     .split('\n')
     .map(s => s.trim())
     .filter(s => s);
 
   let addressY = positions.driverAddress;
-  for (let i = 0; i < Math.min(addressLines.length, 4); i++) {
+  for (let i = 0; i < Math.min(addressLines.length, 5); i++) {
     page.drawText(addressLines[i]!, {
       x: driverX, y: addressY,
       size: fontSize, font, color: textColor,

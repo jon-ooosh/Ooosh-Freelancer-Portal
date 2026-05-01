@@ -99,12 +99,39 @@ export interface VehicleListFilters {
  */
 export type DateUrgency = 'ok' | 'soon' | 'overdue' | 'unknown'
 
-export function getDateUrgency(dateStr: string | null, warningDays = 30): DateUrgency {
+/**
+ * Urgency mode:
+ *   - 'future_due' : the date is when something must be done (MOT, Tax,
+ *                    Insurance, TFL). Past = overdue.
+ *   - 'last_event' : the date is when something last happened (Last Service).
+ *                    The further in the past, the more urgent. Tuned for an
+ *                    annual service cadence:
+ *                      - <11 months ago: ok
+ *                      - 11 months to <50 weeks: soon (amber)
+ *                      - 50+ weeks: overdue (sticks red across the 1y mark)
+ */
+export type DateUrgencyMode = 'future_due' | 'last_event'
+
+export function getDateUrgency(
+  dateStr: string | null,
+  warningDays = 30,
+  mode: DateUrgencyMode = 'future_due',
+): DateUrgency {
   if (!dateStr) return 'unknown'
   const date = new Date(dateStr)
   const now = new Date()
   const diffMs = date.getTime() - now.getTime()
   const diffDays = diffMs / (1000 * 60 * 60 * 24)
+
+  if (mode === 'last_event') {
+    // diffDays is negative for "in the past" — flip to days-ago.
+    const daysAgo = -diffDays
+    if (daysAgo >= 350) return 'overdue'         // 50 weeks
+    if (daysAgo >= 11 * 30.44) return 'soon'     // ~11 months
+    return 'ok'
+  }
+
+  // future_due (default)
   if (diffDays < 0) return 'overdue'
   if (diffDays < warningDays) return 'soon'
   return 'ok'
