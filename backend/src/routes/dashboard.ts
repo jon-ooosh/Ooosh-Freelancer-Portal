@@ -1,9 +1,42 @@
 import { Router, Response } from 'express';
 import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
+import { buildProgressStrips, StripPhase } from '../services/job-progress-strip';
 
 const router = Router();
 router.use(authenticate);
+
+// ── POST /api/dashboard/job-progress — bulk per-job progress strips ──
+// Body: { jobs: [{ id: string, phase: 'pre_hire' | 'post_hire' }] }
+// Returns: { data: { [jobId]: { deprep, client, excess, freelancer, invoicing, payment, vehicle } } }
+// Used by the Today block to render the 7-slot status pip strip per job.
+router.post('/job-progress', async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobs } = req.body as { jobs?: Array<{ id: string; phase?: StripPhase }> };
+    if (!Array.isArray(jobs) || jobs.length === 0) {
+      return res.json({ data: {} });
+    }
+    const trimmed = jobs.slice(0, 200);
+    const ids = trimmed.map(j => j.id).filter(Boolean);
+    const phases: Record<string, StripPhase> = {};
+    for (const j of trimmed) phases[j.id] = j.phase === 'post_hire' ? 'post_hire' : 'pre_hire';
+
+    if (ids.length === 0) return res.json({ data: {} });
+
+    const result = await query(
+      `SELECT job_id, requirement_type, status, phase
+       FROM job_requirements
+       WHERE job_id = ANY($1)`,
+      [ids],
+    );
+
+    const data = buildProgressStrips(result.rows, phases);
+    res.json({ data });
+  } catch (err) {
+    console.error('Error building job progress strips:', err);
+    res.status(500).json({ error: 'Failed to build job progress' });
+  }
+});
 
 // ── GET /api/dashboard/operations — aggregated operational data for Command Centre ──
 router.get('/operations', async (req: AuthRequest, res: Response) => {
@@ -207,14 +240,22 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           AND is_active = true
       `),
 
-      // 9. Excess awaiting collection
+      // 9. Excess held unreimbursed — finished hires (returned / checking in /
+      // completed) where excess is still held, not reimbursed, not rolled over,
+      // and the hire ended 5+ days ago. This is the "money we're sitting on
+      // that we should be returning" bucket — the post-hire pinch point.
+      // Replaces the older "excess awaiting collection" rule (we're good at
+      // taking excess up front, slack on returning it).
       query(`
         SELECT COUNT(*) as count,
-               COALESCE(SUM(je.excess_amount_required), 0) as total_amount
+               COALESCE(SUM(GREATEST(je.amount_taken, je.excess_amount_required, 0)), 0) as total_amount
         FROM job_excess je
-        JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
-        WHERE je.excess_status IN ('needed', 'pending')
-          AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
+        LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+        LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
+        WHERE je.excess_status NOT IN ('reimbursed','partially_reimbursed','rolled_over','waived','fully_claimed','not_required')
+          AND (j.pipeline_status IN ('returned_incomplete','returned','completed')
+               OR j.status IN (6, 7, 11))
+          AND COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE - INTERVAL '5 days'
       `),
 
       // 10. Transport ops summary — counts by ops_status
@@ -389,20 +430,26 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LIMIT 5
       `),
 
-      // 21. Pending excess detail (up to 5)
+      // 21. Excess held unreimbursed detail — same rule as count above.
+      // Show oldest first (longest sitting on our books).
       query(`
-        SELECT je.id AS excess_id, je.excess_status, je.excess_amount_required,
-               d.full_name AS driver_name,
+        SELECT je.id AS excess_id, je.excess_status,
+               COALESCE(GREATEST(je.amount_taken, je.excess_amount_required, 0), 0) AS excess_amount_required,
+               COALESCE(d.full_name, j.client_name) AS driver_name,
                fv.reg AS vehicle_reg,
-               j.id as job_uuid, j.hh_job_number, j.job_name
+               j.id as job_uuid, j.hh_job_number, j.job_name,
+               COALESCE(j.return_date, j.job_end) AS hire_ended_at,
+               (CURRENT_DATE - COALESCE(j.return_date, j.job_end)::date) AS days_since_finish
         FROM job_excess je
-        JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+        LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
         LEFT JOIN drivers d ON d.id = vha.driver_id
         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-        LEFT JOIN jobs j ON j.id = vha.job_id
-        WHERE je.excess_status IN ('needed', 'pending')
-          AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
-        ORDER BY vha.hire_start ASC NULLS LAST
+        LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
+        WHERE je.excess_status NOT IN ('reimbursed','partially_reimbursed','rolled_over','waived','fully_claimed','not_required')
+          AND (j.pipeline_status IN ('returned_incomplete','returned','completed')
+               OR j.status IN (6, 7, 11))
+          AND COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE - INTERVAL '5 days'
+        ORDER BY COALESCE(j.return_date, j.job_end) ASC
         LIMIT 5
       `),
 
@@ -423,6 +470,27 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           AND COALESCE(j.out_date, j.job_date)::date IN (CURRENT_DATE, CURRENT_DATE + 1)
         GROUP BY prep_date
         ORDER BY prep_date ASC
+      `),
+
+      // 24. On-hire sparkline — last 14 days, count of jobs that would have
+      // been on hire on each day (out_date <= day AND return_date >= day).
+      // Cheap snapshot from the existing date columns; no status history table
+      // needed. Cancelled / lost jobs excluded; pre-deposit enquiries excluded
+      // via status filter.
+      query(`
+        WITH days AS (
+          SELECT (CURRENT_DATE - (i || ' days')::interval)::date AS day
+          FROM generate_series(0, 13) i
+        )
+        SELECT d.day,
+               COUNT(j.id) AS on_hire_count
+        FROM days d
+        LEFT JOIN jobs j ON j.is_deleted = false
+          AND j.status IN (2, 3, 4, 5, 6, 7, 11)
+          AND COALESCE(j.out_date, j.job_date)::date <= d.day
+          AND COALESCE(j.return_date, j.job_end)::date >= d.day
+        GROUP BY d.day
+        ORDER BY d.day ASC
       `),
 
       // 23. De-prep time estimates — returning jobs today and tomorrow
@@ -463,8 +531,13 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       todayTransportResult, todayVehiclesResult,
       teamActivityResult, recentActivityResult,
       pendingReferralsResult, pendingExcessResult,
-      prepTimeResult, deprepTimeResult,
+      prepTimeResult, onHireSparkResult, deprepTimeResult,
     ] = results;
+
+    // Build the 14-day on-hire series — oldest day first, today last.
+    const onHireSpark: number[] = onHireSparkResult.rows.map(
+      (row: { on_hire_count: string | number }) => parseInt(String(row.on_hire_count), 10) || 0,
+    );
 
     // Build prep time estimates by day
     const prepEstimates: Record<string, {
@@ -524,7 +597,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
     }
 
     res.json({
-      stat_cards: statCardsResult.rows[0],
+      stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
       today: {
         going_out: goingOutResult.rows,
         returning: returningResult.rows,
@@ -552,6 +625,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         chases_due: chasesDueResult.rows,
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,
+        // ── Excess (semantics changed Apr 2026) ──
+        // These now mean "excess held but not reimbursed, hire finished 5+ days
+        // ago" — the post-hire pinch point. Old field names kept for
+        // backwards compatibility with widgets still on the wire.
         excess_count: parseInt(excessCountResult.rows[0].count as string),
         excess_total: parseFloat(excessCountResult.rows[0].total_amount as string),
         excess_items: pendingExcessResult.rows,
