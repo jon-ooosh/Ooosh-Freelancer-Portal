@@ -915,6 +915,56 @@ function EditableTextArea({ value, placeholder, onSave }: { value: string; place
   );
 }
 
+// ─── Job Alert Banner ─────────────────────────────────────────────────────
+// Shared shell for the time/data-driven banners that sit at the top of the
+// Job Detail page (overdue dispatch, overdue return, hire form missing, etc.).
+// Severity drives the colour scheme; an optional action button on the right
+// gives the user a one-click next step (status change, tab switch, etc.).
+function JobAlertBanner({
+  severity,
+  message,
+  action,
+}: {
+  severity: 'amber' | 'red';
+  message: React.ReactNode;
+  action?: { label: string; onClick: () => void; loading?: boolean };
+}) {
+  const isRed = severity === 'red';
+  return (
+    <div
+      className={`mt-2 flex items-center gap-3 rounded-lg px-3 py-2 text-sm border ${
+        isRed ? 'bg-red-50 border-red-200' : 'bg-amber-50 border-amber-200'
+      }`}
+    >
+      <svg
+        className={`w-4 h-4 flex-shrink-0 ${isRed ? 'text-red-500' : 'text-amber-500'}`}
+        fill="none"
+        stroke="currentColor"
+        viewBox="0 0 24 24"
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth={2}
+          d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
+        />
+      </svg>
+      <span className={isRed ? 'text-red-800' : 'text-amber-800'}>{message}</span>
+      {action && (
+        <button
+          onClick={action.onClick}
+          disabled={action.loading}
+          className={`ml-auto px-3 py-1 text-white text-xs font-medium rounded transition-colors disabled:opacity-50 whitespace-nowrap ${
+            isRed ? 'bg-red-500 hover:bg-red-600' : 'bg-amber-500 hover:bg-amber-600'
+          }`}
+        >
+          {action.loading ? 'Working…' : action.label}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -949,6 +999,12 @@ export default function JobDetailPage() {
   const [showChaseModal, setShowChaseModal] = useState(false);
   const [quotes, setQuotes] = useState<SavedQuote[]>([]);
   const [quotesLoading, setQuotesLoading] = useState(false);
+  // Requirements summary — only the bits the page-level alerts need (full
+  // requirements list is loaded separately by the JobRequirements section).
+  const [reqSummary, setReqSummary] = useState<{
+    hireFormsStatus: string | null;
+    postHireOpenCount: number;
+  }>({ hireFormsStatus: null, postHireOpenCount: 0 });
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [peopleOptions, setPeopleOptions] = useState<PersonOption[]>([]);
   const [peopleSearch, setPeopleSearch] = useState('');
@@ -1526,8 +1582,27 @@ export default function JobDetailPage() {
       loadQuotes();
       loadVehicleAssignments();
       loadJobOrgs();
+      loadRequirementsSummary();
     }
   }, [id]);
+
+  async function loadRequirementsSummary() {
+    if (!id) return;
+    try {
+      const [pre, post] = await Promise.all([
+        api.get<{ data: JobRequirement[] }>(`/requirements/job/${id}?phase=pre_hire`),
+        api.get<{ data: JobRequirement[] }>(`/requirements/job/${id}?phase=post_hire`),
+      ]);
+      const hf = pre.data.find(r => r.requirement_type === 'hire_forms');
+      const openPost = post.data.filter(r => r.status !== 'done').length;
+      setReqSummary({
+        hireFormsStatus: hf?.status || null,
+        postHireOpenCount: openPost,
+      });
+    } catch {
+      // non-fatal — alerts just won't fire
+    }
+  }
 
   // Search orgs for job-org picker
   useEffect(() => {
@@ -1621,6 +1696,21 @@ export default function JobDetailPage() {
       alert(err instanceof Error ? err.message : 'Failed to save');
     } finally {
       setEditSaving(false);
+    }
+  }
+
+  // Cycle client_introduction through not_needed → todo → working_on_it → done.
+  // Mirrors the same pill on TransportOpsPage so staff can clear intros from
+  // the Job Detail without switching pages.
+  async function cycleClientIntro(quoteId: string, current: string) {
+    const order = ['not_needed', 'todo', 'working_on_it', 'done'];
+    const idx = order.indexOf(current);
+    const next = order[(idx + 1) % order.length];
+    try {
+      await api.put(`/quotes/${quoteId}/ops-details`, { client_introduction: next });
+      await loadQuotes();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update client intro');
     }
   }
 
@@ -2016,6 +2106,73 @@ export default function JobDetailPage() {
       }
     }
     return null;
+  })();
+
+  // Overdue return — dispatched job past its return_date with no check-in.
+  // The kit was due back at the warehouse and isn't (or hasn't been recorded
+  // as such). Symmetrical bookend to the overdue dispatch banner.
+  const overdueReturn: { daysOverdue: number } | null = (() => {
+    if (job.pipeline_status !== 'dispatched') return null;
+    if (!returnDay || returnDay >= todayLocalISO) return null;
+    return { daysOverdue: daysBetween(todayLocalISO, returnDay) };
+  })();
+
+  // Hire form missing close to start — confirmed self-drive job within 5 days
+  // of out_date but the hire_forms requirement is still 'not_started'. Auto-
+  // emailer fires at 10d + 5d but a visible flag on the job header surfaces
+  // it earlier. Only when there's actually a hire_forms requirement (i.e.
+  // self-drive vehicles detected on the job).
+  const hireFormMissing: { daysToOut: number } | null = (() => {
+    if (!['confirmed', 'prepped'].includes(job.pipeline_status || '')) return null;
+    if (!outDay) return null;
+    if (reqSummary.hireFormsStatus !== 'not_started') return null;
+    const daysToOut = daysBetween(outDay, todayLocalISO);
+    if (daysToOut < 0 || daysToOut > 5) return null;
+    return { daysToOut };
+  })();
+
+  // Close-out overdue — job returned more than 7 days ago but post-hire
+  // requirements still open (invoice not sent, payment not reconciled,
+  // excess unresolved, damage open, etc.).
+  const closeOutOverdue: { daysSinceReturn: number; openCount: number } | null = (() => {
+    if (job.pipeline_status !== 'returned') return null;
+    if (!returnDay) return null;
+    const daysSinceReturn = daysBetween(todayLocalISO, returnDay);
+    if (daysSinceReturn < 7 || reqSummary.postHireOpenCount === 0) return null;
+    return { daysSinceReturn, openCount: reqSummary.postHireOpenCount };
+  })();
+
+  // Crew unassigned — confirmed/prepped/dispatched job with non-cancelled
+  // transport/crew quotes that have no assignments. Fires within 3 days of
+  // out_date (or after — past out_date with crew unassigned is even worse).
+  const crewUnassigned: { count: number; daysToOut: number } | null = (() => {
+    if (!['confirmed', 'prepped', 'dispatched'].includes(job.pipeline_status || '')) return null;
+    if (!outDay) return null;
+    const daysToOut = daysBetween(outDay, todayLocalISO);
+    if (daysToOut > 3) return null;
+    const unassigned = quotes.filter(q =>
+      q.status !== 'cancelled' &&
+      (!q.assignments || q.assignments.length === 0)
+    );
+    if (unassigned.length === 0) return null;
+    return { count: unassigned.length, daysToOut };
+  })();
+
+  // Crew not introduced — confirmed/prepped job with crew/transport quotes
+  // whose client_introduction is still 'todo' or 'working_on_it'. Fires
+  // within 7 days of out_date.
+  const crewNotIntroduced: { count: number; daysToOut: number } | null = (() => {
+    if (!['confirmed', 'prepped'].includes(job.pipeline_status || '')) return null;
+    if (!outDay) return null;
+    const daysToOut = daysBetween(outDay, todayLocalISO);
+    if (daysToOut < 0 || daysToOut > 7) return null;
+    const needIntro = quotes.filter(q => {
+      if (q.status === 'cancelled') return false;
+      const intro = (q as { client_introduction?: string }).client_introduction;
+      return intro === 'todo' || intro === 'working_on_it';
+    });
+    if (needIntro.length === 0) return null;
+    return { count: needIntro.length, daysToOut };
   })();
 
   // Next-suggested status — the natural progression given dates + current
@@ -2464,52 +2621,98 @@ export default function JobDetailPage() {
               </div>
             )}
 
-            {/* Overdue dispatch banner — pre-dispatch job past its out-date */}
+            {/* Date/data-driven job alert banners */}
             {overdueDispatch && (
-              <div
-                className={`mt-2 flex items-center gap-3 rounded-lg px-3 py-2 text-sm border ${
+              <JobAlertBanner
+                severity={overdueDispatch.severity}
+                message={
                   overdueDispatch.severity === 'red'
-                    ? 'bg-red-50 border-red-200'
-                    : 'bg-amber-50 border-amber-200'
-                }`}
-              >
-                <svg
-                  className={`w-4 h-4 flex-shrink-0 ${
-                    overdueDispatch.severity === 'red' ? 'text-red-500' : 'text-amber-500'
-                  }`}
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
-                  />
-                </svg>
-                <span
-                  className={overdueDispatch.severity === 'red' ? 'text-red-800' : 'text-amber-800'}
-                >
-                  {overdueDispatch.severity === 'red'
                     ? `Booked to go out ${overdueDispatch.daysOverdue} ${
                         overdueDispatch.daysOverdue === 1 ? 'day' : 'days'
                       } ago — not yet marked as Dispatched.`
                     : `Booked to go out today${
                         overdueDispatch.outTime ? ` at ${overdueDispatch.outTime.slice(0, 5)}` : ''
-                      } — not yet marked as Dispatched.`}
-                </span>
-                <button
-                  onClick={() => initiateStatusChange('dispatched' as PipelineStatus)}
-                  className={`ml-auto px-3 py-1 text-white text-xs font-medium rounded transition-colors whitespace-nowrap ${
-                    overdueDispatch.severity === 'red'
-                      ? 'bg-red-500 hover:bg-red-600'
-                      : 'bg-amber-500 hover:bg-amber-600'
-                  }`}
-                >
-                  Mark as Dispatched
-                </button>
-              </div>
+                      } — not yet marked as Dispatched.`
+                }
+                action={{
+                  label: 'Mark as Dispatched',
+                  onClick: () => initiateStatusChange('dispatched' as PipelineStatus),
+                }}
+              />
+            )}
+            {overdueReturn && (
+              <JobAlertBanner
+                severity="red"
+                message={`Booked back ${overdueReturn.daysOverdue} ${
+                  overdueReturn.daysOverdue === 1 ? 'day' : 'days'
+                } ago — not yet checked in.`}
+                action={{
+                  label: 'Mark as Checking In',
+                  onClick: () => initiateStatusChange('returned_incomplete' as PipelineStatus),
+                }}
+              />
+            )}
+            {hireFormMissing && (
+              <JobAlertBanner
+                severity="amber"
+                message={
+                  hireFormMissing.daysToOut === 0
+                    ? 'Self-drive hire goes out today — no hire form sent yet.'
+                    : `Self-drive hire goes out in ${hireFormMissing.daysToOut} ${
+                        hireFormMissing.daysToOut === 1 ? 'day' : 'days'
+                      } — no hire form sent yet.`
+                }
+                action={{
+                  label: 'View Job Requirements',
+                  onClick: () => setActiveTab('overview'),
+                }}
+              />
+            )}
+            {crewUnassigned && (
+              <JobAlertBanner
+                severity="amber"
+                message={`${crewUnassigned.count} ${
+                  crewUnassigned.count === 1 ? 'transport/crew job has' : 'transport/crew jobs have'
+                } no crew assigned${
+                  crewUnassigned.daysToOut < 0
+                    ? ` — out ${Math.abs(crewUnassigned.daysToOut)} day(s) ago`
+                    : crewUnassigned.daysToOut === 0
+                      ? ' — out today'
+                      : ` — out in ${crewUnassigned.daysToOut} day(s)`
+                }.`}
+                action={{
+                  label: 'View Crew & Transport',
+                  onClick: () => setActiveTab('transport'),
+                }}
+              />
+            )}
+            {crewNotIntroduced && (
+              <JobAlertBanner
+                severity="amber"
+                message={`Client not yet introduced for ${crewNotIntroduced.count} transport/crew job${
+                  crewNotIntroduced.count === 1 ? '' : 's'
+                }${
+                  crewNotIntroduced.daysToOut === 0
+                    ? ' — out today'
+                    : ` — out in ${crewNotIntroduced.daysToOut} day(s)`
+                }.`}
+                action={{
+                  label: 'View Crew & Transport',
+                  onClick: () => setActiveTab('transport'),
+                }}
+              />
+            )}
+            {closeOutOverdue && (
+              <JobAlertBanner
+                severity="amber"
+                message={`Returned ${closeOutOverdue.daysSinceReturn} days ago, ${
+                  closeOutOverdue.openCount
+                } close-out item${closeOutOverdue.openCount === 1 ? '' : 's'} still open.`}
+                action={{
+                  label: 'View Close-Out Items',
+                  onClick: () => setActiveTab('overview'),
+                }}
+              />
             )}
 
             {/* HireHop status mismatch banner */}
@@ -3598,6 +3801,31 @@ export default function JobDetailPage() {
                             🔗 Part of a run
                           </span>
                         )}
+                        {/* Client intro pill — clickable, mirrors Transport Ops */}
+                        {(() => {
+                          const intro = (q as { client_introduction?: string }).client_introduction || 'not_needed';
+                          const colour: Record<string, string> = {
+                            not_needed: 'bg-gray-100 text-gray-400',
+                            todo: 'bg-amber-100 text-amber-700',
+                            working_on_it: 'bg-orange-100 text-orange-700',
+                            done: 'bg-green-100 text-green-700',
+                          };
+                          const label: Record<string, string> = {
+                            not_needed: 'n/a',
+                            todo: 'to do',
+                            working_on_it: 'working on it',
+                            done: 'done',
+                          };
+                          return (
+                            <button
+                              onClick={() => cycleClientIntro(q.id, intro)}
+                              className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:opacity-80 transition-opacity ${colour[intro] || 'bg-gray-100 text-gray-600'}`}
+                              title="Click to cycle: n/a → to do → working on it → done"
+                            >
+                              Client intro: {label[intro] || intro}
+                            </button>
+                          );
+                        })()}
                       </div>
 
                       {/* Date, time, venue — top line */}
