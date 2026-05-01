@@ -15,7 +15,7 @@ import { updateVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehic
 import { getOpAuthState } from '../adapters/auth-adapter'
 import { getAuthHeaders } from '../config/api-config'
 import { getDateUrgency } from '../types/vehicle'
-import type { DateUrgency, VehicleFile } from '../types/vehicle'
+import type { DateUrgency, DateUrgencyMode, VehicleFile } from '../types/vehicle'
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return '—'
@@ -381,6 +381,7 @@ export function VehicleDetailPage() {
         />
         <ComplianceDateRow
           label="Last Service" date={vehicle.lastServiceDate}
+          mode="last_event"
           bookedIn={vehicle.serviceBookedInDate}
           onSaveDate={v => saveField('last_service_date', v)}
           onSaveBooked={v => saveField('service_booked_in_date', v)}
@@ -564,6 +565,7 @@ function ComplianceDateRow({
   label,
   date,
   warningDays = 30,
+  mode = 'future_due',
   bookedIn,
   onSaveDate,
   onSaveBooked,
@@ -571,6 +573,7 @@ function ComplianceDateRow({
   label: string
   date: string | null
   warningDays?: number
+  mode?: DateUrgencyMode
   bookedIn?: string | null
   onSaveDate: (v: string | null) => void
   onSaveBooked?: (v: string | null) => void
@@ -580,7 +583,7 @@ function ComplianceDateRow({
   const [dateValue, setDateValue] = useState('')
   const [bookedValue, setBookedValue] = useState('')
 
-  const urgency = date ? getDateUrgency(date, warningDays) : 'unknown'
+  const urgency = date ? getDateUrgency(date, warningDays, mode) : 'unknown'
 
   const urgencyStyles: Record<DateUrgency, { dot: string; text: string; bg: string; label: string }> = {
     ok:      { dot: 'bg-green-500', text: 'text-green-700', bg: '', label: '' },
@@ -590,16 +593,31 @@ function ComplianceDateRow({
   }
   const style = urgencyStyles[urgency]
 
-  // Days remaining text
+  // Countdown / countup text
   let daysText = ''
   if (date && urgency !== 'unknown') {
     const diffDays = Math.ceil((new Date(date).getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24))
-    if (diffDays < 0) {
-      daysText = `${Math.abs(diffDays)}d overdue`
-    } else if (diffDays === 0) {
-      daysText = 'Today'
-    } else if (diffDays <= 90) {
-      daysText = `${diffDays}d`
+    if (mode === 'last_event') {
+      // Always positive — date is in the past
+      const daysAgo = -diffDays
+      const monthsAgo = Math.floor(daysAgo / 30.44)
+      // Once we cross a year, switch to "Xy Ymo ago" (avoids "13mo")
+      if (daysAgo >= 365) {
+        const years = Math.floor(daysAgo / 365)
+        const remMonths = Math.floor((daysAgo - years * 365) / 30.44)
+        daysText = remMonths > 0 ? `${years}y ${remMonths}mo ago` : `${years}y ago`
+      } else if (monthsAgo >= 9) {
+        daysText = `${monthsAgo}mo ago`
+      }
+      // else: <9 months ago — no countdown clutter
+    } else {
+      if (diffDays < 0) {
+        daysText = `${Math.abs(diffDays)}d overdue`
+      } else if (diffDays === 0) {
+        daysText = 'Today'
+      } else if (diffDays <= 90) {
+        daysText = `${diffDays}d`
+      }
     }
   }
 

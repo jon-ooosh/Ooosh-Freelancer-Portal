@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { query } from '../config/database';
 import { uploadToR2, getFromR2, isR2Configured } from '../config/r2';
-import { generateVE103BPDF, formatDateForVE103B, assembleDriverAddress } from '../services/ve103b-pdf';
+import { generateVE103BPDF, formatDateForVE103B, resolveDriverAddressLines } from '../services/ve103b-pdf';
 import emailService from '../services/email-service';
 
 const router = Router();
@@ -41,15 +41,19 @@ router.post('/generate', async (req: AuthRequest, res) => {
       return;
     }
 
-    // Fetch assignment with vehicle, driver, and job data
+    // Fetch assignment with vehicle, driver, and job data.
+    // Hire dates: COALESCE assignment dates with the parent job's dates so
+    // assignments missing per-row hire_start/hire_end still produce a dated
+    // VE103B. j.job_end is the real end of charge (NOT j.return_date which
+    // is the +1-day warehouse turnaround buffer).
     const assignmentResult = await query(
       `SELECT
         a.id AS assignment_id,
         a.vehicle_id,
         a.driver_id,
         a.job_id,
-        a.hire_start,
-        a.hire_end,
+        COALESCE(a.hire_start, j.job_date) AS hire_start,
+        COALESCE(a.hire_end,   j.job_end)  AS hire_end,
         a.hirehop_job_id,
         -- Vehicle V5 fields
         v.reg AS vehicle_reg,
@@ -66,6 +70,7 @@ router.post('/generate', async (req: AuthRequest, res) => {
         v.seats,
         -- Driver fields
         d.full_name AS driver_name,
+        d.address_full,
         d.address_line1,
         d.address_line2,
         d.city,
@@ -97,10 +102,18 @@ router.post('/generate', async (req: AuthRequest, res) => {
       return;
     }
 
-    // Assemble PDF data
-    const driverAddress = assembleDriverAddress(
-      row.address_line1, row.address_line2, row.city, row.postcode,
-    );
+    // Assemble PDF data. Address resolution prefers split columns when at
+    // least two are populated; otherwise falls back to splitting the
+    // single-string `address_full` (or a comma-stuffed `address_line1`)
+    // onto separate lines.
+    const driverAddressLines = resolveDriverAddressLines({
+      address_full:  row.address_full,
+      address_line1: row.address_line1,
+      address_line2: row.address_line2,
+      city:          row.city,
+      postcode:      row.postcode,
+    });
+    const driverAddress = driverAddressLines.join('\n');
 
     const pdfData = {
       vehicleReg: row.vehicle_reg || '',
