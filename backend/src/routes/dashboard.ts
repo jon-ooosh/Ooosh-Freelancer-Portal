@@ -248,7 +248,13 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // taking excess up front, slack on returning it).
       query(`
         SELECT COUNT(*) as count,
-               COALESCE(SUM(GREATEST(je.amount_taken, je.excess_amount_required, 0)), 0) as total_amount
+               COALESCE(
+                 SUM(GREATEST(
+                   COALESCE(je.excess_amount_taken, 0),
+                   COALESCE(je.excess_amount_required, 0)
+                 )),
+                 0
+               ) as total_amount
         FROM job_excess je
         LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
         LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
@@ -434,7 +440,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // Show oldest first (longest sitting on our books).
       query(`
         SELECT je.id AS excess_id, je.excess_status,
-               COALESCE(GREATEST(je.amount_taken, je.excess_amount_required, 0), 0) AS excess_amount_required,
+               GREATEST(
+                 COALESCE(je.excess_amount_taken, 0),
+                 COALESCE(je.excess_amount_required, 0)
+               ) AS excess_amount_required,
                COALESCE(d.full_name, j.client_name) AS driver_name,
                fv.reg AS vehicle_reg,
                j.id as job_uuid, j.hh_job_number, j.job_name,
@@ -479,8 +488,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // via status filter.
       query(`
         WITH days AS (
-          SELECT (CURRENT_DATE - (i || ' days')::interval)::date AS day
-          FROM generate_series(0, 13) i
+          SELECT (CURRENT_DATE - offset_days)::date AS day
+          FROM generate_series(13, 0, -1) AS offset_days
         )
         SELECT d.day,
                COUNT(j.id) AS on_hire_count
