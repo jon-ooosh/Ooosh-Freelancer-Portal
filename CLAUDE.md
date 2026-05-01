@@ -2406,19 +2406,40 @@ When overdue total = 0, the overdue row collapses to a thin green "All clear" li
 2. Add a corresponding `NABucket` in `NeedsAttention.tsx` with the right accent (red for time-critical, amber for action-needed, blue for informational, purple for special category).
 3. Add a `viewAllHref` to deep-link into the full list view for that bucket.
 
-### Excess bucket semantics (Apr 2026)
+### Excess bucket semantics (Apr 2026, refined May 2026)
 
-The `needs_attention.excess_*` fields now mean "**excess held unreimbursed for hires that finished 5+ days ago**" — the post-hire pinch point. Rule:
+The `needs_attention.excess_*` fields mean "**money is actually held with us and the hire ended 5+ days ago**". Rule:
 
-- `job_excess.excess_status NOT IN (reimbursed, partially_reimbursed, rolled_over, waived, fully_claimed, not_required)`
+- `job_excess.excess_status IN ('taken', 'partially_paid')` — whitelisted, not blacklisted. `pre_auth` deliberately excluded (Stripe holds auto-release; pre-auth chasing belongs in its own scheduler — see TODO for pre-auth expiry scheduler). `needed` / `pending` excluded because they're "system thinks one is required" not "money is here".
 - `jobs.pipeline_status IN (returned_incomplete, returned, completed)` OR `jobs.status IN (6, 7, 11)`
 - `COALESCE(jobs.return_date, jobs.job_end) <= CURRENT_DATE - INTERVAL '5 days'`
 
 Sorted oldest finished first. Replaces the earlier "excess awaiting collection" rule (we're good at taking excess up front, slack at returning it). The "needs collecting" gate signal still lives on `<ExcessGateBanner>` per-job.
 
+**Important:** when adding a future "money-held" bucket, prefer whitelisting on `excess_status` over blacklisting. The status set has grown over time (`needed` was added by the derivation engine to seed pre-collection records; future statuses may be added too) and a blacklist accidentally includes them all. The May 2026 refinement caught the original bucket showing 41 "needed" derivation-created rows masquerading as held money.
+
 ### On-hire sparkline (14 days)
 
 `stat_cards.on_hire_spark` is a 14-element array (oldest first) computed by counting jobs where `out_date <= day AND return_date >= day` for each of the last 14 days. Cancelled / lost jobs and pre-deposit enquiries are excluded via status filter. No status-history table needed — derived from the existing date columns.
+
+### Status filter alignment across dashboard surfaces
+
+Multiple dashboard queries answer "what's going out / has gone out / is overdue to go out" — they MUST all use the same status filter or the headline stat card, the Today section, the Coming Up heat strip, and the Overdue Departures bucket disagree.
+
+The canonical "operationally pre-dispatch" filter is:
+```
+status IN (1, 2, 3, 4) OR (status = 5 AND pipeline_status = 'prepped')
+```
+
+The status-5+prepped clause is the OP↔HH semantic gap: HH jumps to status 5 the moment items get checked out, but OP holds `pipeline_status='prepped'` until staff clicks "Mark as Dispatched". A job in this state is physically prepped in the yard, hasn't actually rolled out the gate, and SHOULD count as "going out today" / "overdue if it hasn't left yet".
+
+Surfaces that use this filter:
+- `going_out_count` stat card
+- "Going Out Today" section query
+- Overdue Departures bucket query
+- Coming Up heat strip departures query
+
+When adding a new departure-related surface, use the same filter or the dashboard will visibly disagree with itself. The May 2026 refinement caught a 5-vs-3 mismatch between Today and Coming Up, plus a `prepped` job sitting overdue for 2 days that the Overdue Departures bucket missed entirely.
 
 ## Architecture Notes
 

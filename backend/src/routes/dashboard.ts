@@ -114,30 +114,36 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           )
       `),
 
-      // 5. Coming up — next 14 days, grouped by date (departures + returns)
-      // Departures
-      // HH 4 (Part Dispatched / Prepping) included — prep-in-progress jobs still need to leave.
-      // Date comparison uses >= so today's departures appear (was > which hid them until gone).
+      // 5. Coming up — next 14 days, grouped by date (departures + returns).
+      // Status filters aligned with the Today block (queries 1 & 2) so a job
+      // that shows in "Going Out Today" or "Returning Today" is also visible
+      // on the heat strip. The key inclusion is HH status 5 + OP pipeline
+      // 'prepped' — physically prepped but not yet operationally dispatched.
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                COALESCE(j.out_date, j.job_date)::date as event_date,
                'departure' as event_type
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (1, 2, 3, 4)
+          AND (
+            j.status IN (1, 2, 3, 4)
+            OR (j.status = 5 AND j.pipeline_status = 'prepped')
+          )
           AND COALESCE(j.out_date, j.job_date)::date >= CURRENT_DATE
           AND COALESCE(j.out_date, j.job_date)::date <= CURRENT_DATE + 14
         ORDER BY event_date ASC
       `),
 
-      // Returns (using smart date)
+      // Returns (using smart date — return_date - 24h matches the "could
+      // come back today from midday" logic on JobsPage). Status range
+      // matches Today's returning query: 2-6 inclusive.
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                (j.return_date - interval '24 hours')::date as event_date,
                'return' as event_type
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (2, 3, 4, 5)
+          AND j.status IN (2, 3, 4, 5, 6)
           AND j.return_date IS NOT NULL
           AND (j.return_date - interval '24 hours')::date > CURRENT_DATE
           AND (j.return_date - interval '24 hours')::date <= CURRENT_DATE + 14
@@ -175,8 +181,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
 
       // 7a. Overdue departures — should have left but haven't.
       // Jobs with out_date or job_date in the past, still in pre-dispatch HH
-      // status (1-4), and OP pipeline doesn't say it's gone or done.
-      // Capped at 30 days lookback to avoid stale-data noise.
+      // status (1-4) OR HH 5 + OP pipeline_status='prepped' (the "physically
+      // prepped, in the yard, waiting for staff to click Mark as Dispatched"
+      // state — HH jumps to 5 on item checkout but OP holds 'prepped' until
+      // staff confirms it's actually rolled out the gate). And OP pipeline
+      // doesn't say it's gone or done. Capped at 30 days lookback.
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                COALESCE(j.out_date, j.job_date) AS expected_date, j.venue_name,
@@ -184,7 +193,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
                (CURRENT_DATE - COALESCE(j.out_date, j.job_date)::date) AS days_overdue
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (1, 2, 3, 4)
+          AND (
+            j.status IN (1, 2, 3, 4)
+            OR (j.status = 5 AND j.pipeline_status = 'prepped')
+          )
           AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'dispatched', 'returned')
           AND COALESCE(j.out_date, j.job_date)::date < CURRENT_DATE
           AND COALESCE(j.out_date, j.job_date)::date >= CURRENT_DATE - INTERVAL '30 days'
@@ -241,11 +253,14 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       `),
 
       // 9. Excess held unreimbursed — finished hires (returned / checking in /
-      // completed) where excess is still held, not reimbursed, not rolled over,
-      // and the hire ended 5+ days ago. This is the "money we're sitting on
-      // that we should be returning" bucket — the post-hire pinch point.
-      // Replaces the older "excess awaiting collection" rule (we're good at
-      // taking excess up front, slack on returning it).
+      // completed) where money is actually held with us and the hire ended
+      // 5+ days ago. Whitelisted on excess_status to ensure money is actually
+      // in our hands: 'taken' and 'partially_paid' only. Excludes 'pre_auth'
+      // because Stripe holds auto-release; pre-auth chasing belongs in its
+      // own scheduler bucket. Excludes 'needed' / 'pending' because those are
+      // "system thinks one is required" not "money is here". Replaces the
+      // older "excess awaiting collection" rule (we're good at taking excess
+      // up front, slack on returning it).
       query(`
         SELECT COUNT(*) as count,
                COALESCE(
@@ -258,7 +273,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         FROM job_excess je
         LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
         LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
-        WHERE je.excess_status NOT IN ('reimbursed','partially_reimbursed','rolled_over','waived','fully_claimed','not_required')
+        WHERE je.excess_status IN ('taken','partially_paid')
           AND (j.pipeline_status IN ('returned_incomplete','returned','completed')
                OR j.status IN (6, 7, 11))
           AND COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE - INTERVAL '5 days'
@@ -333,11 +348,17 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           AND pipeline_status IS NOT NULL
       `),
 
-      // 15. Stat card counts
+      // 15. Stat card counts.
+      // going_out_count uses the same status filter as the Today section
+      // (query 1) so the headline number lines up with the listed jobs —
+      // 2/3/4 plus HH 5 still operationally pre-dispatch (pipeline_status
+      // = 'prepped'). Excludes jobs OP has marked dispatched.
       query(`
         SELECT
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (5)) as on_hire_count,
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (2, 3) AND COALESCE(out_date, job_date)::date = CURRENT_DATE) as going_out_count,
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false
+             AND (status IN (2, 3, 4) OR (status = 5 AND pipeline_status = 'prepped'))
+             AND COALESCE(out_date, job_date)::date = CURRENT_DATE) as going_out_count,
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (2, 3, 4, 5, 6) AND (
             (return_date IS NOT NULL AND return_date::date = CURRENT_DATE)
             OR (job_end IS NOT NULL AND job_end::date IN (CURRENT_DATE, CURRENT_DATE - 1))
@@ -454,7 +475,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LEFT JOIN drivers d ON d.id = vha.driver_id
         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
         LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
-        WHERE je.excess_status NOT IN ('reimbursed','partially_reimbursed','rolled_over','waived','fully_claimed','not_required')
+        WHERE je.excess_status IN ('taken','partially_paid')
           AND (j.pipeline_status IN ('returned_incomplete','returned','completed')
                OR j.status IN (6, 7, 11))
           AND COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE - INTERVAL '5 days'
