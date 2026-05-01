@@ -75,7 +75,11 @@ async function request<T>(
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(error.error || `HTTP ${response.status}`);
+    const baseMsg = error.error || `HTTP ${response.status}`;
+    // Include `detail` field when the backend provides extra context (e.g. excess
+    // reimburse loud-fail messages). Without this, callers only see the headline.
+    const fullMsg = error.detail ? `${baseMsg} — ${error.detail}` : baseMsg;
+    throw new Error(fullMsg);
   }
 
   if (response.status === 204) return undefined as T;

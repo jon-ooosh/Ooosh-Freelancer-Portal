@@ -564,34 +564,71 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
       return;
     }
 
-    // Send excess payment confirmation email.
-    // Rolled-over payments use a different template so the client isn't told
-    // "we've taken an excess from you" when really we've just moved money
-    // across from their last hire. Best-effort lookup of the previous hire's
-    // HH job number via the job's client_id; if nothing matches we still send
-    // the rolled-over email but without a specific previous job reference.
+    // Rolled-over payments need extra bookkeeping so the cash chain stays linked
+    // to the original HH deposit. Without this, reimbursing the rolled-over excess
+    // later has no way to find the HH deposit (which lives on the original hire's
+    // job, not this one) and can't push the refund to HireHop.
+    //
+    //   1. Find the most recent excess record for the same client that's still
+    //      holding cash (status taken/partially_paid/rolled_over) AND has an
+    //      hh_deposit_id we can chain to.
+    //   2. Copy that hh_deposit_id onto this new record (marked auto_match).
+    //   3. Flip the previous record's status to 'rolled_over' (terminal — money's
+    //      moved on to this hire).
+    //
+    // Best-effort: failures are logged but don't reject the payment. If the
+    // linkage breaks, the reimburse endpoint will fail loudly later (by design)
+    // so staff get a clear error rather than a silent drift.
     const excess = result.rows[0];
     const isRolledOver = method === 'rolled_over';
     let previousJobNumber: string | undefined;
+    let rolloverLinked = false;
     if (isRolledOver) {
       try {
         const prev = await query(
-          `SELECT j2.hh_job_number
+          `SELECT je2.id, je2.hh_deposit_id, j2.hh_job_number
            FROM job_excess je2
            JOIN jobs j2 ON j2.id = je2.job_id
-           WHERE je2.excess_status = 'rolled_over'
-             AND je2.job_id <> $1
-             AND j2.client_id = (SELECT client_id FROM jobs WHERE id = $1)
+           WHERE je2.id <> $1
+             AND je2.job_id <> $2
+             AND je2.hh_deposit_id IS NOT NULL
+             AND je2.excess_status IN ('taken', 'partially_paid', 'rolled_over')
+             AND j2.client_id = (SELECT client_id FROM jobs WHERE id = $2)
              AND j2.client_id IS NOT NULL
            ORDER BY je2.updated_at DESC
            LIMIT 1`,
-          [excess.job_id]
+          [id, excess.job_id]
         );
-        if (prev.rows.length > 0 && prev.rows[0].hh_job_number) {
-          previousJobNumber = String(prev.rows[0].hh_job_number);
+        if (prev.rows.length > 0) {
+          const prevRow = prev.rows[0];
+          if (prevRow.hh_job_number) {
+            previousJobNumber = String(prevRow.hh_job_number);
+          }
+          // Copy the original HH deposit ID forward so reimbursement can find it.
+          await query(
+            `UPDATE job_excess
+             SET hh_deposit_id = $1,
+                 hh_reconcile_source = COALESCE(hh_reconcile_source, 'auto_match'),
+                 hh_reconciled_at = COALESCE(hh_reconciled_at, NOW()),
+                 updated_at = NOW()
+             WHERE id = $2 AND hh_deposit_id IS NULL`,
+            [prevRow.hh_deposit_id, id]
+          );
+          // Mark the previous record as rolled_over (terminal — cash has moved on).
+          await query(
+            `UPDATE job_excess
+             SET excess_status = 'rolled_over',
+                 updated_at = NOW()
+             WHERE id = $1`,
+            [prevRow.id]
+          );
+          rolloverLinked = true;
+          console.log(`[excess] Rollover linked: new record ${id} inherits hh_deposit_id ${prevRow.hh_deposit_id} from ${prevRow.id}; previous flipped to rolled_over`);
+        } else {
+          console.warn(`[excess] Rollover recorded on ${id} but no previous record with hh_deposit_id found for this client. Reimbursement will fail until manually linked.`);
         }
       } catch (e) {
-        console.error('[excess] Previous rolled-over job lookup failed:', e);
+        console.error('[excess] Rollover linkage failed (non-fatal):', e);
       }
     }
     sendExcessEmail({
@@ -610,7 +647,16 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
       );
     }
 
-    res.json({ data: result.rows[0] });
+    // Re-fetch so the response reflects any rollover-linkage updates we made above.
+    const refreshed = isRolledOver
+      ? await query(`SELECT * FROM job_excess WHERE id = $1`, [id])
+      : null;
+    const responseData = refreshed && refreshed.rows.length > 0 ? refreshed.rows[0] : result.rows[0];
+
+    res.json({
+      data: responseData,
+      ...(isRolledOver ? { rollover_linked: rolloverLinked } : {}),
+    });
   } catch (error) {
     console.error('[excess] Payment error:', error);
     res.status(500).json({ error: 'Failed to record payment' });
@@ -667,6 +713,15 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
 // ── POST /api/excess/:id/reimburse — Record reimbursement ──
 // Pushes a payment application (refund) to HireHop against the original excess deposit.
 // Uses billing_payments_save.php (NOT billing_deposit_save.php — negative deposits are wrong).
+//
+// Loud-fail policy: if the excess record is linked to an HH job, we MUST find the
+// original deposit and push the refund — otherwise we'd create a silent gap between
+// OP (showing reimbursed) and HireHop/Xero (still holding the deposit). On failure
+// we return 422/502 with detail and leave the OP record untouched.
+//
+// OP-only excess records (no hirehop_job_id) are still allowed — manual housekeeping
+// only, no HH/Xero touchpoint to drift from. Response includes op_only: true so the
+// UI can flag it.
 
 router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseSchema), async (req: AuthRequest, res: Response) => {
   try {
@@ -681,8 +736,117 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
     }
     const current = currentResult.rows[0];
     const amountTaken = parseFloat(current.excess_amount_taken || '0');
-    const isPartial = amount < amountTaken;
+    const alreadyReimbursed = parseFloat(current.reimbursement_amount || '0');
+    const claimed = parseFloat(current.claim_amount || '0');
+    const remaining = amountTaken - alreadyReimbursed - claimed;
+    if (amount > remaining + 0.005) {
+      res.status(400).json({
+        error: 'Reimbursement amount exceeds amount available',
+        detail: `Available: £${remaining.toFixed(2)}, requested: £${amount.toFixed(2)}`,
+      });
+      return;
+    }
+    const isPartial = (alreadyReimbursed + amount) < amountTaken;
 
+    // ── Step 1: Find the original HH deposit ID (for HH-linked records) ─────
+    let hhDepositId: number | null = null;
+    let hhPaymentAppId: number | null = null;
+    const isHhLinked = Boolean(current.hirehop_job_id);
+
+    if (isHhLinked) {
+      // Priority 1: hh_deposit_id directly on the excess record (set by money.ts
+      // record-payment, by passive reconciliation, or by the rollover linkage in
+      // the payment endpoint above).
+      if (current.hh_deposit_id) {
+        hhDepositId = current.hh_deposit_id;
+        console.log(`[excess] Found HH deposit ID on excess record: ${hhDepositId}`);
+      }
+      // Priority 2: most recent matching job_payments row.
+      if (!hhDepositId) {
+        const paymentResult = await query(
+          `SELECT hirehop_deposit_id FROM job_payments
+           WHERE excess_id = $1 AND hirehop_deposit_id IS NOT NULL
+           ORDER BY payment_date DESC LIMIT 1`,
+          [id]
+        );
+        if (paymentResult.rows.length > 0 && paymentResult.rows[0].hirehop_deposit_id) {
+          hhDepositId = paymentResult.rows[0].hirehop_deposit_id;
+          console.log(`[excess] Found HH deposit ID from job_payments: ${hhDepositId}`);
+        }
+      }
+      // Priority 3: scan HH billing for an excess-tagged deposit on this job.
+      if (!hhDepositId) {
+        console.log(`[excess] Searching HH billing for excess deposits on job ${current.hirehop_job_id}`);
+        try {
+          const billingRes = await hhBroker.get('/php_functions/billing_list.php',
+            { main_id: current.hirehop_job_id, type: 1 },
+            { priority: 'high', cacheTTL: 0 }
+          );
+          if (billingRes.success && billingRes.data) {
+            const bl = billingRes.data as Record<string, any>;
+            for (const row of bl.rows || []) {
+              if (parseInt(row.kind ?? '0') === 6) { // Deposit/Payment
+                const desc = String(row.data?.DESCRIPTION || row.desc || '').toLowerCase();
+                const memo = String(row.data?.MEMO || '').toLowerCase();
+                const isExcess = /excess|insurance|xs|top.?up/.test(desc + ' ' + memo);
+                if (isExcess) {
+                  hhDepositId = parseInt(row.data?.ID || row.number || String(row.id).replace('e', '') || '0');
+                  console.log(`[excess] Found excess deposit in HH billing: ${hhDepositId} (desc: "${desc}")`);
+                  break;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[excess] HH billing search failed during reimburse:', e);
+        }
+      }
+
+      // No deposit found → loud fail. The cash chain is broken, refusing to drift.
+      if (!hhDepositId) {
+        res.status(422).json({
+          error: 'Cannot locate original HireHop deposit',
+          detail: current.payment_method === 'rolled_over'
+            ? 'This excess was rolled over from a previous hire and the chain back to the original HireHop deposit is broken. Use the "Link HH Deposit" action on the Money tab to attach this record to the correct HireHop deposit before reimbursing.'
+            : 'No excess deposit found on the linked HireHop job. Use the "Link HH Deposit" action on the Money tab to attach the correct HireHop deposit, or check that the original payment was recorded through OP.',
+        });
+        return;
+      }
+
+      // ── Step 2: Push the refund payment application to HireHop ───────────
+      const currentDate = new Date().toISOString().split('T')[0];
+      const hhBankId = HH_BANK_IDS[method] || 265;
+      const description = `${current.hirehop_job_id} - Excess refund${isPartial ? ' (partial)' : ''}`;
+      const memo = `Insurance excess ${isPartial ? 'partial ' : ''}reimbursement — via ${method.replace(/_/g, ' ')} (recorded via Ooosh OP)`;
+
+      console.log(`[excess] Creating HH payment application (refund) for job ${current.hirehop_job_id}, £${amount} against deposit ${hhDepositId}`);
+      const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
+        id: 0,
+        date: currentDate,
+        desc: description,
+        paid: amount,
+        memo: memo,
+        bank: hhBankId,
+        OWNER: 0,
+        deposit: hhDepositId,
+        no_webhook: 1,
+      }, { priority: 'high' });
+
+      if (!hhResult.success || !hhResult.data) {
+        console.error('[excess] HH payment application creation failed:', hhResult.error, hhResult.data);
+        res.status(502).json({
+          error: 'HireHop refund failed',
+          detail: hhResult.error || 'HireHop did not accept the payment application. OP record not updated. Please retry, or contact engineering if this persists.',
+        });
+        return;
+      }
+
+      hhPaymentAppId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
+      console.log(`[excess] HH payment application created: ${hhPaymentAppId}`);
+    }
+
+    // ── Step 3: Update the OP record (only reached if HH push succeeded, or
+    // this is an OP-only record with nothing to push). ─────────────────────
     const result = await query(
       `UPDATE job_excess SET
         excess_status = $1,
@@ -697,96 +861,21 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
 
     const excess = result.rows[0];
 
-    // Push refund to HireHop as a payment application against the original deposit
-    let hhPaymentAppId: number | null = null;
-    if (excess.hirehop_job_id) {
+    // ── Step 4: Trigger Xero sync (best-effort — HH push already succeeded,
+    // so OP and HH are in sync. If Xero sync fails the next sync will pick it
+    // up). Logged so engineering can investigate. ──────────────────────────
+    if (hhPaymentAppId) {
       try {
-        // Step 1: Find the original HH deposit ID for this excess
-        // First check if we stored it in job_payments when recording the excess payment
-        let hhDepositId: number | null = null;
-
-        const paymentResult = await query(
-          `SELECT hirehop_deposit_id FROM job_payments
-           WHERE excess_id = $1 AND hirehop_deposit_id IS NOT NULL
-           ORDER BY payment_date DESC LIMIT 1`,
-          [id]
-        );
-        if (paymentResult.rows.length > 0 && paymentResult.rows[0].hirehop_deposit_id) {
-          hhDepositId = paymentResult.rows[0].hirehop_deposit_id;
-          console.log(`[excess] Found HH deposit ID from job_payments: ${hhDepositId}`);
-        }
-
-        // If not found in job_payments, search HH billing for excess deposits on this job
-        if (!hhDepositId) {
-          console.log(`[excess] Searching HH billing for excess deposits on job ${excess.hirehop_job_id}`);
-          try {
-            const billingRes = await hhBroker.get('/php_functions/billing_list.php',
-              { main_id: excess.hirehop_job_id, type: 1 },
-              { priority: 'high', cacheTTL: 0 } // No cache — need fresh data
-            );
-            if (billingRes.success && billingRes.data) {
-              const bl = billingRes.data as Record<string, any>;
-              for (const row of bl.rows || []) {
-                if (parseInt(row.kind ?? '0') === 6) { // Deposit/Payment
-                  const desc = String(row.data?.DESCRIPTION || row.desc || '').toLowerCase();
-                  const memo = String(row.data?.MEMO || '').toLowerCase();
-                  const isExcess = /excess|insurance|xs|top.?up/.test(desc + ' ' + memo);
-                  if (isExcess) {
-                    hhDepositId = parseInt(row.data?.ID || row.number || String(row.id).replace('e', '') || '0');
-                    console.log(`[excess] Found excess deposit in HH billing: ${hhDepositId} (desc: "${desc}")`);
-                    break;
-                  }
-                }
-              }
-            }
-          } catch { console.error('[excess] HH billing search failed (non-fatal)'); }
-        }
-
-        if (hhDepositId) {
-          // Step 2: Create payment application (refund) against the deposit
-          const currentDate = new Date().toISOString().split('T')[0];
-          const hhBankId = HH_BANK_IDS[method] || 265;
-          const description = `${excess.hirehop_job_id} - Excess refund${isPartial ? ' (partial)' : ''}`;
-          const memo = `Insurance excess ${isPartial ? 'partial ' : ''}reimbursement — via ${method.replace(/_/g, ' ')} (recorded via Ooosh OP)`;
-
-          console.log(`[excess] Creating HH payment application (refund) for job ${excess.hirehop_job_id}, £${amount} against deposit ${hhDepositId}`);
-          const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
-            id: 0,           // 0 = create new
-            date: currentDate,
-            desc: description,
-            paid: amount,    // Positive amount — it's a payment application (refund)
-            memo: memo,
-            bank: hhBankId,
-            OWNER: 0,
-            deposit: hhDepositId,
-            no_webhook: 1,
-          }, { priority: 'high' });
-
-          if (hhResult.success && hhResult.data) {
-            hhPaymentAppId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
-            console.log(`[excess] HH payment application created: ${hhPaymentAppId}`);
-
-            // Step 3: Trigger Xero sync (post_payment, not post_deposit)
-            if (hhPaymentAppId) {
-              try {
-                await hhBroker.post('/php_functions/accounting/tasks.php', {
-                  hh_package_type: 1,
-                  hh_acc_package_id: 3,
-                  hh_task: 'post_payment', // Payment application, not deposit
-                  hh_id: hhPaymentAppId,
-                  hh_acc_id: '',
-                }, { priority: 'high' });
-                console.log('[excess] Xero sync triggered for payment application');
-              } catch { console.error('[excess] Xero sync for refund failed (non-fatal)'); }
-            }
-          } else {
-            console.error('[excess] HH payment application creation failed:', hhResult.error, hhResult.data);
-          }
-        } else {
-          console.log('[excess] No HH excess deposit found to refund against — OP record updated but HH not modified');
-        }
-      } catch (hhErr) {
-        console.error('[excess] HH refund write-back failed (non-fatal):', hhErr);
+        await hhBroker.post('/php_functions/accounting/tasks.php', {
+          hh_package_type: 1,
+          hh_acc_package_id: 3,
+          hh_task: 'post_payment',
+          hh_id: hhPaymentAppId,
+          hh_acc_id: '',
+        }, { priority: 'high' });
+        console.log('[excess] Xero sync triggered for payment application');
+      } catch (e) {
+        console.error('[excess] Xero sync for refund failed (non-fatal — payment posted, sync may catch up later):', e);
       }
     }
 
@@ -808,7 +897,10 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
       );
     }
 
-    res.json({ data: { ...excess, hh_payment_application_id: hhPaymentAppId } });
+    res.json({
+      data: { ...excess, hh_payment_application_id: hhPaymentAppId },
+      ...(isHhLinked ? {} : { op_only: true }),
+    });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error('[excess] Reimburse error:', errMsg, error);

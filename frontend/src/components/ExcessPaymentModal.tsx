@@ -96,9 +96,18 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [claimNotes, setClaimNotes] = useState('');
 
   // Reimburse form
+  // Default to the original payment method IF it's a real bank method we can refund
+  // through. The original payment_method may be 'rolled_over' (carried forward from a
+  // previous hire) — that's not a valid reimburse destination, so we fall back to
+  // wise_bacs. Without this guard the <select> shows the first option visually but
+  // the underlying state stays 'rolled_over' and the backend Zod schema rejects it.
   const amountHeld = Number(excess.excess_amount_taken || 0) - Number(excess.claim_amount || 0) - Number(excess.reimbursement_amount || 0);
   const [reimburseAmount, setReimburseAmount] = useState(amountHeld > 0 ? amountHeld.toFixed(2) : '');
-  const [reimburseMethod, setReimburseMethod] = useState(excess.payment_method || 'wise_bacs');
+  const validReimburseMethods = REIMBURSE_METHODS.map((m) => m.value);
+  const initialReimburseMethod = excess.payment_method && validReimburseMethods.includes(excess.payment_method)
+    ? excess.payment_method
+    : 'wise_bacs';
+  const [reimburseMethod, setReimburseMethod] = useState(initialReimburseMethod);
 
   // Waive form
   const [waiveReason, setWaiveReason] = useState('');
