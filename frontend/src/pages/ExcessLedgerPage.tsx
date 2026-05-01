@@ -90,11 +90,51 @@ export default function ExcessLedgerPage() {
     setClientHistory([]);
   }
 
-  // Summary totals from ledger
-  const totalHeld = ledger.reduce((sum, c) => sum + Number(c.balance_held || 0), 0);
-  const totalPending = ledger.reduce((sum, c) => sum + Number(c.pending_count || 0), 0);
-  const totalClients = ledger.length;
-  const totalRolledOver = ledger.reduce((sum, c) => sum + Number(c.rolled_over_count || 0), 0);
+  // Summary totals.
+  // - On Client Ledger view, totals come from the `ledger` array (one row per client).
+  // - On All Records view, totals come from the filtered `allRecords` array so the
+  //   cards reflect the current search/filter (e.g. searching "vapors" shows only
+  //   Vapors' totals). Otherwise the cards lie about scope when filters are applied.
+  let totalHeld: number;
+  let totalPending: number;
+  let totalClients: number;
+  let totalRolledOver: number;
+
+  if (viewMode === 'all') {
+    // Compute per-record stats from the filtered set.
+    const heldStatuses = new Set(['taken', 'partially_paid', 'pre_auth', 'partially_reimbursed']);
+    const pendingStatuses = new Set(['needed', 'pending', 'partially_paid']);
+    let held = 0;
+    let pending = 0;
+    let rolled = 0;
+    const clientsWithBalance = new Set<string>();
+    for (const r of allRecords) {
+      const balance = Math.max(
+        0,
+        Number(r.excess_amount_taken || 0) - Number(r.claim_amount || 0) - Number(r.reimbursement_amount || 0)
+      );
+      if (heldStatuses.has(r.excess_status) && balance > 0) {
+        held += balance;
+        // Bucket by xero_contact_id when present, else client_name; matches the
+        // grouping used by the ledger view.
+        const key = r.xero_contact_id || (r.client_name ? `name:${r.client_name}` : 'UNLINKED');
+        clientsWithBalance.add(key);
+      }
+      if (pendingStatuses.has(r.excess_status)) pending += 1;
+      if (r.excess_status === 'rolled_over') rolled += 1;
+    }
+    totalHeld = held;
+    totalPending = pending;
+    totalClients = clientsWithBalance.size;
+    totalRolledOver = rolled;
+  } else {
+    totalHeld = ledger.reduce((sum, c) => sum + Number(c.balance_held || 0), 0);
+    totalPending = ledger.reduce((sum, c) => sum + Number(c.pending_count || 0), 0);
+    totalClients = ledger.length;
+    totalRolledOver = ledger.reduce((sum, c) => sum + Number(c.rolled_over_count || 0), 0);
+  }
+
+  const filtered = viewMode === 'all' && (statusFilter || methodFilter || searchDebounced);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -125,12 +165,20 @@ export default function ExcessLedgerPage() {
 
       {/* Summary cards (not shown in client detail) */}
       {viewMode !== 'client-detail' && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-          <SummaryCard label="Total Held" value={`£${totalHeld.toFixed(2)}`} color="green" />
-          <SummaryCard label="Pending Collection" value={String(totalPending)} color="amber" />
-          <SummaryCard label="Clients with Balance" value={String(totalClients)} color="blue" />
-          <SummaryCard label="Rolled Over" value={String(totalRolledOver)} color="purple" />
-        </div>
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-2">
+            <SummaryCard label="Total Held" value={`£${totalHeld.toFixed(2)}`} color="green" />
+            <SummaryCard label="Pending Collection" value={String(totalPending)} color="amber" />
+            <SummaryCard label="Clients with Balance" value={String(totalClients)} color="blue" />
+            <SummaryCard label="Rolled Over" value={String(totalRolledOver)} color="purple" />
+          </div>
+          {filtered && (
+            <p className="text-xs text-gray-500 mb-6 italic">
+              Showing totals for current filter ({allRecords.length} record{allRecords.length === 1 ? '' : 's'})
+            </p>
+          )}
+          {!filtered && <div className="mb-6" />}
+        </>
       )}
 
       {/* Client detail summary cards */}
