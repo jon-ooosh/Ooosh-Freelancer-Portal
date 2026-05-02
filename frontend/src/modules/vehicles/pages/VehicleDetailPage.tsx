@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
@@ -139,6 +139,15 @@ export function VehicleDetailPage() {
   type TabName = typeof validTabs[number]
   const initialTab = validTabs.includes(searchParams.get('tab') as TabName) ? (searchParams.get('tab') as TabName) : 'details'
   const [activeTab, setActiveTab] = useState<TabName>(initialTab)
+
+  // Reset tab when switching vehicles — component instance is reused
+  // across /vehicles/fleet/A → /B so without this the active tab
+  // "drags across".
+  useEffect(() => {
+    const urlTab = searchParams.get('tab')
+    setActiveTab(validTabs.includes(urlTab as TabName) ? (urlTab as TabName) : 'details')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id])
   const [editingTracker, setEditingTracker] = useState(false)
   const [trackerInput, setTrackerInput] = useState('')
   const queryClient = useQueryClient()

@@ -120,6 +120,12 @@ export default function PersonDetailPage() {
     }
   }, [id]);
 
+  // Reset tab when switching people — component instance is reused across
+  // /people/A → /people/B so without this the active tab "drags across".
+  useEffect(() => {
+    setActiveTab('timeline');
+  }, [id]);
+
   async function loadPerson() {
     try {
       const data = await api.get<PersonDetail>(`/people/${id}`);

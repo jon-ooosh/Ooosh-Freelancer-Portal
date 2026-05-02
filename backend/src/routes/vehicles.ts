@@ -2726,6 +2726,15 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   y = addRow('Hire Start', fmtDateTime(data.hireStartDate, data.hireStartTime), y);
   y = addRow('Hire End',   fmtDateTime(data.hireEndDate,   data.hireEndTime),   y);
 
+  // Operator audit row — who actually carried out the book-out / check-in.
+  // Set server-side from req.user (staff JOIN people) or the freelancer
+  // bookout session (people lookup by personId), so it can't be spoofed
+  // from the client payload.
+  if (data.performedByName) {
+    const opLabel = isCheckIn ? 'Checked In By' : 'Booked Out By';
+    y = addRow(opLabel, data.performedByName, y);
+  }
+
   if (data.allDrivers && data.allDrivers.length > 0) {
     const driversText = data.allDrivers.join(', ');
     const maxValueWidth = contentWidth - 50;
@@ -3124,6 +3133,90 @@ function formatDayDate(dateStr: string): string {
  *
  * Returns null if no match. start_time / end_time are 'HH:MM' or null.
  */
+/**
+ * Resolve the operator (book-out / check-in) display name from the
+ * authenticated request. Staff: users JOIN people for first+last name,
+ * fall back to email. Freelancer bookout: people lookup by personId.
+ * Returns null if neither auth context yields a name (caller should
+ * skip rendering the row in that case).
+ */
+async function resolveOperatorName(req: FlexibleVehicleRequest): Promise<string | null> {
+  // Freelancer bookout session — narrow scope, use personId
+  if (req.bookoutSession?.freelancerPersonId) {
+    try {
+      const r = await query(
+        `SELECT TRIM(CONCAT_WS(' ', first_name, last_name)) AS name
+           FROM people WHERE id = $1 LIMIT 1`,
+        [req.bookoutSession.freelancerPersonId]
+      );
+      const name = r.rows[0]?.name?.trim();
+      if (name) return name;
+    } catch (err) {
+      console.warn('[vehicles/pdf] resolveOperatorName freelancer lookup failed:', err);
+    }
+    return req.bookoutSession.freelancerEmail || null;
+  }
+
+  // Staff session
+  if (req.user?.id) {
+    try {
+      const r = await query(
+        `SELECT TRIM(CONCAT_WS(' ', p.first_name, p.last_name)) AS name, u.email
+           FROM users u
+           LEFT JOIN people p ON p.id = u.person_id
+          WHERE u.id = $1 LIMIT 1`,
+        [req.user.id]
+      );
+      const row = r.rows[0];
+      const name = row?.name?.trim();
+      if (name) return name;
+      return row?.email || req.user.email || null;
+    } catch (err) {
+      console.warn('[vehicles/pdf] resolveOperatorName staff lookup failed:', err);
+    }
+    return req.user.email || null;
+  }
+
+  return null;
+}
+
+/**
+ * Used by regenerate-pdf: look up the original operator's name from the
+ * matching vehicle_hire_assignments row's booked_out_by / checked_in_by
+ * user reference. JOIN through users → people for the display name.
+ */
+async function resolveOperatorNameForEvent(
+  reg: string,
+  hireHopJob: string | number | null | undefined,
+  isCheckIn: boolean,
+): Promise<string | null> {
+  if (!hireHopJob) return null;
+  const hhNum = typeof hireHopJob === 'number' ? hireHopJob : parseInt(String(hireHopJob), 10);
+  if (!hhNum || isNaN(hhNum)) return null;
+  const opCol = isCheckIn ? 'vha.checked_in_by' : 'vha.booked_out_by';
+  try {
+    const r = await query(
+      `SELECT TRIM(CONCAT_WS(' ', p.first_name, p.last_name)) AS name, u.email
+         FROM vehicle_hire_assignments vha
+         JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+         LEFT JOIN users u ON u.id = ${opCol}
+         LEFT JOIN people p ON p.id = u.person_id
+        WHERE fv.reg = $1
+          AND vha.hirehop_job_id = $2
+          AND ${opCol} IS NOT NULL
+        ORDER BY vha.created_at DESC
+        LIMIT 1`,
+      [reg, hhNum]
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return (row.name as string)?.trim() || (row.email as string) || null;
+  } catch (err) {
+    console.warn('[vehicles/pdf] resolveOperatorNameForEvent failed:', err);
+    return null;
+  }
+}
+
 async function resolveJobHireDates(hireHopJob: string | number | null | undefined): Promise<{
   start: string | null;
   end: string | null;
@@ -3213,6 +3306,11 @@ router.post('/generate-pdf', async (req: FlexibleVehicleRequest, res: Response) 
       if (!data.hireStartTime && resolved.startTime) data.hireStartTime = resolved.startTime;
       if (!data.hireEndTime   && resolved.endTime)   data.hireEndTime   = resolved.endTime;
     }
+
+    // Operator name — derived server-side, can't be spoofed from the
+    // client payload. Staff: users JOIN people. Freelancer: people row
+    // for the bookout-session person_id.
+    data.performedByName = await resolveOperatorName(req);
 
     const { pdfBytes, filename } = await buildConditionReportPdf(data);
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
@@ -3334,6 +3432,16 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     // client-side at PDF generation time.
     const resolvedDates = await resolveJobHireDates(event.hireHopJob);
 
+    // Operator name — for regenerated PDFs we want the ORIGINAL operator,
+    // not the staff member clicking the regenerate button. Read from the
+    // assignment's booked_out_by / checked_in_by user reference.
+    const isCheckInRegen = event.eventType === 'Check In' || event.eventType === 'check-in';
+    const performedByName = await resolveOperatorNameForEvent(
+      reg,
+      event.hireHopJob,
+      isCheckInRegen,
+    );
+
     // Build the PDF
     const { pdfBytes, filename } = await buildConditionReportPdf({
       vehicleReg: reg,
@@ -3349,12 +3457,13 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       hireEndDate: event.hireEndDate || resolvedDates.end || undefined,
       hireStartTime: event.hireStartTime || resolvedDates.startTime || undefined,
       hireEndTime: event.hireEndTime || resolvedDates.endTime || undefined,
+      performedByName: performedByName || undefined,
       photos: photoBase64s,
       briefingItems: Array.isArray(event.briefingItems) ? event.briefingItems : [],
       bookOutNotes: notes,
       signatureBase64,
       signatureMissing: !signatureBase64,
-      isCheckIn: event.eventType === 'Check In' || event.eventType === 'check-in',
+      isCheckIn: isCheckInRegen,
     });
 
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
