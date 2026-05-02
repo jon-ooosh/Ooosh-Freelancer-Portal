@@ -762,22 +762,27 @@ export default function RequirementCard({
       {/* ── Delete confirmation ── */}
       {showDeleteConfirm && (() => {
         // Hire-forms is the most-misclicked card type (the X sits next to
-        // the email picker dismiss). When drivers are attached to the
-        // requirement we lock down the confirmation HARD: type-to-confirm
-        // ("DELETE"), explicit list of attached drivers + their statuses,
-        // and inline copy explaining that drivers/assignments are NOT
-        // deleted by removing this card (they remain in the system, hit
-        // Sync HH to bring the card back).
-        const hasAttachedDrivers = req.requirement_type === 'hire_forms' && hireFormDrivers.length > 0;
+        // the email picker dismiss). We always lock down deletion of
+        // hire_forms / excess HARD: type-to-confirm ("DELETE"), explicit
+        // copy explaining drivers/assignments are NOT deleted by removing
+        // this card (they remain in the system; hit Sync HH to bring the
+        // card back). When drivers are loaded we list them too so it's
+        // obvious what state the hire is in. The type-to-confirm fires
+        // even with zero loaded drivers, since assignments may have
+        // existed historically (and the misclick is the destructive path
+        // either way).
+        const isHireForms = req.requirement_type === 'hire_forms';
+        const hasAttachedDrivers = isHireForms && hireFormDrivers.length > 0;
+        const requiresTypeConfirm = isHireForms;
         const reasonOk = !requiresDeleteReason || deleteReason.trim().length > 0;
-        const typedOk = !hasAttachedDrivers || deleteReason.trim().toUpperCase().endsWith('DELETE');
+        const typedOk = !requiresTypeConfirm || deleteReason.trim().toUpperCase().endsWith('DELETE');
         const canRemove = reasonOk && typedOk;
 
         const submit = () => {
           if (!canRemove) return;
           // Strip the "DELETE" sentinel before sending the reason — it's
           // a UI guard, not part of the audit message.
-          const reason = hasAttachedDrivers
+          const reason = requiresTypeConfirm
             ? deleteReason.trim().replace(/\s*DELETE\s*$/i, '').trim() || undefined
             : (deleteReason.trim() || undefined);
           onRemove(req.id, reason);
@@ -796,23 +801,33 @@ export default function RequirementCard({
               </span>
             </div>
 
-            {hasAttachedDrivers && (
+            {isHireForms && (
               <div className="mb-2 rounded-md bg-white border border-red-200 p-2 text-xs">
-                <div className="font-semibold text-red-700 mb-1">
-                  ⚠ This card has {hireFormDrivers.length} attached driver{hireFormDrivers.length !== 1 ? 's' : ''}:
-                </div>
-                <ul className="space-y-0.5 mb-2">
-                  {hireFormDrivers.map((d, i) => (
-                    <li key={i} className="flex items-center gap-2">
-                      <span className="font-medium text-gray-800">{d.driver_name || 'Unknown driver'}</span>
-                      <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-600">{d.status}</span>
-                    </li>
-                  ))}
-                </ul>
+                {hasAttachedDrivers ? (
+                  <>
+                    <div className="font-semibold text-red-700 mb-1">
+                      ⚠ This card has {hireFormDrivers.length} attached driver{hireFormDrivers.length !== 1 ? 's' : ''}:
+                    </div>
+                    <ul className="space-y-0.5 mb-2">
+                      {hireFormDrivers.map((d, i) => (
+                        <li key={i} className="flex items-center gap-2">
+                          <span className="font-medium text-gray-800">{d.driver_name || 'Unknown driver'}</span>
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-gray-100 text-gray-600">{d.status}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : (
+                  <div className="font-semibold text-red-700 mb-1">
+                    ⚠ This is the Driver Hire Forms card.
+                  </div>
+                )}
                 <div className="text-gray-600 leading-snug">
-                  Removing the card does <strong>not</strong> delete these drivers or
+                  Removing the card does <strong>not</strong> delete drivers or
                   cancel the hire — assignment records stay in the database. To bring
                   the card back, hit <strong>Sync HH</strong> at the top of the job.
+                  If you meant to dismiss the email picker, click <strong>Close</strong> there
+                  instead — not this X.
                 </div>
               </div>
             )}
@@ -823,15 +838,15 @@ export default function RequirementCard({
                   type="text"
                   value={deleteReason}
                   onChange={e => setDeleteReason(e.target.value)}
-                  placeholder={hasAttachedDrivers ? 'Reason — and type DELETE at the end to confirm' : 'Reason for removing (required)...'}
+                  placeholder={requiresTypeConfirm ? 'Reason — and type DELETE at the end to confirm' : 'Reason for removing (required)...'}
                   className="w-full px-2 py-1.5 text-xs border border-red-300 rounded focus:ring-red-300 focus:border-red-400"
-                  autoFocus={!hasAttachedDrivers}
+                  autoFocus={!isHireForms}
                   onKeyDown={e => {
                     if (e.key === 'Enter' && canRemove) submit();
                     else if (e.key === 'Escape') { setShowDeleteConfirm(false); setDeleteReason(''); }
                   }}
                 />
-                {hasAttachedDrivers && deleteReason.trim() && !typedOk && (
+                {requiresTypeConfirm && deleteReason.trim() && !typedOk && (
                   <div className="text-[11px] text-red-600 mt-1">
                     Type <code className="px-1 bg-red-100 rounded">DELETE</code> at the end of the reason to enable the Remove button.
                   </div>
@@ -850,7 +865,7 @@ export default function RequirementCard({
               <button
                 onClick={() => { setShowDeleteConfirm(false); setDeleteReason(''); }}
                 className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50"
-                autoFocus={hasAttachedDrivers}
+                autoFocus={isHireForms}
               >
                 Cancel
               </button>
