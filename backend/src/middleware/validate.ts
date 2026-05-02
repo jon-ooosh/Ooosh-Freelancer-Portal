@@ -17,6 +17,11 @@ export function validate(schema: ZodSchema, source: 'body' | 'params' | 'query' 
           message: e.message,
         }));
         const summary = details.map(d => `${d.field}: ${d.message}`).join('; ');
+        const bodyKeys = source === 'body' && req.body && typeof req.body === 'object'
+          ? Object.keys(req.body)
+          : [];
+        console.warn(`[validate] 400 ${req.method} ${req.originalUrl} — ${summary}`,
+          bodyKeys.length ? `(${source} keys: ${bodyKeys.join(', ')})` : '');
         res.status(400).json({
           error: `Validation failed: ${summary}`,
           details,
