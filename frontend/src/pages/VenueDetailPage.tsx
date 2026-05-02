@@ -62,6 +62,13 @@ export default function VenueDetailPage() {
     }
   }, [id]);
 
+  // Reset tab when switching venues — component instance is reused
+  // across /venues/A → /venues/B so without this the active tab
+  // "drags across".
+  useEffect(() => {
+    setActiveTab('info');
+  }, [id]);
+
   async function loadVenue() {
     try {
       const data = await api.get<VenueDetail>(`/venues/${id}`);

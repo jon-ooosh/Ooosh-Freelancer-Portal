@@ -90,6 +90,7 @@ interface DriverDetail {
 
 interface HireHistoryItem {
   id: string;
+  job_id: string | null;
   vehicle_reg: string;
   vehicle_type: string;
   hirehop_job_id: number | null;
@@ -359,6 +360,17 @@ export default function DriverDetailPage() {
 
   useEffect(() => {
     if (id) loadDriver();
+  }, [id]);
+
+  // Reset tab + per-tab caches when switching drivers (component instance
+  // is reused across /drivers/A → /drivers/B). Without this the active
+  // tab + previously-loaded history "drags across" to the new driver.
+  useEffect(() => {
+    setActiveTab('details');
+    setHireHistory([]);
+    setExcessHistory([]);
+    setEditing(false);
+    setEditData({});
   }, [id]);
 
   useEffect(() => {
@@ -1601,14 +1613,24 @@ function HireHistoryTab({ history }: { history: HireHistoryItem[] }) {
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">
-          {history.map((h) => (
+          {history.map((h) => {
+            const jobLabel = h.hirehop_job_id
+              ? <span>#{h.hirehop_job_id} {h.hirehop_job_name && `— ${h.hirehop_job_name.substring(0, 30)}`}</span>
+              : '—';
+            return (
             <tr key={h.id} className="hover:bg-gray-50">
               <td className="px-6 py-4 whitespace-nowrap">
                 <span className="text-sm font-medium text-gray-900">{h.vehicle_reg}</span>
                 <span className="ml-2 text-xs text-gray-400">{h.vehicle_type}</span>
               </td>
-              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                {h.hirehop_job_id ? <span>#{h.hirehop_job_id} {h.hirehop_job_name && `— ${h.hirehop_job_name.substring(0, 30)}`}</span> : '—'}
+              <td className="px-6 py-4 whitespace-nowrap text-sm">
+                {h.job_id ? (
+                  <Link to={`/jobs/${h.job_id}`} className="text-ooosh-700 hover:text-ooosh-900 hover:underline">
+                    {jobLabel}
+                  </Link>
+                ) : (
+                  <span className="text-gray-500">{jobLabel}</span>
+                )}
               </td>
               <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                 {formatDate(h.hire_start)} — {formatDate(h.hire_end)}
@@ -1628,7 +1650,8 @@ function HireHistoryTab({ history }: { history: HireHistoryItem[] }) {
                 </div>
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>

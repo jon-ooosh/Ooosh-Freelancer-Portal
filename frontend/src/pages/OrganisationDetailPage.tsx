@@ -134,6 +134,13 @@ export default function OrganisationDetailPage() {
     }
   }, [id]);
 
+  // Reset tab when switching orgs — component instance is reused across
+  // /organisations/A → /organisations/B so without this the active tab
+  // "drags across".
+  useEffect(() => {
+    setActiveTab('people');
+  }, [id]);
+
   async function loadOrg() {
     try {
       const data = await api.get<OrgDetail>(`/organisations/${id}`);

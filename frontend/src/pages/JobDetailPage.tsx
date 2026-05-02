@@ -981,6 +981,18 @@ export default function JobDetailPage() {
   type TabType = typeof validTabs[number];
   const initialTab = (validTabs.includes(searchParams.get('tab') as TabType) ? searchParams.get('tab') : 'overview') as TabType;
   const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+
+  // Reset tab when navigating to a different job. React Router reuses the
+  // JobDetailPage component instance across /jobs/A → /jobs/B, so without
+  // this the active tab "drags across" — e.g. you were on Money on job A,
+  // click through to job B and you're still on Money. Re-reads the URL
+  // tab param so deep-links still land where they should.
+  useEffect(() => {
+    const urlTab = searchParams.get('tab');
+    setActiveTab((validTabs as readonly string[]).includes(urlTab || '') ? (urlTab as TabType) : 'overview');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
   const [showCalculator, setShowCalculator] = useState(false);
   const [showDetailsNotes, setShowDetailsNotes] = useState(false);
   const detailsNotesRef = useRef<HTMLDivElement>(null);
