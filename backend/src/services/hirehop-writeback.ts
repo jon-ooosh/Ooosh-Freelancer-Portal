@@ -28,7 +28,12 @@ const PIPELINE_TO_HH: Record<string, number> = {
   // Operational statuses
   prepping: 4,     // Part Dispatched — prep in progress (some items scanned)
   prepped: 3,
-  // dispatched (On Hire) is OP-only — HH is already at 5 when prepped, no push needed
+  // dispatched (On Hire) maps to HH 5. Usually a no-op because HH auto-jumps
+  // to 5 on physical checkout, but warehouse / staff-initiated dispatches need
+  // to push (e.g. customer-collect sign-off where OP is the origin of the
+  // dispatch event, not HH). The "skip if already at target" guard below
+  // means redundant pushes are silent no-ops.
+  dispatched: 5,
   returned_incomplete: 6,
   returned: 7,
   completed: 11,

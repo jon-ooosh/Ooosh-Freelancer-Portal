@@ -10,6 +10,22 @@
 [[plugins]]
   package = "@netlify/plugin-nextjs"
 
+# Warehouse module migrated to OP (May 2026) — staff.oooshtours.co.uk/warehouse.
+# Belt-and-braces: catch any latent tablet bookmarks pointing at the old URL
+# and redirect them to the new home. Netlify processes [[redirects]] before
+# the Next.js handler so the old (deleted) /warehouse pages never render.
+[[redirects]]
+  from = "/warehouse"
+  to = "https://staff.oooshtours.co.uk/warehouse"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/warehouse/*"
+  to = "https://staff.oooshtours.co.uk/warehouse/:splat"
+  status = 301
+  force = true
+
 # Security headers
 [[headers]]
   for = "/*"
