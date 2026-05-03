@@ -14,7 +14,9 @@
  *   • Routine staff JWTs also work — convenient for non-tablet access.
  *
  * Source-of-truth swap: Monday Q&H board → OP `jobs` table.
- *   • Filter: pipeline_status IN ('confirmed', 'prepped'), out_date ±1 day
+ *   • Filter: pipeline_status IN ('confirmed', 'prepped', 'prepping'), out_date ±1 day
+ *     (prepping = HH "Part Dispatched", i.e. some items already scanned out
+ *     mid-collection — edge case but real)
  *   • Customer-collect filter: HireHop COLLECT=0 (excludes deliveries)
  *   • On-Hire flip: pipeline_status='dispatched' + HH writeback to status 5
  */
@@ -141,7 +143,10 @@ router.use(authenticateWarehouse);
 // ─── GET /api/warehouse/collections ─────────────────────────────────
 // List jobs ready for in-person collection.
 // Filter:
-//   - pipeline_status IN ('confirmed', 'prepped')
+//   - pipeline_status IN ('confirmed', 'prepped', 'prepping')
+//     ('prepping' = HH 4/Part Dispatched — covers the edge case where the
+//     warehouse has already scanned some items out before the customer
+//     finishes signing.)
 //   - out_date BETWEEN today-1 AND today+1
 //   - HireHop COLLECT=0 (customer collects, not delivery)
 
@@ -168,7 +173,7 @@ router.get('/collections', async (_req: WarehouseRequest, res: Response) => {
     const result = await query<CandidateJob>(
       `SELECT id, hh_job_number, job_name, client_name, out_date, pipeline_status
        FROM jobs
-       WHERE pipeline_status IN ('confirmed', 'prepped')
+       WHERE pipeline_status IN ('confirmed', 'prepped', 'prepping')
          AND is_deleted = false
          AND out_date IS NOT NULL
          AND out_date::date BETWEEN (CURRENT_DATE - INTERVAL '1 day') AND (CURRENT_DATE + INTERVAL '1 day')
@@ -372,7 +377,7 @@ router.post('/collections/:jobId/complete', async (req: WarehouseRequest, res: R
     }
     const job = jobResult.rows[0];
 
-    if (!['confirmed', 'prepped', 'dispatched'].includes(job.pipeline_status)) {
+    if (!['confirmed', 'prepped', 'prepping', 'dispatched'].includes(job.pipeline_status)) {
       // Allow re-completion of an already-dispatched job (e.g. emailing the
       // delivery note to an extra recipient after the fact would be a separate
       // future flow, but for now reject to avoid confusion).
