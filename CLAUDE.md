@@ -2337,6 +2337,7 @@ Self-drive hires require an insurance excess. The amount is calculated by the dr
 | HireHop job sync | Every 30 minutes | Pull active jobs from HireHop + sync line items + derive requirements |
 | Chase auto-mover | Every 15 minutes | Move overdue-chase jobs to "chasing" column |
 | On-demand job sync | On page load / button | Per-job: fresh line item fetch from HH, re-derive requirements (non-blocking) |
+| OOH return reminders | Daily at 10:00 | Send T-1 day reminder for vehicles with `return_overnight=true` and `hire_end=tomorrow`. See "Out-of-Hours Returns" section. |
 | Pre-auth expiry check | Daily (TODO — not yet built, fairly-high priority) | Scan `job_excess` with `status='pre_auth'` older than 4 days, flip to expired + notify staff to re-take. Stripe auto-voids at ~7 days; Ooosh policy re-takes inside 4. |
 
 ## HireHop Integration
@@ -2477,6 +2478,55 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 `users.avatar_url` — R2 key for profile photo
 `users.force_password_change` — admin-set flag, prompts user on next login
 `users.password_changed_at` — tracks when password was last changed
+
+### System Settings (migration 072)
+`system_settings` — generic key/text-value store for operational config (gate codes, addresses, URLs, feature toggles). Distinct from `calculator_settings` (DECIMAL only) and `picklist_items` (lists). Categorised via `category` column for UI grouping; admin/manager-editable from the Settings page. Read via `getSystemSetting(key)` / `getSystemSettings([keys])` helpers in `routes/system-settings.ts` (60-second in-process cache, invalidated on PUT).
+
+Use this for any future "one global value" config — gate codes, default email signatures, URLs to shared docs, feature flags. Don't add new ad-hoc env vars when the value needs to be staff-editable without a deploy.
+
+### Out-of-Hours Returns (migration 072 + 073)
+
+End-to-end OOH return automation around the existing `vehicle_hire_assignments.return_overnight` flag. Per-van scope (one info email per vehicle, addressed to every driver on that van's assignments). Self-drive only — Ooosh-driven D&C deferred.
+
+**Tracking columns on `vehicle_hire_assignments`:**
+- `ooh_info_sent_at` — initial info email timestamp (idempotency)
+- `ooh_reminder_sent_at` — day-before reminder timestamp
+- `ooh_returned_at` — when the driver submitted the parking-confirmation form
+- `ooh_parking_lat / ooh_parking_lng` — confirmed location (Traccar-prefilled, driver-confirmed)
+- `ooh_parking_notes` — free-text notes
+- `ooh_parking_token` — random token for the public parking-form URL
+
+**Three trigger paths** (all in `services/ooh-return.ts`):
+1. **Book-out**: `hire-forms.ts` PATCH detects `return_overnight=true` on a `booked_out` transition and fires `sendOohInfoEmailsForJob(jobId)` non-blocking.
+2. **Day-before reminder**: scheduler at 10:00 daily, finds assignments with `hire_end = tomorrow` and `ooh_reminder_sent_at IS NULL`.
+3. **Manual / toggle**: Job Detail > Drivers & Vehicles tab moon pill → `OohReturnModal` flips the flag and optionally fires (or resends) the email. Endpoint: `PATCH /api/ooh-return/assignments/:id/toggle` with `send_email_now`.
+
+**Token validity is status-bound, NOT time-bounded.** `resolveParkingToken` rejects tokens whose assignment has flipped to `returned` or `cancelled`. This means OOH links work for any hire length and auto-expire on check-in — no TTL juggling.
+
+**Public parking form** (`/return-parking/:token`, no auth, mounted outside `Layout`):
+- Backend `routes/ooh-return.ts` exposes 3 public token endpoints (`by-token/:token` for context, `/prefill` for Traccar position, `/submit` for the write).
+- Frontend `OohReturnParkingPage.tsx` renders Leaflet + OpenStreetMap (no API key needed) with the marker pre-positioned at the latest Traccar fix. Stale-position warning when fix > 30 min. Driver drags or taps to adjust + submits.
+- `services/traccar-server.ts`: server-side Traccar lookup so the public page doesn't need a staff JWT proxy. 5-minute device cache.
+- On submit: writes lat/lng/notes to assignment, logs an `📓 OOH return: …` interaction on the job timeline (`SYSTEM_USER_ID`), optionally emails `info@oooshtours.co.uk` per the `ooh_cc_info_email` setting.
+
+**Settings keys (in `system_settings`, category `ooh_returns`):**
+- `ooh_gate_code` (text), `ooh_yard_address`, `ooh_yard_maps_url`, `ooh_keydrop_photo_url`, `ooh_what3words`, `ooh_cc_info_email` (bool string)
+- All edited via the "Out-of-Hours Returns" section of the Settings page (admin/manager only).
+- Migration 073 dropped `ooh_overflow_photo_url` — the seafront mention in the email is plain text, no photo link.
+
+**Discoverability:**
+- Jobs list (`/api/hirehop/jobs`) returns `has_ooh_return` per row + accepts `?ooh_only=true`. JobsPage renders a 🌙 OOH only checkbox + a moon pill next to flagged job names.
+- Dashboard "Returning Today" rows render a 🌙 OOH badge when any assignment on the job has `return_overnight=true`. Note: "Returning Today" includes `return_date = tomorrow`, so an OOH return where the driver drops the van TONIGHT for a 9am-tomorrow official return appears in tonight's list.
+- Job Detail Drivers & Vehicles: per-card moon pill shows Yes/No/—, click to edit.
+
+**Email templates** (in `email-templates/index.ts`):
+- `ooh_return_info` — full instructions (gate code, yard address, key-drop, parking-form CTA). Sent at book-out + on manual resend.
+- `ooh_return_reminder` — shorter T-1 day reminder, same parking-form CTA.
+- `ooh_return_received_internal` — info@ alert when driver submits the parking form (when `ooh_cc_info_email` is true).
+
+**Deferred / future:**
+- Crewed and D&C (Ooosh-driven) van returns — toggle currently only renders for self-drive cards. Settings + email infra ready when scope expands.
+- Daily summary email integration — when the daily summary template is built, it should query for OOH returns expected tonight/tomorrow and surface them.
 
 ## Dashboard (Today) — Section registry & extension points
 
