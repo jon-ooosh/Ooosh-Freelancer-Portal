@@ -1038,6 +1038,37 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  // ── Generic file resend ───────────────────────────────────────────────
+  // Used by the Files tab "Email" action — staff sends an arbitrary
+  // attachment (delivery note, hire agreement, condition report, jpg
+  // photo, anything) to a chosen recipient. Body adapts to whether
+  // staff supplied a custom message.
+
+  file_resend: {
+    variant: 'client',
+    preheader: 'Document from Ooosh Tours',
+    subject: '{{subjectLine}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Document attached</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{recipientName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;white-space:pre-wrap;">{{leadParagraph}}</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Document</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{fileName}}</p>
+            <p style="margin:6px 0 0;font-size:13px;color:#64748b;">{{jobRefLine}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        Sent by {{senderName}}. Reply to this email or call us if you have any questions.
+      </p>
+    `,
+  },
 };
 
 export default templates;

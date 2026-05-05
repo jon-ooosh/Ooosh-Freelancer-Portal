@@ -17,6 +17,7 @@ import DatePicker from '../components/DatePicker';
 import ChaseModal from '../components/ChaseModal';
 import { VenuePicker } from '../components/VenuePicker';
 import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
+import FileEmailModal from '../components/FileEmailModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
 
@@ -5734,6 +5735,46 @@ function JobFilesSection({
   const [error, setError] = useState('');
   const [filterTag, setFilterTag] = useState('');
   const [viewingFile, setViewingFile] = useState<FileAttachment | null>(null);
+  const [emailingFile, setEmailingFile] = useState<FileAttachment | null>(null);
+
+  // Post-save metadata edit — keyed on file URL because that's stable
+  // across re-renders (label/comment shift around as users edit).
+  const [editingFileUrl, setEditingFileUrl] = useState<string | null>(null);
+  const [editLabel, setEditLabel] = useState('');
+  const [editComment, setEditComment] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  const startEdit = (file: FileAttachment) => {
+    setEditingFileUrl(file.url);
+    setEditLabel(file.label || '');
+    setEditComment(file.comment || '');
+  };
+  const cancelEdit = () => {
+    setEditingFileUrl(null);
+    setEditLabel('');
+    setEditComment('');
+  };
+  const saveEdit = async (file: FileAttachment) => {
+    setSavingEdit(true);
+    setError('');
+    try {
+      await api.patch('/files/update-metadata', {
+        entity_type: 'jobs',
+        entity_id: jobId,
+        file_url: file.url,
+        updates: {
+          label: editLabel.trim() || null,
+          comment: editComment.trim() || null,
+        },
+      });
+      cancelEdit();
+      onFilesChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update file');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
 
   const handleToggleShare = async (file: FileAttachment) => {
     try {
@@ -5894,12 +5935,13 @@ function JobFilesSection({
           <div className="space-y-2">
             {filteredFiles.map((file, idx) => {
               const canPreview = isPreviewable(file.name);
+              const isEditing = editingFileUrl === file.url;
               return (
                 <div
                   key={file.url || idx}
-                  className="flex items-center justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
+                  className="flex items-start justify-between p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 group"
                 >
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <div className="flex items-start gap-3 min-w-0 flex-1">
                     <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-bold flex-shrink-0 ${
                       file.type === 'image' ? 'bg-purple-100 text-purple-600' :
                       file.type === 'document' ? 'bg-blue-100 text-blue-600' :
@@ -5918,48 +5960,111 @@ function JobFilesSection({
                             <span className="text-xs text-gray-400 ml-1">(click to view)</span>
                           )}
                         </button>
-                        {file.label && (
+                        {!isEditing && file.label && (
                           <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium flex-shrink-0 ${fileTagColour(file.label)}`}>
                             {file.label}
                           </span>
                         )}
                       </div>
-                      {file.comment && (
-                        <p className="text-xs text-gray-500 mt-0.5 truncate">{file.comment}</p>
+                      {isEditing ? (
+                        <div className="mt-2 space-y-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <label className="text-xs text-gray-500">Tag:</label>
+                            <select
+                              value={editLabel}
+                              onChange={(e) => setEditLabel(e.target.value)}
+                              className="text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                            >
+                              <option value="">No tag</option>
+                              {FILE_TAGS.map(tag => (
+                                <option key={tag} value={tag}>{tag}</option>
+                              ))}
+                              {/* Preserve a custom value not in the standard list */}
+                              {editLabel && !FILE_TAGS.includes(editLabel as typeof FILE_TAGS[number]) && (
+                                <option value={editLabel}>{editLabel}</option>
+                              )}
+                            </select>
+                          </div>
+                          <input
+                            type="text"
+                            value={editComment}
+                            onChange={(e) => setEditComment(e.target.value)}
+                            placeholder="Comment / note about this file"
+                            className="w-full text-xs border border-gray-300 rounded px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                          />
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => saveEdit(file)}
+                              disabled={savingEdit}
+                              className="text-xs px-3 py-1 bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
+                            >
+                              {savingEdit ? 'Saving…' : 'Save'}
+                            </button>
+                            <button
+                              onClick={cancelEdit}
+                              disabled={savingEdit}
+                              className="text-xs px-3 py-1 text-gray-600 hover:bg-gray-100 rounded"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          {file.comment && (
+                            <p className="text-xs text-gray-500 mt-0.5 truncate">{file.comment}</p>
+                          )}
+                          <p className="text-xs text-gray-400">
+                            {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
+                              day: 'numeric', month: 'short', year: 'numeric',
+                            })}
+                          </p>
+                        </>
                       )}
-                      <p className="text-xs text-gray-400">
-                        {file.uploaded_by} &middot; {new Date(file.uploaded_at).toLocaleDateString('en-GB', {
-                          day: 'numeric', month: 'short', year: 'numeric',
-                        })}
-                      </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 flex-shrink-0 ml-2">
-                    <button
-                      onClick={() => handleToggleShare(file)}
-                      className={`text-xs px-2 py-0.5 rounded border transition-colors ${
-                        file.share_with_freelancer
-                          ? 'bg-green-50 border-green-200 text-green-700'
-                          : 'bg-gray-50 border-gray-200 text-gray-400 opacity-0 group-hover:opacity-100'
-                      }`}
-                      title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
-                    >
-                      {file.share_with_freelancer ? 'Shared' : 'Share'}
-                    </button>
-                    <button
-                      onClick={() => setViewingFile(file)}
-                      className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      View
-                    </button>
-                    <button
-                      onClick={() => handleDelete(file.url)}
-                      disabled={deleting === file.url}
-                      className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      {deleting === file.url ? '...' : 'Delete'}
-                    </button>
-                  </div>
+                  {!isEditing && (
+                    <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                      <button
+                        onClick={() => handleToggleShare(file)}
+                        className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                          file.share_with_freelancer
+                            ? 'bg-green-50 border-green-200 text-green-700'
+                            : 'bg-gray-50 border-gray-200 text-gray-400 opacity-0 group-hover:opacity-100'
+                        }`}
+                        title={file.share_with_freelancer ? 'Shared with freelancers — click to unshare' : 'Share with freelancers'}
+                      >
+                        {file.share_with_freelancer ? 'Shared' : 'Share'}
+                      </button>
+                      <button
+                        onClick={() => setEmailingFile(file)}
+                        className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Email this file"
+                      >
+                        Email
+                      </button>
+                      <button
+                        onClick={() => startEdit(file)}
+                        className="text-xs text-gray-600 hover:text-gray-800 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="Edit tag / comment"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => setViewingFile(file)}
+                        className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        View
+                      </button>
+                      <button
+                        onClick={() => handleDelete(file.url)}
+                        disabled={deleting === file.url}
+                        className="text-xs text-red-500 hover:text-red-700 font-medium disabled:opacity-50 opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        {deleting === file.url ? '...' : 'Delete'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -5972,6 +6077,26 @@ function JobFilesSection({
         <FileViewerModal
           file={viewingFile}
           onClose={() => setViewingFile(null)}
+        />
+      )}
+
+      {/* File email modal */}
+      {emailingFile && (
+        <FileEmailModal
+          file={{
+            name: emailingFile.name,
+            url: emailingFile.url,
+            label: emailingFile.label,
+            comment: emailingFile.comment,
+          }}
+          entityType="jobs"
+          entityId={jobId}
+          contextLabel="Send this file from the job to one or more recipients"
+          onClose={() => setEmailingFile(null)}
+          onSent={() => {
+            setEmailingFile(null);
+            onFilesChanged();
+          }}
         />
       )}
 

@@ -1782,9 +1782,10 @@ The `prepping` (HH 4 / Part Dispatched) inclusion handles the edge case of a job
 
 **Tear-down:** Legacy `src/app/warehouse/*` and `src/app/api/warehouse/*` pages + routes deleted from the Next.js portal. `netlify.toml` has a 301 redirect from `/warehouse[/*]` → `https://staff.oooshtours.co.uk/warehouse` for any latent tablet bookmarks. `MONDAY_API_TOKEN` in the Next.js portal is now warehouse-unused (still used by other freelancer-portal flows pre-repoint).
 
+**Nav:** "Warehouse Collections" link added to Operations submenu (between Backline and Issues). Clicking takes staff to the same kiosk-style page the iPad uses — they're already authenticated via staff JWT so no PIN needed. To return to the OP nav, use browser back.
+
 **Future enhancements (deferred):**
-- Resend delivery note from the Files tab (currently re-download → forward manually)
-- "Recent collections" / "Customer-collected" filter on Jobs + Returns pages
+- "Recent collections" / "Customer-collected" filter on Jobs + Returns pages — would surface a `collect_method` column on `jobs` (HH `COLLECT` field synced down: 0=customer, 1=we deliver, 2=courier, 3=other) and add a filter pill + Job Detail header pip. Discussed May 2026, parked in favour of higher-value work.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
@@ -2485,6 +2486,36 @@ Surfaces that use this filter:
 - Coming Up heat strip departures query
 
 When adding a new departure-related surface, use the same filter or the dashboard will visibly disagree with itself. The May 2026 refinement caught a 5-vs-3 mismatch between Today and Coming Up, plus a `prepped` job sitting overdue for 2 days that the Overdue Departures bucket missed entirely.
+
+## Files tab — actions registry (May 2026)
+
+The Files tab on Job Detail (and the same `JobFilesTab` component reused on Person/Org/Venue detail pages) supports four per-file actions beyond download/delete. **Anything new touching files-on-entities should slot into the same pattern, not invent its own.**
+
+| Action | Backend | Notes |
+|---|---|---|
+| **Toggle Share with freelancers** | `PATCH /api/files/update-metadata` (`share_with_freelancer`) | Existing flag the freelancer portal reads when filtering shared files |
+| **Email file to recipients** | `POST /api/files/email` | Generic — any file type (PDF, JPG, etc.). Loads job contacts from `/api/hire-forms/email-contacts/:jobId` (reused for the picker — same shape: client org email, linked people, band/promoter contacts, HH contact-name match). Free-text "add another email" too. Mandatory "I'm sending externally" sanity tick before Send enables. STAFF_ROLES only. Logs an `email`-type interaction on the entity timeline. Uses the `file_resend` template. |
+| **Edit tag / comment** | `PATCH /api/files/update-metadata` (`label`, `comment`) | Inline edit on the file row. Replaces the previous "set at upload time only" limitation. |
+| **View** | (no backend — opens FileViewerModal) | Inline preview for images + PDFs |
+
+**Backend endpoint contract for `POST /api/files/email`:**
+```
+{
+  entity_type: 'jobs' | 'people' | 'organisations' | 'venues' | 'drivers',
+  entity_id: uuid,
+  file_url: string,                 // R2 key — must start with files/ or delivery-notes/
+  recipients: [{ email, name? }],   // 1-10
+  message?: string,                 // optional, max 2000 chars
+  external_share_acknowledged: true // literal — request fails without it
+}
+```
+Returns `{ success, sent, failed, results: [{ email, success, error? }] }`. Per-recipient sends are parallel via Promise.all. The R2 path-prefix check (`files/` or `delivery-notes/`) prevents anyone passing a key from outside the file system (e.g. a backup key).
+
+**Frontend component:** `frontend/src/components/FileEmailModal.tsx` — currently wired into `JobFilesTab` only. To enable on Person/Org/Venue detail pages later, mount the same modal with `entityType` set appropriately. The contact picker is hidden for non-job entities (the picker logic lives in `/api/hire-forms/email-contacts/:jobId` which is job-scoped); free-text recipient entry still works.
+
+**Email template:** `file_resend` in `email-templates/index.ts`. Plain-text variables only (the substituter HTML-escapes), so optional sections like the message body and job ref line are composed in the caller as either a real string or `''`.
+
+**Why no automatic CC/BCC of internal team:** explicit recipient list keeps the audit trail clean — every send shows up as one interaction with a known target list. If staff want a record they pick `info@oooshtours.co.uk` themselves.
 
 ## Architecture Notes
 
