@@ -403,6 +403,94 @@ router.get('/:id/outstanding-invoices', async (req: AuthRequest, res: Response) 
   }
 });
 
+// ── GET /api/excess/:id/available-rollover ─────────────────────────────────
+// "Does this client have a rolled-over excess balance available to apply to
+// THIS excess record?" — drives the "Apply Rolled Over Excess" action in the
+// Money tab modal so staff don't have to navigate Manage → Record Payment →
+// pick "Rolled Over from Previous Hire" (which is misleading UX since no money
+// is moving).
+//
+// Walks the client's excess history: finds the latest record with held cash
+// (status taken/partially_paid AND has hh_deposit_id) that hasn't already been
+// chained forward via 'rolled_over' status. Available amount =
+// taken − claimed − reimbursed.
+//
+// Returns { available: false } if nothing applicable. Otherwise returns the
+// amount + source HH job + source HH deposit ID for the UI to display
+// ("£1,200 available from job #15577") and pre-fill the form.
+
+router.get('/:id/available-rollover', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const result = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const current = result.rows[0];
+    if (!current.job_id) {
+      res.json({ data: { available: false, reason: 'no_job' } });
+      return;
+    }
+
+    // Find candidate source records for the same client. Status filter:
+    //   - 'taken' / 'partially_paid' = live record with cash
+    //   - 'rolled_over' is EXCLUDED here because that means it's already been
+    //     chained forward to a newer record (which is the real source).
+    // We also exclude the current record itself, and require hh_deposit_id so
+    // the chain back to the original HireHop deposit is intact.
+    const candidates = await query(
+      `SELECT je2.id, je2.hh_deposit_id,
+              je2.excess_amount_taken, je2.claim_amount, je2.reimbursement_amount,
+              je2.excess_status, je2.payment_method,
+              j2.hh_job_number AS source_hh_job
+       FROM job_excess je2
+       JOIN jobs j2 ON j2.id = je2.job_id
+       WHERE je2.id <> $1
+         AND je2.job_id <> $2
+         AND je2.hh_deposit_id IS NOT NULL
+         AND je2.excess_status IN ('taken', 'partially_paid')
+         AND j2.client_id = (SELECT client_id FROM jobs WHERE id = $2)
+         AND j2.client_id IS NOT NULL
+       ORDER BY je2.updated_at DESC
+       LIMIT 5`,
+      [id, current.job_id]
+    );
+
+    // Pick the first candidate with positive available balance.
+    for (const row of candidates.rows) {
+      const taken = parseFloat(row.excess_amount_taken || 0);
+      const claimed = parseFloat(row.claim_amount || 0);
+      const reimbursed = parseFloat(row.reimbursement_amount || 0);
+      const available = taken - claimed - reimbursed;
+      if (available > 0.005) {
+        res.json({
+          data: {
+            available: true,
+            amount_available: Number(available.toFixed(2)),
+            source_excess_id: row.id,
+            source_hh_deposit_id: row.hh_deposit_id,
+            source_hh_job: row.source_hh_job ? Number(row.source_hh_job) : null,
+            // Helpful for UI defaults: pre-fill min(required, available) so
+            // applying never over-collects.
+            suggested_apply_amount: Math.min(
+              available,
+              parseFloat(current.excess_amount_required || 0) - parseFloat(current.excess_amount_taken || 0)
+            ),
+          },
+        });
+        return;
+      }
+    }
+
+    res.json({ data: { available: false } });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Available rollover error:', errMsg);
+    res.status(500).json({ error: 'Failed to check rollover availability', detail: errMsg });
+  }
+});
+
 // ── GET /api/excess/ledger — Client excess ledger ──
 
 router.get('/ledger', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {

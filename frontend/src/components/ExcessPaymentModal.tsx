@@ -16,7 +16,7 @@ interface OutstandingInvoice {
   date: string | null;
 }
 
-type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'move' | 'edit_required' | 'unlink_deposit';
+type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit';
 
 interface ExcessPaymentModalProps {
   excess: JobExcess;
@@ -168,6 +168,45 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   );
   const [editRequiredReason, setEditRequiredReason] = useState(excess.excess_calculation_basis || '');
 
+  // Rollover-apply form (separate from "Roll Over to Next Hire" which is the
+  // outgoing-side action). This is the incoming-side: this excess record needs
+  // collection, and the same client has rolled-over money sitting on a previous
+  // hire's deposit. We auto-detect availability so staff don't have to navigate
+  // Manage → Record Payment → "Rolled Over from Previous Hire" (which is
+  // misleading UX — calling it a "payment" hides what's actually happening).
+  interface RolloverAvailability {
+    available: boolean;
+    amount_available?: number;
+    source_hh_job?: number | null;
+    source_hh_deposit_id?: number;
+    suggested_apply_amount?: number;
+    source_excess_id?: string;
+  }
+  const [rolloverInfo, setRolloverInfo] = useState<RolloverAvailability | null>(null);
+  const [rolloverApplyAmount, setRolloverApplyAmount] = useState('');
+
+  // Look up rollover availability when the modal opens — only worth checking on
+  // records that still need collection (otherwise the action is irrelevant).
+  const needsCollection = ['needed', 'pending', 'partially_paid'].includes(excess.excess_status);
+  useEffect(() => {
+    if (!needsCollection) return;
+    let cancelled = false;
+    api.get<{ data: RolloverAvailability }>(`/excess/${excess.id}/available-rollover`)
+      .then((r) => {
+        if (cancelled) return;
+        setRolloverInfo(r.data);
+        if (r.data.available && r.data.suggested_apply_amount !== undefined) {
+          setRolloverApplyAmount(Number(r.data.suggested_apply_amount).toFixed(2));
+        }
+      })
+      .catch((err: any) => {
+        // Non-fatal: rollover detection is a UX nicety. Log and move on.
+        console.warn('[excess modal] Rollover availability check failed:', err.message);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsCollection, excess.id]);
+
   // Move form
   const [moveXeroId, setMoveXeroId] = useState('');
   const [moveXeroName, setMoveXeroName] = useState('');
@@ -241,6 +280,30 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             excess_status: 'rolled_over',
           });
           break;
+        case 'rollover_apply': {
+          // Incoming-side: apply the client's rolled-over balance from a
+          // previous hire to this record. Posts to the existing payment
+          // endpoint with method='rolled_over' — backend's rollover linkage
+          // copies the source HH deposit ID forward and flips the previous
+          // record to 'rolled_over' (terminal). Total-collected semantics:
+          // we send the new TOTAL (previous taken + applied), not just the
+          // delta.
+          const applyAmount = parseFloat(rolloverApplyAmount);
+          if (isNaN(applyAmount) || applyAmount <= 0) {
+            throw new Error('Enter a valid amount to apply');
+          }
+          if (rolloverInfo?.amount_available && applyAmount > rolloverInfo.amount_available + 0.005) {
+            throw new Error(`Amount exceeds available rollover balance (£${rolloverInfo.amount_available.toFixed(2)})`);
+          }
+          const newTotal = previousTaken + applyAmount;
+          await api.post(`/excess/${excess.id}/payment`, {
+            total_collected: newTotal,
+            method: 'rolled_over',
+            reference: null,
+            push_to_hirehop: false, // No HH push — no money moves; backend handles linkage + HH note
+          });
+          break;
+        }
         case 'move':
           await api.post(`/excess/${excess.id}/move`, {
             xero_contact_id: moveXeroId,
@@ -276,6 +339,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const availableActions: { action: ModalAction; label: string; icon: string }[] = [];
   const s = excess.excess_status;
 
+  // Rollover-apply lands at the TOP when available — most natural action when
+  // staff have just confirmed a hire and the client already has rolled-over
+  // money on file. No money moves; we just apply that balance to this record.
+  if (needsCollection && rolloverInfo?.available) {
+    availableActions.push({ action: 'rollover_apply', label: 'Apply Rolled Over Excess', icon: '↻' });
+  }
   if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
     availableActions.push({ action: 'payment', label: 'Record Payment', icon: '£' });
   }
@@ -653,6 +722,37 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                   Mark £{Number(excess.excess_amount_taken || 0).toFixed(2)} as held on account for the client's next hire.
                   This amount will appear as a credit on their next excess requirement.
                 </p>
+              </div>
+            )}
+
+            {action === 'rollover_apply' && rolloverInfo?.available && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900">Apply Rolled Over Excess</h3>
+                <div className="text-xs bg-purple-50 border border-purple-200 rounded-md p-3 text-purple-900">
+                  <strong>£{Number(rolloverInfo.amount_available || 0).toFixed(2)}</strong> available
+                  {rolloverInfo.source_hh_job ? <> from previous hire <strong>#{rolloverInfo.source_hh_job}</strong></> : ' from a previous hire'}.
+                  <br />
+                  <span className="text-purple-700">No money moves — the existing deposit on the previous hire is being earmarked for this hire.</span>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Amount to apply</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max={rolloverInfo.amount_available}
+                      value={rolloverApplyAmount}
+                      onChange={(e) => setRolloverApplyAmount(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
+                    />
+                  </div>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Pre-filled with the lesser of (required £{Number(excess.excess_amount_required || 0).toFixed(2)}) and (available £{Number(rolloverInfo.amount_available || 0).toFixed(2)}).
+                  </p>
+                </div>
               </div>
             )}
 
