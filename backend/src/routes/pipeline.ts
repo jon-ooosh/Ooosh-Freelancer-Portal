@@ -20,11 +20,14 @@ const router = Router();
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
 
-// Pipeline status labels for transition logging
+// Pipeline status labels for transition logging.
+// 'chasing' is intentionally NOT a value here — it's a derived view (a job
+// with next_chase_date <= today and a pre-confirmed status), surfaced via
+// is_chasing on the API response. The Kanban renders it as a column but
+// pipeline_status itself never holds 'chasing'.
 const PIPELINE_LABELS: Record<string, string> = {
   new_enquiry: 'Enquiries',
   quoting: 'Enquiries',
-  chasing: 'Chasing',
   paused: 'Paused Enquiry',
   provisional: 'Provisional',
   confirmed: 'Confirmed',
@@ -134,7 +137,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
          WHERE jo.job_id = j.id AND jo.role = 'band' LIMIT 1) as band_name,
         (SELECT json_agg(json_build_object('id', jo.id, 'role', jo.role, 'organisation_name', o.name, 'organisation_type', o.type, 'organisation_id', jo.organisation_id))
          FROM job_organisations jo JOIN organisations o ON o.id = jo.organisation_id
-         WHERE jo.job_id = j.id) as linked_organisations
+         WHERE jo.job_id = j.id) as linked_organisations,
+        (j.next_chase_date IS NOT NULL
+         AND j.next_chase_date <= CURRENT_DATE
+         AND j.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')) as is_chasing
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id
@@ -464,7 +470,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
 // ── Update pipeline status (with transition logging) ───────────────────────
 
 const updateStatusSchema = z.object({
-  pipeline_status: z.enum(['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional', 'confirmed', 'lost', 'cancelled',
+  pipeline_status: z.enum(['new_enquiry', 'quoting', 'paused', 'provisional', 'confirmed', 'lost', 'cancelled',
     'prepped', 'dispatched', 'returned_incomplete', 'returned', 'completed']),
   // Context fields depending on status
   hold_reason: z.string().optional().nullable(),

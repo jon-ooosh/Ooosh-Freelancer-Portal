@@ -192,7 +192,13 @@ export const HH_JOB_STATUS_MAP: Record<number, string> = {
 // Active statuses worth syncing (not dead/done)
 export const HH_ACTIVE_STATUSES = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 
-// Pipeline status values
+// Pipeline status values.
+// Note: 'chasing' is kept in the union for legacy compatibility but is no
+// longer written by the application. It's a derived view (see Job.is_chasing
+// — set when next_chase_date <= today AND status is pre-confirmed). The
+// Kanban surfaces a "Chasing" column from is_chasing; pipeline_status itself
+// holds the real lifecycle status (new_enquiry / quoting / paused /
+// provisional / confirmed / etc.) at all times.
 export type PipelineStatus = 'new_enquiry' | 'quoting' | 'chasing' | 'paused' | 'provisional' | 'confirmed' | 'lost' | 'cancelled';
 export type OperationalStatus = 'prepping' | 'prepped' | 'dispatched' | 'returned_incomplete' | 'returned' | 'completed';
 export type JobLifecycleStatus = PipelineStatus | OperationalStatus;
@@ -317,6 +323,10 @@ export interface Job {
   last_chased_at: string | null;
   next_chase_date: string | null;
   chase_interval_days: number;
+  // Derived flag (set by GET /api/pipeline): a job is "in the Chasing pile"
+  // when next_chase_date <= today AND pipeline_status is pre-confirmed. Drives
+  // Kanban column membership without overwriting pipeline_status.
+  is_chasing?: boolean;
   // Hold/pause
   hold_reason: HoldReason | null;
   hold_reason_detail: string | null;

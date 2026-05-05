@@ -1542,10 +1542,10 @@ export default function JobDetailPage() {
     const needsPrompt = ['paused', 'confirmed', 'lost', 'cancelled', 'completed'].includes(targetStatus);
     const needsDispatchConfirm = ['dispatched'].includes(targetStatus);
     // Check if going backwards from confirmed/operational to enquiry stage
-    const enquiryStages = ['new_enquiry', 'chasing', 'provisional'];
+    const enquiryStages = ['new_enquiry', 'provisional'];
     const isGoingBackwards = (isConfirmed || isOperational) && enquiryStages.includes(targetStatus);
     if (isGoingBackwards) {
-      const LABELS: Record<string, string> = { new_enquiry: 'Enquiry', chasing: 'Chasing', provisional: 'Provisional' };
+      const LABELS: Record<string, string> = { new_enquiry: 'Enquiry', provisional: 'Provisional' };
       if (!window.confirm(`Move this job back to "${LABELS[targetStatus] || targetStatus}"? This will also update HireHop.`)) return;
       handleStatusTransition(targetStatus);
     } else if (needsPrompt) {
@@ -2076,9 +2076,11 @@ export default function JobDetailPage() {
     : (STATUS_COLOURS[job.status] || 'bg-gray-100 text-gray-600');
   const hasPipelineStatus = !!job.pipeline_status;
 
-  // Available pipeline statuses for the dropdown (excluding current)
-  // Contextual status transitions based on current status
-  const ENQUIRY_STATUSES: PipelineStatus[] = ['new_enquiry', 'chasing', 'provisional', 'paused'];
+  // Available pipeline statuses for the dropdown (excluding current).
+  // 'chasing' is intentionally absent — it's a derived view (a job with
+  // next_chase_date <= today + pre-confirmed status), not a selectable
+  // lifecycle status. Use the chase modal to set a chase date instead.
+  const ENQUIRY_STATUSES: PipelineStatus[] = ['new_enquiry', 'provisional', 'paused'];
   const PIPELINE_STATUSES: PipelineStatus[] = [...ENQUIRY_STATUSES, 'confirmed', 'lost'];
   const OPERATIONAL_STATUSES: string[] = ['prepping', 'prepped', 'dispatched', 'returned_incomplete', 'returned', 'completed'];
   const isOperational = OPERATIONAL_STATUSES.includes(job.pipeline_status || '');
@@ -2214,7 +2216,7 @@ export default function JobDetailPage() {
   const nextSuggestedStatus: string | null = (() => {
     const status = job.pipeline_status;
     if (!status) return null;
-    if (['new_enquiry', 'quoting', 'chasing', 'provisional', 'paused'].includes(status)) {
+    if (['new_enquiry', 'quoting', 'provisional', 'paused'].includes(status)) {
       return 'confirmed';
     }
     if ((status === 'confirmed' || status === 'prepped') && outDay && todayLocalISO >= outDay) {

@@ -117,16 +117,15 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
         pipelineStatusAt, chase_method || null, chase_response || null]
     );
 
-    // Chase side-effects: auto-increment chase_count, set next_chase_date
-    // When chase is logged with a future date, move job back to Enquiries (from Chasing)
-    // The auto-mover will bring it back to Chasing when the chase date arrives
+    // Chase side-effects: bump chase_count, set next_chase_date, persist
+    // alert preferences. Crucially we DO NOT touch pipeline_status — chasing
+    // is a derived view (next_chase_date + pre-confirmed status), not a
+    // stored status. Setting next_chase_date to a future date is enough to
+    // drop the card out of the Chasing pile in the Kanban; the underlying
+    // pipeline_status (new_enquiry / quoting / paused / provisional) is
+    // preserved.
     if (type === 'chase' && job_id) {
       const chaseDate = next_chase_date || null;
-      // Persist the chase alert preference on the job too, so it survives
-      // across chase events and the auto-mover scheduler can read it when
-      // the chase date arrives. Only overwrite if the client supplied a value
-      // (avoids clearing an existing assignment when the modal is submitted
-      // without touching those fields).
       await query(
         `UPDATE jobs SET
           chase_count = chase_count + 1,
@@ -137,23 +136,10 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
           END,
           chase_alert_user_id = COALESCE($3, chase_alert_user_id),
           chase_alert_delivery = COALESCE($4, chase_alert_delivery),
-          pipeline_status = CASE
-            WHEN pipeline_status = 'chasing' THEN 'new_enquiry'
-            ELSE pipeline_status
-          END,
-          pipeline_status_changed_at = CASE
-            WHEN pipeline_status = 'chasing' THEN NOW()
-            ELSE pipeline_status_changed_at
-          END,
           updated_at = NOW()
         WHERE id = $2`,
         [chaseDate, job_id, chase_alert_user_id || null, chase_alert_delivery || null]
       );
-
-      // No immediate notification on log: the auto-mover will fire one when
-      // next_chase_date arrives (subject to chase_alert_delivery preference).
-      // Chase alert preference (user + delivery method) is persisted on the
-      // job above so the scheduler can honour it then.
     }
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);

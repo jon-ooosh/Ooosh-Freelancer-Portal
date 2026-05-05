@@ -330,22 +330,35 @@ function PipelineCard({
       className={`bg-white rounded-lg shadow-sm border border-gray-200 p-3 cursor-grab active:cursor-grabbing
         hover:shadow-md transition-shadow ${borderClass}`}
     >
-      {/* Row 1: Job number + value */}
-      <div className="flex items-center justify-between mb-1">
-        {job.hh_job_number ? (
-          <a
-            href={`https://myhirehop.com/job.php?id=${job.hh_job_number}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            className="text-xs font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
-            title="Open in HireHop"
-          >
-            J-{job.hh_job_number}
-          </a>
-        ) : (
-          <span className="text-xs font-mono text-gray-400">NEW</span>
-        )}
+      {/* Row 1: Job number + (real status badge if visiting Chasing) + value */}
+      <div className="flex items-center justify-between mb-1 gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {job.hh_job_number ? (
+            <a
+              href={`https://myhirehop.com/job.php?id=${job.hh_job_number}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-xs font-mono text-ooosh-600 hover:text-ooosh-700 hover:underline"
+              title="Open in HireHop"
+            >
+              J-{job.hh_job_number}
+            </a>
+          ) : (
+            <span className="text-xs font-mono text-gray-400">NEW</span>
+          )}
+          {/* Underlying status badge: shown when card is visiting the Chasing
+              virtual column so the real lifecycle state stays visible. */}
+          {job.is_chasing && job.pipeline_status && PIPELINE_STATUS_CONFIG[(job.pipeline_status === 'quoting' ? 'new_enquiry' : job.pipeline_status) as PipelineStatus] && (
+            <span
+              className="text-[10px] font-medium px-1.5 py-0.5 rounded text-white"
+              style={{ backgroundColor: PIPELINE_STATUS_CONFIG[(job.pipeline_status === 'quoting' ? 'new_enquiry' : job.pipeline_status) as PipelineStatus].colour }}
+              title="Underlying status"
+            >
+              {PIPELINE_STATUS_CONFIG[(job.pipeline_status === 'quoting' ? 'new_enquiry' : job.pipeline_status) as PipelineStatus].label}
+            </span>
+          )}
+        </div>
         <span className="text-sm font-semibold text-gray-900">
           {formatCurrency(job.job_value)}
         </span>
@@ -1843,8 +1856,10 @@ export default function PipelinePage() {
       if (filterChase) params.set('chase_status', filterChase);
       if (filterSearch) params.set('search', filterSearch);
 
-      // Build status filter based on toggles
-      const statuses = ['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional'];
+      // Build status filter based on toggles. 'chasing' is no longer a stored
+      // status — cards land in the Chasing column via server-derived
+      // is_chasing (next_chase_date <= today + pre-confirmed status).
+      const statuses = ['new_enquiry', 'quoting', 'paused', 'provisional'];
       if (showConfirmed) statuses.push('confirmed');
       if (showLost) statuses.push('lost');
       params.set('status', statuses.join(','));
@@ -1894,7 +1909,44 @@ export default function PipelinePage() {
   const handleDrop = async (e: React.DragEvent, targetStatus: PipelineStatus) => {
     e.preventDefault();
     const job = dragJobRef.current;
-    if (!job || job.pipeline_status === targetStatus) return;
+    if (!job) return;
+
+    // Dropping INTO Chasing isn't a status change — it's a chase-date set.
+    // Pull the chase date forward to today; the underlying pipeline_status is
+    // preserved, and the card surfaces in the Chasing column on next fetch
+    // via the server-derived is_chasing flag.
+    if (targetStatus === 'chasing') {
+      if (job.is_chasing) return;  // already there, nothing to do
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        await api.patch(`/pipeline/${job.id}`, { next_chase_date: today });
+        fetchPipeline();
+      } catch (err) {
+        console.error('Chase date update failed:', err);
+      }
+      return;
+    }
+
+    // Dropping OUT of Chasing into a real status column: the underlying
+    // status may already match (the card was just visiting Chasing because
+    // of an overdue chase date). In that case, push the chase date forward
+    // by chase_interval_days so the card lands in the target column visibly.
+    if (job.is_chasing && job.pipeline_status === targetStatus) {
+      try {
+        const interval = job.chase_interval_days || 5;
+        const future = new Date();
+        future.setDate(future.getDate() + interval);
+        await api.patch(`/pipeline/${job.id}`, {
+          next_chase_date: future.toISOString().split('T')[0],
+        });
+        fetchPipeline();
+      } catch (err) {
+        console.error('Chase date update failed:', err);
+      }
+      return;
+    }
+
+    if (job.pipeline_status === targetStatus) return;
 
     if (['paused', 'confirmed', 'lost'].includes(targetStatus)) {
       setTransitionModal({ jobId: job.id, targetStatus });
@@ -1929,16 +1981,28 @@ export default function PipelinePage() {
   };
 
   // ── Group jobs by status ───────────────────────────────────────────────
+  //
+  // 'Chasing' is a virtual column. A job appears in it when is_chasing is
+  // true (server-derived: next_chase_date <= today AND pre-confirmed status).
+  // The card's underlying pipeline_status stays untouched — when the chase
+  // is logged with a future date, the card silently drops back into its
+  // real status column on the next fetch.
 
   const jobsByStatus: Record<PipelineStatus, Job[]> = {
     new_enquiry: [], quoting: [], chasing: [], paused: [],
     provisional: [], confirmed: [], lost: [], cancelled: [],
   };
   for (const job of jobs) {
-    // Merge quoting into new_enquiry (now "Enquiries")
-    const status = job.pipeline_status === 'quoting' ? 'new_enquiry' : (job.pipeline_status || 'new_enquiry');
-    if (jobsByStatus[status]) {
-      jobsByStatus[status].push(job);
+    // Chasing wins over real status when due. Otherwise merge quoting into
+    // new_enquiry (now "Enquiries").
+    let bucket: PipelineStatus;
+    if (job.is_chasing) {
+      bucket = 'chasing';
+    } else {
+      bucket = job.pipeline_status === 'quoting' ? 'new_enquiry' : (job.pipeline_status || 'new_enquiry');
+    }
+    if (jobsByStatus[bucket]) {
+      jobsByStatus[bucket].push(job);
     }
   }
 
