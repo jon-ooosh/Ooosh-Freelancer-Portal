@@ -30,6 +30,10 @@ async function main() {
   );
 
   const buckets = { bcrypt: 0, non_bcrypt: 0, missing: 0 };
+  // Track only active rows for the deploy-safety warning. Inactive rows
+  // never get queried by verifyApiKey, so they shouldn't trigger the
+  // "will FAIL authentication" alarm even if their key_hash is junk.
+  const activeBuckets = { bcrypt: 0, non_bcrypt: 0, missing: 0 };
 
   console.log(`Found ${result.rows.length} api_keys row(s):\n`);
   console.log('  ID                                    | active | service              | prefix    | hash status   | last_used');
@@ -46,6 +50,7 @@ async function main() {
       status = 'non_bcrypt';
     }
     buckets[status]++;
+    if (row.is_active) activeBuckets[status]++;
 
     const lastUsed = row.last_used_at ? new Date(row.last_used_at).toISOString().substring(0, 10) : 'never';
     const activeLabel = row.is_active ? 'YES   ' : 'no    ';
@@ -54,12 +59,17 @@ async function main() {
     );
   }
 
-  console.log('\nSummary:');
-  console.log(`  bcrypt-shaped: ${buckets.bcrypt}  (full-key verification will work)`);
-  console.log(`  non-bcrypt:    ${buckets.non_bcrypt}  (will FAIL authentication after deploy — re-issue key first)`);
-  console.log(`  missing hash:  ${buckets.missing}  (will FAIL authentication after deploy — re-issue key first)`);
+  console.log('\nSummary (all rows):');
+  console.log(`  bcrypt-shaped: ${buckets.bcrypt}`);
+  console.log(`  non-bcrypt:    ${buckets.non_bcrypt}  (irrelevant if inactive)`);
+  console.log(`  missing hash:  ${buckets.missing}  (irrelevant if inactive)`);
 
-  if (buckets.non_bcrypt > 0 || buckets.missing > 0) {
+  console.log('\nDeploy-safety check (active rows only — these are what verifyApiKey actually queries):');
+  console.log(`  bcrypt-shaped: ${activeBuckets.bcrypt}  (full-key verification will work)`);
+  console.log(`  non-bcrypt:    ${activeBuckets.non_bcrypt}  (will FAIL authentication after deploy — re-issue key first)`);
+  console.log(`  missing hash:  ${activeBuckets.missing}  (will FAIL authentication after deploy — re-issue key first)`);
+
+  if (activeBuckets.non_bcrypt > 0 || activeBuckets.missing > 0) {
     console.log('\n⚠️  Some active keys will stop authenticating after the bcrypt-comparison fix is deployed.');
     console.log('   To fix: generate a fresh key, bcrypt-hash it, INSERT a new row, distribute the new key,');
     console.log('   then deactivate the old row. Example:');

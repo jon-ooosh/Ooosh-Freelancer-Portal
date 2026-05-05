@@ -2099,7 +2099,22 @@ Used by:
 
 **Routes that DON'T use this:** routes authenticating against a single env-var key (`hire-forms.ts`, `driver-verification.ts`) use `crypto.timingSafeEqual` directly — different pattern, not vulnerable.
 
-**Audit script:** `backend/src/scripts/audit-api-key-hashes.ts` checks existing rows have bcrypt-shaped `key_hash` values. Run before deploying the fix to surface any rows that need re-hashing (a non-bcrypt hash will fail to authenticate after the change).
+**Audit script:** `backend/src/scripts/audit-api-key-hashes.ts` checks existing rows have bcrypt-shaped `key_hash` values. Run before deploying changes that affect API key auth, or whenever a new row is added. Reports non-bcrypt / missing hashes per row, and the deploy-safety summary only counts active rows (inactive rows can have any garbage in `key_hash` — `verifyApiKey` won't query them).
+
+**Creating a new api_keys row:** never insert plaintext or non-bcrypt values into `key_hash`. The May 2026 audit revealed two historical rows had been inserted incorrectly — one with a SHA-256 hex string in `key_hash`, one with `key_hash = NULL`. Both authenticated under the old prefix-only code despite the wrong hash format; both broke under the new bcrypt-strict code. Standard creation pattern:
+
+```ts
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const key = `ppk_live_${crypto.randomBytes(24).toString('hex')}`;
+const hash = await bcrypt.hash(key, 12);
+// INSERT INTO api_keys (name, key_hash, key_prefix, service, is_active)
+//   VALUES ('Foo Service', $hash, key.substring(0, 8), 'foo_service', true);
+// Then store `key` in the consuming integration's env var (Netlify, Vercel, etc.)
+// — that's the only time you'll see the full plaintext value.
+```
+
+The `key_prefix` should be the first 8 chars of the plaintext key (used as a fast lookup index — `verifyApiKey` matches on prefix, then bcrypt-compares the full key against each candidate's `key_hash`).
 
 ### Hire Date Resolution
 
