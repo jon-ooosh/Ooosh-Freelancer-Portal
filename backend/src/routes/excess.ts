@@ -435,8 +435,12 @@ router.get('/:id/available-rollover', async (req: AuthRequest, res: Response) =>
 
     // Find candidate source records for the same client. Status filter:
     //   - 'taken' / 'partially_paid' = live record with cash
-    //   - 'rolled_over' is EXCLUDED here because that means it's already been
-    //     chained forward to a newer record (which is the real source).
+    //   - 'rolled_over' = was marked rolled over BUT may not actually have been
+    //     chained forward (e.g. legacy flow that only flipped this record's
+    //     status without creating a child record). The cash is still in the
+    //     bank, just labelled "rolled over" without a chain. We INCLUDE these
+    //     and rely on the NOT EXISTS guard below to skip records that HAVE
+    //     been chained forward (would otherwise double-allocate the cash).
     // We also exclude the current record itself, and require hh_deposit_id so
     // the chain back to the original HireHop deposit is intact.
     const candidates = await query(
@@ -449,9 +453,19 @@ router.get('/:id/available-rollover', async (req: AuthRequest, res: Response) =>
        WHERE je2.id <> $1
          AND je2.job_id <> $2
          AND je2.hh_deposit_id IS NOT NULL
-         AND je2.excess_status IN ('taken', 'partially_paid')
+         AND je2.excess_status IN ('taken', 'partially_paid', 'rolled_over')
          AND j2.client_id = (SELECT client_id FROM jobs WHERE id = $2)
          AND j2.client_id IS NOT NULL
+         -- Exclude records that have already been chained forward to a LIVE
+         -- record (same hh_deposit_id, taken/partially_paid status). Without
+         -- this we'd double-allocate cash that's already been earmarked.
+         AND NOT EXISTS (
+           SELECT 1 FROM job_excess je3
+           WHERE je3.hh_deposit_id = je2.hh_deposit_id
+             AND je3.id <> je2.id
+             AND je3.id <> $1
+             AND je3.excess_status IN ('taken', 'partially_paid')
+         )
        ORDER BY je2.updated_at DESC
        LIMIT 5`,
       [id, current.job_id]
