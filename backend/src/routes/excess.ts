@@ -16,6 +16,7 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
+import { pushDepositToHH } from '../services/hh-deposit';
 
 const router = Router();
 router.use(authenticate);
@@ -34,11 +35,26 @@ const updateExcessSchema = z.object({
   client_name: z.string().max(200).nullable().optional(),
 });
 
+// Excess payment schema.
+//
+// `total_collected` is the new total (absolute set, not delta-add). Replaces
+// the old additive `amount` to make the modal idempotent — clicking save twice
+// can't double the collected amount the way it did historically.
+//
+// `amount` is still accepted for backwards compatibility (existing API
+// consumers that haven't been updated) — when present and `total_collected`
+// is absent, it's interpreted as a delta to add.
 const paymentSchema = z.object({
-  amount: z.number().min(0),
+  total_collected: z.number().min(0).optional(),
+  amount: z.number().min(0).optional(),
   method: z.enum(['stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank', 'rolled_over']),
   reference: z.string().max(200).nullable().optional(),
-});
+  notes: z.string().max(1000).nullable().optional(),
+  push_to_hirehop: z.boolean().default(true),
+}).refine(
+  (val) => val.total_collected !== undefined || val.amount !== undefined,
+  { message: 'Either total_collected or amount must be provided' }
+);
 
 const claimSchema = z.object({
   amount: z.number().positive(),
@@ -615,13 +631,98 @@ router.put('/:id', validate(updateExcessSchema), async (req: AuthRequest, res: R
 router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { amount, method, reference } = req.body;
+    const { total_collected, amount: bodyAmount, method, reference, notes, push_to_hirehop } = req.body;
 
+    // Look up the existing record so we can compute the delta (new money) when
+    // the caller passes total_collected (absolute set), and so we have
+    // hirehop_job_id for the HH push.
+    const existing = await query(
+      `SELECT je.*, j.hh_job_number FROM job_excess je
+       LEFT JOIN jobs j ON j.id = je.job_id
+       WHERE je.id = $1`,
+      [id]
+    );
+
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+
+    const previous = existing.rows[0];
+    const previousTaken = parseFloat(previous.excess_amount_taken || 0);
+
+    // Determine new total + delta. New callers send `total_collected` (absolute).
+    // Legacy callers (or rollover flows that haven't been migrated) send
+    // `amount` (delta).
+    let newTotal: number;
+    let delta: number;
+    if (total_collected !== undefined) {
+      newTotal = total_collected;
+      delta = newTotal - previousTaken;
+    } else {
+      delta = bodyAmount;
+      newTotal = previousTaken + delta;
+    }
+
+    if (newTotal < 0) {
+      res.status(400).json({ error: 'Total collected cannot be negative' });
+      return;
+    }
+
+    // Idempotent no-op: total_collected matches what's already on file. Don't
+    // touch the record, don't insert a payment row, don't push HH.
+    if (Math.abs(delta) < 0.005) {
+      res.json({
+        data: previous,
+        delta: 0,
+        idempotent: true,
+        hh_push_error: null,
+      });
+      return;
+    }
+
+    if (delta < 0) {
+      // Lowering total_collected is a correction — allow it, but don't push HH
+      // (you'd need a reverse deposit / refund flow). Typically used to fix a
+      // double-record like the 15624 incident.
+      const result = await query(
+        `UPDATE job_excess SET
+          excess_amount_taken = $1,
+          excess_status = CASE
+            WHEN $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
+            WHEN $1 > 0 THEN 'partially_paid'
+            ELSE 'needed'
+          END,
+          payment_method = $2,
+          payment_reference = $3,
+          updated_at = NOW()
+        WHERE id = $4
+        RETURNING *`,
+        [newTotal, method, reference || null, id]
+      );
+
+      // Sync requirement status (might flip back from 'done')
+      if (previous.job_id) {
+        syncExcessRequirementStatus(previous.job_id).catch(e =>
+          console.error('[excess] syncExcessRequirementStatus failed (correction):', e)
+        );
+      }
+
+      res.json({
+        data: result.rows[0],
+        delta,
+        correction: true,
+        hh_push_error: null,
+      });
+      return;
+    }
+
+    // Positive delta — real new payment. Update the record absolutely.
     const result = await query(
       `UPDATE job_excess SET
-        excess_amount_taken = COALESCE(excess_amount_taken, 0) + $1,
+        excess_amount_taken = $1,
         excess_status = CASE
-          WHEN COALESCE(excess_amount_taken, 0) + $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
+          WHEN $1 >= COALESCE(excess_amount_required, 0) THEN 'taken'
           ELSE 'partially_paid'
         END,
         payment_method = $2,
@@ -630,13 +731,8 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
         updated_at = NOW()
       WHERE id = $4
       RETURNING *`,
-      [amount, method, reference || null, id]
+      [newTotal, method, reference || null, id]
     );
-
-    if (result.rows.length === 0) {
-      res.status(404).json({ error: 'Excess record not found' });
-      return;
-    }
 
     // Rolled-over payments need extra bookkeeping so the cash chain stays linked
     // to the original HH deposit. Without this, reimbursing the rolled-over excess
@@ -704,7 +800,7 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
           // rollover if HH note posting fails.
           if (excess.hirehop_job_id && prevRow.hh_deposit_id && prevRow.hh_job_number) {
             try {
-              const noteText = `£${amount.toFixed(2)} excess held against deposit #${prevRow.hh_deposit_id} on job #${prevRow.hh_job_number} — rolled over from previous hire. (${new Date().toLocaleDateString('en-GB')})`;
+              const noteText = `£${delta.toFixed(2)} excess held against deposit #${prevRow.hh_deposit_id} on job #${prevRow.hh_job_number} — rolled over from previous hire. (${new Date().toLocaleDateString('en-GB')})`;
               await hhBroker.get('/api/job_note.php', {
                 job: excess.hirehop_job_id,
                 note: noteText,
@@ -721,11 +817,96 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
         console.error('[excess] Rollover linkage failed (non-fatal):', e);
       }
     }
+
+    // Insert a job_payments row so payment history stays consistent with the
+    // /money/:jobId/record-payment path. Without this, payments recorded via
+    // the Manage modal never appear in payment history (one of the bugs that
+    // hid the 15624 issue from staff).
+    let jobPaymentId: string | null = null;
+    try {
+      const paymentRow = await query(
+        `INSERT INTO job_payments
+          (job_id, hirehop_job_id, payment_type, amount, payment_method,
+           payment_reference, payment_status, source, excess_id,
+           client_name, recorded_by, notes, payment_date)
+         VALUES ($1, $2, 'excess', $3, $4, $5, 'completed', $6, $7, $8, $9, $10, NOW())
+         RETURNING id`,
+        [
+          excess.job_id,
+          previous.hh_job_number || null,
+          delta,
+          method,
+          reference || null,
+          isRolledOver ? 'op_rollover' : 'op_excess_modal',
+          id,
+          previous.client_name || null,
+          req.user?.id || null,
+          notes || null,
+        ]
+      );
+      jobPaymentId = paymentRow.rows[0]?.id || null;
+    } catch (err) {
+      // Non-fatal — the excess record itself is already updated, payment
+      // history just won't show the row. Log loudly for diagnosis.
+      console.error('[excess] Failed to insert job_payments row (non-fatal):', err);
+    }
+
+    // Push to HireHop as a deposit. Skip when:
+    //   - caller opted out (push_to_hirehop=false)
+    //   - this is a rollover (cash didn't physically move, the previous deposit ID is reused)
+    //   - the OP record isn't linked to a HH job (no hirehop_job_id)
+    //   - the record already has hh_deposit_id (don't double-push when a top-up
+    //     is being recorded against a record that already has a HH deposit; the
+    //     top-up will need a separate manual HH entry — flagged in response)
+    let hhPushError: string | null = null;
+    let pushedHHDepositId: number | null = null;
+    const shouldPush = push_to_hirehop && !isRolledOver && previous.hh_job_number;
+    if (shouldPush) {
+      if (previous.hh_deposit_id) {
+        hhPushError = `Excess record already linked to HH deposit ${previous.hh_deposit_id}. Top-up of £${delta.toFixed(2)} not pushed — record manually in HireHop and link via Manage > Link to HH.`;
+        console.warn('[excess] Skipped HH push:', hhPushError);
+      } else {
+        const pushResult = await pushDepositToHH({
+          hhJobNumber: Number(previous.hh_job_number),
+          amount: delta,
+          paymentMethod: method,
+          paymentReference: reference || null,
+          paymentType: 'excess',
+          notes: notes || null,
+        });
+        hhPushError = pushResult.error;
+        pushedHHDepositId = pushResult.hhDepositId;
+
+        if (pushResult.hhDepositId) {
+          // Back-link to job_excess and job_payments so the reconciliation
+          // queries on Money tab don't show the deposit as orphaned.
+          try {
+            await query(
+              `UPDATE job_excess
+               SET hh_deposit_id = $1,
+                   hh_reconciled_at = NOW(),
+                   hh_reconcile_source = 'op_push'
+               WHERE id = $2 AND hh_deposit_id IS NULL`,
+              [pushResult.hhDepositId, id]
+            );
+            if (jobPaymentId) {
+              await query(
+                `UPDATE job_payments SET hirehop_deposit_id = $1 WHERE id = $2`,
+                [pushResult.hhDepositId, jobPaymentId]
+              );
+            }
+          } catch (linkErr) {
+            console.error('[excess] HH deposit linkage update failed (non-fatal):', linkErr);
+          }
+        }
+      }
+    }
+
     sendExcessEmail({
       templateId: isRolledOver ? 'excess_rolled_over_applied' : 'excess_payment_confirmed',
       excessId: id as string,
       jobId: excess.job_id,
-      amount,
+      amount: delta,
       paymentMethod: method,
       previousJobNumber,
     }).catch(e => console.error('[excess] Payment email failed:', e));
@@ -737,14 +918,17 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
       );
     }
 
-    // Re-fetch so the response reflects any rollover-linkage updates we made above.
-    const refreshed = isRolledOver
+    // Re-fetch so the response reflects any rollover-linkage / HH-push updates.
+    const refreshed = (isRolledOver || pushedHHDepositId)
       ? await query(`SELECT * FROM job_excess WHERE id = $1`, [id])
       : null;
     const responseData = refreshed && refreshed.rows.length > 0 ? refreshed.rows[0] : result.rows[0];
 
     res.json({
       data: responseData,
+      delta,
+      hh_push_error: hhPushError,
+      hh_deposit_id: pushedHHDepositId,
       ...(isRolledOver ? { rollover_linked: rolloverLinked } : {}),
     });
   } catch (error) {

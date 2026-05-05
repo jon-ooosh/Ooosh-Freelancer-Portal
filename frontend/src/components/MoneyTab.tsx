@@ -90,6 +90,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [payPushToHH, setPayPushToHH] = useState(true);
   const [payLoading, setPayLoading] = useState(false);
   const [payError, setPayError] = useState('');
+  const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
 
   // Excess action modal
   const [actionExcess, setActionExcess] = useState<JobExcess | null>(null);
@@ -116,7 +117,12 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   // Escape key closes payment modal
   useEffect(() => {
     if (!showPaymentForm) return;
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowPaymentForm(false); };
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowPaymentForm(false);
+        setPayHHPushError(null);
+      }
+    };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [showPaymentForm]);
@@ -128,30 +134,77 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     }
     setPayLoading(true);
     setPayError('');
+    setPayHHPushError(null);
     try {
       const isExcess = (typeOverride === 'excess' || payType === 'excess');
       let excessId = isExcess ? payExcessId : undefined;
 
-      // If recording excess but no excess record selected, create one first
+      // If recording excess but no excess record selected, look for one on the
+      // job (any status — including 'taken' for top-ups) before falling back
+      // to creating a new one. The previous filter excluded 'taken' records,
+      // which led to phantom auto-create promises in the UI.
       if (isExcess && !excessId) {
-        const createResult = await api.post<{ data: { id: string } }>('/excess/create', {
-          job_id: jobId,
-          excess_amount_required: parseFloat(payAmount),
-          excess_calculation_basis: 'Manual entry from Money tab',
-          client_name: job.client_name || job.company_name || undefined,
-        });
-        excessId = createResult.data.id;
+        const existing = data?.excess?.records || [];
+        if (existing.length > 0) {
+          // Prefer pre-collection records (needed/partially_paid) but fall
+          // back to most recent so top-ups link correctly.
+          const sorted = [...existing].sort((a, b) => {
+            const aPriority = ['needed', 'pending', 'partially_paid', 'partial'].includes(a.excess_status) ? 0 : 1;
+            const bPriority = ['needed', 'pending', 'partially_paid', 'partial'].includes(b.excess_status) ? 0 : 1;
+            if (aPriority !== bPriority) return aPriority - bPriority;
+            return new Date(b.updated_at || b.created_at || 0).getTime()
+                 - new Date(a.updated_at || a.created_at || 0).getTime();
+          });
+          excessId = sorted[0]!.id;
+        } else {
+          // Genuinely no excess record on the job — create one with this
+          // payment as the seed required amount.
+          const createResult = await api.post<{ data: { id: string } }>('/excess/create', {
+            job_id: jobId,
+            excess_amount_required: parseFloat(payAmount),
+            excess_calculation_basis: 'Manual entry from Money tab',
+            client_name: job.client_name || job.company_name || undefined,
+          });
+          excessId = createResult.data.id;
+        }
       }
 
-      await api.post(`/money/${jobId}/record-payment`, {
+      // For excess payments, send `total_collected` (absolute) so the backend
+      // computes the delta. The amount field stays as the user-entered
+      // delta-style "money taking" — backend converts.
+      const body: Record<string, unknown> = {
         payment_type: typeOverride || payType,
-        amount: parseFloat(payAmount),
         payment_method: payMethod,
         payment_reference: payRef || undefined,
         notes: payNotes || undefined,
         excess_id: excessId || undefined,
         push_to_hirehop: payPushToHH,
-      });
+        amount: parseFloat(payAmount),
+      };
+      // If this is an excess top-up against an existing record, also send
+      // total_collected so re-submits are idempotent.
+      if (isExcess && excessId) {
+        const rec = data?.excess?.records?.find((r) => r.id === excessId);
+        if (rec) {
+          const previousTaken = Number(rec.excess_amount_taken || 0);
+          body.total_collected = previousTaken + parseFloat(payAmount);
+        }
+      }
+
+      const resp = await api.post<{ data: any; hh_push_error?: string | null }>(
+        `/money/${jobId}/record-payment`,
+        body
+      );
+
+      if (resp.hh_push_error) {
+        // OP recorded the payment, but HH push failed. Keep modal open so the
+        // user can manually link in HH. The OP record is correct either way.
+        setPayHHPushError(resp.hh_push_error);
+        loadData();
+        onJobChanged?.();
+        return;
+      }
+
       setShowPaymentForm(false);
       setPayAmount('');
       setPayRef('');
@@ -644,12 +697,18 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   </button>
                 </div>
 
-                {/* Excess: link to existing record or create new */}
+                {/* Excess: link to existing record or create new.
+                    Show ALL records on the job regardless of status — including
+                    'taken' records, so staff can record a top-up against an
+                    excess that was thought to be fully collected. The previous
+                    filter excluded everything except needed/partially_paid,
+                    which led the modal to falsely promise auto-creation when
+                    a record already existed. */}
                 {isExcessMode && (() => {
-                  const pendingRecords = excess.records.filter(r => ['needed', 'pending', 'partially_paid', 'partial'].includes(r.excess_status));
+                  const allRecords = excess.records;
 
-                  if (pendingRecords.length === 0) {
-                    // No existing excess records — will auto-create on submit
+                  if (allRecords.length === 0) {
+                    // Genuinely no excess records — backend will auto-create.
                     return (
                       <div className="px-3 py-2 text-xs bg-blue-50 border border-blue-200 rounded-md text-blue-700">
                         No excess record exists for this job yet. One will be created automatically when you record this payment.
@@ -658,9 +717,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     );
                   }
 
-                  // Auto-select if only one pending record and nothing selected yet
-                  if (pendingRecords.length === 1 && !payExcessId) {
-                    const rec = pendingRecords[0];
+                  // Auto-select: prefer pre-collection records, then most recent.
+                  const sortedRecords = [...allRecords].sort((a, b) => {
+                    const aPriority = ['needed', 'pending', 'partially_paid', 'partial'].includes(a.excess_status) ? 0 : 1;
+                    const bPriority = ['needed', 'pending', 'partially_paid', 'partial'].includes(b.excess_status) ? 0 : 1;
+                    if (aPriority !== bPriority) return aPriority - bPriority;
+                    return new Date(b.updated_at || b.created_at || 0).getTime()
+                         - new Date(a.updated_at || a.created_at || 0).getTime();
+                  });
+                  if (allRecords.length === 1 && !payExcessId) {
+                    const rec = sortedRecords[0]!;
                     setTimeout(() => {
                       setPayExcessId(rec.id);
                       setPayAmount(String(Math.max(0, Number(rec.excess_amount_required || 0) - Number(rec.excess_amount_taken || 0)).toFixed(2)));
@@ -670,9 +736,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   return (
                     <div>
                       <label className="block text-xs font-medium text-gray-600 mb-1">Excess Record</label>
-                      {pendingRecords.length === 1 ? (
+                      {allRecords.length === 1 ? (
                         <div className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-md text-gray-700">
-                          {pendingRecords[0].driver_name || pendingRecords[0].client_name || 'Unknown'} — £{Number(pendingRecords[0].excess_amount_required || 0).toFixed(2)}
+                          {sortedRecords[0]!.driver_name || sortedRecords[0]!.client_name || 'Unknown'} — £{Number(sortedRecords[0]!.excess_amount_required || 0).toFixed(2)}
+                          {' '}({statusLabel(sortedRecords[0]!.excess_status)})
                         </div>
                       ) : (
                         <select
@@ -685,7 +752,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                           className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                         >
                           <option value="">Select excess record...</option>
-                          {pendingRecords.map(r => (
+                          {sortedRecords.map(r => (
                             <option key={r.id} value={r.id}>
                               {r.driver_name || r.client_name || 'Unknown'} — £{Number(r.excess_amount_required || 0).toFixed(2)} ({statusLabel(r.excess_status)})
                             </option>
@@ -797,6 +864,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
 
                 {payError && <p className="text-xs text-red-600">{payError}</p>}
 
+                {payHHPushError && (
+                  <div className="px-3 py-2 text-xs bg-amber-50 border border-amber-200 rounded-md text-amber-800">
+                    <div className="font-semibold mb-1">Saved in OP — HireHop push failed</div>
+                    <div>{payHHPushError}</div>
+                    <div className="mt-1 text-amber-700">
+                      The OP record is correct. To reconcile: create the deposit manually in HireHop, then on /money/excess use Manage &gt; Link to HH.
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex gap-2 pt-2">
                   <button
                     onClick={() => handleRecordPayment(isExcessMode ? 'excess' : autoType)}
@@ -806,10 +883,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {payLoading ? 'Recording...' : `Record ${isExcessMode ? 'Excess' : 'Payment'}`}
                   </button>
                   <button
-                    onClick={() => { setShowPaymentForm(false); setPayError(''); }}
+                    onClick={() => { setShowPaymentForm(false); setPayError(''); setPayHHPushError(null); }}
                     className="px-4 py-2 text-sm font-medium text-gray-600 border border-gray-300 rounded-md"
                   >
-                    Cancel
+                    {payHHPushError ? 'Close' : 'Cancel'}
                   </button>
                 </div>
               </div>

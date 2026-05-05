@@ -13,6 +13,7 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { hhBroker } from '../services/hirehop-broker';
+import { pushDepositToHH } from '../services/hh-deposit';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
 import {
   triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
@@ -77,9 +78,17 @@ const PAYMENT_METHODS_LABELS: Record<string, string> = {
 
 // ── Schemas ──
 
+// `amount` is the new money to record (delta).
+//
+// `total_collected` (optional, excess only): the absolute new total on the
+// excess record. When present, the backend computes the delta (new - previous)
+// and uses that as the payment `amount`. This makes the Excess form
+// idempotent — clicking "Record" twice with the same total_collected can't
+// double the collected amount on the excess record.
 const recordPaymentSchema = z.object({
   payment_type: z.enum(['deposit', 'balance', 'excess', 'refund', 'excess_refund', 'other']),
-  amount: z.number().min(0.01),
+  amount: z.number().min(0).optional(),
+  total_collected: z.number().min(0).optional(),
   payment_method: z.enum([
     'stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank', 'rolled_over',
   ]),
@@ -87,7 +96,10 @@ const recordPaymentSchema = z.object({
   notes: z.string().max(1000).optional(),
   excess_id: z.string().uuid().optional(),
   push_to_hirehop: z.boolean().default(true),
-});
+}).refine(
+  (val) => (val.amount !== undefined && val.amount >= 0.01) || val.total_collected !== undefined,
+  { message: 'Either amount (>= 0.01) or total_collected must be provided' }
+);
 
 // ── GET /api/money/job-lookup/:hhJobNumber — Look up OP job by HireHop job number ──
 // Used by Payment Portal to resolve HH job numbers to OP UUIDs for subsequent API calls.
@@ -850,7 +862,8 @@ router.get('/:jobId/payments', async (req: AuthRequest, res: Response) => {
 router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { jobId } = req.params;
-    const { payment_type, amount, payment_method, payment_reference, notes, excess_id, push_to_hirehop } = req.body;
+    const { payment_type, payment_method, payment_reference, notes, push_to_hirehop } = req.body;
+    let { amount, excess_id, total_collected } = req.body;
 
     // Look up the job
     const jobResult = await query(
@@ -864,6 +877,60 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
     }
 
     const job = jobResult.rows[0];
+
+    // Excess auto-find: if no excess_id passed (frontend used to filter out
+    // 'taken' records, leaving the field empty when an existing record was
+    // present), look up the most recent record on this job. Prefer
+    // pre-collection records first, then fall back to any record so top-ups on
+    // already-collected excesses link correctly.
+    if (payment_type === 'excess' && !excess_id) {
+      const found = await query(
+        `SELECT id FROM job_excess
+         WHERE job_id = $1
+         ORDER BY
+           CASE WHEN excess_status IN ('needed','pending','partially_paid','partial') THEN 0 ELSE 1 END,
+           updated_at DESC
+         LIMIT 1`,
+        [job.id]
+      );
+      if (found.rows.length > 0) {
+        excess_id = found.rows[0].id;
+        console.log(`[money] Auto-linked excess payment to existing record ${excess_id} on job ${job.id}`);
+      }
+    }
+
+    // total_collected → amount delta translation. Used by the new "Total
+    // collected" UX for excess payments.
+    if (total_collected !== undefined && excess_id) {
+      const existingExcess = await query(
+        `SELECT excess_amount_taken FROM job_excess WHERE id = $1`,
+        [excess_id]
+      );
+      if (existingExcess.rows.length > 0) {
+        const previousTaken = parseFloat(existingExcess.rows[0].excess_amount_taken || 0);
+        amount = total_collected - previousTaken;
+
+        if (Math.abs(amount) < 0.005) {
+          res.json({
+            data: { idempotent: true, excess_id, message: 'Total collected already matches — nothing to record.' },
+            hh_push_error: null,
+          });
+          return;
+        }
+
+        if (amount < 0) {
+          res.status(400).json({
+            error: 'Lowering the total collected requires a refund/correction. Use the excess Manage form instead.',
+          });
+          return;
+        }
+      }
+    }
+
+    if (amount === undefined || amount < 0.01) {
+      res.status(400).json({ error: 'Amount must be at least £0.01' });
+      return;
+    }
 
     // Record in OP
     const paymentResult = await query(
@@ -988,98 +1055,50 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
       }
     }
 
-    // Push to HireHop as deposit (if requested and job has HH number)
-    // Uses the two-step process: 1) Create deposit, 2) Trigger Xero sync
+    // Push to HireHop as deposit (if requested and job has HH number).
+    //
+    // Failures used to be swallowed silently — the response was 200 OK with
+    // hirehop_deposit_id: null and no signal to the user. We now surface the
+    // error in the response so the frontend can show a "Saved in OP but HH
+    // push failed" banner and prompt for manual link/retry.
     let hhDepositId: number | null = null;
     let xeroSynced = false;
+    let hhPushError: string | null = null;
     if (push_to_hirehop && job.hh_job_number && payment_type !== 'refund' && payment_method !== 'rolled_over') {
-      try {
-        // Get CLIENT_ID from HireHop job data for the deposit
-        let hhClientId: number | null = null;
+      const pushResult = await pushDepositToHH({
+        hhJobNumber: Number(job.hh_job_number),
+        amount,
+        paymentMethod: payment_method,
+        paymentReference: payment_reference || null,
+        paymentType: payment_type,
+        notes: notes || null,
+      });
+      hhDepositId = pushResult.hhDepositId;
+      xeroSynced = pushResult.xeroSynced;
+      hhPushError = pushResult.error;
+
+      if (hhDepositId) {
         try {
-          const jobDataRes = await hhBroker.get<Record<string, any>>('/api/job_data.php', { job: job.hh_job_number }, { priority: 'high', cacheTTL: 60 });
-          if (jobDataRes.success && jobDataRes.data) {
-            hhClientId = jobDataRes.data.CLIENT_ID || jobDataRes.data.client_id || null;
-          }
-        } catch { /* non-fatal */ }
+          await query(
+            `UPDATE job_payments SET hirehop_deposit_id = $1 WHERE id = $2`,
+            [hhDepositId, payment.id]
+          );
 
-        const currentDate = new Date().toISOString().split('T')[0];
-        const formattedDate = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        const methodLabel = PAYMENT_METHODS_LABELS[payment_method] || payment_method.replace(/_/g, ' ');
-        const typeLabel = payment_type === 'excess' ? 'excess' : payment_type === 'deposit' ? 'deposit' : payment_type;
-        const description = `${job.hh_job_number} - ${typeLabel}`;
-        const memo = `${typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1)} ${formattedDate} via ${methodLabel}${payment_reference ? ` (Ref: ${payment_reference})` : ''}${notes ? ` — ${notes}` : ''} (recorded via Ooosh OP)`;
-
-        // STEP 1: Create the deposit with full HireHop params
-        const hhBankId = getHHBankId(payment_method);
-        const depositParams: Record<string, unknown> = {
-          ID: 0, // 0 = create new
-          DATE: currentDate,
-          DESCRIPTION: description,
-          AMOUNT: amount,
-          MEMO: memo,
-          ACC_ACCOUNT_ID: hhBankId,
-          ACC_PACKAGE_ID: 3,   // 3 = Xero integration
-          'CURRENCY[CODE]': 'GBP',
-          'CURRENCY[NAME]': 'United Kingdom Pound',
-          'CURRENCY[SYMBOL]': '£',
-          'CURRENCY[DECIMALS]': 2,
-          'CURRENCY[MULTIPLIER]': 1,
-          'CURRENCY[NEGATIVE_FORMAT]': 1,
-          'CURRENCY[SYMBOL_POSITION]': 0,
-          'CURRENCY[DECIMAL_SEPARATOR]': '.',
-          'CURRENCY[THOUSAND_SEPARATOR]': ',',
-          JOB_ID: job.hh_job_number,
-          CLIENT_ID: hhClientId || '',
-          local: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          tz: 'Europe/London',
-          no_webhook: 1,
-        };
-
-        console.log('[money] Creating HH deposit for job', job.hh_job_number, '£' + amount);
-        const hhResult = await hhBroker.post('/php_functions/billing_deposit_save.php', depositParams, { priority: 'high' });
-
-        if (hhResult.success && hhResult.data) {
-          hhDepositId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
-          console.log('[money] HH deposit created:', hhDepositId);
-
-          // Update OP record with HH deposit ID
-          if (hhDepositId) {
+          // Link HH deposit to job_excess record for reconciliation
+          if (payment_type === 'excess' && excess_id) {
             await query(
-              `UPDATE job_payments SET hirehop_deposit_id = $1 WHERE id = $2`,
-              [hhDepositId, payment.id]
+              `UPDATE job_excess SET hh_deposit_id = $1, hh_reconciled_at = NOW(), hh_reconcile_source = 'op_push' WHERE id = $2 AND hh_deposit_id IS NULL`,
+              [hhDepositId, excess_id]
             );
-
-            // Also link HH deposit to job_excess record (for reconciliation)
-            if (payment_type === 'excess' && excess_id) {
-              query(
-                `UPDATE job_excess SET hh_deposit_id = $1, hh_reconciled_at = NOW(), hh_reconcile_source = 'op_push' WHERE id = $2`,
-                [hhDepositId, excess_id]
-              ).catch(() => {}); // non-fatal, fire-and-forget
-            }
-
-            // STEP 2: Trigger Xero sync
-            try {
-              const syncResult = await hhBroker.post('/php_functions/accounting/tasks.php', {
-                hh_package_type: 1,
-                hh_acc_package_id: 3,  // Xero
-                hh_task: 'post_deposit',
-                hh_id: hhDepositId,
-                hh_acc_id: '',
-              }, { priority: 'high' });
-
-              xeroSynced = syncResult.success;
-              console.log('[money] Xero sync triggered:', xeroSynced ? 'success' : 'failed');
-            } catch (syncError) {
-              console.error('[money] Xero sync trigger failed (non-fatal):', syncError);
-            }
           }
-        } else {
-          console.error('[money] HH deposit creation failed:', hhResult.error, hhResult.data);
+        } catch (linkErr) {
+          console.error('[money] HH deposit linkage update failed (non-fatal):', linkErr);
         }
-      } catch (hhError) {
-        console.error('[money] HH deposit write-back failed (non-fatal):', hhError);
       }
+    } else if (push_to_hirehop && !job.hh_job_number) {
+      // Caller asked for HH push but the job isn't linked to HireHop yet —
+      // surface this so they know the payment is OP-only.
+      hhPushError = 'Job is not linked to HireHop yet — payment recorded in OP only. Create the HH job first to enable HH sync.';
     }
 
     // ── Email triggers (fire-and-forget) ──
@@ -1146,6 +1165,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
         hirehop_deposit_id: hhDepositId,
         xero_synced: xeroSynced,
       },
+      hh_push_error: hhPushError,
     });
   } catch (error) {
     console.error('[money] Record payment error:', error);
@@ -1470,30 +1490,7 @@ function buildHHDepositMemo(
   return parts.join(' — ');
 }
 
-/**
- * Map OP payment method to HireHop bank account ID.
- * These IDs correspond to the bank accounts configured in HireHop:
- *   165 = Amex
- *   168 = Till (Cash)
- *   169 = Worldpay (all cards EXCEPT AMEX) — default for card in office
- *   170 = Lloyds Bank
- *   173 = Paypal
- *   265 = Wise - Current Account (BACS) — bank transfers
- *   267 = Stripe GBP — online card payments via Payment Portal
- */
-function getHHBankId(paymentMethod: string): number {
-  const mapping: Record<string, number> = {
-    stripe_gbp: 267,       // Stripe GBP
-    worldpay: 169,         // Worldpay (all cards EXCEPT AMEX)
-    amex: 165,             // Amex
-    wise_bacs: 265,        // Wise - Current Account (BACS)
-    till_cash: 168,        // Till (Cash)
-    paypal: 173,           // Paypal
-    lloyds_bank: 170,      // Lloyds Bank
-    rolled_over: 265,      // Default to Wise for rollovers
-  };
-  return mapping[paymentMethod] || 169; // Default to Worldpay
-}
+// HH bank ID mapping moved to services/hh-deposit.ts (shared with excess.ts).
 
 /**
  * Detect if a deposit description/memo indicates an excess payment.

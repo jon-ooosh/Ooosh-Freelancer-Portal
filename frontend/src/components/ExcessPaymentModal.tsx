@@ -91,14 +91,19 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Payment form
-  const [payAmount, setPayAmount] = useState(
-    excess.excess_amount_required
-      ? (Number(excess.excess_amount_required) - Number(excess.excess_amount_taken || 0)).toFixed(2)
-      : ''
+  // Payment form — uses absolute "total collected" semantics (not delta-add).
+  // Default: full required amount (the most common case is "fully collected
+  // now"). User can lower this to record a partial collection. Pre-existing
+  // collected amount is shown as guidance below the field.
+  const previousTaken = Number(excess.excess_amount_taken || 0);
+  const requiredAmount = Number(excess.excess_amount_required || 0);
+  const [payTotalCollected, setPayTotalCollected] = useState(
+    requiredAmount > 0 ? requiredAmount.toFixed(2) : previousTaken.toFixed(2)
   );
   const [payMethod, setPayMethod] = useState('worldpay');
   const [payReference, setPayReference] = useState('');
+  const [payPushToHH, setPayPushToHH] = useState(true);
+  const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
 
   // Claim form
   const [claimAmount, setClaimAmount] = useState('');
@@ -177,13 +182,31 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
     setError('');
     try {
       switch (action) {
-        case 'payment':
-          await api.post(`/excess/${excess.id}/payment`, {
-            amount: parseFloat(payAmount),
-            method: payMethod,
-            reference: payReference || null,
-          });
+        case 'payment': {
+          const totalCollected = parseFloat(payTotalCollected);
+          if (isNaN(totalCollected) || totalCollected < 0) {
+            throw new Error('Enter a valid total collected amount');
+          }
+          const resp = await api.post<{ data: any; hh_push_error?: string | null; idempotent?: boolean }>(
+            `/excess/${excess.id}/payment`,
+            {
+              total_collected: totalCollected,
+              method: payMethod,
+              reference: payReference || null,
+              push_to_hirehop: payPushToHH,
+            }
+          );
+          if (resp.hh_push_error) {
+            // OP saved successfully but HH push failed. Surface the error and
+            // keep the modal open so staff can decide what to do (manual link,
+            // retry by re-submitting, etc.). The OP record is already correct.
+            setPayHHPushError(resp.hh_push_error);
+            onUpdated();
+            setLoading(false);
+            return;
+          }
           break;
+        }
         case 'claim': {
           const claimAmountNum = parseFloat(claimAmount);
           if (isNaN(claimAmountNum) || claimAmountNum <= 0) {
@@ -386,17 +409,32 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             {action === 'payment' && (
               <div className="space-y-3">
                 <h3 className="text-sm font-semibold text-gray-900">Record Payment</h3>
+                {payHHPushError && (
+                  <div className="px-3 py-2 text-xs bg-amber-50 border border-amber-200 rounded-md text-amber-800">
+                    <div className="font-semibold mb-1">Saved in OP — HireHop push failed</div>
+                    <div>{payHHPushError}</div>
+                    <div className="mt-1 text-amber-700">
+                      The excess record is correct in OP. Record the deposit manually in HireHop and use Manage &gt; Link to HH to reconcile.
+                    </div>
+                  </div>
+                )}
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Amount</label>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Total collected</label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
                     <input
                       type="number"
                       step="0.01"
-                      value={payAmount}
-                      onChange={(e) => setPayAmount(e.target.value)}
+                      value={payTotalCollected}
+                      onChange={(e) => setPayTotalCollected(e.target.value)}
                       className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
                     />
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500">
+                    {previousTaken > 0
+                      ? <>Currently collected: <span className="font-medium">£{previousTaken.toFixed(2)}</span>. Required: £{requiredAmount.toFixed(2)}. Setting this saves the new total — not adding to it.</>
+                      : <>Required: £{requiredAmount.toFixed(2)}. Enter the total amount you've collected (usually the full required amount).</>
+                    }
                   </div>
                 </div>
                 <div>
@@ -421,6 +459,15 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>
+                <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={payPushToHH}
+                    onChange={(e) => setPayPushToHH(e.target.checked)}
+                    className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  Also create deposit in HireHop
+                </label>
               </div>
             )}
 
