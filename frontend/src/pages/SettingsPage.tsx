@@ -526,6 +526,9 @@ function SettingsContent() {
       {/* Calculator Settings — admin & manager */}
       <CostingSettingsSection />
 
+      {/* Out-of-Hours return settings — admin & manager */}
+      <OohSettingsSection />
+
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
 
@@ -1087,6 +1090,181 @@ function CostingSettingsSection() {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Out-of-Hours Return Settings ─────────────────────────────────────────
+
+interface SystemSetting {
+  key: string;
+  value: string | null;
+  label: string | null;
+  category: string | null;
+  value_type: string | null;
+  sort_order: number;
+}
+
+function OohSettingsSection() {
+  const [settings, setSettings] = useState<SystemSetting[]>([]);
+  const [editValues, setEditValues] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => {
+    loadSettings();
+  }, []);
+
+  async function loadSettings() {
+    try {
+      const res = await api.get<{ data: SystemSetting[] }>('/system-settings?category=ooh_returns');
+      setSettings(res.data);
+      const vals: Record<string, string> = {};
+      for (const s of res.data) vals[s.key] = s.value ?? '';
+      setEditValues(vals);
+    } catch (err) {
+      console.error('Failed to load OOH settings:', err);
+      setError('Could not load OOH return settings.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function hasChanges(): boolean {
+    return settings.some(s => (s.value ?? '') !== (editValues[s.key] ?? ''));
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      const changed: Record<string, string | null> = {};
+      for (const s of settings) {
+        const orig = s.value ?? '';
+        const next = editValues[s.key] ?? '';
+        if (orig !== next) changed[s.key] = next === '' ? null : next;
+      }
+      if (Object.keys(changed).length === 0) {
+        setEditing(false);
+        return;
+      }
+      await api.put('/system-settings', { settings: changed });
+      setSuccess('OOH settings updated.');
+      setEditing(false);
+      loadSettings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save settings');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleCancel() {
+    const vals: Record<string, string> = {};
+    for (const s of settings) vals[s.key] = s.value ?? '';
+    setEditValues(vals);
+    setEditing(false);
+    setError('');
+  }
+
+  if (loading) return null;
+
+  return (
+    <div className="mb-8">
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900">Out-of-Hours Returns</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Settings used in the OOH info email — gate code, yard address, key-drop photo.
+          </p>
+        </div>
+        {!editing ? (
+          <button
+            onClick={() => setEditing(true)}
+            className="px-4 py-2 text-sm border border-gray-300 rounded font-medium hover:bg-gray-50 transition-colors"
+          >
+            Edit
+          </button>
+        ) : (
+          <div className="flex gap-2">
+            <button
+              onClick={handleCancel}
+              disabled={saving}
+              className="px-4 py-2 text-sm border border-gray-300 rounded font-medium hover:bg-gray-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving || !hasChanges()}
+              className="px-4 py-2 text-sm bg-blue-600 text-white rounded font-medium hover:bg-blue-700 disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {error && <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700">{error}</div>}
+      {success && <div className="mb-3 p-3 bg-green-50 border border-green-200 rounded text-sm text-green-700">{success}</div>}
+
+      <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+        {settings.map(s => {
+          const isBool = s.value_type === 'bool';
+          const isUrl = s.value_type === 'url';
+          return (
+            <div key={s.key} className="flex items-center justify-between gap-4 py-1">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-gray-700">{s.label || s.key}</p>
+                {!editing && isUrl && (editValues[s.key] || '').length > 0 && (
+                  <a
+                    href={editValues[s.key]}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-blue-600 hover:underline truncate block"
+                  >
+                    {editValues[s.key]}
+                  </a>
+                )}
+              </div>
+              <div className="flex items-center gap-2 min-w-0">
+                {editing ? (
+                  isBool ? (
+                    <select
+                      value={editValues[s.key] || 'false'}
+                      onChange={e => setEditValues(v => ({ ...v, [s.key]: e.target.value }))}
+                      className="border border-gray-300 rounded px-2 py-1 text-sm"
+                    >
+                      <option value="true">Yes</option>
+                      <option value="false">No</option>
+                    </select>
+                  ) : (
+                    <input
+                      type={isUrl ? 'url' : 'text'}
+                      value={editValues[s.key] ?? ''}
+                      onChange={e => setEditValues(v => ({ ...v, [s.key]: e.target.value }))}
+                      placeholder={isUrl ? 'https://…' : ''}
+                      className="border border-gray-300 rounded px-2 py-1 text-sm w-72 max-w-full"
+                    />
+                  )
+                ) : (
+                  <span className="text-sm text-gray-900 font-mono truncate max-w-xs">
+                    {isBool
+                      ? editValues[s.key] === 'true' ? 'Yes' : 'No'
+                      : !isUrl
+                      ? editValues[s.key] || <span className="text-gray-400 italic">—</span>
+                      : null}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

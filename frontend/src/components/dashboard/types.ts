@@ -55,6 +55,7 @@ export interface ScheduleJob {
   out_time: string | null;
   return_time: string | null;
   end_time: string | null;
+  has_ooh_return?: boolean;
 }
 
 export interface TransportQuote {

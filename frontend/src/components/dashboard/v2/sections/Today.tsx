@@ -34,6 +34,14 @@ function JobRow({
           className="block text-sm font-medium text-gray-900 hover:text-purple-700 transition leading-tight"
         >
           {jobLine(job)}
+          {phase === 'post_hire' && job.has_ooh_return && (
+            <span
+              className="ml-2 inline-flex items-center gap-0.5 text-xs px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 align-middle font-normal"
+              title="Out-of-hours return expected"
+            >
+              🌙 OOH
+            </span>
+          )}
         </Link>
         {job.venue_name && (
           <div className="text-xs text-gray-500 mt-0.5">{job.venue_name}</div>

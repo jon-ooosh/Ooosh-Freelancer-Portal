@@ -28,6 +28,7 @@ import LostCancelledPage from './pages/LostCancelledPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
+import OohReturnParkingPage from './pages/OohReturnParkingPage';
 import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
@@ -115,6 +116,8 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       {/* Public freelancer book-out entry — bypasses ProtectedRoute */}
       <Route path="/vehicles/book-out" element={<BookOutEntry />} />
+      {/* Public OOH parking-confirmation form — token-authenticated, no Layout wrapper */}
+      <Route path="/return-parking/:token" element={<OohReturnParkingPage />} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
       <Route path="/warehouse" element={<WarehousePinPage />} />
       <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />

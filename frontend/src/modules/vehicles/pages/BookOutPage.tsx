@@ -2488,7 +2488,6 @@ function ReturnOvernightField({
         <option value="">— Select —</option>
         <option value="Yes">Yes</option>
         <option value="No">No</option>
-        <option value="Don't know">Don&apos;t know</option>
       </select>
     </div>
   )
