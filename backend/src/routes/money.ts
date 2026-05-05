@@ -12,6 +12,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
 import { pushDepositToHH } from '../services/hh-deposit';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
@@ -35,23 +36,20 @@ async function authenticateFlexible(req: Request, res: Response, next: NextFunct
   const apiKey = req.headers['x-api-key'] as string | undefined;
 
   if (apiKey) {
-    // API key auth — for Payment Portal and external services
+    // API key auth — for Payment Portal and external services. Uses the
+    // shared verifier which does full-key bcrypt comparison (the previous
+    // inline implementation matched on key_prefix only, accepting anything
+    // starting with `ppk_live`).
     try {
-      const keyPrefix = apiKey.substring(0, 8);
-      const keyResult = await query(
-        `SELECT id, name, service, permissions FROM api_keys WHERE key_prefix = $1 AND is_active = true`,
-        [keyPrefix]
-      );
-      if (keyResult.rows.length === 0) {
+      const matched = await verifyApiKey(apiKey);
+      if (!matched) {
         res.status(403).json({ error: 'Invalid API key' });
         return;
       }
-      // Update last_used_at (fire and forget)
-      query(`UPDATE api_keys SET last_used_at = NOW() WHERE id = $1`, [keyResult.rows[0].id]).catch(() => {});
-      // Set a minimal service user so downstream code works
-      (req as any).user = { id: keyResult.rows[0].id, role: 'service', name: keyResult.rows[0].service };
+      (req as any).user = { id: matched.id, role: 'service', name: matched.service };
       next();
     } catch (err) {
+      console.error('[money] API key verification error:', err);
       res.status(500).json({ error: 'API key verification failed' });
     }
     return;
