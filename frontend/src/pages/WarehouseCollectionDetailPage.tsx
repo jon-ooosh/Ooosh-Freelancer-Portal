@@ -267,7 +267,7 @@ export default function WarehouseCollectionDetailPage() {
             <h1 className="text-lg font-bold text-gray-800 truncate">{job.jobName}</h1>
             <p className="text-sm text-gray-500">Collection sign-off</p>
           </div>
-          <img src="/ooosh-logo.svg" alt="Ooosh" className="h-9 w-auto" />
+          <img src="/ooosh-logo.png" alt="Ooosh" className="h-9 w-auto" />
         </div>
       </header>
 
