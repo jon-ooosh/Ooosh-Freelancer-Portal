@@ -212,11 +212,21 @@ export default function JobsPage() {
   const [lastSync, setLastSync] = useState<SyncLog | null>(null);
   const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
   const [oohOnly, setOohOnly] = useState(false);
+  const [managerFilter, setManagerFilter] = useState('');
+  const [serviceTypeFilter, setServiceTypeFilter] = useState<string[]>([]);
+  const [managerOptions, setManagerOptions] = useState<{ id: string; first_name: string; last_name: string }[]>([]);
   const navigate = useNavigate();
+
+  // Load manager dropdown options once
+  useEffect(() => {
+    api.get<{ data: { id: string; first_name: string; last_name: string }[] }>('/pipeline/managers')
+      .then(res => setManagerOptions(res.data))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     loadJobs();
-  }, [search, statusFilter, oohOnly]);
+  }, [search, statusFilter, oohOnly, managerFilter, serviceTypeFilter]);
 
   useEffect(() => {
     loadLastSync();
@@ -238,6 +248,8 @@ export default function JobsPage() {
       if (search) params.set('search', search);
       if (statusFilter) params.set('status', statusFilter);
       if (oohOnly) params.set('ooh_only', 'true');
+      if (managerFilter) params.set('manager', managerFilter);
+      if (serviceTypeFilter.length > 0) params.set('service_type', serviceTypeFilter.join(','));
 
       const data = await api.get<JobsResponse>(`/hirehop/jobs?${params}`);
       setJobs(data.data);
@@ -562,6 +574,46 @@ export default function JobsPage() {
           />
           🌙 OOH only
         </label>
+
+        {/* Manager filter */}
+        <select
+          value={managerFilter}
+          onChange={(e) => setManagerFilter(e.target.value)}
+          className="rounded border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        >
+          <option value="">All managers</option>
+          {managerOptions.map(m => (
+            <option key={m.id} value={m.id}>{m.first_name} {m.last_name}</option>
+          ))}
+        </select>
+
+        {/* Service type filter — multi-select pills */}
+        <div className="inline-flex items-center gap-1">
+          <span className="text-xs text-gray-500 mr-1">Type:</span>
+          {([
+            { key: 'vehicle', label: 'Vehicles' },
+            { key: 'backline', label: 'Backline' },
+            { key: 'rehearsal', label: 'Rehearsals' },
+          ] as const).map(opt => {
+            const active = serviceTypeFilter.includes(opt.key);
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => setServiceTypeFilter(prev =>
+                  prev.includes(opt.key) ? prev.filter(p => p !== opt.key) : [...prev, opt.key]
+                )}
+                className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                  active
+                    ? 'bg-ooosh-600 text-white border-ooosh-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Sync info bar */}
