@@ -1272,7 +1272,7 @@ Global operational view for what's currently happening / about to happen with tr
 - [x] **Last-mover auto-dispatch on portal completion (5 May 2026)** — when a freelancer marks the FINAL outstanding delivery quote on a job complete via the portal, OP flips `jobs.pipeline_status = 'dispatched'` + writes back HH status 5. Mirrors the warehouse module's auto-dispatch but at quote-aggregate level. Only fires for `job_type='delivery'` (collections + crewed bypass). Only fires when current `pipeline_status IN ('confirmed', 'prepped', 'prepping')` — never regresses a job past dispatch. Adding a new delivery later (e.g. mid-tour bass amp swap) won't un-dispatch: the pipeline_status whitelist + HH writeback's "skip if already at target" guard make this idempotent. Lives in `routes/portal.ts` completion handler's background IIFE; logs a `🚚 Job dispatched — final delivery completed by ...` interaction on the timeline with `created_by = SYSTEM_USER_ID`. Removes a chronically-forgotten manual step (was Monday, now OP).
 - [ ] Invoice comparison (freelancer invoice vs expected cost, overcharge flagging) — nice-to-have, post go-live
 - [ ] **Arrangement pills → dashboard integration**: Surface arrangement statuses on Dashboard and Job Requirements
-  - Dashboard widget: "X jobs in next 7 days need client intros" (query `client_introduction = 'todo'` where `job_date` within 7 days)
+  - [x] **Transport Introductions dashboard bucket (May 2026)** — quotes in next 7 days where `client_introduction IN ('todo', 'working_on_it')` AND linked job is `pipeline_status IN ('confirmed', 'prepping', 'prepped')`. Click-through to `/operations/transport?needs_intro=1`. See "Transport Introductions bucket + chase-date clearing" section under Dashboard for full detail.
   - Dashboard widget: "X jobs with outstanding tolls/accommodation/flights" (query `*_status = 'todo'` on active quotes)
   - Job Requirements integration: arrangement items auto-create as requirements on prep checklist
   - Freelancer portal: show arrangement status in job details (e.g. "accommodation: booked")
@@ -2457,7 +2457,7 @@ The slot resolves by fetching `job_requirements` rows and mapping `requirement_t
 `<NeedsAttention>` (`sections/NeedsAttention.tsx`) is the canonical "things that need a human" surface. It has two rows:
 
 - **Overdue (red):** Returns / Departures / Backline / Transport. Empty cards still render in this row when overdue total ≥ 1 (so layout doesn't shift as items resolve).
-- **Secondary (amber/blue/purple):** Referrals / Excess (held unreimbursed) / Chases / Fleet Compliance. Cards in this row hide when count = 0 (and the whole row disappears if all four are empty).
+- **Secondary (amber/blue/purple):** Referrals / Excess (held unreimbursed) / Transport Introductions / Fleet Compliance. Cards in this row hide when count = 0 (and the whole row disappears if all four are empty).
 
 When overdue total = 0, the overdue row collapses to a thin green "All clear" line and only the populated secondary cards render.
 
@@ -2478,6 +2478,23 @@ The `needs_attention.excess_*` fields mean "**money is actually held with us and
 Sorted oldest finished first. Replaces the earlier "excess awaiting collection" rule (we're good at taking excess up front, slack at returning it). The "needs collecting" gate signal still lives on `<ExcessGateBanner>` per-job.
 
 **Important:** when adding a future "money-held" bucket, prefer whitelisting on `excess_status` over blacklisting. The status set has grown over time (`needed` was added by the derivation engine to seed pre-collection records; future statuses may be added too) and a blacklist accidentally includes them all. The May 2026 refinement caught the original bucket showing 41 "needed" derivation-created rows masquerading as held money.
+
+### Transport Introductions bucket + chase-date clearing (May 2026)
+
+Replaced the old "Chases Due" NeedsAttention bucket with **Transport Introductions** — surfaces transport quotes in the next 7 days where `client_introduction IN ('todo', 'working_on_it')` AND the linked job is `pipeline_status IN ('confirmed', 'prepping', 'prepped')`. Enquiries / provisional / dispatched / lost / cancelled all drop out.
+
+Local D&C quotes default to `client_introduction = NULL` (rendered as "n/a") so they're naturally excluded. Full-calculator quotes default to `'todo'` (hardcoded in `routes/quotes.ts:278`). This is the deliberate split: anything further afield 9/10 needs a client intro, local stuff usually doesn't.
+
+Click-through (per-item + "View all"): `/operations/transport?needs_intro=1` — TransportOpsPage has a `needsIntroOnly` filter pill mirroring the `needsCrewOnly` pattern, with URL param round-tripping.
+
+**Chase-date clearing rule (companion change):** `next_chase_date` now nulls automatically on any pipeline transition out of an enquiry stage. Pre-confirmation stages where a chase is meaningful: `new_enquiry`, `quoting`, `chasing`, `paused`, `provisional`. Anything else clears the date.
+
+Three write paths handle this:
+1. `PATCH /api/pipeline/:id/status` — explicitly clears on `confirmed` (alongside `lost` and `cancelled` which already cleared it).
+2. Both HH webhook handlers in `routes/webhooks.ts` — generic `enquiryStages` check applies to inbound HH status changes.
+3. Migration `070_clear_stale_chase_dates.sql` — one-shot backfill for historical drift (jobs that had progressed to confirmed/dispatched/returned/completed before the clearing logic landed kept their stale chase dates, inflating the dashboard chase count with completed jobs).
+
+The chases-due stat card (top of dashboard) is preserved — its count is now accurate because the underlying data is clean. Chases that genuinely need to happen post-confirmation belong to the reminders system, not the enquiry chase pipeline.
 
 ### On-hire sparkline (14 days)
 
