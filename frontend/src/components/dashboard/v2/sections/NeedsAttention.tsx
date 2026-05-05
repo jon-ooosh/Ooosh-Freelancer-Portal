@@ -196,17 +196,18 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     })),
     viewAllHref: '/money/excess',
   };
-  // Client intros to arrange — transport quotes in next 7 days where the
-  // intro pill is still 'todo' or 'working_on_it'. Replaces the old
-  // "Chases Due" bucket: chases now live solely on the stat-card row, and
-  // post-confirmation follow-ups belong to the reminders system.
+  // Transport introductions to arrange — quotes in next 7 days on a
+  // confirmed/pre-dispatch job where the intro pill is still 'todo' or
+  // 'working_on_it'. Replaces the old "Chases Due" bucket: chases now live
+  // solely on the stat-card row, and post-confirmation follow-ups belong
+  // to the reminders system.
   const introLabel: Record<string, string> = {
     todo: 'to do',
     working_on_it: 'working on it',
   };
-  const clientIntros: NABucket = {
-    key: 'client_intros',
-    title: 'Client Intros',
+  const transportIntros: NABucket = {
+    key: 'transport_intros',
+    title: 'Transport Introductions',
     accent: 'blue',
     count: na.client_intros?.length || 0,
     items: (na.client_intros || []).map((q) => {
@@ -221,10 +222,10 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
         label: `${who} — ${where}`.slice(0, 80),
         age: dateLabel,
         sub: introLabel[q.client_introduction] || q.client_introduction,
-        href: q.job_id ? `/jobs/${q.job_id}` : '/operations/transport',
+        href: '/operations/transport?needs_intro=1',
       };
     }),
-    viewAllHref: '/operations/transport',
+    viewAllHref: '/operations/transport?needs_intro=1',
   };
 
   const fleetItems: NACardItem[] = [];
@@ -257,7 +258,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // ones.
   const allClear = overdueTotal === 0;
   const overdueBuckets = [returns, departures, backline, transport];
-  const secondaryBuckets = [referrals, excess, clientIntros, fleetBucket];
+  const secondaryBuckets = [referrals, excess, transportIntros, fleetBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (
