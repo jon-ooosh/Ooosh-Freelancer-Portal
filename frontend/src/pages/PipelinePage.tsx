@@ -44,6 +44,8 @@ type StatusPill = 'enquiry' | 'paused' | 'provisional';
 type ValueBucket = '' | 'under_500' | '500_2000' | '2000_10000' | 'over_10000';
 type ChaseCountBucket = '' | 'never' | '1_2' | '3_plus';
 type ServiceTypePill = 'vehicle' | 'backline' | 'rehearsal';
+// 'all' = no filter; 'yes' = only HireHop-linked; 'no' = only OP-native (no HH job number)
+type HHJobFilter = 'all' | 'yes' | 'no';
 
 interface PipelinePrefs {
   view: 'kanban' | 'list';
@@ -54,7 +56,7 @@ interface PipelinePrefs {
   filterManager: string;               // person UUID or ''
   filterDateFrom: string;              // YYYY-MM-DD or ''
   filterDateTo: string;                // YYYY-MM-DD or ''
-  filterHasHHJob: boolean;             // true = only jobs linked to HireHop
+  filterHasHHJob: HHJobFilter;         // 3-state: All / In HireHop / OP-only
   filterServiceTypes: ServiceTypePill[];
   filterValueBucket: ValueBucket;
   filterChaseCount: ChaseCountBucket;
@@ -69,7 +71,7 @@ const PIPELINE_PREFS_DEFAULTS: PipelinePrefs = {
   filterManager: '',
   filterDateFrom: '',
   filterDateTo: '',
-  filterHasHHJob: true,                 // Default ON — most ops work happens on HH-linked jobs
+  filterHasHHJob: 'all',                // Default: show everything regardless of HH link
   filterServiceTypes: [],
   filterValueBucket: '',
   filterChaseCount: '',
@@ -1878,7 +1880,15 @@ export default function PipelinePage() {
   const [filterManager, setFilterManager] = useState<string>(initialPrefs.filterManager);
   const [filterDateFrom, setFilterDateFrom] = useState<string>(initialPrefs.filterDateFrom);
   const [filterDateTo, setFilterDateTo] = useState<string>(initialPrefs.filterDateTo);
-  const [filterHasHHJob, setFilterHasHHJob] = useState<boolean>(initialPrefs.filterHasHHJob);
+  // Migrate legacy boolean prefs (pre-3-state pill) to the new union type.
+  const initialHHJob: HHJobFilter = (() => {
+    const v = initialPrefs.filterHasHHJob as unknown;
+    if (v === true) return 'yes';
+    if (v === false) return 'all';     // legacy "off" meant unfiltered
+    if (v === 'yes' || v === 'no' || v === 'all') return v;
+    return 'all';
+  })();
+  const [filterHasHHJob, setFilterHasHHJob] = useState<HHJobFilter>(initialHHJob);
   const [filterServiceTypes, setFilterServiceTypes] = useState<ServiceTypePill[]>(initialPrefs.filterServiceTypes);
   const [filterValueBucket, setFilterValueBucket] = useState<ValueBucket>(initialPrefs.filterValueBucket);
   const [filterChaseCount, setFilterChaseCount] = useState<ChaseCountBucket>(initialPrefs.filterChaseCount);
@@ -1919,7 +1929,7 @@ export default function PipelinePage() {
   const hasActiveFilters = filterLikelihood !== '' || filterChase !== '' || filterStatuses.length > 0
     || filterManager !== '' || filterDateFrom !== '' || filterDateTo !== ''
     || filterServiceTypes.length > 0 || filterValueBucket !== '' || filterChaseCount !== ''
-    || !filterHasHHJob;  // off = active filter (default is on)
+    || filterHasHHJob !== 'all';
 
   const clearAllFilters = () => {
     setFilterLikelihood('');
@@ -1928,7 +1938,7 @@ export default function PipelinePage() {
     setFilterManager('');
     setFilterDateFrom('');
     setFilterDateTo('');
-    setFilterHasHHJob(true);
+    setFilterHasHHJob('all');
     setFilterServiceTypes([]);
     setFilterValueBucket('');
     setFilterChaseCount('');
@@ -1965,14 +1975,10 @@ export default function PipelinePage() {
       if (filterDateFrom) params.set('date_from', filterDateFrom);
       if (filterDateTo) params.set('date_to', filterDateTo);
 
-      // has_hh_job defaults ON. Only send the param when user has explicitly
-      // toggled it off (we want both states queryable; the backend default of
-      // unfiltered isn't what the UI default is).
-      if (!filterHasHHJob) {
-        // No-op: when checkbox is off, we want ALL jobs (the backend's natural default).
-      } else {
-        params.set('has_hh_job', 'true');
-      }
+      // 3-state HH job filter: 'all' = no param (backend returns everything);
+      // 'yes' = only HireHop-linked; 'no' = only OP-native (no HH number).
+      if (filterHasHHJob === 'yes') params.set('has_hh_job', 'true');
+      else if (filterHasHHJob === 'no') params.set('has_hh_job', 'false');
 
       // Status pills control which pre-confirmed pipeline_status values to
       // include. No pills selected = all four (new_enquiry/quoting/paused/
@@ -2356,16 +2362,31 @@ export default function PipelinePage() {
               />
             </div>
 
-            {/* Has HireHop job */}
-            <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer" title="Show only enquiries linked to a HireHop job. Off = include OP-native enquiries with no HH number yet.">
-              <input
-                type="checkbox"
-                checked={filterHasHHJob}
-                onChange={(e) => setFilterHasHHJob(e.target.checked)}
-                className="rounded border-gray-300"
-              />
-              In HireHop
-            </label>
+            {/* HireHop link — 3-state pill: All / In HireHop / OP-only */}
+            <div className="inline-flex items-center gap-1" title="Filter by whether the enquiry is linked to a HireHop job number.">
+              <span className="text-xs text-gray-500 mr-1">HH:</span>
+              {([
+                { key: 'all', label: 'All' },
+                { key: 'yes', label: 'In HireHop' },
+                { key: 'no', label: 'OP-only' },
+              ] as { key: HHJobFilter; label: string }[]).map(opt => {
+                const active = filterHasHHJob === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setFilterHasHHJob(opt.key)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                      active
+                        ? 'bg-ooosh-600 text-white border-ooosh-600'
+                        : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
 
             {/* Service type pills */}
             <div className="inline-flex items-center gap-1">

@@ -103,7 +103,11 @@ export default function LostCancelledPage() {
   const filterDateTo = searchParams.get('date_to') || '';
   const filterValueBucket = (searchParams.get('value_bucket') || '') as ValueBucket;
   const filterNoticePeriod = searchParams.get('notice_period') || '';
-  const filterOutstandingCloseout = searchParams.get('outstanding_closeout') === 'true';
+  // Defaults to ON — most of the time staff are looking for jobs that still
+  // need action (refund pending, invoice not sent, etc.). User can untick to
+  // see all lost/cancelled jobs. Toggle writes 'false' explicitly when
+  // unchecked so the URL distinguishes "user opted out" from "default state".
+  const filterOutstandingCloseout = searchParams.get('outstanding_closeout') !== 'false';
   const filterHideReopened = searchParams.get('hide_reopened') === 'true';
 
   const setUrlParam = (key: string, value: string) => {
@@ -113,8 +117,12 @@ export default function LostCancelledPage() {
     setSearchParams(p);
   };
 
+  // 'Outstanding close-out' defaults to true, so its presence isn't a sign
+  // of an active user-set filter. Treat as active only when explicitly
+  // unticked (URL param 'false').
+  const outstandingCloseoutChanged = searchParams.get('outstanding_closeout') === 'false';
   const hasActiveFilters = filterLostReason || filterTier || filterManager || filterDateFrom
-    || filterDateTo || filterValueBucket || filterNoticePeriod || filterOutstandingCloseout || filterHideReopened;
+    || filterDateTo || filterValueBucket || filterNoticePeriod || outstandingCloseoutChanged || filterHideReopened;
 
   const clearAllFilters = () => {
     const p = new URLSearchParams(searchParams);
@@ -357,7 +365,10 @@ export default function LostCancelledPage() {
             <input
               type="checkbox"
               checked={filterOutstandingCloseout}
-              onChange={e => setUrlParam('outstanding_closeout', e.target.checked ? 'true' : '')}
+              // Default is ON. Checked = no param needed (default). Unchecked
+              // writes 'false' explicitly so the URL records the opt-out and
+              // survives refresh.
+              onChange={e => setUrlParam('outstanding_closeout', e.target.checked ? '' : 'false')}
               className="rounded border-gray-300"
             />
             Outstanding close-out

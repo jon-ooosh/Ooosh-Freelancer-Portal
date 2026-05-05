@@ -112,7 +112,7 @@ router.get('/jobs/last-sync', async (_req: AuthRequest, res: Response) => {
 // GET /api/hirehop/jobs — list synced jobs from our DB
 router.get('/jobs', async (req: AuthRequest, res: Response) => {
   try {
-    const { status, search, ooh_only, page = '1', limit = '50' } = req.query;
+    const { status, search, ooh_only, manager, service_type, page = '1', limit = '50' } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let whereClause = 'WHERE is_deleted = false';
@@ -139,6 +139,27 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
         WHERE vha.job_id = jobs.id
           AND vha.return_overnight = TRUE
           AND vha.status NOT IN ('cancelled', 'returned')
+      )`;
+    }
+
+    // Manager filter — matches against either of the two manager slots.
+    if (manager) {
+      params.push(manager);
+      whereClause += ` AND (jobs.manager1_person_id = $${params.length} OR jobs.manager2_person_id = $${params.length})`;
+    }
+
+    // Service type filter — comma-separated requirement_type values
+    // (vehicle, backline, rehearsal). Matches if the job has ANY listed
+    // type as a non-cancelled pre-hire requirement.
+    if (service_type) {
+      const types = (service_type as string).split(',');
+      params.push(types);
+      whereClause += ` AND EXISTS (
+        SELECT 1 FROM job_requirements jr
+        WHERE jr.job_id = jobs.id
+          AND jr.phase = 'pre_hire'
+          AND jr.status != 'cancelled'
+          AND jr.requirement_type = ANY($${params.length})
       )`;
     }
 
