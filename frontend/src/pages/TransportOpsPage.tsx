@@ -259,6 +259,7 @@ export default function TransportOpsPage() {
     (initialParams.get('type') as 'all' | 'transport' | 'crewed') || 'all'
   );
   const [needsCrewOnly, setNeedsCrewOnly] = useState(() => initialParams.get('needs_crew') === '1');
+  const [needsIntroOnly, setNeedsIntroOnly] = useState(() => initialParams.get('needs_intro') === '1');
   const [viewMode, setViewMode] = useState<'table' | 'calendar'>(
     initialParams.get('view') === 'calendar' ? 'calendar' : 'table'
   );
@@ -303,6 +304,7 @@ export default function TransportOpsPage() {
     if (showCompleted) params.set('completed', '1');
     if (showCancelled) params.set('cancelled', '1');
     if (needsCrewOnly) params.set('needs_crew', '1');
+    if (needsIntroOnly) params.set('needs_intro', '1');
     if (dateWindow !== 'all') params.set('when', dateWindow);
     if (searchTerm) params.set('q', searchTerm);
     if (sortBy !== 'date') params.set('sort', sortBy);
@@ -317,7 +319,7 @@ export default function TransportOpsPage() {
       window.history.replaceState({}, '', newUrl);
     }, 200);
     return () => window.clearTimeout(timer);
-  }, [filter, viewMode, showCompleted, showCancelled, needsCrewOnly, dateWindow, searchTerm, sortBy, personPin, venuePin]);
+  }, [filter, viewMode, showCompleted, showCancelled, needsCrewOnly, needsIntroOnly, dateWindow, searchTerm, sortBy, personPin, venuePin]);
 
   // Escape key to close assign modal
   useEffect(() => {
@@ -492,6 +494,12 @@ export default function TransportOpsPage() {
     if (needsCrewOnly) {
       out = out.filter((q) => (q.assignments || []).filter((a) => a.status !== 'cancelled').length === 0);
     }
+    if (needsIntroOnly) {
+      out = out.filter((q) => {
+        const intro = q.client_introduction || 'not_needed';
+        return intro === 'todo' || intro === 'working_on_it';
+      });
+    }
     if (dateWindow !== 'all') {
       out = out.filter((q) => inDateWindow(q, dateWindow));
     }
@@ -509,7 +517,7 @@ export default function TransportOpsPage() {
       out = out.filter((q) => matchesSearch(q, searchTerm));
     }
     return out;
-  }, [quotes, needsCrewOnly, dateWindow, personPin, venuePin, searchTerm]);
+  }, [quotes, needsCrewOnly, needsIntroOnly, dateWindow, personPin, venuePin, searchTerm]);
 
   // Group quotes by ops_status for table view
   const grouped = useMemo(() => {
@@ -547,7 +555,7 @@ export default function TransportOpsPage() {
   // you're looking at.
   const summary = useMemo(() => {
     const today = startOfToday();
-    let overdue = 0, todayCount = 0, thisWeek = 0, needsCrew = 0;
+    let overdue = 0, todayCount = 0, thisWeek = 0, needsCrew = 0, needsIntro = 0;
     for (const q of quotes) {
       const jd = quoteDate(q);
       const active = q.ops_status !== 'completed' && q.ops_status !== 'cancelled';
@@ -555,8 +563,9 @@ export default function TransportOpsPage() {
       if (jd && jd.getTime() === today.getTime()) todayCount++;
       if (active && jd && inDateWindow(q, 'this_week')) thisWeek++;
       if (active && (q.assignments || []).filter((a) => a.status !== 'cancelled').length === 0) needsCrew++;
+      if (active && (q.client_introduction === 'todo' || q.client_introduction === 'working_on_it')) needsIntro++;
     }
-    return { overdue, todayCount, thisWeek, needsCrew };
+    return { overdue, todayCount, thisWeek, needsCrew, needsIntro };
   }, [quotes]);
 
   if (loading) {
@@ -679,6 +688,17 @@ export default function TransportOpsPage() {
         >
           {summary.needsCrew} needing crew
         </button>
+        <button
+          onClick={() => setNeedsIntroOnly(!needsIntroOnly)}
+          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            needsIntroOnly
+              ? 'bg-blue-600 text-white border-blue-700'
+              : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+          }`}
+          title="Quotes whose client introduction is 'to do' or 'working on it'"
+        >
+          {summary.needsIntro} needing client intro
+        </button>
       </div>
 
       {/* Filter bar — search + date window pills + sort */}
@@ -774,6 +794,18 @@ export default function TransportOpsPage() {
           <button
             onClick={() => setNeedsCrewOnly(false)}
             className="text-amber-700 hover:text-amber-900 font-medium"
+          >
+            Clear filter &times;
+          </button>
+        </div>
+      )}
+
+      {needsIntroOnly && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800 flex items-center justify-between">
+          <span>Showing quotes where the client introduction is still to-do or working-on-it.</span>
+          <button
+            onClick={() => setNeedsIntroOnly(false)}
+            className="text-blue-700 hover:text-blue-900 font-medium"
           >
             Clear filter &times;
           </button>

@@ -166,10 +166,12 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LIMIT 10
       `),
 
-      // 7. Client intros to arrange — transport quotes in the next 7 days
-      // whose client_introduction pill is still 'todo' or 'working_on_it'.
-      // Local D&C quotes default to 'not_needed' (NULL) so they're naturally
-      // excluded; staff bumps them to 'todo' manually if an intro is needed.
+      // 7. Transport introductions to arrange — quotes in the next 7 days
+      // attached to a CONFIRMED (or pre-dispatch) job whose intro pill is
+      // still 'todo' or 'working_on_it'. Enquiries / provisional are
+      // excluded — those aren't genuinely upcoming yet. Local D&C quotes
+      // default to 'not_needed' (NULL) so they're naturally excluded; staff
+      // bumps them to 'todo' manually if an intro is needed.
       // This replaces the old "Chases Due" bucket — chases now live solely
       // on the stat-card row above, and the post-confirmation pile uses the
       // reminders system.
@@ -184,6 +186,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           AND q.client_introduction IN ('todo', 'working_on_it')
           AND q.job_date IS NOT NULL
           AND q.job_date::date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'
+          AND j.pipeline_status IN ('confirmed', 'prepping', 'prepped')
         ORDER BY q.job_date ASC, q.arrival_time ASC NULLS LAST
         LIMIT 10
       `),
