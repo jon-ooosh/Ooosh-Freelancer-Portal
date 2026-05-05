@@ -28,6 +28,10 @@ const createInteractionSchema = z.object({
   // Chase alert: notify a user when chase is due
   chase_alert_user_id: z.string().uuid().optional().nullable(),
   chase_alert_delivery: z.enum(['bell', 'bell_email', 'none']).optional().nullable(),
+  // Opt-out for the auto-chase-bump on call/email/meeting interactions.
+  // Default false (= bump fires). Set true when logging a backdated or
+  // non-consequential contact event that shouldn't shift the chase date.
+  skip_chase_bump: z.boolean().optional().default(false),
 });
 
 // GET /api/interactions — timeline for an entity
@@ -87,7 +91,7 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
     const {
       type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
       mentioned_user_ids, mention_priority, chase_method, chase_response, next_chase_date,
-      chase_alert_user_id, chase_alert_delivery,
+      chase_alert_user_id, chase_alert_delivery, skip_chase_bump,
     } = req.body;
 
     // If linked to a job, snapshot current status for tracking
@@ -139,6 +143,43 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
           updated_at = NOW()
         WHERE id = $2`,
         [chaseDate, job_id, chase_alert_user_id || null, chase_alert_delivery || null]
+      );
+    }
+
+    // Auto-bump chase on contact-type interactions (call / email / meeting).
+    // Logging a contact event IS evidence of action — push the chase forward.
+    // Notes and mentions are deliberately excluded: notes are too varied
+    // (could be internal observations) and mentions are internal collaboration,
+    // not client contact.
+    //
+    // Safety rule: only bump if the current chase date is null/today/past.
+    // A future-dated chase is a deliberate user decision and must not be
+    // shortened (e.g. "chase Friday because client said they'd reply then" —
+    // an unrelated email logged Wednesday should NOT shrink Friday → Monday).
+    //
+    // Opt-out: skip_chase_bump=true on the request body skips the bump.
+    // Use for backdated entries or non-consequential events.
+    const CONTACT_BUMP_TYPES = new Set(['call', 'email', 'meeting']);
+    if (
+      job_id
+      && CONTACT_BUMP_TYPES.has(type)
+      && !skip_chase_bump
+      // Only bump for jobs that are actually in an enquiry stage — chase
+      // dates on confirmed/lost/cancelled jobs are stale anyway.
+      && pipelineStatusAt
+      && ['new_enquiry', 'quoting', 'paused', 'provisional'].includes(pipelineStatusAt)
+    ) {
+      await query(
+        `UPDATE jobs SET
+          next_chase_date = CASE
+            WHEN next_chase_date IS NULL OR next_chase_date <= CURRENT_DATE
+              THEN (CURRENT_DATE + (COALESCE(chase_interval_days, 5) || ' days')::interval)::date
+            ELSE next_chase_date
+          END,
+          last_chased_at = NOW(),
+          updated_at = NOW()
+        WHERE id = $1`,
+        [job_id]
       );
     }
 

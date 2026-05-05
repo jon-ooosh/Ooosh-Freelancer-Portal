@@ -95,6 +95,11 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
   const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>(null);
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
 
+  // Auto-chase-bump opt-out — for backdated or non-consequential contact
+  // events. Only meaningful for call/email/meeting on a job, where the
+  // backend would otherwise push next_chase_date forward.
+  const [skipChaseBump, setSkipChaseBump] = useState(false);
+
   // Move interaction
   const [movingId, setMovingId] = useState<string | null>(null);
   const [moveSearch, setMoveSearch] = useState('');
@@ -254,6 +259,10 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         if (nextChaseDate) payload.next_chase_date = nextChaseDate;
         if (chaseAlertUserId) payload.chase_alert_user_id = chaseAlertUserId;
       }
+      // Pass through skip_chase_bump only when relevant (job + contact type)
+      if (entityType === 'job_id' && ['call', 'email', 'meeting'].includes(interactionType) && skipChaseBump) {
+        payload.skip_chase_bump = true;
+      }
       await api.post('/interactions', payload);
       setContent('');
       setMentionedIds([]);
@@ -261,6 +270,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       setNextChaseDate('');
       setSelectedChasePreset(null);
       setChaseAlertUserId('');
+      setSkipChaseBump(false);
       onInteractionAdded();
     } catch (err) {
       console.error('Failed to add interaction:', err);
@@ -448,6 +458,23 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
               <option value="urgent">Urgent</option>
             </select>
           </div>
+        )}
+
+        {/* Skip-chase-bump opt-out — only relevant when logging a contact
+            event on a job. Checked = don't push next_chase_date forward. */}
+        {entityType === 'job_id' && ['call', 'email', 'meeting'].includes(interactionType) && (
+          <label
+            className="flex items-center gap-1.5 text-xs text-gray-500 mt-2 cursor-pointer"
+            title="By default, logging a call/email/meeting pushes the chase date forward by your usual chase interval. Tick this to keep the chase date as-is — useful for backdated entries or non-consequential events."
+          >
+            <input
+              type="checkbox"
+              checked={skipChaseBump}
+              onChange={(e) => setSkipChaseBump(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            Don't update chase date
+          </label>
         )}
 
         <div className="flex justify-between items-center mt-2">

@@ -38,13 +38,26 @@ type SortMode = 'chase_date' | 'job_date_nearest' | 'job_date_furthest' | 'value
 
 const PIPELINE_PREFS_KEY = 'ooosh.pipeline.prefs';
 
+// Status pill keys correspond to the Kanban columns. 'enquiry' bundles
+// new_enquiry + quoting (they render in the same Enquiries column).
+type StatusPill = 'enquiry' | 'paused' | 'provisional';
+type ValueBucket = '' | 'under_500' | '500_2000' | '2000_10000' | 'over_10000';
+type ChaseCountBucket = '' | 'never' | '1_2' | '3_plus';
+type ServiceTypePill = 'vehicle' | 'backline' | 'rehearsal';
+
 interface PipelinePrefs {
   view: 'kanban' | 'list';
   sortMode: SortMode;
   filterLikelihood: string;
   filterChase: string;
-  showConfirmed: boolean;
-  showLost: boolean;
+  filterStatuses: StatusPill[];        // Multi-select status pills (empty = all)
+  filterManager: string;               // person UUID or ''
+  filterDateFrom: string;              // YYYY-MM-DD or ''
+  filterDateTo: string;                // YYYY-MM-DD or ''
+  filterHasHHJob: boolean;             // true = only jobs linked to HireHop
+  filterServiceTypes: ServiceTypePill[];
+  filterValueBucket: ValueBucket;
+  filterChaseCount: ChaseCountBucket;
 }
 
 const PIPELINE_PREFS_DEFAULTS: PipelinePrefs = {
@@ -52,8 +65,14 @@ const PIPELINE_PREFS_DEFAULTS: PipelinePrefs = {
   sortMode: 'chase_date',
   filterLikelihood: '',
   filterChase: '',
-  showConfirmed: false,
-  showLost: false,
+  filterStatuses: [],
+  filterManager: '',
+  filterDateFrom: '',
+  filterDateTo: '',
+  filterHasHHJob: true,                 // Default ON — most ops work happens on HH-linked jobs
+  filterServiceTypes: [],
+  filterValueBucket: '',
+  filterChaseCount: '',
 };
 
 function loadPipelinePrefs(): PipelinePrefs {
@@ -69,10 +88,49 @@ function loadPipelinePrefs(): PipelinePrefs {
 }
 
 // ── Column order ───────────────────────────────────────────────────────────
+//
+// Pipeline shows ENQUIRY-STAGE columns only (no Confirmed, no Lost — those
+// have dedicated pages: /jobs and /jobs/lost-cancelled). Chasing is the
+// virtual column for jobs with overdue chase dates.
 
 const COLUMN_ORDER: PipelineStatus[] = [
-  'new_enquiry', 'chasing', 'provisional', 'paused', 'confirmed', 'lost',
+  'new_enquiry', 'chasing', 'provisional', 'paused',
 ];
+
+// Map a status pill → which COLUMN_ORDER entries it controls
+const PILL_TO_COLUMNS: Record<StatusPill, PipelineStatus[]> = {
+  enquiry: ['new_enquiry'],          // 'chasing' is its own pill-independent column
+  paused: ['paused'],
+  provisional: ['provisional'],
+};
+
+// Map a status pill → which pipeline_status DB values it covers
+const PILL_TO_DB_STATUSES: Record<StatusPill, string[]> = {
+  enquiry: ['new_enquiry', 'quoting'],
+  paused: ['paused'],
+  provisional: ['provisional'],
+};
+
+const VALUE_BUCKETS: Record<ValueBucket, { min: number | null; max: number | null; label: string }> = {
+  '': { min: null, max: null, label: 'All values' },
+  under_500: { min: null, max: 500, label: 'Under £500' },
+  '500_2000': { min: 500, max: 2000, label: '£500 – £2k' },
+  '2000_10000': { min: 2000, max: 10000, label: '£2k – £10k' },
+  over_10000: { min: 10000, max: null, label: 'Over £10k' },
+};
+
+const CHASE_COUNT_BUCKETS: Record<ChaseCountBucket, { min: number | null; max: number | null; label: string }> = {
+  '': { min: null, max: null, label: 'Any chase count' },
+  never: { min: 0, max: 0, label: 'Never chased' },
+  '1_2': { min: 1, max: 2, label: 'Chased 1–2×' },
+  '3_plus': { min: 3, max: null, label: 'Chased 3+×' },
+};
+
+const SERVICE_TYPE_LABELS: Record<ServiceTypePill, string> = {
+  vehicle: 'Vehicles',
+  backline: 'Backline',
+  rehearsal: 'Rehearsals',
+};
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1816,18 +1874,66 @@ export default function PipelinePage() {
     : initialPrefs.filterChase;
   const [filterChase, setFilterChase] = useState<string>(initialChase);
   const [filterSearch, setFilterSearch] = useState<string>('');
-  const [showConfirmed, setShowConfirmed] = useState(initialPrefs.showConfirmed);
-  const [showLost, setShowLost] = useState(initialPrefs.showLost);
+  const [filterStatuses, setFilterStatuses] = useState<StatusPill[]>(initialPrefs.filterStatuses);
+  const [filterManager, setFilterManager] = useState<string>(initialPrefs.filterManager);
+  const [filterDateFrom, setFilterDateFrom] = useState<string>(initialPrefs.filterDateFrom);
+  const [filterDateTo, setFilterDateTo] = useState<string>(initialPrefs.filterDateTo);
+  const [filterHasHHJob, setFilterHasHHJob] = useState<boolean>(initialPrefs.filterHasHHJob);
+  const [filterServiceTypes, setFilterServiceTypes] = useState<ServiceTypePill[]>(initialPrefs.filterServiceTypes);
+  const [filterValueBucket, setFilterValueBucket] = useState<ValueBucket>(initialPrefs.filterValueBucket);
+  const [filterChaseCount, setFilterChaseCount] = useState<ChaseCountBucket>(initialPrefs.filterChaseCount);
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+
+  // Manager dropdown options — fetched once
+  const [managerOptions, setManagerOptions] = useState<{ id: string; first_name: string; last_name: string }[]>([]);
+  useEffect(() => {
+    api.get<{ data: { id: string; first_name: string; last_name: string }[] }>('/pipeline/managers')
+      .then(res => setManagerOptions(res.data))
+      .catch(() => { /* non-critical, dropdown just stays empty */ });
+  }, []);
 
   // Persist preferences whenever they change
   useEffect(() => {
     try {
-      const prefs: PipelinePrefs = { view, sortMode, filterLikelihood, filterChase, showConfirmed, showLost };
+      const prefs: PipelinePrefs = {
+        view, sortMode, filterLikelihood, filterChase,
+        filterStatuses, filterManager, filterDateFrom, filterDateTo,
+        filterHasHHJob, filterServiceTypes, filterValueBucket, filterChaseCount,
+      };
       window.localStorage.setItem(PIPELINE_PREFS_KEY, JSON.stringify(prefs));
     } catch {
       // Ignore quota / private mode errors
     }
-  }, [view, sortMode, filterLikelihood, filterChase, showConfirmed, showLost]);
+  }, [view, sortMode, filterLikelihood, filterChase, filterStatuses, filterManager, filterDateFrom, filterDateTo, filterHasHHJob, filterServiceTypes, filterValueBucket, filterChaseCount]);
+
+  // Toggle handlers for multi-select pills
+  const toggleStatusPill = (pill: StatusPill) => {
+    setFilterStatuses(prev => prev.includes(pill) ? prev.filter(p => p !== pill) : [...prev, pill]);
+  };
+  const toggleServiceTypePill = (pill: ServiceTypePill) => {
+    setFilterServiceTypes(prev => prev.includes(pill) ? prev.filter(p => p !== pill) : [...prev, pill]);
+  };
+
+  // True if any filter beyond the defaults is active — used to show a "Clear all"
+  // button + indicate to the user that results are filtered.
+  const hasActiveFilters = filterLikelihood !== '' || filterChase !== '' || filterStatuses.length > 0
+    || filterManager !== '' || filterDateFrom !== '' || filterDateTo !== ''
+    || filterServiceTypes.length > 0 || filterValueBucket !== '' || filterChaseCount !== ''
+    || !filterHasHHJob;  // off = active filter (default is on)
+
+  const clearAllFilters = () => {
+    setFilterLikelihood('');
+    setFilterChase('');
+    setFilterStatuses([]);
+    setFilterManager('');
+    setFilterDateFrom('');
+    setFilterDateTo('');
+    setFilterHasHHJob(true);
+    setFilterServiceTypes([]);
+    setFilterValueBucket('');
+    setFilterChaseCount('');
+    setFilterSearch('');
+  };
 
   // Modals
   const [showNewEnquiry, setShowNewEnquiry] = useState(false);
@@ -1855,14 +1961,47 @@ export default function PipelinePage() {
       if (filterLikelihood) params.set('likelihood', filterLikelihood);
       if (filterChase) params.set('chase_status', filterChase);
       if (filterSearch) params.set('search', filterSearch);
+      if (filterManager) params.set('manager', filterManager);
+      if (filterDateFrom) params.set('date_from', filterDateFrom);
+      if (filterDateTo) params.set('date_to', filterDateTo);
 
-      // Build status filter based on toggles. 'chasing' is no longer a stored
-      // status — cards land in the Chasing column via server-derived
-      // is_chasing (next_chase_date <= today + pre-confirmed status).
-      const statuses = ['new_enquiry', 'quoting', 'paused', 'provisional'];
-      if (showConfirmed) statuses.push('confirmed');
-      if (showLost) statuses.push('lost');
-      params.set('status', statuses.join(','));
+      // has_hh_job defaults ON. Only send the param when user has explicitly
+      // toggled it off (we want both states queryable; the backend default of
+      // unfiltered isn't what the UI default is).
+      if (!filterHasHHJob) {
+        // No-op: when checkbox is off, we want ALL jobs (the backend's natural default).
+      } else {
+        params.set('has_hh_job', 'true');
+      }
+
+      // Status pills control which pre-confirmed pipeline_status values to
+      // include. No pills selected = all four (new_enquiry/quoting/paused/
+      // provisional). Note: 'chasing' is no longer a stored status — cards
+      // land in the Chasing column via server-derived is_chasing.
+      const dbStatuses: string[] = [];
+      if (filterStatuses.length === 0) {
+        dbStatuses.push('new_enquiry', 'quoting', 'paused', 'provisional');
+      } else {
+        for (const pill of filterStatuses) {
+          dbStatuses.push(...PILL_TO_DB_STATUSES[pill]);
+        }
+      }
+      params.set('status', dbStatuses.join(','));
+
+      // Service type pills (multi-select)
+      if (filterServiceTypes.length > 0) {
+        params.set('service_type', filterServiceTypes.join(','));
+      }
+
+      // Value bucket
+      const valueB = VALUE_BUCKETS[filterValueBucket];
+      if (valueB.min != null) params.set('value_min', String(valueB.min));
+      if (valueB.max != null) params.set('value_max', String(valueB.max));
+
+      // Chase count bucket
+      const chaseB = CHASE_COUNT_BUCKETS[filterChaseCount];
+      if (chaseB.min != null) params.set('chase_count_min', String(chaseB.min));
+      if (chaseB.max != null) params.set('chase_count_max', String(chaseB.max));
 
       const [jobsRes, statsRes] = await Promise.all([
         api.get<PipelineResponse>(`/pipeline?${params}`),
@@ -1876,7 +2015,7 @@ export default function PipelinePage() {
     } finally {
       setLoading(false);
     }
-  }, [filterLikelihood, filterChase, filterSearch, showConfirmed, showLost]);
+  }, [filterLikelihood, filterChase, filterSearch, filterStatuses, filterManager, filterDateFrom, filterDateTo, filterHasHHJob, filterServiceTypes, filterValueBucket, filterChaseCount]);
 
   useEffect(() => {
     fetchPipeline();
@@ -2012,11 +2151,21 @@ export default function PipelinePage() {
   }
 
   // ── Visible columns ───────────────────────────────────────────────────
+  //
+  // Pipeline only ever shows enquiry-stage columns. Status pills narrow the
+  // visible set: with 'paused' selected and others off, only Paused +
+  // Chasing render (Chasing always shows because overdue-chase visiting
+  // cards may originate from any selected status). With no pills selected,
+  // all four columns render.
 
   const visibleColumns = COLUMN_ORDER.filter(status => {
-    if (status === 'confirmed' && !showConfirmed) return false;
-    if (status === 'lost' && !showLost) return false;
-    return true;
+    if (filterStatuses.length === 0) return true;
+    if (status === 'chasing') return true;  // virtual column always visible when any column is
+    // Find which pill (if any) controls this column
+    for (const pill of filterStatuses) {
+      if (PILL_TO_COLUMNS[pill].includes(status)) return true;
+    }
+    return false;
   });
 
   // ── Render ─────────────────────────────────────────────────────────────
@@ -2080,7 +2229,7 @@ export default function PipelinePage() {
           </div>
         </div>
 
-        {/* Filters */}
+        {/* Filters — primary row (always visible) */}
         <div className="flex items-center gap-3 flex-wrap">
           <input
             type="text"
@@ -2101,6 +2250,29 @@ export default function PipelinePage() {
             <option value="value_low">Sort: Lowest value</option>
             <option value="newest">Sort: Newest first</option>
           </select>
+
+          {/* Status pills — multi-select. None selected = show everything. */}
+          <div className="inline-flex items-center gap-1 ml-1">
+            {(['enquiry', 'paused', 'provisional'] as StatusPill[]).map(pill => {
+              const active = filterStatuses.includes(pill);
+              const label = pill === 'enquiry' ? 'Enquiry' : pill === 'paused' ? 'Paused' : 'Provisional';
+              return (
+                <button
+                  key={pill}
+                  type="button"
+                  onClick={() => toggleStatusPill(pill)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                    active
+                      ? 'bg-ooosh-600 text-white border-ooosh-600'
+                      : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+
           <select
             value={filterLikelihood}
             onChange={(e) => setFilterLikelihood(e.target.value)}
@@ -2121,25 +2293,125 @@ export default function PipelinePage() {
             <option value="due_today">Due today</option>
             <option value="due_this_week">Due this week</option>
           </select>
-          <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={showConfirmed}
-              onChange={(e) => setShowConfirmed(e.target.checked)}
-              className="rounded border-gray-300"
-            />
-            Confirmed
-          </label>
-          <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={showLost}
-              onChange={(e) => setShowLost(e.target.checked)}
-              className="rounded border-gray-300"
-            />
-            Lost
-          </label>
+
+          <button
+            type="button"
+            onClick={() => setShowAdvancedFilters(s => !s)}
+            className={`px-3 py-1.5 text-xs font-medium rounded border transition-colors ${
+              showAdvancedFilters || hasActiveFilters
+                ? 'bg-gray-100 text-gray-900 border-gray-400'
+                : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+            }`}
+            title="More filters"
+          >
+            {showAdvancedFilters ? '− Filters' : '+ Filters'}
+            {hasActiveFilters && !showAdvancedFilters && (
+              <span className="ml-1 inline-flex items-center justify-center w-1.5 h-1.5 rounded-full bg-ooosh-600" />
+            )}
+          </button>
+
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={clearAllFilters}
+              className="text-xs text-gray-500 hover:text-gray-700 underline"
+            >
+              Clear all
+            </button>
+          )}
         </div>
+
+        {/* Filters — advanced row (collapsible) */}
+        {showAdvancedFilters && (
+          <div className="flex items-center gap-3 flex-wrap mt-3 pt-3 border-t border-gray-100">
+            {/* Manager */}
+            <select
+              value={filterManager}
+              onChange={(e) => setFilterManager(e.target.value)}
+              className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            >
+              <option value="">All managers</option>
+              {managerOptions.map(m => (
+                <option key={m.id} value={m.id}>
+                  {m.first_name} {m.last_name}
+                </option>
+              ))}
+            </select>
+
+            {/* Date range */}
+            <div className="flex items-center gap-1 text-xs text-gray-600">
+              <span className="text-gray-500">Job dates:</span>
+              <input
+                type="date"
+                value={filterDateFrom}
+                onChange={(e) => setFilterDateFrom(e.target.value)}
+                className="border border-gray-300 rounded px-2 py-1 text-xs focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+              <span className="text-gray-400">→</span>
+              <input
+                type="date"
+                value={filterDateTo}
+                onChange={(e) => setFilterDateTo(e.target.value)}
+                className="border border-gray-300 rounded px-2 py-1 text-xs focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              />
+            </div>
+
+            {/* Has HireHop job */}
+            <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer" title="Show only enquiries linked to a HireHop job. Off = include OP-native enquiries with no HH number yet.">
+              <input
+                type="checkbox"
+                checked={filterHasHHJob}
+                onChange={(e) => setFilterHasHHJob(e.target.checked)}
+                className="rounded border-gray-300"
+              />
+              In HireHop
+            </label>
+
+            {/* Service type pills */}
+            <div className="inline-flex items-center gap-1">
+              <span className="text-xs text-gray-500 mr-1">Type:</span>
+              {(['vehicle', 'backline', 'rehearsal'] as ServiceTypePill[]).map(pill => {
+                const active = filterServiceTypes.includes(pill);
+                return (
+                  <button
+                    key={pill}
+                    type="button"
+                    onClick={() => toggleServiceTypePill(pill)}
+                    className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                      active
+                        ? 'bg-ooosh-600 text-white border-ooosh-600'
+                        : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    {SERVICE_TYPE_LABELS[pill]}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Value bucket */}
+            <select
+              value={filterValueBucket}
+              onChange={(e) => setFilterValueBucket(e.target.value as ValueBucket)}
+              className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            >
+              {(Object.keys(VALUE_BUCKETS) as ValueBucket[]).map(k => (
+                <option key={k || 'all'} value={k}>{VALUE_BUCKETS[k].label}</option>
+              ))}
+            </select>
+
+            {/* Chase count bucket */}
+            <select
+              value={filterChaseCount}
+              onChange={(e) => setFilterChaseCount(e.target.value as ChaseCountBucket)}
+              className="border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            >
+              {(Object.keys(CHASE_COUNT_BUCKETS) as ChaseCountBucket[]).map(k => (
+                <option key={k || 'all'} value={k}>{CHASE_COUNT_BUCKETS[k].label}</option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       {/* Board */}

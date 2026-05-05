@@ -497,7 +497,15 @@ router.post(
 
 router.get('/list', async (req: AuthRequest, res: Response) => {
   try {
-    const { status, page = '1', limit = '50', sort = 'date_desc', search } = req.query as Record<string, string>;
+    const {
+      status, page = '1', limit = '50', sort = 'date_desc', search,
+      lost_reason, cancellation_tier, manager,
+      date_from, date_to,           // Date the job was lost / cancelled (not job dates)
+      value_min, value_max,
+      notice_period,                // 'same_day' | 'within_week' | 'within_month' | 'over_month' (Cancelled only)
+      outstanding_closeout,         // 'true' = jobs with at least one open post_hire requirement
+      hide_reopened,                // 'true' = hide jobs that have a reopened_to_job_id set
+    } = req.query as Record<string, string>;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
     let whereClause = `j.is_deleted = false AND j.pipeline_status IN ('lost', 'cancelled')`;
@@ -510,15 +518,87 @@ router.get('/list', async (req: AuthRequest, res: Response) => {
       whereClause = `j.is_deleted = false AND j.pipeline_status = 'lost'`;
     }
 
+    // Search now includes hh_job_number — was the missing search target.
     if (search) {
-      whereClause += ` AND (j.job_name ILIKE $${pIdx} OR j.company_name ILIKE $${pIdx} OR j.client_name ILIKE $${pIdx})`;
+      whereClause += ` AND (j.job_name ILIKE $${pIdx} OR j.company_name ILIKE $${pIdx} OR j.client_name ILIKE $${pIdx} OR CAST(j.hh_job_number AS TEXT) ILIKE $${pIdx})`;
       params.push(`%${search}%`);
       pIdx++;
     }
 
+    if (lost_reason) {
+      whereClause += ` AND j.lost_reason = $${pIdx}`;
+      params.push(lost_reason);
+      pIdx++;
+    }
+
+    if (cancellation_tier) {
+      whereClause += ` AND j.cancellation_tier = $${pIdx}`;
+      params.push(cancellation_tier);
+      pIdx++;
+    }
+
+    if (manager) {
+      whereClause += ` AND (j.manager1_person_id = $${pIdx} OR j.manager2_person_id = $${pIdx})`;
+      params.push(manager);
+      pIdx++;
+    }
+
+    // Date range filter — applies to lost_at OR cancelled_at depending on
+    // which is set. COALESCE picks whichever one the job has.
+    if (date_from) {
+      whereClause += ` AND COALESCE(j.cancelled_at, j.lost_at) >= $${pIdx}`;
+      params.push(date_from);
+      pIdx++;
+    }
+    if (date_to) {
+      // Inclusive end-of-day
+      whereClause += ` AND COALESCE(j.cancelled_at, j.lost_at) < ($${pIdx}::date + INTERVAL '1 day')`;
+      params.push(date_to);
+      pIdx++;
+    }
+
+    if (value_min) {
+      whereClause += ` AND j.job_value >= $${pIdx}`;
+      params.push(parseFloat(value_min));
+      pIdx++;
+    }
+    if (value_max) {
+      whereClause += ` AND j.job_value <= $${pIdx}`;
+      params.push(parseFloat(value_max));
+      pIdx++;
+    }
+
+    // Notice period bucket (Cancelled tab only — based on cancellation_notice_days)
+    if (notice_period === 'same_day') {
+      whereClause += ` AND j.cancellation_notice_days = 0`;
+    } else if (notice_period === 'within_week') {
+      whereClause += ` AND j.cancellation_notice_days > 0 AND j.cancellation_notice_days < 7`;
+    } else if (notice_period === 'within_month') {
+      whereClause += ` AND j.cancellation_notice_days >= 7 AND j.cancellation_notice_days < 30`;
+    } else if (notice_period === 'over_month') {
+      whereClause += ` AND j.cancellation_notice_days >= 30`;
+    }
+
+    // Outstanding close-out toggle: show only jobs with at least one open
+    // post_hire requirement (status not in done/cancelled).
+    if (outstanding_closeout === 'true') {
+      whereClause += ` AND EXISTS (
+        SELECT 1 FROM job_requirements jr
+        WHERE jr.job_id = j.id
+          AND jr.phase = 'post_hire'
+          AND jr.status NOT IN ('done', 'cancelled')
+      )`;
+    }
+
+    // Hide jobs that have been re-opened (have reopened_to_job_id set)
+    if (hide_reopened === 'true') {
+      whereClause += ` AND j.reopened_to_job_id IS NULL`;
+    }
+
     let orderBy = 'j.cancelled_at DESC NULLS LAST, j.lost_at DESC NULLS LAST';
-    if (sort === 'date_asc') orderBy = 'COALESCE(j.cancelled_at, j.lost_at) ASC';
+    if (sort === 'date_asc') orderBy = 'COALESCE(j.cancelled_at, j.lost_at) ASC NULLS LAST';
     if (sort === 'value_desc') orderBy = 'j.job_value DESC NULLS LAST';
+    if (sort === 'value_asc') orderBy = 'j.job_value ASC NULLS LAST';
     if (sort === 'name') orderBy = 'j.job_name ASC';
 
     const countResult = await query(
@@ -532,8 +612,10 @@ router.get('/list', async (req: AuthRequest, res: Response) => {
               j.lost_reason, j.lost_detail, j.lost_at,
               j.cancelled_at, j.cancellation_reason, j.cancellation_fee,
               j.cancellation_refund, j.cancellation_tier, j.cancellation_notice_days,
-              j.cancellation_notes, j.reopened_to_job_id
+              j.cancellation_notes, j.reopened_to_job_id,
+              m1p.first_name as manager1_first_name, m1p.last_name as manager1_last_name
        FROM jobs j
+       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
        WHERE ${whereClause}
        ORDER BY ${orderBy}
        LIMIT $${pIdx} OFFSET $${pIdx + 1}`,
