@@ -829,6 +829,60 @@ A `job_excess` row is created exactly once per self-drive slot and enriched thro
 
 Coverage rule used by `all_cleared` and `syncExcessRequirementStatus`: **covered = terminal status (waived/reimbursed/claimed/rolled_over/not_required) OR amount_taken >= amount_required**.
 
+##### Excess multi-claim "nibble" flow + apply-to-invoice (May 2026)
+
+The Phase B claim endpoint was a single-shot operation that flipped status to `fully_claimed` and didn't push to HireHop at all. Damage-charge accounting drifted because OP showed claimed-£X but HH still held the full deposit. Rewritten to a **multi-claim apply-to-invoice model** where each claim consumes part of the held deposit by paying a HireHop invoice on the current job, and reimbursement of the remainder is a separate later step.
+
+**The model.** A held deposit (vanilla on the same job, or rolled-over from a previous job) sits with an available balance = `taken − claimed − reimbursed`. Each claim is one application of part of that balance to a chosen HH invoice. Multiple claims allowed against the same deposit, each potentially against a different invoice with a different Xero nominal:
+
+```
+£1,200 deposit collected
+  ↓ Claim £120 → invoice OT-INV-1234 (Vehicle damage nominal)   → balance £1,080
+  ↓ Claim £350 → invoice OT-INV-1235 (Premium Splitter hire)    → balance £730
+  ↓ Claim £85  → invoice OT-INV-1236 (Cleaning recharge)        → balance £645
+  ↓ Reimburse £645 to client                                     → balance £0, status: reimbursed
+```
+
+**HireHop side.** Each claim posts a deposit-to-invoice **payment application** via `billing_payments_save.php` with `OWNER=<invoice_id>`, `deposit=<hh_deposit_id>`, `paid=<amount>`, `bank=169` (metadata only — no real cash moves; the deposit is already in the bank). Then triggers Xero sync via `accounting/tasks.php` with `hh_task: 'post_payment'`. The invoice's line items carry the `ACC_NOMINAL_ID` so claims against different categories all route correctly without OP needing to know about nominals — staff create the invoice manually in HH with whatever nominal is appropriate (Vehicle damage 184, Misc income, Premium Splitter hire 185, etc.) and pick it from the OP picker.
+
+**Cross-job linkage.** For rolled-over excess: the deposit lives on the *original* hire's HH job, but the new £120 damage invoice gets created on the *current* hire's HH job. The application then pays Job B's invoice from Job A's deposit. HH supports this natively via the `OWNER` (invoice on B) + `deposit` (deposit on A) pairing.
+
+**Status semantics.**
+| Event | Resulting status |
+|---|---|
+| Claim partial, balance > 0 | `taken` (status doesn't downgrade) |
+| Claim consumes full deposit, no reimbursement yet | `fully_claimed` |
+| Reimburse, balance > 0 after | `partially_reimbursed` |
+| Reimburse, balance = 0 (claims + reimbursed = taken) | `reimbursed` |
+
+`isPartial` on reimburse now factors in claims: `(reimbursed + amount + claimed) < taken`. Without this a £40-claim + £60-reimburse on £100 incorrectly stayed at `partially_reimbursed` even though fully resolved.
+
+**Loud-fail policy** (matches reimburse). For HH-linked records: missing `hh_deposit_id` → 422 (linkage broken, point staff at the link-deposit action), missing `invoice_id` → 400, claim > available → 400, HH application reject → 502. OP record stays untouched on any HH-side failure. OP-only records (no `hirehop_job_id`) accept claims locally and surface `op_only: true` in the response.
+
+**New endpoints.**
+- `GET /api/excess/:id/outstanding-invoices` — fresh HH `billing_list.php` fetch (no cache), returns kind:1 invoice rows with `owing > 0` for the picker.
+- `GET /api/excess/:id/available-rollover` — walks the client's excess history for a previous record still holding cash (status `taken` / `partially_paid` / `rolled_over` with positive `taken − claimed − reimbursed`, has `hh_deposit_id`), excluding records that have been chained forward via the `NOT EXISTS` guard so we never double-allocate. Returns `{ available, amount_available, source_hh_job, source_hh_deposit_id, suggested_apply_amount }`. Drives the "Apply Rolled Over Excess" UX (see below).
+
+**Rollover UX — incoming vs outgoing sides.** The Manage modal exposes both directions of the rollover lifecycle as distinct top-level actions, instead of forcing staff through "Record Payment → method = Rolled Over from Previous Hire" (which was misleading — no money moves):
+- **"Roll Over to Next Hire"** (outgoing) — on the OLD job's record (status `taken`/`partially_paid`/`pre_auth`, `amountHeld > 0`). Marks this excess as held on account for the client's next hire.
+- **"Apply Rolled Over Excess"** (incoming) — on the NEW job's record when `/available-rollover` returns `available: true`. Single-purpose form: shows source hire number + available amount, pre-fills `min(required, available)`, one Confirm. Posts to existing `/payment` endpoint with `method='rolled_over'`. Backend's existing rollover linkage (copy `hh_deposit_id` forward, flip previous to `rolled_over`, post HH note) handles the rest.
+
+The legacy "Record Payment → Rolled Over from Previous Hire" dropdown option is preserved as a fallback for edge cases where auto-detect can't find the source.
+
+**HH job note on rollover.** When a payment with `method='rolled_over'` is recorded, OP drops a note on the new HH job: *"£X excess held against deposit #Y on job #Z — rolled over from previous hire."* Best-effort; logged warning if HH note posting fails but doesn't block the rollover. Gives HireHop staff visibility into the linkage without having to dig through OP.
+
+**Payment portal rollover linkage exposure.** `/api/money/:jobId/excess-info` exposes per-driver `is_rolled_over: bool` and `rolled_over_from_hh_job: number | null` (resolves via LATERAL join on `hh_deposit_id` chain, picks the earliest non-rolled-over record). Lets the portal display: *"Your £1,200 excess is already held from your previous hire #15676 — no further excess payment needed."* Portal-side display change is for the portal Claude.
+
+**Reimburse method default sanitisation (frontend).** ExcessPaymentModal's reimburse default was reading `excess.payment_method`, which on rolled-over records is `'rolled_over'` — not in `REIMBURSE_METHODS`. The browser visually fell back to "Worldpay" but kept the underlying state at `'rolled_over'`, and clicking the same displayed option didn't fire onChange (HTML quirk), so submissions silently rejected at the Zod schema. Now defaults to `wise_bacs` when `payment_method` isn't a valid reimburse destination.
+
+**Reimburse loud-fail.** The reimburse endpoint also went through the same loud-fail rewrite: find HH deposit first (priority `excess.hh_deposit_id` → `job_payments` → HH billing keyword search), HH push first, OP UPDATE only on success. 422 on missing linkage (with rolled-over-specific copy pointing at the link-deposit action), 502 on HH reject. OP record left untouched on failure.
+
+**Deferred from this round.**
+- Auto-creating invoices in HH from OP (staff create manually for now — they prefer this control anyway).
+- Splitting one claim across multiple invoices in a single click (one-claim-per-invoice in the picker is fine until usage proves otherwise).
+- Moving deposits between HH jobs (HH doesn't support this; OP linkage handles the conceptual move).
+- `/money/excess` summary cards now reflect current filter on the All Records tab — captured separately, also shipped this round.
+
 ##### Phase F — Staff Card Payments (future)
 Allow staff to take card payments directly from the Money tab, rather than walking to the card terminal.
 - [ ] Stripe integration in OP (PaymentIntent creation from backend)
