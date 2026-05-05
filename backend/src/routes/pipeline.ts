@@ -538,6 +538,9 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updateParams.push(confirmed_method || null);
       pIdx++;
       updates.push(`confirmed_at = NOW()`);
+      // Clear chase date — once confirmed, chasing belongs to the reminders
+      // system, not the enquiry chase pipeline.
+      updates.push(`next_chase_date = NULL`);
     } else if (pipeline_status === 'lost') {
       updates.push(`lost_reason = $${pIdx}`);
       updateParams.push(lost_reason || null);

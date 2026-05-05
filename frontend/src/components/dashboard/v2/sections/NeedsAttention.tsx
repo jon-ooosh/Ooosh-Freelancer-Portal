@@ -196,22 +196,35 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     })),
     viewAllHref: '/money/excess',
   };
-  const chases: NABucket = {
-    key: 'chases',
-    title: 'Chases Due',
+  // Client intros to arrange — transport quotes in next 7 days where the
+  // intro pill is still 'todo' or 'working_on_it'. Replaces the old
+  // "Chases Due" bucket: chases now live solely on the stat-card row, and
+  // post-confirmation follow-ups belong to the reminders system.
+  const introLabel: Record<string, string> = {
+    todo: 'to do',
+    working_on_it: 'working on it',
+  };
+  const clientIntros: NABucket = {
+    key: 'client_intros',
+    title: 'Client Intros',
     accent: 'blue',
-    count: na.chases_due?.length || 0,
-    items: (na.chases_due || []).map((c) => {
-      const due = new Date(c.next_chase_date);
-      const days = Math.floor((Date.now() - due.getTime()) / 86400000);
+    count: na.client_intros?.length || 0,
+    items: (na.client_intros || []).map((q) => {
+      const date = new Date(q.job_date);
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const days = Math.round((date.getTime() - today.getTime()) / 86400000);
+      const dateLabel = days <= 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days}d`;
+      const who = q.client_name || q.company_name || 'Unknown';
+      const where = q.venue_name || q.job_name || 'Untitled';
       return {
-        id: c.id,
-        label: `${c.client_name || c.company_name || 'Unknown'} — ${c.job_name || 'Untitled'}`.slice(0, 80),
-        age: days >= 0 ? `${days}d ago` : `in ${-days}d`,
-        href: `/jobs/${c.id}`,
+        id: q.quote_id,
+        label: `${who} — ${where}`.slice(0, 80),
+        age: dateLabel,
+        sub: introLabel[q.client_introduction] || q.client_introduction,
+        href: q.job_id ? `/jobs/${q.job_id}` : '/operations/transport',
       };
     }),
-    viewAllHref: '/pipeline?chasesDue=1',
+    viewAllHref: '/operations/transport',
   };
 
   const fleetItems: NACardItem[] = [];
@@ -244,7 +257,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // ones.
   const allClear = overdueTotal === 0;
   const overdueBuckets = [returns, departures, backline, transport];
-  const secondaryBuckets = [referrals, excess, chases, fleetBucket];
+  const secondaryBuckets = [referrals, excess, clientIntros, fleetBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (
