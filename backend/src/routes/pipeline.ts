@@ -42,6 +42,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const {
       status, likelihood, manager, chase_status, has_hh_job,
       date_from, date_to, search,
+      service_type,            // Comma-separated requirement_type values (vehicle, backline, rehearsal)
+      value_min, value_max,    // Job value bucket bounds (£)
+      chase_count_min,         // e.g. "3" for "chased 3+ times"
+      chase_count_max,         // e.g. "0" for "never chased"
       page = '1', limit = '50', sort = 'next_chase_date', order = 'asc',
     } = req.query;
 
@@ -96,6 +100,45 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     if (date_to) {
       conditions.push(`j.job_end <= $${paramIndex}`);
       params.push(date_to);
+      paramIndex++;
+    }
+
+    // Service type filter — checks job_requirements for matching requirement_type.
+    // Comma-separated; matches if the job has ANY of the listed requirement types.
+    if (service_type) {
+      const types = (service_type as string).split(',');
+      conditions.push(`EXISTS (
+        SELECT 1 FROM job_requirements jr
+        WHERE jr.job_id = j.id
+          AND jr.phase = 'pre_hire'
+          AND jr.status != 'cancelled'
+          AND jr.requirement_type = ANY($${paramIndex})
+      )`);
+      params.push(types);
+      paramIndex++;
+    }
+
+    // Value bucket filter
+    if (value_min) {
+      conditions.push(`j.job_value >= $${paramIndex}`);
+      params.push(parseFloat(value_min as string));
+      paramIndex++;
+    }
+    if (value_max) {
+      conditions.push(`j.job_value <= $${paramIndex}`);
+      params.push(parseFloat(value_max as string));
+      paramIndex++;
+    }
+
+    // Chase count filter
+    if (chase_count_min) {
+      conditions.push(`COALESCE(j.chase_count, 0) >= $${paramIndex}`);
+      params.push(parseInt(chase_count_min as string));
+      paramIndex++;
+    }
+    if (chase_count_max) {
+      conditions.push(`COALESCE(j.chase_count, 0) <= $${paramIndex}`);
+      params.push(parseInt(chase_count_max as string));
       paramIndex++;
     }
 
@@ -209,6 +252,31 @@ router.get('/stats', async (_req: AuthRequest, res: Response) => {
     });
   } catch (error) {
     console.error('Pipeline stats error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── Distinct managers (for filter dropdown) ────────────────────────────────
+//
+// Returns every person currently referenced as manager1 or manager2 on any
+// non-deleted job. Used by the Pipeline + Lost/Cancelled filter dropdowns to
+// avoid loading the full /users or /people lists.
+
+router.get('/managers', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(`
+      SELECT DISTINCT p.id, p.first_name, p.last_name
+      FROM people p
+      WHERE p.id IN (
+        SELECT manager1_person_id FROM jobs WHERE is_deleted = false AND manager1_person_id IS NOT NULL
+        UNION
+        SELECT manager2_person_id FROM jobs WHERE is_deleted = false AND manager2_person_id IS NOT NULL
+      )
+      ORDER BY p.first_name, p.last_name
+    `);
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('Pipeline managers error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -563,6 +631,20 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       // Clear chase date — cancelled jobs don't need chasing
       updates.push(`next_chase_date = NULL`);
       updates.push(`cancelled_at = NOW()`);
+    } else if (pipeline_status === 'provisional') {
+      // Auto-bump chase: moving INTO provisional from a pre-confirmed enquiry
+      // stage signals "we have movement, expect a deposit/decision soon".
+      // Bump next_chase_date forward by chase_interval_days — but only if the
+      // current chase date is null/today/past. A future-dated chase is a
+      // deliberate user decision and must not be shortened.
+      const enquiryStages = ['new_enquiry', 'quoting', 'paused'];
+      if (enquiryStages.includes(fromStatus)) {
+        updates.push(`next_chase_date = CASE
+          WHEN next_chase_date IS NULL OR next_chase_date <= CURRENT_DATE
+            THEN (CURRENT_DATE + (COALESCE(chase_interval_days, 5) || ' days')::interval)::date
+          ELSE next_chase_date
+        END`);
+      }
     }
 
     // Clear hold fields when moving out of paused
