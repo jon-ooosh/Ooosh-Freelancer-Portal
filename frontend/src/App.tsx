@@ -26,6 +26,9 @@ import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import LostCancelledPage from './pages/LostCancelledPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
+import WarehousePinPage from './pages/WarehousePinPage';
+import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
+import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
 import { BookOutPage as StaffBookOutPage } from './modules/vehicles/pages/BookOutPage';
@@ -112,6 +115,10 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       {/* Public freelancer book-out entry — bypasses ProtectedRoute */}
       <Route path="/vehicles/book-out" element={<BookOutEntry />} />
+      {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
+      <Route path="/warehouse" element={<WarehousePinPage />} />
+      <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />
+      <Route path="/warehouse/collections/:jobId" element={<WarehouseCollectionDetailPage />} />
       <Route
         path="/*"
         element={

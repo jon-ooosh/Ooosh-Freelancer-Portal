@@ -31,6 +31,7 @@ import ve103bRouter from './ve103b';
 import backlineRouter from './backline';
 import cancellationsRouter from './cancellations';
 import issuesRouter from './issues';
+import warehouseRouter from './warehouse';
 
 const router = Router();
 
@@ -63,6 +64,7 @@ router.use('/issues', issuesRouter);
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
+router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
 router.use('/data-cleanup', dataCleanupRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
 router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
