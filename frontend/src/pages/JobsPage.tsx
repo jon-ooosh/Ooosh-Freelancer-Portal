@@ -120,23 +120,26 @@ function isInReturnWindow(job: Job, todayStr: string): boolean {
 }
 
 function isGoingOutToday(job: Job, todayStr: string): boolean {
-  // Dispatched+ jobs are already out — they belong in "Out Now", not "Going Out"
-  if (job.status >= 4) return false;
+  // OP says it's actually on hire — belongs in "Out Now", not "Going Out".
+  if (job.pipeline_status === 'dispatched') return false;
+  // HH already past dispatch (returning legs) — also not "Going Out".
+  if (job.status >= 6) return false;
   const jobDate = (job.job_date || '').split('T')[0];
   const outDate = (job.out_date || '').split('T')[0];
   return jobDate === todayStr || outDate === todayStr;
 }
 
-function isCurrentlyOut(job: Job, todayStr: string): boolean {
-  // HH status 4-6 = actively dispatched
-  if (job.status >= 4 && job.status <= 6) return true;
-
-  const jobDate = (job.job_date || '').split('T')[0];
-  const jobEnd = (job.job_end || job.job_date || '').split('T')[0];
-  if (!jobDate) return false;
-
-  // Date range includes today
-  return jobDate < todayStr && jobEnd >= todayStr;
+function isCurrentlyOut(_job: Job, _todayStr: string): boolean {
+  // "Out Now" is OP-driven, not HH-driven. HH flips to status 5 (Dispatched)
+  // the moment items are barcode-checked-out in the warehouse, but at that
+  // point the van is prepped and ready, not physically on hire. The job only
+  // counts as Out Now when staff explicitly Mark as On Hire (or a book-out
+  // confirmation lands on the warehouse tablet) — both write
+  // pipeline_status='dispatched'. HH status 6/7 (returning legs) also imply
+  // it left and is on its way back.
+  if (_job.pipeline_status === 'dispatched') return true;
+  if (_job.status === 6 || _job.status === 7) return true;
+  return false;
 }
 
 type HappeningCategory = 'going_out' | 'returning' | 'currently_out';
