@@ -1039,6 +1039,160 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  // ── Out-of-hours return ───────────────────────────────────────────────
+  // Sent at book-out (or ad-hoc later) when the driver has indicated they
+  // intend to return the van outside our usual office hours. Includes the
+  // gate code, yard address/photos, and a link to the parking-confirmation
+  // form (which dual-purposes as both "tell us where you parked it if the
+  // yard is full" and as the receipt of return).
+
+  ooh_return_info: {
+    variant: 'client',
+    preheader: 'Returning your van out of hours — gate code and instructions inside',
+    subject: 'Out-of-hours van return — {{vehicleReg}} ({{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Returning your van overnight</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{driverName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Hope you have a great trip in <strong>{{vehicleReg}}</strong>.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        You've told us you may be returning <strong>outside our office hours</strong> (we close at 5pm
+        and reopen at 9am). Please follow the instructions below — you may want to pin this email
+        or pop a reminder in your calendar. We'll also send you a reminder the day before, with a
+        one-tap link to confirm where you've parked.
+      </p>
+
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Yard gate code</p>
+            <p style="margin:0;font-size:28px;color:#1e293b;font-weight:700;letter-spacing:2px;font-family:monospace;">{{gateCode}}</p>
+            <p style="margin:8px 0 0;font-size:13px;color:#64748b;">{{yardAddressLine}}</p>
+            {{yardMapsLine}}
+            {{what3wordsLine}}
+          </td>
+        </tr>
+      </table>
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">When you arrive</h3>
+      <ul style="margin:0 0 16px;padding-left:20px;font-size:14px;color:#334155;line-height:1.7;">
+        <li>Let yourself into the yard — line up the padlock numbers and pull the black knob to open.</li>
+        <li>Drive as far in to the yard as possible and as far over to the left as you can. Leave room for other vehicles to enter behind you.</li>
+        <li>Double-check you haven't left anything in the van.</li>
+        <li>Close all windows / sunroofs and lock all doors.</li>
+        <li>Close the gates behind you and refit the padlock through the gate chain. Roll the numbers to scramble the code.</li>
+      </ul>
+
+      {{keydropBlock}}
+
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">If the yard is full</h3>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        Please <strong>do not</strong> park outside our gates, in front of our neighbour's gates, or
+        on any double-yellow lines. Parking illegally or inconsiderately may incur additional costs.
+      </p>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        The nearest safe legal parking is usually the seafront. {{overflowLine}}
+      </p>
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>Wherever you park, please tell us where</strong> using the link below — it pre-fills
+        the van's GPS location, you just confirm or drag the marker to where you actually parked.
+      </p>
+
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td align="center" style="padding:8px;">
+            <a href="{{parkingFormUrl}}" style="display:inline-block;padding:14px 28px;background-color:#7B5EA7;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;font-size:15px;">
+              Confirm parking location →
+            </a>
+          </td>
+        </tr>
+      </table>
+
+      <p style="margin:0 0 12px;font-size:13px;color:#64748b;line-height:1.6;">
+        Remember: the out-of-hours return facility is offered as a courtesy by pre-arrangement.
+        You remain legally responsible for the vehicle until we open and check it in
+        (usually the next working day).
+      </p>
+    `,
+  },
+
+  ooh_return_reminder: {
+    variant: 'client',
+    preheader: 'Reminder: returning your van overnight tomorrow',
+    subject: 'Reminder: out-of-hours van return tomorrow — {{vehicleReg}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Returning your van tomorrow</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{driverName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Quick reminder — you're due to return <strong>{{vehicleReg}}</strong> overnight tonight or
+        tomorrow morning, before 9am.
+      </p>
+
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:14px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Gate code</p>
+            <p style="margin:0;font-size:24px;color:#1e293b;font-weight:700;letter-spacing:2px;font-family:monospace;">{{gateCode}}</p>
+            <p style="margin:8px 0 0;font-size:13px;color:#64748b;">{{yardAddressLine}}</p>
+          </td>
+        </tr>
+      </table>
+
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        When you've parked up, please tap the button below and confirm where you left the van.
+        It pre-fills from GPS — you just check the marker is right and submit.
+      </p>
+
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td align="center" style="padding:8px;">
+            <a href="{{parkingFormUrl}}" style="display:inline-block;padding:14px 28px;background-color:#7B5EA7;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;font-size:15px;">
+              Confirm parking location →
+            </a>
+          </td>
+        </tr>
+      </table>
+
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
+        Full instructions are in the email we sent earlier in the week. If you've lost it, just reply and we'll resend.
+      </p>
+    `,
+  },
+
+  ooh_return_received_internal: {
+    variant: 'internal',
+    subject: 'OOH return logged: {{vehicleReg}} — job #{{jobNumber}}',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Out-of-hours return logged</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        <strong>{{driverName}}</strong> has just confirmed where they parked
+        <strong>{{vehicleReg}}</strong> for job <strong>#{{jobNumber}}</strong>.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Submitted at</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;font-weight:600;">{{submittedAt}}</p>
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Location</p>
+            <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">
+              <a href="{{mapsLink}}" style="color:#7B5EA7;text-decoration:none;">{{coordsLine}}</a>
+            </p>
+            {{notesBlock}}
+            {{photosBlock}}
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:14px;color:#334155;">
+        <a href="{{jobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in Ooosh →</a>
+      </p>
+    `,
+  },
+
   // ── Generic file resend ───────────────────────────────────────────────
   // Used by the Files tab "Email" action — staff sends an arbitrary
   // attachment (delivery note, hire agreement, condition report, jpg

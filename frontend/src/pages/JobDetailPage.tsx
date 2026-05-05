@@ -8,6 +8,7 @@ import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
+import OohReturnModal from '../components/OohReturnModal';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
@@ -265,6 +266,10 @@ interface VehicleAssignment {
    * inferred link gets cemented retroactively.
    */
   effective_vehicle_id?: string | null;
+  /** Out-of-hours return tracking (per-assignment) */
+  return_overnight?: boolean | null;
+  ooh_info_sent_at?: string | null;
+  ooh_returned_at?: string | null;
 }
 
 interface DispatchCheckResult {
@@ -1064,6 +1069,7 @@ export default function JobDetailPage() {
   const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
   const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | undefined>(undefined);
   const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
+  const [oohModalAssignmentId, setOohModalAssignmentId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
   // Cross-job allocation conflicts — van also booked on another job over
@@ -3467,6 +3473,27 @@ export default function JobDetailPage() {
                         <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
                           {typeLabels[a.assignment_type] || a.assignment_type}
                         </span>
+                        {/* OOH return pill — self-drive only */}
+                        {a.assignment_type === 'self_drive' && (
+                          <button
+                            type="button"
+                            onClick={() => setOohModalAssignmentId(a.id)}
+                            title="Out-of-hours return"
+                            className={`text-xs px-2 py-0.5 rounded-full font-medium hover:opacity-80 ${
+                              a.return_overnight === true
+                                ? 'bg-indigo-100 text-indigo-700'
+                                : a.return_overnight === false
+                                ? 'bg-gray-100 text-gray-500'
+                                : 'bg-gray-50 text-gray-400 border border-dashed border-gray-300'
+                            }`}
+                          >
+                            {a.return_overnight === true
+                              ? `🌙 OOH: Yes${a.ooh_returned_at ? ' · returned' : a.ooh_info_sent_at ? ' · sent' : ''}`
+                              : a.return_overnight === false
+                              ? '🌙 OOH: No'
+                              : '🌙 OOH: —'}
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -4362,6 +4389,28 @@ export default function JobDetailPage() {
           onUpdated={() => { loadVehicleAssignments(); }}
         />
       )}
+
+      {/* Out-of-Hours Return Modal */}
+      {oohModalAssignmentId && (() => {
+        const assignment = vehicleAssignments.find(v => v.id === oohModalAssignmentId);
+        if (!assignment) return null;
+        // Sibling drivers on the same van — for showing "will email X, Y" preview.
+        const siblings = vehicleAssignments.filter(
+          v => v.vehicle_id && v.vehicle_id === assignment.vehicle_id && v.driver_email
+        );
+        const driverEmails = siblings.map(v => v.driver_email!).filter(Boolean);
+        return (
+          <OohReturnModal
+            assignmentId={assignment.id}
+            vehicleReg={assignment.vehicle_reg}
+            current={assignment.return_overnight ?? null}
+            infoSentAt={assignment.ooh_info_sent_at ?? null}
+            driverEmails={driverEmails}
+            onClose={() => setOohModalAssignmentId(null)}
+            onSaved={() => { loadVehicleAssignments(); }}
+          />
+        );
+      })()}
 
       <ChaseModal
         isOpen={showChaseModal}

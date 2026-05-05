@@ -73,7 +73,13 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         SELECT j.id, j.hh_job_number, j.job_name, j.status, j.pipeline_status,
                j.client_name, j.company_name, j.venue_name,
                j.job_date, j.job_end, j.out_date, j.return_date,
-               j.out_time, j.return_time, j.end_time
+               j.out_time, j.return_time, j.end_time,
+               EXISTS (
+                 SELECT 1 FROM vehicle_hire_assignments vha
+                 WHERE vha.job_id = j.id
+                   AND vha.return_overnight = TRUE
+                   AND vha.status IN ('booked_out', 'active')
+               ) AS has_ooh_return
         FROM jobs j
         WHERE j.is_deleted = false
           AND j.status IN (2, 3, 4, 5, 6)

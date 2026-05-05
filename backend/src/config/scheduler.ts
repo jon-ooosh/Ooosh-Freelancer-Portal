@@ -8,6 +8,7 @@ import { query } from './database';
 import { generateBVRLACSV } from '../routes/ve103b';
 import emailService from '../services/email-service';
 import { getFrontendUrl } from './app-urls';
+import { sendOohReminderEmails } from '../services/ooh-return';
 
 /**
  * Starts the backup and sync schedulers.
@@ -255,6 +256,21 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Stale enquiry auto-lose scheduled daily at 10:00');
+
+  // ── OOH Return Reminder ─────────────────────────────────────────────
+  // Daily at 10:00 — send the day-before reminder for any vehicle with
+  // return_overnight=true and hire_end=tomorrow.
+  cron.schedule('0 10 * * *', async () => {
+    try {
+      const summary = await sendOohReminderEmails();
+      if (summary.sent > 0) {
+        console.log(`Scheduler: OOH reminders sent: ${summary.sent} (skipped ${summary.skipped})`);
+      }
+    } catch (err) {
+      console.error('Scheduler: OOH reminder run failed:', err);
+    }
+  });
+  console.log('Scheduler: OOH return reminders scheduled daily at 10:00');
 
   // ── Close-Out Requirement Chase Scanner ─────────────────────────────
   // Daily at 09:30 — check for overdue post-hire requirements and create notifications

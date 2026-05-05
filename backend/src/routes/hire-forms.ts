@@ -1392,6 +1392,21 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
           });
         });
       }
+
+      // Out-of-hours return: if the driver flagged Yes during book-out, fire
+      // the info email (per van — function dedupes via ooh_info_sent_at).
+      // Non-blocking, runs after response.
+      if (updated.return_overnight === true && updated.job_id) {
+        const oohJobId: string = updated.job_id;
+        setImmediate(async () => {
+          try {
+            const { sendOohInfoEmailsForJob } = await import('../services/ooh-return');
+            await sendOohInfoEmailsForJob(oohJobId);
+          } catch (err) {
+            console.error(`[hire-forms] OOH info email send failed for job ${oohJobId}:`, err);
+          }
+        });
+      }
     }
 
     res.json({ data: updated });

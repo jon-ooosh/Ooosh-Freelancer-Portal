@@ -106,6 +106,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '069_chase_no_alert_and_org_dismissals.sql',
         '070_clear_stale_chase_dates.sql',
         '071_unwind_chasing_status.sql',
+        '072_out_of_hours_returns.sql',
       ];
 
       for (const migration of migrations) {
