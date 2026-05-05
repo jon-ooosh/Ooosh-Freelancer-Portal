@@ -78,137 +78,67 @@ export function startScheduler() {
     console.log('Scheduler: HireHop job sync scheduled every 30 minutes');
   }
 
-  // ── Chase Auto-Mover ──────────────────────────────────────────────────
-  // Every 15 minutes, move jobs with overdue chase dates to 'chasing' status
-  cron.schedule('*/15 * * * *', async () => {
+  // ── Chase Alert Scanner ───────────────────────────────────────────────
+  // Daily at 08:00, fire bell/email alerts for jobs that have crossed their
+  // next_chase_date AND have an explicit chase_alert_user_id.
+  //
+  // No status writes — 'chasing' is a derived view (next_chase_date + status
+  // pre-confirmed), the Kanban surfaces these jobs in the Chasing column on
+  // its own. Default behaviour for chase dates is silent: cards just appear
+  // in the Chasing pile. Bell/email alerts only fire when staff explicitly
+  // opted in via the ChaseModal (chase_alert_user_id set, delivery !=
+  // 'none'). Dedup by "no chase_alert notification created in the last 24h".
+  cron.schedule('0 8 * * *', async () => {
     try {
-      // Find jobs where next_chase_date has arrived and status is an active pipeline stage
-      // (not already chasing, confirmed, or lost)
       const result = await query(
-        `UPDATE jobs
-         SET pipeline_status = 'chasing',
-             pipeline_status_changed_at = NOW()
-         WHERE next_chase_date <= CURRENT_DATE
-           AND next_chase_date IS NOT NULL
-           AND pipeline_status IN ('new_enquiry', 'quoting', 'provisional', 'paused')
-         RETURNING id, job_name, hh_job_number, next_chase_date,
-                   client_name, chase_alert_user_id, chase_alert_delivery`
+        `SELECT j.id, j.job_name, j.hh_job_number, j.client_name,
+                j.chase_alert_user_id, j.chase_alert_delivery
+         FROM jobs j
+         WHERE j.is_deleted = false
+           AND j.next_chase_date IS NOT NULL
+           AND j.next_chase_date <= CURRENT_DATE
+           AND j.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
+           AND j.chase_alert_user_id IS NOT NULL
+           AND COALESCE(j.chase_alert_delivery, 'bell') != 'none'
+           AND NOT EXISTS (
+             SELECT 1 FROM notifications n
+             WHERE n.entity_type = 'jobs'
+               AND n.entity_id = j.id
+               AND n.type = 'chase_alert'
+               AND n.created_at >= NOW() - INTERVAL '24 hours'
+           )`
       );
 
-      if (result.rows.length > 0) {
-        console.log(`Scheduler: Chase auto-mover moved ${result.rows.length} job(s) to chasing`);
+      if (result.rows.length === 0) return;
+      console.log(`Scheduler: Chase alert scanner — ${result.rows.length} alert(s) to fire`);
 
-        // Get admin/manager users for notifications
-        const admins = await query(
-          `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
-        );
-        const adminIds = admins.rows.map((r: Record<string, unknown>) => r.id as string);
-
-        // Log a status_transition interaction + create inbox notification for each moved job
-        for (const job of result.rows) {
-          try {
-            await query(
-              `INSERT INTO interactions (type, content, job_id)
-               VALUES ('status_transition', $1, $2)`,
-              [
-                `Auto-moved to Chasing — chase date ${job.next_chase_date} reached`,
-                job.id,
-              ]
-            );
-
-            // 'none' delivery preference: silent move into Chasing column,
-            // no bell, no email. The Chasing pile is the queue; staff pick
-            // from it visually rather than being pinged.
-            if (job.chase_alert_delivery === 'none') {
-              continue;
-            }
-
-            // Chase alert recipient + delivery preference: prefer what's
-            // persisted on the job itself (set via the ChaseModal). Fall back
-            // to the most-recent interaction's chase_alert_user_id if nothing
-            // is stored on the job (legacy data), then to admins as last resort.
-            let targetUsers: string[] = [];
-            let isAdminFallback = false;
-            if (job.chase_alert_user_id) {
-              targetUsers = [job.chase_alert_user_id as string];
-            } else {
-              const lastChase = await query(
-                `SELECT chase_alert_user_id FROM interactions
-                 WHERE job_id = $1 AND type = 'chase' AND chase_alert_user_id IS NOT NULL
-                 ORDER BY created_at DESC LIMIT 1`,
-                [job.id]
-              );
-              if (lastChase.rows.length > 0 && lastChase.rows[0].chase_alert_user_id) {
-                targetUsers = [lastChase.rows[0].chase_alert_user_id as string];
-              } else {
-                // Unassigned chase: spray admin/manager bells AND send an email
-                // copy to info@ so the shared inbox has a paper trail.
-                targetUsers = adminIds;
-                isAdminFallback = true;
-              }
-            }
-
-            // Delivery preference → notification priority. 'bell_email' becomes
-            // 'urgent' so the escalation scheduler emails it immediately.
-            // 'bell' (or unspecified) is 'normal' — bell shows, email follows
-            // after 4h if still unread per the user's notification prefs.
-            const priority = job.chase_alert_delivery === 'bell_email' ? 'urgent' : 'normal';
-
-            const jobName = job.job_name || `Job ${job.hh_job_number || ''}`;
-            for (const userId of targetUsers) {
-              try {
-                await query(
-                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-                   VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, $6)`,
-                  [
-                    userId,
-                    `Chase due: ${jobName}`,
-                    `Chase date reached for ${jobName} — needs follow-up`,
-                    job.id,
-                    `/jobs/${job.id}?tab=timeline`,
-                    priority,
-                  ]
-                );
-              } catch { /* dedup or other error — non-critical */ }
-            }
-
-            // If nobody was explicitly assigned, also email info@ so the
-            // shared inbox sees it alongside the admin/manager bells.
-            if (isAdminFallback) {
-              try {
-                const lastChased = await query(
-                  `SELECT MAX(created_at) AS last_chased_at
-                   FROM interactions
-                   WHERE job_id = $1 AND type = 'chase'`,
-                  [job.id]
-                );
-                const lastChaseDate = lastChased.rows[0]?.last_chased_at
-                  ? new Date(lastChased.rows[0].last_chased_at as string).toISOString().split('T')[0]
-                  : '—';
-                await emailService.send('chase_reminder', {
-                  to: 'info@oooshtours.co.uk',
-                  variables: {
-                    jobName,
-                    jobNumber: job.hh_job_number ? String(job.hh_job_number) : '—',
-                    clientName: job.client_name || '—',
-                    lastChaseDate,
-                    jobUrl: `${getFrontendUrl()}/jobs/${job.id}?tab=timeline`,
-                  },
-                });
-              } catch (err) {
-                console.error('Scheduler: info@ chase email failed:', err);
-              }
-            }
-          } catch {
-            // Non-critical — don't block other jobs
-          }
+      for (const job of result.rows) {
+        try {
+          // 'bell_email' → 'urgent' for immediate email escalation; 'bell' →
+          // 'normal' (bell now, email after 4h if still unread per user prefs).
+          const priority = job.chase_alert_delivery === 'bell_email' ? 'urgent' : 'normal';
+          const jobName = job.job_name || `Job ${job.hh_job_number || ''}`;
+          await query(
+            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
+             VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, $6)`,
+            [
+              job.chase_alert_user_id,
+              `Chase due: ${jobName}`,
+              `Chase date reached for ${jobName} — needs follow-up`,
+              job.id,
+              `/jobs/${job.id}?tab=timeline`,
+              priority,
+            ]
+          );
+        } catch {
+          // Non-critical — don't block other alerts
         }
       }
     } catch (err) {
-      console.error('Scheduler: Chase auto-mover failed:', err);
+      console.error('Scheduler: Chase alert scanner failed:', err);
     }
   });
-  console.log('Scheduler: Chase auto-mover scheduled every 15 minutes');
+  console.log('Scheduler: Chase alert scanner scheduled daily at 08:00');
 
   // ── Vehicle Compliance Check ────────────────────────────────────────
   // Daily at 08:00 — check MOT, Tax, Insurance, TFL due dates
@@ -291,7 +221,7 @@ export function startScheduler() {
              updated_at = NOW()
          WHERE job_date IS NOT NULL
            AND job_date::date < CURRENT_DATE
-           AND pipeline_status IN ('new_enquiry', 'quoting', 'chasing', 'paused', 'provisional')
+           AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')
            AND status < 2
            AND is_deleted = false
          RETURNING id, job_name, hh_job_number, pipeline_status, job_date`
