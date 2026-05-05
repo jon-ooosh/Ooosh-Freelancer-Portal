@@ -2433,7 +2433,6 @@ Key fields returned per item on a job:
 |---|---|---|---|
 | `new_enquiry` | 0 | Enquiry | New enquiry created |
 | `quoting` | 0 | Enquiry | Quote being prepared (HH stays Enquiry) |
-| `chasing` | 0 | Enquiry | Following up (HH stays Enquiry) |
 | `paused` | 0 | Enquiry | Paused enquiry (HH stays Enquiry) |
 | `provisional` | 1 | Provisional | Awaiting deposit / held pending |
 | `confirmed` | 2 | Booked | Deposit/full payment received |
@@ -2455,6 +2454,62 @@ Body: { hirehop_job_id, new_status, trigger, source, metadata }
 ```
 
 **HireHop write-back:** Uses `POST status_save.php` with `no_webhook=1` to prevent loops.
+
+## Pipeline Chase Model (May 2026)
+
+**Read this before touching anything chase-related.** Re-introducing the bug we killed in May 2026 is easy if you don't know the rules.
+
+### "Chasing" is a derived view, not a stored status
+
+`pipeline_status` NEVER holds the value `'chasing'`. The Kanban's "Chasing" column is rendered from a server-derived flag `is_chasing` on each Job, computed as:
+
+```
+is_chasing = (next_chase_date <= CURRENT_DATE
+              AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional'))
+```
+
+The legacy auto-mover scheduler is gone. Setting a future `next_chase_date` is enough to drop a card out of the Chasing pile on the next fetch — no status writes, no scheduler, no cleanup. When the date arrives, the card surfaces automatically.
+
+The `'chasing'` value is kept in the `PipelineStatus` TypeScript union for legacy compatibility but is filtered out of selectable status dropdowns and the Zod enum on PATCH/POST. Migration 071 unwound every row that historically held it. Future migrations should NOT add `'chasing'` back.
+
+### Daily 08:00 alert scanner (opt-in only)
+
+`config/scheduler.ts` has a daily 08:00 task that fires bell/email notifications for jobs that have crossed their `next_chase_date` AND have an explicit `chase_alert_user_id` set (via the ChaseModal). No status writes. No admin-spray fallback. No info@ noise. Default behaviour for chase dates is silent — cards just appear in the Chasing pile.
+
+This means: **chase dates are date-granular, not timestamp**. Anything with intra-day precision ("chase me in 2 hours") is not supported by the model. The "2 hrs" preset on the chase modal/forms was removed in May 2026 because it was misleading (it set today's date, not a 2-hour timer). Same-day chases are visible on the Kanban immediately but won't ping until the next 08:00 scanner run.
+
+### Auto-bump rules — and the "sacred future" rule
+
+Two paths automatically push `next_chase_date` forward:
+
+1. **Enquiry → Provisional transition** (`pipeline.ts` PATCH `/:id/status`). When target is `provisional` from a pre-confirmed stage (`new_enquiry` / `quoting` / `paused`), bump by `chase_interval_days` (default 5).
+2. **Contact-type interactions on a job** (`interactions.ts` POST). Types `call` / `email` / `meeting` bump by `chase_interval_days`. Types `note` and `mention` deliberately do NOT bump — notes are too varied (could be internal observations, not contact events) and mentions are internal collaboration.
+
+**The sacred-future rule:** auto-bumps only fire when `next_chase_date` is null, today, or in the past. **Never shorten a future-dated chase.** A future date is a deliberate user decision (e.g. "chase Friday because client said they'd reply then") and must survive an unrelated email logged on Wednesday. Both code paths use:
+
+```sql
+next_chase_date = CASE
+  WHEN next_chase_date IS NULL OR next_chase_date <= CURRENT_DATE
+    THEN (CURRENT_DATE + (COALESCE(chase_interval_days, 5) || ' days')::interval)::date
+  ELSE next_chase_date
+END
+```
+
+When you wire a new auto-bump source (e.g. for a new interaction type or status transition), use this CASE expression. Don't write a plain UPDATE.
+
+### `skip_chase_bump` opt-out
+
+The contact-type interaction path accepts `skip_chase_bump: true` on the request body to bypass the bump for that single call. The `ActivityTimeline` form surfaces this as a "Don't update chase date" checkbox, only shown when the type is call/email/meeting AND the entity is a job. Use for backdated entries (logging a call from last week) or non-consequential events (CC of an email thread that happens to be about something else).
+
+### Chase-date clearing on lifecycle moves
+
+`next_chase_date` is auto-nulled when a job moves to `confirmed` / `lost` / `cancelled` (`pipeline.ts` `/:id/status`). Same applies on inbound HireHop webhooks via `webhooks.ts`. Migration 070 was the historical backfill for jobs that had drifted before this rule landed.
+
+### Watch list
+
+If staff complain "my chase keeps moving when I don't want it to" → point them at the "Don't update chase date" checkbox.
+
+If they complain "I logged a call but the chase didn't move" → it's the sacred-future rule. The chase was already future-dated; auto-bump correctly skipped it. They can manually reschedule via the chase modal if they actually want it shortened.
 
 ## Database Tables Overview
 

@@ -689,12 +689,6 @@ function addDaysToDate(days: number): string {
   return d.toISOString().split('T')[0];
 }
 
-function addHoursToNow(hours: number): string {
-  const d = new Date();
-  d.setHours(d.getHours() + hours);
-  return d.toISOString().split('T')[0]; // Chase dates are date-only in DB
-}
-
 // ── New Enquiry Modal ──────────────────────────────────────────────────────
 
 interface StagedFile {
@@ -1397,7 +1391,6 @@ function NewEnquiryModal({
             <label className="block text-sm font-medium text-gray-700 mb-1">First chase</label>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               {[
-                { label: '2 hrs', fn: () => addHoursToNow(2) },
                 { label: '2 days', fn: () => addDaysToDate(2) },
                 { label: '5 days', fn: () => addDaysToDate(5) },
                 { label: '14 days', fn: () => addDaysToDate(14) },

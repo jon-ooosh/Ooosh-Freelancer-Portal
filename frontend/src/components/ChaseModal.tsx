@@ -16,12 +16,6 @@ interface ChaseableJob {
 type Mode = 'reschedule' | 'log';
 type Delivery = 'bell' | 'bell_email' | 'none';
 
-function addHoursToNow(hours: number): string {
-  const d = new Date();
-  d.setHours(d.getHours() + hours);
-  return d.toISOString().split('T')[0];
-}
-
 function addDaysToDate(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() + days);
@@ -219,7 +213,6 @@ export default function ChaseModal({
             </label>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               {[
-                { label: '2 hrs', fn: () => addHoursToNow(2) },
                 { label: '2 days', fn: () => addDaysToDate(2) },
                 { label: '3 days', fn: () => addDaysToDate(3) },
                 { label: '5 days', fn: () => addDaysToDate(5) },

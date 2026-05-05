@@ -343,7 +343,6 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
               <label className="text-xs font-medium text-gray-600 w-16">Next chase</label>
               <div className="flex gap-1.5 flex-wrap items-center">
                 {[
-                  { label: '2 hrs', fn: () => { const d = new Date(); d.setHours(d.getHours() + 2); return d.toISOString().split('T')[0]; } },
                   { label: '2 days', fn: () => addDays(2) },
                   { label: '5 days', fn: () => addDays(5) },
                   { label: '14 days', fn: () => addDays(14) },
