@@ -745,6 +745,7 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] HH ↔ OP excess deduplication: migration 039 adds `hh_deposit_id` to `job_excess`, passive reconciliation on Money tab load matches HH excess deposits to OP records, manual link/unlink + create-from-HH for edge cases (FIXED 3 Apr)
 - [x] Email recipient: excess emails now fall back to client organisation email when no people contacts found (FIXED 3 Apr)
 - [ ] Excess email: "finishes" vs "finished" tense depends on context (payment received = future, reimbursement = past) — FIXED 1 Apr
+- [x] **Excess Manage modal silent-failure + idempotency (FIXED May 2026)** — `POST /api/excess/:id/payment` had two distinct gaps: (a) it never pushed to HireHop and never inserted a `job_payments` row, so excesses recorded via Manage > Record Payment never appeared in HH billing or in Money tab payment history; (b) it used additive `excess_amount_taken = previous + amount` semantics, so clicking Save twice doubled the collected amount. Job 15624 incident: £1200 worldpay was saved twice via Manage modal, ending up at £2400 collected against £1200 required, while HireHop showed nothing for the excess. Fix: shared `services/hh-deposit.ts` helper called by both `/excess/:id/payment` and `/money/:jobId/record-payment`. Both endpoints now (a) push to HH and surface `hh_push_error: string | null` in the response (frontend renders amber "Saved in OP — HireHop push failed" banner when set), (b) accept `total_collected` (absolute new total) for idempotent re-submits, (c) auto-find existing excess records on the job when `excess_id` isn't passed (preferring pre-collection records, falling back to most recent for top-ups). The Money tab Record Payment > Excess form also dropped its status filter so `taken` records are visible (previously hidden, leading to a misleading "no excess record exists" banner that promised auto-creation the backend never implemented). See "HireHop Deposit Push" under Shared Utilities for the failure-surfacing contract.
 
 ##### Phase D — VAT Adjustment Display ✅ COMPLETE (30 Mar 2026)
 Port the international VAT calculation from the Payment Portal into the OP. Staff now see VAT breakdowns directly on the Money tab instead of visiting the client payment portal.
@@ -811,7 +812,7 @@ The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from M
 - [ ] Client ledger balance surfaced in portal (requires `client_balance_on_account` in excess-info response)
 
 *Known gaps / follow-ups (non-blocking, captured 17 Apr 2026):*
-- [ ] **API key auth vuln — MUST FIX:** `authenticateFlexible` in `money.ts` only matches `apiKey.substring(0, 8)` against `key_prefix`. Any string starting with `ppk_live` authenticates. Needs full-key hash comparison.
+- [x] **API key auth vuln — FIXED May 2026:** `authenticateFlexible` in `money.ts` and the inline check in `webhooks.ts` `/external/status-transition` now route through the shared `middleware/api-key.ts` `verifyApiKey()` helper, which pulls all rows with the matching `key_prefix` and `bcrypt.compare`s the full key against each `key_hash`. Previous behaviour matched only the 8-char prefix and accepted any string starting with `ppk_live`. Pre-deploy audit script: `backend/src/scripts/audit-api-key-hashes.ts` (checks every row's hash is bcrypt-shaped — non-bcrypt rows would stop authenticating after the fix, so they need re-issuing first).
 - [ ] **Refund path doesn't unwind excess record:** `payment-event` with `payment_type: 'refund'` or `'excess_refund'` records the payment in `job_payments` but doesn't flip `excess_status` back from `pre_auth`/`taken`. Staff must manually mark reimbursed on Money tab.
 - [ ] **Pre-auth capture vs release:** portal's `admin-claim-preauth.js` fires `payment_type: 'excess'` to capture a hold as a real charge. Works in common case but on pre_auth records `amount_taken` is REPLACED (not added), so split-capture scenarios could produce odd aggregates.
 - [ ] **Stripe pre-auth expiry scheduler — FAIRLY HIGH PRIORITY (21 Apr 2026):** OP currently trusts a stored `excess_status = 'pre_auth'` indefinitely, but Stripe auto-voids holds after ~7 days and Ooosh policy is to re-take inside 4 days. Need a daily scheduler task that scans `job_excess` records with `status = 'pre_auth'` and a `payment_date` (or `updated_at`) older than 4 days, flips them to a new `expired` (or `pre_auth_expired`) status, and fires a bell notification + email to staff prompting re-take. Touches `backend/src/config/scheduler.ts`, `backend/src/routes/excess.ts`, probably a new excess status value in migration. See handoff 21 Apr 2026 open item #3.
@@ -2064,6 +2065,41 @@ await syncFleetHireStatusByReg(reg);
 **NOT wired into:** the manual override paths (`PATCH /api/vehicles/fleet/:id`, `PATCH /api/vehicles/fleet/by-reg/:reg/hire-status`, bulk import). These are explicit user actions that should stand as written.
 
 **Backfill:** `backend/src/scripts/backfill-fleet-hire-status.ts` runs the same rules across the entire fleet to clean up historical drift. Dry-run by default; `--commit` to apply.
+
+### HireHop Deposit Push ✅ COMPLETE
+
+**File:** `backend/src/services/hh-deposit.ts`
+
+Centralised two-step HireHop deposit push (`billing_deposit_save.php` + Xero sync via `accounting/tasks.php`). Used by `POST /api/money/:jobId/record-payment` and `POST /api/excess/:id/payment`. Returns a structured `{hhDepositId, xeroSynced, error}` so callers can surface failures rather than silently logging "non-fatal".
+
+**Why this exists:** Before May 2026 the Money tab's Record Payment endpoint had its own inline HH push, and the Excess Manage modal's `/payment` endpoint had no HH push at all — excesses recorded via Manage never appeared in HireHop billing. Job 15624 incident: £1200 worldpay was recorded twice via the Manage modal, doubling the OP-side `excess_amount_taken` to £2400, while HireHop showed nothing for the excess. The shared helper closes both gaps and standardises the failure-surfacing contract.
+
+**Failure surfacing contract:** any caller hitting this helper should bubble `error` back to the client as `hh_push_error: string | null` in the JSON response. Frontend renders an amber "Saved in OP — HireHop push failed" banner that keeps the modal open so staff can decide whether to retry or record manually in HH and use Manage > Link to HH. Three failure modes covered:
+1. HireHop returns `success: false` (rate-limit / validation error)
+2. HireHop returns 200 but no extractable deposit ID (the "silent success" case that bit 15624)
+3. Network throw / timeout
+
+**Idempotency contract on excess:** both `/excess/:id/payment` and `/money/:jobId/record-payment` accept `total_collected` (absolute new total on the excess record) alongside `amount` (delta-add legacy). Frontend now sends `total_collected` for excess flows, so re-clicking Save with the same value is a no-op rather than doubling. Lowering `total_collected` is treated as a correction (allowed, no HH push). The Money tab's Record Payment > Excess form also auto-finds existing excess records on the job (any status — including `taken` for top-ups), replacing the previous filter that excluded `taken` records and led to a misleading "no excess record exists" banner.
+
+**Top-ups against records that already have `hh_deposit_id`:** the helper deliberately skips the HH push and returns `hh_push_error` set to a descriptive message. Reason: the existing HH deposit row would need a separate top-up entry, not an additive update. Staff create the top-up deposit manually in HH and use Manage > Link to HH (or a future change splits the OP record).
+
+**Don't bypass:** route handlers should NOT call `billing_deposit_save.php` directly from inline code — that bypasses the failure-surfacing contract. The previous direct call in `money.ts` was the source of the silent-failure problem.
+
+### API Key Verification ✅ COMPLETE
+
+**File:** `backend/src/middleware/api-key.ts`
+
+Single source of truth for verifying the `X-API-Key` header against the `api_keys` table. Pulls all rows with the matching `key_prefix` and `bcrypt.compare`s the full key against each row's `key_hash`. Bumps `last_used_at` on success.
+
+Used by:
+- `POST /api/money/*` (`authenticateFlexible` in `money.ts`) — Payment Portal
+- `POST /api/webhooks/external/status-transition` — external status pushes
+
+**Why this exists:** the original inline implementation in both files only matched the first 8 chars of the supplied key against `api_keys.key_prefix`, accepting any string starting with a known prefix (e.g. `ppk_live`) as authenticated. Bypassed the bcrypt hash entirely. Fixed May 2026.
+
+**Routes that DON'T use this:** routes authenticating against a single env-var key (`hire-forms.ts`, `driver-verification.ts`) use `crypto.timingSafeEqual` directly — different pattern, not vulnerable.
+
+**Audit script:** `backend/src/scripts/audit-api-key-hashes.ts` checks existing rows have bcrypt-shaped `key_hash` values. Run before deploying the fix to surface any rows that need re-hashing (a non-bcrypt hash will fail to authenticate after the change).
 
 ### Hire Date Resolution
 

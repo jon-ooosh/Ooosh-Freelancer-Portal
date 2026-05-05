@@ -12,6 +12,7 @@ import { Router, Request, Response } from 'express';
 import { query } from '../config/database';
 import { HH_TO_PIPELINE } from '../services/hirehop-writeback';
 import { alertReturnedWithStillBookedOutVans } from '../services/vehicle-emails';
+import { verifyApiKey } from '../middleware/api-key';
 
 const router = Router();
 
@@ -372,21 +373,14 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
       return;
     }
 
-    // Verify API key
-    const keyPrefix = apiKey.substring(0, 8);
-    const keyResult = await query(
-      `SELECT id, name, service, permissions FROM api_keys
-       WHERE key_prefix = $1 AND is_active = true`,
-      [keyPrefix],
-    );
-
-    if (keyResult.rows.length === 0) {
+    // Verify API key (full bcrypt comparison via shared helper — the inline
+    // implementation that was here matched only on key_prefix and accepted
+    // any string starting with `ppk_live` as authenticated).
+    const matched = await verifyApiKey(apiKey);
+    if (!matched) {
       res.status(403).json({ error: 'Invalid API key' });
       return;
     }
-
-    // Update last_used_at
-    await query(`UPDATE api_keys SET last_used_at = NOW() WHERE id = $1`, [keyResult.rows[0].id]);
 
     const { hirehop_job_id, new_status, trigger, source, metadata } = req.body;
 
@@ -399,7 +393,7 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
     await query(
       `INSERT INTO webhook_log (source, event, payload)
        VALUES ($1, 'status_transition', $2)`,
-      [source || keyResult.rows[0].service, JSON.stringify(req.body)],
+      [source || matched.service, JSON.stringify(req.body)],
     );
 
     // Find the job
