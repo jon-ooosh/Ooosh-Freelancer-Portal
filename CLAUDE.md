@@ -1741,6 +1741,51 @@ Respects `user_notification_preferences.delivery_method` — if user has set `no
 - Mobile push notifications (if mobile app/PWA built)
 - Tasks system (general-purpose tasks linked to inbox — freelancer application review, annual reviews, admin tasks)
 
+#### Step 8: Warehouse Module — Customer Collections ✅ LIVE (May 2026)
+
+In-person sign-off tool for clients picking up equipment at the warehouse. Replaces the standalone Monday-driven module that previously lived in the Next.js freelancer portal at `ooosh-freelancer-portal.netlify.app/warehouse`. Single OP module now, single auth, single deploy.
+
+**Where:** `staff.oooshtours.co.uk/warehouse` — three kiosk-mode routes mounted **outside** the `<Layout>` wrapper (no nav shell, tablet-friendly):
+- `/warehouse` — PIN entry (`WarehousePinPage.tsx`)
+- `/warehouse/collections` — list of jobs ready for pickup (`WarehouseCollectionsPage.tsx`)
+- `/warehouse/collections/:jobId` — equipment review + signature + complete (`WarehouseCollectionDetailPage.tsx`)
+
+**Auth:** `POST /api/warehouse/auth/pin` validates the kiosk PIN (`WAREHOUSE_PIN` env var) and returns a 12h `warehouse_session` JWT, stored in `sessionStorage` via `services/warehouseSession.ts`. Staff JWTs also accepted on the same routes — desk users can drive it from desktop without re-PINning. Distinct from the staff Zustand store so kiosk and staff sessions don't pollute each other.
+
+**Backend:** `backend/src/routes/warehouse.ts` mounted at `/api/warehouse`. Four endpoints:
+- `POST /auth/pin` — public, exchanges PIN for warehouse session JWT
+- `GET /collections` — list candidates (PIN or staff JWT)
+- `GET /collections/:jobId` — job + equipment list
+- `POST /collections/:jobId/complete` — sign-off action
+
+**Candidate filter** (Monday Q&H board → OP `jobs` table):
+```
+pipeline_status IN ('confirmed', 'prepped', 'prepping')
+  AND out_date BETWEEN today-1 AND today+1
+  AND HireHop COLLECT = 0
+```
+The `prepping` (HH 4 / Part Dispatched) inclusion handles the edge case of a job already being part-scanned when the customer signs. The OP↔HH semantic gap (HH jumps to 5 on physical checkout but OP holds at `prepped` until staff explicitly dispatches) is exactly what this list covers — anything in `prepped` with HH at 5 is "ready for sign-off". Customer-collect filter via per-candidate `job_data.php` call (broker-cached, fail-open if HH unreachable).
+
+**On sign-off:**
+1. Signature → R2 at `warehouse-collections/{jobId}/signature-{ts}.png`
+2. Delivery note PDF (reuses `services/delivery-note-pdf.ts` — same artefact the freelancer portal D&C completion uses) → R2 + appended to `jobs.files` JSONB so it appears on the **Files tab** of the job
+3. PDF emailed to recipients via `emailService.send('delivery_note')` (existing template)
+4. `pipeline_status` → `dispatched` + HH writeback to status 5 (no-op if already at 5)
+5. `interaction` logged on the Activity Timeline (`type='note'`, content `📦 Equipment collected at HH:MM by [name]. Delivery note emailed to [recipients].`)
+
+**Writeback addition:** `PIPELINE_TO_HH` map in `services/hirehop-writeback.ts` gained `dispatched: 5`. Previously absent because HH normally auto-jumps to 5 on physical checkout; the warehouse flow is the origin event, not a mirror, so the push is needed. The "skip if already at target" guard makes this safe for all callers.
+
+**Env vars:**
+- `WAREHOUSE_PIN` — required (4-8 digit PIN, set in OP backend `.env`); endpoint returns 503 without it.
+
+**Audit attribution:** PIN-only sessions log interactions as the system service user (UUID `00000000-0000-0000-0000-000000000000` from migration 031). Staff JWT sessions attribute to the actual user.
+
+**Tear-down:** Legacy `src/app/warehouse/*` and `src/app/api/warehouse/*` pages + routes deleted from the Next.js portal. `netlify.toml` has a 301 redirect from `/warehouse[/*]` → `https://staff.oooshtours.co.uk/warehouse` for any latent tablet bookmarks. `MONDAY_API_TOKEN` in the Next.js portal is now warehouse-unused (still used by other freelancer-portal flows pre-repoint).
+
+**Future enhancements (deferred):**
+- Resend delivery note from the Files tab (currently re-download → forward manually)
+- "Recent collections" / "Customer-collected" filter on Jobs + Returns pages
+
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
 These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready (Step 5 above):

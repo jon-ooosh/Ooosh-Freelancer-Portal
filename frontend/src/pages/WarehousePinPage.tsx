@@ -65,9 +65,9 @@ export default function WarehousePinPage() {
       <div className="bg-white rounded-2xl shadow-xl p-8 w-full max-w-md">
         <div className="text-center mb-8">
           <img
-            src="/ooosh-logo.svg"
+            src="/ooosh-logo-full.jpg"
             alt="Ooosh Tours"
-            className="h-16 mx-auto mb-4"
+            className="h-32 mx-auto mb-4"
           />
           <h1 className="text-2xl font-bold text-gray-800">Warehouse Collections</h1>
           <p className="text-gray-500 mt-2">Enter PIN to continue</p>
