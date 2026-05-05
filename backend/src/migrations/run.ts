@@ -104,6 +104,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '067_portal_notification_preferences.sql',
         '068_unify_ooosh_staff_assignments.sql',
         '069_chase_no_alert_and_org_dismissals.sql',
+        '070_clear_stale_chase_dates.sql',
       ];
 
       for (const migration of migrations) {

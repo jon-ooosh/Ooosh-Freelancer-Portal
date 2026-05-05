@@ -166,16 +166,25 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LIMIT 10
       `),
 
-      // 7. Chases due
+      // 7. Client intros to arrange — transport quotes in the next 7 days
+      // whose client_introduction pill is still 'todo' or 'working_on_it'.
+      // Local D&C quotes default to 'not_needed' (NULL) so they're naturally
+      // excluded; staff bumps them to 'todo' manually if an intro is needed.
+      // This replaces the old "Chases Due" bucket — chases now live solely
+      // on the stat-card row above, and the post-confirmation pile uses the
+      // reminders system.
       query(`
-        SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
-               j.next_chase_date, j.job_value, j.pipeline_status
-        FROM jobs j
-        WHERE j.is_deleted = false
-          AND j.pipeline_status NOT IN ('confirmed', 'lost')
-          AND j.next_chase_date IS NOT NULL
-          AND j.next_chase_date <= CURRENT_DATE
-        ORDER BY j.next_chase_date ASC, j.job_value DESC NULLS LAST
+        SELECT q.id AS quote_id, q.job_type, q.job_date, q.arrival_time,
+               q.venue_name, q.client_introduction, q.ops_status,
+               j.id AS job_id, j.hh_job_number, j.job_name, j.client_name, j.company_name
+        FROM quotes q
+        LEFT JOIN jobs j ON j.id = q.job_id
+        WHERE q.is_deleted = false
+          AND q.status NOT IN ('cancelled', 'completed')
+          AND q.client_introduction IN ('todo', 'working_on_it')
+          AND q.job_date IS NOT NULL
+          AND q.job_date::date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'
+        ORDER BY q.job_date ASC, q.arrival_time ASC NULLS LAST
         LIMIT 10
       `),
 
@@ -552,7 +561,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       goingOutResult, returningResult,
       tomorrowGoingOutResult, tomorrowReturningResult,
       upcomingDeparturesResult, upcomingReturnsResult,
-      overdueReturnsResult, chasesDueResult,
+      overdueReturnsResult, clientIntrosResult,
       overdueDeparturesResult, overdueBacklineResult, overdueTransportOpsResult,
       referralCountResult, excessCountResult,
       transportOpsResult, unassignedTransportResult,
@@ -645,14 +654,14 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         overdue_backline: overdueBacklineResult.rows,
         overdue_transport_ops: overdueTransportOpsResult.rows,
         // Aggregate count for "X items need attention" headline. Excludes
-        // chases (separate concept) and referrals/excess counts (live in
-        // their own widgets).
+        // client intros (separate concept) and referrals/excess counts
+        // (live in their own widgets).
         total_overdue_count:
           overdueReturnsResult.rows.length +
           overdueDeparturesResult.rows.length +
           overdueBacklineResult.rows.length +
           overdueTransportOpsResult.rows.length,
-        chases_due: chasesDueResult.rows,
+        client_intros: clientIntrosResult.rows,
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,
         // ── Excess (semantics changed Apr 2026) ──

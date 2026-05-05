@@ -203,8 +203,15 @@ async function handleJobStatusChange(
     const fromLabel = PIPELINE_LABELS[job.pipeline_status] || job.pipeline_status;
     const toLabel = PIPELINE_LABELS[newPipelineStatus] || newPipelineStatus;
 
+    // Clear chase date when moving out of an enquiry-stage status — chases
+    // belong to the pre-confirmation pipeline; once the job is past that, the
+    // reminders system handles any genuine follow-ups.
+    const enquiryStages = ['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional'];
+    const clearChase = !enquiryStages.includes(newPipelineStatus);
+
     await query(
       `UPDATE jobs SET pipeline_status = $1, pipeline_status_changed_at = NOW(), updated_at = NOW()
+         ${clearChase ? ', next_chase_date = NULL' : ''}
        WHERE id = $2`,
       [newPipelineStatus, job.id],
     );
@@ -419,12 +426,19 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
       return;
     }
 
+    // Clear chase date when moving out of an enquiry-stage status — chases
+    // belong to the pre-confirmation pipeline; once past that, the reminders
+    // system handles any genuine follow-ups.
+    const enquiryStages = ['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional'];
+    const clearChase = !enquiryStages.includes(newPipelineStatus);
+
     // Update pipeline status
     await query(
       `UPDATE jobs SET
          pipeline_status = $1, pipeline_status_changed_at = NOW(),
          status = $2, hh_status = $2, status_name = $3,
          updated_at = NOW()
+         ${clearChase ? ', next_chase_date = NULL' : ''}
        WHERE id = $4`,
       [newPipelineStatus, new_status, getHHStatusName(new_status), job.id],
     );

@@ -98,15 +98,19 @@ export interface UpcomingEvent {
   event_type: 'departure' | 'return';
 }
 
-export interface ChaseJob {
-  id: string;
+export interface ClientIntroJob {
+  quote_id: string;
+  job_id: string | null;
   hh_job_number: number | null;
   job_name: string | null;
   client_name: string | null;
   company_name: string | null;
-  next_chase_date: string;
-  job_value: number | null;
-  pipeline_status: string;
+  venue_name: string | null;
+  job_type: string;
+  job_date: string;
+  arrival_time: string | null;
+  client_introduction: string;
+  ops_status: string | null;
 }
 
 export interface PendingReferral {
@@ -248,7 +252,7 @@ export interface OperationsData {
     overdue_backline?: OverdueBacklineRow[];
     overdue_transport_ops?: OverdueTransportRow[];
     total_overdue_count?: number;
-    chases_due: ChaseJob[];
+    client_intros: ClientIntroJob[];
     referral_count: number;
     referrals: PendingReferral[];
     excess_count: number;
