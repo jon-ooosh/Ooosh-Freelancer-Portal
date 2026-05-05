@@ -43,6 +43,7 @@ interface Job {
   manager1_name: string | null;
   job_value: number | null;
   pipeline_status: string | null;
+  has_ooh_return?: boolean;
 }
 
 interface JobsResponse {
@@ -210,11 +211,12 @@ export default function JobsPage() {
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState<SyncLog | null>(null);
   const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
+  const [oohOnly, setOohOnly] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
     loadJobs();
-  }, [search, statusFilter]);
+  }, [search, statusFilter, oohOnly]);
 
   useEffect(() => {
     loadLastSync();
@@ -235,6 +237,7 @@ export default function JobsPage() {
       const params = new URLSearchParams({ page: String(page), limit: '500' });
       if (search) params.set('search', search);
       if (statusFilter) params.set('status', statusFilter);
+      if (oohOnly) params.set('ooh_only', 'true');
 
       const data = await api.get<JobsResponse>(`/hirehop/jobs?${params}`);
       setJobs(data.data);
@@ -414,8 +417,16 @@ export default function JobsPage() {
           )}
         </td>
         <td className="px-4 py-3 whitespace-nowrap">
-          <div className="text-sm font-medium text-gray-900 truncate max-w-[200px]">
-            {job.job_name || '\u2014'}
+          <div className="text-sm font-medium text-gray-900 truncate max-w-[200px] flex items-center gap-1.5">
+            <span className="truncate">{job.job_name || '\u2014'}</span>
+            {job.has_ooh_return && (
+              <span
+                className="text-xs px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-normal flex-shrink-0"
+                title="Out-of-hours return flagged"
+              >
+                \ud83c\udf19
+              </span>
+            )}
           </div>
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 truncate max-w-[180px]">
@@ -535,6 +546,22 @@ export default function JobsPage() {
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
+        <label
+          className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded border cursor-pointer transition-colors ${
+            oohOnly
+              ? 'border-indigo-300 bg-indigo-50 text-indigo-700'
+              : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+          }`}
+          title="Show only jobs with at least one out-of-hours return flagged"
+        >
+          <input
+            type="checkbox"
+            checked={oohOnly}
+            onChange={(e) => setOohOnly(e.target.checked)}
+            className="rounded border-gray-300"
+          />
+          🌙 OOH only
+        </label>
       </div>
 
       {/* Sync info bar */}

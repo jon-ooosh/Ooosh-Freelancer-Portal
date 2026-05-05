@@ -146,7 +146,6 @@ async function buildEmailVariables(ctx: OohContext): Promise<Record<string, stri
     'ooh_yard_address',
     'ooh_yard_maps_url',
     'ooh_keydrop_photo_url',
-    'ooh_overflow_photo_url',
     'ooh_what3words',
   ]);
 
@@ -178,10 +177,6 @@ async function buildEmailVariables(ctx: OohContext): Promise<Record<string, stri
          <strong>Do not</strong> put the keys through the letterbox on the glass door.
        </p>`;
 
-  const overflowLine = settings.ooh_overflow_photo_url
-    ? `<a href="${settings.ooh_overflow_photo_url}" style="color:#7B5EA7;text-decoration:none;">View nearest legal parking →</a>`
-    : '';
-
   return {
     driverName: ctx.driverName || 'there',
     vehicleReg: ctx.vehicleReg,
@@ -191,7 +186,6 @@ async function buildEmailVariables(ctx: OohContext): Promise<Record<string, stri
     yardMapsLine,
     what3wordsLine,
     keydropBlock,
-    overflowLine,
     parkingFormUrl,
   };
 }

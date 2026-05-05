@@ -112,7 +112,7 @@ router.get('/jobs/last-sync', async (_req: AuthRequest, res: Response) => {
 // GET /api/hirehop/jobs — list synced jobs from our DB
 router.get('/jobs', async (req: AuthRequest, res: Response) => {
   try {
-    const { status, search, page = '1', limit = '50' } = req.query;
+    const { status, search, ooh_only, page = '1', limit = '50' } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let whereClause = 'WHERE is_deleted = false';
@@ -131,6 +131,17 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       whereClause += ` AND (job_name ILIKE $${params.length} OR client_name ILIKE $${params.length} OR company_name ILIKE $${params.length} OR venue_name ILIKE $${params.length} OR CAST(hh_job_number AS TEXT) ILIKE $${params.length})`;
     }
 
+    // OOH return filter — only show jobs with at least one assignment
+    // currently flagged for out-of-hours return (and still open).
+    if (ooh_only === 'true' || ooh_only === '1') {
+      whereClause += ` AND EXISTS (
+        SELECT 1 FROM vehicle_hire_assignments vha
+        WHERE vha.job_id = jobs.id
+          AND vha.return_overnight = TRUE
+          AND vha.status NOT IN ('cancelled', 'returned')
+      )`;
+    }
+
     const countResult = await query(
       `SELECT COUNT(*) FROM jobs ${whereClause}`,
       params
@@ -138,8 +149,18 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
 
     params.push(parseInt(limit as string));
     params.push(offset);
+    // Surface has_ooh_return per row so the Out Now list can render the
+    // moon badge inline. Same EXISTS-shape as the filter — kept as a
+    // computed column rather than a join so we don't duplicate rows.
     const jobsResult = await query(
-      `SELECT * FROM jobs ${whereClause}
+      `SELECT jobs.*,
+         EXISTS (
+           SELECT 1 FROM vehicle_hire_assignments vha
+           WHERE vha.job_id = jobs.id
+             AND vha.return_overnight = TRUE
+             AND vha.status NOT IN ('cancelled', 'returned')
+         ) AS has_ooh_return
+       FROM jobs ${whereClause}
        ORDER BY job_date DESC NULLS LAST
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params

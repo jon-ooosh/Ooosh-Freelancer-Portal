@@ -1094,7 +1094,7 @@ const templates: Record<string, EmailTemplate> = {
         on any double-yellow lines. Parking illegally or inconsiderately may incur additional costs.
       </p>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
-        The nearest safe legal parking is usually the seafront. {{overflowLine}}
+        The nearest safe legal parking is usually the seafront.
       </p>
       <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
         <strong>Wherever you park, please tell us where</strong> using the link below — it pre-fills
