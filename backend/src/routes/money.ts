@@ -503,6 +503,14 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     let hireDepositAppliedToInvoices = 0;
     // Collect approved invoices for reconciliation (detect direct invoice payments)
     const approvedInvoices: Array<{ amount: number; owing: number }> = [];
+    // HireHop dual-publishes a single payment-application as TWO kind=3 rows:
+    //   - one as a child of the deposit (parent_is="deposit", negative credit)
+    //   - one as a child of the invoice (parent_is="invoice", positive credit)
+    // Both rows carry the same data.ID. Without dedup we double-count
+    // hireDepositAppliedToInvoices, which clamps directInvoicePayments to 0 and
+    // makes side-invoices (e.g. shop sales paid directly) appear unpaid.
+    // Track seen application IDs and skip subsequent occurrences.
+    const seenApplicationIds = new Set<number>();
 
     // Extract banks array for resolving bank IDs to names
     const banks: Array<{ ID: number; NAME: string }> = bl?.banks || bl?.rows?.[0]?.data?.banks || [];
@@ -593,6 +601,18 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           const appId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
           const absAmount = Math.abs(creditAmount);
           const ownerDepositId = data.OWNER_DEPOSIT;
+
+          // Skip duplicate published views of the same application (see seenApplicationIds note above).
+          // Dedup key is data.ID (HH's primary key for the application record). We only dedup when
+          // we have a valid ID; falls through if missing so we don't lose data.
+          const dedupId = parseInt(data.ID || '0');
+          if (dedupId > 0) {
+            if (seenApplicationIds.has(dedupId)) {
+              console.warn(`[money] Skipping duplicate kind=3 row for application ID ${dedupId} on job ${hhJobId}`);
+              continue;
+            }
+            seenApplicationIds.add(dedupId);
+          }
 
           if (absAmount > 0) {
             if (ownerDepositId) {
