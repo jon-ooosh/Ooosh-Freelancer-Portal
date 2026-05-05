@@ -3,19 +3,23 @@
  * Keep these types in sync if either side changes.
  */
 
-export type ProgressStripStatus = 'todo' | 'wip' | 'done' | 'na' | 'prob';
+export type ProgressStripStatus = 'todo' | 'wip' | 'done' | 'prob';
 
 export type ProgressStripCategory =
   | 'deprep' | 'client' | 'excess' | 'freelancer' | 'invoicing' | 'payment' | 'vehicle';
 
-export type JobProgressStrip = Record<ProgressStripCategory, ProgressStripStatus>;
+/**
+ * Partial map — a category is present iff the job has at least one matching
+ * requirement for it. Missing categories don't render.
+ */
+export type JobProgressStrip = Partial<Record<ProgressStripCategory, ProgressStripStatus>>;
 
 export type StripPhase = 'pre_hire' | 'post_hire';
 
 export const STRIP_LABELS: Record<StripPhase, Record<ProgressStripCategory, string>> = {
   pre_hire: {
-    deprep: 'Prep',
-    client: 'Client',
+    deprep: 'Backline',
+    client: 'Hire Form',
     excess: 'Excess',
     freelancer: 'Freelancer',
     invoicing: 'Invoicing',
@@ -33,16 +37,16 @@ export const STRIP_LABELS: Record<StripPhase, Record<ProgressStripCategory, stri
   },
 };
 
-const STRIP_KEYS: ProgressStripCategory[] = [
+export const STRIP_ORDER: ProgressStripCategory[] = [
   'deprep', 'client', 'excess', 'freelancer', 'invoicing', 'payment', 'vehicle',
 ];
 
-/** % completion (done / applicable). N/A slots excluded from denominator. */
+/** % completion based on the slots actually present on the strip. */
 export function stripPercent(strip: JobProgressStrip): { done: number; wip: number; total: number; pct: number } {
   let done = 0; let wip = 0; let total = 0;
-  for (const k of STRIP_KEYS) {
+  for (const k of STRIP_ORDER) {
     const s = strip[k];
-    if (s === 'na') continue;
+    if (s === undefined) continue;
     total++;
     if (s === 'done') done++;
     else if (s === 'wip') wip++;
@@ -50,7 +54,4 @@ export function stripPercent(strip: JobProgressStrip): { done: number; wip: numb
   return { done, wip, total, pct: total === 0 ? 0 : Math.round((done / total) * 100) };
 }
 
-export const EMPTY_STRIP: JobProgressStrip = {
-  deprep: 'na', client: 'na', excess: 'na', freelancer: 'na',
-  invoicing: 'na', payment: 'na', vehicle: 'na',
-};
+export const EMPTY_STRIP: JobProgressStrip = {};

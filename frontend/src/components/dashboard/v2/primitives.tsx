@@ -1,5 +1,7 @@
 import { ReactNode } from 'react';
-import type { ProgressStripStatus, ProgressStripCategory } from './progress-strip';
+import { Link } from 'react-router-dom';
+import type { ProgressStripStatus, ProgressStripCategory, JobProgressStrip } from './progress-strip';
+import { STRIP_ORDER } from './progress-strip';
 
 /* ── Card / Section header ─────────────────────────────────────────────── */
 
@@ -27,12 +29,13 @@ export function SectionHd({
 /* ── Stat card (top row) ────────────────────────────────────────────────── */
 
 export function StatCard({
-  value, label, accent = 'grey', sparkline,
+  value, label, accent = 'grey', sparkline, to,
 }: {
   value: string | number;
   label: string;
   accent?: 'grey' | 'red' | 'amber' | 'green' | 'blue' | 'purple';
   sparkline?: number[];
+  to?: string;
 }) {
   const stripeColor: Record<string, string> = {
     grey: 'var(--op-text-3)',
@@ -42,22 +45,31 @@ export function StatCard({
     blue: 'var(--op-blue)',
     purple: 'var(--op-purple)',
   };
-  return (
-    <div
-      className="op-card relative overflow-hidden"
-      style={{ borderLeft: `3px solid ${stripeColor[accent]}` }}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <div className="op-num text-2xl font-semibold leading-none">{value}</div>
-          <div className="text-xs text-gray-500 mt-1.5">{label}</div>
-        </div>
-        {sparkline && sparkline.length > 1 && (
-          <Sparkline values={sparkline} color={stripeColor[accent]} />
-        )}
+  const inner = (
+    <div className="flex items-center justify-between gap-3">
+      <div>
+        <div className="op-num text-2xl font-semibold leading-none">{value}</div>
+        <div className="text-xs text-gray-500 mt-1.5">{label}</div>
       </div>
+      {sparkline && sparkline.length > 1 && (
+        <Sparkline values={sparkline} color={stripeColor[accent]} />
+      )}
     </div>
   );
+  const className = 'op-card relative overflow-hidden';
+  const style = { borderLeft: `3px solid ${stripeColor[accent]}` };
+  if (to) {
+    return (
+      <Link
+        to={to}
+        className={`${className} block transition hover:shadow-md hover:-translate-y-0.5`}
+        style={style}
+      >
+        {inner}
+      </Link>
+    );
+  }
+  return <div className={className} style={style}>{inner}</div>;
 }
 
 /* ── Sparkline ─────────────────────────────────────────────────────────── */
@@ -94,7 +106,6 @@ const PIP_CLASS: Record<ProgressStripStatus, string> = {
   todo: 'op-pip-todo',
   wip: 'op-pip-wip',
   done: 'op-pip-done',
-  na: 'op-pip-na',
   prob: 'op-pip-prob',
 };
 
@@ -102,23 +113,26 @@ const PIP_STATUS_LABEL: Record<ProgressStripStatus, string> = {
   todo: 'To do',
   wip: 'In progress',
   done: 'Done',
-  na: 'Not applicable',
   prob: 'Problem',
 };
 
 export function ProgressStrip({
   strip, labels,
 }: {
-  strip: Record<ProgressStripCategory, ProgressStripStatus>;
+  strip: JobProgressStrip;
   labels: Record<ProgressStripCategory, string>;
 }) {
-  const order: ProgressStripCategory[] = [
-    'deprep', 'client', 'excess', 'freelancer', 'invoicing', 'payment', 'vehicle',
-  ];
+  // Only render categories present on the strip — a missing category means
+  // the job has no matching requirement for it, so showing nothing is more
+  // informative than showing a greyed-out "not applicable" placeholder.
+  const present = STRIP_ORDER.filter((cat) => strip[cat] !== undefined);
+  if (present.length === 0) {
+    return <div className="text-xs text-gray-400">No requirements yet.</div>;
+  }
   return (
     <div className="flex flex-wrap gap-1.5">
-      {order.map((cat) => {
-        const status = strip[cat];
+      {present.map((cat) => {
+        const status = strip[cat]!;
         return (
           <span
             key={cat}
