@@ -100,7 +100,7 @@ export default function WarehouseCollectionsPage() {
       <header className="bg-white shadow-sm sticky top-0 z-10">
         <div className="max-w-3xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src="/ooosh-logo.png" alt="Ooosh Tours" className="h-10 w-auto" />
+            <img src="/ooosh-logo-full.jpg" alt="Ooosh Tours" className="h-10 w-auto" />
             <div>
               <h1 className="text-lg font-bold text-gray-800">Collections</h1>
               <p className="text-xs text-gray-500">Ready for pickup</p>
