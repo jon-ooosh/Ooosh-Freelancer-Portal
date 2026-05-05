@@ -21,6 +21,12 @@ import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
+import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+
+// Stable UUID seeded by migration 031 — used as created_by for portal-driven
+// auto-actions (the freelancer is a `people` row, not a `users` row, so we
+// can't attribute interactions directly to them).
+const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
 const router = Router();
 
@@ -1621,6 +1627,80 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
         } catch (emailErr) {
           console.error('[portal completion] Failed to send staff alert:', emailErr);
         }
+      }
+
+      // ── Last-mover dispatch flip ───────────────────────────────────
+      // When the FINAL outstanding delivery quote on a job completes, push
+      // the job to pipeline_status='dispatched' + HH status 5. Mirrors the
+      // warehouse module's auto-dispatch but at quote-aggregate level.
+      //
+      // Carve-outs:
+      //   - Only delivery quotes count. Collections + crewed don't trigger.
+      //   - Only fires if pipeline_status is currently confirmed/prepped/prepping
+      //     — never regresses a job already past dispatch (returned, completed, etc).
+      //   - Subsequent deliveries added later (e.g. mid-tour bass amp swap) won't
+      //     un-dispatch the job; the writeback's "skip if already at target" guard
+      //     + the pipeline_status whitelist make this naturally idempotent.
+      try {
+        if (ctx.job_id && ctx.job_type === 'delivery') {
+          const remaining = await query(
+            `SELECT COUNT(*)::int AS remaining
+             FROM quotes
+             WHERE job_id = $1
+               AND id != $2
+               AND job_type = 'delivery'
+               AND is_deleted = false
+               AND COALESCE(ops_status, 'todo') NOT IN ('completed', 'cancelled')
+               AND status NOT IN ('completed', 'cancelled')`,
+            [ctx.job_id, quoteId]
+          );
+
+          if (remaining.rows[0].remaining === 0) {
+            const jobRow = await query(
+              `SELECT pipeline_status, hh_job_number
+               FROM jobs WHERE id = $1`,
+              [ctx.job_id]
+            );
+            const job = jobRow.rows[0];
+            if (job && ['confirmed', 'prepped', 'prepping'].includes(job.pipeline_status)) {
+              await query(
+                `UPDATE jobs SET pipeline_status = 'dispatched',
+                                 pipeline_status_changed_at = NOW(),
+                                 updated_at = NOW()
+                 WHERE id = $1`,
+                [ctx.job_id]
+              );
+
+              try {
+                await query(
+                  `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+                   VALUES ('note', $1, $2, $3, 'dispatched')`,
+                  [
+                    `🚚 Job dispatched — final delivery completed by ${completionName} via freelancer portal.`,
+                    ctx.job_id,
+                    SYSTEM_USER_ID,
+                  ]
+                );
+              } catch (err) {
+                console.error('[portal completion] Dispatch interaction insert error:', err);
+              }
+
+              if (job.hh_job_number) {
+                try {
+                  await writeBackStatusToHireHop(
+                    ctx.job_id,
+                    'dispatched',
+                    `portal:${req.portalUser!.email}`
+                  );
+                } catch (err) {
+                  console.error('[portal completion] HH writeback error:', err);
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[portal completion] Dispatch flip error:', err);
       }
     })().catch(err => console.error('[portal completion] Background task error:', err));
   } catch (error) {
