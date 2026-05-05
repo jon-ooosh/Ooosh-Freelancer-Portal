@@ -37,7 +37,7 @@ export function AppShell() {
       {/* Header */}
       <header className="bg-ooosh-navy px-4 py-3 text-white">
         <Link to={vmPath('/')} className="flex items-center gap-2.5">
-          <img src="/ooosh-logo.png" alt="Ooosh" className="h-8 w-auto" />
+          <img src="/ooosh-logo-full.jpg" alt="Ooosh" className="h-8 w-auto" />
           <h1 className="text-lg font-semibold">Ooosh Vehicles</h1>
         </Link>
       </header>
