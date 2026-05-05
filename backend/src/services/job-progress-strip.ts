@@ -32,7 +32,7 @@
  * ────────────────────────────────────────────────────────────────────────
  */
 
-export type ProgressStripStatus = 'todo' | 'wip' | 'done' | 'na' | 'prob';
+export type ProgressStripStatus = 'todo' | 'wip' | 'done' | 'prob';
 
 export type ProgressStripCategory =
   | 'deprep'
@@ -43,15 +43,24 @@ export type ProgressStripCategory =
   | 'payment'
   | 'vehicle';
 
-export type JobProgressStrip = Record<ProgressStripCategory, ProgressStripStatus>;
+/**
+ * Per-job strip is a partial map. A category is present iff the job has at
+ * least one matching `job_requirements` row for that slot+phase. Missing
+ * categories are NOT rendered — staff sees only the things this specific
+ * job actually tracks.
+ */
+export type JobProgressStrip = Partial<Record<ProgressStripCategory, ProgressStripStatus>>;
 
 export type StripPhase = 'pre_hire' | 'post_hire';
 
-/** UI labels for each slot. Slot 0's label changes per phase (Prep / De-prep). */
+/** UI labels for each slot, per phase. Pre-hire labels match the underlying
+ *  requirement so staff can read the strip at a glance: "Backline" = backline
+ *  prep status, "Hire Form" = client's hire form returned, etc. Post-hire
+ *  labels are kept generic for now (under separate review). */
 export const STRIP_CATEGORY_LABELS: Record<StripPhase, Record<ProgressStripCategory, string>> = {
   pre_hire: {
-    deprep: 'Prep',
-    client: 'Client',
+    deprep: 'Backline',
+    client: 'Hire Form',
     excess: 'Excess',
     freelancer: 'Freelancer',
     invoicing: 'Invoicing',
@@ -99,7 +108,9 @@ export const STRIP_MAPPING: Record<StripPhase, Record<ProgressStripCategory, str
  * Worst-status precedence applies when multiple requirements feed one slot.
  */
 function mapReqStatusToStrip(reqStatus: string | null | undefined): ProgressStripStatus {
-  if (!reqStatus) return 'na';
+  // A requirement row with no status string is unusual but treat as todo —
+  // the requirement exists, it's just not done.
+  if (!reqStatus) return 'todo';
   switch (reqStatus) {
     case 'done':
     case 'reconciled':
@@ -131,7 +142,6 @@ function mapReqStatusToStrip(reqStatus: string | null | undefined): ProgressStri
 }
 
 const STATUS_RANK: Record<ProgressStripStatus, number> = {
-  na: 0,
   done: 1,
   wip: 2,
   todo: 3,
@@ -183,27 +193,23 @@ export function buildProgressStrips(
 
   for (const [jobId, phase] of Object.entries(phases)) {
     const reqs = index[jobId]?.[phase] ?? {};
-    const strip: JobProgressStrip = {
-      deprep: 'na', client: 'na', excess: 'na', freelancer: 'na',
-      invoicing: 'na', payment: 'na', vehicle: 'na',
-    };
+    const strip: JobProgressStrip = {};
 
+    // A slot only renders if at least one of its mapped requirement types
+    // exists on the job (in the relevant phase). Empty mapping arrays are
+    // skipped, and slots whose mapped types have no matching requirement
+    // are omitted entirely — staff sees only what this specific job tracks.
     for (const cat of allCats) {
       const types = STRIP_MAPPING[phase][cat];
       if (types.length === 0) continue;
-      let s: ProgressStripStatus = 'todo'; // mapped slot defaults to todo (not na) — slot exists, just nothing done
-      let any = false;
+      let s: ProgressStripStatus | undefined;
       for (const t of types) {
         const rs = reqs[t];
         if (rs !== undefined) {
-          s = any ? worstStatus(s, rs) : rs;
-          any = true;
+          s = s === undefined ? rs : worstStatus(s, rs);
         }
       }
-      // If no requirement of that type exists for the job, leave slot as todo
-      // (the slot is meaningful for this phase, just not yet created). Future:
-      // distinguish "no req" from "todo" by adding a separate state.
-      strip[cat] = any ? s : 'todo';
+      if (s !== undefined) strip[cat] = s;
     }
 
     out[jobId] = strip;

@@ -158,19 +158,45 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      {/* Stat row */}
+      {/* Stat row — each card click-throughs to its filtered list view */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         <StatCard
           value={stats.on_hire_count}
           label="On hire"
           accent="green"
           sparkline={stats.on_hire_spark}
+          to="/jobs?status=5&time=out_now"
         />
-        <StatCard value={stats.going_out_count} label="Going out today" accent="purple" />
-        <StatCard value={stats.coming_back_count} label="Coming back" accent="blue" />
-        <StatCard value={stats.overdue_count} label="Overdue returns" accent="red" />
-        <StatCard value={stats.chases_due_count} label="Chases due" accent="amber" />
-        <StatCard value={stats.open_enquiries_count} label="Open enquiries" accent="purple" />
+        <StatCard
+          value={stats.going_out_count}
+          label="Going out today"
+          accent="purple"
+          to="/jobs?status=2,3,4,5,8&time=out_now"
+        />
+        <StatCard
+          value={stats.coming_back_count}
+          label="Coming back"
+          accent="blue"
+          to="/jobs?status=5&time=out_now"
+        />
+        <StatCard
+          value={stats.overdue_count}
+          label="Overdue returns"
+          accent="red"
+          to="/jobs?status=5&time=out_now"
+        />
+        <StatCard
+          value={stats.chases_due_count}
+          label="Chases due"
+          accent="amber"
+          to="/pipeline?chase=overdue"
+        />
+        <StatCard
+          value={stats.open_enquiries_count}
+          label="Open enquiries"
+          accent="purple"
+          to="/pipeline"
+        />
       </div>
 
       {/* Sections (registry-driven) */}

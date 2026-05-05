@@ -2155,37 +2155,55 @@ export default function JobDetailPage() {
     return { daysSinceReturn, openCount: reqSummary.postHireOpenCount };
   })();
 
-  // Crew unassigned — confirmed/prepped/dispatched job with non-cancelled
-  // transport/crew quotes that have no assignments. Fires within 3 days of
-  // out_date (or after — past out_date with crew unassigned is even worse).
-  const crewUnassigned: { count: number; daysToOut: number } | null = (() => {
+  // Crew unassigned + Crew not introduced — gate on EACH QUOTE'S OWN date,
+  // not the job's overall out_date. A job can have a delivery in 1 day plus
+  // a collection in 3 weeks; only the imminent quote should fire the banner.
+  // Without per-quote gating the banner fires for the late quote every time
+  // the early one approaches, with confusingly job-scoped wording.
+  type NudgeQuote = { id: string; daysTo: number; jobDate: string | null; jobType: string | null };
+  const formatQuoteDate = (iso: string | null): string => {
+    if (!iso) return '';
+    return new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  };
+  const describeQuote = (q: NudgeQuote): string => {
+    const type = q.jobType || 'transport';
+    const date = formatQuoteDate(q.jobDate);
+    if (q.daysTo < 0) return `${type} on ${date} — ${Math.abs(q.daysTo)} day(s) ago`;
+    if (q.daysTo === 0) return `${type} today (${date})`;
+    if (q.daysTo === 1) return `${type} tomorrow (${date})`;
+    return `${type} on ${date} (in ${q.daysTo} days)`;
+  };
+  const collectImminentQuotes = (predicate: (q: SavedQuote) => boolean, windowDays: number): NudgeQuote[] => {
+    const out: NudgeQuote[] = [];
+    for (const q of quotes) {
+      if (q.status === 'cancelled') continue;
+      if (!q.job_date) continue;
+      if (!predicate(q)) continue;
+      const qDay = q.job_date.slice(0, 10);
+      const daysTo = daysBetween(qDay, todayLocalISO);
+      if (daysTo > windowDays) continue;
+      out.push({ id: q.id, daysTo, jobDate: q.job_date, jobType: q.job_type });
+    }
+    out.sort((a, b) => a.daysTo - b.daysTo);
+    return out;
+  };
+
+  const crewUnassigned: { quotes: NudgeQuote[] } | null = (() => {
     if (!['confirmed', 'prepped', 'dispatched'].includes(job.pipeline_status || '')) return null;
-    if (!outDay) return null;
-    const daysToOut = daysBetween(outDay, todayLocalISO);
-    if (daysToOut > 3) return null;
-    const unassigned = quotes.filter(q =>
-      q.status !== 'cancelled' &&
-      (!q.assignments || q.assignments.length === 0)
+    const matches = collectImminentQuotes(
+      (q) => !q.assignments || q.assignments.length === 0,
+      3,
     );
-    if (unassigned.length === 0) return null;
-    return { count: unassigned.length, daysToOut };
+    return matches.length === 0 ? null : { quotes: matches };
   })();
 
-  // Crew not introduced — confirmed/prepped job with crew/transport quotes
-  // whose client_introduction is still 'todo' or 'working_on_it'. Fires
-  // within 7 days of out_date.
-  const crewNotIntroduced: { count: number; daysToOut: number } | null = (() => {
+  const crewNotIntroduced: { quotes: NudgeQuote[] } | null = (() => {
     if (!['confirmed', 'prepped'].includes(job.pipeline_status || '')) return null;
-    if (!outDay) return null;
-    const daysToOut = daysBetween(outDay, todayLocalISO);
-    if (daysToOut < 0 || daysToOut > 7) return null;
-    const needIntro = quotes.filter(q => {
-      if (q.status === 'cancelled') return false;
+    const matches = collectImminentQuotes((q) => {
       const intro = (q as { client_introduction?: string }).client_introduction;
       return intro === 'todo' || intro === 'working_on_it';
-    });
-    if (needIntro.length === 0) return null;
-    return { count: needIntro.length, daysToOut };
+    }, 7);
+    return matches.length === 0 ? null : { quotes: matches };
   })();
 
   // Next-suggested status — the natural progression given dates + current
@@ -2684,15 +2702,11 @@ export default function JobDetailPage() {
             {crewUnassigned && (
               <JobAlertBanner
                 severity="amber"
-                message={`${crewUnassigned.count} ${
-                  crewUnassigned.count === 1 ? 'transport/crew job has' : 'transport/crew jobs have'
-                } no crew assigned${
-                  crewUnassigned.daysToOut < 0
-                    ? ` — out ${Math.abs(crewUnassigned.daysToOut)} day(s) ago`
-                    : crewUnassigned.daysToOut === 0
-                      ? ' — out today'
-                      : ` — out in ${crewUnassigned.daysToOut} day(s)`
-                }.`}
+                message={
+                  crewUnassigned.quotes.length === 1
+                    ? `Crew unassigned for ${describeQuote(crewUnassigned.quotes[0])}.`
+                    : `Crew unassigned for ${crewUnassigned.quotes.length} transport/crew jobs — soonest: ${describeQuote(crewUnassigned.quotes[0])}.`
+                }
                 action={{
                   label: 'View Crew & Transport',
                   onClick: () => setActiveTab('transport'),
@@ -2702,13 +2716,11 @@ export default function JobDetailPage() {
             {crewNotIntroduced && (
               <JobAlertBanner
                 severity="amber"
-                message={`Client not yet introduced for ${crewNotIntroduced.count} transport/crew job${
-                  crewNotIntroduced.count === 1 ? '' : 's'
-                }${
-                  crewNotIntroduced.daysToOut === 0
-                    ? ' — out today'
-                    : ` — out in ${crewNotIntroduced.daysToOut} day(s)`
-                }.`}
+                message={
+                  crewNotIntroduced.quotes.length === 1
+                    ? `Client not yet introduced for ${describeQuote(crewNotIntroduced.quotes[0])}.`
+                    : `Client not yet introduced for ${crewNotIntroduced.quotes.length} transport/crew jobs — soonest: ${describeQuote(crewNotIntroduced.quotes[0])}.`
+                }
                 action={{
                   label: 'View Crew & Transport',
                   onClick: () => setActiveTab('transport'),

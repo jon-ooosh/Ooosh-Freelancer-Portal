@@ -195,11 +195,16 @@ function RequirementsProgress({ progress }: { progress: ReqProgress | undefined 
 export default function JobsPage() {
   const [searchParams] = useSearchParams();
   const initialStatus = searchParams.get('status') || '2,3,4,5,8';
+  const VALID_TIME_FILTERS: readonly TimeFilter[] = ['all', 'out_now', 'next_2_weeks', 'over_2_weeks'] as const;
+  const timeParam = searchParams.get('time');
+  const initialTime: TimeFilter = (VALID_TIME_FILTERS as readonly string[]).includes(timeParam || '')
+    ? (timeParam as TimeFilter)
+    : 'all';
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState(initialStatus);
-  const [timeFilter, setTimeFilter] = useState<TimeFilter>('all');
+  const [timeFilter, setTimeFilter] = useState<TimeFilter>(initialTime);
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
   const [syncing, setSyncing] = useState(false);

@@ -1793,9 +1793,15 @@ export default function PipelinePage() {
   // Sort
   const [sortMode, setSortMode] = useState<SortMode>(initialPrefs.sortMode);
 
-  // Filters
+  // Filters — chase filter can be deep-linked via ?chase= so dashboard cards
+  // can drop the user straight onto the right view.
   const [filterLikelihood, setFilterLikelihood] = useState<string>(initialPrefs.filterLikelihood);
-  const [filterChase, setFilterChase] = useState<string>(initialPrefs.filterChase);
+  const VALID_CHASE_FILTERS = ['', 'overdue', 'due_today', 'due_this_week'];
+  const chaseParam = searchParams.get('chase');
+  const initialChase = VALID_CHASE_FILTERS.includes(chaseParam || '')
+    ? (chaseParam as string)
+    : initialPrefs.filterChase;
+  const [filterChase, setFilterChase] = useState<string>(initialChase);
   const [filterSearch, setFilterSearch] = useState<string>('');
   const [showConfirmed, setShowConfirmed] = useState(initialPrefs.showConfirmed);
   const [showLost, setShowLost] = useState(initialPrefs.showLost);
