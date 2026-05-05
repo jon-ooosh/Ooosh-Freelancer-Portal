@@ -170,7 +170,7 @@ interface CollectionListItem {
 
 router.get('/collections', async (_req: WarehouseRequest, res: Response) => {
   try {
-    const result = await query<CandidateJob>(
+    const result = await query(
       `SELECT id, hh_job_number, job_name, client_name, out_date, pipeline_status
        FROM jobs
        WHERE pipeline_status IN ('confirmed', 'prepped', 'prepping')
@@ -180,7 +180,7 @@ router.get('/collections', async (_req: WarehouseRequest, res: Response) => {
        ORDER BY out_date ASC`
     );
 
-    const candidates = result.rows;
+    const candidates = result.rows as CandidateJob[];
 
     // Customer-collect filter: HireHop COLLECT=0. Done in parallel via the
     // broker (rate-limited, deduped). If the call fails for a job, we
@@ -251,9 +251,9 @@ interface EquipmentItem {
 
 router.get('/collections/:jobId', async (req: WarehouseRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = String(req.params.jobId);
 
-    const result = await query<JobDetailRow>(
+    const result = await query(
       `SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.client_id,
               j.out_date, j.pipeline_status,
               o.email AS client_email
@@ -268,7 +268,7 @@ router.get('/collections/:jobId', async (req: WarehouseRequest, res: Response) =
       return;
     }
 
-    const job = result.rows[0];
+    const job = result.rows[0] as JobDetailRow;
 
     // Pull equipment from HireHop. Same filter as the portal completion flow:
     // kind:2 + non-virtual = real physical line items (excluding headers,
@@ -357,7 +357,7 @@ const completeSchema = z.object({
 
 router.post('/collections/:jobId/complete', async (req: WarehouseRequest, res: Response) => {
   try {
-    const { jobId } = req.params;
+    const jobId = String(req.params.jobId);
     const parsed = completeSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: 'Invalid completion data', details: parsed.error.issues });
@@ -366,7 +366,7 @@ router.post('/collections/:jobId/complete', async (req: WarehouseRequest, res: R
     const { signatureBase64, collectedBy, recipientEmails, jobName, hireStartDate, hhRef, items } = parsed.data;
 
     // Verify job exists + is in a dispatchable state
-    const jobResult = await query<{ id: string; hh_job_number: number | null; pipeline_status: string; out_date: Date | null; job_name: string | null; client_name: string | null }>(
+    const jobResult = await query(
       `SELECT id, hh_job_number, pipeline_status, out_date, job_name, client_name
        FROM jobs WHERE id = $1 AND is_deleted = false`,
       [jobId]
@@ -375,7 +375,14 @@ router.post('/collections/:jobId/complete', async (req: WarehouseRequest, res: R
       res.status(404).json({ error: 'Job not found' });
       return;
     }
-    const job = jobResult.rows[0];
+    const job = jobResult.rows[0] as {
+      id: string;
+      hh_job_number: number | null;
+      pipeline_status: string;
+      out_date: Date | null;
+      job_name: string | null;
+      client_name: string | null;
+    };
 
     if (!['confirmed', 'prepped', 'prepping', 'dispatched'].includes(job.pipeline_status)) {
       // Allow re-completion of an already-dispatched job (e.g. emailing the
