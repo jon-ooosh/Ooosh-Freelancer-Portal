@@ -54,6 +54,20 @@ function getEntityFk(entityType: string): string | null {
 }
 
 // POST /api/files/upload — upload a file to R2 and return metadata
+//
+// Two modes:
+//
+// 1) **Default (entity-anchored).** Caller supplies entity_type + entity_id;
+//    file is uploaded, appended to the entity's `files` JSONB, and a
+//    companion `📎 Uploaded file: …` interaction is written to the
+//    activity timeline. Used by the Files tab on every detail page.
+//
+// 2) **`attachment_only=true` (interaction attachments).** Caller is staging
+//    files to attach to a forthcoming `POST /api/interactions` call. We
+//    upload to R2 and return ONLY the metadata blob; no entity files
+//    JSONB write, no companion interaction. The caller passes the returned
+//    metadata verbatim in the `attachments` array on the next interaction
+//    POST. See docs/MESSAGING-SPEC.md §5.4.
 router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Response) => {
   try {
     if (!isR2Configured()) {
@@ -63,6 +77,26 @@ router.post('/upload', upload.single('file'), async (req: AuthRequest, res: Resp
 
     if (!req.file) {
       res.status(400).json({ error: 'No file provided' });
+      return;
+    }
+
+    // Mode 2: attachment_only — short-circuit, return metadata only.
+    if (req.body.attachment_only === 'true' || req.body.attachment_only === true) {
+      const ext = path.extname(req.file.originalname).toLowerCase();
+      const fileId = uuid();
+      // Scoped under user id so a casual reader can't enumerate someone
+      // else's pending uploads via the download endpoint's prefix check.
+      const key = `files/attachments/${req.user!.id}/${fileId}${ext}`;
+
+      await uploadToR2(key, req.file.buffer, req.file.mimetype);
+
+      res.status(201).json({
+        r2_key: key,
+        filename: req.file.originalname,
+        content_type: req.file.mimetype,
+        size_bytes: req.file.size,
+        thumbnail_key: null, // generated lazily on first render — Phase B follow-up
+      });
       return;
     }
 
