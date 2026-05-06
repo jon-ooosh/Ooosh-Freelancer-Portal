@@ -248,8 +248,10 @@ export interface OperationsData {
   };
   upcoming_events: UpcomingEvent[];
   needs_attention: {
-    /** Renamed from overdue_returns Apr 2026 — jobs returned (HH 6/7/8) but not closed out. */
+    /** Renamed from overdue_returns Apr 2026 — jobs returned (HH 6/7/8) but not closed out. List is LIMITed; headline count is overdue_completions_total. */
     overdue_completions?: ScheduleJob[];
+    /** Full count of overdue completions (the rows array is capped at 10 for display). */
+    overdue_completions_total?: number;
     /** @deprecated Use overdue_completions. Backwards-compat alias kept for one release. */
     overdue_returns?: ScheduleJob[];
     overdue_departures?: OverdueDeparture[];

@@ -161,16 +161,25 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // Returned, 8 = Requires Attention. The "physically out and overdue
       // back" case (status 4/5) lives on the headline stat card and links to
       // /jobs?overdue=1 — those aren't completions yet, the van is still out.
+      // Returns the top 10 oldest as items + a separate total count, so the
+      // bucket headline reflects the truth (was capped at 10 = misleading).
       query(`
-        SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
-               j.return_date, j.venue_name
-        FROM jobs j
-        WHERE j.is_deleted = false
-          AND j.status IN (6, 7, 8)
-          AND j.return_date IS NOT NULL
-          AND j.return_date::date < CURRENT_DATE
-        ORDER BY j.return_date ASC
-        LIMIT 10
+        WITH overdue AS (
+          SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
+                 j.return_date, j.venue_name,
+                 ROW_NUMBER() OVER (ORDER BY j.return_date ASC) AS rn,
+                 COUNT(*) OVER () AS total_count
+          FROM jobs j
+          WHERE j.is_deleted = false
+            AND j.status IN (6, 7, 8)
+            AND j.return_date IS NOT NULL
+            AND j.return_date::date < CURRENT_DATE
+        )
+        SELECT id, hh_job_number, job_name, client_name, company_name,
+               return_date, venue_name, total_count
+        FROM overdue
+        WHERE rn <= 10
+        ORDER BY return_date ASC
       `),
 
       // 7. Transport introductions to arrange — quotes in the next 7 days
@@ -662,7 +671,13 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // Renamed from overdue_returns Apr 2026 — bucket now means
         // "jobs returned (HH 6/7/8) but not closed out", not "jobs that should
         // be back but aren't". The latter lives on the headline stat card.
+        // The query LIMITs to 10 items; the bucket headline number reflects
+        // the FULL count via overdue_completions_total (was capped at 10
+        // until May 2026 — misleading when 32 jobs were stuck in close-out).
         overdue_completions: overdueCompletionsResult.rows,
+        overdue_completions_total: overdueCompletionsResult.rows[0]
+          ? parseInt(overdueCompletionsResult.rows[0].total_count, 10)
+          : 0,
         // Backwards-compat alias — old field name kept on the wire for any
         // widget still reading the old key. Drop after one release cycle.
         overdue_returns: overdueCompletionsResult.rows,
@@ -671,12 +686,15 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         overdue_transport_ops: overdueTransportOpsResult.rows,
         // Aggregate count for "X items need attention" headline. Excludes
         // client intros (separate concept) and referrals/excess counts
-        // (live in their own widgets).
+        // (live in their own widgets). Uses the FULL completions count, not
+        // the LIMIT-10 row count.
         total_overdue_count:
-          overdueCompletionsResult.rows.length +
-          overdueDeparturesResult.rows.length +
-          overdueBacklineResult.rows.length +
-          overdueTransportOpsResult.rows.length,
+          (overdueCompletionsResult.rows[0]
+            ? parseInt(overdueCompletionsResult.rows[0].total_count, 10)
+            : 0)
+          + overdueDeparturesResult.rows.length
+          + overdueBacklineResult.rows.length
+          + overdueTransportOpsResult.rows.length,
         client_intros: clientIntrosResult.rows,
         referral_count: parseInt(referralCountResult.rows[0].count as string),
         referrals: pendingReferralsResult.rows,

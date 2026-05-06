@@ -193,7 +193,7 @@ router.get('/job/:jobId', async (req: AuthRequest, res: Response) => {
 
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { status, category, severity, search, page = '1', limit = '50' } = req.query;
+    const { status, category, severity, source, search, page = '1', limit = '50' } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     const conditions: string[] = [`jr.requirement_type = 'issue'`];
@@ -216,6 +216,10 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     if (severity) {
       params.push(severity);
       conditions.push(`jr.severity = $${params.length}`);
+    }
+    if (source) {
+      params.push(source);
+      conditions.push(`jr.source_module = $${params.length}`);
     }
     if (search && (search as string).trim()) {
       params.push(`%${(search as string).trim()}%`);
