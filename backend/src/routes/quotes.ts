@@ -652,7 +652,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
           );
           for (const a of assignees.rows) {
             // Informational notification — respect global / per-job mute.
-            const { suppress } = await shouldSuppressInformational(a.person_id, req.params.id);
+            const { suppress } = await shouldSuppressInformational(a.person_id, String(req.params.id));
             if (suppress) {
               // Still flag confirmed_at so we don't re-send if mute later expires
               // and the quote bounces draft → confirmed again.
@@ -794,7 +794,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
           if (row.quote_status !== 'confirmed') return;
 
           // Informational notification — respect global / per-job mute.
-          const { suppress } = await shouldSuppressInformational(personId, req.params.id);
+          const { suppress } = await shouldSuppressInformational(personId, String(req.params.id));
           if (suppress) return;
 
           const freelancerName = (row.first_name || '').trim() || 'there';
