@@ -31,6 +31,7 @@ import {
   buildConflictPayload,
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
+import { autoDispatchJob } from '../services/auto-dispatch';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -1404,6 +1405,33 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
             await sendOohInfoEmailsForJob(oohJobId);
           } catch (err) {
             console.error(`[hire-forms] OOH info email send failed for job ${oohJobId}:`, err);
+          }
+        });
+      }
+
+      // Auto-dispatch: flip OP pipeline_status to 'dispatched' + writeback HH.
+      // Mirrors warehouse + portal completion flows. Includes a sanity-check
+      // email to info@ (and bell to staff) when HH is still < 5 (pre-Dispatched
+      // — i.e. items not all out yet). Idempotent — won't regress jobs past
+      // dispatched. Fire-and-forget after response.
+      if (updated.job_id) {
+        const dispatchJobId: string = updated.job_id;
+        const isFreelancer = isFreelancerBookout(req);
+        const actorUserId = isFreelancer ? null : (req.user?.id || null);
+        const actorLabel = isFreelancer
+          ? 'freelancer book-out'
+          : (req.user?.email || 'staff');
+        setImmediate(async () => {
+          try {
+            await autoDispatchJob({
+              jobId: dispatchJobId,
+              source: 'staff-bookout',
+              actorLabel,
+              actorUserId,
+              interactionContent: `🚐 Job dispatched — booked out by ${actorLabel}.`,
+            });
+          } catch (err) {
+            console.error(`[hire-forms] auto-dispatch failed for job ${dispatchJobId}:`, err);
           }
         });
       }

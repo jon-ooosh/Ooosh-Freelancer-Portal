@@ -105,9 +105,19 @@ function isTemplateGoingLive(templateId: string, config: ReturnType<typeof getEm
 // ── Variable Substitution ────────────────────────────────────────────────
 
 function substituteVariables(template: string, variables: Record<string, string>): string {
-  let result = template;
+  // 1. Resolve {{#if varName}}...{{/if}} blocks first. The block renders iff
+  // the variable is present and non-empty (after trimming). Lets templates
+  // own their HTML structure while still keeping data values escaped.
+  let result = template.replace(
+    /\{\{#if (\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g,
+    (_match, key: string, body: string) => {
+      const value = variables[key];
+      return value && value.trim() !== '' ? body : '';
+    }
+  );
+
+  // 2. Substitute remaining {{var}} with HTML-escaped values (XSS-safe).
   for (const [key, value] of Object.entries(variables)) {
-    // Escape any HTML in values to prevent XSS in emails
     const safeValue = value
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')

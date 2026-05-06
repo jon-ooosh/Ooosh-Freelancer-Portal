@@ -26,7 +26,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
 import { hhBroker } from '../services/hirehop-broker';
-import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { autoDispatchJob } from '../services/auto-dispatch';
 import { generateDeliveryNotePdf, type DeliveryNoteItem } from '../services/delivery-note-pdf';
 import { emailService } from '../services/email-service';
 import { uploadToR2, isR2Configured } from '../config/r2';
@@ -501,29 +501,18 @@ router.post('/collections/:jobId/complete', async (req: WarehouseRequest, res: R
     }
 
     // ── 4. Status flip ──
-    // OP: confirmed/prepped → dispatched
-    // HH: writeback to 5 (no-op if already at 5)
-    let opStatusChanged = false;
-    if (job.pipeline_status !== 'dispatched') {
-      await query(
-        `UPDATE jobs SET pipeline_status = 'dispatched',
-                         pipeline_status_changed_at = NOW(),
-                         updated_at = NOW()
-         WHERE id = $1`,
-        [jobId]
-      );
-      opStatusChanged = true;
-    }
-
-    let hhWriteback: { success: boolean; message: string } = { success: true, message: 'No HH writeback attempted' };
-    if (job.hh_job_number) {
-      try {
-        hhWriteback = await writeBackStatusToHireHop(jobId, 'dispatched', `warehouse:${actorLabel(req)}`);
-      } catch (err) {
-        console.error('[warehouse] HH writeback error:', err);
-        hhWriteback = { success: false, message: String(err) };
-      }
-    }
+    // Auto-dispatch (shared helper): OP pipeline → 'dispatched' if not
+    // already + HH writeback to 5 + sanity-check email to info@ (and bell
+    // to staff) when HH is still pre-Dispatched.
+    const dispatchResult = await autoDispatchJob({
+      jobId,
+      source: 'warehouse',
+      actorLabel: actorLabel(req),
+      actorUserId: req.staffUser?.id || null,
+      interactionContent: `🚐 Job dispatched — equipment collected via warehouse by ${collectedBy}.`,
+    });
+    const opStatusChanged = dispatchResult.opStatusChanged;
+    const hhWriteback = dispatchResult.hhWriteback;
 
     // ── 5. Activity Timeline ──
     const recipientsLine = emailedTo.length > 0

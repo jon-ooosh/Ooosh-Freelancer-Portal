@@ -152,40 +152,19 @@ async function buildEmailVariables(ctx: OohContext): Promise<Record<string, stri
   const frontendUrl = getFrontendUrl();
   const parkingFormUrl = `${frontendUrl}/return-parking/${ctx.parkingToken}`;
 
-  const yardAddressLine = settings.ooh_yard_address
-    ? `Yard: ${settings.ooh_yard_address}`
-    : 'Yard: Ooosh Tours';
-
-  const yardMapsLine = settings.ooh_yard_maps_url
-    ? `<p style="margin:8px 0 0;font-size:13px;"><a href="${settings.ooh_yard_maps_url}" style="color:#7B5EA7;text-decoration:none;">Open in Google Maps →</a></p>`
-    : '';
-
-  const what3wordsLine = settings.ooh_what3words
-    ? `<p style="margin:4px 0 0;font-size:13px;color:#64748b;">what3words: <strong>${settings.ooh_what3words}</strong></p>`
-    : '';
-
-  const keydropBlock = settings.ooh_keydrop_photo_url
-    ? `<h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Where the key drop is</h3>
-       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
-         Once the van is parked, place the keys in the secure key drop under the first window on our building.
-         <strong>Do not</strong> put the keys through the letterbox on the glass door.
-       </p>
-       <p style="margin:0 0 16px;"><a href="${settings.ooh_keydrop_photo_url}" style="color:#7B5EA7;text-decoration:none;font-size:14px;">View photo of the key drop →</a></p>`
-    : `<h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Where the key drop is</h3>
-       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
-         Once the van is parked, place the keys in the secure key drop under the first window on our building.
-         <strong>Do not</strong> put the keys through the letterbox on the glass door.
-       </p>`;
-
+  // Pass primitives only — the template owns the HTML structure and uses
+  // {{#if varName}}...{{/if}} blocks to conditionally render the wrapping
+  // markup for optional values. Building HTML strings here would get
+  // double-escaped by the template substituter.
   return {
     driverName: ctx.driverName || 'there',
     vehicleReg: ctx.vehicleReg,
     jobNumber: String(ctx.hhJobNumber ?? ''),
     gateCode: settings.ooh_gate_code || '—',
-    yardAddressLine,
-    yardMapsLine,
-    what3wordsLine,
-    keydropBlock,
+    yardAddress: settings.ooh_yard_address || 'Ooosh Tours',
+    yardMapsUrl: settings.ooh_yard_maps_url || '',
+    what3words: settings.ooh_what3words || '',
+    keydropPhotoUrl: settings.ooh_keydrop_photo_url || '',
     parkingFormUrl,
   };
 }
@@ -485,10 +464,7 @@ export async function recordOohParkingSubmission(opts: {
           submittedAt: new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' }),
           coordsLine: `${opts.lat.toFixed(5)}, ${opts.lng.toFixed(5)}`,
           mapsLink,
-          notesBlock: opts.notes
-            ? `<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Notes</p><p style="margin:0 0 8px;font-size:14px;color:#1e293b;">${opts.notes.replace(/[<>]/g, '')}</p>`
-            : '',
-          photosBlock: '',
+          notes: opts.notes || '',
           jobUrl: `${frontendUrl}/jobs/${opts.jobId}`,
         },
       });
