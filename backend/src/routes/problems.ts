@@ -83,11 +83,11 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       `INSERT INTO job_requirements (
          job_id, requirement_type, phase, status, custom_label, notes,
          issue_category, severity, source_module, due_date,
-         is_auto, source, created_by, updated_by
+         is_auto, source, created_by
        ) VALUES (
          $1, 'issue', 'post_hire', 'not_started', $2, $3,
          $4, $5, $6, $7,
-         false, 'manual', $8, $8
+         false, 'manual', $8
        )
        RETURNING id, job_id, status, issue_category, severity, custom_label, notes,
                  source_module, due_date, created_at`,
@@ -132,8 +132,6 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
     if (updates.length === 0) {
       return res.status(400).json({ error: 'No updatable fields supplied' });
     }
-    params.push(req.user!.id);
-    updates.push(`updated_by = $${params.length}`);
     updates.push(`updated_at = NOW()`);
 
     const result = await query(
