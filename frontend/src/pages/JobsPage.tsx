@@ -474,7 +474,7 @@ export default function JobsPage() {
                 className="text-xs px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 font-normal flex-shrink-0"
                 title="Out-of-hours return flagged"
               >
-                \ud83c\udf19
+                🌙
               </span>
             )}
           </div>

@@ -21,7 +21,7 @@ import { emailService } from '../services/email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from '../services/money-emails';
 import { uploadToR2, isR2Configured, getPresignedDownloadUrl } from '../config/r2';
 import { generateDeliveryNotePdf, DeliveryNoteItem } from '../services/delivery-note-pdf';
-import { writeBackStatusToHireHop } from '../services/hirehop-writeback';
+import { autoDispatchJob } from '../services/auto-dispatch';
 
 // Stable UUID seeded by migration 031 — used as created_by for portal-driven
 // auto-actions (the freelancer is a `people` row, not a `users` row, so we
@@ -1656,46 +1656,20 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
           );
 
           if (remaining.rows[0].remaining === 0) {
-            const jobRow = await query(
-              `SELECT pipeline_status, hh_job_number
-               FROM jobs WHERE id = $1`,
-              [ctx.job_id]
-            );
-            const job = jobRow.rows[0];
-            if (job && ['confirmed', 'prepped', 'prepping'].includes(job.pipeline_status)) {
-              await query(
-                `UPDATE jobs SET pipeline_status = 'dispatched',
-                                 pipeline_status_changed_at = NOW(),
-                                 updated_at = NOW()
-                 WHERE id = $1`,
-                [ctx.job_id]
-              );
-
-              try {
-                await query(
-                  `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
-                   VALUES ('note', $1, $2, $3, 'dispatched')`,
-                  [
-                    `🚚 Job dispatched — final delivery completed by ${completionName} via freelancer portal.`,
-                    ctx.job_id,
-                    SYSTEM_USER_ID,
-                  ]
-                );
-              } catch (err) {
-                console.error('[portal completion] Dispatch interaction insert error:', err);
-              }
-
-              if (job.hh_job_number) {
-                try {
-                  await writeBackStatusToHireHop(
-                    ctx.job_id,
-                    'dispatched',
-                    `portal:${req.portalUser!.email}`
-                  );
-                } catch (err) {
-                  console.error('[portal completion] HH writeback error:', err);
-                }
-              }
+            // Auto-dispatch (shared helper): OP pipeline → 'dispatched' +
+            // HH writeback to 5 + under-dispatched sanity-check email when
+            // HH is still pre-Dispatched. The whitelist
+            // ['confirmed','prepped','prepping'] is enforced inside the helper.
+            try {
+              await autoDispatchJob({
+                jobId: ctx.job_id,
+                source: 'portal',
+                actorLabel: req.portalUser!.email,
+                actorUserId: null,
+                interactionContent: `🚚 Job dispatched — final delivery completed by ${completionName} via freelancer portal.`,
+              });
+            } catch (err) {
+              console.error('[portal completion] auto-dispatch error:', err);
             }
           }
         }

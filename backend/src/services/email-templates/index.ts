@@ -1070,9 +1070,9 @@ const templates: Record<string, EmailTemplate> = {
           <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
             <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Yard gate code</p>
             <p style="margin:0;font-size:28px;color:#1e293b;font-weight:700;letter-spacing:2px;font-family:monospace;">{{gateCode}}</p>
-            <p style="margin:8px 0 0;font-size:13px;color:#64748b;">{{yardAddressLine}}</p>
-            {{yardMapsLine}}
-            {{what3wordsLine}}
+            <p style="margin:8px 0 0;font-size:13px;color:#64748b;">Yard: {{yardAddress}}</p>
+            {{#if yardMapsUrl}}<p style="margin:8px 0 0;font-size:13px;"><a href="{{yardMapsUrl}}" style="color:#7B5EA7;text-decoration:none;">Open in Google Maps →</a></p>{{/if}}
+            {{#if what3words}}<p style="margin:4px 0 0;font-size:13px;color:#64748b;">what3words: <strong>{{what3words}}</strong></p>{{/if}}
           </td>
         </tr>
       </table>
@@ -1086,7 +1086,12 @@ const templates: Record<string, EmailTemplate> = {
         <li>Close the gates behind you and refit the padlock through the gate chain. Roll the numbers to scramble the code.</li>
       </ul>
 
-      {{keydropBlock}}
+      <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">Where the key drop is</h3>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        Once the van is parked, place the keys in the secure key drop under the first window on our building.
+        <strong>Do not</strong> put the keys through the letterbox on the glass door.
+      </p>
+      {{#if keydropPhotoUrl}}<p style="margin:0 0 16px;"><a href="{{keydropPhotoUrl}}" style="color:#7B5EA7;text-decoration:none;font-size:14px;">View photo of the key drop →</a></p>{{/if}}
 
       <h3 style="margin:24px 0 8px;font-size:16px;color:#1e293b;">If the yard is full</h3>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
@@ -1138,7 +1143,7 @@ const templates: Record<string, EmailTemplate> = {
           <td style="padding:14px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
             <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Gate code</p>
             <p style="margin:0;font-size:24px;color:#1e293b;font-weight:700;letter-spacing:2px;font-family:monospace;">{{gateCode}}</p>
-            <p style="margin:8px 0 0;font-size:13px;color:#64748b;">{{yardAddressLine}}</p>
+            <p style="margin:8px 0 0;font-size:13px;color:#64748b;">Yard: {{yardAddress}}</p>
           </td>
         </tr>
       </table>
@@ -1164,6 +1169,37 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  under_dispatched_warning: {
+    variant: 'internal',
+    subject: 'Sanity check: {{jobRef}} marked On Hire but HH not fully dispatched',
+    body: `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#92400e;">⚠️ Under-dispatched warning</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        Job <strong>{{jobRef}}</strong> ({{jobName}}) has just been marked
+        <strong>On Hire</strong> in OP via <strong>{{source}}</strong> by
+        <strong>{{actorLabel}}</strong>, but HireHop status is still
+        <strong>{{hhStatusLabel}}</strong> — not all items appear to be
+        dispatched in HH.
+      </p>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
+        OP has gone ahead and pushed the HH status to Dispatched. Please
+        confirm the items are correct, or flip back in HireHop if needed.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fffbeb;border-radius:8px;border:1px solid #fde68a;">
+            <p style="margin:0 0 8px;font-size:13px;color:#92400e;">
+              <a href="{{opJobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in OP →</a>
+            </p>
+            {{#if hhJobUrl}}<p style="margin:0;font-size:13px;color:#92400e;">
+              <a href="{{hhJobUrl}}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">Open job in HireHop →</a>
+            </p>{{/if}}
+          </td>
+        </tr>
+      </table>
+    `,
+  },
+
   ooh_return_received_internal: {
     variant: 'internal',
     subject: 'OOH return logged: {{vehicleReg}} — job #{{jobNumber}}',
@@ -1182,8 +1218,7 @@ const templates: Record<string, EmailTemplate> = {
             <p style="margin:0 0 8px;font-size:14px;color:#1e293b;">
               <a href="{{mapsLink}}" style="color:#7B5EA7;text-decoration:none;">{{coordsLine}}</a>
             </p>
-            {{notesBlock}}
-            {{photosBlock}}
+            {{#if notes}}<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Notes</p><p style="margin:0 0 8px;font-size:14px;color:#1e293b;">{{notes}}</p>{{/if}}
           </td>
         </tr>
       </table>
