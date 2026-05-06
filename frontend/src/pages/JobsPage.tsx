@@ -322,13 +322,24 @@ export default function JobsPage() {
       'No date set': [],
     };
 
-    // First pass: identify "Happening Today" jobs
+    // First pass: identify "Happening Today" jobs.
+    // When overdueOnly is on, every row in sourceJobs is overdue by
+    // definition (return_date past + status 4/5). Force them all into the
+    // happening list — otherwise the section-bucket logic below routes
+    // the awkward ones (e.g. status 5 + pipeline_status='prepped' that
+    // didn't physically leave, jobs without a return-window match) into
+    // 'Recently Completed', which the timeFilter='out_now' default for
+    // overdue mode then hides. Caused the headline "4 overdue" stat card
+    // to show only 3 rows on the page.
     for (const job of sourceJobs) {
       const categories: HappeningCategory[] = [];
 
       if (isGoingOutToday(job, todayStr)) categories.push('going_out');
       if (isCurrentlyOut(job, todayStr)) categories.push('currently_out');
       if (isInReturnWindow(job, todayStr)) categories.push('returning');
+
+      // Overdue rule: if no other category matched, treat as currently_out.
+      if (categories.length === 0 && overdueOnly) categories.push('currently_out');
 
       if (categories.length > 0) {
         happening.push({ job, categories });
@@ -558,7 +569,7 @@ export default function JobsPage() {
       </div>
 
       {/* Search + Filters */}
-      <div className="mt-6 flex flex-col sm:flex-row gap-3">
+      <div className="mt-6 flex flex-col sm:flex-row sm:flex-wrap gap-3">
         <input
           type="text"
           placeholder="Search by job name, client, venue, or job number..."

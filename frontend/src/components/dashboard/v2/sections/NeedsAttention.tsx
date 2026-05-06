@@ -145,11 +145,15 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // stat card. Backend exposes the same data under both `overdue_completions`
   // (new) and `overdue_returns` (back-compat alias).
   const completionsRows = na.overdue_completions || na.overdue_returns || [];
+  // Backend caps the row list at 10 for display; the true count comes from
+  // overdue_completions_total (added May 2026). Falls back to row count if
+  // we're talking to an older backend that doesn't expose the total.
+  const completionsTotal = na.overdue_completions_total ?? completionsRows.length;
   const completions: NABucket = {
     key: 'completions',
     title: 'Overdue Completions',
     accent: 'red',
-    count: completionsRows.length || 0,
+    count: completionsTotal,
     items: completionsRows.map((j) => {
       const ret = j.return_date ? new Date(j.return_date) : null;
       const days = ret ? Math.floor((Date.now() - ret.getTime()) / 86400000) : 0;
