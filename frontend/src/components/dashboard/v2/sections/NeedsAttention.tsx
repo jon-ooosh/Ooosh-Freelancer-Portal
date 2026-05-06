@@ -14,7 +14,7 @@ interface ProblemSummary {
   items: Array<{
     id: string;
     job_id: string;
-    issue_category: string;
+    category: string;
     severity: string;
     summary: string;
     hh_job_number?: number;
@@ -310,9 +310,9 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     items: (problems?.items || []).map((p) => ({
       id: p.id,
       label: `${p.hh_job_number ? `#${p.hh_job_number} ` : ''}${p.client_name || 'Unknown'} — ${p.summary}`.slice(0, 80),
-      sub: p.issue_category,
+      sub: p.category,
       tag: p.severity === 'urgent' ? 'URGENT' : undefined,
-      href: `/jobs/${p.job_id}`,
+      href: `/operations/problems/${p.id}`,
     })),
     viewAllHref: '/operations/problems',
   };
