@@ -81,7 +81,9 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
   }
 
   // Fetch overdue candidates: confirmed, not completed/cancelled,
-  // with a crew assignment to a real person (not Ooosh crew), who has an email.
+  // with a crew assignment to anyone with an email (Ooosh crew via the
+  // info@ shared account included — they get chased on the same ladder
+  // because completion accountability bypasses the portal mute).
   // Looking back 48h to catch stragglers but not run wild.
   const candidates = await query(
     `SELECT q.id, q.job_type, q.venue_name, q.job_date, q.arrival_time,
@@ -97,7 +99,6 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
      WHERE q.status = 'confirmed'
        AND q.ops_status NOT IN ('completed', 'cancelled')
        AND q.is_deleted = false
-       AND qa.is_ooosh_crew = false
        AND qa.status NOT IN ('declined', 'cancelled', 'completed')
        AND p.email IS NOT NULL
        AND q.job_date IS NOT NULL
@@ -178,8 +179,11 @@ export async function runCompletionChase(): Promise<{ scanned: number; sent: num
       console.error(`[completion-chaser] Failed to email ${row.freelancer_email} (L${level}):`, err);
     }
 
-    // Level 3 → staff escalation
-    if (level === 3) {
+    // Level 3 → staff escalation. Suppressed when the chasee IS info@ — no
+    // point copying info@ to itself; the L1+L2+L3 chase emails already landed
+    // there.
+    const isInfoMailbox = (row.freelancer_email || '').toLowerCase() === 'info@oooshtours.co.uk';
+    if (level === 3 && !isInfoMailbox) {
       try {
         const fullName = `${row.freelancer_first_name || ''} ${row.freelancer_last_name || ''}`.trim()
           || row.freelancer_email;

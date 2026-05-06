@@ -51,6 +51,7 @@ interface PersonDetail {
   working_terms_notes: string | null;
   ai_summary: string | null;
   ai_research: string | null;
+  portal_notifications_paused_until: string | null;
   files: FileAttachment[];
   created_at: string;
   organisations: Array<{
@@ -475,6 +476,22 @@ export default function PersonDetailPage() {
               <>
                 <div className="col-span-full border-t pt-4 mt-2">
                   <h3 className="text-sm font-semibold text-gray-700 mb-3">Freelancer Details</h3>
+                  {(() => {
+                    const pausedUntil = person.portal_notifications_paused_until
+                      ? new Date(person.portal_notifications_paused_until)
+                      : null;
+                    if (!pausedUntil || pausedUntil <= new Date()) return null;
+                    const yearsAhead = (pausedUntil.getTime() - Date.now()) / (365 * 24 * 60 * 60 * 1000);
+                    const label = yearsAhead > 5
+                      ? 'Portal notifications paused indefinitely'
+                      : `Portal notifications paused until ${pausedUntil.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+                    return (
+                      <div className="mb-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
+                        <span aria-hidden="true">🔕</span>
+                        <span>{label}</span>
+                      </div>
+                    );
+                  })()}
                 </div>
                 <DetailField label="Joined Date" value={person.freelancer_joined_date ? formatDate(person.freelancer_joined_date) : null} />
                 <DetailField label="Next Review Date" value={person.freelancer_next_review_date ? formatDate(person.freelancer_next_review_date) : null} />

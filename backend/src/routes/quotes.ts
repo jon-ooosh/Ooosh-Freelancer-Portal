@@ -10,6 +10,7 @@ import {
 } from '../services/crew-transport-calculator';
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
+import { shouldSuppressInformational } from '../services/portal-notification-prefs';
 
 const router = Router();
 router.use(authenticate);
@@ -536,9 +537,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       (async () => {
         try {
           const assignees = await query(
-            `SELECT qa.person_id, p.first_name, p.last_name, p.email,
-                    p.portal_notifications_paused_until,
-                    p.portal_muted_quote_ids
+            `SELECT qa.person_id, p.first_name, p.last_name, p.email
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
              WHERE qa.quote_id = $1 AND qa.status NOT IN ('declined', 'cancelled')
@@ -552,21 +551,10 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
                 weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
               })
             : 'TBC';
-          const now = new Date();
           for (const crew of assignees.rows) {
-            // Respect mute preferences: skip if globally paused or this quote is muted
-            const pausedUntil = crew.portal_notifications_paused_until
-              ? new Date(crew.portal_notifications_paused_until)
-              : null;
-            if (pausedUntil && pausedUntil > now) {
-              console.log(`Skipping job change notification for ${crew.email} — globally muted until ${pausedUntil.toISOString()}`);
-              continue;
-            }
-            const mutedIds: string[] = crew.portal_muted_quote_ids || [];
-            if (mutedIds.includes(quoteId)) {
-              console.log(`Skipping job change notification for ${crew.email} — quote ${quoteId} muted`);
-              continue;
-            }
+            // Informational notification — respect global / per-job mute.
+            const { suppress } = await shouldSuppressInformational(crew.person_id, quoteId);
+            if (suppress) continue;
             try {
               await emailService.send('job_change_notification', {
                 to: crew.email,
@@ -648,7 +636,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
         try {
           const assignees = await query(
             `SELECT qa.id AS assignment_id, qa.role, qa.agreed_rate, qa.rate_type,
-                    p.first_name, p.email, p.is_freelancer,
+                    p.id AS person_id, p.first_name, p.email, p.is_freelancer,
                     q.job_date, q.venue_name, j.job_name
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
@@ -663,6 +651,17 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
             [req.params.id]
           );
           for (const a of assignees.rows) {
+            // Informational notification — respect global / per-job mute.
+            const { suppress } = await shouldSuppressInformational(a.person_id, req.params.id);
+            if (suppress) {
+              // Still flag confirmed_at so we don't re-send if mute later expires
+              // and the quote bounces draft → confirmed again.
+              await query(
+                `UPDATE quote_assignments SET confirmed_at = NOW() WHERE id = $1`,
+                [a.assignment_id]
+              );
+              continue;
+            }
             const freelancerName = (a.first_name || '').trim() || 'there';
             const jobName = a.job_name || a.venue_name || 'a job';
             const jobDate = a.job_date
@@ -793,6 +792,10 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
           const row = ctx.rows[0];
           if (!row.is_freelancer || !row.email) return;
           if (row.quote_status !== 'confirmed') return;
+
+          // Informational notification — respect global / per-job mute.
+          const { suppress } = await shouldSuppressInformational(personId, req.params.id);
+          if (suppress) return;
 
           const freelancerName = (row.first_name || '').trim() || 'there';
           const jobName = row.job_name || row.venue_name || 'a job';
