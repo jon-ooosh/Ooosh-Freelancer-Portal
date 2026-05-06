@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'reac
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ActivityTimeline from '../components/ActivityTimeline';
+import JobProblemsPanel from '../components/JobProblemsPanel';
 import TransportCalculator from '../components/TransportCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
@@ -3270,6 +3271,11 @@ export default function JobDetailPage() {
         <div className="space-y-4">
           {/* Compact financial progress strip */}
           {id && <OverviewFinancialStrip jobId={id} />}
+
+          {/* Problems / Issues register — cross-module damage / missing /
+              broken / dispute / other tracking. Hidden when empty so it
+              doesn't clutter clean jobs; "+ Log Problem" button sits inside. */}
+          {id && <JobProblemsPanel jobId={id} />}
 
           <JobPrepChecklist
             key={prepChecklistKey}

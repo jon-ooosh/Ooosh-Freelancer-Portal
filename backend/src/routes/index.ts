@@ -31,6 +31,7 @@ import ve103bRouter from './ve103b';
 import backlineRouter from './backline';
 import cancellationsRouter from './cancellations';
 import issuesRouter from './issues';
+import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
 import systemSettingsRouter from './system-settings';
 import oohReturnRouter from './ooh-return';
@@ -63,6 +64,7 @@ router.use('/ve103b', ve103bRouter);
 router.use('/backline', backlineRouter);
 router.use('/cancellations', cancellationsRouter);
 router.use('/issues', issuesRouter);
+router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute) — distinct from /issues platform tracker
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)

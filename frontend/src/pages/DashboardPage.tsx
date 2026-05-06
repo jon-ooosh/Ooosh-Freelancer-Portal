@@ -183,7 +183,7 @@ export default function DashboardPage() {
           value={stats.overdue_count}
           label="Overdue returns"
           accent="red"
-          to="/jobs?status=5&time=out_now"
+          to="/jobs?overdue=1"
         />
         <StatCard
           value={stats.chases_due_count}

@@ -112,7 +112,12 @@ router.get('/jobs/last-sync', async (_req: AuthRequest, res: Response) => {
 // GET /api/hirehop/jobs — list synced jobs from our DB
 router.get('/jobs', async (req: AuthRequest, res: Response) => {
   try {
-    const { status, search, ooh_only, manager, service_type, page = '1', limit = '50' } = req.query;
+    const {
+      status, search, ooh_only, manager, service_type,
+      date_from, date_to, date_field,
+      has_issues,
+      page = '1', limit = '50',
+    } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let whereClause = 'WHERE is_deleted = false';
@@ -124,6 +129,23 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
         params.push(statuses);
         whereClause += ` AND status = ANY($${params.length})`;
       }
+    }
+
+    // Date range. Defaults to filtering on return_date (used by the Returns
+    // page); pass date_field=job_date to filter on departure date instead.
+    const allowedDateFields: Record<string, string> = {
+      return_date: 'return_date',
+      job_date: 'job_date',
+      job_end: 'job_end',
+    };
+    const dateColumn = allowedDateFields[(date_field as string) || 'return_date'] || 'return_date';
+    if (date_from && (date_from as string).trim()) {
+      params.push((date_from as string).trim());
+      whereClause += ` AND ${dateColumn}::date >= $${params.length}`;
+    }
+    if (date_to && (date_to as string).trim()) {
+      params.push((date_to as string).trim());
+      whereClause += ` AND ${dateColumn}::date <= $${params.length}`;
     }
 
     if (search && (search as string).trim()) {
@@ -146,6 +168,18 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
     if (manager) {
       params.push(manager);
       whereClause += ` AND (jobs.manager1_person_id = $${params.length} OR jobs.manager2_person_id = $${params.length})`;
+    }
+
+    // Has-issues filter — only jobs with at least one OPEN issue (problem
+    // register row). Drives the "Issues" filter pill on the Jobs and Returns
+    // pages. NULL has_issues param = no filter.
+    if (has_issues === 'true' || has_issues === '1') {
+      whereClause += ` AND EXISTS (
+        SELECT 1 FROM job_requirements jr
+        WHERE jr.job_id = jobs.id
+          AND jr.requirement_type = 'issue'
+          AND jr.status NOT IN ('done', 'cancelled')
+      )`;
     }
 
     // Service type filter — comma-separated requirement_type values
@@ -199,6 +233,49 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('Jobs list error:', error);
     res.status(500).json({ error: 'Failed to load jobs' });
+  }
+});
+
+// POST /api/hirehop/jobs/retros-bulk — bulk fetch the latest "Job retro" interaction
+// per job. Used by the Returns & Completed page to surface a snippet column
+// (rating + first ~80 chars of notes) without N+1 queries. Retro data is
+// stored as an interaction with content starting "Job retro: <rating>\n<notes>"
+// — see pipeline.ts completion handler.
+router.post('/jobs/retros-bulk', async (req: AuthRequest, res: Response) => {
+  try {
+    const { job_ids } = req.body;
+    if (!Array.isArray(job_ids) || job_ids.length === 0) {
+      return res.json({ data: {} });
+    }
+    const ids = job_ids.slice(0, 500);
+    const result = await query(
+      `SELECT DISTINCT ON (i.job_id) i.job_id, i.content, i.created_at
+       FROM interactions i
+       WHERE i.job_id = ANY($1) AND i.content LIKE 'Job retro:%'
+       ORDER BY i.job_id, i.created_at DESC`,
+      [ids]
+    );
+    const data: Record<string, { rating: string; notes: string; created_at: string }> = {};
+    for (const row of result.rows) {
+      const lines = (row.content as string).split('\n');
+      const ratingMatch = /^Job retro:\s*(.+)$/.exec(lines[0] || '');
+      // First line is "Job retro: <rating>". Notes are subsequent lines until
+      // a "Follow-up:" line (which we don't include in the snippet).
+      const noteLines: string[] = [];
+      for (let i = 1; i < lines.length; i++) {
+        if (lines[i].startsWith('Follow-up:')) break;
+        noteLines.push(lines[i]);
+      }
+      data[row.job_id] = {
+        rating: (ratingMatch ? ratingMatch[1] : 'unknown').trim().toLowerCase(),
+        notes: noteLines.join(' ').trim(),
+        created_at: row.created_at,
+      };
+    }
+    res.json({ data });
+  } catch (error) {
+    console.error('Retros bulk error:', error);
+    res.status(500).json({ error: 'Failed to load retros' });
   }
 });
 

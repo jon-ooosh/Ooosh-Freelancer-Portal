@@ -1,5 +1,15 @@
-import { useState, useEffect, useMemo } from 'react';
-import { Link } from 'react-router-dom';
+/**
+ * Returns & Completed — the place where things go to get finished up,
+ * then live as a record for future queries.
+ *
+ * Replaces the previous bare-bones Returns page. Server-side everything:
+ * search, status filter, type filter, date range, overdue toggle,
+ * pagination with jump-to-page. Per-job retro snippet + days-since-return
+ * red after 5 days. Post-hire progress shown as a bar (matches the Jobs
+ * page) instead of dots — drilling into a job still shows per-item detail.
+ */
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 
 const STATUS_MAP: Record<number, string> = {
@@ -13,24 +23,16 @@ const STATUS_COLOURS: Record<number, string> = {
   11: 'bg-emerald-100 text-emerald-700',
 };
 
-// Close-out item status → dot colour
-const DOT_COLOUR: Record<string, string> = {
-  done: 'bg-green-500',
-  in_progress: 'bg-amber-400',
-  blocked: 'bg-red-500',
-  not_started: 'bg-gray-300',
+const RATING_COLOURS: Record<string, string> = {
+  great: 'bg-green-100 text-green-700',
+  ok: 'bg-amber-100 text-amber-700',
+  issues: 'bg-red-100 text-red-700',
 };
 
-// Close-out type → short label for filter pills
-const CLOSEOUT_TYPE_LABELS: Record<string, string> = {
-  vehicle: 'Check-In',
-  backline: 'De-Prep',
-  invoice: 'Invoice',
-  payment_reconcile: 'Payment',
-  excess_resolve: 'Excess',
-  freelancer_followup: 'Freelancer',
-  client_followup: 'Client',
-  damage_review: 'Damage',
+const RATING_LABEL: Record<string, string> = {
+  great: 'Great',
+  ok: 'OK',
+  issues: 'Issues',
 };
 
 interface Job {
@@ -51,20 +53,22 @@ interface Job {
   pipeline_status: string | null;
 }
 
-interface CloseoutItem {
-  type: string;
-  label: string;
-  icon: string;
-  status: string;
-  custom_label: string | null;
-}
+interface ReqProgress { total: number; done: number; blocked: number }
+interface RetroSnippet { rating: string; notes: string; created_at: string }
 
-interface CloseoutProgress {
-  items: CloseoutItem[];
-  total: number;
-  done: number;
-  blocked: number;
-  in_progress: number;
+type StatusFilter = 'all' | 'returned' | 'completed';
+type TypeFilter = 'vehicle' | 'backline' | 'rehearsal';
+
+const STATUS_PILLS: { key: StatusFilter; label: string; statusCsv: string }[] = [
+  { key: 'all',       label: 'All',                     statusCsv: '6,7,8,11' },
+  { key: 'returned',  label: 'Returned (needs completing)', statusCsv: '6,7,8' },
+  { key: 'completed', label: 'Completed',                   statusCsv: '11' },
+];
+
+function daysAgo(dateStr: string): number {
+  const d = new Date(dateStr);
+  const now = new Date();
+  return Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
 }
 
 function formatDateRange(start: string | null, end: string | null): string {
@@ -74,170 +78,156 @@ function formatDateRange(start: string | null, end: string | null): string {
   return '';
 }
 
-function daysAgo(dateStr: string): number {
-  const d = new Date(dateStr);
-  const now = new Date();
-  return Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+function ProgressBar({ progress }: { progress: ReqProgress | undefined }) {
+  if (!progress || progress.total === 0) {
+    return <span className="text-[10px] text-gray-400 italic">No close-out</span>;
+  }
+  const { total, done, blocked } = progress;
+  const pct = Math.round((done / total) * 100);
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="w-20 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full ${blocked > 0 ? 'bg-red-500' : pct === 100 ? 'bg-green-500' : 'bg-amber-400'}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className={`text-xs ${blocked > 0 ? 'text-red-600 font-medium' : done === total ? 'text-green-600' : 'text-gray-500'}`}>
+        {blocked > 0 ? `${blocked} blocked` : `${done}/${total}`}
+      </span>
+    </div>
+  );
 }
 
-type FilterType = 'all' | 'invoice' | 'damage_review' | 'excess_resolve' | 'freelancer_followup' | 'payment_reconcile';
-type SortType = 'return_date' | 'days_out' | 'outstanding';
-
 export default function ReturnsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialOverdue = searchParams.get('overdue') === '1';
+  const initialStatus = (searchParams.get('status_filter') as StatusFilter) || 'all';
+
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [closeoutData, setCloseoutData] = useState<Record<string, CloseoutProgress>>({});
-  const [showCompleted, setShowCompleted] = useState(false);
-  const [filter, setFilter] = useState<FilterType>('all');
-  const [sortBy, setSortBy] = useState<SortType>('return_date');
+  const [search, setSearch] = useState(searchParams.get('search') || '');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(initialStatus);
+  const [typeFilter, setTypeFilter] = useState<TypeFilter[]>([]);
+  const [dateFrom, setDateFrom] = useState(searchParams.get('date_from') || '');
+  const [dateTo, setDateTo] = useState(searchParams.get('date_to') || '');
+  const [overdueOnly, setOverdueOnly] = useState(initialOverdue);
+  const [hasIssuesOnly, setHasIssuesOnly] = useState(searchParams.get('has_issues') === '1');
+  const [page, setPage] = useState(parseInt(searchParams.get('page') || '1', 10));
+  const [limit] = useState(50);
+  const [totalPages, setTotalPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [pageInput, setPageInput] = useState('');
 
-  useEffect(() => {
-    loadJobs();
-  }, []);
+  const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
+  const [retros, setRetros] = useState<Record<string, RetroSnippet>>({});
 
-  useEffect(() => {
-    if (jobs.length === 0) return;
-    const jobIds = jobs.map(j => j.id);
-    api.post<{ data: Record<string, CloseoutProgress> }>('/requirements/closeout-progress', { job_ids: jobIds })
-      .then(res => setCloseoutData(res.data))
-      .catch(() => {});
-  }, [jobs]);
-
-  async function loadJobs() {
+  const loadJobs = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: '500', status: '6,7,8,11' });
-      const data = await api.get<{ data: Job[] }>(`/hirehop/jobs?${params}`);
-      setJobs(data.data);
+      const params = new URLSearchParams();
+      const statusCsv = STATUS_PILLS.find(p => p.key === statusFilter)?.statusCsv || '6,7,8,11';
+      params.set('status', statusCsv);
+      params.set('page', String(page));
+      params.set('limit', String(limit));
+      params.set('date_field', 'return_date');
+      if (search.trim()) params.set('search', search.trim());
+      if (typeFilter.length > 0) params.set('service_type', typeFilter.join(','));
+      if (dateFrom) params.set('date_from', dateFrom);
+      if (dateTo) params.set('date_to', dateTo);
+      if (hasIssuesOnly) params.set('has_issues', '1');
+
+      const res = await api.get<{ data: Job[]; pagination: { totalPages: number; total: number } }>(
+        `/hirehop/jobs?${params.toString()}`
+      );
+      let rows = res.data;
+      // Overdue is computed client-side (return_date < today). Cheaper than
+      // adding more SQL — we already paginate server-side.
+      if (overdueOnly) {
+        const today = new Date().toISOString().split('T')[0];
+        rows = rows.filter(j => {
+          const ret = (j.return_date || j.job_end || '').split('T')[0];
+          return ret && ret < today && j.status !== 11;
+        });
+      }
+      setJobs(rows);
+      setTotalPages(res.pagination.totalPages);
+      setTotal(res.pagination.total);
     } catch (err) {
       console.error('Failed to load returns:', err);
     } finally {
       setLoading(false);
     }
+  }, [statusFilter, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly, page, limit, search]);
+
+  useEffect(() => { loadJobs(); }, [loadJobs]);
+
+  // Sync filter state into URL so links survive a refresh / share.
+  useEffect(() => {
+    const next = new URLSearchParams();
+    if (statusFilter !== 'all') next.set('status_filter', statusFilter);
+    if (search.trim()) next.set('search', search.trim());
+    if (dateFrom) next.set('date_from', dateFrom);
+    if (dateTo) next.set('date_to', dateTo);
+    if (overdueOnly) next.set('overdue', '1');
+    if (hasIssuesOnly) next.set('has_issues', '1');
+    if (page > 1) next.set('page', String(page));
+    setSearchParams(next, { replace: true });
+  }, [statusFilter, search, dateFrom, dateTo, overdueOnly, hasIssuesOnly, page, setSearchParams]);
+
+  // Load post-hire progress + retros after jobs change.
+  useEffect(() => {
+    if (jobs.length === 0) {
+      setReqProgress({}); setRetros({});
+      return;
+    }
+    const ids = jobs.map(j => j.id);
+    api.post<{ data: Record<string, ReqProgress> }>('/requirements/bulk', { job_ids: ids, phase: 'post_hire' })
+      .then(res => setReqProgress(res.data))
+      .catch(() => {});
+    api.post<{ data: Record<string, RetroSnippet> }>('/hirehop/jobs/retros-bulk', { job_ids: ids })
+      .then(res => setRetros(res.data))
+      .catch(() => {});
+  }, [jobs]);
+
+  // Reset page when filters change so the user sees results from the start.
+  useEffect(() => { setPage(1); }, [statusFilter, search, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly]);
+
+  const stats = useMemo(() => {
+    const active = jobs.filter(j => [6, 7, 8].includes(j.status)).length;
+    const completed = jobs.filter(j => j.status === 11).length;
+    return { active, completed };
+  }, [jobs]);
+
+  function clearFilters() {
+    setSearch(''); setTypeFilter([]); setDateFrom(''); setDateTo('');
+    setOverdueOnly(false); setHasIssuesOnly(false); setStatusFilter('all'); setPage(1);
   }
 
-  const { checkingIn, completed } = useMemo(() => {
-    let filtered = search
-      ? jobs.filter(j =>
-          (j.job_name || '').toLowerCase().includes(search.toLowerCase()) ||
-          (j.client_name || '').toLowerCase().includes(search.toLowerCase()) ||
-          (j.company_name || '').toLowerCase().includes(search.toLowerCase()) ||
-          String(j.hh_job_number).includes(search)
-        )
-      : jobs;
-
-    const ci: Job[] = [];
-    const comp: Job[] = [];
-
-    for (const job of filtered) {
-      if (job.status === 11) {
-        comp.push(job);
-      } else if ([6, 7, 8].includes(job.status)) {
-        ci.push(job);
-      }
+  function jumpToPage() {
+    const n = parseInt(pageInput, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= totalPages) {
+      setPage(n); setPageInput('');
     }
-
-    // Apply close-out filter
-    const filteredCi = filter === 'all'
-      ? ci
-      : ci.filter(j => {
-          const co = closeoutData[j.id];
-          if (!co) return false;
-          return co.items.some(item => item.type === filter && item.status !== 'done');
-        });
-
-    // Sort
-    filteredCi.sort((a, b) => {
-      if (sortBy === 'return_date') {
-        const da = a.return_date ? new Date(a.return_date).getTime() : 0;
-        const db = b.return_date ? new Date(b.return_date).getTime() : 0;
-        return db - da;
-      }
-      if (sortBy === 'days_out') {
-        const da = a.return_date ? daysAgo(a.return_date) : 0;
-        const db = b.return_date ? daysAgo(b.return_date) : 0;
-        return db - da; // most overdue first
-      }
-      if (sortBy === 'outstanding') {
-        const coA = closeoutData[a.id];
-        const coB = closeoutData[b.id];
-        const outA = coA ? coA.total - coA.done : 0;
-        const outB = coB ? coB.total - coB.done : 0;
-        return outB - outA; // most outstanding first
-      }
-      return 0;
-    });
-
-    comp.sort((a, b) => {
-      const da = a.return_date ? new Date(a.return_date).getTime() : 0;
-      const db = b.return_date ? new Date(b.return_date).getTime() : 0;
-      return db - da;
-    });
-
-    return { checkingIn: filteredCi, completed: comp };
-  }, [jobs, search, closeoutData, filter, sortBy]);
-
-  // Count jobs per filter
-  const filterCounts = useMemo(() => {
-    const counts: Record<FilterType, number> = {
-      all: 0, invoice: 0, damage_review: 0, excess_resolve: 0,
-      freelancer_followup: 0, payment_reconcile: 0,
-    };
-    for (const job of jobs) {
-      if (job.status === 11) continue; // skip completed
-      if (![6, 7, 8].includes(job.status)) continue;
-      counts.all++;
-      const co = closeoutData[job.id];
-      if (!co) continue;
-      for (const item of co.items) {
-        if (item.status !== 'done' && item.type in counts) {
-          counts[item.type as FilterType]++;
-        }
-      }
-    }
-    return counts;
-  }, [jobs, closeoutData]);
-
-  function CloseoutDots({ jobId }: { jobId: string }) {
-    const co = closeoutData[jobId];
-    if (!co || co.items.length === 0) return <span className="text-xs text-gray-400 italic">No close-out data</span>;
-
-    return (
-      <div className="flex items-center gap-1.5 flex-wrap">
-        {co.items.map((item, i) => (
-          <span
-            key={`${item.type}-${i}`}
-            className="inline-flex items-center gap-1"
-            title={`${item.custom_label || item.label}: ${item.status.replace('_', ' ')}`}
-          >
-            <span className={`w-2 h-2 rounded-full ${DOT_COLOUR[item.status] || DOT_COLOUR.not_started}`} />
-            <span className={`text-[10px] ${item.status === 'done' ? 'text-gray-400' : item.status === 'blocked' ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
-              {CLOSEOUT_TYPE_LABELS[item.type] || item.label}
-            </span>
-          </span>
-        ))}
-      </div>
-    );
   }
 
   function JobRow({ job }: { job: Job }) {
     const returnDays = job.return_date ? daysAgo(job.return_date) : null;
-    const co = closeoutData[job.id];
-    const isOverdue = returnDays !== null && returnDays > 7 && job.status !== 11;
-    const hasIssues = co && co.blocked > 0;
+    const isOverdue = returnDays !== null && returnDays > 5 && job.status !== 11;
+    const retro = retros[job.id];
+    const progress = reqProgress[job.id];
 
     return (
       <Link
         to={`/jobs/${job.id}`}
         state={{ from: '/jobs/returns' }}
         className={`block bg-white rounded-lg border p-4 hover:shadow-sm transition-all ${
-          job.status === 8 ? 'border-red-300 bg-red-50/30' :
-          hasIssues ? 'border-amber-200' :
-          'border-gray-200 hover:border-ooosh-300'
+          job.status === 8 ? 'border-red-300 bg-red-50/30'
+          : isOverdue ? 'border-red-200 bg-red-50/20'
+          : 'border-gray-200 hover:border-ooosh-300'
         }`}
       >
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 mb-1 flex-wrap">
               {job.hh_job_number ? (
@@ -248,29 +238,37 @@ export default function ReturnsPage() {
               <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLOURS[job.status] || 'bg-gray-100 text-gray-600'}`}>
                 {STATUS_MAP[job.status] || job.status_name || `Status ${job.status}`}
               </span>
-              {returnDays !== null && returnDays > 0 && job.status !== 11 && (
-                <span className={`text-xs ${isOverdue ? 'text-red-600 font-semibold' : 'text-gray-500'}`}>
-                  {isOverdue ? `${returnDays}d overdue` : `Returned ${returnDays}d ago`}
+              {returnDays !== null && returnDays >= 0 && job.status !== 11 && (
+                <span className={`text-xs ${isOverdue ? 'text-red-700 font-semibold' : 'text-gray-500'}`}>
+                  {isOverdue ? `⚠ ${returnDays}d since return` : `Returned ${returnDays}d ago`}
                 </span>
               )}
-              {co && co.total > 0 && (
-                <span className={`text-xs font-medium ${co.done === co.total ? 'text-green-600' : 'text-gray-500'}`}>
-                  {co.done}/{co.total} done
+              {retro && (
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${RATING_COLOURS[retro.rating] || 'bg-gray-100 text-gray-600'}`}
+                  title={retro.notes || RATING_LABEL[retro.rating] || retro.rating}
+                >
+                  {RATING_LABEL[retro.rating] || retro.rating}
                 </span>
               )}
             </div>
             <h3 className="font-medium text-gray-900 truncate">{job.job_name || 'Untitled Job'}</h3>
-            <div className="flex items-center gap-3 mt-1 text-sm text-gray-500">
+            <div className="flex items-center gap-3 mt-1 text-sm text-gray-500 flex-wrap">
               <span>{job.client_name || job.company_name || 'No client'}</span>
               {job.job_date && (
                 <span className="text-gray-400">{formatDateRange(job.job_date, job.job_end)}</span>
               )}
               {job.job_value != null && job.job_value > 0 && (
-                <span className="text-gray-400">&pound;{job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                <span className="text-gray-400">£{job.job_value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               )}
             </div>
+            {retro && retro.notes && (
+              <div className="mt-1.5 text-xs text-gray-600 italic truncate" title={retro.notes}>
+                “{retro.notes.length > 90 ? retro.notes.slice(0, 90) + '…' : retro.notes}”
+              </div>
+            )}
             <div className="mt-2">
-              <CloseoutDots jobId={job.id} />
+              <ProgressBar progress={progress} />
             </div>
           </div>
           <div className="flex flex-col items-end gap-1 flex-shrink-0">
@@ -283,130 +281,187 @@ export default function ReturnsPage() {
     );
   }
 
-  if (loading) {
-    return <div className="text-center py-12 text-gray-500">Loading returns...</div>;
-  }
-
-  const FILTER_PILLS: { key: FilterType; label: string }[] = [
-    { key: 'all', label: 'All' },
-    { key: 'invoice', label: 'Needs Invoice' },
-    { key: 'payment_reconcile', label: 'Payment Due' },
-    { key: 'excess_resolve', label: 'Excess Pending' },
-    { key: 'damage_review', label: 'Damage Open' },
-    { key: 'freelancer_followup', label: 'Freelancer' },
+  const TYPE_OPTIONS: { key: TypeFilter; label: string }[] = [
+    { key: 'vehicle',   label: 'Vehicles' },
+    { key: 'backline',  label: 'Backline' },
+    { key: 'rehearsal', label: 'Rehearsals' },
   ];
+
+  const hasFilters = search.trim() !== '' || typeFilter.length > 0 || dateFrom !== '' || dateTo !== '' || overdueOnly || hasIssuesOnly || statusFilter !== 'all';
 
   return (
     <div>
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Returns</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Returns &amp; Completed</h1>
           <p className="text-sm text-gray-500 mt-1">
-            {checkingIn.length} active return{checkingIn.length !== 1 ? 's' : ''} &middot; {completed.length} completed
+            {total} total
+            {jobs.length !== total && ` · showing ${jobs.length} on this page`}
+            {' '}· {stats.active} active · {stats.completed} completed (this page)
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <select
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as SortType)}
-            className="text-xs border border-gray-300 rounded-lg px-2 py-1.5 text-gray-600 focus:border-ooosh-500 focus:ring-1 focus:ring-ooosh-500"
+      </div>
+
+      {/* ── Filters ── */}
+      <div className="space-y-3 mb-4">
+        {/* Search + status */}
+        <div className="flex flex-col sm:flex-row gap-3">
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by job name, client, or job number…"
+            className="flex-1 max-w-md border border-gray-300 rounded-lg px-4 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+          />
+          <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
+            {STATUS_PILLS.map(p => (
+              <button
+                key={p.key}
+                onClick={() => setStatusFilter(p.key)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                  statusFilter === p.key ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Type pills + date range + overdue toggle */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="inline-flex items-center gap-1">
+            <span className="text-xs text-gray-500 mr-1">Type:</span>
+            {TYPE_OPTIONS.map(opt => {
+              const active = typeFilter.includes(opt.key);
+              return (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setTypeFilter(prev =>
+                    prev.includes(opt.key) ? prev.filter(p => p !== opt.key) : [...prev, opt.key]
+                  )}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                    active ? 'bg-ooosh-600 text-white border-ooosh-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="inline-flex items-center gap-1.5">
+            <span className="text-xs text-gray-500">Returned:</span>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={e => setDateFrom(e.target.value)}
+              className="border border-gray-300 rounded px-2 py-1 text-xs"
+              title="From (return_date >= …)"
+            />
+            <span className="text-xs text-gray-400">→</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={e => setDateTo(e.target.value)}
+              className="border border-gray-300 rounded px-2 py-1 text-xs"
+              title="To (return_date <= …)"
+            />
+          </div>
+
+          <label
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full border cursor-pointer transition-colors ${
+              overdueOnly
+                ? 'border-red-300 bg-red-50 text-red-700'
+                : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
+            }`}
+            title="Only show returned jobs more than 5 days past return date"
           >
-            <option value="return_date">Sort: Return Date</option>
-            <option value="days_out">Sort: Days Overdue</option>
-            <option value="outstanding">Sort: Most Outstanding</option>
-          </select>
-        </div>
-      </div>
+            <input
+              type="checkbox"
+              checked={overdueOnly}
+              onChange={e => setOverdueOnly(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            ⚠ Overdue only
+          </label>
 
-      {/* Search */}
-      <div className="mb-4">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by job name, client, or number..."
-          className="w-full max-w-md border border-gray-300 rounded-lg px-4 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-        />
-      </div>
+          <label
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full border cursor-pointer transition-colors ${
+              hasIssuesOnly
+                ? 'border-purple-300 bg-purple-50 text-purple-700'
+                : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
+            }`}
+            title="Only show jobs with at least one open problem in the issues register"
+          >
+            <input
+              type="checkbox"
+              checked={hasIssuesOnly}
+              onChange={e => setHasIssuesOnly(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            ⚠ Has issues
+          </label>
 
-      {/* Filter pills */}
-      <div className="flex flex-wrap gap-2 mb-6">
-        {FILTER_PILLS.map(pill => {
-          const count = filterCounts[pill.key];
-          const isActive = filter === pill.key;
-          return (
+          {hasFilters && (
             <button
-              key={pill.key}
-              onClick={() => setFilter(pill.key)}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
-                isActive
-                  ? 'bg-ooosh-600 text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
+              onClick={clearFilters}
+              className="text-xs text-gray-500 hover:text-gray-700 underline"
             >
-              {pill.label}
-              {pill.key !== 'all' && count > 0 && (
-                <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${
-                  isActive ? 'bg-ooosh-500 text-white' : 'bg-gray-200 text-gray-700'
-                }`}>
-                  {count}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Active Returns Section */}
-      <div className="mb-8">
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-1 h-6 bg-amber-500 rounded-full" />
-          <h2 className="text-lg font-semibold text-gray-900">Active Returns</h2>
-          <span className="text-sm text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">{checkingIn.length}</span>
-        </div>
-
-        {checkingIn.length === 0 ? (
-          <div className="text-center py-8 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-200">
-            {filter !== 'all' ? 'No jobs matching this filter' : 'Nothing to check in right now'}
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {checkingIn.map(job => <JobRow key={job.id} job={job} />)}
-          </div>
-        )}
-      </div>
-
-      {/* Completed Section */}
-      <div>
-        <div className="flex items-center gap-3 mb-4">
-          <div className="w-1 h-6 bg-emerald-500 rounded-full" />
-          <h2 className="text-lg font-semibold text-gray-900">Completed</h2>
-          <span className="text-sm text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">{completed.length}</span>
-          {completed.length > 0 && (
-            <button
-              onClick={() => setShowCompleted(!showCompleted)}
-              className="text-xs text-ooosh-600 hover:text-ooosh-700 ml-2"
-            >
-              {showCompleted ? 'Hide' : 'Show'}
+              Clear filters
             </button>
           )}
         </div>
-
-        {showCompleted && completed.length > 0 && (
-          <div className="space-y-3">
-            {completed.slice(0, 50).map(job => <JobRow key={job.id} job={job} />)}
-            {completed.length > 50 && (
-              <p className="text-sm text-gray-400 text-center py-2">Showing first 50 of {completed.length}</p>
-            )}
-          </div>
-        )}
-
-        {!showCompleted && completed.length > 0 && (
-          <div className="text-center py-4 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-200">
-            {completed.length} completed jobs &mdash; click Show to view
-          </div>
-        )}
       </div>
+
+      {/* ── Jobs list ── */}
+      {loading ? (
+        <div className="text-center py-12 text-gray-500">Loading…</div>
+      ) : jobs.length === 0 ? (
+        <div className="text-center py-12 text-gray-400 bg-gray-50 rounded-lg border border-dashed border-gray-200">
+          No jobs match these filters.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {jobs.map(job => <JobRow key={job.id} job={job} />)}
+        </div>
+      )}
+
+      {/* ── Pagination ── */}
+      {totalPages > 1 && (
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-gray-500">
+            Page {page} of {totalPages} · {total} total
+          </p>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setPage(1)} disabled={page <= 1}
+              className="px-2.5 py-1 text-sm border rounded disabled:opacity-50">⏮</button>
+            <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page <= 1}
+              className="px-3 py-1 text-sm border rounded disabled:opacity-50">Prev</button>
+            <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages}
+              className="px-3 py-1 text-sm border rounded disabled:opacity-50">Next</button>
+            <button onClick={() => setPage(totalPages)} disabled={page >= totalPages}
+              className="px-2.5 py-1 text-sm border rounded disabled:opacity-50">⏭</button>
+            <span className="text-xs text-gray-400 ml-2">Jump to:</span>
+            <input
+              type="number"
+              min={1}
+              max={totalPages}
+              value={pageInput}
+              onChange={e => setPageInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') jumpToPage(); }}
+              placeholder={String(page)}
+              className="w-16 border border-gray-300 rounded px-2 py-1 text-sm"
+            />
+            <button
+              onClick={jumpToPage}
+              disabled={!pageInput}
+              className="px-2.5 py-1 text-sm border rounded disabled:opacity-50"
+            >Go</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

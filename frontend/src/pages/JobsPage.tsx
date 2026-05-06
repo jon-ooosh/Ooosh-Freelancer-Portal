@@ -195,17 +195,22 @@ function RequirementsProgress({ progress }: { progress: ReqProgress | undefined 
 
 export default function JobsPage() {
   const [searchParams] = useSearchParams();
-  const initialStatus = searchParams.get('status') || '2,3,4,5,8';
+  // ?overdue=1 — narrow to "physically out, return date past" (status 4,5).
+  // Set by the dashboard "Overdue returns" stat card.
+  const initialOverdue = searchParams.get('overdue') === '1';
+  const initialStatus = searchParams.get('status') || (initialOverdue ? '4,5' : '2,3,4,5,8');
   const VALID_TIME_FILTERS: readonly TimeFilter[] = ['all', 'out_now', 'next_2_weeks', 'over_2_weeks'] as const;
   const timeParam = searchParams.get('time');
   const initialTime: TimeFilter = (VALID_TIME_FILTERS as readonly string[]).includes(timeParam || '')
     ? (timeParam as TimeFilter)
-    : 'all';
+    : (initialOverdue ? 'out_now' : 'all');
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState(initialStatus);
   const [timeFilter, setTimeFilter] = useState<TimeFilter>(initialTime);
+  const [overdueOnly, setOverdueOnly] = useState(initialOverdue);
+  const [hasIssuesOnly, setHasIssuesOnly] = useState(searchParams.get('has_issues') === '1');
   const [loading, setLoading] = useState(true);
   const [pagination, setPagination] = useState({ page: 1, total: 0, totalPages: 0 });
   const [syncing, setSyncing] = useState(false);
@@ -226,20 +231,33 @@ export default function JobsPage() {
 
   useEffect(() => {
     loadJobs();
-  }, [search, statusFilter, oohOnly, managerFilter, serviceTypeFilter]);
+  }, [search, statusFilter, oohOnly, managerFilter, serviceTypeFilter, overdueOnly, hasIssuesOnly]);
 
   useEffect(() => {
     loadLastSync();
   }, []);
 
-  // Load requirements progress when jobs change
+  // Load requirements progress when jobs change. Pre-hire only — the Jobs
+  // page is a "is this hire ready to go" view; post-hire close-out belongs to
+  // the Returns page. Without the phase filter the bar mixed Done prep with
+  // outstanding invoicing/payment/etc and was useless for either question.
   useEffect(() => {
     if (jobs.length === 0) return;
     const jobIds = jobs.map(j => j.id);
-    api.post<{ data: Record<string, ReqProgress> }>('/requirements/bulk', { job_ids: jobIds })
+    api.post<{ data: Record<string, ReqProgress> }>('/requirements/bulk', { job_ids: jobIds, phase: 'pre_hire' })
       .then(res => setReqProgress(res.data))
       .catch(() => { /* requirements table may not exist yet */ });
   }, [jobs]);
+
+  // True when a job's return_date is in the past and HH says it's still out
+  // (4 = Part Dispatched, 5 = Dispatched). Drives red row tinting.
+  function isOverdueReturn(job: Job): boolean {
+    if (job.status !== 4 && job.status !== 5) return false;
+    const ret = (job.return_date || job.job_end || '').split('T')[0];
+    if (!ret) return false;
+    const today = toDateStr(new Date());
+    return ret < today;
+  }
 
   async function loadJobs(page = 1) {
     setLoading(true);
@@ -250,6 +268,7 @@ export default function JobsPage() {
       if (oohOnly) params.set('ooh_only', 'true');
       if (managerFilter) params.set('manager', managerFilter);
       if (serviceTypeFilter.length > 0) params.set('service_type', serviceTypeFilter.join(','));
+      if (hasIssuesOnly) params.set('has_issues', '1');
 
       const data = await api.get<JobsResponse>(`/hirehop/jobs?${params}`);
       setJobs(data.data);
@@ -290,6 +309,10 @@ export default function JobsPage() {
     twoWeeks.setDate(twoWeeks.getDate() + 14);
     const twoWeeksStr = toDateStr(twoWeeks);
 
+    // Overdue-only mode: drop everything except overdue-return rows before
+    // section bucketing. Stat-card click-throughs land here with overdue=1.
+    const sourceJobs = overdueOnly ? jobs.filter(isOverdueReturn) : jobs;
+
     const happening: HappeningJob[] = [];
     const happeningIds = new Set<string>();
     const groups: Record<Section, Job[]> = {
@@ -300,7 +323,7 @@ export default function JobsPage() {
     };
 
     // First pass: identify "Happening Today" jobs
-    for (const job of jobs) {
+    for (const job of sourceJobs) {
       const categories: HappeningCategory[] = [];
 
       if (isGoingOutToday(job, todayStr)) categories.push('going_out');
@@ -314,7 +337,7 @@ export default function JobsPage() {
     }
 
     // Second pass: categorise remaining jobs
-    for (const job of jobs) {
+    for (const job of sourceJobs) {
       if (happeningIds.has(job.id)) continue; // already in Happening Today
 
       if (!job.job_date) {
@@ -372,7 +395,7 @@ export default function JobsPage() {
     }
 
     return { happeningToday: happening, groupedJobs: filteredGroups, filteredCount: count };
-  }, [jobs, timeFilter]);
+  }, [jobs, timeFilter, overdueOnly]);
 
   function formatDateRange(start: string | null, end: string | null) {
     if (!start) return '\u2014';
@@ -407,11 +430,15 @@ export default function JobsPage() {
 
   function renderJobRow(job: Job, showRequirements = false, happeningBadge?: { text: string; colour: string }) {
     const progress = showRequirements ? reqProgress[job.id] : undefined;
+    const overdue = isOverdueReturn(job);
+    const overdueDays = overdue
+      ? Math.floor((Date.now() - new Date(job.return_date || job.job_end || '').getTime()) / 86400000)
+      : 0;
     return (
       <tr
         key={job.id}
         onClick={() => navigate(`/jobs/${job.id}`)}
-        className="hover:bg-gray-50 cursor-pointer transition-colors"
+        className={`cursor-pointer transition-colors ${overdue ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'}`}
       >
         <td className="px-4 py-3 whitespace-nowrap text-sm">
           {job.hh_job_number ? (
@@ -452,6 +479,11 @@ export default function JobsPage() {
             {happeningBadge && (
               <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${happeningBadge.colour}`}>
                 {happeningBadge.text}
+              </span>
+            )}
+            {overdue && (
+              <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700" title="Past return date — should be back already">
+                ⚠ {overdueDays}d overdue
               </span>
             )}
           </div>
@@ -573,6 +605,40 @@ export default function JobsPage() {
             className="rounded border-gray-300"
           />
           🌙 OOH only
+        </label>
+
+        <label
+          className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded border cursor-pointer transition-colors ${
+            overdueOnly
+              ? 'border-red-300 bg-red-50 text-red-700'
+              : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+          }`}
+          title="Show only jobs that should be back already (status 4/5, return date past)"
+        >
+          <input
+            type="checkbox"
+            checked={overdueOnly}
+            onChange={(e) => setOverdueOnly(e.target.checked)}
+            className="rounded border-gray-300"
+          />
+          ⚠ Overdue only
+        </label>
+
+        <label
+          className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded border cursor-pointer transition-colors ${
+            hasIssuesOnly
+              ? 'border-purple-300 bg-purple-50 text-purple-700'
+              : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-50'
+          }`}
+          title="Show only jobs with at least one open problem in the issues register"
+        >
+          <input
+            type="checkbox"
+            checked={hasIssuesOnly}
+            onChange={(e) => setHasIssuesOnly(e.target.checked)}
+            className="rounded border-gray-300"
+          />
+          ⚠ Has issues
         </label>
 
         {/* Manager filter */}
