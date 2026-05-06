@@ -108,6 +108,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '071_unwind_chasing_status.sql',
         '072_out_of_hours_returns.sql',
         '073_drop_ooh_overflow_setting.sql',
+        '074_issues_register.sql',
       ];
 
       for (const migration of migrations) {

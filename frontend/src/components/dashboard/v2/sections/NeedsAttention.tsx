@@ -1,6 +1,27 @@
+import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import type { DashboardSectionProps } from '../sections';
 import { Card } from '../primitives';
+import { api } from '../../../../services/api';
+
+interface ProblemSummary {
+  open_total: number;
+  urgent_total: number;
+  damaged_open: number;
+  missing_open: number;
+  broken_open: number;
+  dispute_open: number;
+  items: Array<{
+    id: string;
+    job_id: string;
+    issue_category: string;
+    severity: string;
+    summary: string;
+    hh_job_number?: number;
+    job_name?: string | null;
+    client_name?: string | null;
+  }>;
+}
 
 interface NACardItem {
   id: string;
@@ -107,13 +128,29 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   const na = data.needs_attention;
   const overdueTotal = na.total_overdue_count ?? 0;
 
-  // Overdue (red row)
-  const returns: NABucket = {
-    key: 'returns',
-    title: 'Overdue Returns',
+  // Job problems / issues register — fetched separately because dashboard's
+  // /operations endpoint doesn't (yet) include problems in its aggregate.
+  // Kept side-loaded so the rest of NeedsAttention renders even if the
+  // problems table doesn't exist (returns 500 → empty bucket).
+  const [problems, setProblems] = useState<ProblemSummary | null>(null);
+  useEffect(() => {
+    api.get<{ data: ProblemSummary }>('/problems/summary')
+      .then(res => setProblems(res.data))
+      .catch(() => {});
+  }, []);
+
+  // Overdue (red row) — "Overdue Completions" means jobs that came back but
+  // haven't been closed out yet (invoiced, paid, excess resolved, etc.). The
+  // separate "physically out and not back yet" case lives on the headline
+  // stat card. Backend exposes the same data under both `overdue_completions`
+  // (new) and `overdue_returns` (back-compat alias).
+  const completionsRows = na.overdue_completions || na.overdue_returns || [];
+  const completions: NABucket = {
+    key: 'completions',
+    title: 'Overdue Completions',
     accent: 'red',
-    count: na.overdue_returns?.length || 0,
-    items: (na.overdue_returns || []).map((j) => {
+    count: completionsRows.length || 0,
+    items: completionsRows.map((j) => {
       const ret = j.return_date ? new Date(j.return_date) : null;
       const days = ret ? Math.floor((Date.now() - ret.getTime()) / 86400000) : 0;
       return {
@@ -123,7 +160,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
         href: `/jobs/${j.id}`,
       };
     }),
-    viewAllHref: '/jobs/returns',
+    viewAllHref: '/jobs/returns?overdue=1',
   };
   const departures: NABucket = {
     key: 'departures',
@@ -256,9 +293,29 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // Same for the secondary row: when ALL secondary buckets are empty the
   // whole row hides; otherwise empty ones render faded alongside populated
   // ones.
+  // Open problems / issues register — purple accent (special category, not
+  // time-critical like "overdue" but actively needs human chasing). Urgent
+  // problems get a flag in the title.
+  const problemsBucket: NABucket = {
+    key: 'problems',
+    title: problems && problems.urgent_total > 0
+      ? `Open Problems (${problems.urgent_total} urgent)`
+      : 'Open Problems',
+    accent: 'purple',
+    count: problems?.open_total || 0,
+    items: (problems?.items || []).map((p) => ({
+      id: p.id,
+      label: `${p.hh_job_number ? `#${p.hh_job_number} ` : ''}${p.client_name || 'Unknown'} — ${p.summary}`.slice(0, 80),
+      sub: p.issue_category,
+      tag: p.severity === 'urgent' ? 'URGENT' : undefined,
+      href: `/jobs/${p.job_id}`,
+    })),
+    viewAllHref: '/operations/problems',
+  };
+
   const allClear = overdueTotal === 0;
-  const overdueBuckets = [returns, departures, backline, transport];
-  const secondaryBuckets = [referrals, excess, transportIntros, fleetBucket];
+  const overdueBuckets = [completions, departures, backline, transport];
+  const secondaryBuckets = [referrals, excess, transportIntros, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (

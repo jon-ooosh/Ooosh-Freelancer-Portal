@@ -917,7 +917,7 @@ Bidirectional job status sync — depends on excess tracking for gate conditions
 - [ ] Soft gate: warn on dispatch if prep checklist incomplete (non-blocking)
 - [ ] Gate conditions: check excess collected before allowing dispatch
 - [ ] HH item check-in/out counts for prep progress indicator (needs API research)
-- [ ] Job Issues tracker (duplicate vehicle issues pattern — track problems throughout hire lifecycle: prep issues, on-hire breakdowns, return damage, missing items)
+- [x] **Job Issues / Problems Register** (May 2026) — cross-module register at `/operations/problems`, panel on Job Detail Overview, NeedsAttention bucket, "Has issues" filter on JobsPage + ReturnsPage. Backend `/api/problems/*` (NOT `/api/issues/*` — that's the platform bug tracker). Categories: damaged / missing / broken / dispute / other. Severity: normal / urgent. Storage: `job_requirements` with `requirement_type='issue'` (migration 074). Phase 2 enhancements (dedicated `job_issues` table, equipment FK, severity → notification mapping) captured in Future Enhancements.
 
 #### Step 4b: Returns & Close-Out System ← IN PROGRESS (Apr 2026)
 
@@ -1869,6 +1869,16 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 - **Post-hire pill rethink + central "Problems" register (5 May 2026)** — the Today block's per-job progress strip currently shows the same pill set across both phases (Backline · Hire Form · Excess · Vehicle pre-hire; De-prep · Client · Excess · Freelancer · Invoicing · Payment · Vehicle post-hire). The post-hire pills are of limited operational value: as soon as staff starts checking the hire in, the job drops off the "Returning Today" pile, so most of those pills never have time to shift to a useful state. More useful would be an at-a-glance summary of any **on-the-road problems** aggregated across the vehicle / backline / transport modules — but there's no central "problems" register today. Each module has its own ad-hoc problem-tracking (vehicle has_damage flag, backline has manual notes, transport has internal_notes / freelancer_notes etc.) but nothing unified. New module-shaped piece: needs a design pass for what "problem" means cross-module, where it gets logged from, and how it surfaces (Today block, Job Detail header alert, dashboard widget, notifications). Until that lands, the post-hire pill strip stays as-is.
 
+- **Job Issues / Problems register — phase 2 (May 2026)** — phase 1 shipped May 2026 (migration 074, `/api/problems/*`, `/operations/problems` page, `JobProblemsPanel` on Job Detail Overview tab, NeedsAttention bucket, "Has Issues" filter pill on Jobs + Returns pages). Storage rides on `job_requirements` with `requirement_type='issue'` plus three new columns: `issue_category`, `severity`, `source_module`. Categories: `damaged | missing | broken | dispute | other`. Severity: `normal | urgent`. Status uses the existing requirement vocabulary (`not_started` ≡ Open, `in_progress` ≡ Working on it, `done` ≡ Resolved, `blocked` ≡ Awaiting, `cancelled`). API namespace is **`/api/problems/*`** (NOT `/api/issues/*` — that's the platform bug tracker, taken). Frontend namespace is `/operations/problems`. **Phase 2 enhancements** (captured, not scheduled):
+  - **Promote to dedicated `job_issues` table.** Phase 1's `job_requirements` storage covers the 1:1 case (one issue belongs to one job). Cross-job linkage (equipment damaged on Job A, returned-still-broken on Job B, repaired on Job C) needs a dedicated table with `job_links` junction. The public surface lives at `/api/problems/*` exactly so this migration doesn't break callers — swap the storage, keep the API.
+  - **Equipment / vehicle FK as first-class.** Currently the linked vehicle/equipment is in free-text `notes` or `custom_label`. Querying "all damage issues for vehicle RX22SXL this year" is awkward. Add `vehicle_id`, `stock_item_id` columns (or pull from related `vehicle_hire_assignments` row).
+  - **Structured resolution history.** Status changes are logged to the activity timeline as interactions, but not as a typed `issue_events` child table. Reporting like "average time-to-resolve by category" requires the latter.
+  - **Insurance/financial linkage.** Cleaner to FK an issue to an excess record or a claim than to thread it through requirements.
+  - **Auto-create from source modules.** Vehicle check-in's `has_damage` flag already auto-creates a `damage_review` requirement (per phase A of Returns & Close-Out). Extend the pattern: backline missing items, transport on-road breakdowns, etc., should ALL auto-create `issue` rows with `source_module` populated. Phase 1 supports manual logging only.
+  - **Category-specific status workflows.** Phase 1 uses the universal status vocabulary. Each category arguably wants its own state machine (damaged: open → awaiting_quote → quoted → claimed/written_off/client_paying → resolved; missing: open → searching → lost/replaced/waived → resolved; etc.). Could be added via a per-row `resolution_substatus` text column without migrating storage.
+  - **Severity → notification mapping.** `severity = 'urgent'` should fire an immediate notification via the existing notification escalation scheduler (`config/scheduler.ts`). Currently severity is informational only — bucket title shows "(N urgent)" but no email goes out.
+  - **Returns & Completed close-out gate.** When a returned job has open issues, it can't auto-complete. Phase 1 doesn't enforce this — completion modal could be extended to warn ("1 open issue, complete anyway?"). Existing close-out warning pattern fits.
+
 - **Data-aware suggested-next-status hint (5 May 2026)** — the bold + asterisk on the suggested next status in the Job Detail status dropdown is currently pure date-based: `confirmed`/`prepped` + on-or-past `out_date` → bold `dispatched`, etc. Could be smarter:
   - Bold `prepped` (rather than skipping straight to `dispatched`) only when the prep checklist is complete — i.e. all pre-hire `job_requirements` are `done`.
   - Bold `completed` only when all post-hire close-out items are done (the existing completion modal already warns about outstanding items, but the dropdown itself doesn't reflect close-out state).
@@ -2741,6 +2751,28 @@ Surfaces that use this filter:
 - Coming Up heat strip departures query
 
 When adding a new departure-related surface, use the same filter or the dashboard will visibly disagree with itself. The May 2026 refinement caught a 5-vs-3 mismatch between Today and Coming Up, plus a `prepped` job sitting overdue for 2 days that the Overdue Departures bucket missed entirely.
+
+### "Overdue returns" vs "Overdue completions" (May 2026)
+
+Two distinct overdue concepts on the dashboard, easy to conflate, deliberately split:
+
+- **Stat-card "Overdue returns"** = jobs that should physically be back. Filter: `status IN (4, 5) AND return_date::date < CURRENT_DATE`. Click-through: `/jobs?overdue=1` (Out Now filtered to overdue rows). The van is out, the return date has passed, it should be on the forecourt. Renders a red row + "⚠ Nd overdue" badge in the JobsPage Out Now section.
+- **NeedsAttention bucket "Overdue Completions"** = jobs that came back but didn't get closed out. Filter: `status IN (6, 7, 8) AND return_date::date < CURRENT_DATE`. Click-through: `/jobs/returns?overdue=1`. The van's already returned (HH 6/7/8) but invoice / payment / excess / damage / etc. are still open with the return date receding into the past. Mostly an admin-overhead bucket.
+
+Pre-May 2026 the bucket query was `status IN (1, 2, 3, 4, 5, 6, 8)` which conflated both meanings AND included stale enquiries (status 1-3 with old return_dates that were never going out). The narrow 6/7/8 query drops the noise and the rename ("Returns" → "Completions") makes the distinction explicit. Backend exposes the new bucket data under both `na.overdue_completions` (canonical) and `na.overdue_returns` (back-compat alias kept for one release; drop after).
+
+When adding similar dashboard concepts, prefer two narrow buckets over one wide ambiguous one.
+
+### Phase-aware progress bars (May 2026)
+
+Per-job requirement progress is **phase-aware** to keep the bar meaningful for its surface:
+
+- **JobsPage** (Going Out / Out Now / regular sections) reads `pre_hire` only — "is this hire ready to go".
+- **ReturnsPage** (Returns & Completed) reads `post_hire` only — "is the close-out done".
+
+Backend: `POST /api/requirements/bulk` accepts an optional `phase` body field (`pre_hire | post_hire`). Omitted = both (legacy callers get original behaviour). The previous "sum everything" mode was useless for either question — an Out Now job's bar was a 50/50 mix of "did I prep this properly" and "have I de-prepped/invoiced yet".
+
+ReturnsPage now uses the same shaped progress **bar** as JobsPage (was per-requirement coloured **dots**). Drilling into a job still shows per-requirement detail on the Job Detail Overview tab.
 
 ## Files tab — actions registry (May 2026)
 

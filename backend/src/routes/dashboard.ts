@@ -156,16 +156,17 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         ORDER BY event_date ASC
       `),
 
-      // 6. Needs attention — overdue returns (return_date in the past = actually overdue).
-      // Includes confirmed-but-not-yet-out jobs (HH 1-3) so jobs that should have gone out
-      // but didn't, and now have a passed return_date, also surface here. HH 8 = Requires
-      // Attention (returned with problems) is included as a "still needs resolving" case.
+      // 6. Needs attention — overdue COMPLETIONS (jobs that came back but
+      // didn't get closed out). HH status 6 = Returned Incomplete, 7 =
+      // Returned, 8 = Requires Attention. The "physically out and overdue
+      // back" case (status 4/5) lives on the headline stat card and links to
+      // /jobs?overdue=1 — those aren't completions yet, the van is still out.
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                j.return_date, j.venue_name
         FROM jobs j
         WHERE j.is_deleted = false
-          AND j.status IN (1, 2, 3, 4, 5, 6, 8)
+          AND j.status IN (6, 7, 8)
           AND j.return_date IS NOT NULL
           AND j.return_date::date < CURRENT_DATE
         ORDER BY j.return_date ASC
@@ -570,7 +571,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       goingOutResult, returningResult,
       tomorrowGoingOutResult, tomorrowReturningResult,
       upcomingDeparturesResult, upcomingReturnsResult,
-      overdueReturnsResult, clientIntrosResult,
+      overdueCompletionsResult, clientIntrosResult,
       overdueDeparturesResult, overdueBacklineResult, overdueTransportOpsResult,
       referralCountResult, excessCountResult,
       transportOpsResult, unassignedTransportResult,
@@ -658,7 +659,13 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       },
       upcoming_events: upcomingEvents,
       needs_attention: {
-        overdue_returns: overdueReturnsResult.rows,
+        // Renamed from overdue_returns Apr 2026 — bucket now means
+        // "jobs returned (HH 6/7/8) but not closed out", not "jobs that should
+        // be back but aren't". The latter lives on the headline stat card.
+        overdue_completions: overdueCompletionsResult.rows,
+        // Backwards-compat alias — old field name kept on the wire for any
+        // widget still reading the old key. Drop after one release cycle.
+        overdue_returns: overdueCompletionsResult.rows,
         overdue_departures: overdueDeparturesResult.rows,
         overdue_backline: overdueBacklineResult.rows,
         overdue_transport_ops: overdueTransportOpsResult.rows,
@@ -666,7 +673,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // client intros (separate concept) and referrals/excess counts
         // (live in their own widgets).
         total_overdue_count:
-          overdueReturnsResult.rows.length +
+          overdueCompletionsResult.rows.length +
           overdueDeparturesResult.rows.length +
           overdueBacklineResult.rows.length +
           overdueTransportOpsResult.rows.length,

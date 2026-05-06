@@ -48,16 +48,22 @@ router.get('/job/:jobId', async (req: AuthRequest, res: Response) => {
 
 router.post('/bulk', async (req: AuthRequest, res: Response) => {
   try {
-    const { job_ids } = req.body;
+    const { job_ids, phase } = req.body;
     if (!Array.isArray(job_ids) || job_ids.length === 0) {
       return res.json({ data: {} });
     }
     // Limit to 500 job IDs
     const ids = job_ids.slice(0, 500);
+    // Optional phase filter: 'pre_hire' for the Jobs/Going Out/Out Now view
+    // (don't sum post-hire close-out into the prep progress bar), 'post_hire'
+    // for the Returns view. Omitted = both, the original behaviour.
+    const phaseFilter = phase === 'pre_hire' || phase === 'post_hire'
+      ? `AND jr.phase = '${phase}'`
+      : '';
     const result = await query(
       `SELECT jr.job_id, jr.status, jr.requirement_type
        FROM job_requirements jr
-       WHERE jr.job_id = ANY($1)`,
+       WHERE jr.job_id = ANY($1) ${phaseFilter}`,
       [ids]
     );
     // Group by job_id for easy lookup

@@ -95,7 +95,18 @@ export default function BacklinePage() {
   const [days, setDays] = useState(7);
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
   const [direction, setDirection] = useState<'both' | 'out' | 'return'>('both');
+  const [search, setSearch] = useState('');
   const navigate = useNavigate();
+
+  function matchesSearch(j: BacklineJob): boolean {
+    if (!search.trim()) return true;
+    const q = search.trim().toLowerCase();
+    return (
+      (j.jobName || '').toLowerCase().includes(q)
+      || (j.client || '').toLowerCase().includes(q)
+      || String(j.hhJobNumber || '').includes(q)
+    );
+  }
 
   function loadData() {
     setLoading(true);
@@ -142,10 +153,10 @@ export default function BacklinePage() {
     if (statusFilter === 'not_started') return j.backlineStatus === 'not_started' && !j.effectivelyDone;
     return j.backlineStatus === statusFilter;
   }
-  const filteredOut = goingOut.jobs.filter(matchesStatusFilter);
-  const filteredReturn = returning.jobs.filter(matchesStatusFilter);
-  const filteredOverdueOut = (overdueOut?.jobs || []).filter(matchesStatusFilter);
-  const filteredOverdueReturn = (overdueReturning?.jobs || []).filter(matchesStatusFilter);
+  const filteredOut = goingOut.jobs.filter(j => matchesStatusFilter(j) && matchesSearch(j));
+  const filteredReturn = returning.jobs.filter(j => matchesStatusFilter(j) && matchesSearch(j));
+  const filteredOverdueOut = (overdueOut?.jobs || []).filter(j => matchesStatusFilter(j) && matchesSearch(j));
+  const filteredOverdueReturn = (overdueReturning?.jobs || []).filter(j => matchesStatusFilter(j) && matchesSearch(j));
 
   async function updateStatus(reqId: string, newStatus: string) {
     try {
@@ -213,6 +224,15 @@ export default function BacklinePage() {
           {syncing ? 'Syncing...' : 'Sync'}
         </button>
       </div>
+
+      {/* ── Search ── */}
+      <input
+        type="text"
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+        placeholder="Search by job name, client, or job number…"
+        className="w-full max-w-md border border-gray-300 rounded-lg px-4 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+      />
 
       {/* ── Filters — wrap on small screens ── */}
       <div className="flex flex-wrap gap-2">
@@ -498,8 +518,15 @@ function JobRow({ job, dateField, navigate, onStatusChange }: {
 
   const hhDomain = 'myhirehop.com';
 
+  const isOverdueRow = (job.daysOverdue ?? 0) > 0;
   return (
-    <div className={`flex items-center justify-between px-4 py-3 hover:bg-gray-50 transition-colors ${job.hasMismatch ? 'bg-amber-50/50' : ''}`}>
+    <div
+      className={`flex items-center justify-between px-4 py-3 transition-colors ${
+        isOverdueRow ? 'bg-red-50 hover:bg-red-100'
+        : job.hasMismatch ? 'bg-amber-50/50 hover:bg-amber-50'
+        : 'hover:bg-gray-50'
+      }`}
+    >
       <div
         className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
         onClick={() => navigate(`/jobs/${job.id}`)}

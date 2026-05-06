@@ -248,7 +248,10 @@ export interface OperationsData {
   };
   upcoming_events: UpcomingEvent[];
   needs_attention: {
-    overdue_returns: ScheduleJob[];
+    /** Renamed from overdue_returns Apr 2026 — jobs returned (HH 6/7/8) but not closed out. */
+    overdue_completions?: ScheduleJob[];
+    /** @deprecated Use overdue_completions. Backwards-compat alias kept for one release. */
+    overdue_returns?: ScheduleJob[];
     overdue_departures?: OverdueDeparture[];
     overdue_backline?: OverdueBacklineRow[];
     overdue_transport_ops?: OverdueTransportRow[];
