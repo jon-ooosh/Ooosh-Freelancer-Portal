@@ -8,7 +8,7 @@
  *        watchers, due date, surface_on, dangerous-zone (resolve, cancel).
  */
 import { useState, useEffect, useCallback } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
@@ -116,7 +116,6 @@ interface User { id: string; first_name: string; last_name: string }
 
 export default function IssueDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const [issue, setIssue] = useState<Issue | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);

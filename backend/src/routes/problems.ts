@@ -298,7 +298,7 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
 
 router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const body = req.body as z.infer<typeof updateSchema>;
 
     const existing = await query(`SELECT * FROM job_issues WHERE id = $1`, [id]);
@@ -374,7 +374,7 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
 
 router.post('/:id/comments', validate(commentSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const { body } = req.body as { body: string };
     const exists = await query(`SELECT 1 FROM job_issues WHERE id = $1`, [id]);
     if (exists.rowCount === 0) return res.status(404).json({ error: 'Issue not found' });
@@ -394,7 +394,7 @@ router.post('/:id/comments', validate(commentSchema), async (req: AuthRequest, r
 
 router.post('/:id/watch', async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     await query(
       `UPDATE job_issues SET watchers = array_append(watchers, $2)
        WHERE id = $1 AND NOT (watchers && ARRAY[$2]::uuid[])`,
@@ -409,7 +409,7 @@ router.post('/:id/watch', async (req: AuthRequest, res: Response) => {
 
 router.post('/:id/unwatch', async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     await query(
       `UPDATE job_issues SET watchers = array_remove(watchers, $2) WHERE id = $1`,
       [id, req.user!.id]
@@ -425,7 +425,7 @@ router.post('/:id/unwatch', async (req: AuthRequest, res: Response) => {
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     const issueResult = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [id]);
     if (issueResult.rowCount === 0) return res.status(404).json({ error: 'Issue not found' });
 
