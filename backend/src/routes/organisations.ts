@@ -669,6 +669,376 @@ router.delete('/:id', authorize('admin', 'manager'), async (req: AuthRequest, re
   }
 });
 
+// ============================================================================
+// MERGE — combine two duplicate organisations
+// ============================================================================
+// Loser is `:id` in the URL. Keeper is `keep_id` in the body. Loser's FK rows
+// are reassigned to keeper, scalar fields are filled where keeper is null,
+// arrays are unioned, and loser is soft-deleted with a backref note.
+// Always transactional — partial failure rolls back.
+
+// GET /api/organisations/:id/merge-preview?keep_id=...
+// Returns counts of what will move so the UI can show a confirmation summary.
+router.get('/:id/merge-preview', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const loserId = req.params.id as string;
+    const keepId = (req.query as Record<string, string>).keep_id;
+
+    if (!keepId || keepId === loserId) {
+      res.status(400).json({ error: 'Provide keep_id (must differ from :id)' });
+      return;
+    }
+
+    const both = await query(
+      `SELECT id, name, type, do_not_hire FROM organisations WHERE id = ANY($1) AND is_deleted = false`,
+      [[loserId, keepId]]
+    );
+    if (both.rows.length !== 2) {
+      res.status(404).json({ error: 'One or both organisations not found' });
+      return;
+    }
+    const keeper = both.rows.find(r => r.id === keepId)!;
+    const loser = both.rows.find(r => r.id === loserId)!;
+
+    const [people, jobs, jobOrgs, venues, interactions, rels, subs, jobIssues, extIds] = await Promise.all([
+      query(`SELECT COUNT(*)::int AS n FROM person_organisation_roles WHERE organisation_id = $1`, [loserId]),
+      query(`SELECT COUNT(*)::int AS n FROM jobs WHERE client_id = $1`, [loserId]),
+      query(`SELECT COUNT(*)::int AS n FROM job_organisations WHERE organisation_id = $1`, [loserId]),
+      query(`SELECT COUNT(*)::int AS n FROM venues WHERE organisation_id = $1`, [loserId]),
+      query(`SELECT COUNT(*)::int AS n FROM interactions WHERE organisation_id = $1`, [loserId]),
+      query(`SELECT COUNT(*)::int AS n FROM organisation_relationships WHERE from_org_id = $1 OR to_org_id = $1`, [loserId]),
+      query(`SELECT COUNT(*)::int AS n FROM organisations WHERE parent_id = $1 AND is_deleted = false`, [loserId]),
+      query(`SELECT COUNT(*)::int AS n FROM job_issues WHERE client_organisation_id = $1`, [loserId]),
+      query(`SELECT external_system, external_id FROM external_id_map WHERE entity_type = 'organisations' AND entity_id = ANY($1)`, [[loserId, keepId]]),
+    ]);
+
+    const keeperExt = extIds.rows.filter(r => r.external_id && r.external_id !== '').reduce((acc: Record<string, string[]>, r: { external_system: string; external_id: string }) => {
+      acc[r.external_system] = acc[r.external_system] || [];
+      acc[r.external_system].push(r.external_id);
+      return acc;
+    }, {});
+
+    res.json({
+      keeper: { id: keeper.id, name: keeper.name, type: keeper.type, do_not_hire: keeper.do_not_hire },
+      loser: { id: loser.id, name: loser.name, type: loser.type, do_not_hire: loser.do_not_hire },
+      counts: {
+        people: people.rows[0].n,
+        jobs_as_client: jobs.rows[0].n,
+        job_organisation_links: jobOrgs.rows[0].n,
+        venues: venues.rows[0].n,
+        interactions: interactions.rows[0].n,
+        relationships: rels.rows[0].n,
+        child_organisations: subs.rows[0].n,
+        job_issues: jobIssues.rows[0].n,
+      },
+      external_ids: keeperExt,
+    });
+  } catch (error) {
+    console.error('Org merge preview error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/organisations/:id/merge — merge :id (loser) INTO body.keep_id (keeper)
+router.post('/:id/merge',
+  authorize('admin', 'manager'),
+  validate(z.object({ keep_id: z.string().uuid() })),
+  async (req: AuthRequest, res: Response) => {
+    const loserId = req.params.id as string;
+    const { keep_id: keepId } = req.body as { keep_id: string };
+
+    if (keepId === loserId) {
+      res.status(400).json({ error: 'keep_id must differ from :id' });
+      return;
+    }
+
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+
+      // Lock both rows in a deterministic order to avoid deadlocks
+      const lockOrder = [loserId, keepId].sort();
+      const lockRes = await client.query(
+        `SELECT * FROM organisations WHERE id = ANY($1) AND is_deleted = false ORDER BY id FOR UPDATE`,
+        [lockOrder]
+      );
+      if (lockRes.rows.length !== 2) {
+        await client.query('ROLLBACK');
+        res.status(404).json({ error: 'One or both organisations not found' });
+        return;
+      }
+      const keeper = lockRes.rows.find(r => r.id === keepId)!;
+      const loser = lockRes.rows.find(r => r.id === loserId)!;
+
+      // ── 1. Fill null scalar fields on keeper from loser ──────────────────
+      const fillFields = [
+        'website', 'email', 'phone', 'address', 'location', 'notes',
+        'working_terms_type', 'working_terms_credit_days', 'working_terms_notes',
+        'ai_summary', 'ai_research', 'parent_id',
+      ];
+      const updates: string[] = [];
+      const params: unknown[] = [];
+      let paramIndex = 1;
+      for (const field of fillFields) {
+        const keeperVal = keeper[field];
+        const loserVal = loser[field];
+        const keeperEmpty = keeperVal === null || keeperVal === undefined || keeperVal === '';
+        if (keeperEmpty && loserVal !== null && loserVal !== undefined && loserVal !== '') {
+          // parent_id: don't accidentally point keeper at itself or at the loser
+          if (field === 'parent_id' && (loserVal === keepId || loserVal === loserId)) continue;
+          updates.push(`${field} = $${paramIndex}`);
+          params.push(loserVal);
+          paramIndex++;
+        }
+      }
+
+      // Union tags
+      const keeperTags: string[] = keeper.tags || [];
+      const loserTags: string[] = loser.tags || [];
+      const combinedTags = [...new Set([...keeperTags, ...loserTags])];
+      if (combinedTags.length > keeperTags.length) {
+        updates.push(`tags = $${paramIndex}`);
+        params.push(combinedTags);
+        paramIndex++;
+      }
+
+      // Union files
+      const keeperFiles = Array.isArray(keeper.files) ? keeper.files : [];
+      const loserFiles = Array.isArray(loser.files) ? loser.files : [];
+      if (loserFiles.length > 0) {
+        // Dedupe by url to avoid double-listing the same file
+        const seen = new Set(keeperFiles.map((f: { url?: string }) => f.url).filter(Boolean));
+        const merged = [...keeperFiles];
+        for (const f of loserFiles) {
+          if (!f.url || !seen.has(f.url)) {
+            merged.push(f);
+            if (f.url) seen.add(f.url);
+          }
+        }
+        if (merged.length > keeperFiles.length) {
+          updates.push(`files = $${paramIndex}::jsonb`);
+          params.push(JSON.stringify(merged));
+          paramIndex++;
+        }
+      }
+
+      // Append a backref note to keeper.notes so future readers can trace
+      const today = new Date().toISOString().split('T')[0];
+      const backrefNote = `\n[Merged from "${loser.name}" (${loserId}) on ${today} by ${req.user!.email || req.user!.id}]`;
+      // If we already updated notes from null, append to that; otherwise append to existing.
+      const notesIdx = updates.findIndex(u => u.startsWith('notes = '));
+      if (notesIdx >= 0) {
+        // We're filling notes from loser — tack the backref onto that value
+        params[notesIdx] = String(params[notesIdx] || '') + backrefNote;
+      } else {
+        // Append to existing keeper.notes
+        updates.push(`notes = COALESCE(notes, '') || $${paramIndex}`);
+        params.push(backrefNote);
+        paramIndex++;
+      }
+
+      updates.push(`updated_at = NOW()`);
+      updates.push(`version = version + 1`);
+      params.push(keepId);
+      await client.query(
+        `UPDATE organisations SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+        params
+      );
+
+      // ── 2. Reassign all FK references from loser to keeper ───────────────
+
+      // person_organisation_roles — no unique constraint, plain reassign
+      await client.query(
+        `UPDATE person_organisation_roles SET organisation_id = $1, updated_at = NOW() WHERE organisation_id = $2`,
+        [keepId, loserId]
+      );
+
+      // jobs.client_id
+      await client.query(
+        `UPDATE jobs SET client_id = $1, updated_at = NOW() WHERE client_id = $2`,
+        [keepId, loserId]
+      );
+
+      // job_organisations — UNIQUE(job_id, organisation_id, role).
+      // First delete any loser rows that would collide with existing keeper rows on the same (job, role).
+      await client.query(
+        `DELETE FROM job_organisations
+         WHERE organisation_id = $1
+           AND (job_id, role) IN (
+             SELECT job_id, role FROM job_organisations WHERE organisation_id = $2
+           )`,
+        [loserId, keepId]
+      );
+      // Reassign the rest
+      await client.query(
+        `UPDATE job_organisations SET organisation_id = $1, updated_at = NOW() WHERE organisation_id = $2`,
+        [keepId, loserId]
+      );
+
+      // venues.organisation_id
+      await client.query(
+        `UPDATE venues SET organisation_id = $1, updated_at = NOW() WHERE organisation_id = $2`,
+        [keepId, loserId]
+      );
+
+      // interactions.organisation_id
+      await client.query(
+        `UPDATE interactions SET organisation_id = $1 WHERE organisation_id = $2`,
+        [keepId, loserId]
+      );
+
+      // organisation_relationships — UNIQUE(from, to, type, status), CHECK(from != to).
+      // 1. Delete edges that would become self-referencing (loser↔keeper edges)
+      await client.query(
+        `DELETE FROM organisation_relationships
+         WHERE (from_org_id = $1 AND to_org_id = $2)
+            OR (from_org_id = $2 AND to_org_id = $1)`,
+        [loserId, keepId]
+      );
+      // 2. Delete loser→other rows that would collide with existing keeper→same-other rows
+      await client.query(
+        `DELETE FROM organisation_relationships r
+         WHERE r.from_org_id = $1
+           AND EXISTS (
+             SELECT 1 FROM organisation_relationships r2
+             WHERE r2.from_org_id = $2
+               AND r2.to_org_id = r.to_org_id
+               AND r2.relationship_type = r.relationship_type
+               AND r2.status = r.status
+           )`,
+        [loserId, keepId]
+      );
+      // 3. Same for inbound edges (other→loser collides with other→keeper)
+      await client.query(
+        `DELETE FROM organisation_relationships r
+         WHERE r.to_org_id = $1
+           AND EXISTS (
+             SELECT 1 FROM organisation_relationships r2
+             WHERE r2.to_org_id = $2
+               AND r2.from_org_id = r.from_org_id
+               AND r2.relationship_type = r.relationship_type
+               AND r2.status = r.status
+           )`,
+        [loserId, keepId]
+      );
+      // 4. Reassign survivors
+      await client.query(
+        `UPDATE organisation_relationships SET from_org_id = $1, updated_at = NOW() WHERE from_org_id = $2`,
+        [keepId, loserId]
+      );
+      await client.query(
+        `UPDATE organisation_relationships SET to_org_id = $1, updated_at = NOW() WHERE to_org_id = $2`,
+        [keepId, loserId]
+      );
+
+      // organisations.parent_id (children of loser become children of keeper)
+      await client.query(
+        `UPDATE organisations SET parent_id = $1, updated_at = NOW()
+         WHERE parent_id = $2 AND is_deleted = false AND id != $1`,
+        [keepId, loserId]
+      );
+
+      // job_issues.client_organisation_id
+      await client.query(
+        `UPDATE job_issues SET client_organisation_id = $1 WHERE client_organisation_id = $2`,
+        [keepId, loserId]
+      );
+
+      // external_id_map — UNIQUE(entity_type, entity_id, external_system).
+      // Reassign loser rows to keeper, dropping ones where keeper already has a row for that system.
+      // (Keeper's existing external_id wins; loser's HH/Xero IDs that conflict are recorded in notes via backref.)
+      const conflictingExtIds = await client.query(
+        `SELECT l.external_system, l.external_id, k.external_id AS keeper_external_id
+         FROM external_id_map l
+         JOIN external_id_map k
+           ON k.entity_type = 'organisations' AND k.entity_id = $1 AND k.external_system = l.external_system
+         WHERE l.entity_type = 'organisations' AND l.entity_id = $2
+           AND l.external_id != k.external_id`,
+        [keepId, loserId]
+      );
+      // Drop conflicting loser rows
+      await client.query(
+        `DELETE FROM external_id_map
+         WHERE entity_type = 'organisations' AND entity_id = $1
+           AND external_system IN (
+             SELECT external_system FROM external_id_map
+             WHERE entity_type = 'organisations' AND entity_id = $2
+           )`,
+        [loserId, keepId]
+      );
+      // Reassign survivors
+      await client.query(
+        `UPDATE external_id_map SET entity_id = $1
+         WHERE entity_type = 'organisations' AND entity_id = $2`,
+        [keepId, loserId]
+      );
+      // If we dropped any conflicting external IDs, append them to keeper notes for audit
+      if (conflictingExtIds.rows.length > 0) {
+        const lines = conflictingExtIds.rows
+          .map((r: { external_system: string; external_id: string; keeper_external_id: string }) =>
+            `  - ${r.external_system}: keeper has ${r.keeper_external_id}, loser had ${r.external_id} (discarded)`)
+          .join('\n');
+        await client.query(
+          `UPDATE organisations SET notes = COALESCE(notes, '') || $1 WHERE id = $2`,
+          [`\n[External ID conflicts dropped during merge:\n${lines}\n]`, keepId]
+        );
+      }
+
+      // notifications — entity references (not FK, just a string)
+      await client.query(
+        `UPDATE notifications SET entity_id = $1
+         WHERE entity_type = 'organisations' AND entity_id = $2`,
+        [keepId, loserId]
+      );
+
+      // sync_review_queue — pending review items
+      await client.query(
+        `UPDATE sync_review_queue SET entity_id = $1
+         WHERE entity_type = 'organisation' AND entity_id = $2`,
+        [keepId, loserId]
+      );
+
+      // ── 3. Soft-delete the loser with a forward-pointing note ────────────
+      await client.query(
+        `UPDATE organisations SET is_deleted = true,
+           notes = COALESCE(notes, '') || $1,
+           updated_at = NOW(), version = version + 1
+         WHERE id = $2`,
+        [`\n[Merged into "${keeper.name}" (${keepId}) on ${today} by ${req.user!.email || req.user!.id}]`, loserId]
+      );
+
+      await client.query('COMMIT');
+
+      await logAudit(req.user!.id, 'organisations', loserId, 'delete' as const, loser, {
+        merged_into: keepId,
+        merged_into_name: keeper.name,
+        external_id_conflicts: conflictingExtIds.rows,
+      });
+      await logAudit(req.user!.id, 'organisations', keepId, 'update' as const, keeper, {
+        merged_from: loserId,
+        merged_from_name: loser.name,
+      });
+
+      res.json({
+        success: true,
+        kept_id: keepId,
+        kept_name: keeper.name,
+        merged_id: loserId,
+        merged_name: loser.name,
+        external_id_conflicts: conflictingExtIds.rows,
+        message: `Merged "${loser.name}" into "${keeper.name}"`,
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Org merge error:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+
 // GET /api/organisations/:id/suggestions — suggest related orgs for job roles
 // e.g. select a band → suggest its management company as client
 router.get('/:id/suggestions', async (req: AuthRequest, res: Response) => {
