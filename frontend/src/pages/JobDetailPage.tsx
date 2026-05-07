@@ -3336,6 +3336,7 @@ export default function JobDetailPage() {
             jobId={id || ''}
             hhJobNumber={job.hh_job_number}
             jobStatus={job.status}
+            pipelineStatus={job.pipeline_status}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
@@ -5372,10 +5373,11 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
+function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
   jobId: string;
   hhJobNumber?: number | null;
   jobStatus?: number;
+  pipelineStatus?: string | null;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
     vehicle_slots?: Array<{ item_id: number; slot_index: number; item_name: string; mode: 'self_drive' | 'van_and_driver' }>;
@@ -5410,12 +5412,17 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
   const effectiveFlags = localFlags || derivedFlags;
   // Phase initial value: prefer ?phase= query param (so inbox links land on
   // the toggle that actually contains the requirement they're chasing), else
-  // default to post_hire for dispatched+ jobs (status 4+), else pre_hire.
+  // default to post_hire only once OP says the job has actually left
+  // (pipeline_status = dispatched or beyond). HH jumps to status 4/5 the
+  // moment items get checked out, but OP holds at 'prepped' until staff
+  // explicitly mark dispatched — staying on Pre-Hire until then avoids the
+  // trap of staff seeing two backline cards and ticking the wrong one.
   const phaseParam = new URLSearchParams(window.location.search).get('phase');
+  const POST_HIRE_PIPELINE_STATUSES = ['dispatched', 'returned_incomplete', 'returned', 'completed', 'cancelled'];
   const initialPhase: 'pre_hire' | 'post_hire' =
     phaseParam === 'pre_hire' || phaseParam === 'post_hire'
       ? phaseParam
-      : (jobStatus && jobStatus >= 4) ? 'post_hire' : 'pre_hire';
+      : (pipelineStatus && POST_HIRE_PIPELINE_STATUSES.includes(pipelineStatus)) ? 'post_hire' : 'pre_hire';
   const [phase, setPhase] = useState<'pre_hire' | 'post_hire'>(initialPhase);
   const addMenuRef = useRef<HTMLDivElement>(null);
 
@@ -5613,9 +5620,15 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
     }
   }
 
-  const doneCount = requirements.filter(r => r.status === 'done').length;
-  const blockedCount = requirements.filter(r => r.status === 'blocked').length;
-  const totalCount = requirements.length;
+  // VD-suspended requirements (hire forms / excess auto-suspended when every
+  // van slot is Van & Driver) are listed below as greyed "Not required" stubs
+  // but shouldn't move the progress meter or count as "blocked" — they're
+  // not a problem, they just don't apply on this job.
+  const isVdSuspended = (r: JobRequirement) => r.notes?.includes('[Suspended: Van & Driver]') === true;
+  const countableReqs = requirements.filter(r => !isVdSuspended(r));
+  const doneCount = countableReqs.filter(r => r.status === 'done').length;
+  const blockedCount = countableReqs.filter(r => r.status === 'blocked').length;
+  const totalCount = countableReqs.length;
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
 
   const availableTypes = types.filter(t => t.type === 'custom' || !requirements.some(r => r.requirement_type === t.type));
