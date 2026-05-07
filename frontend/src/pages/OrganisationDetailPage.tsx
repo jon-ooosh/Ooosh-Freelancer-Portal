@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
+import OrganisationMergeModal from '../components/OrganisationMergeModal';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
@@ -101,6 +102,9 @@ export default function OrganisationDetailPage() {
   // Edit/delete
   const [showEdit, setShowEdit] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  // Merge
+  const [showMergeModal, setShowMergeModal] = useState(false);
 
   // Add relationship
   const [showAddRelationship, setShowAddRelationship] = useState(false);
@@ -376,6 +380,15 @@ export default function OrganisationDetailPage() {
                 title="Flag as Do Not Hire"
               >
                 DNH
+              </button>
+            )}
+            {isAdmin && (
+              <button
+                onClick={() => setShowMergeModal(true)}
+                className="px-3 py-1.5 text-sm border border-amber-200 text-amber-700 rounded hover:bg-amber-50 transition-colors"
+                title="Merge this organisation into another"
+              >
+                Merge
               </button>
             )}
             <div className="relative">
@@ -1164,6 +1177,19 @@ export default function OrganisationDetailPage() {
           onCancel={() => setShowEdit(false)}
         />
       </SlidePanel>
+
+      {/* Merge Modal */}
+      {showMergeModal && id && org && (
+        <OrganisationMergeModal
+          loserId={id}
+          loserName={org.name}
+          onClose={() => setShowMergeModal(false)}
+          onMerged={(keeperId) => {
+            setShowMergeModal(false);
+            navigate(`/organisations/${keeperId}`);
+          }}
+        />
+      )}
     </div>
   );
 }
