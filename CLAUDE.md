@@ -2262,6 +2262,48 @@ setImmediate(() => {
 
 The outer `.catch` is for the post-alert rethrow — the alert has already fired by then, this is just for log visibility.
 
+### Vehicle Notification Recipients ✅ COMPLETE
+
+**File:** `backend/src/services/vehicle-notify.ts`
+
+Centralised recipient helper for vehicle-related alerts (insurance referrals, mid-tour drivers, fleet compliance — MOT/Tax/Insurance/TFL). Returns `{ to: 'info@oooshtours.co.uk', cc: ['will@oooshtours.co.uk'], bellUserIds: [<Will's UUID>] }` with 5-min in-process cache.
+
+**Why this exists:** Pre-May 2026, vehicle bell notifications fanned out to every active `role IN ('admin', 'manager')` user (~5 staff). High-priority bells escalating to email after 1h meant one referral generated 5+ emails to staff who don't look after vehicles. Most managers cover other areas of the business and shouldn't be in this loop. Hardcoded info@ + will@ for now (can move to env vars if recipients ever need to differ across environments).
+
+**Usage:**
+```typescript
+const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+const targets = await getVehicleNotificationTargets();
+
+// Direct email
+await emailService.send('referral_alert', {
+  to: targets.to,        // info@
+  cc: targets.cc,        // will@
+  variables: { ... },
+});
+
+// Bell — only the vehicle manager. Set email_sent_at = NOW() if a direct
+// email was also sent, so notification-escalation doesn't double-fire.
+for (const userId of targets.bellUserIds) {
+  await query(
+    `INSERT INTO notifications (user_id, type, title, content, priority, email_sent_at, ...)
+     VALUES ($1, 'compliance', $2, $3, 'normal', NOW(), ...)`,
+    [userId, ...]
+  );
+}
+```
+
+**info@ as guaranteed fallback:** if Will's user record is missing or `is_active = false`, `bellUserIds` is empty (no bell fires) but emails still send. info@ never goes silent.
+
+**Wired into:**
+- `routes/driver-verification.ts` — referral bell when flag set mid-flow (no email here; the proper email fires from hire-forms.ts when the form is submitted)
+- `routes/hire-forms.ts` — `referral_alert` email + mid-tour driver bell + `mid_tour_driver` email
+- `services/compliance-checker.ts` — daily compliance bells + per-alert `compliance_reminder` email (added direct email path; previously relied on bell→escalation fanout for delivery)
+
+**Don't bypass:** any future vehicle alert path (e.g. issues register notifications, vehicle swap alerts, breakdown notifications) MUST use this helper rather than reverting to `WHERE role IN ('admin', 'manager')`. The legacy `vehicle_compliance_settings.notification_roles` setting is intentionally ignored — kept in the DB for backwards-compat reads but no longer drives recipients.
+
+**Escalation duplicate-prevention pattern:** when both a direct email AND a bell fire for the same event, set `email_sent_at = NOW()` on the bell INSERT. The 15-min escalation scheduler skips notifications where `email_sent_at IS NOT NULL`, so Will doesn't get the same content twice.
+
 ### Hire Date Resolution
 
 **Canonical hire-window source for PDFs / emails / overlap checks:**
