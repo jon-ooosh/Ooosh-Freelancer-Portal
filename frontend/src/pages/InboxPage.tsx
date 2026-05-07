@@ -117,6 +117,8 @@ function formatDate(dateStr: string): string {
   });
 }
 
+type SortMode = 'priority' | 'newest' | 'oldest';
+
 export default function InboxPage() {
   const [tab, setTab] = useState<Tab>('all');
   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -131,7 +133,20 @@ export default function InboxPage() {
   const [savingPrefs, setSavingPrefs] = useState(false);
   const [snoozeId, setSnoozeId] = useState<string | null>(null);
   const [snoozeDays, setSnoozeDays] = useState(7);
+  // Search + sort + show-acknowledged controls. Acknowledged are hidden by
+  // default — once dealt with, they're noise.
+  const [searchQ, setSearchQ] = useState('');
+  const [debouncedQ, setDebouncedQ] = useState('');
+  const [sortMode, setSortMode] = useState<SortMode>('priority');
+  const [showAcknowledged, setShowAcknowledged] = useState(false);
+  const [bulkClearing, setBulkClearing] = useState(false);
   const navigate = useNavigate();
+
+  // Debounce search input so we don't hit the API on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(searchQ.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchQ]);
 
   const loadInbox = useCallback(async (p: number) => {
     setLoading(true);
@@ -145,11 +160,19 @@ export default function InboxPage() {
         setPage(data.pagination.page);
         setTotalPages(data.pagination.totalPages);
       } else {
+        const params = new URLSearchParams({
+          tab,
+          page: String(p),
+          limit: '30',
+          sort: sortMode,
+          include_acknowledged: showAcknowledged ? 'true' : 'false',
+        });
+        if (debouncedQ) params.set('q', debouncedQ);
         const data = await api.get<{
           data: Notification[];
           tab_counts: TabCounts;
           pagination: { page: number; totalPages: number; total: number };
-        }>(`/notifications/inbox?tab=${tab}&page=${p}&limit=30`);
+        }>(`/notifications/inbox?${params.toString()}`);
         setNotifications(data.data);
         setTabCounts(data.tab_counts);
         setPage(data.pagination.page);
@@ -162,7 +185,7 @@ export default function InboxPage() {
     } finally {
       setLoading(false);
     }
-  }, [tab]);
+  }, [tab, sortMode, showAcknowledged, debouncedQ]);
 
   useEffect(() => {
     setPage(1);
@@ -267,6 +290,30 @@ export default function InboxPage() {
     } catch (err) { console.error(err); }
   }
 
+  // Bulk-acknowledge everything that's been READ in the current tab.
+  // Default scope is 'read' (safe — won't touch unread items the user
+  // hasn't seen yet); the confirmation copy makes this explicit.
+  async function bulkClear() {
+    if (bulkClearing) return;
+    const tabLabel = TAB_CONFIG.find(t => t.key === tab)?.label || 'this tab';
+    if (!window.confirm(
+      `Mark every read notification in ${tabLabel} as Done? Unread items will be left alone.`
+    )) return;
+    setBulkClearing(true);
+    try {
+      const body: Record<string, unknown> = { scope: 'read' };
+      if (tab !== 'all') body.tab = tab;
+      await api.post<{ cleared: number }>('/notifications/bulk-acknowledge', body);
+      // Refetch — simpler + safer than mutating the visible list, and
+      // the tab counts need updating too.
+      await loadInbox(1);
+    } catch (err) {
+      console.error('Bulk-clear failed:', err);
+    } finally {
+      setBulkClearing(false);
+    }
+  }
+
   const getTabCount = (t: Tab): number => {
     if (!tabCounts) return 0;
     switch (t) {
@@ -331,6 +378,58 @@ export default function InboxPage() {
           );
         })}
       </div>
+
+      {/* Toolbar: search + sort + show-acknowledged + bulk-clear. Hidden on
+          the Sent tab where it doesn't apply. */}
+      {tab !== 'sent' && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <div className="relative flex-1 min-w-[180px] max-w-md">
+            <input
+              type="text"
+              value={searchQ}
+              onChange={(e) => setSearchQ(e.target.value)}
+              placeholder="Search title or message…"
+              className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 pr-7"
+            />
+            {searchQ && (
+              <button
+                onClick={() => setSearchQ('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-sm"
+                aria-label="Clear search"
+              >
+                ×
+              </button>
+            )}
+          </div>
+          <select
+            value={sortMode}
+            onChange={(e) => setSortMode(e.target.value as SortMode)}
+            className="text-sm border border-gray-300 rounded px-2 py-1.5 focus:border-ooosh-500 focus:outline-none"
+            title="Sort"
+          >
+            <option value="priority">Sort: Priority</option>
+            <option value="newest">Sort: Newest</option>
+            <option value="oldest">Sort: Oldest</option>
+          </select>
+          <label className="inline-flex items-center gap-1.5 text-gray-600 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showAcknowledged}
+              onChange={(e) => setShowAcknowledged(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            Show done
+          </label>
+          <button
+            onClick={bulkClear}
+            disabled={bulkClearing || notifications.length === 0}
+            className="text-xs text-gray-600 hover:text-gray-800 border border-gray-300 px-3 py-1.5 rounded hover:bg-gray-50 transition-colors disabled:opacity-50"
+            title="Mark every read notification in this tab as Done"
+          >
+            {bulkClearing ? 'Clearing…' : 'Clear read'}
+          </button>
+        </div>
+      )}
 
       {/* Content */}
       {loadError ? (

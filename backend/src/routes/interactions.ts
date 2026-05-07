@@ -4,6 +4,8 @@ import { query } from '../config/database';
 import { authenticate, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import emailService from '../services/email-service';
+import { frontendLink } from '../config/app-urls';
 
 const router = Router();
 router.use(authenticate);
@@ -392,16 +394,50 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
 
     const io = req.app.get('io');
 
-    // 1) Explicit @mentions — high-signal, may carry priority + email escalation.
+    // 1) Explicit @mentions — high-signal. Email fires IMMEDIATELY at
+    //    creation time (not via the 15-min escalator) when the recipient's
+    //    preference allows it. Why: the escalator filters on
+    //    `is_read = false`, but users routinely read mention notifications
+    //    via the bell within seconds — flipping is_read=true and silently
+    //    killing any email path. For conversations (which is what mentions
+    //    are), the user expectation is "email me too so I can reply from
+    //    my phone", regardless of whether I happened to glance at the bell.
+    //
+    //    Thread re-notifications (priority='low' below) deliberately
+    //    don't email — that's the spec'd model.
+    const priority = mention_priority || 'normal';
     if (mentioned_user_ids && mentioned_user_ids.length > 0) {
+      // Bulk-load recipients + delivery preferences in one round-trip.
+      const recipientResult = await query(
+        `SELECT u.id, u.email, p.first_name,
+          COALESCE(
+            (SELECT delivery_method FROM user_notification_preferences
+              WHERE user_id = u.id AND notification_type = 'mention'),
+            'both'
+          ) AS pref
+         FROM users u
+         LEFT JOIN people p ON p.id = u.person_id
+         WHERE u.id = ANY($1::uuid[]) AND u.is_active = true`,
+        [mentioned_user_ids]
+      );
+      const recipientMap = new Map(recipientResult.rows.map((r) => [r.id, r]));
+
       for (const userId of mentioned_user_ids) {
         if (notifiedUserIds.has(userId)) continue;
         notifiedUserIds.add(userId);
 
+        const recipient = recipientMap.get(userId);
+        const wantsEmail = recipient
+          && (recipient.pref === 'email' || recipient.pref === 'both')
+          && priority !== 'low'
+          && recipient.email;
+
+        // Stamp email_sent_at at INSERT time when we plan to email
+        // immediately, so the 15-min escalator doesn't double-fire later.
         const notifResult = await query(
           `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id,
-             source_user_id, interaction_id, action_url, priority)
-           VALUES ($1, 'mention', $2, $3, $4, $5, $6, $7, $8, $9)
+             source_user_id, interaction_id, action_url, priority, email_sent_at)
+           VALUES ($1, 'mention', $2, $3, $4, $5, $6, $7, $8, $9, ${wantsEmail ? 'NOW()' : 'NULL'})
            RETURNING *`,
           [
             userId,
@@ -412,12 +448,49 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
             req.user!.id,
             result.rows[0].id,
             actionUrl,
-            mention_priority || 'normal',
+            priority,
           ]
         );
 
         if (io) {
           io.to(`user:${userId}`).emit('notification', notifResult.rows[0]);
+        }
+
+        // Fire email out-of-band — don't block the route response on SMTP.
+        // Failure here just means the user doesn't get the immediate email;
+        // the escalator can't pick it up either (we already stamped
+        // email_sent_at), so we log loudly. Acceptable trade-off — alarming
+        // every flake would create more noise than it saves.
+        if (wantsEmail) {
+          const recipientName = recipient.first_name || 'there';
+          const recipientEmail = recipient.email;
+          const priorityLabel = priority === 'urgent' ? 'URGENT: ' : priority === 'high' ? 'Important: ' : '';
+          const subject = `${priorityLabel}${creatorName} mentioned you`;
+          const linkHtml = actionUrl
+            ? `<p><a href="${frontendLink(actionUrl)}" style="color: #7B5EA7; text-decoration: underline;">View in Ooosh</a></p>`
+            : '';
+          const escapeMap: Record<string, string> = { '<': '&lt;', '>': '&gt;', '&': '&amp;' };
+          const previewBody = (content.length > 200 ? content.slice(0, 200) + '…' : content).replace(/[<>&]/g, (c: string) => escapeMap[c]);
+          setImmediate(() => {
+            emailService.sendRaw({
+              to: recipientEmail,
+              subject,
+              html: `
+                <p>Hi ${recipientName},</p>
+                <p style="font-size: 13px; color: #666;">From: ${creatorName}</p>
+                <p style="font-size: 15px; margin: 16px 0;"><strong>${creatorName} mentioned you</strong></p>
+                <p style="color: #333; white-space: pre-wrap;">${previewBody}</p>
+                ${linkHtml}
+                <p style="color: #999; font-size: 12px; margin-top: 24px;">
+                  You're receiving this because you were @mentioned on the Ooosh Operations Platform.
+                  Adjust your notification preferences in your Inbox settings.
+                </p>
+              `,
+              variant: 'internal',
+            }).catch((err) => {
+              console.error(`[Interactions] Failed to send mention email to ${recipientEmail}:`, err);
+            });
+          });
         }
       }
     }
@@ -515,6 +588,59 @@ router.put('/:id/move', validate(moveInteractionSchema), async (req: AuthRequest
     res.json(result.rows[0]);
   } catch (error) {
     console.error('Move interaction error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/interactions/:id/reactions — toggle a reaction ───────────────
+//
+// Body: { emoji: string }. The user's reaction with this emoji is toggled
+// on/off — idempotent. Server enforces a curated 6-emoji palette to keep
+// the surface tidy and avoid arbitrary emoji proliferation.
+//
+// No notifications fire on reactions — this is intentionally the
+// lightweight "I saw it, no follow-up needed" pattern.
+
+const REACTION_PALETTE = ['👍', '❤️', '✅', '😂', '🎉', '👀'] as const;
+
+const reactionSchema = z.object({
+  emoji: z.enum(REACTION_PALETTE),
+});
+
+router.post('/:id/reactions', validate(reactionSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { emoji } = req.body as { emoji: typeof REACTION_PALETTE[number] };
+    const userId = req.user!.id;
+
+    // Read current reactions, toggle the user's id in the chosen emoji's
+    // array, write back. Single round-trip via JSONB ops would be cleaner
+    // but it's a small payload and this is more readable.
+    const current = await query(
+      `SELECT reactions FROM interactions WHERE id = $1`,
+      [req.params.id]
+    );
+    if (current.rows.length === 0) {
+      return res.status(404).json({ error: 'Interaction not found' });
+    }
+    const reactions = (current.rows[0].reactions || {}) as Record<string, string[]>;
+    const existing = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+    if (existing.includes(userId)) {
+      reactions[emoji] = existing.filter((u) => u !== userId);
+      // Drop the key entirely when the last reactor removes themselves —
+      // keeps the JSONB clean instead of accumulating empty arrays.
+      if (reactions[emoji].length === 0) delete reactions[emoji];
+    } else {
+      reactions[emoji] = [...existing, userId];
+    }
+
+    const result = await query(
+      `UPDATE interactions SET reactions = $1::jsonb WHERE id = $2 RETURNING reactions`,
+      [JSON.stringify(reactions), req.params.id]
+    );
+
+    res.json({ reactions: result.rows[0].reactions });
+  } catch (error) {
+    console.error('Toggle reaction error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

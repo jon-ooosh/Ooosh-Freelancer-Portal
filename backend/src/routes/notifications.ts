@@ -87,14 +87,26 @@ router.post('/read', async (req: AuthRequest, res: Response) => {
 // ── GET /api/notifications/inbox — paginated inbox with tabs ──
 router.get('/inbox', async (req: AuthRequest, res: Response) => {
   try {
-    const { tab = 'all', status = 'all', page = '1', limit = '30' } = req.query;
+    const {
+      tab = 'all',
+      status = 'all',
+      page = '1',
+      limit = '30',
+      q,
+      sort = 'priority',
+      include_acknowledged = 'false',
+    } = req.query;
     const userId = req.user!.id;
     const pageNum = Math.max(1, parseInt(page as string));
     const limitNum = Math.min(100, parseInt(limit as string));
     const offset = (pageNum - 1) * limitNum;
 
-    // Build base WHERE conditions (only use columns that always exist)
+    // Build WHERE conditions + a single shared param array (`whereParams`).
+    // Both data and count queries use the same WHERE; data query appends
+    // limit/offset on top.
     const conditions: string[] = ['n.user_id = $1'];
+    const whereParams: unknown[] = [userId];
+    let nextParam = 2;
 
     // Tab filter
     if (tab === 'mentions') {
@@ -112,6 +124,14 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
       conditions.push(`n.is_read = true`);
     }
 
+    // Search across title + content. Plain ILIKE — no fancy ranking; the
+    // inbox is small per-user and a basic match keeps it predictable.
+    if (q && typeof q === 'string' && q.trim()) {
+      conditions.push(`(n.title ILIKE $${nextParam} OR n.content ILIKE $${nextParam})`);
+      whereParams.push(`%${q.trim()}%`);
+      nextParam++;
+    }
+
     const baseWhere = conditions.join(' AND ');
 
     // Try full query with new columns, fall back to simple query on error
@@ -122,9 +142,38 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
 
     try {
       // Full query — uses new columns from migration 045/046
-      const fullWhere = tab !== 'follow_ups'
-        ? `${baseWhere} AND (n.snoozed_until IS NULL OR n.snoozed_until <= NOW())`
-        : baseWhere;
+      const conditionsFull: string[] = [...conditions];
+      if (tab !== 'follow_ups') {
+        conditionsFull.push(`(n.snoozed_until IS NULL OR n.snoozed_until <= NOW())`);
+      }
+      // Hide acknowledged items by default — once a user clicks Done, the
+      // notification has served its purpose. Toggle "include_acknowledged"
+      // brings them back. Tab counts are independent (always count
+      // unread / active regardless of this flag).
+      if (include_acknowledged !== 'true') {
+        conditionsFull.push(`n.acknowledged_at IS NULL`);
+      }
+      const fullWhere = conditionsFull.join(' AND ');
+
+      // Sort options: priority (default — urgent/high/normal/low + unread first),
+      // newest, oldest. The list is small per-user so a single ORDER BY
+      // does the work without an index dance.
+      let orderBy: string;
+      if (sort === 'newest') {
+        orderBy = 'n.created_at DESC';
+      } else if (sort === 'oldest') {
+        orderBy = 'n.created_at ASC';
+      } else {
+        orderBy = `CASE WHEN n.priority = 'urgent' THEN 0
+               WHEN n.priority = 'high' THEN 1
+               WHEN n.priority = 'normal' THEN 2
+               ELSE 3 END,
+          CASE WHEN n.is_read = false THEN 0 ELSE 1 END,
+          n.created_at DESC`;
+      }
+
+      const limitParam = nextParam;
+      const offsetParam = nextParam + 1;
 
       const [dataResult, countResult] = await Promise.all([
         query(`
@@ -133,16 +182,10 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
           LEFT JOIN users su ON su.id = n.source_user_id
           LEFT JOIN people sp ON sp.id = su.person_id
           WHERE ${fullWhere}
-          ORDER BY
-            CASE WHEN n.priority = 'urgent' THEN 0
-                 WHEN n.priority = 'high' THEN 1
-                 WHEN n.priority = 'normal' THEN 2
-                 ELSE 3 END,
-            CASE WHEN n.is_read = false THEN 0 ELSE 1 END,
-            n.created_at DESC
-          LIMIT $2 OFFSET $3
-        `, [userId, limitNum, offset]),
-        query(`SELECT COUNT(*) FROM notifications n WHERE ${fullWhere}`, [userId]),
+          ORDER BY ${orderBy}
+          LIMIT $${limitParam} OFFSET $${offsetParam}
+        `, [...whereParams, limitNum, offset]),
+        query(`SELECT COUNT(*) FROM notifications n WHERE ${fullWhere}`, whereParams),
       ]);
 
       const tc = await query(`
@@ -161,7 +204,10 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
     } catch (fullErr) {
       console.warn('[Inbox] Full query failed, falling back to simple:', (fullErr as Error).message);
 
-      // Simple fallback — only uses original columns
+      // Simple fallback — only uses original columns. Reuses whereParams
+      // with the correct placeholder numbering.
+      const limitParam = nextParam;
+      const offsetParam = nextParam + 1;
       const [dataResult, countResult] = await Promise.all([
         query(`
           SELECT n.id, n.user_id, n.type, n.title, n.content, n.entity_type, n.entity_id,
@@ -175,9 +221,9 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
           FROM notifications n
           WHERE ${baseWhere}
           ORDER BY CASE WHEN n.is_read = false THEN 0 ELSE 1 END, n.created_at DESC
-          LIMIT $2 OFFSET $3
-        `, [userId, limitNum, offset]),
-        query(`SELECT COUNT(*) FROM notifications n WHERE ${baseWhere}`, [userId]),
+          LIMIT $${limitParam} OFFSET $${offsetParam}
+        `, [...whereParams, limitNum, offset]),
+        query(`SELECT COUNT(*) FROM notifications n WHERE ${baseWhere}`, whereParams),
       ]);
 
       const tc = await query(`
@@ -459,6 +505,76 @@ router.put('/preferences', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'Invalid preferences', details: error.errors });
     }
     console.error('Update preferences error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/notifications/bulk-acknowledge — clear-down helper ─────────────
+//
+// Bulk-acknowledges every notification matching the supplied filter for the
+// current user. Used by the "Clear all dealt with" / "Clear visible" inbox
+// action. Filters mirror the GET /inbox params so the UI can clear "what
+// the user is currently looking at" without a separate filtering language.
+//
+// Idempotent: setting acknowledged_at when it's already set is a no-op (the
+// COALESCE preserves the original timestamp).
+
+const bulkAckSchema = z.object({
+  tab: z.enum(['all', 'mentions', 'follow_ups', 'system']).optional(),
+  type: z.string().optional(),
+  // 'read' = acknowledge already-read items only (the safe default — won't
+  // touch unread notifications that the user hasn't seen yet)
+  // 'all'  = acknowledge everything in scope including unread
+  scope: z.enum(['read', 'all']).default('read'),
+  ids: z.array(z.string().uuid()).optional(),
+});
+
+router.post('/bulk-acknowledge', async (req: AuthRequest, res: Response) => {
+  try {
+    const { tab, type, scope, ids } = bulkAckSchema.parse(req.body);
+    const userId = req.user!.id;
+
+    const conditions: string[] = ['user_id = $1', 'acknowledged_at IS NULL'];
+    const params: unknown[] = [userId];
+    let nextParam = 2;
+
+    if (Array.isArray(ids) && ids.length > 0) {
+      conditions.push(`id = ANY($${nextParam}::uuid[])`);
+      params.push(ids);
+      nextParam++;
+    }
+    if (tab === 'mentions') {
+      conditions.push(`type = 'mention'`);
+    } else if (tab === 'follow_ups') {
+      conditions.push(`type = 'follow_up'`);
+    } else if (tab === 'system') {
+      conditions.push(`type IN ('compliance', 'chase_alert', 'hire_form', 'referral', 'system')`);
+    }
+    if (type) {
+      conditions.push(`type = $${nextParam}`);
+      params.push(type);
+      nextParam++;
+    }
+    if (scope === 'read') {
+      conditions.push('is_read = true');
+    }
+
+    const result = await query(
+      `UPDATE notifications
+       SET acknowledged_at = NOW(),
+           is_read = true,
+           read_at = COALESCE(read_at, NOW())
+       WHERE ${conditions.join(' AND ')}
+       RETURNING id`,
+      params
+    );
+
+    res.json({ cleared: result.rows.length });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Invalid request', details: error.errors });
+    }
+    console.error('Bulk-acknowledge error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
