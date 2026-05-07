@@ -157,6 +157,11 @@ export function isOpClientError(err: unknown): err is OpApiError {
 /**
  * Make an authenticated request to the OP backend portal API.
  * Forwards the session cookie from the incoming request.
+ *
+ * GETs are retried once on 5xx / network failure (300ms backoff) to swallow
+ * brief OP backend restart windows. POSTs are NOT retried — a 5xx mid-POST
+ * is ambiguous (request may have landed and died after the write), and a
+ * blind retry could create duplicate records.
  */
 async function opFetch<T>(
   path: string,
@@ -164,26 +169,54 @@ async function opFetch<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${getOpUrl()}/api/portal${path}`
-
-  const response = await fetch(url, {
+  const fetchOptions: RequestInit = {
     ...options,
     headers: {
       'Content-Type': 'application/json',
       'Cookie': `session=${sessionToken}`,
       ...(options.headers as Record<string, string> || {}),
     },
-  })
-
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
-    throw new OpApiError(
-      (body as { error?: string })?.error || `OP API error: ${response.status}`,
-      response.status,
-      body,
-    )
   }
 
-  return response.json()
+  const isGet = !options.method || options.method.toUpperCase() === 'GET'
+  const maxAttempts = isGet ? 2 : 1
+
+  let lastError: unknown
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await fetch(url, fetchOptions)
+
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }))
+        const err = new OpApiError(
+          (body as { error?: string })?.error || `OP API error: ${response.status}`,
+          response.status,
+          body,
+        )
+        // Retry once on 5xx for GETs; surface 4xx immediately
+        if (isGet && response.status >= 500 && attempt < maxAttempts) {
+          lastError = err
+          await new Promise((r) => setTimeout(r, 300))
+          continue
+        }
+        throw err
+      }
+
+      return response.json()
+    } catch (err) {
+      // Network failures (DNS, ECONNREFUSED, abort) — treat like 5xx for GETs
+      if (err instanceof OpApiError) throw err
+      if (isGet && attempt < maxAttempts) {
+        lastError = err
+        await new Promise((r) => setTimeout(r, 300))
+        continue
+      }
+      throw err
+    }
+  }
+
+  // Unreachable in practice — the loop either returns or throws — but keeps TS happy
+  throw lastError instanceof Error ? lastError : new Error('opFetch exhausted retries')
 }
 
 /**
