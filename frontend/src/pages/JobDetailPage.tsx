@@ -3335,7 +3335,6 @@ export default function JobDetailPage() {
             key={prepChecklistKey}
             jobId={id || ''}
             hhJobNumber={job.hh_job_number}
-            jobStatus={job.status}
             pipelineStatus={job.pipeline_status}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
@@ -5373,10 +5372,9 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
   jobId: string;
   hhJobNumber?: number | null;
-  jobStatus?: number;
   pipelineStatus?: string | null;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
