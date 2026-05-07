@@ -1,8 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import ThreadView from '../components/messaging/ThreadView';
 
 type Tab = 'all' | 'mentions' | 'follow_ups' | 'system' | 'sent';
+
+interface NotificationAction {
+  kind: string;
+  label: string;
+  params?: Record<string, unknown>;
+  success_message?: string;
+}
 
 interface Notification {
   id: string;
@@ -25,6 +33,7 @@ interface Notification {
   source_user_id: string | null;
   source_first_name: string | null;
   source_last_name: string | null;
+  actions?: NotificationAction[];
 }
 
 interface SentNotification {
@@ -197,6 +206,21 @@ export default function InboxPage() {
     } catch (err) { console.error(err); }
   }
 
+  async function runAction(notifId: string, actionIndex: number) {
+    try {
+      const result = await api.post<{
+        success: boolean;
+        notification: Notification;
+      }>(`/notifications/${notifId}/action`, { action_index: actionIndex });
+      // The endpoint marks the notification acknowledged on success — reflect
+      // that locally so the row collapses without a full refetch.
+      setNotifications(prev => prev.map(n => n.id === notifId
+        ? { ...n, is_read: true, acknowledged_at: result.notification.acknowledged_at }
+        : n
+      ));
+    } catch (err) { console.error('Action failed:', err); }
+  }
+
   function navigateToEntity(notif: Notification | SentNotification) {
     const url = notif.action_url;
     if (url) {
@@ -217,29 +241,6 @@ export default function InboxPage() {
       const base = pathMap[notif.entity_type];
       if (base) navigate(`${base}/${notif.entity_id}?_t=${Date.now()}`);
     }
-  }
-
-  // Track replies sent from inbox (for inline display)
-  const [replies, setReplies] = useState<Record<string, string>>({});
-
-  async function replyToMention(notif: Notification, text: string) {
-    if (!notif.source_user_id || !notif.entity_type || !notif.entity_id) return;
-    const fieldMap: Record<string, string> = {
-      jobs: 'job_id', people: 'person_id', organisations: 'organisation_id', venues: 'venue_id',
-    };
-    const entityField = fieldMap[notif.entity_type];
-    if (!entityField) return;
-
-    await api.post('/interactions', {
-      type: 'note',
-      content: text,
-      [entityField]: notif.entity_id,
-      mentioned_user_ids: [notif.source_user_id],
-      mention_priority: 'normal',
-    });
-    // Mark as Done + store reply text for inline display
-    await acknowledge(notif.id);
-    setReplies(prev => ({ ...prev, [notif.id]: text }));
   }
 
   async function loadPreferences() {
@@ -357,8 +358,7 @@ export default function InboxPage() {
               onAcknowledge={acknowledge}
               onSnoozeClick={(id) => { setSnoozeId(id); setSnoozeDays(7); }}
               onNavigate={navigateToEntity}
-              onReply={replyToMention}
-              replyText={replies[notif.id]}
+              onRunAction={runAction}
             />
           ))}
         </div>
@@ -450,34 +450,26 @@ export default function InboxPage() {
 
 /* ── Notification Row ─────────────────────────────────────────────── */
 
-function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNavigate, onReply, replyText }: {
+function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNavigate, onRunAction }: {
   notif: Notification;
   onMarkRead: (id: string) => void;
   onAcknowledge: (id: string) => void;
   onSnoozeClick: (id: string) => void;
   onNavigate: (n: Notification) => void;
-  onReply: (notif: Notification, text: string) => Promise<void>;
-  replyText?: string;
+  onRunAction: (notifId: string, actionIndex: number) => Promise<void>;
 }) {
-  const [showReply, setShowReply] = useState(false);
-  const [replyDraft, setReplyDraft] = useState('');
-  const [replying, setReplying] = useState(false);
+  const [showThread, setShowThread] = useState(false);
+  const [runningActionIdx, setRunningActionIdx] = useState<number | null>(null);
   const ps = PRIORITY_STYLES[notif.priority] || PRIORITY_STYLES.normal;
   const isFollowUp = notif.type === 'follow_up';
-  const isMention = notif.type === 'mention';
+  // Any notification with an interaction_id is part of a thread (mentions,
+  // replies, or any future thread-anchored notification). Replaces the
+  // older isMention-only check that hid the View thread button on
+  // low-priority "replied in a thread" notifications.
+  const hasThread = !!notif.interaction_id;
   const isSnoozed = notif.snoozed_until && new Date(notif.snoozed_until) > new Date();
   const isAcknowledged = !!notif.acknowledged_at;
-
-  async function handleReply() {
-    if (!replyDraft.trim() || replying) return;
-    setReplying(true);
-    try {
-      await onReply(notif, replyDraft.trim());
-      setReplyDraft('');
-      setShowReply(false);
-    } catch { /* handled by parent */ }
-    finally { setReplying(false); }
-  }
+  const actions = notif.actions || [];
 
   return (
     <div
@@ -549,13 +541,37 @@ function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNa
         <div className="flex flex-col items-end gap-1 shrink-0">
           <span className="text-[10px] text-gray-400">{formatTimeAgo(notif.created_at)}</span>
 
-          <div className="flex items-center gap-1 mt-1" onClick={e => e.stopPropagation()}>
-            {isMention && notif.source_user_id && (
+          <div className="flex items-center gap-1 mt-1 flex-wrap justify-end" onClick={e => e.stopPropagation()}>
+            {/* Inline actions — run server-side, acknowledge on success */}
+            {!isAcknowledged && actions.map((act, i) => (
               <button
-                onClick={() => setShowReply(!showReply)}
-                className="text-[10px] text-ooosh-600 hover:text-ooosh-700 border border-ooosh-200 px-2 py-0.5 rounded hover:bg-ooosh-50 transition-colors"
+                key={i}
+                onClick={async () => {
+                  if (runningActionIdx !== null) return;
+                  setRunningActionIdx(i);
+                  try { await onRunAction(notif.id, i); }
+                  finally { setRunningActionIdx(null); }
+                }}
+                disabled={runningActionIdx !== null}
+                className="text-[10px] text-ooosh-700 bg-ooosh-50 border border-ooosh-300 px-2 py-0.5 rounded hover:bg-ooosh-100 transition-colors disabled:opacity-50 font-medium"
+                title={act.success_message}
               >
-                Reply
+                {runningActionIdx === i ? '…' : act.label}
+              </button>
+            ))}
+            {hasThread && (
+              <button
+                onClick={() => {
+                  if (!showThread && !notif.is_read) onMarkRead(notif.id);
+                  setShowThread(!showThread);
+                }}
+                className={`text-[10px] border px-2 py-0.5 rounded transition-colors ${
+                  showThread
+                    ? 'bg-ooosh-100 text-ooosh-700 border-ooosh-300'
+                    : 'text-ooosh-600 hover:text-ooosh-700 border-ooosh-200 hover:bg-ooosh-50'
+                }`}
+              >
+                {showThread ? 'Hide thread' : 'View thread'}
               </button>
             )}
             {!isAcknowledged && (
@@ -578,39 +594,14 @@ function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNa
         </div>
       </div>
 
-      {/* Reply sent indicator */}
-      {replyText && (
-        <div className="mt-2 pt-2 border-t border-green-100 flex items-start gap-2">
-          <svg className="w-3 h-3 text-green-500 mt-0.5 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M7.707 3.293a1 1 0 010 1.414L5.414 7H11a7 7 0 017 7v2a1 1 0 11-2 0v-2a5 5 0 00-5-5H5.414l2.293 2.293a1 1 0 11-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
-          </svg>
-          <div className="text-xs text-green-700">
-            <span className="font-medium">You replied:</span> {replyText}
-          </div>
-        </div>
-      )}
-
-      {/* Inline reply form */}
-      {showReply && !replyText && (
+      {/* Expanded thread view (replaces the old single-line reply input) */}
+      {showThread && hasThread && (
         <div className="mt-3 pt-3 border-t border-gray-200" onClick={e => e.stopPropagation()}>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={replyDraft}
-              onChange={e => setReplyDraft(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleReply(); } }}
-              placeholder={`Reply to ${notif.source_first_name || 'sender'}...`}
-              className="flex-1 border border-gray-300 rounded px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none"
-              autoFocus
-            />
-            <button
-              onClick={handleReply}
-              disabled={!replyDraft.trim() || replying}
-              className="px-3 py-1.5 text-xs bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
-            >
-              {replying ? '...' : 'Send'}
-            </button>
-          </div>
+          <ThreadView
+            interactionId={notif.interaction_id!}
+            onAcknowledge={!isAcknowledged ? () => onAcknowledge(notif.id) : undefined}
+            onSnooze={() => onSnoozeClick(notif.id)}
+          />
         </div>
       )}
     </div>

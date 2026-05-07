@@ -1670,7 +1670,7 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
 
 Unified messaging, notification, and follow-up system. Replaces Monday.com's @mention/update system. The existing interaction/timeline system is the conversation layer; the inbox surfaces conversations and system alerts to the right people.
 
-**Phases A-E shipped Apr 2026 are the foundation. The threaded-messaging upgrade (replies, attachments, actionable notifications, Problems integration) is specced separately in `docs/MESSAGING-SPEC.md` and queued as Phase F below.**
+**Phases A-E shipped Apr 2026 are the inbox foundation. The threaded-messaging upgrade (Phase F) is mostly shipped May 2026 — full thread view in inbox, attachments, paste-to-attach, render polish, actionable notifications. Problems-system integration (issue comments through interactions) is the remaining piece. Spec: `docs/MESSAGING-SPEC.md`.**
 
 **Design principles:**
 - @mention in timelines IS the messaging system — conversations happen on entities (jobs, people, orgs)
@@ -1825,7 +1825,7 @@ Respects `user_notification_preferences.delivery_method` — if user has set `no
 - [x] Dedicated "+ Reminder" button at top of prep checklist (next to "+ Add Job Requirement")
 - [x] Close-out chase scanner respects per-requirement delivery_method
 
-**Phase F — Threaded Messaging Upgrade** ← SPECCED (May 2026), NOT YET BUILT
+**Phase F — Threaded Messaging Upgrade** ← MOSTLY SHIPPED (May 2026)
 
 Closes the "one-way" gap in the current inbox: rolling conversations with replies, attachments, rich rendering, actionable system notifications, and integration with the Problems register. Full spec lives in `docs/MESSAGING-SPEC.md` — read that before touching code. Headline shape:
 
@@ -1836,7 +1836,18 @@ Closes the "one-way" gap in the current inbox: rolling conversations with replie
 - **Markdown-lite rendering** at display time: URL → link, `@user` → pill, `#NNNNN` → job link. Storage stays plain text.
 - **Working agreements** (jon, May 2026): notify ALL prior thread participants on a reply (low priority, no email); per-recipient acknowledgement; issue messages do NOT bubble to vehicle / driver / org timelines; staff-only — no freelancer participation; no backfill of historical replies.
 
-Phased plan in spec; new migration starts at 076 (parent_interaction_id, issue_id, actions). Phase G (email reply ingestion via `reply+<id>@oooshtours.co.uk`) is captured in spec but deferred. Step 4 Job Issues / Problems Stage 3 work depends on this — see that section.
+**What's shipped:**
+- [x] **Phase A (foundation)** — migration 076 (parent_interaction_id, issue_id, actions); `POST /api/interactions` accepts `parent_interaction_id` + `attachments` + flattens to thread root + thread re-notify (low priority); new `GET /api/interactions/:id/thread`; `POST /api/files/upload?attachment_only=true` mode.
+- [x] **Phase B (attachments + render polish)** — composer drag/drop + paste-to-attach for clipboard images (any composer surface); inline image thumbnails (authenticated via api.blob), file pills for non-images; URL / `@user` / `#NNNNN` linkification at render time. Shared primitives in `frontend/src/components/messaging/Attachments.tsx` (types + components + `useAttachments()` hook).
+- [x] **Phase C (threaded ActivityTimeline)** — replies render nested under root, > 2 collapsed by default, inline Reply composer per thread with @mentions + attachments + paste.
+- [x] **Phase D (Inbox thread view)** — `frontend/src/components/messaging/ThreadView.tsx` is the shared full-thread render (used by Inbox now, will be reused by IssueDetailPage in Stage 3). Replaces the old single-line `<input>` reply with a persistent threaded view: fetches `GET /api/interactions/:id/thread`, renders root + replies oldest-first with attachments, persistent reply composer at bottom with @mentions + paste + drop. Triggered by a "View thread" button on any notification with `interaction_id`.
+- [x] **Phase E (actionable notifications)** — `POST /api/notifications/:id/action` endpoint with whitelist of internal handlers; first cut ships **3 server-side kinds**: `mark_chased` (logs a chase interaction + bumps next_chase_date with the sacred-future rule), `complete_requirement` (flips `job_requirements` → status=done with audit note), `mark_handled` (optional note → interaction). `snooze` and `resend_email` are deliberately NOT server kinds — `snooze` is a UI affordance handled client-side via the existing modal; `resend_email` deferred until we have a clear template list. Wired into the chase-alert scheduler (`mark_chased`) and the close-out / reminder requirement scanner (`complete_requirement`). Inbox renders the full action list inline with per-button loading state; NotificationBell renders the first action only (compact dropdown — full list is in the inbox).
+
+**Still TODO under Phase F:**
+- [ ] **Problems integration** — `POST /api/problems/:id/comments` repointed to write through `interactions` (with `issue_id` set). IssueDetailPage merges typed events + interactions at render time, reusing `<ThreadView>`. Critical scoping rule: issue messages must NOT bubble to the linked vehicle / driver / organisation timelines (filter `issue_id IS NULL` already in place on `GET /api/interactions` for those entity reads).
+- [ ] **`resend_email` action kind** — once a clear set of templates benefit from a one-click resend (hire form, OOH info, payment confirmation, etc.).
+
+Phased plan in spec. Phase G (email reply ingestion via `reply+<id>@oooshtours.co.uk`) is captured in spec but deferred. Step 4 Job Issues / Problems Stage 3 work depends on this — see that section.
 
 ##### Future Enhancements
 - Staff working calendar integration (escalation timing based on actual schedules)

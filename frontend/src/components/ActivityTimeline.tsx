@@ -1,19 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-
-interface InteractionAttachment {
-  r2_key?: string;
-  // Files-tab uploads use `url` (legacy), interaction attachments use `r2_key`.
-  url?: string;
-  filename?: string;
-  // Files-tab uploads use `name` (legacy).
-  name?: string;
-  content_type?: string;
-  size_bytes?: number;
-  thumbnail_key?: string | null;
-  uploaded_at?: string;
-}
+import {
+  AttachmentList,
+  PendingAttachmentStrip,
+  useAttachments,
+  type InteractionAttachment,
+} from './messaging/Attachments';
 
 interface Interaction {
   id: string;
@@ -28,24 +21,6 @@ interface Interaction {
   parent_interaction_id?: string | null;
   issue_id?: string | null;
   files?: InteractionAttachment[];
-}
-
-// Pending attachments state — files staged for upload, then uploaded to R2,
-// metadata returned, ready to be passed in `attachments` on the next POST.
-interface PendingAttachment {
-  // Local-only id so the UI can show "uploading" / "uploaded" / "failed".
-  localId: string;
-  filename: string;
-  size_bytes: number;
-  content_type: string;
-  status: 'uploading' | 'uploaded' | 'failed';
-  // Populated once the R2 upload completes.
-  r2_key?: string;
-  thumbnail_key?: string | null;
-  // Local preview URL (object URL) so the UI can show the image before
-  // upload completes.
-  preview_url?: string;
-  error?: string;
 }
 
 const JOB_STATUS_MAP: Record<number, string> = {
@@ -117,160 +92,6 @@ function formatDateTime(dateStr: string) {
   });
 }
 
-// ── Small inline components for attachments ─────────────────────────────────
-
-function isImageAttachment(att: InteractionAttachment): boolean {
-  if (att.content_type?.startsWith('image/')) return true;
-  const name = att.filename || att.name || '';
-  return /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(name);
-}
-
-function attachmentKey(att: InteractionAttachment): string | null {
-  // Prefer the new shape (`r2_key`); fall back to legacy `url` from
-  // existing files-tab uploads that may end up rendered here.
-  return att.r2_key || att.url || null;
-}
-
-function AttachmentImage({ att }: { att: InteractionAttachment }) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    let revoked: string | null = null;
-    let cancelled = false;
-    const key = attachmentKey(att);
-    if (!key) { setError(true); return; }
-
-    api.blob(`/files/download?key=${encodeURIComponent(key)}`)
-      .then(({ blob }) => {
-        if (cancelled) return;
-        const url = URL.createObjectURL(blob);
-        revoked = url;
-        setSrc(url);
-      })
-      .catch(() => { if (!cancelled) setError(true); });
-
-    return () => {
-      cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
-    };
-  }, [att]);
-
-  if (error) {
-    return (
-      <div className="border border-gray-200 rounded p-2 text-xs text-gray-400 bg-gray-50">
-        {att.filename || att.name || 'Image'} (failed to load)
-      </div>
-    );
-  }
-  if (!src) {
-    return (
-      <div className="border border-gray-200 rounded p-2 text-xs text-gray-400 bg-gray-50 animate-pulse">
-        Loading…
-      </div>
-    );
-  }
-  return (
-    <a
-      href={`/api/files/download?key=${encodeURIComponent(attachmentKey(att) || '')}`}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline-block"
-    >
-      <img
-        src={src}
-        alt={att.filename || att.name || 'attachment'}
-        className="max-w-[240px] max-h-[180px] rounded border border-gray-200 object-cover hover:opacity-90 transition-opacity"
-      />
-    </a>
-  );
-}
-
-function AttachmentPill({ att }: { att: InteractionAttachment }) {
-  const name = att.filename || att.name || 'file';
-  const key = attachmentKey(att);
-  const sizeLabel = typeof att.size_bytes === 'number'
-    ? ` · ${(att.size_bytes / 1024).toFixed(0)} KB`
-    : '';
-  return (
-    <a
-      href={key ? `/api/files/download?key=${encodeURIComponent(key)}` : '#'}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-gray-200 bg-white text-xs text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-colors"
-    >
-      <span className="text-gray-400">📎</span>
-      <span className="font-medium">{name}</span>
-      <span className="text-gray-400">{sizeLabel}</span>
-    </a>
-  );
-}
-
-function AttachmentList({ files }: { files?: InteractionAttachment[] }) {
-  if (!files || files.length === 0) return null;
-  const images = files.filter(isImageAttachment);
-  const others = files.filter((f) => !isImageAttachment(f));
-  return (
-    <div className="mt-2 space-y-2">
-      {images.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {images.map((att, i) => (
-            <AttachmentImage key={`img-${i}`} att={att} />
-          ))}
-        </div>
-      )}
-      {others.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {others.map((att, i) => (
-            <AttachmentPill key={`pill-${i}`} att={att} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Pending-attachments preview strip for the composer (uploads in progress).
-function PendingAttachmentStrip({
-  items, onRemove,
-}: {
-  items: PendingAttachment[];
-  onRemove: (localId: string) => void;
-}) {
-  if (items.length === 0) return null;
-  return (
-    <div className="flex flex-wrap gap-2 mt-2">
-      {items.map((p) => (
-        <div
-          key={p.localId}
-          className={`relative inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-xs ${
-            p.status === 'failed'
-              ? 'bg-red-50 border-red-200 text-red-700'
-              : p.status === 'uploaded'
-              ? 'bg-gray-50 border-gray-200 text-gray-700'
-              : 'bg-amber-50 border-amber-200 text-amber-700 animate-pulse'
-          }`}
-        >
-          {p.preview_url
-            ? <img src={p.preview_url} alt={p.filename} className="w-6 h-6 object-cover rounded" />
-            : <span className="text-gray-400">📎</span>}
-          <span className="font-medium max-w-[150px] truncate">{p.filename}</span>
-          {p.status === 'uploading' && <span className="text-[10px]">uploading…</span>}
-          {p.status === 'failed' && <span className="text-[10px]">failed</span>}
-          <button
-            type="button"
-            onClick={() => onRemove(p.localId)}
-            className="hover:text-red-600 ml-0.5"
-            aria-label={`Remove ${p.filename}`}
-          >
-            ×
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export default function ActivityTimeline({ entityType, entityId, interactions, onInteractionAdded }: ActivityTimelineProps) {
   const user = useAuthStore((s) => s.user);
 
@@ -289,21 +110,28 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
   // backend would otherwise push next_chase_date forward.
   const [skipChaseBump, setSkipChaseBump] = useState(false);
 
-  // ── Attachments (top-level composer) ─────────────────────────────────────
-  // Files are uploaded to R2 immediately on selection (attachment_only mode),
-  // and their returned metadata is held here until the interaction is saved.
-  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  // ── Attachments — one hook instance per composer ────────────────────────
+  // Top-level composer (always rendered) + reply composer (open when
+  // replyParentId is set). Each maintains its own pending-upload state,
+  // preview-URL lifecycle, paste/drop helpers via useAttachments.
+  const topAttach = useAttachments();
+  const replyAttach = useAttachments();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
 
   // ── Reply mode ───────────────────────────────────────────────────────────
-  // When a user clicks Reply on a timeline interaction, we open an inline
-  // composer scoped to that thread root. Replies have their own pending
-  // attachments + content + submitting flag.
   const [replyParentId, setReplyParentId] = useState<string | null>(null);
   const [replyContent, setReplyContent] = useState('');
-  const [replyAttachments, setReplyAttachments] = useState<PendingAttachment[]>([]);
   const [replySubmitting, setReplySubmitting] = useState(false);
+
+  // Reply-composer @mention state — parallel to the top-level composer.
+  // Only one reply composer can be open at a time (replyParentId is a
+  // single value), so a single set of state suffices.
+  const [replyShowMentions, setReplyShowMentions] = useState(false);
+  const [replyMentionFilter, setReplyMentionFilter] = useState('');
+  const [replyMentionIndex, setReplyMentionIndex] = useState(0);
+  const [replyMentionedIds, setReplyMentionedIds] = useState<string[]>([]);
+  const replyTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // ── Thread expand/collapse ───────────────────────────────────────────────
   // Threads with > 2 replies collapse the middle by default; clicking
@@ -318,80 +146,17 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     });
   }
 
-  async function uploadOneAttachment(file: File): Promise<PendingAttachment> {
-    const localId = `att-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const previewUrl = file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined;
-
-    const initial: PendingAttachment = {
-      localId,
-      filename: file.name,
-      size_bytes: file.size,
-      content_type: file.type || 'application/octet-stream',
-      status: 'uploading',
-      preview_url: previewUrl,
-    };
-
-    try {
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('attachment_only', 'true');
-      const result = await api.upload<{ r2_key: string; thumbnail_key?: string | null }>('/files/upload', fd);
-      return { ...initial, status: 'uploaded', r2_key: result.r2_key, thumbnail_key: result.thumbnail_key ?? null };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Upload failed';
-      return { ...initial, status: 'failed', error: message };
-    }
+  // Thin adapters so the existing JSX (which used handleFiles + handlePaste
+  // with a 'top'|'reply' target arg) keeps working against the new hooks.
+  function handleFiles(files: FileList | File[], target: 'top' | 'reply') {
+    (target === 'top' ? topAttach : replyAttach).addFiles(files);
   }
-
-  async function handleFiles(files: FileList | File[], target: 'top' | 'reply') {
-    const list = Array.from(files);
-    if (list.length === 0) return;
-
-    // Optimistically push placeholder rows while uploads run in parallel.
-    const placeholders: PendingAttachment[] = list.map((f) => ({
-      localId: `att-pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      filename: f.name,
-      size_bytes: f.size,
-      content_type: f.type || 'application/octet-stream',
-      status: 'uploading' as const,
-      preview_url: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
-    }));
-    if (target === 'top') {
-      setPendingAttachments((prev) => [...prev, ...placeholders]);
-    } else {
-      setReplyAttachments((prev) => [...prev, ...placeholders]);
-    }
-
-    // Run uploads. Replace each placeholder with the resolved row by index.
-    await Promise.all(list.map(async (f, i) => {
-      const resolved = await uploadOneAttachment(f);
-      const stamp = (prev: PendingAttachment[]) => prev.map((p) => p.localId === placeholders[i].localId ? { ...resolved, localId: p.localId, preview_url: p.preview_url } : p);
-      if (target === 'top') setPendingAttachments(stamp);
-      else setReplyAttachments(stamp);
-    }));
+  function handlePaste(e: React.ClipboardEvent, target: 'top' | 'reply') {
+    const handled = (target === 'top' ? topAttach : replyAttach).pasteFromEvent(e);
+    if (handled) e.preventDefault();
   }
-
   function removeAttachment(localId: string, target: 'top' | 'reply') {
-    const setter = target === 'top' ? setPendingAttachments : setReplyAttachments;
-    setter((prev) => {
-      const found = prev.find((p) => p.localId === localId);
-      if (found?.preview_url) URL.revokeObjectURL(found.preview_url);
-      return prev.filter((p) => p.localId !== localId);
-    });
-  }
-
-  // Convert pending attachments → array of metadata for the create payload.
-  // Only `uploaded` ones are included; `failed` and `uploading` are dropped.
-  function attachmentsForPayload(items: PendingAttachment[]) {
-    return items
-      .filter((a) => a.status === 'uploaded' && a.r2_key)
-      .map((a) => ({
-        r2_key: a.r2_key!,
-        filename: a.filename,
-        content_type: a.content_type,
-        size_bytes: a.size_bytes,
-        thumbnail_key: a.thumbnail_key ?? null,
-      }));
+    (target === 'top' ? topAttach : replyAttach).remove(localId);
   }
 
   // Move interaction
@@ -535,6 +300,66 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
     }
   }
 
+  // ── Reply composer @mention plumbing — parallel to the main composer ────
+  // We deliberately keep the state separate (not shared) because the two
+  // composers can be open simultaneously: top-level for a new note, reply
+  // open on an old thread.
+  const replyFilteredUsers = users.filter((u) => {
+    const name = `${u.first_name || ''} ${u.last_name || ''}`.toLowerCase();
+    return name.includes(replyMentionFilter.toLowerCase()) || u.email.toLowerCase().includes(replyMentionFilter.toLowerCase());
+  });
+
+  function handleReplyContentChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
+    const val = e.target.value;
+    setReplyContent(val);
+    const cursorPos = e.target.selectionStart;
+    const upToCursor = val.slice(0, cursorPos);
+    const m = upToCursor.match(/@(\w*)$/);
+    if (m) {
+      setReplyMentionFilter(m[1]);
+      setReplyShowMentions(true);
+      setReplyMentionIndex(0);
+    } else {
+      setReplyShowMentions(false);
+    }
+  }
+
+  function insertReplyMention(u: UserOption) {
+    const ta = replyTextareaRef.current;
+    if (!ta) return;
+    const cursorPos = ta.selectionStart;
+    const upToCursor = replyContent.slice(0, cursorPos);
+    const atPos = upToCursor.lastIndexOf('@');
+    const displayName = `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.email;
+    const newContent = replyContent.slice(0, atPos) + `@${displayName} ` + replyContent.slice(cursorPos);
+    setReplyContent(newContent);
+    setReplyShowMentions(false);
+    if (!replyMentionedIds.includes(u.id)) {
+      setReplyMentionedIds([...replyMentionedIds, u.id]);
+    }
+    setTimeout(() => {
+      ta.focus();
+      const newPos = atPos + displayName.length + 2;
+      ta.setSelectionRange(newPos, newPos);
+    }, 0);
+  }
+
+  function handleReplyKeyDown(e: React.KeyboardEvent) {
+    if (!replyShowMentions || replyFilteredUsers.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setReplyMentionIndex((prev) => Math.min(prev + 1, replyFilteredUsers.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setReplyMentionIndex((prev) => Math.max(prev - 1, 0));
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault();
+      insertReplyMention(replyFilteredUsers[replyMentionIndex]);
+    } else if (e.key === 'Escape') {
+      setReplyShowMentions(false);
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!content.trim() || submitting) return;
@@ -557,7 +382,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       if (entityType === 'job_id' && ['call', 'email', 'meeting'].includes(interactionType) && skipChaseBump) {
         payload.skip_chase_bump = true;
       }
-      const attachments = attachmentsForPayload(pendingAttachments);
+      const attachments = topAttach.payload();
       if (attachments.length > 0) payload.attachments = attachments;
       await api.post('/interactions', payload);
       setContent('');
@@ -567,11 +392,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
       setSelectedChasePreset(null);
       setChaseAlertUserId('');
       setSkipChaseBump(false);
-      // Revoke any object URLs and clear pending list
-      for (const a of pendingAttachments) {
-        if (a.preview_url) URL.revokeObjectURL(a.preview_url);
-      }
-      setPendingAttachments([]);
+      topAttach.clear();
       onInteractionAdded();
     } catch (err) {
       console.error('Failed to add interaction:', err);
@@ -593,15 +414,15 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         // parent) but we send it anyway so the schema validation always
         // passes.
         [entityType]: entityId,
+        mentioned_user_ids: replyMentionedIds,
       };
-      const attachments = attachmentsForPayload(replyAttachments);
+      const attachments = replyAttach.payload();
       if (attachments.length > 0) payload.attachments = attachments;
       await api.post('/interactions', payload);
-      for (const a of replyAttachments) {
-        if (a.preview_url) URL.revokeObjectURL(a.preview_url);
-      }
+      replyAttach.clear();
       setReplyContent('');
-      setReplyAttachments([]);
+      setReplyMentionedIds([]);
+      setReplyShowMentions(false);
       setReplyParentId(null);
       // Auto-expand the thread we just replied in so the new reply is visible.
       setExpandedThreads((prev) => new Set(prev).add(replyParentId));
@@ -798,7 +619,8 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
             value={content}
             onChange={handleContentChange}
             onKeyDown={handleKeyDown}
-            placeholder={interactionType === 'chase' ? 'What happened on the chase?...' : `Add a ${interactionType}... (type @ to mention someone)`}
+            onPaste={(e) => handlePaste(e, 'top')}
+            placeholder={interactionType === 'chase' ? 'What happened on the chase?...' : `Add a ${interactionType}... (type @ to mention someone, paste a screenshot, or drop a file)`}
             rows={3}
             className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
           />
@@ -885,7 +707,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
         )}
 
         {/* Pending attachment thumbnails / pills (uploading + uploaded) */}
-        <PendingAttachmentStrip items={pendingAttachments} onRemove={(id) => removeAttachment(id, 'top')} />
+        <PendingAttachmentStrip items={topAttach.pending} onRemove={(id) => removeAttachment(id, 'top')} />
 
         <div className="flex justify-between items-center mt-2 gap-2">
           <div className="flex items-center gap-3 text-xs text-gray-400">
@@ -911,7 +733,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
           </div>
           <button
             type="submit"
-            disabled={!content.trim() || submitting || pendingAttachments.some((p) => p.status === 'uploading')}
+            disabled={!content.trim() || submitting || topAttach.hasInFlight}
             className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
           >
             {submitting ? 'Saving...' : 'Add'}
@@ -1003,15 +825,66 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                     }}
                     className="mt-3 ml-11 bg-gray-50 rounded-lg border border-gray-200 p-3"
                   >
-                    <textarea
-                      value={replyContent}
-                      onChange={(e) => setReplyContent(e.target.value)}
-                      placeholder="Write a reply…"
-                      rows={2}
-                      autoFocus
-                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
-                    />
-                    <PendingAttachmentStrip items={replyAttachments} onRemove={(id) => removeAttachment(id, 'reply')} />
+                    <div className="relative">
+                      <textarea
+                        ref={replyTextareaRef}
+                        value={replyContent}
+                        onChange={handleReplyContentChange}
+                        onKeyDown={handleReplyKeyDown}
+                        onPaste={(e) => handlePaste(e, 'reply')}
+                        placeholder="Write a reply… (type @ to mention, paste a screenshot, or drop a file)"
+                        rows={2}
+                        autoFocus
+                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+                      />
+                      {replyShowMentions && replyFilteredUsers.length > 0 && (
+                        <div className="absolute left-0 right-0 bottom-full mb-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
+                          {replyFilteredUsers.map((u, i) => (
+                            <button
+                              key={u.id}
+                              type="button"
+                              onClick={() => insertReplyMention(u)}
+                              className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2 ${
+                                i === replyMentionIndex ? 'bg-ooosh-50 text-ooosh-700' : 'hover:bg-gray-50'
+                              }`}
+                            >
+                              <span className="w-6 h-6 rounded-full bg-ooosh-100 text-ooosh-700 flex items-center justify-center text-xs font-bold flex-shrink-0">
+                                {(u.first_name || u.email)[0].toUpperCase()}
+                              </span>
+                              <span>
+                                <span className="font-medium">
+                                  {u.first_name && u.last_name ? `${u.first_name} ${u.last_name}` : u.email}
+                                </span>
+                                {u.first_name && (
+                                  <span className="text-gray-400 text-xs ml-1.5">{u.email}</span>
+                                )}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {replyMentionedIds.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                        {replyMentionedIds.map((uid) => {
+                          const u = users.find((x) => x.id === uid);
+                          if (!u) return null;
+                          return (
+                            <span key={uid} className="inline-flex items-center gap-1 bg-pink-50 text-pink-700 text-xs px-2 py-0.5 rounded-full">
+                              @{u.first_name || u.email}
+                              <button
+                                type="button"
+                                onClick={() => setReplyMentionedIds(replyMentionedIds.filter((id) => id !== uid))}
+                                className="hover:text-pink-900"
+                              >
+                                &times;
+                              </button>
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <PendingAttachmentStrip items={replyAttach.pending} onRemove={(id) => removeAttachment(id, 'reply')} />
                     <div className="flex justify-between items-center mt-2">
                       <label className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-ooosh-700 cursor-pointer">
                         📎 Attach
@@ -1029,9 +902,10 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                         <button
                           type="button"
                           onClick={() => {
-                            for (const a of replyAttachments) if (a.preview_url) URL.revokeObjectURL(a.preview_url);
-                            setReplyAttachments([]);
+                            replyAttach.clear();
                             setReplyContent('');
+                            setReplyMentionedIds([]);
+                            setReplyShowMentions(false);
                             setReplyParentId(null);
                           }}
                           className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1"
@@ -1040,7 +914,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                         </button>
                         <button
                           type="submit"
-                          disabled={!replyContent.trim() || replySubmitting || replyAttachments.some((p) => p.status === 'uploading')}
+                          disabled={!replyContent.trim() || replySubmitting || replyAttach.hasInFlight}
                           className="bg-ooosh-600 text-white px-3 py-1 rounded text-xs font-medium hover:bg-ooosh-700 disabled:opacity-50"
                         >
                           {replySubmitting ? 'Posting…' : 'Reply'}

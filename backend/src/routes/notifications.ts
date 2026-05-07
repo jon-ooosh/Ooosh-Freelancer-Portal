@@ -463,4 +463,162 @@ router.put('/preferences', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── POST /api/notifications/:id/action — actionable notifications (Phase E) ──
+//
+// Generic action runner. A notification's `actions` JSONB carries an array
+// of {kind, label, params, success_message?} entries; the client posts
+// {action_index} and the server dispatches by `kind` to a small whitelist
+// of internal handlers. New kinds require a code change — deliberately —
+// so this can never become an arbitrary RPC channel.
+//
+// Spec: docs/MESSAGING-SPEC.md §5.3.
+//
+// Whitelisted kinds (initial cut):
+//   - mark_chased: log a `chase` interaction on the linked job
+//   - complete_requirement: flip a job_requirements row to status='done'
+//   - mark_handled: log a 'note' interaction with optional content
+//
+// `snooze` is intentionally NOT a server kind — it's a UI affordance the
+// client handles by opening the existing snooze modal. Same with `resend_
+// email` until we have a clear set of templates that benefit from a
+// resend button.
+
+interface NotificationAction {
+  kind: string;
+  label: string;
+  params?: Record<string, unknown>;
+  success_message?: string;
+}
+
+const actionRequestSchema = z.object({
+  action_index: z.number().int().nonnegative(),
+});
+
+router.post('/:id/action', async (req: AuthRequest, res: Response) => {
+  try {
+    const { action_index } = actionRequestSchema.parse(req.body);
+
+    const lookup = await query(
+      `SELECT * FROM notifications WHERE id = $1 AND user_id = $2`,
+      [req.params.id, req.user!.id]
+    );
+    if (lookup.rows.length === 0) {
+      return res.status(404).json({ error: 'Notification not found' });
+    }
+    const notif = lookup.rows[0];
+
+    if (notif.acknowledged_at) {
+      return res.status(409).json({ error: 'Notification already actioned' });
+    }
+
+    const actions = (notif.actions || []) as NotificationAction[];
+    if (action_index >= actions.length) {
+      return res.status(400).json({ error: 'action_index out of range' });
+    }
+    const action = actions[action_index];
+    if (!action || typeof action.kind !== 'string') {
+      return res.status(400).json({ error: 'Invalid action entry' });
+    }
+
+    let summary = '';
+
+    if (action.kind === 'mark_chased') {
+      const jobId = (action.params?.job_id as string | undefined) || notif.entity_id;
+      if (!jobId || notif.entity_type !== 'jobs') {
+        return res.status(400).json({ error: 'mark_chased requires a job-anchored notification' });
+      }
+      const chaseMethod = (action.params?.chase_method as string | undefined) || null;
+      const interactionResult = await query(
+        `INSERT INTO interactions (type, content, job_id, created_by, chase_method)
+         VALUES ('chase', $1, $2, $3, $4)
+         RETURNING id`,
+        [`Chase logged from inbox: ${notif.title}`, jobId, req.user!.id, chaseMethod]
+      );
+      // Bump chase: the interactions endpoint normally handles the date
+      // calculation, but we wrote the row directly to keep this endpoint
+      // self-contained. Apply the same sacred-future rule (only bump if
+      // not already future-dated).
+      await query(
+        `UPDATE jobs SET
+           chase_count = chase_count + 1,
+           last_chased_at = NOW(),
+           next_chase_date = CASE
+             WHEN next_chase_date IS NULL OR next_chase_date <= CURRENT_DATE
+               THEN (CURRENT_DATE + (COALESCE(chase_interval_days, 5) || ' days')::interval)::date
+             ELSE next_chase_date
+           END,
+           updated_at = NOW()
+         WHERE id = $1`,
+        [jobId]
+      );
+      summary = `Logged chase on job (interaction ${interactionResult.rows[0].id}).`;
+    }
+
+    else if (action.kind === 'complete_requirement') {
+      const requirementId = (action.params?.requirement_id as string | undefined) || notif.entity_id;
+      if (!requirementId || notif.entity_type !== 'job_requirements') {
+        return res.status(400).json({ error: 'complete_requirement requires a job_requirements-anchored notification' });
+      }
+      const updateResult = await query(
+        `UPDATE job_requirements
+         SET status = 'done',
+             notes = COALESCE(notes, '') || E'\n[Marked done via inbox action]',
+             updated_at = NOW()
+         WHERE id = $1
+           AND status NOT IN ('done', 'cancelled')
+         RETURNING id, status`,
+        [requirementId]
+      );
+      if (updateResult.rows.length === 0) {
+        return res.status(409).json({ error: 'Requirement already done or not found' });
+      }
+      summary = 'Requirement marked done.';
+    }
+
+    else if (action.kind === 'mark_handled') {
+      const note = action.params?.note as string | undefined;
+      // Optional interaction note. Skipped if the notification has no
+      // entity to attach it to, or if note is missing.
+      if (note && note.trim() && notif.entity_type && notif.entity_id) {
+        const fkMap: Record<string, string> = {
+          jobs: 'job_id', people: 'person_id', organisations: 'organisation_id', venues: 'venue_id',
+        };
+        const fk = fkMap[notif.entity_type];
+        if (fk) {
+          await query(
+            `INSERT INTO interactions (type, content, ${fk}, created_by) VALUES ('note', $1, $2, $3)`,
+            [note.trim(), notif.entity_id, req.user!.id]
+          );
+        }
+      }
+      summary = 'Marked handled.';
+    }
+
+    else {
+      return res.status(400).json({ error: `Unknown action kind: ${action.kind}` });
+    }
+
+    // On success: acknowledge the notification.
+    const ackResult = await query(
+      `UPDATE notifications
+       SET acknowledged_at = NOW(), is_read = true, read_at = COALESCE(read_at, NOW())
+       WHERE id = $1
+       RETURNING *`,
+      [req.params.id]
+    );
+
+    res.json({
+      success: true,
+      summary: action.success_message || summary,
+      notification: ackResult.rows[0],
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Invalid request', details: error.errors });
+    }
+    console.error('Action error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 export default router;
