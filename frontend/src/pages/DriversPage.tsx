@@ -98,6 +98,9 @@ function deriveDriverStatus(driver: DriverListItem): { label: string; colour: st
     if (driver.referral_status === 'approved') {
       return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
     }
+    if (driver.referral_status === 'waived') {
+      return { label: 'Approved (Waived)', colour: 'bg-green-100 text-green-700' };
+    }
     if (driver.referral_status === 'declined') {
       return { label: 'Not Approved', colour: 'bg-red-100 text-red-700' };
     }

@@ -147,6 +147,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     const statusCase = `
       CASE
         WHEN d.requires_referral = true AND d.referral_status = 'approved' THEN 'approved'
+        WHEN d.requires_referral = true AND d.referral_status = 'waived' THEN 'approved'
         WHEN d.requires_referral = true AND d.referral_status = 'declined' THEN 'not_approved'
         WHEN d.requires_referral = true AND d.referral_status = 'pending' THEN 'referred_waiting'
         WHEN d.requires_referral = true THEN 'refer_insurers'
@@ -596,11 +597,16 @@ router.patch('/:id/calculated-excess', authorize('admin', 'manager'), validate(e
 // ── POST /api/drivers/:id/resolve-referral — Resolve insurance referral ──
 
 const resolveReferralSchema = z.object({
-  outcome: z.enum(['approved', 'declined']),
+  // 'approved' = referred to insurer, insurer said yes
+  // 'declined' = referred to insurer, insurer said no
+  // 'waived'   = staff judgement that no insurer referral needed
+  //              (e.g. flagged accident is no-fault). Behaves like
+  //              approved but recorded distinctly for audit clarity.
+  outcome: z.enum(['approved', 'declined', 'waived']),
   notes: z.string().optional().default(''),
   // Optional adjusted excess amount (insurer may approve with higher excess)
   adjusted_excess: z.number().min(0).nullable().optional(),
-  // Optional: extend specific validity dates on approval
+  // Optional: extend specific validity dates on approval / waive
   extend_dates: z.object({
     idenfy_check_date: z.string().nullable().optional(),      // Licence: 90d from this
     dvla_check_date: z.string().nullable().optional(),         // DVLA: 30d from this
@@ -630,22 +636,30 @@ router.post('/:id/resolve-referral', authorize('admin', 'manager'), validate(res
 
     // Build update fields.
     //
-    // On approve we clear `requires_referral` outright — the referral has
-    // been processed and the driver is now a normal approved driver; the UI
-    // no longer needs to treat them as a referral case. Decline keeps the
-    // flag set so the "Not Approved" label (which is gated on
-    // requires_referral=true && referral_status='declined') stays accurate.
+    // 'approved' / 'waived' clear `requires_referral` outright — the
+    // referral has been processed and the driver is now a normal
+    // approved driver; the UI no longer needs to treat them as a
+    // referral case. The two outcomes diverge only in `referral_status`
+    // for audit clarity ('approved' = insurer approved, 'waived' =
+    // staff judgement no referral needed). Decline keeps the flag set
+    // so the "Not Approved" label (gated on requires_referral=true &&
+    // referral_status='declined') stays accurate.
+    const cleared = outcome === 'approved' || outcome === 'waived';
     const updates: Record<string, unknown> = {
       referral_status: outcome,
       referral_notes: [driver.referral_notes, notes].filter(Boolean).join(' | '),
-      insurance_status: outcome === 'approved' ? 'Approved' : 'Failed',
+      insurance_status: cleared ? 'Approved' : 'Failed',
     };
-    if (outcome === 'approved') {
+    if (cleared) {
       updates.requires_referral = false;
     }
 
-    // If approved, optionally extend validity dates
-    if (outcome === 'approved' && extend_dates) {
+    // If approved or waived, optionally extend validity dates. Empty
+    // strings + nulls are skipped so the form's "leave blank to leave
+    // unchanged" UX is honoured (mirrors driver's existing dates,
+    // including the case of "no date at all" e.g. non-UK driver with
+    // no DVLA check).
+    if (cleared && extend_dates) {
       for (const [key, value] of Object.entries(extend_dates)) {
         if (value) updates[key] = value;
       }

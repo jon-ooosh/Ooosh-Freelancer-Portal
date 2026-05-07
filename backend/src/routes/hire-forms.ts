@@ -300,8 +300,16 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     const referralReason = f.referral_reason || '';
 
     if (requiresReferral) {
+      // Leave referral_status NULL on initial submission so the driver
+      // lands in the red "Refer to Insurers" todo state — explicit signal
+      // that staff hasn't actioned anything yet. Staff bumps to 'pending'
+      // ("Referred & Waiting" amber) via the Mark as Referred button on
+      // DriverDetailPage when they actually send the insurer email. The
+      // auto-fire of the referral_alert email to admins still happens
+      // via the requires_referral flag elsewhere — the alert path is
+      // unchanged.
       await client.query(
-        `UPDATE drivers SET requires_referral = true, referral_status = 'pending', referral_notes = $1 WHERE id = $2`,
+        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2`,
         [referralReason, driverId]
       );
     }

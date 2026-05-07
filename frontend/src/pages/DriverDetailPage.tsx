@@ -260,6 +260,7 @@ function addressesDiffer(a: string, b: string): boolean {
 function deriveDriverStatus(driver: { requires_referral: boolean; referral_status: string | null; licence_valid_to: string | null; dvla_valid_until?: string | null; poa1_valid_until: string | null; signature_date: string | null; licence_number: string | null; dvla_check_date: string | null; email: string | null }): { label: string; colour: string } {
   if (driver.requires_referral) {
     if (driver.referral_status === 'approved') return { label: 'Approved', colour: 'bg-green-100 text-green-700' };
+    if (driver.referral_status === 'waived') return { label: 'Approved (Waived)', colour: 'bg-green-100 text-green-700' };
     if (driver.referral_status === 'declined') return { label: 'Not Approved', colour: 'bg-red-100 text-red-700' };
     if (driver.referral_status === 'pending') return { label: 'Referred & Waiting', colour: 'bg-amber-100 text-amber-700' };
     return { label: 'Refer to Insurers', colour: 'bg-red-100 text-red-700' };
@@ -935,24 +936,24 @@ function SnapshotPdfButton({ driverId, driverName }: { driverId: string; driverN
 
 function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDriverUpdate: (d: DriverDetail) => void }) {
   const [resolving, setResolving] = useState(false);
-  const [outcome, setOutcome] = useState<'approved' | 'declined'>('approved');
+  const [outcome, setOutcome] = useState<'approved' | 'declined' | 'waived'>('approved');
   const [notes, setNotes] = useState('');
   const [adjustedExcess, setAdjustedExcess] = useState('');
   const [showResolve, setShowResolve] = useState(false);
   const [error, setError] = useState('');
-  // Pre-populate dates from existing driver data, falling back to today + standard validity
-  const today = new Date().toISOString().split('T')[0];
-  const addDays = (d: string, days: number) => {
-    const dt = new Date(d);
-    dt.setDate(dt.getDate() + days);
-    return dt.toISOString().split('T')[0];
-  };
+  // Mirror the driver's existing dates exactly — empty stays empty.
+  // Falling back to today on null fields would let staff inadvertently
+  // FABRICATE a check date that never happened (e.g. DVLA date for a
+  // non-UK driver), or SHORTEN an already-valid future date by accepting
+  // a defaulted "today" without realising it. Backend at
+  // routes/drivers.ts only writes fields with truthy values, so leaving
+  // a picker empty leaves the underlying date untouched.
   const [extendDates, setExtendDates] = useState({
-    idenfy_check_date: toInputDate(driver.idenfy_check_date) || today,
-    dvla_check_date: toInputDate(driver.dvla_check_date) || today,
-    poa1_valid_until: toInputDate(driver.poa1_valid_until) || addDays(today, 90),
-    poa2_valid_until: toInputDate(driver.poa2_valid_until) || addDays(today, 90),
-    passport_valid_until: toInputDate(driver.passport_valid_until) || addDays(today, 90),
+    idenfy_check_date: toInputDate(driver.idenfy_check_date) || '',
+    dvla_check_date: toInputDate(driver.dvla_check_date) || '',
+    poa1_valid_until: toInputDate(driver.poa1_valid_until) || '',
+    poa2_valid_until: toInputDate(driver.poa2_valid_until) || '',
+    passport_valid_until: toInputDate(driver.passport_valid_until) || '',
   });
 
   // Build referral reasons from driver data
@@ -1042,13 +1043,18 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
       {/* Action buttons — depends on current referral state */}
       {!isResolved && !showResolve && (
         <div className="flex gap-2">
-          {/* If not yet marked as referred, show "Mark as Referred" to transition to pending */}
+          {/* If not yet marked as referred, show "Mark as Referred" to transition to pending.
+              Stamps referral_date so we have a record of when the insurer email actually went out. */}
           {!driver.referral_status && (
             <button
               onClick={async () => {
                 setError('');
                 try {
-                  const result = await api.put<{ data: DriverDetail }>(`/drivers/${driver.id}`, { referral_status: 'pending' });
+                  const today = new Date().toISOString().split('T')[0];
+                  const result = await api.put<{ data: DriverDetail }>(`/drivers/${driver.id}`, {
+                    referral_status: 'pending',
+                    referral_date: today,
+                  });
                   onDriverUpdate(result.data);
                 } catch (err: any) {
                   setError(err.message || 'Failed to update');
@@ -1056,7 +1062,7 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
               }}
               className="bg-amber-600 text-white px-4 py-2 rounded text-sm font-medium hover:bg-amber-700 transition-colors"
             >
-              Mark as Referred
+              Mark as Referred to Insurer
             </button>
           )}
           <button
@@ -1083,11 +1089,12 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
               <label className="block text-xs text-gray-500 mb-1">Outcome</label>
               <select
                 value={outcome}
-                onChange={(e) => setOutcome(e.target.value as 'approved' | 'declined')}
+                onChange={(e) => setOutcome(e.target.value as 'approved' | 'declined' | 'waived')}
                 className="w-full rounded border border-gray-300 px-3 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               >
                 <option value="approved">Approved by insurer</option>
                 <option value="declined">Declined by insurer</option>
+                <option value="waived">Approved without referral (waived)</option>
               </select>
             </div>
             <div>
@@ -1117,11 +1124,11 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
             />
           </div>
 
-          {/* Date extensions — only for approved outcome */}
-          {outcome === 'approved' && (
+          {/* Date extensions — for approved + waived outcomes */}
+          {(outcome === 'approved' || outcome === 'waived') && (
             <div>
               <label className="block text-xs text-gray-500 mb-2">Extend Validity Dates</label>
-              <p className="text-xs text-gray-400 mb-2">Pre-filled with today's date. Adjusts so driver can proceed with hire form.</p>
+              <p className="text-xs text-gray-400 mb-2">Mirrors the driver's current dates — leave blank to leave a date untouched. Empty fields are not overwritten.</p>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-[10px] text-gray-500 mb-0.5">Licence check date (90d validity)</label>
