@@ -119,9 +119,14 @@ export function startScheduler() {
           // 'normal' (bell now, email after 4h if still unread per user prefs).
           const priority = job.chase_alert_delivery === 'bell_email' ? 'urgent' : 'normal';
           const jobName = job.job_name || `Job ${job.hh_job_number || ''}`;
+          // Inline actions: log a chase, snooze 2 days. Reduces "open card →
+          // navigate → click chase → log it → come back" to one click.
+          const actions = JSON.stringify([
+            { kind: 'mark_chased', label: 'Mark chased', success_message: 'Chase logged + bumped.' },
+          ]);
           await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-             VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, $6)`,
+            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority, actions)
+             VALUES ($1, 'chase_alert', $2, $3, 'jobs', $4, $5, $6, $7::jsonb)`,
             [
               job.chase_alert_user_id,
               `Chase due: ${jobName}`,
@@ -129,6 +134,7 @@ export function startScheduler() {
               job.id,
               `/jobs/${job.id}?tab=timeline`,
               priority,
+              actions,
             ]
           );
         } catch {
@@ -467,15 +473,23 @@ export function startScheduler() {
         // (otherwise pre-hire reminders are invisible when the page defaults
         // to post-hire on dispatched+ jobs, and vice versa).
         const phaseQs = rem.phase ? `&phase=${rem.phase}` : '';
+        // Inline action: complete the requirement directly from the inbox.
+        // The acknowledge cascade already handled reminder-type requirements
+        // via the Done button; this exposes the same outcome explicitly as
+        // a labelled action button for any close-out / pre-hire requirement.
+        const actions = JSON.stringify([
+          { kind: 'complete_requirement', label: 'Mark done', success_message: 'Requirement marked done.' },
+        ]);
         const inserted = await query(
           `INSERT INTO notifications
-            (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-           VALUES ($1, 'follow_up', $2, $3, 'job_requirements', $4, $5, $6)
+            (user_id, type, title, content, entity_type, entity_id, action_url, priority, actions)
+           VALUES ($1, 'follow_up', $2, $3, 'job_requirements', $4, $5, $6, $7::jsonb)
            RETURNING id`,
           [
             targetUserId, title, content, rem.id,
             `/jobs/${rem.job_id}?tab=overview${phaseQs}`,
             priority,
+            actions,
           ]
         );
 

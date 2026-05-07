@@ -4,6 +4,13 @@ import { io, Socket } from 'socket.io-client';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 
+interface NotificationAction {
+  kind: string;
+  label: string;
+  params?: Record<string, unknown>;
+  success_message?: string;
+}
+
 interface Notification {
   id: string;
   type: string;
@@ -14,7 +21,9 @@ interface Notification {
   action_url: string | null;
   priority: string | null;
   is_read: boolean;
+  acknowledged_at?: string | null;
   created_at: string;
+  actions?: NotificationAction[];
 }
 
 export default function NotificationBell() {
@@ -115,6 +124,24 @@ export default function NotificationBell() {
     }
   }
 
+  // Run the first action on a notification — bell shows max 1 button to keep
+  // the dropdown compact. The Inbox renders the full action list. On success
+  // we mark the notification acknowledged locally so the row visually
+  // collapses.
+  async function runFirstAction(notif: Notification, e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!notif.actions || notif.actions.length === 0) return;
+    try {
+      await api.post(`/notifications/${notif.id}/action`, { action_index: 0 });
+      setNotifications((prev) => prev.map((n) => n.id === notif.id
+        ? { ...n, is_read: true, acknowledged_at: new Date().toISOString() }
+        : n));
+      if (!notif.is_read) setUnreadCount((prev) => Math.max(0, prev - 1));
+    } catch (err) {
+      console.error('Bell action failed:', err);
+    }
+  }
+
   function formatTimeAgo(dateStr: string) {
     const diff = Date.now() - new Date(dateStr).getTime();
     const mins = Math.floor(diff / 60000);
@@ -182,7 +209,19 @@ export default function NotificationBell() {
                       {notif.content && (
                         <p className="text-xs text-gray-500 mt-0.5 truncate">{notif.content}</p>
                       )}
-                      <p className="text-xs text-gray-400 mt-1">{formatTimeAgo(notif.created_at)}</p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-xs text-gray-400">{formatTimeAgo(notif.created_at)}</span>
+                        {/* Inline action — first one only. Inbox shows the full list. */}
+                        {!notif.acknowledged_at && notif.actions && notif.actions.length > 0 && (
+                          <span
+                            role="button"
+                            onClick={(e) => runFirstAction(notif, e)}
+                            className="text-[10px] text-ooosh-700 bg-ooosh-50 border border-ooosh-300 px-2 py-0.5 rounded hover:bg-ooosh-100 transition-colors font-medium"
+                          >
+                            {notif.actions[0].label}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </button>
