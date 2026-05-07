@@ -82,8 +82,15 @@ export function BookOutPage() {
   // freelancers) — no customer hire form, no customer signature, no customer
   // excess. The assignment row gets promoted to assignment_type='driven' at
   // submit time and the freelancer is recorded via freelancer_person_id.
-  const isVanAndDriver = searchParams.get('mode') === 'van_and_driver'
+  const explicitVand = searchParams.get('mode') === 'van_and_driver'
   const vandAssignmentParam = searchParams.get('assignment')
+  // Auto-detected V&D — set once we've matched the vehicle+job to an
+  // assignment whose slot is in van_and_driver mode. Lets the AllocationsPage
+  // Book Out button (which doesn't pass `mode=`) still land users in the
+  // right flow without each entry point having to compose the URL itself.
+  const [autoVand, setAutoVand] = useState(false)
+  const [autoVandAssignmentId, setAutoVandAssignmentId] = useState<string | null>(null)
+  const isVanAndDriver = explicitVand || autoVand
   const { data: allVehicles, isLoading: vehiclesLoading } = useVehicles()
   const { data: settings } = useSettings()
   const [step, setStep] = useState(0)
@@ -210,19 +217,77 @@ export function BookOutPage() {
     [allVehicles],
   )
 
-  // V&D mode: seed mode + assignment ID from URL params once on mount.
+  // V&D mode: seed mode + assignment ID into form state once V&D is
+  // confirmed (either via URL ?mode= or via auto-detect from slot data).
   // The picker logic in StepDriverHire then loads the job's Ooosh crew
-  // (quote_assignments where is_ooosh_crew=true) for the freelancer picker.
+  // for the freelancer picker.
   const vandSeededRef = useRef(false)
   useEffect(() => {
-    if (!isVanAndDriver || vandSeededRef.current) return
+    if (!isVanAndDriver) return
+    if (vandSeededRef.current) return
     vandSeededRef.current = true
     setForm(f => ({
       ...f,
       mode: 'van_and_driver',
-      vandAssignmentId: vandAssignmentParam || null,
+      vandAssignmentId: vandAssignmentParam || autoVandAssignmentId || null,
     }))
-  }, [isVanAndDriver, vandAssignmentParam])
+  }, [isVanAndDriver, vandAssignmentParam, autoVandAssignmentId])
+
+  // Keep form.vandAssignmentId in sync if auto-detect resolves an assignment
+  // ID after the initial seed (e.g. derived-flags fetch finishes after the
+  // form has already been seeded with no assignment ID).
+  useEffect(() => {
+    if (!autoVandAssignmentId) return
+    setForm(f => (f.vandAssignmentId ? f : { ...f, vandAssignmentId: autoVandAssignmentId }))
+  }, [autoVandAssignmentId])
+
+  // V&D auto-detect: when the URL doesn't explicitly say `mode=van_and_driver`
+  // (e.g. coming from the Allocations page's Book Out link), check whether
+  // the vehicle's slot on this job is in V&D mode. If so, switch to V&D
+  // automatically. Self-drive jobs incur one extra fetch on entry, results
+  // discarded — acceptable cost for "every entry point does the right thing".
+  const vandDetectRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (explicitVand) return  // URL forced it — nothing to detect
+    if (autoVand) return       // Already detected
+    const veh = searchParams.get('vehicle')
+    const job = searchParams.get('job')
+    if (!veh || !job) return
+    const key = `${veh}|${job}`
+    if (vandDetectRef.current === key) return
+    vandDetectRef.current = key
+    ;(async () => {
+      try {
+        // Resolve OP job UUID from HH job number, then fetch derived-flags +
+        // assignments for it. Both endpoints accept the OP UUID directly;
+        // derived-flags currently expects the OP UUID, so we look that up
+        // first via the assignments endpoint (which accepts hirehop_job_id).
+        const assignResp = await apiFetch(`/api/assignments?hirehop_job_id=${encodeURIComponent(job)}`)
+        if (!assignResp.ok) return
+        const assignBody = await assignResp.json().catch(() => ({}))
+        const rows = (assignBody.data as Array<{ id: string; vehicle_id: string | null; van_requirement_index: number | null; job_id: string | null }>) || []
+        const match = rows.find(r => r.vehicle_id === veh)
+        if (!match) return
+        const opJobId = match.job_id
+        if (!opJobId) return
+        const flagsResp = await apiFetch(`/api/hirehop/jobs/${encodeURIComponent(opJobId)}/derived-flags`)
+        if (!flagsResp.ok) return
+        const flagsBody = await flagsResp.json().catch(() => ({}))
+        const slots = (flagsBody?.flags?.vehicle_slots as Array<{ slot_index: number; mode: 'self_drive' | 'van_and_driver' }>) || []
+        const slot = slots.find(s => s.slot_index === (match.van_requirement_index ?? 0))
+        const slotIsVand = slot?.mode === 'van_and_driver'
+        const allSlotsVand = slots.length > 0 && slots.every(s => s.mode === 'van_and_driver')
+        if (slotIsVand || (allSlotsVand && rows.length === 1)) {
+          setAutoVand(true)
+          setAutoVandAssignmentId(match.id)
+        }
+      } catch (err) {
+        // Detection failure is non-fatal — page just stays in self-drive
+        // mode. URL ?mode=van_and_driver still forces V&D regardless.
+        console.warn('[book-out] V&D auto-detect failed:', err)
+      }
+    })()
+  }, [explicitVand, autoVand, searchParams])
 
   // Pre-select vehicle if coming from vehicle detail page or allocations
   const preSelectedId = searchParams.get('vehicle')
