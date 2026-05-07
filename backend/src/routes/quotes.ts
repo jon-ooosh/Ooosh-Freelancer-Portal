@@ -718,6 +718,55 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/quotes/job/:jobId/ooosh-crew ───────────────────────────
+// Returns all Ooosh-supplied crew members assigned across the job's quotes.
+// Used by the Van & Driver soft-book-out flow on BookOutPage to populate the
+// freelancer picker (defaulting to people already on the job's quote_assignments
+// where is_ooosh_crew=true). Accepts OP job UUID or HireHop job number.
+
+router.get('/job/:jobId/ooosh-crew', async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const jobIdStr = Array.isArray(jobId) ? jobId[0]! : jobId!;
+    const isUuid = /^[0-9a-f]{8}-/.test(jobIdStr);
+    const jobLookup = await query(
+      isUuid
+        ? `SELECT id FROM jobs WHERE id = $1`
+        : `SELECT id FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobIdStr : parseInt(jobIdStr, 10)]
+    );
+    if (jobLookup.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const opJobId = jobLookup.rows[0]!.id;
+
+    // DISTINCT on person_id — same person could be on multiple quotes for the
+    // same job; we only need them once in the picker.
+    const result = await query(
+      `SELECT DISTINCT ON (p.id)
+         p.id AS person_id,
+         p.first_name, p.last_name, p.email, p.mobile,
+         p.is_freelancer, p.is_approved,
+         qa.role, qa.id AS quote_assignment_id, qa.quote_id
+       FROM quote_assignments qa
+       JOIN quotes q ON q.id = qa.quote_id
+       JOIN people p ON p.id = qa.person_id
+       WHERE q.job_id = $1
+         AND qa.is_ooosh_crew = true
+         AND COALESCE(qa.status, 'assigned') NOT IN ('declined', 'cancelled')
+         AND COALESCE(q.is_deleted, false) = false
+       ORDER BY p.id, qa.created_at DESC`,
+      [opJobId]
+    );
+
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('List Ooosh crew for job error:', error);
+    res.status(500).json({ error: 'Failed to load Ooosh crew' });
+  }
+});
+
 // ── GET /api/quotes/:id/assignments — list crew for a quote ─────────
 
 router.get('/:id/assignments', async (_req: AuthRequest, res: Response) => {
