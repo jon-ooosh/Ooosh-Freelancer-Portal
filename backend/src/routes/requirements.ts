@@ -63,7 +63,8 @@ router.post('/bulk', async (req: AuthRequest, res: Response) => {
     const result = await query(
       `SELECT jr.job_id, jr.status, jr.requirement_type
        FROM job_requirements jr
-       WHERE jr.job_id = ANY($1) ${phaseFilter}`,
+       WHERE jr.job_id = ANY($1) ${phaseFilter}
+         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')`,
       [ids]
     );
     // Group by job_id for easy lookup
@@ -93,13 +94,16 @@ router.post('/closeout-progress', async (req: AuthRequest, res: Response) => {
     }
     const ids = job_ids.slice(0, 500);
 
-    // Fetch all post_hire requirements for these jobs
+    // Fetch all post_hire requirements for these jobs.
+    // Exclude V&D-suspended rows so they don't count toward the closeout
+    // progress aggregate — they're "not required", not blocked.
     const result = await query(
       `SELECT jr.id, jr.job_id, jr.requirement_type, jr.status, jr.custom_label,
               rtd.label AS type_label, rtd.icon AS type_icon
        FROM job_requirements jr
        JOIN requirement_type_definitions rtd ON rtd.type = jr.requirement_type
        WHERE jr.job_id = ANY($1) AND jr.phase = 'post_hire'
+         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%[Suspended: Van & Driver]%')
        ORDER BY rtd.sort_order`,
       [ids]
     );
