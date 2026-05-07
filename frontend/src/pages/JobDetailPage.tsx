@@ -1157,6 +1157,9 @@ export default function JobDetailPage() {
     derivation: {
       flags: {
         has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
+        vehicle_slots?: Array<{ item_id: number; slot_index: number; item_name: string; mode: 'self_drive' | 'van_and_driver' }>;
+        self_drive_count?: number;
+        van_and_driver_count?: number;
         seat_config: 'round_table' | 'forward_facing' | null;
         has_backline: boolean; backline_item_count: number;
         has_rehearsal: boolean; has_staging: boolean; has_pa: boolean; has_lighting: boolean; has_crew_items: boolean; crew_item_count: number;
@@ -3650,7 +3653,71 @@ export default function JobDetailPage() {
                           BookOutPage's PATCH then writes vehicle_id to this
                           row at submission, retroactively cementing the
                           link. */}
+                      {/* Soft Book Out for Van & Driver mode (Ooosh-supplied driver, no
+                          customer hire form). Detection: assignment is already 'driven'
+                          (post-promotion), OR matching vehicle slot is in V&D mode, OR
+                          the job has V&D slots and this assignment isn't yet booked-out
+                          self-drive. Routes to BookOutPage with ?mode=van_and_driver. */}
+                      {(() => {
+                        const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+                        const matchedSlot = slots.find(s => s.slot_index === (a.van_requirement_index ?? 0));
+                        const slotIsVand = matchedSlot?.mode === 'van_and_driver';
+                        const anySlotIsVand = slots.some(s => s.mode === 'van_and_driver');
+                        const isVandAssignment =
+                          a.assignment_type === 'driven' ||
+                          slotIsVand ||
+                          // No matched slot but job has V&D slots somewhere — coarse
+                          // signal that helps when slot indexing doesn't line up cleanly
+                          // (legacy job-level toggle, sparse vehicle_slots, etc.)
+                          (anySlotIsVand && a.assignment_type === 'self_drive');
+                        if (!isVandAssignment) return null;
+                        const hhJobNum = job.hh_job_number;
+                        const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium';
+                        const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
+                        if (a.status === 'soft' || a.status === 'confirmed') {
+                          if (!effectiveVehicleId) {
+                            return (
+                              <Link
+                                to={`/vehicles/allocations${hhJobNum ? `?job=${hhJobNum}` : ''}`}
+                                className={baseClass}
+                                title="Pick a van for this Van & Driver hire on the Allocations page"
+                              >
+                                🚐 Allocate Van
+                              </Link>
+                            );
+                          }
+                          return (
+                            <Link
+                              to={`/vehicles/book-out?vehicle=${effectiveVehicleId}${hhJobNum ? `&job=${hhJobNum}` : ''}&mode=van_and_driver&assignment=${a.id}`}
+                              className={baseClass}
+                              title="Soft book-out: walkaround + photos + signature for the Ooosh-supplied freelancer driver. No customer hire form."
+                            >
+                              🚐 Soft Book Out (V&amp;D)
+                            </Link>
+                          );
+                        }
+                        if ((a.status === 'booked_out' || a.status === 'active') && effectiveVehicleId) {
+                          return (
+                            <Link
+                              to={`/vehicles/check-in?vehicle=${effectiveVehicleId}`}
+                              className={baseClass}
+                              title="Return walkaround, mileage, damage check"
+                            >
+                              ↩️ Check In
+                            </Link>
+                          );
+                        }
+                        return null;
+                      })()}
+
                       {a.assignment_type === 'self_drive' && (() => {
+                        // If the matching slot is in V&D mode the V&D button above
+                        // owns this card — hide the customer self-drive button to
+                        // keep the UX unambiguous (one path per slot mode).
+                        const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+                        const matchedSlot = slots.find(s => s.slot_index === (a.van_requirement_index ?? 0));
+                        if (matchedSlot?.mode === 'van_and_driver') return null;
+                        if (slots.length > 0 && slots.every(s => s.mode === 'van_and_driver')) return null;
                         const hhJobNum = job.hh_job_number;
                         const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium';
                         const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;

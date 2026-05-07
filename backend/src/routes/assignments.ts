@@ -57,6 +57,16 @@ const statusTransitionSchema = z.object({
 const bookOutSchema = z.object({
   mileage_out: z.number().int().min(0),
   fuel_level_out: z.string().max(20),
+  // Optional V&D promotion: when set, the assignment is being booked out as
+  // an Ooosh-supplied-driver hire (no customer hire form). The freelancer
+  // taking the van is recorded via freelancer_person_id; the gate checks for
+  // referral/excess are skipped (assignment_type='driven' branch).
+  assignment_type: z.enum(['self_drive', 'driven', 'delivery', 'collection']).optional(),
+  freelancer_person_id: z.string().uuid().nullable().optional(),
+  hire_start: z.string().nullable().optional(),
+  hire_end: z.string().nullable().optional(),
+  start_time: z.string().nullable().optional(),
+  end_time: z.string().nullable().optional(),
 });
 
 const checkInSchema = z.object({
@@ -424,7 +434,11 @@ router.patch('/:id/status', validate(statusTransitionSchema), async (req: AuthRe
 router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { mileage_out, fuel_level_out } = req.body;
+    const {
+      mileage_out, fuel_level_out,
+      assignment_type, freelancer_person_id,
+      hire_start, hire_end, start_time, end_time,
+    } = req.body;
 
     // Per-driver advisory check: gather any unresolved referral / excess
     // issues so they can be returned as warnings. These are NON-BLOCKING —
@@ -469,10 +483,24 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
            booked_out_by = $1,
            mileage_out = $2,
            fuel_level_out = $3,
+           assignment_type = COALESCE($5, assignment_type),
+           freelancer_person_id = COALESCE($6, freelancer_person_id),
+           hire_start = COALESCE($7::date, hire_start),
+           hire_end = COALESCE($8::date, hire_end),
+           start_time = COALESCE($9::time, start_time),
+           end_time = COALESCE($10::time, end_time),
            updated_at = NOW()
        WHERE id = $4
        RETURNING *`,
-      [req.user!.id, mileage_out, fuel_level_out, id]
+      [
+        req.user!.id, mileage_out, fuel_level_out, id,
+        assignment_type ?? null,
+        freelancer_person_id ?? null,
+        hire_start ?? null,
+        hire_end ?? null,
+        start_time ?? null,
+        end_time ?? null,
+      ]
     );
 
     if (result.rows.length === 0) {

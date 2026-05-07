@@ -138,6 +138,15 @@ export interface BookOutFormState {
     clientEmail: string | null
   }>
 
+  // Van & Driver soft book-out mode (Ooosh-supplied driver, no customer hire form).
+  // When mode='van_and_driver', the StepDriverHire screen swaps the customer
+  // hire-form picker for a freelancer picker, the hire-form write-back + VE103B
+  // tracks are skipped, and the assignment is promoted to assignment_type='driven'
+  // at submit time. See CLAUDE.md "Non-SDH book-out flow" Future Enhancements entry.
+  mode?: 'self_drive' | 'van_and_driver'
+  vandAssignmentId?: string | null   // Assignment row to PATCH (set from URL ?assignment=)
+  vandFreelancerPersonId?: string | null  // people.id of the freelancer driving
+
   // Step 3: Vehicle state
   mileage: string         // String for form input, parsed to number on submit
   fuelLevel: FuelLevel | null
