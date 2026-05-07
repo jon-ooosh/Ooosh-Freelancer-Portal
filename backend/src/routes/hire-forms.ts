@@ -2097,8 +2097,11 @@ async function sendReferralNotification(
       console.warn('[hire-forms] Could not generate snapshot PDF for referral email:', (snapshotErr as Error).message);
     }
 
+    const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+    const vehicleTargets = await getVehicleNotificationTargets();
     await emailService.send('referral_alert', {
-      to: 'info@oooshtours.co.uk',
+      to: vehicleTargets.to,
+      cc: vehicleTargets.cc,
       variables: {
         driverName: driverName || 'Unknown',
         driverEmail: driverEmail || 'N/A',
@@ -2172,14 +2175,18 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
             // Send notification to team
             const frontendUrl = getFrontendUrl();
             try {
-              // Bell notification to admins/managers
-              const adminUsers = await query(`SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`);
-              for (const user of adminUsers.rows) {
+              const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+              const targets = await getVehicleNotificationTargets();
+
+              // Bell notification to vehicle manager only (no fan-out to all admins).
+              // email_sent_at = NOW() so the escalation scheduler doesn't fire a
+              // duplicate email — the direct mid_tour_driver send below covers it.
+              for (const userId of targets.bellUserIds) {
                 await query(
-                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url)
-                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5)`,
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
                   [
-                    user.id,
+                    userId,
                     `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
                     `${assignment.driver_name || 'A driver'} submitted a hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}) which is already dispatched. Hire form assigned to ${assignment.vehicle_reg || 'unassigned vehicle'}.`,
                     id,
@@ -2188,9 +2195,10 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
                 );
               }
 
-              // Email notification
+              // Email notification — info@ + will@ CC
               await emailService.send('mid_tour_driver', {
-                to: 'info@oooshtours.co.uk',
+                to: targets.to,
+                cc: targets.cc,
                 variables: {
                   driverName: assignment.driver_name || 'Unknown Driver',
                   driverEmail: assignment.driver_email || 'N/A',

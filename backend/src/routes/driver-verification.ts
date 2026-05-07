@@ -735,22 +735,26 @@ async function fireReferralNotification(
       .filter(Boolean);
     const jobsText = jobRefs.length > 0 ? jobRefs.join(', ') : 'No active assignments';
 
-    // 1. Create bell notifications for all admin/manager users
-    const adminUsers = await query(
-      `SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`
-    );
+    // 1. Create bell notification for the vehicle manager only.
+    // Vehicle alerts no longer fan out to all admins/managers — see
+    // services/vehicle-notify.ts.
+    const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+    const targets = await getVehicleNotificationTargets();
 
     const notificationContent = `Manual referral needed: ${driverName} — ${reasonsText}${jobRefs.length > 0 ? ` (Jobs: ${jobsText})` : ''}`;
 
-    for (const user of adminUsers.rows) {
+    // email_sent_at = NOW() so the escalation scheduler doesn't fire an early
+    // email mid-flow. The proper referral_alert email (with snapshot PDF) is
+    // sent from hire-forms.ts once the full form is submitted.
+    for (const userId of targets.bellUserIds) {
       await query(
-        `INSERT INTO notifications (user_id, type, title, content, action_url, priority)
-         VALUES ($1, 'referral', $2, $3, $4, 'high')`,
-        [user.id, `Referral needed: ${driverName}`, notificationContent, `/vehicles/drivers/${driverId}`]
+        `INSERT INTO notifications (user_id, type, title, content, action_url, priority, email_sent_at)
+         VALUES ($1, 'referral', $2, $3, $4, 'high', NOW())`,
+        [userId, `Referral needed: ${driverName}`, notificationContent, `/drivers/${driverId}`]
       );
     }
 
-    console.log(`[driver-verification] Bell notifications sent to ${adminUsers.rows.length} admin/manager users`);
+    console.log(`[driver-verification] Bell notification sent to ${targets.bellUserIds.length} vehicle manager user(s)`);
 
     // NOTE: No email alert fired here. The referral flag is set mid-flow
     // (e.g. during the insurance questionnaire, before POA/DVLA/signature),
