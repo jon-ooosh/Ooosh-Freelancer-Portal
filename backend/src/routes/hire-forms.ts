@@ -32,6 +32,7 @@ import {
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
+import { runHookWithRecovery } from '../services/post-hook-recovery';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -1311,13 +1312,22 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       updates.vehicle_id !== undefined || updates.status !== undefined;
     if (vehicleStateChanged && updated.job_id) {
       const jobId: string = updated.job_id;
-      setImmediate(async () => {
-        try {
-          const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
-          await syncVehicleRequirementStatus(jobId);
-        } catch (err) {
+      const hhJobId: number | null = updated.hirehop_job_id ?? null;
+      setImmediate(() => {
+        runHookWithRecovery(
+          {
+            hookLabel: 'Vehicle requirement sync',
+            jobId,
+            hhJobNumber: hhJobId,
+            assignmentId: id,
+          },
+          async () => {
+            const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+            await syncVehicleRequirementStatus(jobId);
+          }
+        ).catch((err) => {
           console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobId}:`, err);
-        }
+        });
       });
     }
 
@@ -1363,32 +1373,54 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       // hire_forms and vehicle rows we flip directly — book-out by
       // definition means the hire agreement has been executed and
       // the van has left the warehouse.
+      // Shared identifiers for hook recovery alerts on this book-out
+      // transition. hhJobId surfaces the human-readable HH number in
+      // notification titles + alert emails.
+      const hhJobId: number | null = updated.hirehop_job_id ?? null;
+
       if (updated.job_id) {
         const jobId: string = updated.job_id;
-        setImmediate(async () => {
-          try {
-            await query(
-              `UPDATE job_requirements
-               SET status = 'done', updated_at = NOW()
-               WHERE job_id = $1
-                 AND requirement_type IN ('hire_forms', 'vehicle')
-                 AND phase = 'pre_hire'
-                 AND status IN ('not_started', 'in_progress')`,
-              [jobId]
-            );
-            const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
-            await syncExcessRequirementStatus(jobId);
-          } catch (err) {
+        setImmediate(() => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'Post-book-out requirement advance',
+              jobId,
+              hhJobNumber: hhJobId,
+              assignmentId: id,
+            },
+            async () => {
+              await query(
+                `UPDATE job_requirements
+                 SET status = 'done', updated_at = NOW()
+                 WHERE job_id = $1
+                   AND requirement_type IN ('hire_forms', 'vehicle')
+                   AND phase = 'pre_hire'
+                   AND status IN ('not_started', 'in_progress')`,
+                [jobId]
+              );
+              const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+              await syncExcessRequirementStatus(jobId);
+            }
+          ).catch((err) => {
             console.warn(`[hire-forms] Post-book-out requirement advance failed for job ${jobId}:`, err);
-          }
+          });
         });
       }
 
       // Generate + email PDF if this is the first book-out email for this
       // assignment. Runs after we respond so the PATCH stays fast.
       if (!updated.hire_form_emailed_at) {
+        const pdfJobId: string | null = updated.job_id ?? null;
         setImmediate(() => {
-          generateAndEmailHireFormPdf(id, 'book-out').catch((err) => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'Hire form PDF + email',
+              jobId: pdfJobId,
+              hhJobNumber: hhJobId,
+              assignmentId: id,
+            },
+            () => generateAndEmailHireFormPdf(id, 'book-out')
+          ).catch((err) => {
             console.error(`[hire-forms] Post-book-out PDF+email failed for ${id}:`, err);
           });
         });
@@ -1399,13 +1431,21 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       // Non-blocking, runs after response.
       if (updated.return_overnight === true && updated.job_id) {
         const oohJobId: string = updated.job_id;
-        setImmediate(async () => {
-          try {
-            const { sendOohInfoEmailsForJob } = await import('../services/ooh-return');
-            await sendOohInfoEmailsForJob(oohJobId);
-          } catch (err) {
+        setImmediate(() => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'OOH info email',
+              jobId: oohJobId,
+              hhJobNumber: hhJobId,
+              assignmentId: id,
+            },
+            async () => {
+              const { sendOohInfoEmailsForJob } = await import('../services/ooh-return');
+              await sendOohInfoEmailsForJob(oohJobId);
+            }
+          ).catch((err) => {
             console.error(`[hire-forms] OOH info email send failed for job ${oohJobId}:`, err);
-          }
+          });
         });
       }
 
@@ -1421,18 +1461,24 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
         const actorLabel = isFreelancer
           ? 'freelancer book-out'
           : (req.user?.email || 'staff');
-        setImmediate(async () => {
-          try {
-            await autoDispatchJob({
+        setImmediate(() => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'Auto-dispatch',
+              jobId: dispatchJobId,
+              hhJobNumber: hhJobId,
+              assignmentId: id,
+            },
+            () => autoDispatchJob({
               jobId: dispatchJobId,
               source: 'staff-bookout',
               actorLabel,
               actorUserId,
               interactionContent: `🚐 Job dispatched — booked out by ${actorLabel}.`,
-            });
-          } catch (err) {
+            }).then(() => undefined)
+          ).catch((err) => {
             console.error(`[hire-forms] auto-dispatch failed for job ${dispatchJobId}:`, err);
-          }
+          });
         });
       }
     }

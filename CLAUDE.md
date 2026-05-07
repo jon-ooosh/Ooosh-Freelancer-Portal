@@ -1866,6 +1866,16 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 ### Future Enhancements (captured, not scheduled)
 
+- **Post-hook outbox pattern (7 May 2026)** — proper long-term fix for the fragility of `setImmediate` fire-and-forget blocks across the codebase (~12 of them, mostly post-PATCH side-effects). Today's pattern: route handler responds 200, then queues async work with `setImmediate(...)`. If the DB pool blips, network burps, or — most commonly — the server restarts during a deploy, the in-flight hook is lost silently. The 7 May 2026 RX72TKO incident saw all 5 post-book-out hooks (hire form PDF + email, OOH info email, auto-dispatch, requirement advance, vehicle requirement sync) die simultaneously on a single Postgres connection timeout coinciding with a deploy restart. Short-term mitigation shipped same day: `services/post-hook-recovery.ts` adds `withHookRetry` (3 attempts, 1s/4s/16s exponential backoff) + `alertHookFailure` (bell to admins/managers + email to info@ when retries exhausted). Catches transient blips and surfaces permanent failures within minutes. **Doesn't survive server restarts** — that's what the outbox pattern is for. Sketch:
+  - **Storage:** new `pending_hooks` table (`id`, `kind`, `payload JSONB`, `attempts`, `next_run_at`, `last_error`, `completed_at`, `created_at`). One row per pending side-effect.
+  - **Write path:** inside the same DB transaction as the route's primary UPDATE, INSERT one row per hook to `pending_hooks`. Survives commit boundary atomically with the state change that triggered it.
+  - **Read path:** worker (cron every 30s, plus on-demand kick after the route responds) selects rows with `next_run_at <= NOW() AND completed_at IS NULL`, dispatches by `kind` to the registered handler, marks `completed_at` on success or bumps `attempts` + `next_run_at` on failure. Final-failure threshold (e.g. 5 attempts) fires the same `alertHookFailure` flow, then leaves the row in place for manual retrigger.
+  - **Observability:** `/operations/pending-hooks` admin page lists in-flight + failed rows, with re-run / dismiss actions.
+  - **Migration path:** keep `runHookWithRecovery` working in parallel; convert hooks to outbox-style one at a time. Start with the 5 post-book-out hooks (highest blast radius), then sweep `setImmediate` callsites in the rest of the codebase.
+  - Pairs naturally with future patterns where reliable post-action work is needed (post-checkin emails, scheduled-job nudges, etc.). New `setImmediate` blocks become `enqueueHook(kind, payload)` one-liners.
+
+- **Server-startup hook recovery sweep (7 May 2026)** — belt-and-braces alternative to the full outbox above, specifically targeting the deploy-killed-in-flight case (which is probably the most common real-world trigger). On process boot, scan for assignments that look like they had post-book-out hooks die mid-flight: `status='booked_out' AND vehicle_id IS NOT NULL AND booked_out_at > NOW() - INTERVAL '24 hours' AND (hire_form_emailed_at IS NULL OR (return_overnight = TRUE AND ooh_info_sent_at IS NULL) OR pipeline_status NOT IN ('dispatched','returned_incomplete','returned','completed'))`. Re-fire whichever hook is still missing. Cheap because the existing hooks are already idempotent (so a re-fire on a healthy job is a no-op). Probably 1 hour of work; useful even after the outbox lands as a final safety net for the very-edge case where a hook fails on its 3rd retry attempt during shutdown. Not urgent given the retry + alert combo we just shipped.
+
 - **Dashboard polish (5 May 2026)** — small follow-ups from the Today dashboard redesign session, captured but not scheduled:
   - **Drag-to-reorder UI for sections.** Section registry already has `pinnable: true/false` per section, and `useSectionOrder()` reads/writes a localStorage array of section IDs. UI to actually let users drag sections around isn't built. When/if added, just bind it to `useSectionOrder().setOrder(newIds)`. `needs` is hard-pinned first regardless of order.
   - **Server-side persistence of section ordering.** Currently localStorage only — preference doesn't follow the user across browsers/devices. Add `dashboard_section_order TEXT[]` on `users`, then swap `useSectionOrder` to GET/PUT through `/api/users/me/preferences` with localStorage as fast-path fallback.
@@ -2212,6 +2222,45 @@ const hash = await bcrypt.hash(key, 12);
 ```
 
 The `key_prefix` should be the first 8 chars of the plaintext key (used as a fast lookup index — `verifyApiKey` matches on prefix, then bcrypt-compares the full key against each candidate's `key_hash`).
+
+### Post-Hook Recovery ✅ COMPLETE (7 May 2026)
+
+**File:** `backend/src/services/post-hook-recovery.ts`
+
+Hardening for the fire-and-forget `setImmediate` blocks that run after a route has already responded (post-PATCH side-effects: PDF generation, status writebacks, requirement syncs, email sends, etc.). Wrap the inner work with `runHookWithRecovery({...}, async () => { ... })` instead of bare try/catch.
+
+**What it does:**
+1. **Retry with exponential backoff** — 3 attempts at 1s / 4s / 16s. Catches transient DB pool exhaustion, network blips, momentary HH 429s.
+2. **Loud failure alert** — when retries are exhausted, writes a `notifications` row (priority=high, type=`system`) for every active admin/manager + emails `info@oooshtours.co.uk` with the hook label, job ref, error message, and a click-through to the job. Means a permanent failure is visible in minutes instead of "next time someone notices an email didn't arrive".
+
+**Idempotency contract:** every consumer hook MUST be safe to retry. Current consumers all have natural idempotency markers (`hire_form_emailed_at`, `ooh_info_sent_at`, "skip if HH already at target status" guards in auto-dispatch, forward-only requirement sync helpers). Any new hook wrapped with `runHookWithRecovery` must satisfy the same property — adding it to a non-idempotent operation will double-send / double-write.
+
+**Wired into:** the 5 post-book-out hooks in `routes/hire-forms.ts` PATCH handler — vehicle requirement sync, post-book-out requirement advance, hire form PDF + email, OOH info email, auto-dispatch. The 7 May 2026 RX72TKO incident lost all 5 simultaneously to a single Postgres connection timeout that coincided with a deploy restart; after this hardening, the same blip would have been retried + recovered automatically, or surfaced via bell + email if the retries also failed.
+
+**NOT a replacement for the eventual outbox pattern** (see "Future Enhancements" — outbox would survive server restarts and give full observability over pending work). This is the cheap fix that closes ~90% of the gap until that work is scheduled. New `setImmediate` blocks added to the codebase should use `runHookWithRecovery` until the outbox lands.
+
+**Usage:**
+```ts
+import { runHookWithRecovery } from '../services/post-hook-recovery';
+
+setImmediate(() => {
+  runHookWithRecovery(
+    {
+      hookLabel: 'Some background task',
+      jobId,                  // OP UUID — drives the action_url
+      hhJobNumber: hhJobId,   // human-readable in the alert title
+      assignmentId: id,       // optional — included in alert body
+    },
+    async () => {
+      // Do the actual work. Throw on failure.
+    }
+  ).catch((err) => {
+    console.error('[my-route] background task failed (after retries):', err);
+  });
+});
+```
+
+The outer `.catch` is for the post-alert rethrow — the alert has already fired by then, this is just for log visibility.
 
 ### Hire Date Resolution
 
