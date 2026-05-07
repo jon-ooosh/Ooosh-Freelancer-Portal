@@ -516,9 +516,12 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     );
 
     // ── Auto-generate post-hire requirements ──
-    // When a job is dispatched (or has been dispatched), create post_hire
-    // backline requirement if one doesn't exist yet and there's backline on the job.
-    // Use HH status integer (more reliable than pipeline_status which can lag behind)
+    // Gate on OP pipeline_status, not HH status. HH jumps to 4/5 the moment
+    // items get checked out, but OP holds at 'prepped' until staff explicitly
+    // mark the job dispatched. Creating post-hire rows earlier surfaces them
+    // on the Job Requirements toggle before staff are meant to be working
+    // post-hire — they end up ticking the wrong card. Keeps frontend toggle
+    // default and backend creation in lockstep on the same OP gate.
     const jobStatus = await client.query(
       `SELECT status, pipeline_status, hh_job_number, job_date, out_date, job_end, return_date FROM jobs WHERE id = $1`,
       [jobId]
@@ -526,7 +529,9 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
     const hhStatus = jobStatus.rows[0]?.status;
     const hhJobNumber = jobStatus.rows[0]?.hh_job_number;
     const jobRow = jobStatus.rows[0];
-    const isPostHirePhase = hhStatus >= 4; // 4=Part Dispatched, 5=Dispatched, 6=Returned Incomplete, 7=Returned, 11=Completed
+    const opPipelineStatus: string | null = jobStatus.rows[0]?.pipeline_status ?? null;
+    const POST_HIRE_OP_STATUSES = ['dispatched', 'returned_incomplete', 'returned', 'completed'];
+    const isPostHirePhase = !!opPipelineStatus && POST_HIRE_OP_STATUSES.includes(opPipelineStatus);
 
     if (isPostHirePhase && flags.has_backline) {
       const existingPostHire = await client.query(
