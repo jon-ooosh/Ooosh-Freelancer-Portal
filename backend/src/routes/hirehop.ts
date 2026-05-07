@@ -449,9 +449,17 @@ router.post('/jobs/:jobId/sync', authenticate, async (req: AuthRequest, res: Res
 router.get('/jobs/:jobId/derived-flags', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const jobId = req.params.jobId as string;
+    // Accept OP UUID or HireHop job number — staff-allocation rows on the
+    // Allocations page only carry hirehop_job_id (job_id is NULL until a
+    // hire form is submitted), so callers wanting to look up slot modes
+    // for those rows can pass the HH number directly without resolving
+    // the UUID first.
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
-      `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE id = $1`,
-      [jobId]
+      isUuid
+        ? `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE id = $1`
+        : `SELECT hh_derived_flags, line_items_synced_at, is_van_and_driver, vehicle_slot_modes FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId, 10)]
     );
 
     if (jobResult.rows.length === 0) {

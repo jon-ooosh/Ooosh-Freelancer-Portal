@@ -258,26 +258,28 @@ export function BookOutPage() {
     vandDetectRef.current = key
     ;(async () => {
       try {
-        // Resolve OP job UUID from HH job number, then fetch derived-flags +
-        // assignments for it. Both endpoints accept the OP UUID directly;
-        // derived-flags currently expects the OP UUID, so we look that up
-        // first via the assignments endpoint (which accepts hirehop_job_id).
+        // Fetch assignments for this HH job — staff-allocation rows from the
+        // Allocations page only have hirehop_job_id set (job_id is NULL until
+        // a hire form is submitted). For V&D jobs there's never a hire form,
+        // so we look up via HH number and use it for the derived-flags
+        // fetch when job_id is NULL.
         const assignResp = await apiFetch(`/api/assignments?hirehop_job_id=${encodeURIComponent(job)}`)
         if (!assignResp.ok) return
         const assignBody = await assignResp.json().catch(() => ({}))
-        const rows = (assignBody.data as Array<{ id: string; vehicle_id: string | null; van_requirement_index: number | null; job_id: string | null }>) || []
+        const rows = (assignBody.data as Array<{ id: string; vehicle_id: string | null; van_requirement_index: number | null; job_id: string | null; hirehop_job_id: number | null }>) || []
         const match = rows.find(r => r.vehicle_id === veh)
         if (!match) return
-        const opJobId = match.job_id
-        if (!opJobId) return
-        const flagsResp = await apiFetch(`/api/hirehop/jobs/${encodeURIComponent(opJobId)}/derived-flags`)
+        // Prefer OP UUID if we have it; fall back to the HH number which
+        // the derived-flags endpoint also accepts.
+        const flagsLookupId = match.job_id || (match.hirehop_job_id ? String(match.hirehop_job_id) : job)
+        const flagsResp = await apiFetch(`/api/hirehop/jobs/${encodeURIComponent(flagsLookupId)}/derived-flags`)
         if (!flagsResp.ok) return
         const flagsBody = await flagsResp.json().catch(() => ({}))
         const slots = (flagsBody?.flags?.vehicle_slots as Array<{ slot_index: number; mode: 'self_drive' | 'van_and_driver' }>) || []
         const slot = slots.find(s => s.slot_index === (match.van_requirement_index ?? 0))
         const slotIsVand = slot?.mode === 'van_and_driver'
         const allSlotsVand = slots.length > 0 && slots.every(s => s.mode === 'van_and_driver')
-        if (slotIsVand || (allSlotsVand && rows.length === 1)) {
+        if (slotIsVand || allSlotsVand) {
           setAutoVand(true)
           setAutoVandAssignmentId(match.id)
         }
