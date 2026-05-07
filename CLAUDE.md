@@ -566,9 +566,31 @@ Joined-up referral management: flag → email → review → resolve → date ex
 - [x] Referral email notification (`referral_alert` template) on hire form submission when `requires_referral=true`
 - [x] Driver verification snapshot PDF generation (`driver-snapshot-pdf.ts`) — ported from Monday.com Netlify function
 - [x] Snapshot PDF attached to referral notification email
-- [x] Date extension on approval: pre-fills with standard validity periods (Licence 90d, DVLA 30d, POA 90d, Passport 90d)
+- [x] Date extension on approval: mirrors driver's existing dates exactly. **Empty stays empty** — no `today` / `today+90d` fallbacks. Backend skips empty values on the UPDATE so blank pickers leave the underlying date untouched. Stops staff inadvertently fabricating a check date that never happened (e.g. DVLA date for a non-UK driver) or shortening an existing future date by accepting a defaulted "today" without realising. Pre-May 2026 the form pre-filled today / today+90d on every null field — flagged by Mads Antonsen referral 7 May 2026 (HH 15207) where DVLA picker showed today's date for a non-UK driver. Help text reads "Mirrors the driver's current dates — leave blank to leave a date untouched."
 - [x] Adjusted excess field on resolution (for insurer-imposed excess increases, stored on `job_excess` records)
 - [x] Audit trail for referral resolution (`resolve_referral` action in audit_log)
+
+**Referral status hierarchy (May 2026, after `referral_status='pending'` initial-write fix):**
+
+| `requires_referral` | `referral_status` | Pill | Colour | Meaning |
+|---|---|---|---|---|
+| `true` | `NULL` | Refer to Insurers | red | TODO — flagged but no-one's actioned anything yet |
+| `true` | `'pending'` | Referred & Waiting | amber | Insurer email sent, awaiting reply |
+| `false` | `'approved'` | Approved | green | Referred, insurer approved |
+| `false` | `'waived'` | Approved | green | Staff judgement — no referral needed (e.g. no-fault accident) |
+| `true` | `'declined'` | Not Approved | red | Referred, insurer declined |
+
+**The transitions:**
+- Hire form submission with `requires_referral=true` → `referral_status` stays NULL (red Refer to Insurers todo state). Pre-May 2026 `routes/hire-forms.ts` was setting `'pending'` here, jumping the queue and making it look like staff had already actioned something they hadn't. The `referral_alert` email to admins still fires from `requires_referral=true`, independent of `referral_status`.
+- Staff clicks "Mark as Referred to Insurer" on DriverDetailPage → `referral_status='pending'`, `referral_date=today` (audit of when the email actually went out). Button only renders when `referral_status IS NULL`.
+- Staff resolves via "Resolve Referral" form → one of three outcomes:
+  - `'approved'` (insurer said yes): clears `requires_referral`, `insurance_status='Approved'`, allows date extensions
+  - `'waived'` (no referral needed): same effect as `'approved'` but distinct in `referral_status` for audit clarity. UI label "Approved without referral (waived)"
+  - `'declined'` (insurer said no): keeps `requires_referral=true` so the "Not Approved" red pill stays accurate, `insurance_status='Failed'`, no date extensions
+
+**`'waived'` design rationale:** Forging "Approved by insurer" when staff judgement was actually "no referral needed" loses the audit. Distinct enum value preserves "yes we noticed the flag, here's why we cleared it without contacting the insurer" in `referral_status` + `referral_notes`. Clears `requires_referral=false` so downstream UX (assignment guards, `deriveDriverStatus` fall-through to default green Approved) treats the driver as a normal approved hire — same operational effect as `'approved'`, only the audit trail differs. Defensive `'waived'` branch in `deriveDriverStatus` renders "Approved (Waived)" green pill if a row ever surfaces with `requires_referral=true && referral_status='waived'` (shouldn't happen post-resolve, but covers any weird state).
+
+**Resolution form button:** label + colour branch on `outcome` value — `'declined'` is red "Decline Referral", everything else (approved, waived) is green ("Approve Referral" / "Approve (Waive Referral)"). Mirror the same gating on any future outcome additions; defaulting unknown outcomes to red makes the form look hostile to clean resolutions (the original "Approved by insurer | Decline by insurer" branched on `outcome === 'approved'`, leaving waived stuck on the red button until 7 May 2026).
 
 **Snapshot PDF UI:**
 - [ ] "Generate Snapshot PDF" button on Insurance Referral panel (DriverDetailPage) for drivers with `requires_referral = true`

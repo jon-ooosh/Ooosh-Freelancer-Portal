@@ -985,7 +985,7 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
       if (adjustedExcess) {
         payload.adjusted_excess = parseFloat(adjustedExcess);
       }
-      if (outcome === 'approved') {
+      if (outcome === 'approved' || outcome === 'waived') {
         payload.extend_dates = extendDates;
       }
       const result = await api.post<{ data: DriverDetail }>(`/drivers/${driver.id}/resolve-referral`, payload);
@@ -1159,12 +1159,18 @@ function ReferralPanel({ driver, onDriverUpdate }: { driver: DriverDetail; onDri
               onClick={handleResolve}
               disabled={resolving}
               className={`px-4 py-2 rounded text-sm font-medium text-white transition-colors ${
-                outcome === 'approved'
-                  ? 'bg-green-600 hover:bg-green-700'
-                  : 'bg-red-600 hover:bg-red-700'
+                outcome === 'declined'
+                  ? 'bg-red-600 hover:bg-red-700'
+                  : 'bg-green-600 hover:bg-green-700'
               } disabled:opacity-50`}
             >
-              {resolving ? 'Saving...' : outcome === 'approved' ? 'Approve Referral' : 'Decline Referral'}
+              {resolving
+                ? 'Saving...'
+                : outcome === 'declined'
+                  ? 'Decline Referral'
+                  : outcome === 'waived'
+                    ? 'Approve (Waive Referral)'
+                    : 'Approve Referral'}
             </button>
             <button
               onClick={() => setShowResolve(false)}
