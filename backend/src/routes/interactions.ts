@@ -8,6 +8,17 @@ import { logAudit } from '../middleware/audit';
 const router = Router();
 router.use(authenticate);
 
+// Attachment shape — mirrors the metadata returned by
+// POST /api/files/upload?attachment_only=true. Stored on interactions.files
+// JSONB (column already exists from migration 001).
+const attachmentSchema = z.object({
+  r2_key: z.string().min(1),
+  filename: z.string().min(1),
+  content_type: z.string().min(1),
+  size_bytes: z.number().int().nonnegative(),
+  thumbnail_key: z.string().optional().nullable(),
+});
+
 const createInteractionSchema = z.object({
   type: z.enum(['note', 'email', 'call', 'meeting', 'mention', 'chase', 'status_transition']),
   content: z.string().min(1),
@@ -17,6 +28,12 @@ const createInteractionSchema = z.object({
   job_id: z.string().uuid().optional().nullable(),
   opportunity_id: z.string().uuid().optional().nullable(),
   venue_id: z.string().uuid().optional().nullable(),
+  issue_id: z.string().uuid().optional().nullable(),
+  // Threading: if set, this is a reply. Server flattens to thread root and
+  // inherits the parent's anchor (job/person/org/venue/issue/opportunity).
+  parent_interaction_id: z.string().uuid().optional().nullable(),
+  // Attachments — files already uploaded via attachment_only=true
+  attachments: z.array(attachmentSchema).optional().default([]),
   // @mentions
   mentioned_user_ids: z.array(z.string().uuid()).optional().default([]),
   mention_priority: z.enum(['normal', 'high', 'urgent']).optional().default('normal'),
@@ -35,9 +52,19 @@ const createInteractionSchema = z.object({
 });
 
 // GET /api/interactions — timeline for an entity
+//
+// IMPORTANT: timeline reads on person/org/venue MUST exclude issue-scoped
+// interactions (issue_id IS NOT NULL). Issue messages stay scoped to the
+// IssueDetailPage — they don't bubble to vehicle/driver/org timelines per
+// docs/MESSAGING-SPEC.md §6.3.
+//
+// The job-scoped read keeps issue-anchored interactions because the issue is
+// owned by the job — but the IssueDetailPage filters via issue_id to render
+// them as a separate stream. (Job timeline can show "issue logged"-style
+// summary rows from job_issue_events instead of the chatter.)
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const { person_id, organisation_id, job_id, venue_id, page = '1', limit = '50' } = req.query;
+    const { person_id, organisation_id, job_id, venue_id, issue_id, page = '1', limit = '50' } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     let sql = `
@@ -53,23 +80,36 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     let paramIndex = 1;
 
     if (person_id) {
-      sql += ` AND i.person_id = $${paramIndex}`;
+      // Issue messages don't bubble to person timelines.
+      sql += ` AND i.person_id = $${paramIndex} AND i.issue_id IS NULL`;
       params.push(person_id);
       paramIndex++;
     }
     if (organisation_id) {
-      sql += ` AND i.organisation_id = $${paramIndex}`;
+      sql += ` AND i.organisation_id = $${paramIndex} AND i.issue_id IS NULL`;
       params.push(organisation_id);
       paramIndex++;
     }
     if (job_id) {
+      // Job timeline filters issue-scoped interactions out by default — the
+      // IssueDetailPage owns that conversation. Caller can pass
+      // include_issues=true to override (e.g. for a forensic "everything
+      // that touched this job" view).
       sql += ` AND i.job_id = $${paramIndex}`;
       params.push(job_id);
       paramIndex++;
+      if (req.query.include_issues !== 'true') {
+        sql += ` AND i.issue_id IS NULL`;
+      }
     }
     if (venue_id) {
-      sql += ` AND i.venue_id = $${paramIndex}`;
+      sql += ` AND i.venue_id = $${paramIndex} AND i.issue_id IS NULL`;
       params.push(venue_id);
+      paramIndex++;
+    }
+    if (issue_id) {
+      sql += ` AND i.issue_id = $${paramIndex}`;
+      params.push(issue_id);
       paramIndex++;
     }
 
@@ -85,14 +125,134 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST /api/interactions — create a note, log a call, chase, etc.
+// GET /api/interactions/:id/thread — full thread for any interaction in it
+//
+// Walks parent_interaction_id back to the root, then returns root + all
+// descendants ordered oldest-first. Caller can pass any interaction in the
+// thread; response is the same.
+router.get('/:id/thread', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // Find the root: walk parent_interaction_id until we hit a row with NULL
+    // parent. Threads are always one-deep in storage (replies hang directly
+    // off root — see flatten logic in POST), but defensively walk in case
+    // historical data has chains.
+    const rootResult = await query(
+      `WITH RECURSIVE chain AS (
+         SELECT id, parent_interaction_id, 0 AS depth
+         FROM interactions WHERE id = $1
+         UNION ALL
+         SELECT i.id, i.parent_interaction_id, c.depth + 1
+         FROM interactions i
+         JOIN chain c ON i.id = c.parent_interaction_id
+         WHERE c.depth < 10
+       )
+       SELECT id FROM chain WHERE parent_interaction_id IS NULL LIMIT 1`,
+      [id]
+    );
+
+    if (rootResult.rows.length === 0) {
+      res.status(404).json({ error: 'Interaction not found' });
+      return;
+    }
+    const rootId = rootResult.rows[0].id;
+
+    // Fetch root + replies with author info.
+    const threadResult = await query(
+      `SELECT i.*,
+        u.email AS created_by_email,
+        CONCAT(p.first_name, ' ', p.last_name) AS created_by_name
+       FROM interactions i
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE i.id = $1 OR i.parent_interaction_id = $1
+       ORDER BY i.created_at ASC`,
+      [rootId]
+    );
+
+    const root = threadResult.rows.find((r) => r.id === rootId) || threadResult.rows[0];
+    const replies = threadResult.rows.filter((r) => r.id !== rootId);
+
+    // Distinct participants for the header chip strip in the UI.
+    const participantIds = new Set<string>();
+    for (const row of threadResult.rows) {
+      if (row.created_by) participantIds.add(row.created_by);
+      if (Array.isArray(row.mentioned_user_ids)) {
+        for (const uid of row.mentioned_user_ids) participantIds.add(uid);
+      }
+    }
+    let participants: { id: string; name: string; email: string }[] = [];
+    if (participantIds.size > 0) {
+      const partResult = await query(
+        `SELECT u.id,
+          u.email,
+          COALESCE(NULLIF(CONCAT(p.first_name, ' ', p.last_name), ' '), u.email) AS name
+         FROM users u
+         LEFT JOIN people p ON p.id = u.person_id
+         WHERE u.id = ANY($1::uuid[])`,
+        [Array.from(participantIds)]
+      );
+      participants = partResult.rows;
+    }
+
+    res.json({ root, replies, participants });
+  } catch (error) {
+    console.error('Get thread error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/interactions — create a note, log a call, chase, reply, etc.
 router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res: Response) => {
   try {
     const {
-      type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-      mentioned_user_ids, mention_priority, chase_method, chase_response, next_chase_date,
-      chase_alert_user_id, chase_alert_delivery, skip_chase_bump,
+      type, content, mentioned_user_ids, mention_priority, chase_method, chase_response,
+      next_chase_date, chase_alert_user_id, chase_alert_delivery, skip_chase_bump,
+      attachments,
     } = req.body;
+    let { person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id, parent_interaction_id } = req.body;
+
+    // Threading: if this is a reply, look up the parent and inherit its
+    // anchor. We FLATTEN to the thread root — replies always hang off root,
+    // never off another reply. Keeps the read query in /thread simple
+    // (one-deep, no recursion needed in the common case).
+    let parentRow: Record<string, unknown> | null = null;
+    if (parent_interaction_id) {
+      const parentResult = await query(
+        `SELECT id, parent_interaction_id, person_id, organisation_id, job_id,
+                opportunity_id, venue_id, issue_id, created_by, mentioned_user_ids
+         FROM interactions WHERE id = $1`,
+        [parent_interaction_id]
+      );
+      if (parentResult.rows.length === 0) {
+        res.status(400).json({ error: 'parent_interaction_id not found' });
+        return;
+      }
+      parentRow = parentResult.rows[0];
+
+      // Flatten: if the supplied parent is itself a reply, point at root.
+      if (parentRow!.parent_interaction_id) {
+        parent_interaction_id = parentRow!.parent_interaction_id as string;
+        // Re-fetch the actual root for anchor inheritance.
+        const rootResult = await query(
+          `SELECT id, person_id, organisation_id, job_id, opportunity_id, venue_id, issue_id,
+                  created_by, mentioned_user_ids
+           FROM interactions WHERE id = $1`,
+          [parent_interaction_id]
+        );
+        if (rootResult.rows.length > 0) parentRow = rootResult.rows[0];
+      }
+
+      // Inherit anchor from the root. Replies MUST sit on the same entity
+      // as the thread — guard against client passing a different anchor.
+      person_id = (parentRow!.person_id as string | null) ?? null;
+      organisation_id = (parentRow!.organisation_id as string | null) ?? null;
+      job_id = (parentRow!.job_id as string | null) ?? null;
+      opportunity_id = (parentRow!.opportunity_id as string | null) ?? null;
+      venue_id = (parentRow!.venue_id as string | null) ?? null;
+      issue_id = (parentRow!.issue_id as string | null) ?? null;
+    }
 
     // If linked to a job, snapshot current status for tracking
     let jobStatusAt: number | null = null;
@@ -110,15 +270,27 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
       }
     }
 
+    // Stamp uploaded_at / uploaded_by on attachments (caller supplies the
+    // R2 metadata from /api/files/upload?attachment_only=true; we add the
+    // audit fields server-side).
+    const filesPayload = (attachments || []).map((a: Record<string, unknown>) => ({
+      ...a,
+      uploaded_at: new Date().toISOString(),
+      uploaded_by: req.user!.id,
+    }));
+
     const result = await query(
       `INSERT INTO interactions (type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-        mentioned_user_ids, created_by, job_status_at_creation, job_status_name_at_creation,
-        pipeline_status_at_creation, chase_method, chase_response)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        issue_id, parent_interaction_id, mentioned_user_ids, files, created_by,
+        job_status_at_creation, job_status_name_at_creation, pipeline_status_at_creation,
+        chase_method, chase_response)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17)
        RETURNING *`,
       [type, content, person_id, organisation_id, job_id, opportunity_id, venue_id,
-        mentioned_user_ids, req.user!.id, jobStatusAt, jobStatusNameAt,
-        pipelineStatusAt, chase_method || null, chase_response || null]
+        issue_id || null, parent_interaction_id || null,
+        mentioned_user_ids, JSON.stringify(filesPayload), req.user!.id,
+        jobStatusAt, jobStatusNameAt, pipelineStatusAt,
+        chase_method || null, chase_response || null]
     );
 
     // Chase side-effects: bump chase_count, set next_chase_date, persist
@@ -185,27 +357,46 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
 
     await logAudit(req.user!.id, 'interactions', result.rows[0].id, 'create', null, result.rows[0]);
 
-    // Send in-app notifications to mentioned users
+    // Author display name — used by both mention and thread-reply notifications.
+    const creatorResult = await query(
+      `SELECT CONCAT(p.first_name, ' ', p.last_name) as name
+       FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
+      [req.user!.id]
+    );
+    const creatorName = creatorResult.rows[0]?.name || 'Someone';
+
+    // Resolve the entity anchor that mentions / thread re-notifications point at.
+    // Issue-anchored interactions point at the IssueDetailPage rather than a
+    // generic entity page.
+    const entityType = issue_id ? 'job_issues'
+      : person_id ? 'people'
+      : organisation_id ? 'organisations'
+      : venue_id ? 'venues'
+      : job_id ? 'jobs'
+      : null;
+    const entityId = issue_id || person_id || organisation_id || venue_id || job_id || null;
+
+    // Build action URL for click-through navigation. Issue messages route to
+    // the IssueDetailPage; otherwise default to the entity's timeline tab.
+    const actionUrl = issue_id ? `/operations/problems/${issue_id}`
+      : job_id ? `/jobs/${job_id}?tab=timeline`
+      : person_id ? `/people/${person_id}`
+      : organisation_id ? `/organisations/${organisation_id}`
+      : venue_id ? `/venues/${venue_id}`
+      : null;
+
+    // Track who already got a notification for this interaction so we can
+    // dedupe the thread re-notify pass below — explicit mentions take
+    // priority over generic "replied in thread" notifications.
+    const notifiedUserIds = new Set<string>([req.user!.id]);
+
+    const io = req.app.get('io');
+
+    // 1) Explicit @mentions — high-signal, may carry priority + email escalation.
     if (mentioned_user_ids && mentioned_user_ids.length > 0) {
-      const creatorResult = await query(
-        `SELECT CONCAT(p.first_name, ' ', p.last_name) as name
-         FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
-        [req.user!.id]
-      );
-      const creatorName = creatorResult.rows[0]?.name || 'Someone';
-
-      const entityType = person_id ? 'people' : organisation_id ? 'organisations' : venue_id ? 'venues' : null;
-      const entityId = person_id || organisation_id || venue_id || null;
-
-      // Build action URL for click-through navigation (mentions go to timeline tab)
-      const actionUrl = job_id ? `/jobs/${job_id}?tab=timeline`
-        : person_id ? `/people/${person_id}`
-        : organisation_id ? `/organisations/${organisation_id}`
-        : venue_id ? `/venues/${venue_id}`
-        : null;
-
       for (const userId of mentioned_user_ids) {
-        if (userId === req.user!.id) continue; // Don't notify yourself
+        if (notifiedUserIds.has(userId)) continue;
+        notifiedUserIds.add(userId);
 
         const notifResult = await query(
           `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id,
@@ -225,8 +416,59 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
           ]
         );
 
-        // Emit real-time notification via Socket.io
-        const io = req.app.get('io');
+        if (io) {
+          io.to(`user:${userId}`).emit('notification', notifResult.rows[0]);
+        }
+      }
+    }
+
+    // 2) Thread re-notify — fire LOW-PRIORITY "replied in a thread you're in"
+    //    notifications to everyone earlier in the thread (root author +
+    //    every prior reply author + every previously mentioned user), deduped
+    //    against explicit mentions above and the reply's own author.
+    //
+    //    Low priority means no email escalation — pure in-app surfacing.
+    //    Per docs/MESSAGING-SPEC.md §5.1 / working agreement (jon, May 2026).
+    if (parent_interaction_id) {
+      // Find the thread root + collect every distinct user_id who has touched
+      // the thread (authored a row or been mentioned in one).
+      const participantsResult = await query(
+        `SELECT i.created_by, i.mentioned_user_ids
+         FROM interactions i
+         WHERE i.id = $1 OR i.parent_interaction_id = $1`,
+        [parent_interaction_id]
+      );
+      const priorParticipants = new Set<string>();
+      for (const row of participantsResult.rows) {
+        if (row.created_by) priorParticipants.add(row.created_by);
+        if (Array.isArray(row.mentioned_user_ids)) {
+          for (const uid of row.mentioned_user_ids) priorParticipants.add(uid);
+        }
+      }
+
+      const replyPreview = content.length > 200 ? content.slice(0, 200) + '...' : content;
+
+      for (const userId of priorParticipants) {
+        if (notifiedUserIds.has(userId)) continue;
+        notifiedUserIds.add(userId);
+
+        const notifResult = await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id,
+             source_user_id, interaction_id, action_url, priority)
+           VALUES ($1, 'mention', $2, $3, $4, $5, $6, $7, $8, 'low')
+           RETURNING *`,
+          [
+            userId,
+            `${creatorName} replied in a thread`,
+            replyPreview,
+            entityType,
+            entityId,
+            req.user!.id,
+            result.rows[0].id,
+            actionUrl,
+          ]
+        );
+
         if (io) {
           io.to(`user:${userId}`).emit('notification', notifResult.rows[0]);
         }

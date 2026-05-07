@@ -1648,6 +1648,8 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
 
 Unified messaging, notification, and follow-up system. Replaces Monday.com's @mention/update system. The existing interaction/timeline system is the conversation layer; the inbox surfaces conversations and system alerts to the right people.
 
+**Phases A-E shipped Apr 2026 are the foundation. The threaded-messaging upgrade (replies, attachments, actionable notifications, Problems integration) is specced separately in `docs/MESSAGING-SPEC.md` and queued as Phase F below.**
+
 **Design principles:**
 - @mention in timelines IS the messaging system — conversations happen on entities (jobs, people, orgs)
 - Chase pattern for follow-ups: set a date, get reminded, snooze/action/dismiss
@@ -1801,6 +1803,19 @@ Respects `user_notification_preferences.delivery_method` — if user has set `no
 - [x] Dedicated "+ Reminder" button at top of prep checklist (next to "+ Add Job Requirement")
 - [x] Close-out chase scanner respects per-requirement delivery_method
 
+**Phase F — Threaded Messaging Upgrade** ← SPECCED (May 2026), NOT YET BUILT
+
+Closes the "one-way" gap in the current inbox: rolling conversations with replies, attachments, rich rendering, actionable system notifications, and integration with the Problems register. Full spec lives in `docs/MESSAGING-SPEC.md` — read that before touching code. Headline shape:
+
+- **Threading on interactions** via `parent_interaction_id` (no parallel `conversations` table — extend what's there).
+- **Attachments on interactions** via the existing `interactions.files` JSONB (already in migration 001, just needs wiring through the create endpoint and render layer).
+- **Actionable notifications** via a new `notifications.actions` JSONB carrying a small whitelist of `kind`s (`mark_chased`, `complete_requirement`, `resend_email`, `snooze`, `mark_handled`).
+- **Issue messaging** via `interactions.issue_id` — comments on `job_issues` move from `job_issue_events.comment` to real interactions, gain mentions / attachments / replies / escalation. IssueDetailPage merges typed events + interactions at render time.
+- **Markdown-lite rendering** at display time: URL → link, `@user` → pill, `#NNNNN` → job link. Storage stays plain text.
+- **Working agreements** (jon, May 2026): notify ALL prior thread participants on a reply (low priority, no email); per-recipient acknowledgement; issue messages do NOT bubble to vehicle / driver / org timelines; staff-only — no freelancer participation; no backfill of historical replies.
+
+Phased plan in spec; new migration starts at 076 (parent_interaction_id, issue_id, actions). Phase G (email reply ingestion via `reply+<id>@oooshtours.co.uk`) is captured in spec but deferred. Step 4 Job Issues / Problems Stage 3 work depends on this — see that section.
+
 ##### Future Enhancements
 - Staff working calendar integration (escalation timing based on actual schedules)
 - Group mentions (@warehouse, @office — mention a role/team, not just individuals)
@@ -1906,10 +1921,11 @@ These are existing standalone tools that currently push to Monday.com. They need
   **Issue Detail page** (`/operations/problems/:id`, `IssueDetailPage.tsx`): full control panel — header with subject chips (clickable: Job / Vehicle / Driver / Person / Org), event timeline (created → status changes → comments), inline comment box, sidebar with status / severity / assignee / due date / surface_on / resolution_path / cost (with amber "Cost is informational only" note as agreed), watchers count, "Mark as resolved" / "Reopen" buttons.
 
   **Stage 3 (next session):**
-  - File attachments — backend endpoint + UI (R2 upload + display photos/PDFs)
+  - **Comments → threaded interactions (depends on Step 7 Phase F).** Stage 2 carried over the bare `job_issue_events.comment` event type from Stage 1. Stage 3 repoints `POST /api/problems/:id/comments` to write through `interactions` (with `issue_id` set) so comments gain mentions, attachments, replies, escalation, and inbox surfacing. The typed event in `job_issue_events` becomes a pointer (`metadata: {interaction_id: ...}`) for audit. IssueDetailPage merges the two streams at render time. Full design in `docs/MESSAGING-SPEC.md` §5.5 + §6.3. **Critical scoping rule:** issue messages must NOT bubble to the linked vehicle / driver / organisation timelines — `ActivityTimeline` reads on those entities filter `WHERE issue_id IS NULL`.
+  - File attachments — backend endpoint + UI (R2 upload + display photos/PDFs). Note: Phase F adds attachments to *interaction* messages (`interactions.files`). Stage 3 still needs issue-level files via `job_issue_files` for non-message attachments (e.g. a contractor's quote PDF that isn't part of a comment).
   - `surface_on` rules wired through — banners on vehicle check-in form, next hire allocation flow, next book-out flow, job close-out gate
   - Auto-create from vehicle check-in `has_damage = true` → write `job_issues` row with `source_module='vehicle'` + `vehicle_id` populated (replaces the existing `damage_review` requirement creation)
-  - `@mention` notifications via the existing notification system (`user_notification_preferences`)
+  - `@mention` notifications via the existing notification system (`user_notification_preferences`) — mentions on issue comments use the same path as mentions on job interactions once Phase F lands
   - Vehicle Detail "Issues" tab (read from `GET /api/problems/by-vehicle/:id`) and Organisation Detail "Issues" tab (`/by-organisation/:id`) — endpoints already built, just need the tabs mounted
   - Severity → notification priority mapping (`urgent` = immediate, normal = 4h escalation, low = no escalation)
 

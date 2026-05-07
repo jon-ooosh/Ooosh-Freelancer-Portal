@@ -16,7 +16,6 @@
     "paths": {
       "@shared/*": ["../shared/types/*"]
     },
-    "baseUrl": ".",
     "ignoreDeprecations": "5.0"
   },
   "include": ["src/**/*"],
