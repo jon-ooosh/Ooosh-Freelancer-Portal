@@ -84,6 +84,7 @@ const BASE_SELECT = `
     fv.hire_status AS vehicle_hire_status,
     d.full_name AS driver_name,
     d.email AS driver_email,
+    d.phone AS driver_phone,
     d.licence_points AS driver_points,
     d.requires_referral AS driver_requires_referral,
     d.referral_status AS driver_referral_status,

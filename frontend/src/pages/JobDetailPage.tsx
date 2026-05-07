@@ -232,6 +232,7 @@ interface VehicleAssignment {
   driver_id: string | null;
   driver_name: string | null;
   driver_email: string | null;
+  driver_phone: string | null;
   driver_points: number | null;
   freelancer_name: string | null;
   freelancer_person_id: string | null;
@@ -3575,6 +3576,7 @@ export default function JobDetailPage() {
                                   a.driver_name
                                 )}
                                 {a.driver_email && <span className="text-gray-400 font-normal ml-2">{a.driver_email}</span>}
+                                {a.driver_phone && <span className="text-gray-400 font-normal ml-2">{a.driver_phone}</span>}
                               </p>
                             ) : (
                               <p className="text-sm text-gray-400 italic">No driver assigned</p>
