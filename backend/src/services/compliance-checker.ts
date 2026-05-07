@@ -114,51 +114,72 @@ export async function runComplianceCheck(createNotifications = true): Promise<{
   let notificationsCreated = 0;
 
   if (createNotifications && alerts.length > 0) {
-    // Get users with notification_roles
-    const roles = settings.notification_roles;
-    if (roles.length > 0) {
-      const rolePlaceholders = roles.map((_, i) => `$${i + 1}`).join(', ');
-      const userResult = await query(
-        `SELECT id FROM users WHERE role IN (${rolePlaceholders}) AND is_active = true`,
-        roles
+    // Vehicle alerts go to info@ + will@ only — see services/vehicle-notify.ts.
+    // The legacy `notification_roles` setting is intentionally ignored here:
+    // we no longer fan out to every admin/manager because most managers
+    // don't look after vehicles. Setting kept for backwards-compat reads.
+    const { getVehicleNotificationTargets } = await import('./vehicle-notify');
+    const { emailService } = await import('./email-service');
+    const targets = await getVehicleNotificationTargets();
+
+    const frontendUrl = process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk';
+
+    for (const alert of alerts) {
+      // Dedup is per-alert (not per-user) so we don't email info@ twice
+      // when the same item is still due.
+      const dedupDays = alert.urgency === 'overdue' ? 1 : 7;
+      const existingAny = await query(
+        `SELECT id FROM notifications
+         WHERE type = 'compliance'
+           AND entity_id = $1::uuid
+           AND title LIKE $2
+           AND created_at > NOW() - INTERVAL '1 day' * $3
+         LIMIT 1`,
+        [alert.vehicleId, `%${alert.item}%${alert.reg}%`, dedupDays]
       );
+      if (existingAny.rows.length > 0) continue;
 
-      for (const user of userResult.rows) {
-        for (const alert of alerts) {
-          // Dedup: check if a similar notification was created recently
-          const dedupDays = alert.urgency === 'overdue' ? 1 : 7;
-          const existing = await query(
-            `SELECT id FROM notifications
-             WHERE user_id = $1
-               AND type = 'compliance'
-               AND entity_id = $2::uuid
-               AND title LIKE $3
-               AND created_at > NOW() - INTERVAL '1 day' * $4`,
-            [user.id, alert.vehicleId, `%${alert.item}%${alert.reg}%`, dedupDays]
-          );
+      const urgencyLabel = alert.urgency === 'overdue' ? 'OVERDUE' : 'Due soon';
+      const daysText = alert.daysRemaining < 0
+        ? `${Math.abs(alert.daysRemaining)} days overdue`
+        : alert.daysRemaining === 0 ? 'due today'
+        : `due in ${alert.daysRemaining} days`;
 
-          if (existing.rows.length > 0) continue;
+      // Direct email to info@ + will@ CC. Sent once per alert, regardless
+      // of how many bell recipients we have.
+      try {
+        await emailService.send('compliance_reminder', {
+          to: targets.to,
+          cc: targets.cc,
+          variables: {
+            vehicleReg: alert.reg,
+            vehicleName: alert.reg,
+            dueType: alert.item,
+            urgency: urgencyLabel,
+            daysRemaining: daysText,
+            vehicleUrl: `${frontendUrl}/vehicles/fleet/${alert.vehicleId}`,
+          },
+        });
+      } catch (emailErr) {
+        console.warn('[compliance-checker] Direct email failed:', (emailErr as Error).message);
+      }
 
-          const urgencyLabel = alert.urgency === 'overdue' ? 'OVERDUE' : 'Due soon';
-          const daysText = alert.daysRemaining < 0
-            ? `${Math.abs(alert.daysRemaining)} days overdue`
-            : alert.daysRemaining === 0 ? 'due today'
-            : `due in ${alert.daysRemaining} days`;
-
-          await query(
-            `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url)
-             VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, $5, $6)`,
-            [
-              user.id,
-              `${urgencyLabel}: ${alert.item} — ${alert.reg}`,
-              `${alert.item} for ${alert.reg} is ${daysText} (${alert.date})`,
-              alert.vehicleId,
-              alert.urgency === 'overdue' ? 'high' : 'normal',
-              `/vehicles/fleet/${alert.vehicleId}`,
-            ]
-          );
-          notificationsCreated++;
-        }
+      // Bell notification(s) for the vehicle manager. Mark email_sent_at
+      // so the escalation scheduler doesn't fire a duplicate email.
+      for (const userId of targets.bellUserIds) {
+        await query(
+          `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+           VALUES ($1, 'compliance', $2, $3, 'fleet_vehicles', $4, $5, $6, NOW())`,
+          [
+            userId,
+            `${urgencyLabel}: ${alert.item} — ${alert.reg}`,
+            `${alert.item} for ${alert.reg} is ${daysText} (${alert.date})`,
+            alert.vehicleId,
+            alert.urgency === 'overdue' ? 'high' : 'normal',
+            `/vehicles/fleet/${alert.vehicleId}`,
+          ]
+        );
+        notificationsCreated++;
       }
     }
   }
