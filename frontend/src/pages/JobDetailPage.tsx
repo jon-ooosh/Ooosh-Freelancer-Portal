@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
@@ -1609,6 +1609,23 @@ export default function JobDetailPage() {
     }
   }, [id]);
 
+  // Re-run loadVehicleAssignments when V&D slot info arrives — the first
+  // fetch on page load races the HH sync that populates vehicle_slots, so
+  // V&D staff-allocation rows can be filtered out on the first pass and
+  // never re-evaluated. This second fetch picks them up once we know which
+  // slots are V&D. Cheap (one query) and idempotent — assignments rarely
+  // change between these two fetches.
+  const vandSlotSignature = useMemo(() => {
+    const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+    return slots.filter(s => s.mode === 'van_and_driver').map(s => s.slot_index).sort().join(',');
+  }, [hhSyncResult]);
+  useEffect(() => {
+    if (!id) return;
+    if (!vandSlotSignature) return;
+    loadVehicleAssignments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, vandSlotSignature]);
+
   async function loadRequirementsSummary() {
     if (!id) return;
     try {
@@ -1973,10 +1990,44 @@ export default function JobDetailPage() {
         }
       }
 
-      // Display rows: keep the existing shape — driver-bearing or
-      // freelancer-bearing assignments. Staff-allocation rows are plumbing
-      // and stay hidden from the cards.
-      const displayRows = allRows.filter((r: any) => r.driver_id || r.freelancer_person_id);
+      // Slot-mode lookup for V&D detection. Staff-allocation rows on V&D
+      // slots have no customer driver (and no freelancer attached until
+      // soft-book-out), but they ARE the hire — so we surface them as
+      // cards. Without this, V&D-mode jobs render "No vehicle assignments
+      // yet" forever even after vans are allocated.
+      const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+      const slotModeByIndex = new Map<number, 'self_drive' | 'van_and_driver'>();
+      for (const s of slots) {
+        slotModeByIndex.set(s.slot_index, s.mode);
+      }
+      const anySlotIsVand = slots.some(s => s.mode === 'van_and_driver');
+
+      // Track which slot indexes already have a human-bearing row, so we
+      // don't double up by surfacing the staff-allocation sibling on
+      // self-drive jobs that already have a hire-form-driven card.
+      const slotsWithHuman = new Set<number>();
+      for (const r of allRows) {
+        if (r.driver_id || r.freelancer_person_id) {
+          slotsWithHuman.add(r.van_requirement_index ?? 0);
+        }
+      }
+
+      // Display rows: hire-form / freelancer rows always show. Staff-allocation
+      // rows surface only when they sit on a V&D slot and have no human
+      // sibling — that's the V&D case where the freelancer gets attached at
+      // soft-book-out. Self-drive plumbing stays hidden as before.
+      const displayRows = allRows.filter((r: any) => {
+        if (r.driver_id || r.freelancer_person_id) return true;
+        const idx = r.van_requirement_index ?? 0;
+        if (slotsWithHuman.has(idx)) return false;
+        const slotMode = slotModeByIndex.get(idx);
+        if (slotMode === 'van_and_driver') return true;
+        // Coarse fallback for jobs where the per-slot map isn't fully
+        // populated but the job has at least one V&D slot — still safer
+        // than hiding the only row that exists.
+        if (anySlotIsVand && r.assignment_type === 'self_drive') return true;
+        return false;
+      });
 
       const shaped: VehicleAssignment[] = displayRows.map((r: any) => {
         const idx = r.van_requirement_index ?? 0;
