@@ -1252,6 +1252,17 @@ Backline detection is HH-derived (items in backline categories auto-create the r
 - [x] Derivation engine respects phase — creates/updates pre_hire only, doesn't touch post_hire
 - [x] Backline overview: "Going Out" reads pre_hire cards, "Coming Back" prefers post_hire (falls back to pre_hire)
 
+**Threshold convention (May 2026) — read before changing post-hire gating logic:**
+Post-hire backline + vehicle requirement creation (`hh-requirement-derivation.ts:529`) and the frontend Pre/Post toggle default (`JobDetailPage.tsx`) both gate on **OP `pipeline_status` ∈ {`dispatched`, `returned_incomplete`, `returned`, `completed`}** — not HH status. HH jumps to 4/5 the moment items get checked out, but OP holds at `prepped` until staff explicitly mark the job dispatched. Earlier code used `hhStatus >= 4` with a "more reliable than pipeline_status which can lag behind" comment — that reasoning is real but the trade-off was wrong here: surfacing post-hire cards before staff are meant to be working post-hire led to misclicks (job 15738 had pre-hire backline at `in_progress` and post-hire backline at `done` 5 seconds apart, classic toggle-confusion). The frontend toggle default also includes `cancelled` (cancelled jobs land on post-hire view for close-out work). The closeout-specific requirements (`invoice`, `payment_reconcile`, `client_followup`, `excess_resolve`, `freelancer_followup`, `damage_review`) keep their **HH-status gate** (`isReturnPhase = hhStatus >= 6`, `isFullyReturned = hhStatus >= 7`) — they're about physical return + auto-resolve on Returned, not the toggle. Don't conflate the two.
+
+**Van & Driver suspension convention (May 2026):**
+Requirements with `[Suspended: Van & Driver]` in `notes` (auto-derived `hire_forms` / `excess` rows soft-suspended when every van slot is V&D — see `suspendRequirementForVanAndDriver`) carry `status='blocked'` in the DB but are **not actually blocked** — they're "not required" on this job. Filter them out of any count/aggregate over `job_requirements`:
+- Pre-Hire progress counter (`JobDetailPage.tsx`) — drops them from `totalCount` / `doneCount` / `blockedCount` so the bar/meter doesn't go red.
+- Dashboard Today strip SQL (`routes/dashboard.ts`) — `WHERE notes IS NULL OR notes NOT LIKE '%[Suspended: Van & Driver]%'` so they don't render as red `prob` pips.
+- Jobs page + Returns page progress bars (`routes/requirements.ts` `/bulk` and `/closeout-progress` endpoints) — same SQL filter on the bulk count queries that feed the per-row mini progress bars.
+
+The cards still render in the requirements list as greyed "Not required — Van & Driver mode" stubs (`RequirementCard.tsx` already detects via `isSuspendedByVD`), they just don't move meters or fire alerts. Match this filter when adding any new count/aggregate or pip rendering over `job_requirements` — otherwise V&D-only jobs will look like they have unresolved problems on whatever surface you're building.
+
 **Known issue — OP ↔ HH status sync gap:**
 Many jobs confirmed in HH before webhook integration went live (Mar 2026) have stale `pipeline_status` in OP. The backline page works around this by using `jobs.status` (HH integer) as primary filter. Potential fixes for the broader platform:
 1. One-time reconciliation script: update `pipeline_status` based on `jobs.status` for all mismatched jobs
