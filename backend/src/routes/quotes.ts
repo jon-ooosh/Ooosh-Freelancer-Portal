@@ -718,6 +718,64 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── GET /api/quotes/job/:jobId/ooosh-crew ───────────────────────────
+// Returns crew members assigned across the job's quotes — used by the Van &
+// Driver soft book-out picker. Accepts OP job UUID or HireHop job number.
+//
+// We deliberately don't filter by qa.is_ooosh_crew=true: that flag is
+// auto-set when crew is added via specific entry points (the freelancer-
+// portal-flagged path, line ~1397 in this file, and the ops staff pickup
+// path) but NOT when crew is added via the standard "+ Assign" button on a
+// quote — which is the most common path. For a Van & Driver hire, anyone
+// on the job's crew list is implicitly Ooosh-supplied (the whole point is
+// we're providing the driver). Filtering by the flag was hiding crew that
+// staff had clearly assigned for the job. We surface everyone non-cancelled
+// and let the picker UI choose; is_ooosh_crew is returned in the payload
+// so the picker can mark Ooosh-flagged crew if it wants to.
+
+router.get('/job/:jobId/ooosh-crew', async (req: AuthRequest, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const jobIdStr = Array.isArray(jobId) ? jobId[0]! : jobId!;
+    const isUuid = /^[0-9a-f]{8}-/.test(jobIdStr);
+    const jobLookup = await query(
+      isUuid
+        ? `SELECT id FROM jobs WHERE id = $1`
+        : `SELECT id FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobIdStr : parseInt(jobIdStr, 10)]
+    );
+    if (jobLookup.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const opJobId = jobLookup.rows[0]!.id;
+
+    // DISTINCT on person_id — same person could be on multiple quotes for the
+    // same job; we only need them once in the picker. Sort is_ooosh_crew=true
+    // ones first so flagged crew lead the picker, then by recency.
+    const result = await query(
+      `SELECT DISTINCT ON (p.id)
+         p.id AS person_id,
+         p.first_name, p.last_name, p.email, p.mobile,
+         p.is_freelancer, p.is_approved,
+         qa.role, qa.is_ooosh_crew, qa.id AS quote_assignment_id, qa.quote_id
+       FROM quote_assignments qa
+       JOIN quotes q ON q.id = qa.quote_id
+       JOIN people p ON p.id = qa.person_id
+       WHERE q.job_id = $1
+         AND COALESCE(qa.status, 'assigned') NOT IN ('declined', 'cancelled')
+         AND COALESCE(q.is_deleted, false) = false
+       ORDER BY p.id, qa.is_ooosh_crew DESC NULLS LAST, qa.created_at DESC`,
+      [opJobId]
+    );
+
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('List Ooosh crew for job error:', error);
+    res.status(500).json({ error: 'Failed to load Ooosh crew' });
+  }
+});
+
 // ── GET /api/quotes/:id/assignments — list crew for a quote ─────────
 
 router.get('/:id/assignments', async (_req: AuthRequest, res: Response) => {

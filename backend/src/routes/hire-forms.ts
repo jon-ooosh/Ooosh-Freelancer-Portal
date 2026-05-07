@@ -32,6 +32,7 @@ import {
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
+import { runHookWithRecovery } from '../services/post-hook-recovery';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -299,8 +300,16 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
     const referralReason = f.referral_reason || '';
 
     if (requiresReferral) {
+      // Leave referral_status NULL on initial submission so the driver
+      // lands in the red "Refer to Insurers" todo state — explicit signal
+      // that staff hasn't actioned anything yet. Staff bumps to 'pending'
+      // ("Referred & Waiting" amber) via the Mark as Referred button on
+      // DriverDetailPage when they actually send the insurer email. The
+      // auto-fire of the referral_alert email to admins still happens
+      // via the requires_referral flag elsewhere — the alert path is
+      // unchanged.
       await client.query(
-        `UPDATE drivers SET requires_referral = true, referral_status = 'pending', referral_notes = $1 WHERE id = $2`,
+        `UPDATE drivers SET requires_referral = true, referral_notes = $1 WHERE id = $2`,
         [referralReason, driverId]
       );
     }
@@ -1311,13 +1320,22 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       updates.vehicle_id !== undefined || updates.status !== undefined;
     if (vehicleStateChanged && updated.job_id) {
       const jobId: string = updated.job_id;
-      setImmediate(async () => {
-        try {
-          const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
-          await syncVehicleRequirementStatus(jobId);
-        } catch (err) {
+      const hhJobId: number | null = updated.hirehop_job_id ?? null;
+      setImmediate(() => {
+        runHookWithRecovery(
+          {
+            hookLabel: 'Vehicle requirement sync',
+            jobId,
+            hhJobNumber: hhJobId,
+            assignmentId: id,
+          },
+          async () => {
+            const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+            await syncVehicleRequirementStatus(jobId);
+          }
+        ).catch((err) => {
           console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobId}:`, err);
-        }
+        });
       });
     }
 
@@ -1363,32 +1381,54 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       // hire_forms and vehicle rows we flip directly — book-out by
       // definition means the hire agreement has been executed and
       // the van has left the warehouse.
+      // Shared identifiers for hook recovery alerts on this book-out
+      // transition. hhJobId surfaces the human-readable HH number in
+      // notification titles + alert emails.
+      const hhJobId: number | null = updated.hirehop_job_id ?? null;
+
       if (updated.job_id) {
         const jobId: string = updated.job_id;
-        setImmediate(async () => {
-          try {
-            await query(
-              `UPDATE job_requirements
-               SET status = 'done', updated_at = NOW()
-               WHERE job_id = $1
-                 AND requirement_type IN ('hire_forms', 'vehicle')
-                 AND phase = 'pre_hire'
-                 AND status IN ('not_started', 'in_progress')`,
-              [jobId]
-            );
-            const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
-            await syncExcessRequirementStatus(jobId);
-          } catch (err) {
+        setImmediate(() => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'Post-book-out requirement advance',
+              jobId,
+              hhJobNumber: hhJobId,
+              assignmentId: id,
+            },
+            async () => {
+              await query(
+                `UPDATE job_requirements
+                 SET status = 'done', updated_at = NOW()
+                 WHERE job_id = $1
+                   AND requirement_type IN ('hire_forms', 'vehicle')
+                   AND phase = 'pre_hire'
+                   AND status IN ('not_started', 'in_progress')`,
+                [jobId]
+              );
+              const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+              await syncExcessRequirementStatus(jobId);
+            }
+          ).catch((err) => {
             console.warn(`[hire-forms] Post-book-out requirement advance failed for job ${jobId}:`, err);
-          }
+          });
         });
       }
 
       // Generate + email PDF if this is the first book-out email for this
       // assignment. Runs after we respond so the PATCH stays fast.
       if (!updated.hire_form_emailed_at) {
+        const pdfJobId: string | null = updated.job_id ?? null;
         setImmediate(() => {
-          generateAndEmailHireFormPdf(id, 'book-out').catch((err) => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'Hire form PDF + email',
+              jobId: pdfJobId,
+              hhJobNumber: hhJobId,
+              assignmentId: id,
+            },
+            () => generateAndEmailHireFormPdf(id, 'book-out')
+          ).catch((err) => {
             console.error(`[hire-forms] Post-book-out PDF+email failed for ${id}:`, err);
           });
         });
@@ -1399,13 +1439,21 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       // Non-blocking, runs after response.
       if (updated.return_overnight === true && updated.job_id) {
         const oohJobId: string = updated.job_id;
-        setImmediate(async () => {
-          try {
-            const { sendOohInfoEmailsForJob } = await import('../services/ooh-return');
-            await sendOohInfoEmailsForJob(oohJobId);
-          } catch (err) {
+        setImmediate(() => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'OOH info email',
+              jobId: oohJobId,
+              hhJobNumber: hhJobId,
+              assignmentId: id,
+            },
+            async () => {
+              const { sendOohInfoEmailsForJob } = await import('../services/ooh-return');
+              await sendOohInfoEmailsForJob(oohJobId);
+            }
+          ).catch((err) => {
             console.error(`[hire-forms] OOH info email send failed for job ${oohJobId}:`, err);
-          }
+          });
         });
       }
 
@@ -1421,18 +1469,24 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
         const actorLabel = isFreelancer
           ? 'freelancer book-out'
           : (req.user?.email || 'staff');
-        setImmediate(async () => {
-          try {
-            await autoDispatchJob({
+        setImmediate(() => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'Auto-dispatch',
+              jobId: dispatchJobId,
+              hhJobNumber: hhJobId,
+              assignmentId: id,
+            },
+            () => autoDispatchJob({
               jobId: dispatchJobId,
               source: 'staff-bookout',
               actorLabel,
               actorUserId,
               interactionContent: `🚐 Job dispatched — booked out by ${actorLabel}.`,
-            });
-          } catch (err) {
+            }).then(() => undefined)
+          ).catch((err) => {
             console.error(`[hire-forms] auto-dispatch failed for job ${dispatchJobId}:`, err);
-          }
+          });
         });
       }
     }
@@ -2097,8 +2151,11 @@ async function sendReferralNotification(
       console.warn('[hire-forms] Could not generate snapshot PDF for referral email:', (snapshotErr as Error).message);
     }
 
+    const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+    const vehicleTargets = await getVehicleNotificationTargets();
     await emailService.send('referral_alert', {
-      to: 'info@oooshtours.co.uk',
+      to: vehicleTargets.to,
+      cc: vehicleTargets.cc,
       variables: {
         driverName: driverName || 'Unknown',
         driverEmail: driverEmail || 'N/A',
@@ -2172,14 +2229,18 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
             // Send notification to team
             const frontendUrl = getFrontendUrl();
             try {
-              // Bell notification to admins/managers
-              const adminUsers = await query(`SELECT id FROM users WHERE role IN ('admin', 'manager') AND is_active = true`);
-              for (const user of adminUsers.rows) {
+              const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+              const targets = await getVehicleNotificationTargets();
+
+              // Bell notification to vehicle manager only (no fan-out to all admins).
+              // email_sent_at = NOW() so the escalation scheduler doesn't fire a
+              // duplicate email — the direct mid_tour_driver send below covers it.
+              for (const userId of targets.bellUserIds) {
                 await query(
-                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url)
-                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5)`,
+                  `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, priority, action_url, email_sent_at)
+                   VALUES ($1, 'hire_form', $2, $3, 'vehicle_hire_assignments', $4, 'high', $5, NOW())`,
                   [
-                    user.id,
+                    userId,
                     `Mid-tour driver — ${assignment.driver_name || 'Unknown'}`,
                     `${assignment.driver_name || 'A driver'} submitted a hire form for job #${hhJobId} (${assignment.hirehop_job_name || ''}) which is already dispatched. Hire form assigned to ${assignment.vehicle_reg || 'unassigned vehicle'}.`,
                     id,
@@ -2188,9 +2249,10 @@ router.post('/:id/post-signature', authenticateOrApiKey, async (req: AuthRequest
                 );
               }
 
-              // Email notification
+              // Email notification — info@ + will@ CC
               await emailService.send('mid_tour_driver', {
-                to: 'info@oooshtours.co.uk',
+                to: targets.to,
+                cc: targets.cc,
                 variables: {
                   driverName: assignment.driver_name || 'Unknown Driver',
                   driverEmail: assignment.driver_email || 'N/A',

@@ -1252,6 +1252,17 @@ Backline detection is HH-derived (items in backline categories auto-create the r
 - [x] Derivation engine respects phase — creates/updates pre_hire only, doesn't touch post_hire
 - [x] Backline overview: "Going Out" reads pre_hire cards, "Coming Back" prefers post_hire (falls back to pre_hire)
 
+**Threshold convention (May 2026) — read before changing post-hire gating logic:**
+Post-hire backline + vehicle requirement creation (`hh-requirement-derivation.ts:529`) and the frontend Pre/Post toggle default (`JobDetailPage.tsx`) both gate on **OP `pipeline_status` ∈ {`dispatched`, `returned_incomplete`, `returned`, `completed`}** — not HH status. HH jumps to 4/5 the moment items get checked out, but OP holds at `prepped` until staff explicitly mark the job dispatched. Earlier code used `hhStatus >= 4` with a "more reliable than pipeline_status which can lag behind" comment — that reasoning is real but the trade-off was wrong here: surfacing post-hire cards before staff are meant to be working post-hire led to misclicks (job 15738 had pre-hire backline at `in_progress` and post-hire backline at `done` 5 seconds apart, classic toggle-confusion). The frontend toggle default also includes `cancelled` (cancelled jobs land on post-hire view for close-out work). The closeout-specific requirements (`invoice`, `payment_reconcile`, `client_followup`, `excess_resolve`, `freelancer_followup`, `damage_review`) keep their **HH-status gate** (`isReturnPhase = hhStatus >= 6`, `isFullyReturned = hhStatus >= 7`) — they're about physical return + auto-resolve on Returned, not the toggle. Don't conflate the two.
+
+**Van & Driver suspension convention (May 2026):**
+Requirements with `[Suspended: Van & Driver]` in `notes` (auto-derived `hire_forms` / `excess` rows soft-suspended when every van slot is V&D — see `suspendRequirementForVanAndDriver`) carry `status='blocked'` in the DB but are **not actually blocked** — they're "not required" on this job. Filter them out of any count/aggregate over `job_requirements`:
+- Pre-Hire progress counter (`JobDetailPage.tsx`) — drops them from `totalCount` / `doneCount` / `blockedCount` so the bar/meter doesn't go red.
+- Dashboard Today strip SQL (`routes/dashboard.ts`) — `WHERE notes IS NULL OR notes NOT LIKE '%[Suspended: Van & Driver]%'` so they don't render as red `prob` pips.
+- Jobs page + Returns page progress bars (`routes/requirements.ts` `/bulk` and `/closeout-progress` endpoints) — same SQL filter on the bulk count queries that feed the per-row mini progress bars.
+
+The cards still render in the requirements list as greyed "Not required — Van & Driver mode" stubs (`RequirementCard.tsx` already detects via `isSuspendedByVD`), they just don't move meters or fire alerts. Match this filter when adding any new count/aggregate or pip rendering over `job_requirements` — otherwise V&D-only jobs will look like they have unresolved problems on whatever surface you're building.
+
 **Known issue — OP ↔ HH status sync gap:**
 Many jobs confirmed in HH before webhook integration went live (Mar 2026) have stale `pipeline_status` in OP. The backline page works around this by using `jobs.status` (HH integer) as primary filter. Potential fixes for the broader platform:
 1. One-time reconciliation script: update `pipeline_status` based on `jobs.status` for all mismatched jobs
@@ -1870,6 +1881,16 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 ### Future Enhancements (captured, not scheduled)
 
+- **Post-hook outbox pattern (7 May 2026)** — proper long-term fix for the fragility of `setImmediate` fire-and-forget blocks across the codebase (~12 of them, mostly post-PATCH side-effects). Today's pattern: route handler responds 200, then queues async work with `setImmediate(...)`. If the DB pool blips, network burps, or — most commonly — the server restarts during a deploy, the in-flight hook is lost silently. The 7 May 2026 RX72TKO incident saw all 5 post-book-out hooks (hire form PDF + email, OOH info email, auto-dispatch, requirement advance, vehicle requirement sync) die simultaneously on a single Postgres connection timeout coinciding with a deploy restart. Short-term mitigation shipped same day: `services/post-hook-recovery.ts` adds `withHookRetry` (3 attempts, 1s/4s/16s exponential backoff) + `alertHookFailure` (bell to admins/managers + email to info@ when retries exhausted). Catches transient blips and surfaces permanent failures within minutes. **Doesn't survive server restarts** — that's what the outbox pattern is for. Sketch:
+  - **Storage:** new `pending_hooks` table (`id`, `kind`, `payload JSONB`, `attempts`, `next_run_at`, `last_error`, `completed_at`, `created_at`). One row per pending side-effect.
+  - **Write path:** inside the same DB transaction as the route's primary UPDATE, INSERT one row per hook to `pending_hooks`. Survives commit boundary atomically with the state change that triggered it.
+  - **Read path:** worker (cron every 30s, plus on-demand kick after the route responds) selects rows with `next_run_at <= NOW() AND completed_at IS NULL`, dispatches by `kind` to the registered handler, marks `completed_at` on success or bumps `attempts` + `next_run_at` on failure. Final-failure threshold (e.g. 5 attempts) fires the same `alertHookFailure` flow, then leaves the row in place for manual retrigger.
+  - **Observability:** `/operations/pending-hooks` admin page lists in-flight + failed rows, with re-run / dismiss actions.
+  - **Migration path:** keep `runHookWithRecovery` working in parallel; convert hooks to outbox-style one at a time. Start with the 5 post-book-out hooks (highest blast radius), then sweep `setImmediate` callsites in the rest of the codebase.
+  - Pairs naturally with future patterns where reliable post-action work is needed (post-checkin emails, scheduled-job nudges, etc.). New `setImmediate` blocks become `enqueueHook(kind, payload)` one-liners.
+
+- **Server-startup hook recovery sweep (7 May 2026)** — belt-and-braces alternative to the full outbox above, specifically targeting the deploy-killed-in-flight case (which is probably the most common real-world trigger). On process boot, scan for assignments that look like they had post-book-out hooks die mid-flight: `status='booked_out' AND vehicle_id IS NOT NULL AND booked_out_at > NOW() - INTERVAL '24 hours' AND (hire_form_emailed_at IS NULL OR (return_overnight = TRUE AND ooh_info_sent_at IS NULL) OR pipeline_status NOT IN ('dispatched','returned_incomplete','returned','completed'))`. Re-fire whichever hook is still missing. Cheap because the existing hooks are already idempotent (so a re-fire on a healthy job is a no-op). Probably 1 hour of work; useful even after the outbox lands as a final safety net for the very-edge case where a hook fails on its 3rd retry attempt during shutdown. Not urgent given the retry + alert combo we just shipped.
+
 - **Dashboard polish (5 May 2026)** — small follow-ups from the Today dashboard redesign session, captured but not scheduled:
   - **Drag-to-reorder UI for sections.** Section registry already has `pinnable: true/false` per section, and `useSectionOrder()` reads/writes a localStorage array of section IDs. UI to actually let users drag sections around isn't built. When/if added, just bind it to `useSectionOrder().setOrder(newIds)`. `needs` is hard-pinned first regardless of order.
   - **Server-side persistence of section ordering.** Currently localStorage only — preference doesn't follow the user across browsers/devices. Add `dashboard_section_order TEXT[]` on `users`, then swap `useSectionOrder` to GET/PUT through `/api/users/me/preferences` with localStorage as fast-path fallback.
@@ -1930,7 +1951,11 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 - **HH job sync overwrites OP date columns but ignores OP time columns (29 Apr 2026)** — `hirehop-job-sync.ts:354` writes `OUT_DATE`/`JOB_DATE`/`JOB_END`/`RETURN_DATE` from HH directly into OP's TIMESTAMPTZ date columns, but does NOT touch the separate `out_time`/`return_time`/`end_time` TIME columns. So if you set `out_time=15:30` in OP and HH stored 09:00, after the next 30-min sync the date column has 09:00 baked in but `out_time` still says 15:30 — drift. Not blocking the duration-sync fix, but worth tidying. Two options: (a) parse the time portion out of HH's response and write it into the matching `*_time` column, or (b) stop sync touching the time portion of date columns (preserve OP's time; only update the date part). (b) is cleaner — OP becomes the source of truth for times once a job is created from OP. Pre-existing behaviour, flagged during the duration-fix investigation.
 
-- **Non-SDH book-out flow (27 Apr 2026)** — current Book Out path on Job Detail and the BookOutPage flow are designed around self-drive hires (driver fills hire form, van leaves with that driver). For Ooosh-driven hires (delivery / collection / van-and-driver where a freelancer or staff drives the van), the flow is different: no hire form needed for the *client*, no client signature, no client excess. Probably needs a `mode='ooosh_driven' | 'self_drive'` switch on the BookOutPage. Defer until self-drive flow is proven in live use. Until built, staff use the existing Crew & Transport / Operations Transport pages for D&C jobs.
+- **Non-SDH book-out — Van & Driver shipped May 2026 (Phase 1A); D&C / delivery / collection still TODO.** V&D flow (Ooosh supplies van AND a freelancer driver to the customer) is now live (PR #460). BookOutPage takes `?mode=van_and_driver` (Job Detail purple "🚐 Soft Book Out (V&D)" button) OR auto-detects from slot mode when entering via `?vehicle=X&job=Y` (Allocations page Book Out button) — every entry point Does The Right Thing™ without each one having to compose the URL. Step 2 swaps the customer hire-form picker for a freelancer picker reading the job's `quote_assignments` (no `is_ooosh_crew` filter — the standard "+ Assign" picker on a Crewed quote doesn't set that flag, so requiring it was hiding crew staff had clearly assigned; the flag still drives calculator billing semantics, just not picker visibility). Reuses the existing Vehicle Condition Report PDF + email exactly — sent to the freelancer instead of a customer. At submit, promotes the assignment row to `assignment_type='driven'` + `freelancer_person_id` via the existing `POST /api/assignments/:id/book-out` endpoint (extended with optional V&D fields — backwards-compat with self-drive callers). Skips the hire-form write-back + VE103B tracks (neither apply for V&D). The Job Detail card detection uses `assignment.assignment_type === 'driven'` OR matching `vehicle_slots[].mode === 'van_and_driver'` OR (job-level fallback) any slot is V&D and assignment is still self_drive — covers existing pre-V&D allocations that were created before the promotion path existed. `loadVehicleAssignments` filter widened to surface staff-allocation rows on V&D slots — they used to be filtered out as "plumbing" because in self-drive mode the customer hire form creates the visible card, but for V&D no hire form ever lands so the staff-allocation row IS the hire. `/api/hirehop/jobs/:jobId/derived-flags` widened to accept HH job number alongside OP UUID (staff allocations only carry `hirehop_job_id`; `job_id` stays NULL until a hire form is submitted, which never happens for V&D). New `GET /api/quotes/job/:jobId/ooosh-crew` returns DISTINCT crew on the job's quotes for the picker. **No DB migration needed** — `assignment_type='driven'` and `freelancer_person_id` already existed on `vehicle_hire_assignments` (migration 017). **D&C / delivery / collection still uses Crew & Transport ops flow** — the BookOutPage mode switch is positioned to extend to those when needed (the `assignment_type` enum values `delivery` and `collection` are already in the schema). **Phase 2 (freelancer-led V&D handover from the portal)** maps cleanly onto the existing freelancer-bookout JWT flow with this mode switch in place — should be a small follow-up.
+
+- **Book-out photo upload reliability for low-signal areas.** First IRL V&D book-out (job 15738, May 2026) reported "9 uploaded, 5 failed" on photo upload while the PDF correctly embedded all 14 photos — the PDF embed and R2 audit upload are two separate pipelines (PDF uses locally-resized base64s and always works; R2 upload depends on network). Net effect: PDF Alex received was a complete legal record, but the R2 audit trail is missing 5 photos and the "View full size" links in the PDF point at 404s for those 5. Most likely cause: 4/5G signal at a warehouse handover. Captured as a future hardening pass — possible levers: serialise uploads instead of parallelising (slower but more resilient on poor signal), add a "retry failed uploads" button on the success screen so staff can re-attempt without redoing the whole walkaround, pre-upload size warning if photos are particularly large, or treat R2 upload as fully background/queueable so it can complete after the user has left the page. Not pressing — happens rarely, doesn't compromise the PDF, and the workaround "leave it, the PDF is the legal record" is acceptable. Touches `frontend/src/modules/vehicles/lib/photo-upload.ts` (`uploadAllPhotos`) and the `pdfData` r2Url construction in `BookOutPage.tsx`.
+
+- **Non-SDH book-out — D&C / delivery / collection mode (Phase 1B).** V&D shipped May 2026 (see entry above); the same pattern can extend to delivery / collection / D&C book-outs (freelancer collects van from base → delivers to customer site, or the reverse on collection). The schema already supports `assignment_type` values of `delivery` and `collection`, and the BookOutPage mode switch is positioned to add these — the picker would still pull from the job's crew assignments, the PDF + email flow stays the same, and the only new wiring is the assignment_type promotion at submit time. Trigger from Crew & Transport ops cards / Allocations page when slot is non-self-drive non-V&D. Defer until V&D is proven in live use across more hires.
 
 - **Mid-hire breakdown swap UI (27 Apr 2026)** — `POST /api/assignments/:id/swap-vehicle` endpoint already exists (creates a new assignment for the replacement van, marks the original as `swapped`, copies excess across). What's missing is the UI: a "Mid-hire swap" button on Job Detail > Drivers & Vehicles that opens a modal to (a) pick replacement vehicle, (b) record swap reason, (c) trigger fresh hire agreement PDF email to the driver, (d) regenerate VE103B for the replacement if international. The `match-job-dates` and book-out in-flight swap shipped 27 Apr handle the simpler cases (date drift, last-minute van issue before book-out). Mid-hire breakdown is the rarer, higher-stakes case — needs its own scoped UI pass.
 
@@ -2217,6 +2242,87 @@ const hash = await bcrypt.hash(key, 12);
 ```
 
 The `key_prefix` should be the first 8 chars of the plaintext key (used as a fast lookup index — `verifyApiKey` matches on prefix, then bcrypt-compares the full key against each candidate's `key_hash`).
+
+### Post-Hook Recovery ✅ COMPLETE (7 May 2026)
+
+**File:** `backend/src/services/post-hook-recovery.ts`
+
+Hardening for the fire-and-forget `setImmediate` blocks that run after a route has already responded (post-PATCH side-effects: PDF generation, status writebacks, requirement syncs, email sends, etc.). Wrap the inner work with `runHookWithRecovery({...}, async () => { ... })` instead of bare try/catch.
+
+**What it does:**
+1. **Retry with exponential backoff** — 3 attempts at 1s / 4s / 16s. Catches transient DB pool exhaustion, network blips, momentary HH 429s.
+2. **Loud failure alert** — when retries are exhausted, writes a `notifications` row (priority=high, type=`system`) for every active admin/manager + emails `info@oooshtours.co.uk` with the hook label, job ref, error message, and a click-through to the job. Means a permanent failure is visible in minutes instead of "next time someone notices an email didn't arrive".
+
+**Idempotency contract:** every consumer hook MUST be safe to retry. Current consumers all have natural idempotency markers (`hire_form_emailed_at`, `ooh_info_sent_at`, "skip if HH already at target status" guards in auto-dispatch, forward-only requirement sync helpers). Any new hook wrapped with `runHookWithRecovery` must satisfy the same property — adding it to a non-idempotent operation will double-send / double-write.
+
+**Wired into:** the 5 post-book-out hooks in `routes/hire-forms.ts` PATCH handler — vehicle requirement sync, post-book-out requirement advance, hire form PDF + email, OOH info email, auto-dispatch. The 7 May 2026 RX72TKO incident lost all 5 simultaneously to a single Postgres connection timeout that coincided with a deploy restart; after this hardening, the same blip would have been retried + recovered automatically, or surfaced via bell + email if the retries also failed.
+
+**NOT a replacement for the eventual outbox pattern** (see "Future Enhancements" — outbox would survive server restarts and give full observability over pending work). This is the cheap fix that closes ~90% of the gap until that work is scheduled. New `setImmediate` blocks added to the codebase should use `runHookWithRecovery` until the outbox lands.
+
+**Usage:**
+```ts
+import { runHookWithRecovery } from '../services/post-hook-recovery';
+
+setImmediate(() => {
+  runHookWithRecovery(
+    {
+      hookLabel: 'Some background task',
+      jobId,                  // OP UUID — drives the action_url
+      hhJobNumber: hhJobId,   // human-readable in the alert title
+      assignmentId: id,       // optional — included in alert body
+    },
+    async () => {
+      // Do the actual work. Throw on failure.
+    }
+  ).catch((err) => {
+    console.error('[my-route] background task failed (after retries):', err);
+  });
+});
+```
+
+The outer `.catch` is for the post-alert rethrow — the alert has already fired by then, this is just for log visibility.
+
+### Vehicle Notification Recipients ✅ COMPLETE
+
+**File:** `backend/src/services/vehicle-notify.ts`
+
+Centralised recipient helper for vehicle-related alerts (insurance referrals, mid-tour drivers, fleet compliance — MOT/Tax/Insurance/TFL). Returns `{ to: 'info@oooshtours.co.uk', cc: ['will@oooshtours.co.uk'], bellUserIds: [<Will's UUID>] }` with 5-min in-process cache.
+
+**Why this exists:** Pre-May 2026, vehicle bell notifications fanned out to every active `role IN ('admin', 'manager')` user (~5 staff). High-priority bells escalating to email after 1h meant one referral generated 5+ emails to staff who don't look after vehicles. Most managers cover other areas of the business and shouldn't be in this loop. Hardcoded info@ + will@ for now (can move to env vars if recipients ever need to differ across environments).
+
+**Usage:**
+```typescript
+const { getVehicleNotificationTargets } = await import('../services/vehicle-notify');
+const targets = await getVehicleNotificationTargets();
+
+// Direct email
+await emailService.send('referral_alert', {
+  to: targets.to,        // info@
+  cc: targets.cc,        // will@
+  variables: { ... },
+});
+
+// Bell — only the vehicle manager. Set email_sent_at = NOW() if a direct
+// email was also sent, so notification-escalation doesn't double-fire.
+for (const userId of targets.bellUserIds) {
+  await query(
+    `INSERT INTO notifications (user_id, type, title, content, priority, email_sent_at, ...)
+     VALUES ($1, 'compliance', $2, $3, 'normal', NOW(), ...)`,
+    [userId, ...]
+  );
+}
+```
+
+**info@ as guaranteed fallback:** if Will's user record is missing or `is_active = false`, `bellUserIds` is empty (no bell fires) but emails still send. info@ never goes silent.
+
+**Wired into:**
+- `routes/driver-verification.ts` — referral bell when flag set mid-flow (no email here; the proper email fires from hire-forms.ts when the form is submitted)
+- `routes/hire-forms.ts` — `referral_alert` email + mid-tour driver bell + `mid_tour_driver` email
+- `services/compliance-checker.ts` — daily compliance bells + per-alert `compliance_reminder` email (added direct email path; previously relied on bell→escalation fanout for delivery)
+
+**Don't bypass:** any future vehicle alert path (e.g. issues register notifications, vehicle swap alerts, breakdown notifications) MUST use this helper rather than reverting to `WHERE role IN ('admin', 'manager')`. The legacy `vehicle_compliance_settings.notification_roles` setting is intentionally ignored — kept in the DB for backwards-compat reads but no longer drives recipients.
+
+**Escalation duplicate-prevention pattern:** when both a direct email AND a bell fire for the same event, set `email_sent_at = NOW()` on the bell INSERT. The 15-min escalation scheduler skips notifications where `email_sent_at IS NOT NULL`, so Will doesn't get the same content twice.
 
 ### Hire Date Resolution
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, Link, useLocation, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
@@ -1157,6 +1157,9 @@ export default function JobDetailPage() {
     derivation: {
       flags: {
         has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
+        vehicle_slots?: Array<{ item_id: number; slot_index: number; item_name: string; mode: 'self_drive' | 'van_and_driver' }>;
+        self_drive_count?: number;
+        van_and_driver_count?: number;
         seat_config: 'round_table' | 'forward_facing' | null;
         has_backline: boolean; backline_item_count: number;
         has_rehearsal: boolean; has_staging: boolean; has_pa: boolean; has_lighting: boolean; has_crew_items: boolean; crew_item_count: number;
@@ -1606,6 +1609,23 @@ export default function JobDetailPage() {
     }
   }, [id]);
 
+  // Re-run loadVehicleAssignments when V&D slot info arrives — the first
+  // fetch on page load races the HH sync that populates vehicle_slots, so
+  // V&D staff-allocation rows can be filtered out on the first pass and
+  // never re-evaluated. This second fetch picks them up once we know which
+  // slots are V&D. Cheap (one query) and idempotent — assignments rarely
+  // change between these two fetches.
+  const vandSlotSignature = useMemo(() => {
+    const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+    return slots.filter(s => s.mode === 'van_and_driver').map(s => s.slot_index).sort().join(',');
+  }, [hhSyncResult]);
+  useEffect(() => {
+    if (!id) return;
+    if (!vandSlotSignature) return;
+    loadVehicleAssignments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, vandSlotSignature]);
+
   async function loadRequirementsSummary() {
     if (!id) return;
     try {
@@ -1970,10 +1990,44 @@ export default function JobDetailPage() {
         }
       }
 
-      // Display rows: keep the existing shape — driver-bearing or
-      // freelancer-bearing assignments. Staff-allocation rows are plumbing
-      // and stay hidden from the cards.
-      const displayRows = allRows.filter((r: any) => r.driver_id || r.freelancer_person_id);
+      // Slot-mode lookup for V&D detection. Staff-allocation rows on V&D
+      // slots have no customer driver (and no freelancer attached until
+      // soft-book-out), but they ARE the hire — so we surface them as
+      // cards. Without this, V&D-mode jobs render "No vehicle assignments
+      // yet" forever even after vans are allocated.
+      const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+      const slotModeByIndex = new Map<number, 'self_drive' | 'van_and_driver'>();
+      for (const s of slots) {
+        slotModeByIndex.set(s.slot_index, s.mode);
+      }
+      const anySlotIsVand = slots.some(s => s.mode === 'van_and_driver');
+
+      // Track which slot indexes already have a human-bearing row, so we
+      // don't double up by surfacing the staff-allocation sibling on
+      // self-drive jobs that already have a hire-form-driven card.
+      const slotsWithHuman = new Set<number>();
+      for (const r of allRows) {
+        if (r.driver_id || r.freelancer_person_id) {
+          slotsWithHuman.add(r.van_requirement_index ?? 0);
+        }
+      }
+
+      // Display rows: hire-form / freelancer rows always show. Staff-allocation
+      // rows surface only when they sit on a V&D slot and have no human
+      // sibling — that's the V&D case where the freelancer gets attached at
+      // soft-book-out. Self-drive plumbing stays hidden as before.
+      const displayRows = allRows.filter((r: any) => {
+        if (r.driver_id || r.freelancer_person_id) return true;
+        const idx = r.van_requirement_index ?? 0;
+        if (slotsWithHuman.has(idx)) return false;
+        const slotMode = slotModeByIndex.get(idx);
+        if (slotMode === 'van_and_driver') return true;
+        // Coarse fallback for jobs where the per-slot map isn't fully
+        // populated but the job has at least one V&D slot — still safer
+        // than hiding the only row that exists.
+        if (anySlotIsVand && r.assignment_type === 'self_drive') return true;
+        return false;
+      });
 
       const shaped: VehicleAssignment[] = displayRows.map((r: any) => {
         const idx = r.van_requirement_index ?? 0;
@@ -3281,7 +3335,7 @@ export default function JobDetailPage() {
             key={prepChecklistKey}
             jobId={id || ''}
             hhJobNumber={job.hh_job_number}
-            jobStatus={job.status}
+            pipelineStatus={job.pipeline_status}
             derivedFlags={hhSyncResult?.derivation?.flags || null}
             seatAvailability={hhSyncResult?.derivation?.seatAvailability || null}
             hasCrewQuotes={quotes.some(q => (q.job_type === 'crewed' || (q.assignments && q.assignments.length > 0)) && q.status !== 'cancelled')}
@@ -3650,7 +3704,71 @@ export default function JobDetailPage() {
                           BookOutPage's PATCH then writes vehicle_id to this
                           row at submission, retroactively cementing the
                           link. */}
+                      {/* Soft Book Out for Van & Driver mode (Ooosh-supplied driver, no
+                          customer hire form). Detection: assignment is already 'driven'
+                          (post-promotion), OR matching vehicle slot is in V&D mode, OR
+                          the job has V&D slots and this assignment isn't yet booked-out
+                          self-drive. Routes to BookOutPage with ?mode=van_and_driver. */}
+                      {(() => {
+                        const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+                        const matchedSlot = slots.find(s => s.slot_index === (a.van_requirement_index ?? 0));
+                        const slotIsVand = matchedSlot?.mode === 'van_and_driver';
+                        const anySlotIsVand = slots.some(s => s.mode === 'van_and_driver');
+                        const isVandAssignment =
+                          a.assignment_type === 'driven' ||
+                          slotIsVand ||
+                          // No matched slot but job has V&D slots somewhere — coarse
+                          // signal that helps when slot indexing doesn't line up cleanly
+                          // (legacy job-level toggle, sparse vehicle_slots, etc.)
+                          (anySlotIsVand && a.assignment_type === 'self_drive');
+                        if (!isVandAssignment) return null;
+                        const hhJobNum = job.hh_job_number;
+                        const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm font-medium';
+                        const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
+                        if (a.status === 'soft' || a.status === 'confirmed') {
+                          if (!effectiveVehicleId) {
+                            return (
+                              <Link
+                                to={`/vehicles/allocations${hhJobNum ? `?job=${hhJobNum}` : ''}`}
+                                className={baseClass}
+                                title="Pick a van for this Van & Driver hire on the Allocations page"
+                              >
+                                🚐 Allocate Van
+                              </Link>
+                            );
+                          }
+                          return (
+                            <Link
+                              to={`/vehicles/book-out?vehicle=${effectiveVehicleId}${hhJobNum ? `&job=${hhJobNum}` : ''}&mode=van_and_driver&assignment=${a.id}`}
+                              className={baseClass}
+                              title="Soft book-out: walkaround + photos + signature for the Ooosh-supplied freelancer driver. No customer hire form."
+                            >
+                              🚐 Soft Book Out (V&amp;D)
+                            </Link>
+                          );
+                        }
+                        if ((a.status === 'booked_out' || a.status === 'active') && effectiveVehicleId) {
+                          return (
+                            <Link
+                              to={`/vehicles/check-in?vehicle=${effectiveVehicleId}`}
+                              className={baseClass}
+                              title="Return walkaround, mileage, damage check"
+                            >
+                              ↩️ Check In
+                            </Link>
+                          );
+                        }
+                        return null;
+                      })()}
+
                       {a.assignment_type === 'self_drive' && (() => {
+                        // If the matching slot is in V&D mode the V&D button above
+                        // owns this card — hide the customer self-drive button to
+                        // keep the UX unambiguous (one path per slot mode).
+                        const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+                        const matchedSlot = slots.find(s => s.slot_index === (a.van_requirement_index ?? 0));
+                        if (matchedSlot?.mode === 'van_and_driver') return null;
+                        if (slots.length > 0 && slots.every(s => s.mode === 'van_and_driver')) return null;
                         const hhJobNum = job.hh_job_number;
                         const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium';
                         const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
@@ -5254,10 +5372,10 @@ function OverviewFinancialStrip({ jobId }: { jobId: string }) {
 }
 
 
-function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
+function JobPrepChecklist({ jobId, hhJobNumber, pipelineStatus, derivedFlags, seatAvailability, hasCrewQuotes, hasCrewOnHH, onOpenCrewCalculator }: {
   jobId: string;
   hhJobNumber?: number | null;
-  jobStatus?: number;
+  pipelineStatus?: string | null;
   derivedFlags?: {
     has_vehicle: boolean; vehicle_count: number; vehicle_types: string[];
     vehicle_slots?: Array<{ item_id: number; slot_index: number; item_name: string; mode: 'self_drive' | 'van_and_driver' }>;
@@ -5292,12 +5410,17 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
   const effectiveFlags = localFlags || derivedFlags;
   // Phase initial value: prefer ?phase= query param (so inbox links land on
   // the toggle that actually contains the requirement they're chasing), else
-  // default to post_hire for dispatched+ jobs (status 4+), else pre_hire.
+  // default to post_hire only once OP says the job has actually left
+  // (pipeline_status = dispatched or beyond). HH jumps to status 4/5 the
+  // moment items get checked out, but OP holds at 'prepped' until staff
+  // explicitly mark dispatched — staying on Pre-Hire until then avoids the
+  // trap of staff seeing two backline cards and ticking the wrong one.
   const phaseParam = new URLSearchParams(window.location.search).get('phase');
+  const POST_HIRE_PIPELINE_STATUSES = ['dispatched', 'returned_incomplete', 'returned', 'completed', 'cancelled'];
   const initialPhase: 'pre_hire' | 'post_hire' =
     phaseParam === 'pre_hire' || phaseParam === 'post_hire'
       ? phaseParam
-      : (jobStatus && jobStatus >= 4) ? 'post_hire' : 'pre_hire';
+      : (pipelineStatus && POST_HIRE_PIPELINE_STATUSES.includes(pipelineStatus)) ? 'post_hire' : 'pre_hire';
   const [phase, setPhase] = useState<'pre_hire' | 'post_hire'>(initialPhase);
   const addMenuRef = useRef<HTMLDivElement>(null);
 
@@ -5495,9 +5618,15 @@ function JobPrepChecklist({ jobId, hhJobNumber, jobStatus, derivedFlags, seatAva
     }
   }
 
-  const doneCount = requirements.filter(r => r.status === 'done').length;
-  const blockedCount = requirements.filter(r => r.status === 'blocked').length;
-  const totalCount = requirements.length;
+  // VD-suspended requirements (hire forms / excess auto-suspended when every
+  // van slot is Van & Driver) are listed below as greyed "Not required" stubs
+  // but shouldn't move the progress meter or count as "blocked" — they're
+  // not a problem, they just don't apply on this job.
+  const isVdSuspended = (r: JobRequirement) => r.notes?.includes('[Suspended: Van & Driver]') === true;
+  const countableReqs = requirements.filter(r => !isVdSuspended(r));
+  const doneCount = countableReqs.filter(r => r.status === 'done').length;
+  const blockedCount = countableReqs.filter(r => r.status === 'blocked').length;
+  const totalCount = countableReqs.length;
   const progressPct = totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0;
 
   const availableTypes = types.filter(t => t.type === 'custom' || !requirements.some(r => r.requirement_type === t.type));

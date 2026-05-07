@@ -78,6 +78,19 @@ export function BookOutPage() {
   const [searchParams] = useSearchParams()
   const { scope, freelancerContext } = useAuth()
   const isFreelancer = scope === 'freelancer'
+  // Van & Driver soft book-out: Ooosh supplies the driver (one of our
+  // freelancers) — no customer hire form, no customer signature, no customer
+  // excess. The assignment row gets promoted to assignment_type='driven' at
+  // submit time and the freelancer is recorded via freelancer_person_id.
+  const explicitVand = searchParams.get('mode') === 'van_and_driver'
+  const vandAssignmentParam = searchParams.get('assignment')
+  // Auto-detected V&D — set once we've matched the vehicle+job to an
+  // assignment whose slot is in van_and_driver mode. Lets the AllocationsPage
+  // Book Out button (which doesn't pass `mode=`) still land users in the
+  // right flow without each entry point having to compose the URL itself.
+  const [autoVand, setAutoVand] = useState(false)
+  const [autoVandAssignmentId, setAutoVandAssignmentId] = useState<string | null>(null)
+  const isVanAndDriver = explicitVand || autoVand
   const { data: allVehicles, isLoading: vehiclesLoading } = useVehicles()
   const { data: settings } = useSettings()
   const [step, setStep] = useState(0)
@@ -203,6 +216,80 @@ export function BookOutPage() {
     () => (allVehicles || []).filter(v => !v.isOldSold),
     [allVehicles],
   )
+
+  // V&D mode: seed mode + assignment ID into form state once V&D is
+  // confirmed (either via URL ?mode= or via auto-detect from slot data).
+  // The picker logic in StepDriverHire then loads the job's Ooosh crew
+  // for the freelancer picker.
+  const vandSeededRef = useRef(false)
+  useEffect(() => {
+    if (!isVanAndDriver) return
+    if (vandSeededRef.current) return
+    vandSeededRef.current = true
+    setForm(f => ({
+      ...f,
+      mode: 'van_and_driver',
+      vandAssignmentId: vandAssignmentParam || autoVandAssignmentId || null,
+    }))
+  }, [isVanAndDriver, vandAssignmentParam, autoVandAssignmentId])
+
+  // Keep form.vandAssignmentId in sync if auto-detect resolves an assignment
+  // ID after the initial seed (e.g. derived-flags fetch finishes after the
+  // form has already been seeded with no assignment ID).
+  useEffect(() => {
+    if (!autoVandAssignmentId) return
+    setForm(f => (f.vandAssignmentId ? f : { ...f, vandAssignmentId: autoVandAssignmentId }))
+  }, [autoVandAssignmentId])
+
+  // V&D auto-detect: when the URL doesn't explicitly say `mode=van_and_driver`
+  // (e.g. coming from the Allocations page's Book Out link), check whether
+  // the vehicle's slot on this job is in V&D mode. If so, switch to V&D
+  // automatically. Self-drive jobs incur one extra fetch on entry, results
+  // discarded — acceptable cost for "every entry point does the right thing".
+  const vandDetectRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (explicitVand) return  // URL forced it — nothing to detect
+    if (autoVand) return       // Already detected
+    const veh = searchParams.get('vehicle')
+    const job = searchParams.get('job')
+    if (!veh || !job) return
+    const key = `${veh}|${job}`
+    if (vandDetectRef.current === key) return
+    vandDetectRef.current = key
+    ;(async () => {
+      try {
+        // Fetch assignments for this HH job — staff-allocation rows from the
+        // Allocations page only have hirehop_job_id set (job_id is NULL until
+        // a hire form is submitted). For V&D jobs there's never a hire form,
+        // so we look up via HH number and use it for the derived-flags
+        // fetch when job_id is NULL.
+        const assignResp = await apiFetch(`/api/assignments?hirehop_job_id=${encodeURIComponent(job)}`)
+        if (!assignResp.ok) return
+        const assignBody = await assignResp.json().catch(() => ({}))
+        const rows = (assignBody.data as Array<{ id: string; vehicle_id: string | null; van_requirement_index: number | null; job_id: string | null; hirehop_job_id: number | null }>) || []
+        const match = rows.find(r => r.vehicle_id === veh)
+        if (!match) return
+        // Prefer OP UUID if we have it; fall back to the HH number which
+        // the derived-flags endpoint also accepts.
+        const flagsLookupId = match.job_id || (match.hirehop_job_id ? String(match.hirehop_job_id) : job)
+        const flagsResp = await apiFetch(`/api/hirehop/jobs/${encodeURIComponent(flagsLookupId)}/derived-flags`)
+        if (!flagsResp.ok) return
+        const flagsBody = await flagsResp.json().catch(() => ({}))
+        const slots = (flagsBody?.flags?.vehicle_slots as Array<{ slot_index: number; mode: 'self_drive' | 'van_and_driver' }>) || []
+        const slot = slots.find(s => s.slot_index === (match.van_requirement_index ?? 0))
+        const slotIsVand = slot?.mode === 'van_and_driver'
+        const allSlotsVand = slots.length > 0 && slots.every(s => s.mode === 'van_and_driver')
+        if (slotIsVand || allSlotsVand) {
+          setAutoVand(true)
+          setAutoVandAssignmentId(match.id)
+        }
+      } catch (err) {
+        // Detection failure is non-fatal — page just stays in self-drive
+        // mode. URL ?mode=van_and_driver still forces V&D regardless.
+        console.warn('[book-out] V&D auto-detect failed:', err)
+      }
+    })()
+  }, [explicitVand, autoVand, searchParams])
 
   // Pre-select vehicle if coming from vehicle detail page or allocations
   const preSelectedId = searchParams.get('vehicle')
@@ -411,6 +498,12 @@ export function BookOutPage() {
       case 'Select Vehicle':
         return !!form.vehicleId
       case 'Driver & Hire':
+        // V&D soft book-out: no customer hire form needed — Ooosh supplies
+        // the freelancer driver. Just needs the freelancer picked (driverName
+        // populated from the picker).
+        if (isVanAndDriver) {
+          return form.driverName.trim().length > 0
+        }
         // Freelancer mode: must have at least one customer hire form on
         // file before we let the freelancer hand the van over. The hire
         // agreement comes from the customer's hire-form submission, not
@@ -790,7 +883,9 @@ export function BookOutPage() {
 
     // Track: Hire form write-back (independent)
     // VE103B ref is only written to the LEAD driver's entry (the one being booked out)
+    // V&D soft book-out: skipped — no customer hire form to write back to.
     const writeBackTrack = (async () => {
+      if (isVanAndDriver) return []
       const hireFormEntries = form.hireFormEntries || []
       if (hireFormEntries.length === 0) return []
       let writeBackOk = 0
@@ -829,7 +924,9 @@ export function BookOutPage() {
     })()
 
     // Track: VE103B certificate generation (independent, only if cert number entered)
+    // V&D soft book-out: skipped — no VE103B for non-customer hires.
     const ve103bTrack = (async () => {
+      if (isVanAndDriver) return []
       if (!form.ve103b || !form.hireFormEntries || form.hireFormEntries.length === 0) return []
       // Find the lead driver's assignment ID
       const leadEntry = form.hireFormEntries.find(e => e.driverName === form.driverName)
@@ -866,14 +963,67 @@ export function BookOutPage() {
       }
     })()
 
+    // Track: V&D assignment promotion + book-out state transition
+    // (independent, only fires in van_and_driver mode). Promotes the
+    // assignment to assignment_type='driven', records the freelancer person
+    // ID, and flips status to 'booked_out' with mileage/fuel.
+    const vandPromotionTrack = (async () => {
+      if (!isVanAndDriver) return []
+      if (!form.vandAssignmentId) {
+        return [{
+          label: 'V&D assignment promotion',
+          success: false,
+          detail: 'Missing assignment ID — open V&D book-out from the Job Detail card',
+        }]
+      }
+      try {
+        const response = await apiFetch(`/api/assignments/${form.vandAssignmentId}/book-out`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mileage_out: isNaN(mileageNum) ? 0 : mileageNum,
+            fuel_level_out: form.fuelLevel || 'unknown',
+            assignment_type: 'driven',
+            freelancer_person_id: form.vandFreelancerPersonId || null,
+            hire_start: form.hireStartDate || null,
+            hire_end: form.hireEndDate || null,
+            start_time: form.hireStartTime || null,
+            end_time: form.hireEndTime || null,
+          }),
+        })
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}))
+          return [{
+            label: 'V&D assignment booked out',
+            success: false,
+            detail: err.error || err.message || `Failed (${response.status})`,
+          }]
+        }
+        const data = await response.json().catch(() => ({}))
+        const warnings = (data.warnings as string[] | undefined) || []
+        return [{
+          label: 'V&D assignment booked out',
+          success: true,
+          detail: warnings.length > 0 ? `Warnings: ${warnings.join('; ')}` : 'Assignment promoted to driven, status=booked_out',
+        }]
+      } catch (e) {
+        return [{
+          label: 'V&D assignment booked out',
+          success: false,
+          detail: e instanceof Error ? e.message : 'Network error',
+        }]
+      }
+    })()
+
     // Wait for all parallel tracks to complete
-    const [pdfEmailResults, allocResults, wbResults, ve103bResults] = await Promise.all([
+    const [pdfEmailResults, allocResults, wbResults, ve103bResults, vandResults] = await Promise.all([
       pdfEmailTrack,
       allocationTrack,
       writeBackTrack,
       ve103bTrack,
+      vandPromotionTrack,
     ])
-    results.push(...pdfEmailResults, ...allocResults, ...wbResults, ...ve103bResults)
+    results.push(...pdfEmailResults, ...allocResults, ...wbResults, ...ve103bResults, ...vandResults)
 
     setOpResults(results)
     setUploadProgress(null)
@@ -1254,7 +1404,7 @@ export function BookOutPage() {
         )}
 
         {STEPS[step] === 'Driver & Hire' && (
-          <StepDriverHire form={form} onUpdate={updateForm} isFreelancer={isFreelancer} />
+          <StepDriverHire form={form} onUpdate={updateForm} isFreelancer={isFreelancer} isVanAndDriver={isVanAndDriver} />
         )}
 
         {STEPS[step] === 'Vehicle State' && (
@@ -1492,10 +1642,12 @@ function StepDriverHire({
   form,
   onUpdate,
   isFreelancer,
+  isVanAndDriver,
 }: {
   form: BookOutFormState
   onUpdate: <K extends keyof BookOutFormState>(key: K, value: BookOutFormState[K]) => void
   isFreelancer: boolean
+  isVanAndDriver: boolean
 }) {
   const [showJobPicker, setShowJobPicker] = useState(false)
   const [localJobNum, setLocalJobNum] = useState(form.hireHopJob)
@@ -1531,8 +1683,12 @@ function StepDriverHire({
   // We need this so the customer's hire form data flows onto the
   // condition-report PDF + email and the post-book-out write-back +
   // hire-agreement PDF chain can fire.
+  //
+  // V&D soft book-out: skipped — no customer hire form exists for these
+  // hires (Ooosh supplies the driver). The freelancer picker below replaces
+  // the customer driver selection.
   const { data: hireForms, isLoading: hireFormsLoading } = useDriverHireForms(
-    form.hireHopJob || null,
+    isVanAndDriver ? null : (form.hireHopJob || null),
   )
 
   // Find allocation for this vehicle + selected job
@@ -1796,15 +1952,20 @@ function StepDriverHire({
         )}
       </div>
 
-      {/* Driver selection — hire form based, no manual entry */}
-      <DriverSelection
-        form={form}
-        hireForms={hireForms || null}
-        hireFormsLoading={hireFormsLoading}
-        onSelectDriver={handleSelectDriver}
-        onUpdate={onUpdate}
-        isFreelancer={isFreelancer}
-      />
+      {/* Driver selection — hire form based for self-drive, freelancer
+          picker for Van & Driver soft book-out. */}
+      {isVanAndDriver ? (
+        <VandDriverPicker form={form} onUpdate={onUpdate} />
+      ) : (
+        <DriverSelection
+          form={form}
+          hireForms={hireForms || null}
+          hireFormsLoading={hireFormsLoading}
+          onSelectDriver={handleSelectDriver}
+          onUpdate={onUpdate}
+          isFreelancer={isFreelancer}
+        />
+      )}
 
       {/* Hire form fields — editable, auto-populated from the linked hire form */}
       {form.hireHopJob && (
@@ -1894,6 +2055,216 @@ function StepDriverHire({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/* ──────────────────────────────────────────────
+ * Van & Driver picker sub-component
+ *
+ * Used in soft book-out mode for jobs where Ooosh supplies the freelancer
+ * driver (no customer hire form). Defaults to crew already assigned on the
+ * job's quote_assignments where is_ooosh_crew=true; falls back to a free-text
+ * driver name + email entry when no crew is assigned (or staff want to
+ * override). On selection, populates form.driverName + form.clientEmail
+ * (used as the condition-report PDF email recipient) + form.vandFreelancerPersonId
+ * (PATCHed onto the assignment row at submit time).
+ * ────────────────────────────────────────────── */
+
+interface OooshCrewMember {
+  person_id: string
+  first_name: string | null
+  last_name: string | null
+  email: string | null
+  mobile: string | null
+  is_freelancer: boolean
+  is_approved: boolean
+  role: string | null
+}
+
+function VandDriverPicker({
+  form,
+  onUpdate,
+}: {
+  form: BookOutFormState
+  onUpdate: <K extends keyof BookOutFormState>(key: K, value: BookOutFormState[K]) => void
+}) {
+  const [crew, setCrew] = useState<OooshCrewMember[] | null>(null)
+  const [loadingCrew, setLoadingCrew] = useState(false)
+  const [crewError, setCrewError] = useState<string | null>(null)
+  const [showOverride, setShowOverride] = useState(false)
+  const fetchedJobRef = useRef<string | null>(null)
+
+  // Fetch Ooosh crew assigned on this job once a HireHop job number is set
+  useEffect(() => {
+    if (!form.hireHopJob) return
+    if (fetchedJobRef.current === form.hireHopJob) return
+    fetchedJobRef.current = form.hireHopJob
+    setLoadingCrew(true)
+    setCrewError(null)
+    apiFetch(`/api/quotes/job/${form.hireHopJob}/ooosh-crew`)
+      .then(async r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const json = await r.json()
+        setCrew((json.data as OooshCrewMember[]) || [])
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to load crew'
+        console.warn('[V&D picker] Failed to load crew:', msg)
+        setCrewError(msg)
+        setCrew([])
+      })
+      .finally(() => setLoadingCrew(false))
+  }, [form.hireHopJob])
+
+  function selectCrewMember(c: OooshCrewMember) {
+    const fullName = [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || 'Freelancer'
+    onUpdate('driverName', fullName)
+    onUpdate('clientEmail', c.email || '')
+    onUpdate('vandFreelancerPersonId', c.person_id)
+    onUpdate('allDrivers', [fullName])
+    setShowOverride(false)
+  }
+
+  function clearSelection() {
+    onUpdate('driverName', '')
+    onUpdate('clientEmail', '')
+    onUpdate('vandFreelancerPersonId', null)
+    onUpdate('allDrivers', undefined)
+  }
+
+  if (!form.hireHopJob) {
+    return (
+      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-center">
+        <p className="text-sm text-amber-800">Select a HireHop job above to load Ooosh crew</p>
+      </div>
+    )
+  }
+
+  if (loadingCrew) {
+    return (
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center">
+        <div className="mx-auto mb-2 h-5 w-5 animate-spin rounded-full border-2 border-gray-300 border-t-ooosh-navy" />
+        <p className="text-xs text-gray-500">Loading Ooosh crew on this job...</p>
+      </div>
+    )
+  }
+
+  const hasCrew = (crew?.length ?? 0) > 0
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="mb-1.5 block text-sm font-medium text-gray-700">
+          Freelancer driving (Van &amp; Driver) <span className="text-red-500">*</span>
+        </label>
+
+        {hasCrew && !showOverride && (
+          <div className="space-y-1.5">
+            {(crew || []).map(c => {
+              const fullName = [c.first_name, c.last_name].filter(Boolean).join(' ').trim() || 'Freelancer'
+              const isSelected = form.vandFreelancerPersonId === c.person_id
+              return (
+                <button
+                  key={c.person_id}
+                  type="button"
+                  onClick={() => selectCrewMember(c)}
+                  className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
+                    isSelected
+                      ? 'border-green-400 bg-green-50 font-medium text-green-800 ring-1 ring-green-400'
+                      : 'border-gray-200 bg-white text-gray-700 active:bg-gray-50'
+                  }`}
+                >
+                  <div>
+                    <span>{fullName}</span>
+                    {c.role && <span className="ml-2 text-xs text-gray-400">({c.role})</span>}
+                    {c.email && <span className="ml-2 text-xs text-gray-400">{c.email}</span>}
+                  </div>
+                  {isSelected && (
+                    <svg className="h-5 w-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        )}
+
+        {!hasCrew && !showOverride && (
+          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-center">
+            <p className="mb-1.5 text-sm text-gray-600">No Ooosh crew assigned on this job yet</p>
+            {crewError && (
+              <p className="mb-2 text-xs text-red-600">Error: {crewError}</p>
+            )}
+            <p className="text-xs text-gray-500">Add a freelancer manually or assign crew first via Crew &amp; Transport</p>
+          </div>
+        )}
+
+        {/* Override link — picks any freelancer, free-text fallback */}
+        {!showOverride ? (
+          <button
+            type="button"
+            onClick={() => setShowOverride(true)}
+            className="mt-2 text-xs text-ooosh-navy underline"
+          >
+            {hasCrew ? '+ Different freelancer' : '+ Add freelancer manually'}
+          </button>
+        ) : (
+          <div className="mt-2 space-y-2 rounded-lg border border-gray-200 bg-white p-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">Freelancer name</label>
+              <input
+                type="text"
+                value={form.driverName}
+                onChange={e => onUpdate('driverName', e.target.value)}
+                placeholder="Full name"
+                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">
+                Email <span className="text-gray-400">(for condition report)</span>
+              </label>
+              <input
+                type="email"
+                value={form.clientEmail}
+                onChange={e => onUpdate('clientEmail', e.target.value)}
+                placeholder="freelancer@example.com"
+                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <button
+                type="button"
+                onClick={() => setShowOverride(false)}
+                className="text-xs text-gray-500 underline"
+              >
+                Cancel
+              </button>
+              {(form.driverName || form.clientEmail) && (
+                <button
+                  type="button"
+                  onClick={() => { clearSelection(); setShowOverride(false); }}
+                  className="text-xs text-red-600 underline"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {form.driverName && (
+          <div className="mt-2 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">
+            <strong>{form.driverName}</strong>
+            {form.clientEmail && <span className="ml-1">— {form.clientEmail}</span>}
+            <p className="mt-1 text-xs text-blue-700">
+              Condition report PDF will be emailed to the freelancer. No customer hire form needed for Van &amp; Driver hires.
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
