@@ -86,6 +86,7 @@ export function attachmentsForPayload(items: PendingAttachment[]) {
 export function AttachmentImage({ att }: { att: InteractionAttachment }) {
   const [src, setSrc] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  const [lightbox, setLightbox] = useState(false);
 
   useEffect(() => {
     let revoked: string | null = null;
@@ -108,6 +109,16 @@ export function AttachmentImage({ att }: { att: InteractionAttachment }) {
     };
   }, [att]);
 
+  // Escape closes the lightbox.
+  useEffect(() => {
+    if (!lightbox) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setLightbox(false);
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [lightbox]);
+
   if (error) {
     return (
       <div className="border border-gray-200 rounded p-2 text-xs text-gray-400 bg-gray-50">
@@ -122,19 +133,59 @@ export function AttachmentImage({ att }: { att: InteractionAttachment }) {
       </div>
     );
   }
+  // Click → in-page lightbox using the SAME blob URL we already have.
+  // The previous link-out went to /api/files/download which requires JWT
+  // headers and 401s when opened directly in a new tab.
   return (
-    <a
-      href={`/api/files/download?key=${encodeURIComponent(attachmentKey(att) || '')}`}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline-block"
-    >
-      <img
-        src={src}
-        alt={att.filename || att.name || 'attachment'}
-        className="max-w-[240px] max-h-[180px] rounded border border-gray-200 object-cover hover:opacity-90 transition-opacity"
-      />
-    </a>
+    <>
+      <button
+        type="button"
+        onClick={() => setLightbox(true)}
+        className="inline-block p-0 border-0 bg-transparent cursor-zoom-in"
+        title={att.filename || att.name || 'attachment'}
+      >
+        <img
+          src={src}
+          alt={att.filename || att.name || 'attachment'}
+          className="max-w-[240px] max-h-[180px] rounded border border-gray-200 object-cover hover:opacity-90 transition-opacity"
+        />
+      </button>
+
+      {lightbox && (
+        <div
+          className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 cursor-zoom-out"
+          onClick={() => setLightbox(false)}
+        >
+          <div className="relative max-w-[95vw] max-h-[95vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <img
+              src={src}
+              alt={att.filename || att.name || 'attachment'}
+              className="max-w-[95vw] max-h-[88vh] rounded shadow-2xl object-contain bg-white"
+            />
+            <div className="flex items-center justify-between mt-2 px-2">
+              <span className="text-white text-xs truncate">{att.filename || att.name || 'attachment'}</span>
+              <div className="flex items-center gap-2">
+                <a
+                  href={src}
+                  download={att.filename || att.name || 'attachment'}
+                  className="text-white text-xs px-2 py-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
+                >
+                  Download
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setLightbox(false)}
+                  className="text-white text-xs px-2 py-1 rounded bg-white/10 hover:bg-white/20 transition-colors"
+                  title="Close (Esc)"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -144,17 +195,55 @@ export function AttachmentPill({ att }: { att: InteractionAttachment }) {
   const sizeLabel = typeof att.size_bytes === 'number'
     ? ` · ${(att.size_bytes / 1024).toFixed(0)} KB`
     : '';
+  const [downloading, setDownloading] = useState(false);
+
+  // Click → authenticated blob fetch → trigger download / preview in a new
+  // tab. We can't link directly to /api/files/download because the
+  // download endpoint requires the JWT in the Authorization header, which
+  // browsers don't attach to ordinary <a target=_blank> navigations.
+  // Same pattern as FileUpload / DriverDetailPage.
+  async function handleClick(e: React.MouseEvent) {
+    e.preventDefault();
+    if (!key || downloading) return;
+    setDownloading(true);
+    try {
+      const { blob, contentType } = await api.blob(`/files/download?key=${encodeURIComponent(key)}`);
+      const url = URL.createObjectURL(blob);
+      // PDFs + plain text we open in a new tab (preview); everything else
+      // we trigger as a download with the proper filename.
+      const previewTypes = ['application/pdf', 'text/plain'];
+      if (previewTypes.includes(contentType)) {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      } else {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+      // Revoke after a short delay so the new tab / download has time to
+      // grab the bytes.
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    } catch (err) {
+      console.error('Attachment download failed:', err);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   return (
-    <a
-      href={key ? `/api/files/download?key=${encodeURIComponent(key)}` : '#'}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-gray-200 bg-white text-xs text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-colors"
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={!key || downloading}
+      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-gray-200 bg-white text-xs text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-colors disabled:opacity-50"
     >
       <span className="text-gray-400">📎</span>
       <span className="font-medium">{name}</span>
       <span className="text-gray-400">{sizeLabel}</span>
-    </a>
+      {downloading && <span className="text-[10px] text-gray-400">…</span>}
+    </button>
   );
 }
 
