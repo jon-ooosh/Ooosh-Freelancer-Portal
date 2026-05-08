@@ -4,8 +4,16 @@
  * Reads from job_requirements (type='backline') + jobs table + hh_derived_flags
  * to produce a warehouse-friendly overview of what needs prepping and de-prepping.
  *
- * Uses HireHop status (jobs.status integer) as primary filter since OP pipeline_status
- * can lag behind HH — many jobs are confirmed in HH but still show as enquiry in OP.
+ * "Operational" = jobs that are actually booked and warehouse-relevant. This means
+ * HH status 2/3/4 (Booked/Prepped/Part Dispatched), or HH 5 + OP pipeline_status =
+ * 'prepped' (the "physically prepped, in the yard, waiting for staff to click Mark
+ * as Dispatched" state). Provisional + Enquiry are EXCLUDED from operational views
+ * because no warehouse work should happen until a hire is actually booked.
+ *
+ * Heads-up planning views: callers can opt in to seeing provisional and/or enquiry
+ * jobs via ?include_provisional=true and/or ?include_enquiry=true. These come back
+ * in a separate `unconfirmed` block so warehouse staff can input on capacity without
+ * mixing speculative work into the headline stats.
  */
 
 import { Router, Response } from 'express';
@@ -18,22 +26,40 @@ router.use(authorize(...STAFF_ROLES));
 
 // HH statuses: 0=Enquiry, 1=Provisional, 2=Booked, 3=Prepped, 4=Part Dispatched (Prepping),
 //              5=Dispatched, 6=Returned Incomplete, 7=Returned, 8=Requires Attention, 11=Completed
-// For "going out" we want: Provisional(1), Booked(2), Prepped(3), Part Dispatched(4), Dispatched(5)
-// For "coming back" we want: Dispatched(5), Returned Incomplete(6), Returned(7), Requires Attention(8)
+
+// Operational rule for "going out" — drives the headline stats and per-job lists.
+// Booked / Prepped / Part Dispatched, OR HH 5 + OP held at 'prepped'. Excludes
+// provisional + enquiry (those route through the heads-up planning queries).
+const OPERATIONAL_GOING_OUT_SQL = `
+  (j.status IN (2, 3, 4) OR (j.status = 5 AND j.pipeline_status = 'prepped'))
+  AND j.pipeline_status NOT IN ('lost', 'cancelled')
+`;
+
+// Provisional planning bucket — pipeline_status = 'provisional' (deposit pending)
+// or HH 1, with a backline requirement and a future-or-recent date.
+const PROVISIONAL_GOING_OUT_SQL = `
+  (j.status = 1 OR j.pipeline_status = 'provisional')
+  AND j.pipeline_status NOT IN ('lost', 'cancelled')
+`;
+
+// Enquiry planning bucket — pre-provisional pipeline stages, HH still at Enquiry.
+const ENQUIRY_GOING_OUT_SQL = `
+  (j.status = 0 OR j.pipeline_status IN ('new_enquiry', 'quoting', 'paused'))
+  AND j.pipeline_status NOT IN ('lost', 'cancelled', 'provisional')
+`;
 
 router.get('/overview', async (req: AuthRequest, res: Response) => {
   try {
     const days = Math.min(Math.max(parseInt(req.query.days as string) || 7, 1), 30);
+    const includeProvisional = req.query.include_provisional === 'true';
+    const includeEnquiry = req.query.include_enquiry === 'true';
     const now = new Date();
     const endDate = new Date(now);
     endDate.setDate(endDate.getDate() + days);
     const nowStr = now.toISOString().slice(0, 10);
     const endStr = endDate.toISOString().slice(0, 10);
 
-    // Jobs going out: use HH status as primary filter (more reliable than OP pipeline_status).
-    // HH status 4 (Part Dispatched) and OP 'prepping' MUST be included — when staff start
-    // prepping a job, both flip to that state and were previously falling through both halves
-    // of the OR, making the job vanish from the page until marked Done.
+    // Operational "going out" — actually-booked work the warehouse needs to prep.
     const goingOutResult = await query(
       `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
@@ -45,8 +71,7 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.job_date >= $1
          AND j.job_date <= $2
-         AND (j.status IN (1, 2, 3, 4, 5)
-              OR j.pipeline_status IN ('confirmed', 'prepping', 'prepped', 'provisional', 'dispatched'))
+         AND ${OPERATIONAL_GOING_OUT_SQL}
        ORDER BY j.job_date ASC`,
       [nowStr, endStr]
     );
@@ -71,9 +96,10 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
       [nowStr, endStr]
     );
 
-    // Overdue going out: job_date < today AND not yet dispatched (HH < 5)
-    // AND backline not already marked done. Caps lookback at 30 days to keep
-    // payload small — anything older is probably stale data, not a live action.
+    // Overdue going out: job_date < today AND operationally booked but not yet
+    // dispatched (matches "going out" rule, restricted to past dates). Caps lookback
+    // at 30 days. The auto-lose scheduler at 09:00 sweeps stale enquiries/provisional
+    // separately — those don't surface here.
     const overdueOutResult = await query(
       `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
@@ -86,15 +112,16 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.job_date < $1
          AND j.job_date >= $1::date - INTERVAL '30 days'
-         AND j.status < 5
-         AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'returned')
+         AND ${OPERATIONAL_GOING_OUT_SQL}
          AND jr.status != 'done'
        ORDER BY j.job_date ASC`,
       [nowStr]
     );
 
-    // Overdue returning: return_date < today AND not yet returned (HH < 7)
-    // AND backline (post_hire if exists, else pre_hire) not done.
+    // Overdue returning: return_date < today AND not yet returned (HH < 7).
+    // Tightened to require the van to have actually gone out — a job stuck in
+    // enquiry/provisional with a stale return_date isn't "overdue back", it's
+    // stale data that the auto-lose scheduler will clear.
     const overdueReturnResult = await query(
       `SELECT DISTINCT ON (j.id) j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
               j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
@@ -107,11 +134,49 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
        WHERE j.is_deleted = false
          AND j.return_date < $1
          AND j.return_date >= $1::date - INTERVAL '30 days'
-         AND j.status < 7
-         AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'returned')
+         AND (j.status IN (5, 6) OR j.pipeline_status IN ('dispatched', 'returned_incomplete'))
        ORDER BY j.id, jr.phase DESC`,
       [nowStr]
     );
+
+    // Optional heads-up planning queries: provisional and/or enquiry going-out
+    // jobs surfaced separately from operational stats. Run only when toggled on
+    // by the caller. Same date window as operational; same per-row data shape.
+    const provisionalGoingOut = includeProvisional
+      ? await query(
+          `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
+                  j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
+                  jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
+                  jr.hh_mismatch, jr.hh_mismatch_detail,
+                  j.hh_derived_flags
+           FROM jobs j
+           JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
+           WHERE j.is_deleted = false
+             AND j.job_date >= $1
+             AND j.job_date <= $2
+             AND ${PROVISIONAL_GOING_OUT_SQL}
+           ORDER BY j.job_date ASC`,
+          [nowStr, endStr]
+        )
+      : null;
+
+    const enquiryGoingOut = includeEnquiry
+      ? await query(
+          `SELECT j.id, j.job_name, j.hh_job_number, j.job_date, j.return_date,
+                  j.company_name, j.client_name, j.pipeline_status, j.status AS hh_status,
+                  jr.id AS req_id, jr.status AS backline_status, jr.notes AS backline_notes,
+                  jr.hh_mismatch, jr.hh_mismatch_detail,
+                  j.hh_derived_flags
+           FROM jobs j
+           JOIN job_requirements jr ON jr.job_id = j.id AND jr.requirement_type = 'backline' AND jr.phase = 'pre_hire'
+           WHERE j.is_deleted = false
+             AND j.job_date >= $1
+             AND j.job_date <= $2
+             AND ${ENQUIRY_GOING_OUT_SQL}
+           ORDER BY j.job_date ASC`,
+          [nowStr, endStr]
+        )
+      : null;
 
     // Build job rows — sort returning by return_date (DISTINCT ON breaks ordering)
     const goingOut = goingOutResult.rows.map(row => mapJobRow(row, 'out'));
@@ -130,10 +195,11 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
         const db = b.returnDate ? new Date(b.returnDate).getTime() : 0;
         return da - db;
       });
+    const provisionalJobs = provisionalGoingOut?.rows.map(row => mapJobRow(row, 'out')) ?? null;
+    const enquiryJobs = enquiryGoingOut?.rows.map(row => mapJobRow(row, 'out')) ?? null;
 
-    // Aggregate stats
-    // For remaining prep time: exclude jobs where backline status is 'done'
-    // OR where HH status is prepped(3) or dispatched(5) — work is done even if card wasn't updated
+    // Aggregate stats — operational only. The unconfirmed buckets carry their
+    // own counts but deliberately don't roll up into the headline figures.
     const goingOutStats = buildStats(goingOut);
     const returningStats = buildStats(returning);
     const overdueOutStats = buildStats(overdueOut);
@@ -145,6 +211,14 @@ router.get('/overview', async (req: AuthRequest, res: Response) => {
         returning: { stats: returningStats, jobs: returning },
         overdueOut: { stats: overdueOutStats, jobs: overdueOut },
         overdueReturning: { stats: overdueReturnStats, jobs: overdueReturning },
+        unconfirmed: {
+          provisional: provisionalJobs
+            ? { stats: buildStats(provisionalJobs), jobs: provisionalJobs }
+            : null,
+          enquiry: enquiryJobs
+            ? { stats: buildStats(enquiryJobs), jobs: enquiryJobs }
+            : null,
+        },
       },
     });
   } catch (err) {

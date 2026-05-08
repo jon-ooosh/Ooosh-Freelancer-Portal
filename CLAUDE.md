@@ -2583,6 +2583,7 @@ Self-drive hires require an insurance excess. The amount is calculated by the dr
 | On-demand job sync | On page load / button | Per-job: fresh line item fetch from HH, re-derive requirements (non-blocking) |
 | OOH return reminders | Daily at 10:00 | Send T-1 day reminder for vehicles with `return_overnight=true` and `hire_end=tomorrow`. See "Out-of-Hours Returns" section. |
 | Pre-auth expiry check | Daily (TODO — not yet built, fairly-high priority) | Scan `job_excess` with `status='pre_auth'` older than 4 days, flip to expired + notify staff to re-take. Stripe auto-voids at ~7 days; Ooosh policy re-takes inside 4. |
+| Stale enquiry auto-lose | Daily at 09:00 | Mark unconfirmed enquiries / provisional as lost when `job_date::date < CURRENT_DATE`, `pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')`, `status < 2`. Runs at office start so staff don't open the day to phantom enquiries cluttering operational lists (backline prep, overdue departures, etc.). Also pushes status 10 (Not Interested) to HireHop. Was 10:00 pre-May 2026 — moved to 09:00 to land before staff start their day. |
 
 ## HireHop Integration
 
@@ -2916,20 +2917,26 @@ The chases-due stat card (top of dashboard) is preserved — its count is now ac
 
 Multiple dashboard queries answer "what's going out / has gone out / is overdue to go out" — they MUST all use the same status filter or the headline stat card, the Today section, the Coming Up heat strip, and the Overdue Departures bucket disagree.
 
-The canonical "operationally pre-dispatch" filter is:
+The canonical **"operationally pre-dispatch"** filter (May 2026):
 ```
-status IN (1, 2, 3, 4) OR (status = 5 AND pipeline_status = 'prepped')
+(status IN (2, 3, 4) OR (status = 5 AND pipeline_status = 'prepped'))
+AND pipeline_status NOT IN ('lost', 'cancelled')
 ```
 
 The status-5+prepped clause is the OP↔HH semantic gap: HH jumps to status 5 the moment items get checked out, but OP holds `pipeline_status='prepped'` until staff clicks "Mark as Dispatched". A job in this state is physically prepped in the yard, hasn't actually rolled out the gate, and SHOULD count as "going out today" / "overdue if it hasn't left yet".
+
+**Provisional (HH 1) and Enquiry (HH 0) are deliberately excluded.** No warehouse work should happen until a hire is actually booked (HH 2 = Booked). Stale enquiries / provisional are swept by the daily 09:00 stale-enquiry auto-lose scheduler — they don't surface as "overdue" warehouse work, they surface as a separate "auto-lost" log entry. Pre-May 2026 the operational filter included `status IN (1, ...)` and a small `pipeline_status NOT IN (lost, cancelled, ...)` blacklist, which let provisional + enquiry through; the backline page + dashboard overdue widgets started showing speculative work as "to-do" and "overdue" — fixed by tightening to the whitelist above.
 
 Surfaces that use this filter:
 - `going_out_count` stat card
 - "Going Out Today" section query
 - Overdue Departures bucket query
 - Coming Up heat strip departures query
+- Overdue Backline widget (dashboard) + `routes/backline.ts` overdue-out + going-out queries
 
-When adding a new departure-related surface, use the same filter or the dashboard will visibly disagree with itself. The May 2026 refinement caught a 5-vs-3 mismatch between Today and Coming Up, plus a `prepped` job sitting overdue for 2 days that the Overdue Departures bucket missed entirely.
+When adding a new departure-related warehouse surface, use the same filter or the dashboard will visibly disagree with itself. The May 2026 refinement caught a 5-vs-3 mismatch between Today and Coming Up, plus a `prepped` job sitting overdue for 2 days that the Overdue Departures bucket missed entirely. The follow-up refinement (also May 2026, post BLK KACTUS / Chip Bernal report) dropped provisional from the same set of surfaces.
+
+**Heads-up planning views** (e.g. `routes/backline.ts` `?include_provisional=true&include_enquiry=true`) deliberately bypass the operational filter to surface speculative work in a separate visually-distinct bucket. Headline stats stay scoped to operational; unconfirmed jobs render below the main lists labelled "Provisional — Awaiting Deposit" / "Enquiries — Speculative" so warehouse staff can input on capacity without the speculative figures contaminating "remaining prep time" totals. New views adopting this pattern should follow the same shape: separate `unconfirmed: { provisional, enquiry }` block on the response, opt-in via query params, frontend renders below operational sections with a "Not counted in headline stats" note.
 
 ### "Overdue returns" vs "Overdue completions" (May 2026)
 
