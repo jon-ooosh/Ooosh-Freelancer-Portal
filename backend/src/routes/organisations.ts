@@ -191,9 +191,25 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       [req.params.id]
     );
 
+    // Total hire history count — UNION of job_organisations links AND jobs.client_id direct links
+    // (matches the hire-history endpoint, so the tab badge agrees with the tab content).
+    const linkedJobCountResult = await query(
+      `SELECT COUNT(*) AS total FROM (
+         SELECT jo.job_id FROM job_organisations jo
+         JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
+         WHERE jo.organisation_id = $1
+         UNION
+         SELECT j2.id FROM jobs j2
+         WHERE j2.client_id = $1 AND j2.is_deleted = false
+           AND j2.id NOT IN (SELECT jo2.job_id FROM job_organisations jo2 WHERE jo2.organisation_id = $1)
+       ) AS combined`,
+      [req.params.id]
+    );
+
     const org = result.rows[0];
     org.relationships = relationships.rows;
     org.linked_jobs = linkedJobs.rows;
+    org.linked_job_count = parseInt(linkedJobCountResult.rows[0]?.total || '0', 10);
 
     res.json(org);
   } catch (error) {
@@ -1123,6 +1139,43 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const offset = (page - 1) * limit;
 
+    // Whitelisted sort + direction (no string interpolation of user input into SQL).
+    const SORT_COLUMNS: Record<string, string> = {
+      date: 'j.job_date',
+      job_number: 'j.hh_job_number',
+      value: 'j.job_value',
+      status: 'j.pipeline_status',
+    };
+    const sortKey = (req.query.sort as string) || 'date';
+    const sortColumn = SORT_COLUMNS[sortKey] || SORT_COLUMNS.date;
+    const dir = (req.query.dir as string) === 'asc' ? 'ASC' : 'DESC';
+
+    // Optional filters.
+    const role = (req.query.role as string) || '';
+    const outcome = (req.query.outcome as string) || '';
+    const year = parseInt((req.query.year as string) || '', 10);
+
+    const filterClauses: string[] = [];
+    const filterParams: any[] = [];
+    if (role) {
+      filterParams.push(role);
+      filterClauses.push(`oj.role = $${filterParams.length + 1}`); // +1 because $1 is id
+    }
+    if (outcome === 'confirmed') {
+      filterClauses.push(`(j.pipeline_status IN ('confirmed','prepped','dispatched') OR (j.pipeline_status IS NULL AND j.status IN (2,3,4,5,8)))`);
+    } else if (outcome === 'returned') {
+      filterClauses.push(`(j.pipeline_status IN ('returned','returned_incomplete','completed') OR (j.pipeline_status IS NULL AND j.status IN (6,7,11)))`);
+    } else if (outcome === 'open') {
+      filterClauses.push(`(j.pipeline_status IN ('new_enquiry','quoting','provisional','paused','chasing') OR (j.pipeline_status IS NULL AND j.status IN (0,1)))`);
+    } else if (outcome === 'lost') {
+      filterClauses.push(`(j.pipeline_status IN ('lost','cancelled') OR (j.pipeline_status IS NULL AND j.status IN (9,10)))`);
+    }
+    if (Number.isFinite(year) && year > 1900 && year < 3000) {
+      filterParams.push(year);
+      filterClauses.push(`EXTRACT(YEAR FROM j.job_date) = $${filterParams.length + 1}`);
+    }
+    const filterSql = filterClauses.length ? ` AND ${filterClauses.join(' AND ')}` : '';
+
     // Use a CTE to unify jobs linked via job_organisations AND via jobs.client_id
     // This ensures hire history shows ALL jobs for the org, regardless of how the link was created.
     const jobLinkCTE = `
@@ -1137,17 +1190,20 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
           AND j2.id NOT IN (SELECT jo2.job_id FROM job_organisations jo2 WHERE jo2.organisation_id = $1)
       )`;
 
-    // Count total
+    // Count total (respects filters so the pagination tracks the visible list)
     const countResult = await query(
       `${jobLinkCTE}
        SELECT COUNT(*) AS total
        FROM org_jobs oj
-       JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false`,
-      [id]
+       JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
+       WHERE 1=1${filterSql}`,
+      [id, ...filterParams]
     );
     const total = parseInt(countResult.rows[0]?.total || '0');
 
     // Fetch jobs with retro interaction
+    const limitParamIdx = filterParams.length + 2; // $1 is id; filters are $2..; then limit, offset
+    const offsetParamIdx = filterParams.length + 3;
     const jobsResult = await query(
       `${jobLinkCTE}
        SELECT
@@ -1161,9 +1217,10 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
          ) AS retro_content
        FROM org_jobs oj
        JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
-       ORDER BY j.job_date DESC NULLS LAST
-       LIMIT $2 OFFSET $3`,
-      [id, limit, offset]
+       WHERE 1=1${filterSql}
+       ORDER BY ${sortColumn} ${dir} NULLS LAST, j.hh_job_number DESC
+       LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}`,
+      [id, ...filterParams, limit, offset]
     );
 
     // Compute summary stats
@@ -1190,6 +1247,21 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
        FROM org_jobs oj
        JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
        LEFT JOIN interactions i ON i.job_id = j.id AND i.content LIKE 'Job retro:%'`,
+      [id]
+    );
+
+    // Distinct roles + years across the whole hire history (unfiltered) — populates filter dropdowns
+    const facetsResult = await query(
+      `${jobLinkCTE}
+       SELECT
+         (SELECT array_agg(DISTINCT oj.role ORDER BY oj.role)
+            FROM org_jobs oj
+            JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
+            WHERE oj.role IS NOT NULL) AS roles,
+         (SELECT array_agg(DISTINCT EXTRACT(YEAR FROM j.job_date)::int ORDER BY EXTRACT(YEAR FROM j.job_date)::int DESC)
+            FROM org_jobs oj
+            JOIN jobs j ON j.id = oj.job_id AND j.is_deleted = false
+            WHERE j.job_date IS NOT NULL) AS years`,
       [id]
     );
 
@@ -1223,6 +1295,10 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
       stats: {
         ...statsResult.rows[0],
         ...retroResult.rows[0],
+      },
+      facets: {
+        roles: facetsResult.rows[0]?.roles || [],
+        years: facetsResult.rows[0]?.years || [],
       },
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });

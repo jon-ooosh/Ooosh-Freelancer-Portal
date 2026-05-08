@@ -64,6 +64,7 @@ interface OrgDetail {
     return_date: string | null;
     job_value: number | null;
   }>;
+  linked_job_count?: number;
 }
 
 interface Interaction {
@@ -544,7 +545,12 @@ export default function OrganisationDetailPage() {
         <nav className="flex gap-6">
           {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
-            const linkedJobCount = (org.linked_jobs || []).length;
+            // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
+            // matching the Hire History tab content. Falls back to local linked_jobs.length only
+            // if the backend hasn't been redeployed yet.
+            const linkedJobCount = typeof org.linked_job_count === 'number'
+              ? org.linked_job_count
+              : (org.linked_jobs || []).length;
             const label = tab === 'people' ? `People (${(org.people || []).length})`
               : tab === 'relationships' ? `Relationships${relCount ? ` (${relCount})` : ''}`
               : tab === 'hire_history' ? `Hire History${linkedJobCount ? ` (${linkedJobCount})` : ''}`
