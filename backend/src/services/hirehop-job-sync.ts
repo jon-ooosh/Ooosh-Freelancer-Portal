@@ -122,6 +122,22 @@ async function linkMatchingPersonToShellOrg(
   return { linked: false, flagged: true };
 }
 
+// ── Project prefix stripping ─────────────────────────────────────────────
+// HireHop's search_list.php and webhook payloads decorate JOB_NAME with the
+// containing project's name as "<Project> ► <JobName>" for sub-jobs. The
+// raw JOB_NAME field on the job itself (visible in HH UI and via job_data.php)
+// is just the leaf. We always store the leaf so OP renames can stick — see
+// CLAUDE.md "Pipeline & Enquiry Cleanup" for context.
+//
+// `►` (U+25B6) is HH's path separator and won't appear in genuine names.
+export function stripProjectPrefix(name: string | null | undefined): string | null {
+  if (!name) return null;
+  const sep = ' ► ';
+  const idx = name.lastIndexOf(sep);
+  if (idx === -1) return name;
+  return name.substring(idx + sep.length);
+}
+
 // ── HireHop search_list response types ───────────────────────────────────
 
 interface HHJobRow {
@@ -340,7 +356,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
              updated_at = NOW()
            WHERE hh_job_number = $21`,
           [
-            job.JOB_NAME || null,
+            stripProjectPrefix(job.JOB_NAME),
             job.JOB_TYPE || null,
             statusCode,
             statusName,
@@ -388,7 +404,7 @@ export async function syncJobsFromHireHop(userId: string): Promise<JobSyncResult
            ) RETURNING id`,
           [
             jobNumber,
-            job.JOB_NAME || null,
+            stripProjectPrefix(job.JOB_NAME),
             job.JOB_TYPE || null,
             statusCode,
             statusName,
