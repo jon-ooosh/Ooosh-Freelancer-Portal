@@ -2324,12 +2324,15 @@ export default function JobDetailPage() {
                 {job.cancellation_reason ? ` — ${job.cancellation_reason}` : ''}
               </p>
               {(job.cancellation_fee != null || job.cancellation_refund != null) && (
-                <div className="flex gap-4 mt-1 text-sm">
+                <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1 text-sm">
                   {job.cancellation_fee != null && (
-                    <span className="text-red-600">Fee retained: <strong>£{Number(job.cancellation_fee).toFixed(2)}</strong></span>
+                    <span className="text-red-600">
+                      Fee retained (ex-VAT): <strong>£{Number(job.cancellation_fee).toFixed(2)}</strong>
+                      <span className="text-red-500/80 ml-1">(inc-VAT £{(Number(job.cancellation_fee) * 1.2).toFixed(2)})</span>
+                    </span>
                   )}
                   {job.cancellation_refund != null && Number(job.cancellation_refund) > 0 && (
-                    <span className="text-green-700">Refund due: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
+                    <span className="text-green-700">Refund due (ex-VAT): <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
                   )}
                 </div>
               )}
