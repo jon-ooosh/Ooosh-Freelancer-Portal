@@ -337,10 +337,18 @@ async function handleJobUpdate(
     MONEY: 'job_value',
   };
 
+  // HH search_list / webhook payloads decorate JOB_NAME for sub-jobs as
+  // "<Project> ► <Leaf>". OP stores the leaf — strip the prefix on inbound.
+  const { stripProjectPrefix } = await import('../services/hirehop-job-sync');
+
   for (const [hhField, dbField] of Object.entries(fieldMap)) {
     if (data && data[hhField] !== undefined) {
+      const raw = data[hhField];
+      const value = hhField === 'JOB_NAME' && typeof raw === 'string'
+        ? stripProjectPrefix(raw)
+        : (raw || null);
       updates.push(`${dbField} = $${pIdx}`);
-      params.push(data[hhField] || null);
+      params.push(value);
       pIdx++;
     }
   }
