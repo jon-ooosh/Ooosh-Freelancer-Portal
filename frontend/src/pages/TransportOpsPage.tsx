@@ -38,7 +38,6 @@ interface OpsQuote {
   is_multi_day: boolean;
   status: string;
   ops_status: string;
-  key_points: string | null;
   client_introduction: string | null;
   work_type: string | null;
   work_type_other: string | null;
@@ -1947,7 +1946,6 @@ function ExpandedDetail({
 }) {
   const [editingField, setEditingField] = useState<string | null>(null);
   const [fieldValues, setFieldValues] = useState({
-    key_points: q.key_points || '',
     internal_notes: q.internal_notes || '',
     freelancer_notes: q.freelancer_notes || '',
   });
@@ -2130,17 +2128,6 @@ function ExpandedDetail({
             status={q.client_introduction || 'not_needed'}
             onClick={handleClientIntroClick}
             statusList={CLIENT_INTRO_STATUSES}
-          />
-
-          {/* Key points */}
-          <InlineEditField
-            label="Key points"
-            value={fieldValues.key_points}
-            isEditing={editingField === 'key_points'}
-            onStartEdit={() => setEditingField('key_points')}
-            onChange={(v) => setFieldValues((prev) => ({ ...prev, key_points: v }))}
-            onSave={() => saveField('key_points')}
-            onCancel={() => { setEditingField(null); setFieldValues((prev) => ({ ...prev, key_points: q.key_points || '' })); }}
           />
 
           {/* Arrangement status pills — clickable to cycle */}

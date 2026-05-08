@@ -955,7 +955,7 @@ router.get('/jobs', async (req: PortalRequest, res: Response) => {
         q.arrival_time, q.job_date, q.job_finish_date, q.is_multi_day,
         q.work_duration_hrs, q.num_days,
         q.what_is_it, q.status, q.ops_status,
-        q.key_points, q.client_introduction,
+        q.client_introduction,
         q.work_type, q.work_type_other, q.work_description,
         q.freelancer_notes, q.freelancer_fee, q.freelancer_fee_rounded,
         q.run_group, q.run_order, q.run_group_fee,
@@ -1836,7 +1836,10 @@ function formatJobForPortal(row: Record<string, unknown>) {
     hhRef: row.hirehop_id ? String(row.hirehop_id) : null,
     status: portalStatus,
     opsStatus,
-    keyNotes: row.key_points as string | null,
+    // Key notes for the freelancer — was a separate `key_points` column pre
+    // migration 079; now consolidated into `freelancer_notes`. Field name
+    // preserved on the response so the Next.js portal needs no change.
+    keyNotes: row.freelancer_notes as string | null,
     completedAtDate: row.completed_at ? new Date(row.completed_at as string).toISOString().split('T')[0] : null,
     completionNotes: row.completion_notes as string | null,
     isLocal: row.is_local as boolean,

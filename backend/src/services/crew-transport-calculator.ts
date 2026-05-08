@@ -34,16 +34,24 @@ export interface ExpenseItem {
 export interface CalculatorInput {
   jobType: 'delivery' | 'collection' | 'crewed';
   calculationMode: 'hourly' | 'dayrate';
-  distanceMiles: number;       // One-way
-  driveTimeMins: number;       // One-way
+  distanceMiles: number;       // One-way van leg distance
+  driveTimeMins: number;       // One-way van leg time
   arrivalTime: string;         // HH:MM — when the person needs to arrive at venue
   workDurationHrs?: number;    // Crewed jobs: hours of work on site
   numDays?: number;            // Day rate mode: number of days
   setupExtraHrs?: number;      // Extra setup/pack-down time (hours)
   setupPremium?: number;       // Flat premium for setup (£)
   travelMethod: 'vehicle' | 'public_transport';
+  // Travel-method semantics:
+  //   D&C delivery:    'vehicle'         = van there + van back (round trip)
+  //                    'public_transport'= van one way + transport the other way (typical)
+  //   D&C collection:  same as delivery (one direction by van, the other by transport when public_transport)
+  //   Crewed:          'vehicle'         = van both ways
+  //                    'public_transport'= transport both ways (no van)
+  travelTimeMins?: number;     // Time on the public-transport leg(s). For D&C: one-way. For crewed: round-trip total.
+  travelCost?: number;         // Fare for the public-transport leg(s). Same convention as travelTimeMins.
   dayRateOverride?: number;    // Override freelancer day rate
-  clientRateOverride?: number; // Override client charge
+  clientRateOverride?: number; // Override client charge (per-day in dayrate mode, total in hourly mode)
   expenses: ExpenseItem[];
 }
 
@@ -51,6 +59,7 @@ export interface CalculatedCosts {
   clientChargeLabour: number;
   clientChargeFuel: number;
   clientChargeExpenses: number;
+  clientChargeTransport: number;
   clientChargeTotal: number;
   clientChargeTotalRounded: number;
   freelancerFee: number;
@@ -155,34 +164,56 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
   const {
     jobType, calculationMode, distanceMiles, driveTimeMins, arrivalTime,
     workDurationHrs = 0, numDays = 1, setupExtraHrs = 0, setupPremium = 0,
-    travelMethod, dayRateOverride, clientRateOverride, expenses,
+    travelMethod, travelTimeMins = 0, travelCost = 0,
+    dayRateOverride, clientRateOverride, expenses,
   } = input;
 
   const setupMins = setupExtraHrs * 60;
 
+  // ── Leg model ──
+  // For D&C: one direction is by van (the delivery/collection direction), the other depends on travelMethod.
+  //   travelMethod='vehicle'         → van both ways (rare; round-trip in van)
+  //   travelMethod='public_transport'→ van one way + public transport the other way (typical)
+  // For crewed: same method both ways.
+  //   travelMethod='vehicle'         → van both ways
+  //   travelMethod='public_transport'→ public transport both ways (no van)
+  const isDC = jobType === 'delivery' || jobType === 'collection';
+  let vanLegs: number;
+  let transportLegs: number;
+  if (travelMethod === 'vehicle') {
+    vanLegs = 2;
+    transportLegs = 0;
+  } else {
+    // public_transport
+    if (isDC) {
+      vanLegs = 1;
+      transportLegs = 1;
+    } else {
+      // Crewed by public transport — no van at all; treat travelTimeMins/travelCost as round-trip totals (×1)
+      vanLegs = 0;
+      transportLegs = 1;
+    }
+  }
+
   // ── Fuel calculation ──
-  // fuel = (totalMiles * fuelPricePerLitre) / milesPerLitre
-  const isReturn = jobType !== 'crewed'; // D&C: drive there and back. Crewed: one-way each direction but counted as return too
-  const totalMiles = distanceMiles * 2; // Always return trip
-  const fuelCost = travelMethod === 'vehicle'
-    ? (totalMiles * settings.fuel_price_per_litre) / settings.fuel_efficiency_mpg
-    : 0;
+  // fuel = (vanMiles * fuelPricePerLitre) / milesPerLitre
+  const totalMiles = distanceMiles * vanLegs;
+  const fuelCost = (totalMiles * settings.fuel_price_per_litre) / settings.fuel_efficiency_mpg;
 
   // ── Time calculation ──
-  const driveOneWay = driveTimeMins;
-  const driveReturn = driveTimeMins; // Same distance back
-  const handoverMins = travelMethod === 'vehicle' ? settings.handover_time_mins : 0;
-  const unloadMins = (jobType === 'delivery' || jobType === 'collection') ? settings.unload_time_mins : 0;
+  const driveOneWay = driveTimeMins;            // user input is one-way van time
+  const totalDriveMins = driveTimeMins * vanLegs;
+  const transportMins = transportLegs * (travelTimeMins || 0);
+  const handoverMins = vanLegs > 0 ? settings.handover_time_mins : 0;
+  const unloadMins = isDC ? settings.unload_time_mins : 0;
   const workMins = workDurationHrs * 60;
 
-  // Total engaged time
+  // Total engaged time — driver paid for both legs (van leg + transport leg if any) plus on-site time
   let totalEngagedMins: number;
   if (jobType === 'crewed') {
-    // Drive there + work + setup + drive back
-    totalEngagedMins = driveOneWay + workMins + setupMins + driveReturn;
+    totalEngagedMins = totalDriveMins + transportMins + workMins + setupMins;
   } else {
-    // D&C: drive there + handover + unload + setup + drive back
-    totalEngagedMins = driveOneWay + handoverMins + unloadMins + setupMins + driveReturn;
+    totalEngagedMins = totalDriveMins + transportMins + handoverMins + unloadMins + setupMins;
   }
 
   // Departure time = arrival time - drive time
@@ -222,7 +253,8 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
     freelancerFee = (baseRate * numDays) + setupPremium;
 
     if (clientRateOverride) {
-      clientChargeLabour = clientRateOverride;
+      // Override is the per-day client rate — multiply by numDays to get the labour total
+      clientChargeLabour = (clientRateOverride * numDays) + setupPremium;
     } else {
       clientChargeLabour = freelancerFee * settings.day_rate_client_markup;
     }
@@ -266,17 +298,21 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
   const clientChargeFuel = fuelIncludedInCharge ? fuelCost : 0;
   // Client expenses: charge for included expenses (in quote) with markup
   const clientChargeExpenses = expensesIncluded + expenseMarkup;
-  const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses;
+  // Transport cost (train fare etc.): always passed to client with markup, and counted as our cost
+  const transportCostTotal = transportLegs * (travelCost || 0);
+  const clientChargeTransport = transportCostTotal * (1 + settings.expense_markup_percent / 100);
+  const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses + clientChargeTransport;
   const clientChargeTotalRounded = Math.max(Math.round(clientChargeTotal), settings.min_client_charge_floor);
 
   const freelancerFeeRounded = roundToFive(freelancerFee);
-  const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded + adminCost;
+  const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded + transportCostTotal + adminCost;
   const ourMargin = clientChargeTotalRounded - ourTotalCost;
 
   return {
     clientChargeLabour: round2(clientChargeLabour),
     clientChargeFuel: round2(clientChargeFuel),
     clientChargeExpenses: round2(clientChargeExpenses),
+    clientChargeTransport: round2(clientChargeTransport),
     clientChargeTotal: round2(clientChargeTotal),
     clientChargeTotalRounded,
     freelancerFee: round2(freelancerFee),
@@ -294,7 +330,7 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
     finishTimeMinutes: Math.round(finishMins % 1440),
     breakdown: {
       driveTimeMinsOneWay: driveOneWay,
-      driveTimeMinsReturn: driveReturn,
+      driveTimeMinsReturn: vanLegs >= 2 ? driveOneWay : 0,
       handoverMins,
       unloadMins,
       setupMins: Math.round(setupMins),

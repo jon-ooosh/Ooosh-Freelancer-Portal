@@ -203,6 +203,8 @@ const calculateSchema = z.object({
   setupExtraHrs: z.number().min(0).optional().nullable(),
   setupPremium: z.number().min(0).optional().nullable(),
   travelMethod: z.enum(['vehicle', 'public_transport']).default('vehicle'),
+  travelTimeMins: z.number().min(0).optional().nullable(),
+  travelCost: z.number().min(0).optional().nullable(),
   dayRateOverride: z.number().optional().nullable(),
   clientRateOverride: z.number().optional().nullable(),
   expenses: z.array(z.object({
@@ -252,10 +254,129 @@ const saveQuoteSchema = calculateSchema.extend({
   crewCount: z.number().int().min(1).optional().nullable(),
 });
 
+// Apply crew-count multiplication to a calculator result. Per-crew costs scale;
+// fuel / transport / expenses (already accounted for once at the trip level) do not.
+function applyCrewMultiplier(single: ReturnType<typeof calculateCosts>, crewCount: number) {
+  if (crewCount <= 1) return single;
+  return {
+    ...single,
+    clientChargeLabour: Math.round(single.clientChargeLabour * crewCount * 100) / 100,
+    clientChargeTotal: Math.round(single.clientChargeTotal * crewCount * 100) / 100,
+    clientChargeTotalRounded: Math.round(single.clientChargeTotalRounded * crewCount),
+    freelancerFee: Math.round(single.freelancerFee * crewCount * 100) / 100,
+    freelancerFeeRounded: Math.ceil((single.freelancerFeeRounded * crewCount) / 5) * 5,
+    ourTotalCost: Math.round(single.ourTotalCost * crewCount * 100) / 100,
+    ourMargin: Math.round((single.clientChargeTotalRounded * crewCount) - (single.ourTotalCost * crewCount) * 100) / 100,
+  };
+}
+
+// Insert one quote row. Used twice when creating delivery + collection siblings.
+async function insertQuoteRow(
+  client: { query: (text: string, params?: unknown[]) => Promise<{ rows: { id: string }[] }> },
+  body: any,
+  jobType: 'delivery' | 'collection' | 'crewed',
+  jobDate: string | null,
+  arrivalTime: string,
+  result: ReturnType<typeof calculateCosts>,
+  settings: unknown,
+  crewCount: number,
+  isMultiDay: boolean,
+  addCollection: boolean,
+  collectionDate: string | null,
+  collectionTime: string | null,
+  userId: string,
+): Promise<string> {
+  const inserted = await client.query(
+    `INSERT INTO quotes (
+      job_id, job_type, calculation_mode,
+      venue_name, venue_id, distance_miles, drive_time_mins,
+      arrival_time, job_date, job_finish_date, is_multi_day,
+      work_duration_hrs, num_days,
+      setup_extra_hrs, setup_premium, travel_method,
+      day_rate_override, client_rate_override, expenses,
+      what_is_it, add_collection, collection_date, collection_time,
+      client_name, includes_setup, setup_description,
+      work_type, work_description,
+      ooh_manual, early_start_mins, late_finish_mins,
+      client_charge_labour, client_charge_fuel, client_charge_expenses,
+      client_charge_total, client_charge_rounded,
+      freelancer_fee, freelancer_fee_rounded,
+      expected_fuel_cost, expenses_included, expenses_not_included,
+      our_total_cost, our_margin,
+      estimated_time_mins, estimated_time_hrs,
+      settings_snapshot, internal_notes, freelancer_notes,
+      travel_time_mins, travel_cost, created_by, client_introduction,
+      crew_count
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+      $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
+      $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
+      $49, $50, $51, 'todo', $52
+    ) RETURNING id`,
+    [
+      body.jobId || null,
+      jobType,
+      body.calculationMode,
+      body.venueName || null,
+      body.venueId || null,
+      body.distanceMiles,
+      body.driveTimeMins,
+      arrivalTime,
+      jobDate,
+      body.jobFinishDate || null,
+      isMultiDay,
+      body.workDurationHrs || null,
+      body.numDays || null,
+      body.setupExtraHrs || null,
+      body.setupPremium || null,
+      body.travelMethod,
+      body.dayRateOverride || null,
+      body.clientRateOverride || null,
+      JSON.stringify(body.expenses || []),
+      body.whatIsIt || null,
+      addCollection,
+      collectionDate,
+      collectionTime,
+      body.clientName || null,
+      body.includesSetup || false,
+      body.setupDescription || null,
+      body.workType || null,
+      body.workDescription || null,
+      body.oohManual || false,
+      result.autoEarlyStartMinutes,
+      result.autoLateFinishMinutes,
+      result.clientChargeLabour,
+      result.clientChargeFuel,
+      result.clientChargeExpenses,
+      result.clientChargeTotal,
+      result.clientChargeTotalRounded,
+      result.freelancerFee,
+      result.freelancerFeeRounded,
+      result.expectedFuelCost,
+      result.expensesIncluded,
+      result.expensesNotIncluded,
+      result.ourTotalCost,
+      result.ourMargin,
+      result.estimatedTimeMinutes,
+      result.estimatedTimeHours,
+      JSON.stringify(settings),
+      body.internalNotes || null,
+      body.freelancerNotes || null,
+      body.travelTimeMins || null,
+      body.travelCost || null,
+      userId,
+      crewCount,
+    ],
+  );
+  return inserted.rows[0].id;
+}
+
 router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Response) => {
+  const dbClient = await (await import('../config/database')).getClient();
   try {
     const settings = await loadSettings();
-    const calculatorInput: CalculatorInput = {
+
+    const baseInput: CalculatorInput = {
       jobType: req.body.jobType,
       calculationMode: req.body.calculationMode,
       distanceMiles: req.body.distanceMiles,
@@ -266,115 +387,94 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
       setupExtraHrs: req.body.setupExtraHrs,
       setupPremium: req.body.setupPremium,
       travelMethod: req.body.travelMethod,
+      travelTimeMins: req.body.travelTimeMins ?? undefined,
+      travelCost: req.body.travelCost ?? undefined,
       dayRateOverride: req.body.dayRateOverride,
       clientRateOverride: req.body.clientRateOverride,
       expenses: req.body.expenses || [],
     };
 
-    const singleCrewResult = calculateCosts(calculatorInput, settings);
-
-    // Multi-crew: multiply costs by crew_count for crewed jobs
     const crewCount = (req.body.jobType === 'crewed' && req.body.crewCount > 1) ? req.body.crewCount : 1;
-    const result = crewCount > 1 ? {
-      ...singleCrewResult,
-      clientChargeLabour: Math.round(singleCrewResult.clientChargeLabour * crewCount * 100) / 100,
-      clientChargeTotal: Math.round(singleCrewResult.clientChargeTotal * crewCount * 100) / 100,
-      clientChargeTotalRounded: Math.round(singleCrewResult.clientChargeTotalRounded * crewCount),
-      freelancerFee: Math.round(singleCrewResult.freelancerFee * crewCount * 100) / 100,
-      freelancerFeeRounded: Math.ceil((singleCrewResult.freelancerFeeRounded * crewCount) / 5) * 5,
-      ourTotalCost: Math.round(singleCrewResult.ourTotalCost * crewCount * 100) / 100,
-      ourMargin: Math.round((singleCrewResult.clientChargeTotalRounded * crewCount) - (singleCrewResult.ourTotalCost * crewCount) * 100) / 100,
-    } : singleCrewResult;
+    const primarySingle = calculateCosts(baseInput, settings);
+    const primaryResult = applyCrewMultiplier(primarySingle, crewCount);
 
-    const saved = await query(
-      `INSERT INTO quotes (
-        job_id, job_type, calculation_mode,
-        venue_name, venue_id, distance_miles, drive_time_mins,
-        arrival_time, job_date, job_finish_date, is_multi_day,
-        work_duration_hrs, num_days,
-        setup_extra_hrs, setup_premium, travel_method,
-        day_rate_override, client_rate_override, expenses,
-        what_is_it, add_collection, collection_date, collection_time,
-        client_name, includes_setup, setup_description,
-        work_type, work_description,
-        ooh_manual, early_start_mins, late_finish_mins,
-        client_charge_labour, client_charge_fuel, client_charge_expenses,
-        client_charge_total, client_charge_rounded,
-        freelancer_fee, freelancer_fee_rounded,
-        expected_fuel_cost, expenses_included, expenses_not_included,
-        our_total_cost, our_margin,
-        estimated_time_mins, estimated_time_hrs,
-        settings_snapshot, internal_notes, freelancer_notes,
-        travel_time_mins, travel_cost, created_by, client_introduction,
-        crew_count
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31,
-        $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48,
-        $49, $50, $51, 'todo', $52
-      ) RETURNING id`,
-      [
-        req.body.jobId || null,
-        req.body.jobType,
-        req.body.calculationMode,
-        req.body.venueName || null,
-        req.body.venueId || null,
-        req.body.distanceMiles,
-        req.body.driveTimeMins,
-        req.body.arrivalTime,
-        req.body.jobDate || null,
-        req.body.jobFinishDate || null,
-        req.body.isMultiDay || false,
-        req.body.workDurationHrs || null,
-        req.body.numDays || null,
-        req.body.setupExtraHrs || null,
-        req.body.setupPremium || null,
-        req.body.travelMethod,
-        req.body.dayRateOverride || null,
-        req.body.clientRateOverride || null,
-        JSON.stringify(req.body.expenses || []),
-        req.body.whatIsIt || null,
-        req.body.addCollection || false,
-        req.body.collectionDate || null,
-        req.body.collectionTime || null,
-        req.body.clientName || null,
-        req.body.includesSetup || false,
-        req.body.setupDescription || null,
-        req.body.workType || null,
-        req.body.workDescription || null,
-        req.body.oohManual || false,
-        result.autoEarlyStartMinutes,
-        result.autoLateFinishMinutes,
-        result.clientChargeLabour,
-        result.clientChargeFuel,
-        result.clientChargeExpenses,
-        result.clientChargeTotal,
-        result.clientChargeTotalRounded,
-        result.freelancerFee,
-        result.freelancerFeeRounded,
-        result.expectedFuelCost,
-        result.expensesIncluded,
-        result.expensesNotIncluded,
-        result.ourTotalCost,
-        result.ourMargin,
-        result.estimatedTimeMinutes,
-        result.estimatedTimeHours,
-        JSON.stringify(settings),
-        req.body.internalNotes || null,
-        req.body.freelancerNotes || null,
-        req.body.travelTimeMins || null,
-        req.body.travelCost || null,
-        req.user!.id,
-        crewCount,
-      ]
+    // "Add collection" turns a delivery into TWO quote rows: delivery + collection sibling.
+    // Each leg is calculated independently (different arrival time → different OOH split).
+    // We DON'T pass addCollection through to either row — they're now standalone quotes.
+    const wantsCollectionSibling = !!req.body.addCollection
+      && req.body.jobType === 'delivery'
+      && !!req.body.collectionTime;
+
+    await dbClient.query('BEGIN');
+
+    const primaryId = await insertQuoteRow(
+      dbClient,
+      req.body,
+      req.body.jobType,
+      req.body.jobDate || null,
+      req.body.arrivalTime,
+      primaryResult,
+      settings,
+      crewCount,
+      req.body.isMultiDay || false,
+      false,                    // never store add_collection on the actual rows now
+      null,
+      null,
+      req.user!.id,
     );
 
-    res.status(201).json({ id: saved.rows[0].id, ...result });
+    let collectionId: string | null = null;
+    if (wantsCollectionSibling) {
+      const collectionInput: CalculatorInput = {
+        ...baseInput,
+        jobType: 'collection',
+        arrivalTime: req.body.collectionTime,
+      };
+      const collectionResult = applyCrewMultiplier(calculateCosts(collectionInput, settings), crewCount);
+      collectionId = await insertQuoteRow(
+        dbClient,
+        req.body,
+        'collection',
+        req.body.collectionDate || req.body.jobDate || null,
+        req.body.collectionTime,
+        collectionResult,
+        settings,
+        crewCount,
+        false, // collection sibling is single-day even if delivery was multi-day
+        false,
+        null,
+        null,
+        req.user!.id,
+      );
+
+      // Link the pair both ways
+      await dbClient.query(
+        `UPDATE quotes SET paired_quote_id = $1 WHERE id = $2`,
+        [collectionId, primaryId],
+      );
+      await dbClient.query(
+        `UPDATE quotes SET paired_quote_id = $1 WHERE id = $2`,
+        [primaryId, collectionId],
+      );
+    }
+
+    await dbClient.query('COMMIT');
+
+    res.status(201).json({
+      id: primaryId,
+      paired_id: collectionId,
+      ...primaryResult,
+    });
   } catch (error) {
+    await dbClient.query('ROLLBACK');
     console.error('Save quote error:', error);
     res.status(500).json({ error: 'Failed to save quote' });
+    return;
+  } finally {
+    dbClient.release();
   }
 });
+
 
 // ── GET /api/quotes — list quotes (optionally by job) ───────────────
 
@@ -493,6 +593,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
     const existing = await query(
       `SELECT q.id, q.calculation_mode, q.is_local, q.job_date, q.arrival_time,
               q.venue_name, q.venue_id, q.status,
+              q.job_type, q.num_days, q.is_multi_day, q.crew_count,
               j.job_name as linked_job_name
        FROM quotes q
        LEFT JOIN jobs j ON j.id = q.job_id
@@ -518,6 +619,25 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       'internal_notes', 'freelancer_notes',
     ];
 
+    // Did the user change any field that affects the cost calculation?
+    // If yes, we re-run calculateCosts() after persisting field changes and
+    // overwrite the derived totals — the calculator is the source of truth
+    // when inputs change. Pure note edits / venue tweaks skip the recalc.
+    const calcAffectingFields = ['job_type', 'num_days', 'arrival_time', 'crew_count', 'is_multi_day'];
+    let recalcNeeded = false;
+    for (const f of calcAffectingFields) {
+      if (fields[f] !== undefined) {
+        const oldVal = oldQuote[f];
+        const oldComparable = oldVal instanceof Date ? oldVal.toISOString().split('T')[0] : oldVal;
+        if (fields[f] !== oldComparable) {
+          recalcNeeded = true;
+          break;
+        }
+      }
+    }
+    // Local D&C quotes don't have calculator inputs — skip recalc for them
+    if (oldQuote.is_local) recalcNeeded = false;
+
     for (const field of allowedFields) {
       if (fields[field] !== undefined) {
         updates.push(`${field} = $${idx}`);
@@ -527,16 +647,20 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       }
     }
 
-    // Fee overrides (available for all quote types)
-    if (fields.client_charge_rounded !== undefined) {
-      updates.push(`client_charge_rounded = $${idx}, client_charge_total = $${idx}`);
-      params.push(fields.client_charge_rounded);
-      idx++;
-    }
-    if (fields.freelancer_fee_rounded !== undefined) {
-      updates.push(`freelancer_fee_rounded = $${idx}, freelancer_fee = $${idx}`);
-      params.push(fields.freelancer_fee_rounded);
-      idx++;
+    // Fee overrides (available for all quote types). When recalc is happening,
+    // the calculator output wins — ignore submitted overrides because they're
+    // stale snapshots from the form that doesn't know the new totals yet.
+    if (!recalcNeeded) {
+      if (fields.client_charge_rounded !== undefined) {
+        updates.push(`client_charge_rounded = $${idx}, client_charge_total = $${idx}`);
+        params.push(fields.client_charge_rounded);
+        idx++;
+      }
+      if (fields.freelancer_fee_rounded !== undefined) {
+        updates.push(`freelancer_fee_rounded = $${idx}, freelancer_fee = $${idx}`);
+        params.push(fields.freelancer_fee_rounded);
+        idx++;
+      }
     }
 
     if (updates.length === 0) {
@@ -552,7 +676,56 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       params
     );
 
-    const updatedQuote = result.rows[0];
+    let updatedQuote = result.rows[0];
+
+    // Recalc derived totals from the post-update calculator inputs.
+    // Note: we do NOT clear hh_pushed_at — the line item still exists in HH at
+    // the old price, and the frontend uses hh_pushed_at to flag that.
+    if (recalcNeeded && updatedQuote) {
+      const settings = await loadSettings();
+      const reInput: CalculatorInput = {
+        jobType: updatedQuote.job_type,
+        calculationMode: updatedQuote.calculation_mode,
+        distanceMiles: Number(updatedQuote.distance_miles) || 0,
+        driveTimeMins: Number(updatedQuote.drive_time_mins) || 0,
+        arrivalTime: updatedQuote.arrival_time || '09:00',
+        workDurationHrs: Number(updatedQuote.work_duration_hrs) || 0,
+        numDays: Number(updatedQuote.num_days) || 1,
+        setupExtraHrs: Number(updatedQuote.setup_extra_hrs) || 0,
+        setupPremium: Number(updatedQuote.setup_premium) || 0,
+        travelMethod: updatedQuote.travel_method || 'vehicle',
+        travelTimeMins: updatedQuote.travel_time_mins != null ? Number(updatedQuote.travel_time_mins) : undefined,
+        travelCost: updatedQuote.travel_cost != null ? Number(updatedQuote.travel_cost) : undefined,
+        dayRateOverride: updatedQuote.day_rate_override != null ? Number(updatedQuote.day_rate_override) : undefined,
+        clientRateOverride: updatedQuote.client_rate_override != null ? Number(updatedQuote.client_rate_override) : undefined,
+        expenses: Array.isArray(updatedQuote.expenses) ? updatedQuote.expenses : (updatedQuote.expenses ? JSON.parse(updatedQuote.expenses) : []),
+      };
+      const newCrewCount = (reInput.jobType === 'crewed' && Number(updatedQuote.crew_count) > 1) ? Number(updatedQuote.crew_count) : 1;
+      const recalc = applyCrewMultiplier(calculateCosts(reInput, settings), newCrewCount);
+      const recalcUpdate = await query(
+        `UPDATE quotes SET
+           client_charge_labour = $1, client_charge_fuel = $2, client_charge_expenses = $3,
+           client_charge_total = $4, client_charge_rounded = $5,
+           freelancer_fee = $6, freelancer_fee_rounded = $7,
+           expected_fuel_cost = $8, expenses_included = $9, expenses_not_included = $10,
+           our_total_cost = $11, our_margin = $12,
+           estimated_time_mins = $13, estimated_time_hrs = $14,
+           early_start_mins = $15, late_finish_mins = $16,
+           updated_at = NOW()
+         WHERE id = $17 AND is_deleted = false RETURNING *`,
+        [
+          recalc.clientChargeLabour, recalc.clientChargeFuel, recalc.clientChargeExpenses,
+          recalc.clientChargeTotal, recalc.clientChargeTotalRounded,
+          recalc.freelancerFee, recalc.freelancerFeeRounded,
+          recalc.expectedFuelCost, recalc.expensesIncluded, recalc.expensesNotIncluded,
+          recalc.ourTotalCost, recalc.ourMargin,
+          recalc.estimatedTimeMinutes, recalc.estimatedTimeHours,
+          recalc.autoEarlyStartMinutes, recalc.autoLateFinishMinutes,
+          req.params.id,
+        ]
+      );
+      updatedQuote = recalcUpdate.rows[0] || updatedQuote;
+    }
 
     // Check if key fields changed and notify assigned crew
     const keyFieldsChanged: string[] = [];
@@ -1166,7 +1339,7 @@ router.post(
 // ── PUT /api/quotes/:id/ops-details — update arranging/ops fields ───
 
 const opsDetailsSchema = z.object({
-  key_points: z.string().optional().nullable(),
+  // key_points was dropped in migration 079 — content backfilled into freelancer_notes
   client_introduction: z.string().optional().nullable(),
   tolls_status: z.enum(['not_needed', 'todo', 'booked', 'paid']).optional(),
   accommodation_status: z.enum(['not_needed', 'todo', 'booked', 'paid']).optional(),
@@ -1864,6 +2037,10 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     }
 
     console.log(`[HH Push] Quote ${quoteId} → HH job ${hhJobId}: ${quote.job_type} item added (list=${listId}, qty=${qty}, price=${price})`);
+    // Track that this quote has been pushed so the Edit Quote modal can warn
+    // staff that subsequent edits won't update HH (we'd need to find + edit the
+    // line item there manually, which we don't currently do).
+    await query(`UPDATE quotes SET hh_pushed_at = NOW() WHERE id = $1`, [quoteId]);
     res.json({ success: true, hhJobId });
   } catch (error: any) {
     const msg = error?.message || String(error);
