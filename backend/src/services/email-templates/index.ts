@@ -658,11 +658,13 @@ const templates: Record<string, EmailTemplate> = {
         Hi {{clientName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        We're writing to confirm that your booking <strong>{{jobNumber}}</strong> — {{jobName}} has been cancelled.
+        {{clientIntro}}
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
         <tr>
           <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Booking</p>
+            <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{jobNumber}} — {{jobName}}</p>
             <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Original dates</p>
             <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{jobDates}}</p>
             {{refundSection}}

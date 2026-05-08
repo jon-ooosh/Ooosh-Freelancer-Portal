@@ -126,6 +126,10 @@ const processSchema = z.object({
   cancellation_notice_days: z.number().min(0),
   transport_charges: z.number().min(0).optional(),
   breakdown: z.string().optional(),
+  // Optional override of cancelled_at — used when staff backdate the
+  // cancellation (e.g. client emailed yesterday, we're processing today).
+  // Sent as ISO string from the modal date picker (UTC noon to dodge tz edges).
+  cancelled_at: z.string().datetime().optional().nullable(),
   // Requirement IDs the user explicitly chose to KEEP alive past cancellation.
   // Everything else open on the job is auto-cancelled below. Kept items get
   // keep_after_close=true so background scanners still fire them. See
@@ -145,7 +149,7 @@ router.post(
         cancellation_reason, cancellation_notes,
         cancellation_fee, cancellation_refund,
         cancellation_tier, cancellation_notice_days,
-        breakdown, keep_requirement_ids,
+        breakdown, keep_requirement_ids, cancelled_at,
       } = req.body;
 
       // Verify job exists and is in a cancellable state (confirmed+)
@@ -164,12 +168,19 @@ router.post(
         return;
       }
 
-      // 1. Update job status to cancelled
+      // 1. Update job status to cancelled. cancelled_at honours the optional
+      // backdate override — used by the modal when staff process a cancellation
+      // a day or two after the client actually emailed (which would otherwise
+      // shift the notice tier). Future dates are clamped to NOW server-side
+      // (Zod min isn't enough because the front-end could lie).
+      const cancelledAtSql = cancelled_at && new Date(cancelled_at) <= new Date()
+        ? cancelled_at
+        : null;
       await query(
         `UPDATE jobs SET
           pipeline_status = 'cancelled',
           pipeline_status_changed_at = NOW(),
-          cancelled_at = NOW(),
+          cancelled_at = COALESCE($9::timestamptz, NOW()),
           cancelled_by = $2,
           cancellation_reason = $3,
           cancellation_notes = $4,
@@ -181,7 +192,8 @@ router.post(
           updated_at = NOW()
         WHERE id = $1`,
         [jobId, userId, cancellation_reason, cancellation_notes || null,
-         cancellation_fee, cancellation_refund, cancellation_tier, cancellation_notice_days]
+         cancellation_fee, cancellation_refund, cancellation_tier, cancellation_notice_days,
+         cancelledAtSql]
       );
 
       // 2. Log cancellation as interaction on activity timeline
@@ -400,7 +412,26 @@ router.post(
         },
       }).catch(err => console.error('[Cancellation] Internal email failed:', err));
 
-      // 10. Send client cancellation email
+      // 10. Send client cancellation email — reason-aware intro paragraph.
+      // The boilerplate "We're writing to confirm…" line worked for client-led
+      // cancellations but read tone-deaf when the cancellation was Ooosh-side
+      // (e.g. overbooked) or out of anyone's control (e.g. event cancelled).
+      // Build the intro server-side and pass it as a template variable.
+      // Plain text — the email-service substituter HTML-escapes variable
+      // values, so any markup here would render as literal text. The static
+      // template below already has a "Original dates" panel showing the job
+      // number and name; the intro just needs to set the tone.
+      const clientIntroByReason: Record<string, string> = {
+        'Client cancelled': "We're writing to confirm that your booking has been cancelled at your request.",
+        'Event cancelled': "We're sorry to hear the event has been cancelled. We're writing to confirm that your booking has been cancelled accordingly.",
+        'Date change': "Following the date change, we're writing to confirm that your original booking has been cancelled. Please get in touch if you'd like us to set up the new dates.",
+        'Venue change': "Following the venue change, we're writing to confirm that your original booking has been cancelled. Please get in touch if you'd like to rebook for the new venue.",
+        'Budget': "We're writing to confirm that your booking has been cancelled.",
+        'Overbooked': "Unfortunately we're no longer able to fulfil your booking due to a clash on our end, and we're writing to confirm that the booking has been cancelled. We're very sorry for the inconvenience.",
+        'Other': "We're writing to confirm that your booking has been cancelled.",
+      };
+      const clientIntro = clientIntroByReason[cancellation_reason] || clientIntroByReason['Other'];
+
       (async () => {
         try {
           const target = await resolveClientEmailTarget(jobId);
@@ -431,6 +462,7 @@ router.post(
               jobDates,
               refundSection,
               invoiceNote,
+              clientIntro,
             },
           });
           if (target.isFallback) {
