@@ -720,17 +720,24 @@ export default function TransportCalculator({
         }
       }
 
-      // Auto-push to HireHop if job has an HH number
+      // Auto-push to HireHop if job has an HH number.
+      // Paired delivery+collection quotes get pushed as two separate line items.
+      const pairedId = (saveResult as { paired_id?: string | null } | null)?.paired_id || null;
       if (saveResult?.id && hhJobNumber) {
         try {
           await api.post(`/quotes/${saveResult.id}/push-hirehop`, {});
-          setSuccess('Quote saved + pushed to HireHop');
+          if (pairedId) {
+            await api.post(`/quotes/${pairedId}/push-hirehop`, {});
+            setSuccess('Quotes saved + pushed to HireHop (delivery + collection)');
+          } else {
+            setSuccess('Quote saved + pushed to HireHop');
+          }
         } catch (hhErr) {
           console.warn('HireHop push failed (quote saved OK):', hhErr);
           setSuccess('Quote saved (HireHop push failed — push manually later)');
         }
       } else {
-        setSuccess('Quote saved successfully');
+        setSuccess(pairedId ? 'Quotes saved (delivery + collection)' : 'Quote saved successfully');
       }
       onSaved?.();
     } catch (err: unknown) {

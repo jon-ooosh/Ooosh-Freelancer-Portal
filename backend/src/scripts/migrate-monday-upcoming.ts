@@ -414,6 +414,8 @@ async function migrateDC(): Promise<void> {
     const timeRaw = cv(item, DC_COLS.timeToArrive)?.value ? JSON.parse(cv(item, DC_COLS.timeToArrive)!.value!) : null;
     const arrivalTime = timeRaw?.hour != null ? `${String(timeRaw.hour).padStart(2, '0')}:${String(timeRaw.minute || 0).padStart(2, '0')}` : null;
     const runGroup = cvText(item, DC_COLS.runGroup) || null;
+    // Monday's "Key points" column maps onto OP's freelancer_notes after migration 079
+    // (the standalone key_points column was dropped in favour of consolidating notes).
     const keyPoints = cvText(item, DC_COLS.keyPoints) || null;
     const driverPay = Number(cvText(item, DC_COLS.driverPayDirect)) || Number(cvText(item, DC_COLS.driverPayMirror)) || null;
     const clientEmail = cvText(item, DC_COLS.clientEmail) || null;
@@ -461,7 +463,7 @@ async function migrateDC(): Promise<void> {
            job_id, job_type, calculation_mode, what_is_it,
            venue_id, venue_name,
            job_date, arrival_time,
-           key_points, run_group,
+           freelancer_notes, run_group,
            freelancer_fee, freelancer_fee_rounded,
            client_charge_total, client_charge_rounded,
            expenses_included, expenses_not_included,

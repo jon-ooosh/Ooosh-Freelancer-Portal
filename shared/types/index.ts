@@ -541,6 +541,12 @@ export interface SavedQuote {
   // Notes
   internal_notes: string | null;
   freelancer_notes: string | null;
+  // HireHop push tracking — non-null timestamp means this quote was added as a
+  // line item on the linked HH job. Used to flag "edits in OP won't update HH".
+  hh_pushed_at: string | null;
+  // Pair link — when a delivery quote is created with "also collect from same
+  // place", we save TWO sibling rows, each pointing at the other via paired_quote_id.
+  paired_quote_id: string | null;
   // Meta
   created_by: string;
   created_by_name: string | null;

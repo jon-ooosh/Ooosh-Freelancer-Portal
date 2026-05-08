@@ -204,6 +204,10 @@ interface SavedQuote {
   // Notes
   internal_notes: string | null;
   freelancer_notes: string | null;
+  // HireHop push tracking — non-null when this quote was added as a line item on the linked HH job
+  hh_pushed_at: string | null;
+  // Pair link — set on delivery+collection siblings created together
+  paired_quote_id: string | null;
   created_by_name: string | null;
   created_at: string;
 }
@@ -4311,11 +4315,20 @@ export default function JobDetailPage() {
           )}
 
           {/* Edit Quote Modal */}
-          {editingQuoteId && (
+          {editingQuoteId && (() => {
+            const editingQuote = quotes.find((q) => q.id === editingQuoteId);
+            const wasPushedToHh = !!editingQuote?.hh_pushed_at;
+            return (
             <div className="fixed inset-0 z-50 flex items-center justify-center">
               <div className="absolute inset-0 bg-black/50" onClick={() => setEditingQuoteId(null)} />
               <div className="relative bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[90vh] overflow-y-auto">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">Edit Quote</h3>
+                {wasPushedToHh && (
+                  <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                    <strong>Heads up:</strong> this quote has already been pushed to HireHop.
+                    Edits here will NOT update the HireHop line item — adjust it manually in HireHop if the price or details have changed.
+                  </div>
+                )}
                 <div className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
@@ -4481,7 +4494,8 @@ export default function JobDetailPage() {
                 </div>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* Hire Forms Section (testing) */}
 
