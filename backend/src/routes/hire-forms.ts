@@ -26,6 +26,7 @@ import {
   buildFallbackBanner,
   logFallbackToTimeline,
 } from '../services/money-emails';
+import { resolveHireFormContacts } from '../services/hire-form-contacts';
 import {
   findOverlappingAssignments,
   buildConflictPayload,
@@ -2420,13 +2421,9 @@ router.get('/email-contacts/:jobId', authenticate, async (req: AuthRequest, res:
   try {
     const jobId = req.params.jobId as string;
 
-    // Get job with client org
     const jobResult = await query(
-      `SELECT j.id, j.hh_job_number, j.client_id, j.client_name, j.company_name,
-              j.job_date, j.job_name, o.email AS org_email, o.name AS org_name
-       FROM jobs j
-       LEFT JOIN organisations o ON o.id = j.client_id
-       WHERE j.id = $1 AND j.is_deleted = false`,
+      `SELECT id, hh_job_number, client_name, company_name, job_date, job_name
+       FROM jobs WHERE id = $1 AND is_deleted = false`,
       [jobId]
     );
 
@@ -2436,78 +2433,8 @@ router.get('/email-contacts/:jobId', authenticate, async (req: AuthRequest, res:
     }
 
     const job = jobResult.rows[0];
-    const contacts: Array<{ email: string; name: string; source: string }> = [];
-
-    // Client org email
-    if (job.org_email) {
-      contacts.push({ email: job.org_email, name: job.org_name || job.company_name || 'Client', source: 'client_org' });
-    }
-
-    // People linked to the client org
-    if (job.client_id) {
-      const peopleResult = await query(
-        `SELECT p.email, p.first_name, p.last_name
-         FROM person_organisation_roles por
-         JOIN people p ON p.id = por.person_id
-         WHERE por.organisation_id = $1 AND p.email IS NOT NULL AND p.email != '' AND p.is_deleted = false
-         ORDER BY p.first_name`,
-        [job.client_id]
-      );
-      for (const p of peopleResult.rows) {
-        if (!contacts.some(c => c.email === p.email)) {
-          contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim(), source: 'client_person' });
-        }
-      }
-    }
-
-    // People linked to the job via job_organisations (band contacts, promoter contacts, etc.)
-    const joResult = await query(
-      `SELECT DISTINCT p.email, p.first_name, p.last_name, jo.role AS org_role, o.name AS org_name
-       FROM job_organisations jo
-       JOIN organisations o ON o.id = jo.organisation_id
-       JOIN person_organisation_roles por ON por.organisation_id = jo.organisation_id
-       JOIN people p ON p.id = por.person_id
-       WHERE jo.job_id = $1 AND p.email IS NOT NULL AND p.email != '' AND p.is_deleted = false
-       ORDER BY p.first_name`,
-      [jobId]
-    );
-    for (const p of joResult.rows) {
-      if (!contacts.some(c => c.email === p.email)) {
-        const source = p.org_role ? `${p.org_role}${p.org_name ? ` (${p.org_name})` : ''}` : 'linked_org';
-        contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim(), source });
-      }
-    }
-
-    // Organisation emails from job_organisations (band email, promoter email, etc.)
-    const joOrgResult = await query(
-      `SELECT DISTINCT o.email, o.name, jo.role
-       FROM job_organisations jo
-       JOIN organisations o ON o.id = jo.organisation_id
-       WHERE jo.job_id = $1 AND o.email IS NOT NULL AND o.email != ''`,
-      [jobId]
-    );
-    for (const o of joOrgResult.rows) {
-      if (!contacts.some(c => c.email === o.email)) {
-        contacts.push({ email: o.email, name: o.name || 'Organisation', source: o.role || 'linked_org' });
-      }
-    }
-
-    // People directly associated with the job's contact person (HH contact name match)
-    if (job.client_name) {
-      const contactResult = await query(
-        `SELECT p.email, p.first_name, p.last_name
-         FROM people p
-         WHERE p.email IS NOT NULL AND p.email != '' AND p.is_deleted = false
-           AND (p.first_name || ' ' || p.last_name) ILIKE $1
-         LIMIT 5`,
-        [job.client_name]
-      );
-      for (const p of contactResult.rows) {
-        if (!contacts.some(c => c.email === p.email)) {
-          contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim(), source: 'job_contact' });
-        }
-      }
-    }
+    // Use shared resolver — same source of truth as the auto-email scheduler
+    const contacts = await resolveHireFormContacts(jobId);
 
     res.json({
       contacts,

@@ -13,6 +13,11 @@ import { query } from '../config/database';
 import { HH_TO_PIPELINE } from '../services/hirehop-writeback';
 import { alertReturnedWithStillBookedOutVans } from '../services/vehicle-emails';
 import { verifyApiKey } from '../middleware/api-key';
+import {
+  triggerHireFormEmailOnConfirmation,
+  hireFormResultIsAnomaly,
+  sendConfirmationSilentSkipAlert,
+} from '../services/confirmation-hooks';
 
 const router = Router();
 
@@ -237,6 +242,37 @@ async function handleJobStatusChange(
         jobId: job.id,
         triggerSource: `HireHop webhook (HH status ${oldHHStatus} → ${newHHStatus})`,
       });
+    }
+
+    // Hire form email + silent-skip alerting on confirmation. Pre-May 2026
+    // the HH webhook didn't trigger this, so any job confirmed by HH staff
+    // (rather than via OP UI / payment portal) silently skipped both the
+    // on-confirmation send AND was at the mercy of the daily 09:00 scheduler
+    // hitting the exact 10-day mark.
+    if (newPipelineStatus === 'confirmed' && job.pipeline_status !== 'confirmed') {
+      void (async () => {
+        try {
+          const hfResult = await triggerHireFormEmailOnConfirmation(job.id);
+          const anomaly = hireFormResultIsAnomaly(hfResult);
+          if (anomaly) {
+            const jobRow = await query(
+              `SELECT hh_job_number, job_name, client_name FROM jobs WHERE id = $1`,
+              [job.id]
+            );
+            const j = jobRow.rows[0] || {};
+            await sendConfirmationSilentSkipAlert({
+              jobId: job.id,
+              jobNumber: j.hh_job_number,
+              jobName: j.job_name ?? null,
+              clientName: j.client_name ?? null,
+              triggerSource: 'status_change',
+              issues: [anomaly],
+            });
+          }
+        } catch (err) {
+          console.error('[Webhook] Hire form email on confirmation failed:', err);
+        }
+      })();
     }
 
     return {

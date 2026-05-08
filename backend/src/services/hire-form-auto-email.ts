@@ -2,15 +2,27 @@
  * Hire Form Auto-Email Service
  *
  * Runs daily (09:00) to send hire form emails for self-drive jobs:
- * - 10 days before job_date: initial hire form request email
- * - If confirmed with <10 days to go: send on confirmation (handled by pipeline status change)
- * - 5 days before job_date: chase email if no hire forms received
- *   (unless initial was sent <24h ago, in which case chase at 4 days)
+ * - 8-11 days before job_date: initial hire form request email (self-healing
+ *   window — pre-May 2026 this was an exact `= 10` match, which silently lost
+ *   any job that wasn't in the right state on the single day the cron looked.
+ *   Now any of 4 days will catch it; the `notes NOT LIKE 'Hire form email
+ *   sent%'` guard prevents duplicates).
+ * - If confirmed with <11 days to go: send on confirmation (handled by
+ *   pipeline status change + payment-event + HH webhook).
+ * - 4-5 days before job_date: chase email if initial was sent and no forms
+ *   received (unless initial was sent <24h ago, in which case wait).
+ * - Missed-initial backstop: if a job hits the 4-5 day window but no initial
+ *   was ever sent (e.g. confirmed late, scheduler missed every window day,
+ *   contact lookup returned 0 then), send the INITIAL email — not a chase.
+ *   Without this backstop, jobs that slipped through the initial window had
+ *   no recovery path at all.
  */
 
 import { query } from '../config/database';
 import emailService from './email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from './money-emails';
+import { resolveHireFormContacts } from './hire-form-contacts';
+import { sendConfirmationSilentSkipAlert } from './confirmation-hooks';
 
 export interface AutoEmailResult {
   initialSent: number;
@@ -25,13 +37,9 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
   try {
     const now = new Date();
 
-    // ── Initial emails: jobs with self-drive vehicles, job_date in 10 days ──
-    // Find jobs that:
-    // 1. Have a vehicle requirement (is_auto, source=hirehop_sync)
-    // 2. Are NOT van_and_driver
-    // 3. Have a hire_forms requirement that's still not_started
-    // 4. job_date is 10 days from now (or fewer if just confirmed)
-    // 5. Haven't had a hire form email sent yet (notes don't contain 'Hire form email sent')
+    // ── Initial emails: jobs with self-drive vehicles, job_date 8-11 days out
+    // ── Self-healing window — any of 4 days will catch the job. The notes
+    //    guard ('Hire form email sent') prevents duplicates within the window.
     const initialJobs = await query(
       `SELECT j.id, j.hh_job_number, j.job_name, j.job_date, j.company_name, j.client_name, j.client_id,
               jr.id AS req_id, jr.notes AS req_notes
@@ -43,7 +51,7 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
          AND j.job_date IS NOT NULL
          AND jr.status = 'not_started'
          AND j.pipeline_status IN ('confirmed', 'provisional')
-         AND j.job_date::date - CURRENT_DATE = 10
+         AND j.job_date::date - CURRENT_DATE BETWEEN 8 AND 11
          AND (jr.notes IS NULL OR jr.notes NOT LIKE '%Hire form email sent%')
        ORDER BY j.job_date ASC`
     );
@@ -58,9 +66,12 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
       }
     }
 
-    // ── Chase emails: jobs with job_date in 5 days, no hire forms received ──
-    // Check that initial wasn't sent in the last 24 hours (if so, wait until 4 days)
-    const chaseJobs = await query(
+    // ── Chase + missed-initial backstop: jobs 4-5 days out, no forms received.
+    //    Two cases:
+    //    a) Initial was sent → send chase (unless <24h since initial)
+    //    b) Initial was NEVER sent (slipped through the 8-11 day window) →
+    //       send initial as a backstop. Surfaces any prior auto-emailer gap.
+    const lateWindowJobs = await query(
       `SELECT j.id, j.hh_job_number, j.job_name, j.job_date, j.company_name, j.client_name, j.client_id,
               jr.id AS req_id, jr.notes AS req_notes
        FROM jobs j
@@ -72,22 +83,40 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
          AND jr.status = 'not_started'
          AND j.pipeline_status IN ('confirmed', 'provisional')
          AND j.job_date::date - CURRENT_DATE BETWEEN 4 AND 5
-         AND (jr.notes IS NULL OR jr.notes NOT LIKE '%Hire form reminder sent%')
-         AND (jr.notes LIKE '%Hire form email sent%')
        ORDER BY j.job_date ASC`
     );
 
-    for (const job of chaseJobs.rows) {
+    for (const job of lateWindowJobs.rows) {
       try {
-        // Check if initial was sent <24h ago (from notes timestamp)
         const notes = job.req_notes || '';
+        const initialSent = notes.includes('Hire form email sent');
+        const reminderSent = notes.includes('Hire form reminder sent');
+
+        if (!initialSent) {
+          // Missed-initial backstop. Treat as initial, with an alert noting it
+          // arrived late.
+          console.warn(
+            `[Hire Form Auto-Email] Missed-initial backstop firing for job ${job.hh_job_number} (4-5 days out, never received initial)`
+          );
+          const sent = await sendHireFormEmailForJob(job, false, { isLateBackstop: true });
+          if (sent > 0) result.initialSent += sent;
+          else result.skipped++;
+          continue;
+        }
+
+        if (reminderSent) {
+          // Already chased — don't double-chase
+          result.skipped++;
+          continue;
+        }
+
+        // Was the initial sent <24h ago? If so, hold the chase another day.
         const lastSentMatch = notes.match(/Hire form email sent.*on (\d{2}\/\d{2}\/\d{4})/);
         if (lastSentMatch) {
           const parts = lastSentMatch[1].split('/');
           const lastSentDate = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
           const hoursSinceSent = (now.getTime() - lastSentDate.getTime()) / (1000 * 60 * 60);
           if (hoursSinceSent < 24) {
-            // Sent less than 24h ago — skip this cycle, will pick up at 4 days
             result.skipped++;
             continue;
           }
@@ -112,50 +141,32 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
 /**
  * Send hire form email(s) for a specific job to client contacts.
  * Returns the number of emails sent.
+ *
+ * Uses the broad `resolveHireFormContacts` resolver (covers client_id + people
+ * + job_organisations links + HH contact-name match), so management/booking
+ * agents linked via job_organisations are reached. If still 0 contacts after
+ * the resolver, falls back to info@ with the amber "no client email" banner +
+ * fires a silent-skip alert.
+ *
+ * `isLateBackstop` flags the missed-initial backstop case so we can surface
+ * via the silent-skip alert that the auto-emailer slipped a window.
  */
 export async function sendHireFormEmailForJob(
   job: { id: string; hh_job_number: number; job_name: string; job_date: string; company_name: string; client_name: string; client_id: string | null; req_id: string },
-  isChase: boolean
+  isChase: boolean,
+  opts: { isLateBackstop?: boolean } = {}
 ): Promise<number> {
-  // Gather contacts — client org email + people linked to client org
-  const contacts: Array<{ email: string; name: string }> = [];
+  // Use the shared broad resolver — same surface as the manual send picker.
+  const resolved = await resolveHireFormContacts(job.id);
+  let contacts: Array<{ email: string; name: string }> = resolved.map(c => ({
+    email: c.email,
+    name: c.name,
+  }));
 
-  if (job.client_id) {
-    // Org email
-    const orgResult = await query(
-      `SELECT email, name FROM organisations WHERE id = $1 AND email IS NOT NULL AND email != ''`,
-      [job.client_id]
-    );
-    if (orgResult.rows.length > 0 && orgResult.rows[0].email) {
-      contacts.push({ email: orgResult.rows[0].email, name: orgResult.rows[0].name });
-    }
-
-    // People at the org
-    const peopleResult = await query(
-      `SELECT p.email, p.first_name, p.last_name
-       FROM person_organisation_roles por
-       JOIN people p ON p.id = por.person_id
-       WHERE por.organisation_id = $1 AND p.email IS NOT NULL AND p.email != '' AND p.is_deleted = false
-       LIMIT 5`,
-      [job.client_id]
-    );
-    for (const p of peopleResult.rows) {
-      if (!contacts.some(c => c.email === p.email)) {
-        contacts.push({ email: p.email, name: `${p.first_name} ${p.last_name}`.trim() });
-      }
-    }
-  }
-
-  const hireFormUrl = `https://hireforms.oooshtours.co.uk/?job=${job.hh_job_number}`;
-  const jobDate = job.job_date ? new Date(job.job_date) : null;
-  const startDay = jobDate ? jobDate.toLocaleDateString('en-GB', { weekday: 'long' }) : '';
-  const startDate = jobDate ? jobDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
-  const templateId = isChase ? 'hire_form_chase' : 'hire_form_request';
-
-  // Safety net: if we couldn't find any client contacts, route the email to
+  // Safety net: if the broad resolver returned nothing, route the email to
   // info@ once (with the amber "no client email on file" banner + timeline
-  // entry) so staff can forward and update the address book. Otherwise the
-  // hire form would never go out at all and no one would know.
+  // entry) so staff can forward and update the address book. Without this
+  // the form would never go out at all.
   let sentToFallback = false;
   if (contacts.length === 0) {
     const target = await resolveClientEmailTarget(job.id);
@@ -165,7 +176,34 @@ export async function sendHireFormEmailForJob(
     }
   }
 
+  // If contacts is STILL empty (info@ fallback didn't resolve either — should
+  // not happen unless email config is missing), fire a silent-skip alert and
+  // return 0. Better than logging "0/0 sent" and silently giving up.
+  if (contacts.length === 0) {
+    console.warn(`[Hire Form Auto-Email] Job ${job.hh_job_number}: no contacts resolved AND info@ fallback failed`);
+    sendConfirmationSilentSkipAlert({
+      jobId: job.id,
+      jobNumber: job.hh_job_number,
+      jobName: job.job_name ?? null,
+      clientName: job.client_name ?? null,
+      triggerSource: 'status_change',
+      issues: [{
+        kind: 'hire_form_email',
+        reason: 'auto-emailer resolved 0 contacts and the info@ fallback did not resolve either — check email service configuration',
+        context: opts.isLateBackstop ? 'Late backstop fire (4-5 days out, no initial ever sent)' : undefined,
+      }],
+    }).catch(e => console.error('[Hire Form Auto-Email] Silent-skip alert failed:', e));
+    return 0;
+  }
+
+  const hireFormUrl = `https://hireforms.oooshtours.co.uk/?job=${job.hh_job_number}`;
+  const jobDate = job.job_date ? new Date(job.job_date) : null;
+  const startDay = jobDate ? jobDate.toLocaleDateString('en-GB', { weekday: 'long' }) : '';
+  const startDate = jobDate ? jobDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
+  const templateId = isChase ? 'hire_form_chase' : 'hire_form_request';
+
   let sent = 0;
+  const sentEmails: string[] = [];
   for (const contact of contacts) {
     try {
       await emailService.send(templateId, {
@@ -188,6 +226,7 @@ export async function sendHireFormEmailForJob(
           : undefined,
       });
       sent++;
+      sentEmails.push(contact.email);
     } catch (err) {
       console.warn(`[Hire Form Auto-Email] Failed to send to ${contact.email}:`, err);
     }
@@ -195,6 +234,24 @@ export async function sendHireFormEmailForJob(
 
   if (sentToFallback && sent > 0) {
     await logFallbackToTimeline({ jobId: job.id, templateId });
+  }
+
+  // If the late backstop fired (initial sent because we slipped the 8-11 day
+  // window), alert info@ so we can investigate WHY it slipped. Don't gate on
+  // `sent > 0` — even a successful late send is worth flagging.
+  if (opts.isLateBackstop && sent > 0) {
+    sendConfirmationSilentSkipAlert({
+      jobId: job.id,
+      jobNumber: job.hh_job_number,
+      jobName: job.job_name ?? null,
+      clientName: job.client_name ?? null,
+      triggerSource: 'status_change',
+      issues: [{
+        kind: 'hire_form_email',
+        reason: 'hire form initial email fired from the 4-5 day backstop — the 8-11 day window was missed',
+        context: `Sent late to ${sentEmails.join(', ')}. Check why the earlier window did not fire (job confirmation timing, contact lookup, or scheduler error).`,
+      }],
+    }).catch(e => console.error('[Hire Form Auto-Email] Late-backstop alert failed:', e));
   }
 
   // Update the requirement notes
@@ -206,7 +263,7 @@ export async function sendHireFormEmailForJob(
          updated_at = NOW()
        WHERE id = $2`,
       [
-        `${notePrefix} to ${contacts.filter((_, i) => i < sent).map(c => c.email).join(', ')} on ${new Date().toLocaleDateString('en-GB')}`,
+        `${notePrefix} to ${sentEmails.join(', ')} on ${new Date().toLocaleDateString('en-GB')}`,
         job.req_id,
       ]
     );
@@ -221,6 +278,6 @@ export async function sendHireFormEmailForJob(
     }
   }
 
-  console.log(`[Hire Form Auto-Email] ${isChase ? 'Chase' : 'Initial'} for job ${job.hh_job_number}: sent to ${sent}/${contacts.length} contacts`);
+  console.log(`[Hire Form Auto-Email] ${isChase ? 'Chase' : 'Initial'} for job ${job.hh_job_number}: sent to ${sent}/${contacts.length} contacts (${sentEmails.join(', ') || 'none'})`);
   return sent;
 }
