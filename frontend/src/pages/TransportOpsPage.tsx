@@ -76,10 +76,66 @@ interface OpsQuote {
   client_name: string | null;
   out_date: string | null;
   return_date: string | null;
+  pipeline_status: string | null;
+  job_status: number | null;
   linked_venue_name: string | null;
   venue_address: string | null;
   venue_city: string | null;
   assignments: Assignment[];
+}
+
+// Speculative-section bucket. Operational = confirmed-and-beyond (the default
+// view). The other four are opt-in via the "Show:" filter pills and render
+// in dedicated sections below the operational lists.
+type JobBucket = 'operational' | 'provisional' | 'enquiry' | 'lost' | 'cancelled';
+
+type SpeculativeBucket = Exclude<JobBucket, 'operational'>;
+
+const JOB_BUCKET_ORDER: SpeculativeBucket[] = ['provisional', 'enquiry', 'lost', 'cancelled'];
+
+const JOB_BUCKET_CONFIG: Record<Exclude<JobBucket, 'operational'>, {
+  label: string;
+  description: string;
+  badge: string;          // used on the speculative section header
+  rowBadge: string;       // used as a small pill on each row in case of merge
+}> = {
+  provisional: {
+    label: 'Provisional',
+    description: 'Awaiting deposit — not yet confirmed.',
+    badge: 'bg-blue-100 text-blue-700 border-blue-200',
+    rowBadge: 'bg-blue-100 text-blue-700',
+  },
+  enquiry: {
+    label: 'Enquiry',
+    description: 'Pre-provisional. Speculative — these jobs may not happen.',
+    badge: 'bg-purple-100 text-purple-700 border-purple-200',
+    rowBadge: 'bg-purple-100 text-purple-700',
+  },
+  lost: {
+    label: 'Lost',
+    description: 'Enquiries that didn\'t convert.',
+    badge: 'bg-gray-100 text-gray-600 border-gray-200',
+    rowBadge: 'bg-gray-100 text-gray-600',
+  },
+  cancelled: {
+    label: 'Cancelled',
+    description: 'Confirmed jobs that were later cancelled.',
+    badge: 'bg-rose-100 text-rose-700 border-rose-200',
+    rowBadge: 'bg-rose-100 text-rose-700',
+  },
+};
+
+function getJobBucket(q: OpsQuote): JobBucket {
+  const ps = q.pipeline_status;
+  const js = q.job_status;
+  if (ps === 'provisional' || (ps == null && js === 1)) return 'provisional';
+  if (
+    ps === 'new_enquiry' || ps === 'quoting' || ps === 'paused' ||
+    (ps == null && js === 0)
+  ) return 'enquiry';
+  if (ps === 'lost' || (ps == null && js === 10)) return 'lost';
+  if (ps === 'cancelled' || (ps == null && js === 9)) return 'cancelled';
+  return 'operational';
 }
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -265,6 +321,26 @@ export default function TransportOpsPage() {
   );
   const [showCompleted, setShowCompleted] = useState(initialParams.get('completed') === '1');
   const [showCancelled, setShowCancelled] = useState(initialParams.get('cancelled') === '1');
+  // Job-stage toggles — heads-up planning, mirroring the backline page.
+  // These widen the API query to include speculative / dead-stage jobs and
+  // surface them in their own collapsible sections below the operational
+  // lists. Default off; URL-persisted so a shared link keeps the view.
+  const [showProvisional, setShowProvisional] = useState(initialParams.get('provisional') === '1');
+  const [showEnquiry, setShowEnquiry] = useState(initialParams.get('enquiry') === '1');
+  const [showLostJobs, setShowLostJobs] = useState(initialParams.get('lost') === '1');
+  const [showCancelledJobs, setShowCancelledJobs] = useState(initialParams.get('cancelled_jobs') === '1');
+  // Collapsed section keys — persisted in localStorage so refreshes keep
+  // the layout staff have set up. Separate keyspace per render-bucket so a
+  // collapsed "todo" in the operational list doesn't collapse a "todo"
+  // sub-list inside the Provisional section (and vice versa).
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('transportOps.collapsedSections');
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
 
   // New filter controls — date window, free-text search, sort, person/venue pins.
   const [dateWindow, setDateWindow] = useState<DateWindow>(
@@ -292,7 +368,10 @@ export default function TransportOpsPage() {
 
   useEffect(() => {
     loadOps();
-  }, [filter]);
+    // Job-stage toggles are part of the API query, so re-fetch when they
+    // change. The other URL-synced state (date window, sort, search, etc.)
+    // is filtered client-side from a single response and doesn't refetch.
+  }, [filter, showProvisional, showEnquiry, showLostJobs, showCancelledJobs]);
 
   // Keep the URL in sync with the current filter state so refresh / share
   // preserves what the user was looking at. Debounce the search string so
@@ -303,6 +382,10 @@ export default function TransportOpsPage() {
     if (viewMode !== 'table') params.set('view', viewMode);
     if (showCompleted) params.set('completed', '1');
     if (showCancelled) params.set('cancelled', '1');
+    if (showProvisional) params.set('provisional', '1');
+    if (showEnquiry) params.set('enquiry', '1');
+    if (showLostJobs) params.set('lost', '1');
+    if (showCancelledJobs) params.set('cancelled_jobs', '1');
     if (needsCrewOnly) params.set('needs_crew', '1');
     if (needsIntroOnly) params.set('needs_intro', '1');
     if (dateWindow !== 'all') params.set('when', dateWindow);
@@ -319,7 +402,41 @@ export default function TransportOpsPage() {
       window.history.replaceState({}, '', newUrl);
     }, 200);
     return () => window.clearTimeout(timer);
-  }, [filter, viewMode, showCompleted, showCancelled, needsCrewOnly, needsIntroOnly, dateWindow, searchTerm, sortBy, personPin, venuePin]);
+  }, [
+    filter, viewMode, showCompleted, showCancelled,
+    showProvisional, showEnquiry, showLostJobs, showCancelledJobs,
+    needsCrewOnly, needsIntroOnly, dateWindow, searchTerm, sortBy, personPin, venuePin,
+  ]);
+
+  // Toggle a collapsible section's collapsed state and persist to
+  // localStorage. Section keys are namespaced per render bucket — see the
+  // sectionKey() helper below.
+  const toggleSection = useCallback((key: string) => {
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      try {
+        localStorage.setItem('transportOps.collapsedSections', JSON.stringify([...next]));
+      } catch {
+        // ignore quota errors — non-essential
+      }
+      return next;
+    });
+  }, []);
+
+  // Build the /quotes/ops/overview query string for the active filter +
+  // toggle state. Used by every fetch path so they stay in lockstep.
+  const buildOverviewQuery = useCallback(() => {
+    const params = new URLSearchParams();
+    if (filter !== 'all') params.set('job_type', filter);
+    if (showProvisional) params.set('include_provisional', 'true');
+    if (showEnquiry) params.set('include_enquiry', 'true');
+    if (showLostJobs) params.set('include_lost', 'true');
+    if (showCancelledJobs) params.set('include_cancelled', 'true');
+    const qs = params.toString();
+    return qs ? `?${qs}` : '';
+  }, [filter, showProvisional, showEnquiry, showLostJobs, showCancelledJobs]);
 
   // Escape key to close assign modal
   useEffect(() => {
@@ -345,8 +462,7 @@ export default function TransportOpsPage() {
   async function loadOps() {
     try {
       setLoading(true);
-      const params = filter !== 'all' ? `?job_type=${filter}` : '';
-      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${params}`);
+      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${buildOverviewQuery()}`);
       setQuotes(mapEffectiveOpsStatus(res.data));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load');
@@ -454,8 +570,7 @@ export default function TransportOpsPage() {
     try {
       await api.put(`/quotes/${quoteId}/run-group`, { run_group: runGroup, run_order: runOrder });
       // Full reload to ensure all quotes see the updated run groups
-      const params = filter !== 'all' ? `?job_type=${filter}` : '';
-      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${params}`);
+      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${buildOverviewQuery()}`);
       setQuotes(mapEffectiveOpsStatus(res.data));
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update run group');
@@ -470,8 +585,7 @@ export default function TransportOpsPage() {
   ) {
     try {
       await api.patch(`/quotes/runs/${runGroupId}`, fields);
-      const params = filter !== 'all' ? `?job_type=${filter}` : '';
-      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${params}`);
+      const res = await api.get<{ data: OpsQuote[] }>(`/quotes/ops/overview${buildOverviewQuery()}`);
       setQuotes(mapEffectiveOpsStatus(res.data));
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update combined fee');
@@ -519,11 +633,22 @@ export default function TransportOpsPage() {
     return out;
   }, [quotes, needsCrewOnly, needsIntroOnly, dateWindow, personPin, venuePin, searchTerm]);
 
-  // Group quotes by ops_status for table view
+  // Split filtered pool by job-stage bucket. Operational drives the main
+  // grouped-by-ops_status table; the four speculative buckets render as
+  // their own flat date-sorted sections below it.
+  const filteredByBucket = useMemo(() => {
+    const out: Record<JobBucket, OpsQuote[]> = {
+      operational: [], provisional: [], enquiry: [], lost: [], cancelled: [],
+    };
+    for (const q of filteredQuotes) out[getJobBucket(q)].push(q);
+    return out;
+  }, [filteredQuotes]);
+
+  // Group operational quotes by ops_status for the main table view.
   const grouped = useMemo(() => {
     const groups: Record<string, OpsQuote[]> = {};
     for (const status of OPS_STATUSES) groups[status] = [];
-    for (const q of filteredQuotes) {
+    for (const q of filteredByBucket.operational) {
       const status = q.ops_status || 'todo';
       if (!groups[status]) groups[status] = [];
       groups[status].push(q);
@@ -534,7 +659,25 @@ export default function TransportOpsPage() {
       groups[status] = sortQuotes(groups[status], sortBy);
     }
     return groups;
-  }, [filteredQuotes, sortBy]);
+  }, [filteredByBucket.operational, sortBy]);
+
+  // Speculative-section quotes: flat list per bucket, sorted by the
+  // current sort key. We deliberately don't sub-group these by ops_status —
+  // the volumes are small and a single date-sorted list is more useful.
+  const speculativeSections = useMemo(() => {
+    return JOB_BUCKET_ORDER
+      .filter((b) => {
+        if (b === 'provisional') return showProvisional;
+        if (b === 'enquiry') return showEnquiry;
+        if (b === 'lost') return showLostJobs;
+        if (b === 'cancelled') return showCancelledJobs;
+        return false;
+      })
+      .map((bucket) => ({
+        bucket,
+        quotes: sortQuotes(filteredByBucket[bucket], sortBy),
+      }));
+  }, [filteredByBucket, showProvisional, showEnquiry, showLostJobs, showCancelledJobs, sortBy]);
 
   // Calendar data: group by date (respects completed/cancelled toggles)
   const calendarData = useMemo(() => {
@@ -549,14 +692,17 @@ export default function TransportOpsPage() {
     return byDate;
   }, [filteredQuotes, showCompleted, showCancelled]);
 
-  // Top-of-page summary counts, computed against the raw quotes (not
-  // filteredQuotes) so clicking a chip doesn't then change the chip count.
-  // Respects the job-type pill though — these counts are about the stream
-  // you're looking at.
+  // Top-of-page summary counts, computed against the raw operational quotes
+  // (not filteredQuotes) so clicking a chip doesn't then change the chip
+  // count. Speculative buckets (provisional / enquiry / lost / cancelled
+  // jobs) are excluded — the chips are about real operational work, mirror-
+  // ing the backline page convention. Respects the job-type pill though —
+  // these counts are about the stream you're looking at.
   const summary = useMemo(() => {
     const today = startOfToday();
     let overdue = 0, todayCount = 0, thisWeek = 0, needsCrew = 0, needsIntro = 0;
     for (const q of quotes) {
+      if (getJobBucket(q) !== 'operational') continue;
       const jd = quoteDate(q);
       const active = q.ops_status !== 'completed' && q.ops_status !== 'cancelled';
       if (active && jd && jd < today) overdue++;
@@ -617,7 +763,10 @@ export default function TransportOpsPage() {
             </button>
           </div>
 
-          {/* Show completed/cancelled toggles */}
+          {/* Show completed/cancelled toggles — quote-level (controls the
+              Completed / Cancelled ops_status sections in the operational
+              table). Distinct from the Show: pills below, which are
+              job-level (pipeline_status). */}
           <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer">
             <input
               type="checkbox"
@@ -637,6 +786,60 @@ export default function TransportOpsPage() {
             Cancelled
           </label>
         </div>
+      </div>
+
+      {/* Job-stage toggles — heads-up planning. Off by default; speculative
+          and dead-stage jobs render in their own collapsible sections below
+          the operational lists. Headline stat chips above stay scoped to
+          operational work. */}
+      <div className="flex flex-wrap items-center gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+        <span className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
+          Show:
+        </span>
+        <button
+          type="button"
+          onClick={() => setShowProvisional((v) => !v)}
+          title="Show jobs awaiting deposit (Provisional). Stat chips above stay scoped to confirmed work."
+          className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+            showProvisional ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showProvisional ? 'bg-blue-400' : 'bg-gray-300'}`} />
+          Provisional
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowEnquiry((v) => !v)}
+          title="Show pre-provisional enquiries. Useful for forward-planning capacity."
+          className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+            showEnquiry ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showEnquiry ? 'bg-purple-400' : 'bg-gray-300'}`} />
+          Enquiry
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowLostJobs((v) => !v)}
+          title="Show jobs that didn't convert (Lost)."
+          className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+            showLostJobs ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showLostJobs ? 'bg-gray-500' : 'bg-gray-300'}`} />
+          Lost
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowCancelledJobs((v) => !v)}
+          title="Show jobs that were confirmed and later cancelled."
+          className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+            showCancelledJobs ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showCancelledJobs ? 'bg-rose-500' : 'bg-gray-300'}`} />
+          Cancelled
+        </button>
       </div>
 
       {/* Summary chips — click any count to jump to that view */}
@@ -828,42 +1031,120 @@ export default function TransportOpsPage() {
             if (items.length === 0 && (status === 'completed' || status === 'cancelled')) return null;
 
             const config = OPS_STATUS_CONFIG[status];
+            // Section keys are namespaced per render bucket so that
+            // collapsing "todo" inside Operational doesn't also collapse
+            // the operational table when toggled from elsewhere.
+            const key = `op:${status}`;
+            const isCollapsed = collapsedSections.has(key);
 
             return (
               <div key={status} className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-                {/* Section header */}
-                <div className={`px-4 py-2.5 border-b border-gray-200 flex items-center justify-between ${config.bgColour}`}>
+                {/* Section header — click to collapse */}
+                <button
+                  type="button"
+                  onClick={() => toggleSection(key)}
+                  className={`w-full px-4 py-2.5 border-b border-gray-200 flex items-center justify-between text-left ${config.bgColour}`}
+                  aria-expanded={!isCollapsed}
+                >
                   <div className="flex items-center gap-2">
+                    <span className={`text-xs ${config.colour}`} aria-hidden="true">
+                      {isCollapsed ? '▸' : '▾'}
+                    </span>
                     <h2 className={`font-semibold text-sm ${config.colour}`}>{config.label}</h2>
                     <span className={`text-xs px-1.5 py-0.5 rounded-full ${config.bgColour} ${config.colour} font-medium`}>
                       {items.length}
                     </span>
                   </div>
-                </div>
+                </button>
 
-                {items.length === 0 ? (
-                  <div className="px-4 py-6 text-center text-sm text-gray-400">No items</div>
-                ) : (
-                  <div className="divide-y divide-gray-100">
-                    {items.map((q) => (
-                      <QuoteRow
-                        key={q.id}
-                        quote={q}
-                        expanded={expandedId === q.id}
-                        onToggle={() => setExpandedId(expandedId === q.id ? null : q.id)}
-                        onStatusChange={updateOpsStatus}
-                        onAssign={openAssignModal}
-                        onRemoveAssignment={removeAssignment}
-                        onUpdateDetails={updateOpsDetails}
-                        onEdit={openEditModal}
-                        onUpdateRunGroup={updateRunGroup}
-                        onUpdateRunCombinedFee={updateRunCombinedFee}
-                        onPinPerson={(id, name) => setPersonPin({ id, name })}
-                        onPinVenue={(name) => setVenuePin({ name })}
-                        allQuotes={quotes}
-                      />
-                    ))}
+                {!isCollapsed && (
+                  items.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-sm text-gray-400">No items</div>
+                  ) : (
+                    <div className="divide-y divide-gray-100">
+                      {items.map((q) => (
+                        <QuoteRow
+                          key={q.id}
+                          quote={q}
+                          expanded={expandedId === q.id}
+                          onToggle={() => setExpandedId(expandedId === q.id ? null : q.id)}
+                          onStatusChange={updateOpsStatus}
+                          onAssign={openAssignModal}
+                          onRemoveAssignment={removeAssignment}
+                          onUpdateDetails={updateOpsDetails}
+                          onEdit={openEditModal}
+                          onUpdateRunGroup={updateRunGroup}
+                          onUpdateRunCombinedFee={updateRunCombinedFee}
+                          onPinPerson={(id, name) => setPersonPin({ id, name })}
+                          onPinVenue={(name) => setVenuePin({ name })}
+                          allQuotes={quotes}
+                        />
+                      ))}
+                    </div>
+                  )
+                )}
+              </div>
+            );
+          })}
+
+          {/* Speculative sections — heads-up planning, off by default. Each
+              one shows quotes whose linked job is in a non-operational
+              pipeline stage. The flat date-sorted list is intentional: the
+              ops_status sub-grouping only matters for confirmed work. */}
+          {speculativeSections.map(({ bucket, quotes: bucketQuotes }) => {
+            const config = JOB_BUCKET_CONFIG[bucket];
+            const key = `spec:${bucket}`;
+            const isCollapsed = collapsedSections.has(key);
+            return (
+              <div
+                key={bucket}
+                className={`bg-white rounded-lg shadow-sm border ${config.badge.includes('border-') ? '' : 'border-gray-200'} overflow-hidden`}
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleSection(key)}
+                  className={`w-full px-4 py-2.5 border-b border-gray-200 flex items-center justify-between text-left ${config.badge}`}
+                  aria-expanded={!isCollapsed}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs" aria-hidden="true">
+                      {isCollapsed ? '▸' : '▾'}
+                    </span>
+                    <h2 className="font-semibold text-sm">{config.label}</h2>
+                    <span className="text-xs px-1.5 py-0.5 rounded-full bg-white/70 font-medium">
+                      {bucketQuotes.length}
+                    </span>
+                    <span className="text-xs font-normal opacity-75 hidden sm:inline">
+                      — {config.description}
+                    </span>
                   </div>
+                </button>
+
+                {!isCollapsed && (
+                  bucketQuotes.length === 0 ? (
+                    <div className="px-4 py-6 text-center text-sm text-gray-400">No items</div>
+                  ) : (
+                    <div className="divide-y divide-gray-100">
+                      {bucketQuotes.map((q) => (
+                        <QuoteRow
+                          key={q.id}
+                          quote={q}
+                          expanded={expandedId === q.id}
+                          onToggle={() => setExpandedId(expandedId === q.id ? null : q.id)}
+                          onStatusChange={updateOpsStatus}
+                          onAssign={openAssignModal}
+                          onRemoveAssignment={removeAssignment}
+                          onUpdateDetails={updateOpsDetails}
+                          onEdit={openEditModal}
+                          onUpdateRunGroup={updateRunGroup}
+                          onUpdateRunCombinedFee={updateRunCombinedFee}
+                          onPinPerson={(id, name) => setPersonPin({ id, name })}
+                          onPinVenue={(name) => setVenuePin({ name })}
+                          allQuotes={quotes}
+                        />
+                      ))}
+                    </div>
+                  )
                 )}
               </div>
             );

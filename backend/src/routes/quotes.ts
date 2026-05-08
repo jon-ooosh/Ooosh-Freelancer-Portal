@@ -19,7 +19,10 @@ router.use(authenticate);
 
 router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
   try {
-    const { job_type, ops_status, date_from, date_to, show_all } = req.query;
+    const {
+      job_type, ops_status, date_from, date_to, show_all,
+      include_provisional, include_enquiry, include_lost, include_cancelled,
+    } = req.query;
 
     let whereClause = 'WHERE q.is_deleted = false';
     const params: unknown[] = [];
@@ -36,6 +39,37 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
       params.push(ops_status);
       whereClause += ` AND q.ops_status = $${params.length}`;
     }
+
+    // Job-stage filter: by default, only operational jobs (confirmed and
+    // beyond, excluding lost / cancelled). Toggles widen to include
+    // speculative or dead stages. The frontend uses pipeline_status +
+    // job_status (returned in the SELECT below) to render speculative work
+    // in its own sections, so headline stat chips stay scoped to
+    // operational quotes. Quotes with no linked job (job_id IS NULL) are
+    // always shown — they're local D&C entries with no pipeline status.
+    //
+    // Stage detection mirrors backline overview: prefer pipeline_status,
+    // fall back to HH numeric status when pipeline_status is NULL (legacy
+    // data pre-webhook).
+    const stageOrClauses: string[] = [
+      // Operational
+      `(j.id IS NULL
+        OR j.pipeline_status IN ('confirmed','prepping','prepped','dispatched','returned_incomplete','returned','completed')
+        OR (j.pipeline_status IS NULL AND j.status IN (2,3,4,5,6,7,8,11)))`,
+    ];
+    if (include_provisional === 'true') {
+      stageOrClauses.push(`(j.pipeline_status = 'provisional' OR (j.pipeline_status IS NULL AND j.status = 1))`);
+    }
+    if (include_enquiry === 'true') {
+      stageOrClauses.push(`(j.pipeline_status IN ('new_enquiry','quoting','paused') OR (j.pipeline_status IS NULL AND j.status = 0))`);
+    }
+    if (include_lost === 'true') {
+      stageOrClauses.push(`(j.pipeline_status = 'lost' OR (j.pipeline_status IS NULL AND j.status = 10))`);
+    }
+    if (include_cancelled === 'true') {
+      stageOrClauses.push(`(j.pipeline_status = 'cancelled' OR (j.pipeline_status IS NULL AND j.status = 9))`);
+    }
+    whereClause += ` AND (${stageOrClauses.join(' OR ')})`;
 
     // Default window: last 14 days → forward. Keeps the payload small
     // as migrated history grows. Caller can override with ?date_from /
@@ -58,6 +92,7 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
       `SELECT q.*,
         CASE WHEN q.status = 'cancelled' THEN 'cancelled' ELSE COALESCE(q.ops_status, 'todo') END as effective_ops_status,
         j.job_name, j.hh_job_number, j.client_name, j.out_date, j.return_date,
+        j.pipeline_status, j.status as job_status,
         v.name as linked_venue_name, v.address as venue_address, v.city as venue_city,
         rg.combined_freelancer_fee as run_combined_freelancer_fee,
         rg.combined_client_fee as run_combined_client_fee,
