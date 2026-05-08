@@ -94,7 +94,13 @@ export async function runArrangingChase(): Promise<{ scanned: number; sent: numb
   if (!isWithinBusinessHours()) return { scanned: 0, sent: 0, skipped: 0 };
 
   // Pull candidates: quotes still in 'todo', date within next 5 days,
-  // not at max reminder level yet, not deleted/cancelled.
+  // not at max reminder level yet, not deleted/cancelled, and on an
+  // operationally-live job. The job-stage gate mirrors the Crew &
+  // Transport page default — no point chasing "needs arranging" for an
+  // unconfirmed enquiry / provisional booking that may not happen, or for
+  // a job that's already been lost / cancelled. Local D&C quotes (no
+  // linked job) always pass through. NULL pipeline_status falls back to
+  // HH numeric status for legacy pre-webhook data.
   const candidates = await query(
     `SELECT q.id, q.job_type, q.what_is_it, q.venue_name, q.job_date,
             COALESCE(q.arranging_reminder_level, 0) AS arranging_reminder_level,
@@ -110,7 +116,12 @@ export async function runArrangingChase(): Promise<{ scanned: number; sent: numb
        AND q.job_date IS NOT NULL
        AND q.job_date >= CURRENT_DATE
        AND q.job_date <= CURRENT_DATE + INTERVAL '5 days'
-       AND COALESCE(q.arranging_reminder_level, 0) < 3`
+       AND COALESCE(q.arranging_reminder_level, 0) < 3
+       AND (
+         j.id IS NULL
+         OR j.pipeline_status IN ('confirmed','prepping','prepped','dispatched','returned_incomplete','returned','completed')
+         OR (j.pipeline_status IS NULL AND j.status IN (2,3,4,5,6,7,8,11))
+       )`
   );
   const rows = candidates.rows as PendingQuote[];
 
