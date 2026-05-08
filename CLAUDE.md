@@ -1218,8 +1218,8 @@ Full cancellation workflow distinguishing **lost enquiries** (never confirmed) f
   - [x] Hire form email endpoint: `POST /api/hire-forms/send-email` + `GET /api/hire-forms/email-contacts/:jobId` (contacts from 5 sources: client org, org people, job_organisations, org emails, HH contact name match)
   - [x] Hire form sent badge persists on refresh (derivation engine preserves user-appended notes, send sets status to in_progress)
   - [x] Info badges (Sent, Received, Referral) visually distinct from action buttons (pills vs solid filled buttons)
-  - [x] Hire form auto-email scheduler (daily 09:00): 10-day initial, 5-day chase
-  - [x] Hire form on confirmation: auto-sends when job confirmed with <10 days to start
+  - [x] Hire form auto-email scheduler (daily 09:00). Initial fires 8-11 days before hire start (self-healing window), chase fires 4-5 days before. Missed-initial backstop in the 4-5 day window catches jobs that slipped past the initial window for any reason. On-confirmation hook fires from `pipeline.ts`, `money.ts` payment-event, AND `webhooks.ts` HH webhook (no entry-point gaps). Single canonical contact resolver in `services/hire-form-contacts.ts` used by both the auto-emailer and the manual `/email-contacts/:jobId` picker — same 5 sources (client org email, client-org people, `job_organisations` linked entities' people, org-level emails, HH contact-name match). 0-contact resolution fires a `sendConfirmationSilentSkipAlert` to info@ rather than logging-and-moving-on. **May 2026 history:** all five of these were silent gaps until the 15175 incident exposed them — exact `= 10` day match (no recovery if missed), narrow contact lookup (only `client_id` org + people, missed `job_organisations` linked management/promoter contacts), no missed-initial backstop (chase WHERE clause required `notes LIKE 'Hire form email sent'`, so a missed initial meant no chase either — total black hole), HH-webhook-driven confirmations didn't call the on-confirmation hook, 0-contacts silently logged "0/0 sent". 14 jobs in the next 14 days had to be backfilled via `scripts/send-missing-hire-form-emails.ts`. See commit `a3c65c8`.
+  - [x] Hire form on confirmation: auto-sends when job confirmed with ≤10 days to start (covers all three confirmation entry points — manual pipeline transition, payment-portal payment-event, inbound HH webhook)
   - [x] Van & Driver toggle: soft-suspends hire_forms/excess requirements (preserves data, restores on toggle back)
   - [x] Requirement deletion: confirmation dialog with required reason for hire_forms/excess, logged to activity timeline
   - [x] Stale requirement cleanup: removes auto-requirements not on HH, flags manual ones
@@ -1572,7 +1572,8 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
 
 *Step 3: Data cleanup tools* ✅ MOSTLY COMPLETE
 - [x] "Convert Person to Organisation" — transactional: creates org, copies external IDs, moves interactions + job links, soft-deletes person
-- [ ] "Merge duplicates" — merge person+org that represent the same entity (person+person merge exists on DuplicatesPage)
+- [x] **Organisation merge** (May 2026) — admin/manager-only "Merge" button on Org Detail header. `GET /api/organisations/:id/merge-preview?keep_id=…` returns counts of what will move (people, jobs, job-org links, venues, interactions, relationships, child orgs, job issues) + external ID conflicts. `POST /api/organisations/:id/merge` runs in a single transaction (BEGIN/COMMIT/ROLLBACK on failure): reassigns FK rows to keeper, dedups against unique constraints (`job_organisations(job_id, org, role)`, `organisation_relationships(from, to, type, status)`, `external_id_map(entity_type, entity_id, system)`), drops self-referencing relationship edges, fills keeper's null scalars from loser, unions tags + files, appends backref note both directions for audit (`[Merged from "X" on YYYY-MM-DD by user]` on keeper, `[Merged into "Y"]` on loser). Loser is soft-deleted (`is_deleted=true`); audit_log gets entries on both records. External ID conflicts (e.g. both orgs have a HireHop ID) are resolved keeper-wins; discarded IDs are recorded in keeper notes. Frontend modal: org search picker, count preview, type-the-loser-name confirmation guard, redirect to keeper on success. Stays on the same branch as the people merge (transactional was an upgrade — original people-merge in `routes/duplicates.ts` is NOT transactional, latent risk for that flow). **Companion display change:** the Job Detail sidebar Client History "Internal Notes" block (`JobDetailPage.tsx`) is now `line-clamp-2` with a Show more / Show less toggle when content exceeds 120 chars or 2 lines. Merge backref notes + external-ID-conflict logs accumulate on the keeper's `notes` field over time, so the always-fully-rendered display was visibly bloated post-first-merge.
+- [ ] **Person+org merge** — for the case where one record is a person and the other is an org representing the same entity. Person→Org conversion exists already (`/api/data-cleanup/convert-person-to-org`); a true merge would be the conversion path + org-merge path stitched. Lower priority since converting first then merging works.
 - [x] Bulk type correction — multi-select orgs by type, change type in bulk (auto-resolves pending type_mismatch reviews)
 - [x] "Needs review" page — Data Cleanup page (`/data-cleanup`) with Sync Review Queue, Org Types, Convert Person tabs
 - [x] Organisation type stats breakdown with click-through to orgs of each type
@@ -1913,6 +1914,8 @@ These are existing standalone tools that currently push to Monday.com. They need
 - **Cold Lead Finder** — Ticketmaster API integration (standalone, low priority)
 
 ### Future Enhancements (captured, not scheduled)
+
+- **Portal Stripe webhook hardening (8 May 2026)** — `handle-stripe-webhook.js` in the payment portal repo (separate Netlify app, not this codebase) silently swallows HireHop transient errors during `Step 1: Creating HireHop deposit` and proceeds to call OP's `/api/money/:jobId/payment-event` regardless. Result: client gets the OP "Payment Received" email, OP records an orphan `job_payments` row with `hirehop_deposit_id=NULL`, but the deposit never lands in HireHop and the Money tab shows the balance as still outstanding (Money tab reads `billing_list.php` live). Surfaced 8 May 2026 by job 15175: HH returned error 327 (rate limit, max 60 req/min × 3/sec — a 5-second prior webhook tipped us over), portal logged `❌ Deposit creation failed: { error: 327 }`, kept marching, claimed `✅ OP payment event recorded` and `✅ Job status updated`. The very next call succeeded — pure transient blip a retry would have caught. **Fix in portal repo:** detect transient HH errors (327, 329, 429, 5xx), retry with exponential backoff (3 attempts at 2s/4s/8s), and on persistent failure return non-200 to Stripe so its built-in webhook retry takes over (Stripe retries for ~3 days at increasing intervals — gives HH plenty of recovery room). Do NOT call OP's payment-event with `hh_deposit_id=null` after a Step 1 failure. **Companion OP-side hardening** (in this repo, when portal is fixed): passive reconciliation pass that polls HH `billing_list.php` for any portal-source `job_payments` row with NULL `hirehop_deposit_id` older than ~10 min, retro-links matched deposits, alerts info@ for unmatched. Closes the loop if the portal's retries themselves fail. The 14 hire-form silent skips found alongside this incident were a separate issue — fixed OP-side in commit `a3c65c8`.
 
 - **Post-hook outbox pattern (7 May 2026)** — proper long-term fix for the fragility of `setImmediate` fire-and-forget blocks across the codebase (~12 of them, mostly post-PATCH side-effects). Today's pattern: route handler responds 200, then queues async work with `setImmediate(...)`. If the DB pool blips, network burps, or — most commonly — the server restarts during a deploy, the in-flight hook is lost silently. The 7 May 2026 RX72TKO incident saw all 5 post-book-out hooks (hire form PDF + email, OOH info email, auto-dispatch, requirement advance, vehicle requirement sync) die simultaneously on a single Postgres connection timeout coinciding with a deploy restart. Short-term mitigation shipped same day: `services/post-hook-recovery.ts` adds `withHookRetry` (3 attempts, 1s/4s/16s exponential backoff) + `alertHookFailure` (bell to admins/managers + email to info@ when retries exhausted). Catches transient blips and surfaces permanent failures within minutes. **Doesn't survive server restarts** — that's what the outbox pattern is for. Sketch:
   - **Storage:** new `pending_hooks` table (`id`, `kind`, `payload JSONB`, `attempts`, `next_run_at`, `last_error`, `completed_at`, `created_at`). One row per pending side-effect.
@@ -2580,6 +2583,7 @@ Self-drive hires require an insurance excess. The amount is calculated by the dr
 | On-demand job sync | On page load / button | Per-job: fresh line item fetch from HH, re-derive requirements (non-blocking) |
 | OOH return reminders | Daily at 10:00 | Send T-1 day reminder for vehicles with `return_overnight=true` and `hire_end=tomorrow`. See "Out-of-Hours Returns" section. |
 | Pre-auth expiry check | Daily (TODO — not yet built, fairly-high priority) | Scan `job_excess` with `status='pre_auth'` older than 4 days, flip to expired + notify staff to re-take. Stripe auto-voids at ~7 days; Ooosh policy re-takes inside 4. |
+| Stale enquiry auto-lose | Daily at 09:00 | Mark unconfirmed enquiries / provisional as lost when `job_date::date < CURRENT_DATE`, `pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')`, `status < 2`. Runs at office start so staff don't open the day to phantom enquiries cluttering operational lists (backline prep, overdue departures, etc.). Also pushes status 10 (Not Interested) to HireHop. Was 10:00 pre-May 2026 — moved to 09:00 to land before staff start their day. |
 
 ## HireHop Integration
 
@@ -2913,20 +2917,26 @@ The chases-due stat card (top of dashboard) is preserved — its count is now ac
 
 Multiple dashboard queries answer "what's going out / has gone out / is overdue to go out" — they MUST all use the same status filter or the headline stat card, the Today section, the Coming Up heat strip, and the Overdue Departures bucket disagree.
 
-The canonical "operationally pre-dispatch" filter is:
+The canonical **"operationally pre-dispatch"** filter (May 2026):
 ```
-status IN (1, 2, 3, 4) OR (status = 5 AND pipeline_status = 'prepped')
+(status IN (2, 3, 4) OR (status = 5 AND pipeline_status = 'prepped'))
+AND pipeline_status NOT IN ('lost', 'cancelled')
 ```
 
 The status-5+prepped clause is the OP↔HH semantic gap: HH jumps to status 5 the moment items get checked out, but OP holds `pipeline_status='prepped'` until staff clicks "Mark as Dispatched". A job in this state is physically prepped in the yard, hasn't actually rolled out the gate, and SHOULD count as "going out today" / "overdue if it hasn't left yet".
+
+**Provisional (HH 1) and Enquiry (HH 0) are deliberately excluded.** No warehouse work should happen until a hire is actually booked (HH 2 = Booked). Stale enquiries / provisional are swept by the daily 09:00 stale-enquiry auto-lose scheduler — they don't surface as "overdue" warehouse work, they surface as a separate "auto-lost" log entry. Pre-May 2026 the operational filter included `status IN (1, ...)` and a small `pipeline_status NOT IN (lost, cancelled, ...)` blacklist, which let provisional + enquiry through; the backline page + dashboard overdue widgets started showing speculative work as "to-do" and "overdue" — fixed by tightening to the whitelist above.
 
 Surfaces that use this filter:
 - `going_out_count` stat card
 - "Going Out Today" section query
 - Overdue Departures bucket query
 - Coming Up heat strip departures query
+- Overdue Backline widget (dashboard) + `routes/backline.ts` overdue-out + going-out queries
 
-When adding a new departure-related surface, use the same filter or the dashboard will visibly disagree with itself. The May 2026 refinement caught a 5-vs-3 mismatch between Today and Coming Up, plus a `prepped` job sitting overdue for 2 days that the Overdue Departures bucket missed entirely.
+When adding a new departure-related warehouse surface, use the same filter or the dashboard will visibly disagree with itself. The May 2026 refinement caught a 5-vs-3 mismatch between Today and Coming Up, plus a `prepped` job sitting overdue for 2 days that the Overdue Departures bucket missed entirely. The follow-up refinement (also May 2026, post BLK KACTUS / Chip Bernal report) dropped provisional from the same set of surfaces.
+
+**Heads-up planning views** (e.g. `routes/backline.ts` `?include_provisional=true&include_enquiry=true`) deliberately bypass the operational filter to surface speculative work in a separate visually-distinct bucket. Headline stats stay scoped to operational; unconfirmed jobs render below the main lists labelled "Provisional — Awaiting Deposit" / "Enquiries — Speculative" so warehouse staff can input on capacity without the speculative figures contaminating "remaining prep time" totals. New views adopting this pattern should follow the same shape: separate `unconfirmed: { provisional, enquiry }` block on the response, opt-in via query params, frontend renders below operational sections with a "Not counted in headline stats" note.
 
 ### "Overdue returns" vs "Overdue completions" (May 2026)
 

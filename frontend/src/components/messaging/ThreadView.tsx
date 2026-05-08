@@ -31,6 +31,7 @@ import {
   useAttachments,
   type InteractionAttachment,
 } from './Attachments';
+import Reactions, { type ReactionsMap } from './Reactions';
 
 interface ThreadInteraction {
   id: string;
@@ -43,6 +44,7 @@ interface ThreadInteraction {
   parent_interaction_id: string | null;
   mentioned_user_ids: string[];
   files?: InteractionAttachment[];
+  reactions?: ReactionsMap;
 }
 
 interface ThreadParticipant {
@@ -298,6 +300,7 @@ export default function ThreadView({ interactionId, onAcknowledge, onSnooze, onR
               </div>
               <div className="text-sm text-gray-800 whitespace-pre-wrap">{renderContent(m.content)}</div>
               <AttachmentList files={m.files} />
+              <Reactions interactionId={m.id} reactions={m.reactions} />
             </div>
           );
         })}

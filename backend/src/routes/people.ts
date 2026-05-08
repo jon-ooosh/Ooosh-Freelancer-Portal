@@ -514,9 +514,49 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
     const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
     const offset = (page - 1) * limit;
 
-    // Jobs linked through person's organisations (via person_organisation_roles → job_organisations)
-    // UNION with jobs where person is a crew assignment (via quote_assignments)
-    const jobsQuery = `
+    // Whitelisted sort + direction
+    const SORT_COLUMNS: Record<string, string> = {
+      date: 'pj.job_date',
+      job_number: 'pj.hh_job_number',
+      value: 'pj.job_value',
+      status: 'pj.pipeline_status',
+    };
+    const sortKey = (req.query.sort as string) || 'date';
+    const sortColumn = SORT_COLUMNS[sortKey] || SORT_COLUMNS.date;
+    const dir = (req.query.dir as string) === 'asc' ? 'ASC' : 'DESC';
+
+    // Optional filters
+    const role = (req.query.role as string) || '';
+    const linkType = (req.query.link_type as string) || ''; // 'organisation' | 'crew'
+    const outcome = (req.query.outcome as string) || '';
+    const year = parseInt((req.query.year as string) || '', 10);
+
+    const filterClauses: string[] = [];
+    const filterParams: any[] = [];
+    if (role) {
+      filterParams.push(role);
+      filterClauses.push(`pj.link_role = $${filterParams.length + 1}`);
+    }
+    if (linkType === 'organisation' || linkType === 'crew') {
+      filterParams.push(linkType);
+      filterClauses.push(`pj.link_type = $${filterParams.length + 1}`);
+    }
+    if (outcome === 'confirmed') {
+      filterClauses.push(`(pj.pipeline_status IN ('confirmed','prepped','dispatched') OR (pj.pipeline_status IS NULL AND pj.status IN (2,3,4,5,8)))`);
+    } else if (outcome === 'returned') {
+      filterClauses.push(`(pj.pipeline_status IN ('returned','returned_incomplete','completed') OR (pj.pipeline_status IS NULL AND pj.status IN (6,7,11)))`);
+    } else if (outcome === 'open') {
+      filterClauses.push(`(pj.pipeline_status IN ('new_enquiry','quoting','provisional','paused','chasing') OR (pj.pipeline_status IS NULL AND pj.status IN (0,1)))`);
+    } else if (outcome === 'lost') {
+      filterClauses.push(`(pj.pipeline_status IN ('lost','cancelled') OR (pj.pipeline_status IS NULL AND pj.status IN (9,10)))`);
+    }
+    if (Number.isFinite(year) && year > 1900 && year < 3000) {
+      filterParams.push(year);
+      filterClauses.push(`EXTRACT(YEAR FROM pj.job_date) = $${filterParams.length + 1}`);
+    }
+    const filterSql = filterClauses.length ? ` WHERE ${filterClauses.join(' AND ')}` : '';
+
+    const personJobsCTE = `
       WITH person_jobs AS (
         -- Jobs via organisation links
         SELECT DISTINCT j.id, j.hh_job_number, j.job_name, j.pipeline_status, j.status,
@@ -542,64 +582,67 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
         JOIN quotes q ON q.id = qa.quote_id
         JOIN jobs j ON j.id = q.job_id AND j.is_deleted = false
         WHERE qa.person_id = $1 AND qa.status != 'cancelled'
-      )
-      SELECT pj.*,
-             (SELECT i.content FROM interactions i
-              WHERE i.job_id = pj.id AND i.content LIKE 'Job retro:%'
-              ORDER BY i.created_at DESC LIMIT 1
-             ) AS retro_content
-      FROM person_jobs pj
-      ORDER BY pj.job_date DESC NULLS LAST
-      LIMIT $2 OFFSET $3
-    `;
+      )`;
 
-    const jobsResult = await query(jobsQuery, [id, limit, offset]);
+    // Fetch jobs (paginated, filtered, sorted)
+    const limitParamIdx = filterParams.length + 2;
+    const offsetParamIdx = filterParams.length + 3;
+    const jobsResult = await query(
+      `${personJobsCTE}
+       SELECT pj.*,
+              (SELECT i.content FROM interactions i
+               WHERE i.job_id = pj.id AND i.content LIKE 'Job retro:%'
+               ORDER BY i.created_at DESC LIMIT 1
+              ) AS retro_content
+       FROM person_jobs pj${filterSql}
+       ORDER BY ${sortColumn} ${dir} NULLS LAST, pj.hh_job_number DESC
+       LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}`,
+      [id, ...filterParams, limit, offset]
+    );
 
-    // Count total (same UNION but just count)
-    const countResult = await query(`
-      SELECT COUNT(*) AS total FROM (
-        SELECT DISTINCT j.id
-        FROM person_organisation_roles por
-        JOIN job_organisations jo ON jo.organisation_id = por.organisation_id
-        JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
-        WHERE por.person_id = $1
-
-        UNION
-
-        SELECT DISTINCT j.id
-        FROM quote_assignments qa
-        JOIN quotes q ON q.id = qa.quote_id
-        JOIN jobs j ON j.id = q.job_id AND j.is_deleted = false
-        WHERE qa.person_id = $1 AND qa.status != 'cancelled'
-      ) AS combined
-    `, [id]);
+    // Count total (filtered)
+    const countResult = await query(
+      `${personJobsCTE}
+       SELECT COUNT(*) AS total FROM person_jobs pj${filterSql}`,
+      [id, ...filterParams]
+    );
     const total = parseInt(countResult.rows[0]?.total || '0');
 
-    // Stats
-    const statsResult = await query(`
-      WITH person_jobs AS (
-        SELECT DISTINCT j.id, j.pipeline_status, j.status, j.job_value
-        FROM person_organisation_roles por
-        JOIN job_organisations jo ON jo.organisation_id = por.organisation_id
-        JOIN jobs j ON j.id = jo.job_id AND j.is_deleted = false
-        WHERE por.person_id = $1
+    // Stats — always full hire history (unfiltered) so headline cards aren't misleading
+    const statsResult = await query(
+      `${personJobsCTE}
+       SELECT
+         COUNT(*) AS total_jobs,
+         COUNT(*) FILTER (WHERE pj.pipeline_status = 'completed' OR pj.status = 11) AS completed_jobs,
+         COUNT(*) FILTER (WHERE pj.pipeline_status = 'confirmed' OR pj.status = 2) AS confirmed_jobs,
+         COUNT(*) FILTER (WHERE pj.pipeline_status = 'lost') AS lost_jobs,
+         COALESCE(SUM(pj.job_value) FILTER (WHERE pj.pipeline_status IN ('confirmed','completed','prepped','dispatched','returned','returned_incomplete') OR pj.status BETWEEN 2 AND 11), 0) AS total_value
+       FROM person_jobs pj`,
+      [id]
+    );
 
-        UNION
+    // Retro counts (unfiltered)
+    const retroResult = await query(
+      `${personJobsCTE}
+       SELECT
+         COUNT(*) FILTER (WHERE i.content LIKE 'Job retro: Great%') AS retro_great,
+         COUNT(*) FILTER (WHERE i.content LIKE 'Job retro: OK%') AS retro_ok,
+         COUNT(*) FILTER (WHERE i.content LIKE 'Job retro: Issues%') AS retro_issues
+       FROM person_jobs pj
+       LEFT JOIN interactions i ON i.job_id = pj.id AND i.content LIKE 'Job retro:%'`,
+      [id]
+    );
 
-        SELECT DISTINCT j.id, j.pipeline_status, j.status, j.job_value
-        FROM quote_assignments qa
-        JOIN quotes q ON q.id = qa.quote_id
-        JOIN jobs j ON j.id = q.job_id AND j.is_deleted = false
-        WHERE qa.person_id = $1 AND qa.status != 'cancelled'
-      )
-      SELECT
-        COUNT(*) AS total_jobs,
-        COUNT(*) FILTER (WHERE pipeline_status = 'completed' OR status = 11) AS completed_jobs,
-        COUNT(*) FILTER (WHERE pipeline_status = 'confirmed' OR status = 2) AS confirmed_jobs,
-        COUNT(*) FILTER (WHERE pipeline_status = 'lost') AS lost_jobs,
-        COALESCE(SUM(job_value) FILTER (WHERE pipeline_status IN ('confirmed','completed','prepped','dispatched','returned','returned_incomplete') OR status BETWEEN 2 AND 11), 0) AS total_value
-      FROM person_jobs
-    `, [id]);
+    // Distinct roles + years (unfiltered) for dropdown population
+    const facetsResult = await query(
+      `${personJobsCTE}
+       SELECT
+         (SELECT array_agg(DISTINCT pj2.link_role ORDER BY pj2.link_role)
+            FROM person_jobs pj2 WHERE pj2.link_role IS NOT NULL) AS roles,
+         (SELECT array_agg(DISTINCT EXTRACT(YEAR FROM pj2.job_date)::int ORDER BY EXTRACT(YEAR FROM pj2.job_date)::int DESC)
+            FROM person_jobs pj2 WHERE pj2.job_date IS NOT NULL) AS years`,
+      [id]
+    );
 
     // Parse retro
     const jobs = jobsResult.rows.map(row => {
@@ -628,7 +671,14 @@ router.get('/:id/hire-history', async (req: AuthRequest, res: Response) => {
 
     res.json({
       data: jobs,
-      stats: statsResult.rows[0],
+      stats: {
+        ...statsResult.rows[0],
+        ...retroResult.rows[0],
+      },
+      facets: {
+        roles: facetsResult.rows[0]?.roles || [],
+        years: facetsResult.rows[0]?.years || [],
+      },
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
   } catch (error) {

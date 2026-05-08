@@ -7,6 +7,7 @@ import {
   useAttachments,
   type InteractionAttachment,
 } from './messaging/Attachments';
+import Reactions, { type ReactionsMap } from './messaging/Reactions';
 
 interface Interaction {
   id: string;
@@ -21,6 +22,8 @@ interface Interaction {
   parent_interaction_id?: string | null;
   issue_id?: string | null;
   files?: InteractionAttachment[];
+  // Lightweight emoji reactions (migration 077)
+  reactions?: ReactionsMap;
 }
 
 const JOB_STATUS_MAP: Record<number, string> = {
@@ -1006,6 +1009,7 @@ function InteractionRow({
           </div>
           <p className="mt-1 text-sm text-gray-800 whitespace-pre-wrap">{renderContent(interaction.content)}</p>
           <AttachmentList files={interaction.files} />
+          <Reactions interactionId={interaction.id} reactions={interaction.reactions} />
         </div>
       </div>
 

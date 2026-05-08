@@ -111,7 +111,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '074_issues_register.sql',
         '075_job_issues.sql',
         '076_threaded_messaging.sql',
-        '077_strip_project_prefix_from_job_name.sql',
+        '077_interaction_reactions.sql',
+        '078_strip_project_prefix_from_job_name.sql',
       ];
 
       for (const migration of migrations) {

@@ -1572,6 +1572,7 @@ export default function JobDetailPage() {
   }
 
   // Client trading history for sidebar
+  const [clientNotesExpanded, setClientNotesExpanded] = useState(false);
   const [clientHistoryData, setClientHistoryData] = useState<{
     jobs: Array<{
       id: string; hh_job_number: number | null; job_name: string | null;
@@ -4973,13 +4974,30 @@ export default function JobDetailPage() {
               </div>
             )}
 
-            {/* Internal Notes */}
-            {clientHistoryData!.client_info?.internal_notes && (
-              <div className="mb-3 p-2 bg-amber-50 border border-amber-100 rounded-lg">
-                <div className="text-[10px] font-semibold text-amber-700 uppercase mb-0.5">Internal Notes</div>
-                <p className="text-[10px] text-gray-700 whitespace-pre-wrap leading-relaxed">{clientHistoryData!.client_info.internal_notes}</p>
-              </div>
-            )}
+            {/* Internal Notes — clamped to 2 lines with expand toggle for long notes (e.g. merge backref logs) */}
+            {clientHistoryData!.client_info?.internal_notes && (() => {
+              const notes = clientHistoryData!.client_info.internal_notes;
+              const isLong = notes.length > 120 || notes.split('\n').length > 2;
+              return (
+                <div className="mb-3 p-2 bg-amber-50 border border-amber-100 rounded-lg">
+                  <div className="text-[10px] font-semibold text-amber-700 uppercase mb-0.5">Internal Notes</div>
+                  <p
+                    className={`text-[10px] text-gray-700 whitespace-pre-wrap leading-relaxed ${isLong && !clientNotesExpanded ? 'line-clamp-2' : ''}`}
+                    title={isLong && !clientNotesExpanded ? notes : undefined}
+                  >
+                    {notes}
+                  </p>
+                  {isLong && (
+                    <button
+                      onClick={() => setClientNotesExpanded(v => !v)}
+                      className="text-[10px] text-amber-700 hover:text-amber-900 underline mt-0.5"
+                    >
+                      {clientNotesExpanded ? 'Show less' : 'Show more'}
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="grid grid-cols-2 gap-2 mb-4">
               <div className="bg-gray-50 rounded-lg p-2 text-center">

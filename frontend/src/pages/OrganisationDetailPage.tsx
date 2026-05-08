@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import SlidePanel from '../components/SlidePanel';
 import OrganisationForm from '../components/OrganisationForm';
+import OrganisationMergeModal from '../components/OrganisationMergeModal';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
@@ -63,6 +64,7 @@ interface OrgDetail {
     return_date: string | null;
     job_value: number | null;
   }>;
+  linked_job_count?: number;
 }
 
 interface Interaction {
@@ -101,6 +103,9 @@ export default function OrganisationDetailPage() {
   // Edit/delete
   const [showEdit, setShowEdit] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  // Merge
+  const [showMergeModal, setShowMergeModal] = useState(false);
 
   // Add relationship
   const [showAddRelationship, setShowAddRelationship] = useState(false);
@@ -378,6 +383,15 @@ export default function OrganisationDetailPage() {
                 DNH
               </button>
             )}
+            {isAdmin && (
+              <button
+                onClick={() => setShowMergeModal(true)}
+                className="px-3 py-1.5 text-sm border border-amber-200 text-amber-700 rounded hover:bg-amber-50 transition-colors"
+                title="Merge this organisation into another"
+              >
+                Merge
+              </button>
+            )}
             <div className="relative">
               <button
                 onClick={() => setShowDeleteConfirm(!showDeleteConfirm)}
@@ -531,7 +545,12 @@ export default function OrganisationDetailPage() {
         <nav className="flex gap-6">
           {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
-            const linkedJobCount = (org.linked_jobs || []).length;
+            // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
+            // matching the Hire History tab content. Falls back to local linked_jobs.length only
+            // if the backend hasn't been redeployed yet.
+            const linkedJobCount = typeof org.linked_job_count === 'number'
+              ? org.linked_job_count
+              : (org.linked_jobs || []).length;
             const label = tab === 'people' ? `People (${(org.people || []).length})`
               : tab === 'relationships' ? `Relationships${relCount ? ` (${relCount})` : ''}`
               : tab === 'hire_history' ? `Hire History${linkedJobCount ? ` (${linkedJobCount})` : ''}`
@@ -1164,6 +1183,19 @@ export default function OrganisationDetailPage() {
           onCancel={() => setShowEdit(false)}
         />
       </SlidePanel>
+
+      {/* Merge Modal */}
+      {showMergeModal && id && org && (
+        <OrganisationMergeModal
+          loserId={id}
+          loserName={org.name}
+          onClose={() => setShowMergeModal(false)}
+          onMerged={(keeperId) => {
+            setShowMergeModal(false);
+            navigate(`/organisations/${keeperId}`);
+          }}
+        />
+      )}
     </div>
   );
 }
