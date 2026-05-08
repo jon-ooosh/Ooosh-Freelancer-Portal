@@ -211,9 +211,11 @@ export function startScheduler() {
   console.log('Scheduler: BVRLA monthly VE103B report scheduled for 1st of each month at 08:00');
 
   // ── Stale Enquiry Auto-Lose ──────────────────────────────────────────
-  // Daily at 10:00 — mark unconfirmed enquiries as lost if job_date was yesterday or earlier.
-  // Runs 1 day after start date to avoid losing last-minute confirmations.
-  cron.schedule('0 10 * * *', async () => {
+  // Daily at 09:00 — mark unconfirmed enquiries as lost if job_date was yesterday or earlier.
+  // Runs 1 day after start date to avoid losing last-minute confirmations. Scheduled
+  // for 09:00 (office start) so staff don't begin the day with phantom enquiries
+  // still cluttering operational lists like backline prep.
+  cron.schedule('0 9 * * *', async () => {
     console.log('Scheduler: Checking for stale enquiries to auto-lose...');
     try {
       // Find jobs where:
@@ -261,7 +263,7 @@ export function startScheduler() {
       console.error('Scheduler: Stale enquiry auto-lose failed:', err);
     }
   });
-  console.log('Scheduler: Stale enquiry auto-lose scheduled daily at 10:00');
+  console.log('Scheduler: Stale enquiry auto-lose scheduled daily at 09:00');
 
   // ── OOH Return Reminder ─────────────────────────────────────────────
   // Daily at 10:00 — send the day-before reminder for any vehicle with

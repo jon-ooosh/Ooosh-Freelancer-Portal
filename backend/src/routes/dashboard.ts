@@ -135,6 +135,8 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // that shows in "Going Out Today" or "Returning Today" is also visible
       // on the heat strip. The key inclusion is HH status 5 + OP pipeline
       // 'prepped' — physically prepped but not yet operationally dispatched.
+      // Provisional (HH 1) is deliberately excluded — operational warehouse
+      // surfaces only count actually-booked work.
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                COALESCE(j.out_date, j.job_date)::date as event_date,
@@ -142,9 +144,10 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         FROM jobs j
         WHERE j.is_deleted = false
           AND (
-            j.status IN (1, 2, 3, 4)
+            j.status IN (2, 3, 4)
             OR (j.status = 5 AND j.pipeline_status = 'prepped')
           )
+          AND j.pipeline_status NOT IN ('lost', 'cancelled')
           AND COALESCE(j.out_date, j.job_date)::date >= CURRENT_DATE
           AND COALESCE(j.out_date, j.job_date)::date <= CURRENT_DATE + 14
         ORDER BY event_date ASC
@@ -218,12 +221,15 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       `),
 
       // 7a. Overdue departures — should have left but haven't.
-      // Jobs with out_date or job_date in the past, still in pre-dispatch HH
-      // status (1-4) OR HH 5 + OP pipeline_status='prepped' (the "physically
-      // prepped, in the yard, waiting for staff to click Mark as Dispatched"
-      // state — HH jumps to 5 on item checkout but OP holds 'prepped' until
-      // staff confirms it's actually rolled out the gate). And OP pipeline
-      // doesn't say it's gone or done. Capped at 30 days lookback.
+      // Jobs with out_date or job_date in the past, in operational pre-dispatch
+      // HH status (2/3/4 = Booked/Prepped/Part Dispatched) OR HH 5 + OP
+      // pipeline_status='prepped' (the "physically prepped, in the yard,
+      // waiting for staff to click Mark as Dispatched" state — HH jumps to 5
+      // on item checkout but OP holds 'prepped' until staff confirms it's
+      // actually rolled out the gate). Provisional (HH 1) and Enquiry (HH 0)
+      // are deliberately excluded — those route through the stale-enquiry
+      // auto-lose scheduler at 09:00, not the warehouse overdue list.
+      // Capped at 30 days lookback.
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                COALESCE(j.out_date, j.job_date) AS expected_date, j.venue_name,
@@ -232,7 +238,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         FROM jobs j
         WHERE j.is_deleted = false
           AND (
-            j.status IN (1, 2, 3, 4)
+            j.status IN (2, 3, 4)
             OR (j.status = 5 AND j.pipeline_status = 'prepped')
           )
           AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'dispatched', 'returned')
@@ -244,6 +250,9 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
 
       // 7b. Overdue backline — pre-hire backline not done past job_date.
       // Mirrors backline.ts overdueOut logic; capped to 10 for the widget.
+      // Operational filter only — provisional + enquiry are excluded so the
+      // warehouse widget reflects actually-booked work, not speculative
+      // enquiries (which route through the stale-enquiry auto-lose at 09:00).
       query(`
         SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
                j.job_date, j.status AS hh_status, jr.status AS backline_status,
@@ -255,7 +264,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         WHERE j.is_deleted = false
           AND j.job_date::date < CURRENT_DATE
           AND j.job_date::date >= CURRENT_DATE - INTERVAL '30 days'
-          AND j.status < 5
+          AND (j.status IN (2, 3, 4) OR (j.status = 5 AND j.pipeline_status = 'prepped'))
           AND j.pipeline_status NOT IN ('lost', 'cancelled', 'completed', 'returned')
           AND jr.status != 'done'
         ORDER BY j.job_date ASC
