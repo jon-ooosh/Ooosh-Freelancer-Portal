@@ -788,120 +788,125 @@ export default function TransportOpsPage() {
         </div>
       </div>
 
-      {/* Job-stage toggles — heads-up planning. Off by default; speculative
-          and dead-stage jobs render in their own collapsible sections below
-          the operational lists. Headline stat chips above stay scoped to
-          operational work. */}
-      <div className="flex flex-wrap items-center gap-1 bg-gray-100 rounded-lg p-1 w-fit">
-        <span className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
-          Show:
-        </span>
-        <button
-          type="button"
-          onClick={() => setShowProvisional((v) => !v)}
-          title="Show jobs awaiting deposit (Provisional). Stat chips above stay scoped to confirmed work."
-          className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
-            showProvisional ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showProvisional ? 'bg-blue-400' : 'bg-gray-300'}`} />
-          Provisional
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowEnquiry((v) => !v)}
-          title="Show pre-provisional enquiries. Useful for forward-planning capacity."
-          className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
-            showEnquiry ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showEnquiry ? 'bg-purple-400' : 'bg-gray-300'}`} />
-          Enquiry
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowLostJobs((v) => !v)}
-          title="Show jobs that didn't convert (Lost)."
-          className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
-            showLostJobs ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showLostJobs ? 'bg-gray-500' : 'bg-gray-300'}`} />
-          Lost
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowCancelledJobs((v) => !v)}
-          title="Show jobs that were confirmed and later cancelled."
-          className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
-            showCancelledJobs ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showCancelledJobs ? 'bg-rose-500' : 'bg-gray-300'}`} />
-          Cancelled
-        </button>
-      </div>
+      {/* Filter row — summary chips (click-to-filter) on the left, Show:
+          pill group (heads-up planning toggles for speculative / dead-stage
+          jobs) on the right. flex-wrap stacks them on narrow screens. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 justify-between">
+        {/* Summary chips — click any count to jump to that view */}
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => setDateWindow(dateWindow === 'overdue' ? 'all' : 'overdue')}
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+              summary.overdue === 0
+                ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-default'
+                : dateWindow === 'overdue'
+                ? 'bg-red-600 text-white border-red-700'
+                : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
+            }`}
+            disabled={summary.overdue === 0}
+            title="Active quotes whose job date has passed"
+          >
+            {summary.overdue} overdue
+          </button>
+          <button
+            onClick={() => setDateWindow(dateWindow === 'today_tomorrow' ? 'all' : 'today_tomorrow')}
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+              dateWindow === 'today_tomorrow'
+                ? 'bg-blue-600 text-white border-blue-700'
+                : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+            }`}
+            title="Any job with today's date"
+          >
+            {summary.todayCount} today
+          </button>
+          <button
+            onClick={() => setDateWindow(dateWindow === 'this_week' ? 'all' : 'this_week')}
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+              dateWindow === 'this_week'
+                ? 'bg-purple-600 text-white border-purple-700'
+                : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
+            }`}
+            title="Active quotes with a job date this ISO week"
+          >
+            {summary.thisWeek} this week
+          </button>
+          <button
+            onClick={() => setNeedsCrewOnly(!needsCrewOnly)}
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+              needsCrewOnly
+                ? 'bg-amber-600 text-white border-amber-700'
+                : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+            }`}
+            title="Quotes with no crew assigned"
+          >
+            {summary.needsCrew} needing crew
+          </button>
+          <button
+            onClick={() => setNeedsIntroOnly(!needsIntroOnly)}
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+              needsIntroOnly
+                ? 'bg-blue-600 text-white border-blue-700'
+                : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+            }`}
+            title="Quotes whose client introduction is 'to do' or 'working on it'"
+          >
+            {summary.needsIntro} needing client intro
+          </button>
+        </div>
 
-      {/* Summary chips — click any count to jump to that view */}
-      <div className="flex flex-wrap gap-2">
-        <button
-          onClick={() => setDateWindow(dateWindow === 'overdue' ? 'all' : 'overdue')}
-          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
-            summary.overdue === 0
-              ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-default'
-              : dateWindow === 'overdue'
-              ? 'bg-red-600 text-white border-red-700'
-              : 'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'
-          }`}
-          disabled={summary.overdue === 0}
-          title="Active quotes whose job date has passed"
-        >
-          {summary.overdue} overdue
-        </button>
-        <button
-          onClick={() => setDateWindow(dateWindow === 'today_tomorrow' ? 'all' : 'today_tomorrow')}
-          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
-            dateWindow === 'today_tomorrow'
-              ? 'bg-blue-600 text-white border-blue-700'
-              : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
-          }`}
-          title="Any job with today's date"
-        >
-          {summary.todayCount} today
-        </button>
-        <button
-          onClick={() => setDateWindow(dateWindow === 'this_week' ? 'all' : 'this_week')}
-          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
-            dateWindow === 'this_week'
-              ? 'bg-purple-600 text-white border-purple-700'
-              : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
-          }`}
-          title="Active quotes with a job date this ISO week"
-        >
-          {summary.thisWeek} this week
-        </button>
-        <button
-          onClick={() => setNeedsCrewOnly(!needsCrewOnly)}
-          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
-            needsCrewOnly
-              ? 'bg-amber-600 text-white border-amber-700'
-              : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
-          }`}
-          title="Quotes with no crew assigned"
-        >
-          {summary.needsCrew} needing crew
-        </button>
-        <button
-          onClick={() => setNeedsIntroOnly(!needsIntroOnly)}
-          className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
-            needsIntroOnly
-              ? 'bg-blue-600 text-white border-blue-700'
-              : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
-          }`}
-          title="Quotes whose client introduction is 'to do' or 'working on it'"
-        >
-          {summary.needsIntro} needing client intro
-        </button>
+        {/* Job-stage toggles — heads-up planning. Off by default; speculative
+            and dead-stage jobs render in their own collapsible sections below
+            the operational lists. Headline stat chips above stay scoped to
+            operational work. */}
+        <div className="flex flex-wrap items-center gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+          <span className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
+            Show:
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowProvisional((v) => !v)}
+            title="Show jobs awaiting deposit (Provisional). Stat chips stay scoped to confirmed work."
+            className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+              showProvisional ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showProvisional ? 'bg-blue-400' : 'bg-gray-300'}`} />
+            Provisional
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowEnquiry((v) => !v)}
+            title="Show pre-provisional enquiries. Useful for forward-planning capacity."
+            className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+              showEnquiry ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showEnquiry ? 'bg-purple-400' : 'bg-gray-300'}`} />
+            Enquiry
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowLostJobs((v) => !v)}
+            title="Show jobs that didn't convert (Lost)."
+            className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+              showLostJobs ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showLostJobs ? 'bg-gray-500' : 'bg-gray-300'}`} />
+            Lost
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowCancelledJobs((v) => !v)}
+            title="Show jobs that were confirmed and later cancelled."
+            className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+              showCancelledJobs ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showCancelledJobs ? 'bg-rose-500' : 'bg-gray-300'}`} />
+            Cancelled
+          </button>
+        </div>
       </div>
 
       {/* Filter bar — search + date window pills + sort */}
