@@ -2672,6 +2672,16 @@ Key fields returned per item on a job:
   - Also aliased as `/php_functions/job_save.php` in some docs
 - **Add note:** `https://{domain}/api/job_note.php?job={id}&note={text}&token={token}` (GET)
 
+### HireHop sub-jobs / project prefix on JOB_NAME (May 2026)
+
+HireHop's `search_list.php` and inbound webhook payloads decorate `JOB_NAME` for sub-jobs as `"<Project Name> ► <Leaf Job Name>"` — a *display* string. The actual stored field on the job (visible in HH UI's Job Name field, and via `job_data.php`) is just the leaf. `job_data.php` exposes `PROJECT_NAME` and `PROJECT_ID` as separate fields when the job belongs to a Project; both are empty/`"0"` for top-level jobs.
+
+**OP convention: always store the leaf only** in `jobs.job_name`. The 30-min sync (`hirehop-job-sync.ts`) and inbound webhook (`webhooks.ts handleJobUpdate`) call `stripProjectPrefix()` to drop everything up to and including the last ` ► ` before writing. Without this, OP renames on sub-jobs revert on the next sync — the writeback successfully sets the leaf in HH, but the next inbound pulls the prefixed display string and clobbers it.
+
+`►` (U+25B6) is HH's path separator and won't appear in genuine job names. Migration 078 ran a one-shot strip on existing rows. If a future inbound source is added (a different HH endpoint, a new webhook event), apply `stripProjectPrefix()` there too.
+
+PROJECT_NAME / PROJECT_ID are currently ignored on inbound — Projects are rarely used at Ooosh and surfacing them isn't worth the column. Easy to add later if the project context is wanted in the UI.
+
 ## Pipeline ↔ HireHop Status Mapping
 
 | Ooosh Pipeline Status | HireHop Code | HH Name | Trigger Examples |
