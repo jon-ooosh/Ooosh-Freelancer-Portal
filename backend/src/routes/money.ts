@@ -24,6 +24,8 @@ import {
 } from '../services/confirmation-hooks';
 import { calculateVatAdjustment } from '../services/vat-adjustment';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
+import { emailService } from '../services/email-service';
+import { getFrontendUrl } from '../config/app-urls';
 
 const router = Router();
 
@@ -1262,6 +1264,39 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
 
     const payment = result.rows[0];
 
+    // ── Defence-in-depth: alert when portal-source deposit/balance landed
+    //    without a HireHop deposit ID ──
+    // The Payment Portal's `handle-stripe-webhook.js` Step 1 (HH deposit
+    // create) silently swallows HireHop transient errors (notably 327 rate
+    // limit) and proceeds to call us regardless — leaving the OP record
+    // orphaned and the HH side empty. Money tab reads HH billing_list live
+    // so the balance still shows outstanding while the client got a
+    // confirmation email. The proper fix lives in the portal repo (retry on
+    // 327/329/429/5xx, bail to Stripe webhook retry on persistent failure).
+    // Until that ships everywhere, surface the failure within minutes via
+    // a direct email so staff can manually create the HH deposit + link it
+    // from the OP Money tab.
+    //
+    // Scoped to deposit/balance only — excess payments go through a
+    // different portal path that may not pass `hh_deposit_id` even on
+    // success, so a NULL there is not a reliable failure signal.
+    const isPortalDepositOrBalance =
+      effectiveSource === 'payment_portal' &&
+      !hh_deposit_id &&
+      (effectivePaymentType === 'deposit' || effectivePaymentType === 'balance');
+    if (isPortalDepositOrBalance) {
+      sendPortalHHPushFailedAlert({
+        opJobId: job.id,
+        hhJobNumber: job.hh_job_number,
+        clientName: job.client_name,
+        jobName: (job as { job_name?: string }).job_name ?? null,
+        amount,
+        paymentType: effectivePaymentType,
+        paymentReference: payment_reference || null,
+        stripePaymentIntent: stripe_payment_intent || null,
+      }).catch(e => console.error('[money] Portal HH-push-failed alert send failed:', e));
+    }
+
     // ── Update excess if this is an excess payment or pre-auth ──
     let resolvedExcessId = excess_id || null;
 
@@ -1628,6 +1663,83 @@ async function reconcileExcessDeposits(
   }
 
   return results;
+}
+
+// ── Portal HH-push-failed alert ──────────────────────────────────────────
+// Fired when a payment-event arrives from `source=payment_portal` for a
+// deposit/balance payment with no `hh_deposit_id`. Means the portal's Step 1
+// (create HH deposit) silently failed but it called us anyway. Sends a
+// targeted email so staff can manually create the HH deposit and link it.
+//
+// Recipient is hardcoded to jon@oooshtours.co.uk for now (the volume is
+// expected to be very low — once the portal-side retry fix is fully bedded
+// in this should fire ~never). Move to env var if it ever needs to differ.
+const PORTAL_HH_FAIL_ALERT_RECIPIENT = 'jon@oooshtours.co.uk';
+
+async function sendPortalHHPushFailedAlert(opts: {
+  opJobId: string;
+  hhJobNumber: number | string | null;
+  clientName: string | null;
+  jobName: string | null;
+  amount: number;
+  paymentType: string;
+  paymentReference: string | null;
+  stripePaymentIntent: string | null;
+}): Promise<void> {
+  try {
+    const frontendUrl = getFrontendUrl();
+    const jobUrl = `${frontendUrl}/jobs/${opts.opJobId}`;
+    const escape = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const fmtMoney = (n: number) =>
+      n.toLocaleString('en-GB', { style: 'currency', currency: 'GBP' });
+
+    const html = `
+      <h2 style="margin:0 0 12px;font-size:18px;color:#b91c1c;">Stripe payment received but HireHop deposit was not created</h2>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        Job <strong>${escape(String(opts.hhJobNumber ?? '(no HH number)'))}</strong>
+        ${opts.jobName ? `(${escape(opts.jobName)})` : ''}
+        — ${escape(opts.paymentType)} payment of <strong>${fmtMoney(opts.amount)}</strong>
+        landed via the Payment Portal, but the HireHop deposit was not created
+        (the portal's Step 1 call to HireHop failed, most likely a transient
+        rate-limit / error 327, but it called us anyway).
+      </p>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        OP recorded the payment + emailed the client a receipt. HireHop has
+        no record of the deposit, so the Money tab still shows the balance
+        as outstanding.
+      </p>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;">
+        <strong>Client:</strong> ${escape(opts.clientName || '(not set)')}<br>
+        ${opts.paymentReference ? `<strong>Reference:</strong> ${escape(opts.paymentReference)}<br>` : ''}
+        ${opts.stripePaymentIntent ? `<strong>Stripe PI:</strong> ${escape(opts.stripePaymentIntent)}<br>` : ''}
+      </p>
+      <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
+        <strong>Manual fix:</strong>
+      </p>
+      <ol style="margin:0 0 16px 20px;padding:0;font-size:14px;color:#334155;line-height:1.6;">
+        <li>Create the deposit manually in HireHop (Bank: Stripe GBP / 267, Reference: ${opts.paymentReference ? escape(opts.paymentReference) : '(see Stripe)'}).</li>
+        <li>On the OP Money tab → Manage on the relevant record → Link to HireHop deposit.</li>
+        <li>Verify the Money tab balance is now correct.</li>
+      </ol>
+      <p style="margin:0;font-size:14px;">
+        <a href="${jobUrl}" style="color:#7B5EA7;text-decoration:none;font-weight:600;">View job in Ooosh &rarr;</a>
+      </p>
+    `;
+
+    await emailService.sendRaw({
+      to: PORTAL_HH_FAIL_ALERT_RECIPIENT,
+      subject: `[Stripe→HH sync failed] Job #${opts.hhJobNumber ?? opts.opJobId} — manual deposit needed (${fmtMoney(opts.amount)})`,
+      html,
+      variant: 'internal',
+    });
+
+    console.log(
+      `[money] Portal HH-push-failed alert sent to ${PORTAL_HH_FAIL_ALERT_RECIPIENT} for job ${opts.hhJobNumber ?? opts.opJobId} (${fmtMoney(opts.amount)} ${opts.paymentType})`
+    );
+  } catch (err) {
+    console.error('[money] sendPortalHHPushFailedAlert failed:', err);
+  }
 }
 
 export default router;
