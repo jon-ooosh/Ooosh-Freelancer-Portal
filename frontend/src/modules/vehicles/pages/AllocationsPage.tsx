@@ -28,14 +28,23 @@ import type { Vehicle } from '../types/vehicle'
 type DateFilter = 'today' | 'tomorrow' | 'this-week' | 'all'
 type ViewMode = 'going-out' | 'due-back'
 
-/** How many days ahead the allocations page looks */
-const ALLOCATIONS_DAYS_AHEAD = 14
+/** How many days ahead the allocations page looks. The "All" pill maps to
+ *  this window; "This Week" / "Today" / "Tomorrow" are subsets. Bumped from
+ *  14 to 30 in May 2026 so deep-links from Job Detail (?job=<hh>) surface
+ *  jobs further out — 14 days frequently missed next-week bookings whose
+ *  out_date fell after Sunday. */
+const ALLOCATIONS_DAYS_AHEAD = 30
 
 export function AllocationsPage() {
   const [searchParams] = useSearchParams()
   const focusJobId = searchParams.get('job') ? parseInt(searchParams.get('job')!, 10) : null
 
-  const [dateFilter, setDateFilter] = useState<DateFilter>('this-week')
+  // When arriving via ?job=<hh> deep-link from Job Detail, force the
+  // broadest filter so the target job is guaranteed to be visible
+  // regardless of when it lands. Without this the deep-link silently
+  // drops the user on "This Week" and the focused job may be off-screen
+  // entirely. Search box still works on top.
+  const [dateFilter, setDateFilter] = useState<DateFilter>(focusJobId ? 'all' : 'this-week')
   const [viewMode, setViewMode] = useState<ViewMode>('going-out')
   const [searchTerm, setSearchTerm] = useState('')
 
@@ -223,7 +232,7 @@ export function AllocationsPage() {
           { key: 'today' as DateFilter, label: 'Today' },
           { key: 'tomorrow' as DateFilter, label: 'Tomorrow' },
           { key: 'this-week' as DateFilter, label: 'This Week' },
-          { key: 'all' as DateFilter, label: 'Next 2 Weeks' },
+          { key: 'all' as DateFilter, label: 'All' },
         ]).map(({ key, label }) => (
           <button
             key={key}
@@ -267,7 +276,7 @@ export function AllocationsPage() {
           ) : (
             <>
               No jobs {viewMode === 'going-out' ? 'going out' : 'due back'}{' '}
-              {dateFilter === 'today' ? 'today' : dateFilter === 'tomorrow' ? 'tomorrow' : dateFilter === 'this-week' ? 'this week' : 'in the next 2 weeks'}
+              {dateFilter === 'today' ? 'today' : dateFilter === 'tomorrow' ? 'tomorrow' : dateFilter === 'this-week' ? 'this week' : `in the next ${ALLOCATIONS_DAYS_AHEAD} days`}
             </>
           )}
         </div>
