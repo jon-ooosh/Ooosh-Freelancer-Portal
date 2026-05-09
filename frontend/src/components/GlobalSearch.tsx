@@ -13,7 +13,9 @@ interface SearchResult {
   name: string;
   subtitle: string | null;
   type: 'person' | 'organisation' | 'venue' | 'job';
-  pipeline_status?: PipelineStatus | null;
+  // pipeline_status holds both pre-confirmation (PipelineStatus) and
+  // post-confirmation (OperationalStatus) values — typed as string here.
+  pipeline_status?: string | null;
   hh_status?: number | null;
 }
 
@@ -42,13 +44,25 @@ const HH_TO_OPERATIONAL: Record<number, OperationalStatus> = {
 };
 
 function jobBadge(result: SearchResult): { label: string; colour: string } {
-  // Operational lifecycle takes precedence once HH has moved past Booked
+  // OP's pipeline_status is the source of truth — it holds both pipeline
+  // (pre-confirmation) and operational (post-confirmation) values. HH status
+  // is only consulted as a fallback when pipeline_status is missing, since
+  // HH auto-jumps to 5 (Dispatched) on item checkout while OP intentionally
+  // holds at 'prepped' until staff explicitly marks the job On Hire.
+  if (result.pipeline_status) {
+    const ps = result.pipeline_status as PipelineStatus;
+    if (PIPELINE_STATUS_CONFIG[ps]) {
+      const cfg = PIPELINE_STATUS_CONFIG[ps];
+      return { label: cfg.label, colour: cfg.colour };
+    }
+    const ops = result.pipeline_status as unknown as OperationalStatus;
+    if (OPERATIONAL_STATUS_CONFIG[ops]) {
+      const cfg = OPERATIONAL_STATUS_CONFIG[ops];
+      return { label: cfg.label, colour: cfg.colour };
+    }
+  }
   if (result.hh_status != null && HH_TO_OPERATIONAL[result.hh_status]) {
     const cfg = OPERATIONAL_STATUS_CONFIG[HH_TO_OPERATIONAL[result.hh_status]];
-    return { label: cfg.label, colour: cfg.colour };
-  }
-  if (result.pipeline_status && PIPELINE_STATUS_CONFIG[result.pipeline_status]) {
-    const cfg = PIPELINE_STATUS_CONFIG[result.pipeline_status];
     return { label: cfg.label, colour: cfg.colour };
   }
   return { label: 'Job', colour: '#F59E0B' };
