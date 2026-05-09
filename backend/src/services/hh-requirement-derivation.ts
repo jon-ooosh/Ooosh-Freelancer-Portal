@@ -334,6 +334,10 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         snapshot: null,
       });
       await restoreSuspendedRequirement(client, jobId, 'excess');
+      // Restore any V&D-suspended job_excess record so the existing
+      // updatableExcess query below picks it up and recomputes the
+      // required amount based on the (possibly partial) self-drive count.
+      await restoreJobExcessFromVanAndDriver(client, jobId);
 
       // Ensure a job_excess record exists with the standard rate (£1,200 per self-drive van).
       // This gives the Money tab and payment portal something to work with before hire forms are submitted.
@@ -425,8 +429,13 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
       // (e.g. derivation runs after a portal pre-auth has landed).
       await syncExcessRequirementStatus(jobId, client);
     } else if (flags.has_vehicle) {
-      // All vehicle slots are van_and_driver — suspend excess too
+      // All vehicle slots are van_and_driver — suspend excess requirement
+      // AND cascade-waive the derivation-created job_excess record so the
+      // Money tab and ExcessGateBanner stop surfacing a fictional
+      // outstanding amount. Records with money attached are skipped
+      // inside the helper — staff handles those manually.
       await suspendRequirementForVanAndDriver(client, jobId, 'excess');
+      await suspendJobExcessForVanAndDriver(client, jobId);
     }
 
     // ── Backline ──
@@ -883,6 +892,54 @@ async function suspendRequirementForVanAndDriver(client: any, jobId: string, req
        notes = $1, updated_at = NOW()
      WHERE id = $2`,
     [updatedNotes, req.id]
+  );
+}
+
+/**
+ * Suspend the derivation-created job-level excess record when every vehicle
+ * slot is V&D — Option A cascade. Sets `excess_status='waived'` and zeros
+ * `excess_amount_required` so dispatch-check, the gate banner, and the Money
+ * tab all naturally treat the record as resolved (waived is in every
+ * terminal-status whitelist). Tags `notes` with `[Suspended: Van & Driver]`
+ * so we can identify and restore on toggle-back. Only acts on records with
+ * NO money attached (`amount_taken=0`, status `needed`/`pending`); records
+ * holding payments or pre-auth holds are left alone — staff resolves those
+ * manually because real money has moved (or is held).
+ */
+async function suspendJobExcessForVanAndDriver(client: any, jobId: string): Promise<void> {
+  await client.query(
+    `UPDATE job_excess
+     SET excess_status = 'waived',
+         excess_amount_required = 0,
+         notes = COALESCE(NULLIF(notes, '') || E'\n', '') || '[Suspended: Van & Driver]',
+         updated_at = NOW()
+     WHERE job_id = $1
+       AND assignment_id IS NULL
+       AND COALESCE(excess_amount_taken, 0) = 0
+       AND excess_status IN ('needed', 'pending')
+       AND (notes IS NULL OR notes NOT LIKE '%[Suspended: Van & Driver]%')`,
+    [jobId]
+  );
+}
+
+/**
+ * Restore a job_excess record that was V&D-suspended. Flips status back to
+ * `needed` and strips the marker; the existing updatableExcess logic in the
+ * SDH branch then sees a `needed` record with stale (zeroed) required amount
+ * and recomputes it via the standard £1,200 × self_drive_count path. Marker-
+ * gated so we never touch records that were genuinely staff-waived.
+ */
+async function restoreJobExcessFromVanAndDriver(client: any, jobId: string): Promise<void> {
+  await client.query(
+    `UPDATE job_excess
+     SET excess_status = 'needed',
+         notes = NULLIF(TRIM(BOTH E'\n ' FROM REPLACE(COALESCE(notes, ''), '[Suspended: Van & Driver]', '')), ''),
+         updated_at = NOW()
+     WHERE job_id = $1
+       AND assignment_id IS NULL
+       AND notes LIKE '%[Suspended: Van & Driver]%'
+       AND COALESCE(excess_amount_taken, 0) = 0`,
+    [jobId]
   );
 }
 
