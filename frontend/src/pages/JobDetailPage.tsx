@@ -1606,14 +1606,42 @@ export default function JobDetailPage() {
 
   useEffect(() => {
     if (id) {
+      // Clear previous job's state immediately so we never render stale data
+      // for the new job — React Router reuses the component instance across
+      // /jobs/A → /jobs/B, and any in-flight fetch from A could otherwise
+      // resolve and overwrite B's state. Worse: loadVehicleAssignments reads
+      // job.hh_job_number from state to build its second query, so without
+      // this reset it would query A's HH number while displaying B's page.
+      setJob(null);
+      setInteractions([]);
+      setQuotes([]);
+      setVehicleAssignments([]);
+      setDispatchCheck(null);
+      setAllocationConflicts([]);
+      setDateMismatches([]);
+      setJobOrgs([]);
+      setReqSummary(null);
+      setLoading(true);
+
       loadJob();
       loadInteractions();
       loadQuotes();
-      loadVehicleAssignments();
+      // loadVehicleAssignments is now driven by [job?.id, job?.hh_job_number]
+      // below — running it here would use the stale job state.
       loadJobOrgs();
       loadRequirementsSummary();
     }
   }, [id]);
+
+  // loadVehicleAssignments depends on job.hh_job_number to fetch staff
+  // allocations (which only carry hirehop_job_id, not the OP UUID). Run it
+  // only once `job` has loaded for the CURRENT id, otherwise we'd query the
+  // previous job's HH number and merge those rows into this page.
+  useEffect(() => {
+    if (!id || !job || job.id !== id) return;
+    loadVehicleAssignments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, job?.id, job?.hh_job_number]);
 
   // Re-run loadVehicleAssignments when V&D slot info arrives — the first
   // fetch on page load races the HH sync that populates vehicle_slots, so
@@ -1628,9 +1656,13 @@ export default function JobDetailPage() {
   useEffect(() => {
     if (!id) return;
     if (!vandSlotSignature) return;
+    // Don't fire until job has loaded for THIS id — see loadVehicleAssignments
+    // comment above. Otherwise the V&D-driven refetch could run with stale
+    // job state on the first navigation to a new job.
+    if (!job || job.id !== id) return;
     loadVehicleAssignments();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, vandSlotSignature]);
+  }, [id, vandSlotSignature, job?.id]);
 
   async function loadRequirementsSummary() {
     if (!id) return;
@@ -3875,7 +3907,7 @@ export default function JobDetailPage() {
             </div>
           </div>
 
-          {quotesLoading ? (
+          {quotesLoading && quotes.length === 0 ? (
             <div className="flex justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
             </div>
