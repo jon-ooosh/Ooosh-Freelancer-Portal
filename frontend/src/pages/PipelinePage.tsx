@@ -2204,8 +2204,8 @@ export default function PipelinePage() {
             )}
           </div>
           <div className="flex items-center gap-3">
-            {/* View toggle */}
-            <div className="flex border border-gray-300 rounded-lg overflow-hidden">
+            {/* View toggle — desktop only. Mobile always shows list view. */}
+            <div className="hidden md:flex border border-gray-300 rounded-lg overflow-hidden">
               <button
                 onClick={() => setView('kanban')}
                 className={`px-3 py-1.5 text-sm ${view === 'kanban' ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
@@ -2428,9 +2428,12 @@ export default function PipelinePage() {
         )}
       </div>
 
-      {/* Board */}
-      {view === 'kanban' ? (
-        <div className="flex-1 overflow-x-auto p-4">
+      {/* Board — Kanban only on desktop. Mobile always falls through to the
+          list view below, which groups by urgency (Action Required / Waiting
+          / Paused / Provisional / Other) and is far more usable on a phone
+          than horizontally scrolling through narrow columns. */}
+      {view === 'kanban' && (
+        <div className="hidden md:block flex-1 overflow-x-auto p-4">
           <div className="flex gap-4 h-full" style={{ minWidth: `${visibleColumns.length * 280}px` }}>
             {visibleColumns.map((status) => {
               const config = PIPELINE_STATUS_CONFIG[status];
@@ -2489,9 +2492,11 @@ export default function PipelinePage() {
             })}
           </div>
         </div>
-      ) : (
-        /* List view — grouped by urgency */
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      )}
+      {(view === 'list' || view === 'kanban') && (
+        /* List view — grouped by urgency. Always shown when view='list',
+            also shown as mobile fallback when view='kanban' (hidden on md+). */
+        <div className={`flex-1 overflow-y-auto p-4 space-y-4 ${view === 'kanban' ? 'md:hidden' : ''}`}>
           {(() => {
             const sorted = sortJobs(jobs, sortMode);
             const today = new Date(); today.setHours(0, 0, 0, 0);

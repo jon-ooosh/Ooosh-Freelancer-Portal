@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import CalculatedExcessEditModal from '../components/CalculatedExcessEditModal';
+import { MobileListCard } from '../components/mobile/MobileListCard';
+import { TelLink } from '../components/mobile/TapTargets';
 
 interface DriverListItem {
   id: string;
@@ -263,95 +265,174 @@ export default function DriversPage() {
         )}
       </div>
 
-      {/* Table */}
-      <div className="mt-4 bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Licence</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Points</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Excess</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {loading ? (
+      {/* Driver list — desktop table + mobile cards */}
+      <div className="mt-4 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        {/* Desktop table */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
               <tr>
-                <td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">Loading...</td>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Licence</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Points</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Excess</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
               </tr>
-            ) : drivers.length === 0 ? (
-              <tr>
-                <td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">
-                  {filtersActive ? 'No drivers match your filters.' : 'No drivers yet. Drivers appear here after completing the hire form.'}
-                </td>
-              </tr>
-            ) : (
-              drivers.map((driver) => {
-                const status = deriveDriverStatus(driver);
-                return (
-                  <tr
-                    key={driver.id}
-                    onClick={() => navigate(`/drivers/${driver.id}`)}
-                    className="hover:bg-gray-50 cursor-pointer transition-colors"
-                  >
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">{driver.full_name}</div>
-                      {driver.postcode && (
-                        <div className="text-xs text-gray-400">{driver.postcode}</div>
-                      )}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {driver.email || '—'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
-                      {driver.licence_number || '—'}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {pointsBadge(driver.licence_points)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm">
-                      {/* Driver-level individual liability — always editable. */}
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditingExcessDriver(driver);
-                        }}
-                        title={driver.excess_locked
-                          ? 'Locked — manual override pinned. Click to edit.'
-                          : 'Edit driver’s individual liability'}
-                        className={`hover:text-ooosh-700 hover:underline ${
-                          driver.calculated_excess_amount != null
-                            ? 'text-gray-900 font-medium'
-                            : 'text-gray-400'
-                        }`}
-                      >
-                        {driver.calculated_excess_amount != null
-                          ? `£${Number(driver.calculated_excess_amount).toFixed(2)}`
-                          : '—'}
-                        {driver.excess_locked && (
-                          <span className="ml-1 text-xs text-amber-600" title="Locked against auto-update">🔒</span>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {loading ? (
+                <tr>
+                  <td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">Loading...</td>
+                </tr>
+              ) : drivers.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-6 py-8 text-center text-sm text-gray-500">
+                    {filtersActive ? 'No drivers match your filters.' : 'No drivers yet. Drivers appear here after completing the hire form.'}
+                  </td>
+                </tr>
+              ) : (
+                drivers.map((driver) => {
+                  const status = deriveDriverStatus(driver);
+                  return (
+                    <tr
+                      key={driver.id}
+                      onClick={() => navigate(`/drivers/${driver.id}`)}
+                      className="hover:bg-gray-50 cursor-pointer transition-colors"
+                    >
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="text-sm font-medium text-gray-900">{driver.full_name}</div>
+                        {driver.postcode && (
+                          <div className="text-xs text-gray-400">{driver.postcode}</div>
                         )}
-                        <span className="ml-1 text-xs text-gray-400">✎</span>
-                      </button>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" title={driver.updated_at || ''}>
-                      {relativeTime(driver.updated_at)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${status.colour}`}>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {driver.email || '—'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
+                        {driver.licence_number || '—'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        {pointsBadge(driver.licence_points)}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        {/* Driver-level individual liability — always editable. */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingExcessDriver(driver);
+                          }}
+                          title={driver.excess_locked
+                            ? 'Locked — manual override pinned. Click to edit.'
+                            : 'Edit driver’s individual liability'}
+                          className={`hover:text-ooosh-700 hover:underline ${
+                            driver.calculated_excess_amount != null
+                              ? 'text-gray-900 font-medium'
+                              : 'text-gray-400'
+                          }`}
+                        >
+                          {driver.calculated_excess_amount != null
+                            ? `£${Number(driver.calculated_excess_amount).toFixed(2)}`
+                            : '—'}
+                          {driver.excess_locked && (
+                            <span className="ml-1 text-xs text-amber-600" title="Locked against auto-update">🔒</span>
+                          )}
+                          <span className="ml-1 text-xs text-gray-400">✎</span>
+                        </button>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500" title={driver.updated_at || ''}>
+                        {relativeTime(driver.updated_at)}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs ${status.colour}`}>
+                          {status.label}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Mobile cards */}
+        <div className="md:hidden">
+          {loading ? (
+            <div className="px-4 py-8 text-center text-sm text-gray-500">Loading...</div>
+          ) : drivers.length === 0 ? (
+            <div className="px-4 py-8 text-center text-sm text-gray-500">
+              {filtersActive ? 'No drivers match your filters.' : 'No drivers yet. Drivers appear here after completing the hire form.'}
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {drivers.map((driver) => {
+                const status = deriveDriverStatus(driver);
+                const excessDisplay = driver.calculated_excess_amount != null
+                  ? `£${Number(driver.calculated_excess_amount).toFixed(0)}`
+                  : '—';
+                return (
+                  <MobileListCard
+                    key={driver.id}
+                    onToggle={() => navigate(`/drivers/${driver.id}`)}
+                    primary={driver.full_name}
+                    primarySuffix={
+                      driver.excess_locked ? (
+                        <span title="Locked against auto-update" className="text-amber-600 text-xs">🔒</span>
+                      ) : null
+                    }
+                    trailing={
+                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs whitespace-nowrap ${status.colour}`}>
                         {status.label}
                       </span>
-                    </td>
-                  </tr>
+                    }
+                    secondary={
+                      driver.email ? (
+                        <span className="truncate">{driver.email}</span>
+                      ) : null
+                    }
+                    meta={
+                      <>
+                        {driver.licence_number && (
+                          <span className="font-mono">{driver.licence_number}</span>
+                        )}
+                        {driver.postcode && <span>· {driver.postcode}</span>}
+                        <span>· {relativeTime(driver.updated_at)}</span>
+                      </>
+                    }
+                    chips={
+                      <>
+                        {pointsBadge(driver.licence_points)}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingExcessDriver(driver);
+                          }}
+                          className={`text-xs px-2 py-1 rounded-full border font-medium inline-flex items-center gap-1 ${
+                            driver.calculated_excess_amount != null
+                              ? 'bg-gray-100 text-gray-700 border-gray-200'
+                              : 'bg-white text-gray-500 border-gray-300'
+                          }`}
+                        >
+                          Excess: {excessDisplay}
+                          <span className="text-gray-400">✎</span>
+                        </button>
+                        {driver.phone && (
+                          <TelLink phone={driver.phone} className="text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 font-medium">
+                            Call
+                          </TelLink>
+                        )}
+                      </>
+                    }
+                  />
                 );
-              })
-            )}
-          </tbody>
-        </table>
+              })}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Pagination */}

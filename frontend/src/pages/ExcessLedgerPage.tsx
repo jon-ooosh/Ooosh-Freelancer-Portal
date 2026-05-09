@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import ExcessPaymentModal, { statusLabel, statusColor } from '../components/ExcessPaymentModal';
+import { MobileListCard } from '../components/mobile/MobileListCard';
 import type { ClientExcessLedgerEntry, JobExcess } from '../../../shared/types';
 
 type ViewMode = 'ledger' | 'all' | 'client-detail';
@@ -361,62 +362,113 @@ function LedgerTable({ entries, onSelectClient }: { entries: ClientExcessLedgerE
   }
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 overflow-x-auto">
-      <table className="min-w-full divide-y divide-gray-200">
-        <thead className="bg-gray-50">
-          <tr>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Client</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Hires</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total Taken</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Claimed</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Reimbursed</th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Balance Held</th>
-            <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Pending</th>
-            <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Rolled Over</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-200">
-          {entries.map((entry) => (
-            <tr
-              key={entry.xero_contact_id}
-              onClick={() => onSelectClient(entry)}
-              className="hover:bg-gray-50 cursor-pointer"
-            >
-              <td className="px-4 py-3">
-                <p className="text-sm font-medium text-gray-900">{entry.xero_contact_name || entry.client_name}</p>
-                {entry.client_name && entry.client_name !== entry.xero_contact_name && (
-                  <p className="text-xs text-gray-500">{entry.client_name}</p>
-                )}
-              </td>
-              <td className="px-4 py-3 text-right text-sm text-gray-600">{entry.total_hires}</td>
-              <td className="px-4 py-3 text-right text-sm text-gray-600">£{Number(entry.total_taken).toFixed(2)}</td>
-              <td className="px-4 py-3 text-right text-sm text-red-600">
-                {Number(entry.total_claimed) > 0 ? `£${Number(entry.total_claimed).toFixed(2)}` : '—'}
-              </td>
-              <td className="px-4 py-3 text-right text-sm text-gray-600">
-                {Number(entry.total_reimbursed) > 0 ? `£${Number(entry.total_reimbursed).toFixed(2)}` : '—'}
-              </td>
-              <td className="px-4 py-3 text-right text-sm font-semibold text-green-700">
-                £{Number(entry.balance_held).toFixed(2)}
-              </td>
-              <td className="px-4 py-3 text-center">
-                {Number(entry.pending_count) > 0 && (
-                  <span className="inline-block px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-800 rounded-full">
-                    {entry.pending_count}
-                  </span>
-                )}
-              </td>
-              <td className="px-4 py-3 text-center">
-                {Number(entry.rolled_over_count) > 0 && (
-                  <span className="inline-block px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-800 rounded-full">
-                    {entry.rolled_over_count}
-                  </span>
-                )}
-              </td>
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      {/* Desktop table */}
+      <div className="hidden md:block overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Client</th>
+              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Hires</th>
+              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Total Taken</th>
+              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Claimed</th>
+              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Reimbursed</th>
+              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Balance Held</th>
+              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Pending</th>
+              <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Rolled Over</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody className="divide-y divide-gray-200">
+            {entries.map((entry) => (
+              <tr
+                key={entry.xero_contact_id}
+                onClick={() => onSelectClient(entry)}
+                className="hover:bg-gray-50 cursor-pointer"
+              >
+                <td className="px-4 py-3">
+                  <p className="text-sm font-medium text-gray-900">{entry.xero_contact_name || entry.client_name}</p>
+                  {entry.client_name && entry.client_name !== entry.xero_contact_name && (
+                    <p className="text-xs text-gray-500">{entry.client_name}</p>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-right text-sm text-gray-600">{entry.total_hires}</td>
+                <td className="px-4 py-3 text-right text-sm text-gray-600">£{Number(entry.total_taken).toFixed(2)}</td>
+                <td className="px-4 py-3 text-right text-sm text-red-600">
+                  {Number(entry.total_claimed) > 0 ? `£${Number(entry.total_claimed).toFixed(2)}` : '—'}
+                </td>
+                <td className="px-4 py-3 text-right text-sm text-gray-600">
+                  {Number(entry.total_reimbursed) > 0 ? `£${Number(entry.total_reimbursed).toFixed(2)}` : '—'}
+                </td>
+                <td className="px-4 py-3 text-right text-sm font-semibold text-green-700">
+                  £{Number(entry.balance_held).toFixed(2)}
+                </td>
+                <td className="px-4 py-3 text-center">
+                  {Number(entry.pending_count) > 0 && (
+                    <span className="inline-block px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-800 rounded-full">
+                      {entry.pending_count}
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3 text-center">
+                  {Number(entry.rolled_over_count) > 0 && (
+                    <span className="inline-block px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-800 rounded-full">
+                      {entry.rolled_over_count}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Mobile cards */}
+      <div className="md:hidden divide-y divide-gray-100">
+        {entries.map((entry) => (
+          <MobileListCard
+            key={entry.xero_contact_id}
+            onToggle={() => onSelectClient(entry)}
+            primary={entry.xero_contact_name || entry.client_name || '—'}
+            secondary={
+              entry.client_name && entry.client_name !== entry.xero_contact_name
+                ? entry.client_name
+                : null
+            }
+            trailing={
+              <div className="text-right">
+                <div className="text-base font-semibold text-green-700">£{Number(entry.balance_held).toFixed(0)}</div>
+                <div className="text-[10px] text-gray-400 uppercase tracking-wide">held</div>
+              </div>
+            }
+            meta={
+              <>
+                <span>{entry.total_hires} hire{entry.total_hires === 1 ? '' : 's'}</span>
+                <span>· Taken £{Number(entry.total_taken).toFixed(0)}</span>
+                {Number(entry.total_claimed) > 0 && (
+                  <span className="text-red-600">· Claimed £{Number(entry.total_claimed).toFixed(0)}</span>
+                )}
+                {Number(entry.total_reimbursed) > 0 && (
+                  <span>· Reimbursed £{Number(entry.total_reimbursed).toFixed(0)}</span>
+                )}
+              </>
+            }
+            chips={
+              <>
+                {Number(entry.pending_count) > 0 && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 font-medium">
+                    {entry.pending_count} pending
+                  </span>
+                )}
+                {Number(entry.rolled_over_count) > 0 && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 font-medium">
+                    {entry.rolled_over_count} rolled over
+                  </span>
+                )}
+              </>
+            }
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -439,7 +491,9 @@ function RecordsTable({
   }
 
   return (
-    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden overflow-x-auto">
+    <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+      {/* Desktop table */}
+      <div className="hidden md:block overflow-x-auto">
       <table className="min-w-full divide-y divide-gray-200">
         <thead className="bg-gray-50">
           <tr>
@@ -514,6 +568,56 @@ function RecordsTable({
           ))}
         </tbody>
       </table>
+      </div>
+
+      {/* Mobile cards */}
+      <div className="md:hidden divide-y divide-gray-100">
+        {records.map((record) => (
+          <MobileListCard
+            key={record.id}
+            onToggle={() => onSelectRecord(record)}
+            primary={record.hirehop_job_name || record.job_name || '—'}
+            secondary={
+              <>
+                {record.client_name || '—'}
+                {record.hirehop_job_id ? ` · HH #${record.hirehop_job_id}` : ''}
+              </>
+            }
+            trailing={
+              <span className={`inline-block px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap ${statusColor(record.excess_status)}`}>
+                {statusLabel(record.excess_status)}
+              </span>
+            }
+            meta={
+              <>
+                {record.driver_name && <span>👤 {record.driver_name}</span>}
+                {record.vehicle_reg && <span>· 🚐 {record.vehicle_reg}</span>}
+                {record.payment_method && <span>· {record.payment_method.replace(/_/g, ' ')}</span>}
+              </>
+            }
+            chips={
+              <>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 font-medium">
+                  Required £{Number(record.excess_amount_required ?? 0).toFixed(0)}
+                </span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 font-medium">
+                  Taken £{Number(record.excess_amount_taken || 0).toFixed(0)}
+                </span>
+                {record.dispatch_override && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">
+                    overridden
+                  </span>
+                )}
+                {record.hh_deposit_id && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium" title={`HH #${record.hh_deposit_id}`}>
+                    HH linked
+                  </span>
+                )}
+              </>
+            }
+          />
+        ))}
+      </div>
     </div>
   );
 }
