@@ -1,6 +1,12 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import {
+  PIPELINE_STATUS_CONFIG,
+  OPERATIONAL_STATUS_CONFIG,
+  PipelineStatus,
+  OperationalStatus,
+} from '../../../shared/types';
 
 const STATUS_MAP: Record<number, string> = {
   0: 'Enquiry', 1: 'Provisional', 2: 'Booked', 3: 'Prepped',
@@ -8,6 +14,34 @@ const STATUS_MAP: Record<number, string> = {
   7: 'Returned', 8: 'Requires Attention', 9: 'Cancelled',
   10: 'Not Interested', 11: 'Completed',
 };
+
+// Resolve a job's display badge from pipeline_status (OP truth) first,
+// falling back to HH integer status only when pipeline_status is missing.
+// HH auto-jumps to 5 (Dispatched) on item checkout while OP intentionally
+// holds at 'prepped' until staff explicitly marks the job On Hire.
+function getStatusBadge(job: { pipeline_status: string | null; status: number; status_name: string | null }): {
+  label: string;
+  colour: string | null;
+  fallbackClass: string | null;
+} {
+  if (job.pipeline_status) {
+    const ps = job.pipeline_status as PipelineStatus;
+    if (PIPELINE_STATUS_CONFIG[ps]) {
+      const cfg = PIPELINE_STATUS_CONFIG[ps];
+      return { label: cfg.label, colour: cfg.colour, fallbackClass: null };
+    }
+    const ops = job.pipeline_status as unknown as OperationalStatus;
+    if (OPERATIONAL_STATUS_CONFIG[ops]) {
+      const cfg = OPERATIONAL_STATUS_CONFIG[ops];
+      return { label: cfg.label, colour: cfg.colour, fallbackClass: null };
+    }
+  }
+  return {
+    label: STATUS_MAP[job.status] || job.status_name || `Status ${job.status}`,
+    colour: null,
+    fallbackClass: STATUS_COLOURS[job.status] || 'bg-gray-100 text-gray-600',
+  };
+}
 
 const STATUS_COLOURS: Record<number, string> = {
   0: 'bg-blue-100 text-blue-700',
@@ -484,9 +518,24 @@ export default function JobsPage() {
         </td>
         <td className="px-4 py-3 whitespace-nowrap">
           <div className="flex flex-col gap-1">
-            <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_COLOURS[job.status] || 'bg-gray-100 text-gray-600'}`}>
-              {STATUS_MAP[job.status] || job.status_name || `Status ${job.status}`}
-            </span>
+            {(() => {
+              const badge = getStatusBadge(job);
+              if (badge.colour) {
+                return (
+                  <span
+                    className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium"
+                    style={{ backgroundColor: badge.colour + '20', color: badge.colour }}
+                  >
+                    {badge.label}
+                  </span>
+                );
+              }
+              return (
+                <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${badge.fallbackClass}`}>
+                  {badge.label}
+                </span>
+              );
+            })()}
             {happeningBadge && (
               <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${happeningBadge.colour}`}>
                 {happeningBadge.text}
