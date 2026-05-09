@@ -1073,8 +1073,11 @@ export default function JobDetailPage() {
   // Drivers & Vehicles state
   const [vehicleAssignments, setVehicleAssignments] = useState<VehicleAssignment[]>([]);
   const [excessModalRecord, setExcessModalRecord] = useState<JobExcess | null>(null);
-  const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | undefined>(undefined);
+  const [excessModalInitialAction, setExcessModalInitialAction] = useState<'edit_required' | 'reimburse' | undefined>(undefined);
   const [excessModalLoadingId, setExcessModalLoadingId] = useState<string | null>(null);
+  // Excess records held against a cancelled job — used by the cancelled banner
+  // to expose a one-click "Process refund" action straight into ExcessPaymentModal.
+  const [cancelledExcessHeld, setCancelledExcessHeld] = useState<Array<{ id: string; excess_amount_taken: number; excess_status: string }>>([]);
   const [oohModalAssignmentId, setOohModalAssignmentId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
@@ -1922,6 +1925,36 @@ export default function JobDetailPage() {
     }
   }, [job?.hh_job_number]);
 
+  // Cancelled job → fetch any held excess records so the banner can link
+  // straight into a one-click reimburse. Only the records that have actual
+  // money sitting with us are useful here (taken / pre_auth / partially_paid);
+  // 'needed' / 'pending' rows would dump staff into a payment form, not a
+  // refund form. Refreshes after the excess modal closes (onUpdated callback)
+  // so the banner clears as records progress to reimbursed/waived.
+  const loadCancelledExcessHeld = useCallback(async () => {
+    if (!id || job?.pipeline_status !== 'cancelled') {
+      setCancelledExcessHeld([]);
+      return;
+    }
+    try {
+      const res = await api.get<{ data: Array<{ id: string; excess_amount_taken: number | string; excess_status: string }> }>(`/excess?job_id=${id}&limit=20`);
+      const held = (res.data || []).filter(r =>
+        ['taken', 'pre_auth', 'partially_paid'].includes(r.excess_status)
+      ).map(r => ({
+        id: r.id,
+        excess_amount_taken: Number(r.excess_amount_taken || 0),
+        excess_status: r.excess_status,
+      }));
+      setCancelledExcessHeld(held);
+    } catch (err) {
+      console.warn('Failed to load held excess for cancelled job:', err);
+    }
+  }, [id, job?.pipeline_status]);
+
+  useEffect(() => {
+    loadCancelledExcessHeld();
+  }, [loadCancelledExcessHeld]);
+
   async function loadJobOrgs() {
     if (!id) return;
     try {
@@ -2129,7 +2162,7 @@ export default function JobDetailPage() {
     }
   }
 
-  async function openExcessModal(excessId: string, initialAction?: 'edit_required') {
+  async function openExcessModal(excessId: string, initialAction?: 'edit_required' | 'reimburse') {
     setExcessModalLoadingId(excessId);
     try {
       const res = await api.get<{ data: JobExcess }>(`/excess/${excessId}`);
@@ -2368,8 +2401,29 @@ export default function JobDetailPage() {
                     </span>
                   )}
                   {job.cancellation_refund != null && Number(job.cancellation_refund) > 0 && (
-                    <span className="text-green-700">Refund due (ex-VAT): <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
+                    <span className="text-green-700">Refund due to client: <strong>£{Number(job.cancellation_refund).toFixed(2)}</strong></span>
                   )}
+                </div>
+              )}
+              {/* One-click into the reimburse modal for any excess still
+                  held against this cancelled job. Listed individually so
+                  staff can process driver-by-driver without picking from a
+                  list inside the modal. */}
+              {cancelledExcessHeld.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {cancelledExcessHeld.map(rec => (
+                    <button
+                      key={rec.id}
+                      type="button"
+                      onClick={() => openExcessModal(rec.id, 'reimburse')}
+                      disabled={excessModalLoadingId === rec.id}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300 rounded-md hover:bg-amber-200 disabled:opacity-50"
+                    >
+                      {excessModalLoadingId === rec.id
+                        ? 'Opening…'
+                        : `Process excess refund (£${rec.excess_amount_taken.toFixed(2)})`}
+                    </button>
+                  ))}
                 </div>
               )}
               {job.cancellation_notes && (
@@ -4590,7 +4644,7 @@ export default function JobDetailPage() {
           excess={excessModalRecord}
           initialAction={excessModalInitialAction}
           onClose={() => { setExcessModalRecord(null); setExcessModalInitialAction(undefined); }}
-          onUpdated={() => { loadVehicleAssignments(); }}
+          onUpdated={() => { loadVehicleAssignments(); loadCancelledExcessHeld(); }}
         />
       )}
 

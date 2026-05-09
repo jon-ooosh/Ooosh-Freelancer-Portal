@@ -651,7 +651,7 @@ const templates: Record<string, EmailTemplate> = {
   job_cancelled_client: {
     variant: 'client',
     preheader: 'Your booking with Ooosh Tours has been cancelled',
-    subject: 'Booking Cancelled — {{jobNumber}}',
+    subject: 'Booking Cancelled — {{jobNumber}} {{jobName}}',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Booking Cancelled</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
@@ -660,18 +660,48 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         {{clientIntro}}
       </p>
-      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
           <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
             <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Booking</p>
             <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{jobNumber}} — {{jobName}}</p>
             <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Original dates</p>
-            <p style="margin:0 0 8px;font-size:15px;color:#1e293b;font-weight:600;">{{jobDates}}</p>
-            {{refundSection}}
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{jobDates}}</p>
           </td>
         </tr>
       </table>
-      {{invoiceNote}}
+      {{#if refundAmount}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#ecfdf5;border-radius:8px;border:1px solid #a7f3d0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#065f46;">Refund</p>
+            <p style="margin:0 0 4px;font-size:18px;color:#065f46;font-weight:700;">£{{refundAmount}}</p>
+            <p style="margin:0;font-size:13px;color:#065f46;">To be refunded to you within 10 working days.</p>
+          </td>
+        </tr>
+      </table>
+      {{/if}}
+      {{#if outstandingBalance}}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#fef3c7;border-radius:8px;border:1px solid #fcd34d;">
+            <p style="margin:0 0 4px;font-size:13px;color:#92400e;">Outstanding balance</p>
+            <p style="margin:0 0 4px;font-size:18px;color:#92400e;font-weight:700;">£{{outstandingBalance}}</p>
+            <p style="margin:0;font-size:13px;color:#92400e;">An invoice will follow shortly.</p>
+          </td>
+        </tr>
+      </table>
+      {{/if}}
+      {{#if showAllSquare}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Your deposit covers the cancellation fee, so no further action is needed on your part.
+      </p>
+      {{/if}}
+      {{#if feeAmount}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        A cancellation fee of £{{feeAmount}} + VAT (£{{feeIncVat}} inc-VAT) applies per our <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#7B5EA7;text-decoration:none;font-weight:600;">hire terms</a>.
+      </p>
+      {{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         If you have any questions about the cancellation or would like to rebook, please don't hesitate to get in touch.
       </p>
