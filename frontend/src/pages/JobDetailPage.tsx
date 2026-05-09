@@ -1620,7 +1620,7 @@ export default function JobDetailPage() {
       setAllocationConflicts([]);
       setDateMismatches([]);
       setJobOrgs([]);
-      setReqSummary(null);
+      setReqSummary({ hireFormsStatus: null, postHireOpenCount: 0 });
       setLoading(true);
 
       loadJob();
