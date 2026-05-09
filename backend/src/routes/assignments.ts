@@ -213,7 +213,8 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
          d.full_name AS driver_name,
          fv.reg AS vehicle_reg
        FROM vehicle_hire_assignments vha
-       LEFT JOIN jobs j ON j.id = vha.job_id
+       LEFT JOIN jobs j ON (vha.job_id IS NOT NULL AND j.id = vha.job_id)
+                        OR (vha.job_id IS NULL AND j.hh_job_number = vha.hirehop_job_id)
        LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
        LEFT JOIN drivers d ON d.id = vha.driver_id
        WHERE vha.status IN ('soft', 'confirmed', 'booked_out', 'active')

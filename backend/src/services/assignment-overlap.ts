@@ -18,6 +18,13 @@ import { query } from '../config/database';
  * overlap checks exclude the target job from the search. Passing both the
  * OP job UUID (`jobId`) and the HireHop job number (`hirehopJobId`) catches
  * both linkage styles.
+ *
+ * Job linkage on the JOIN: V&D staff-allocation rows carry only
+ * `hirehop_job_id` (their `job_id` stays NULL because no hire form ever
+ * lands), so the JOIN matches on job_id when set, otherwise falls back to
+ * hh_job_number. Without this dual match the COALESCE on `j.job_date` /
+ * `j.job_end` returns NULL for V&D rows and the date predicate filters them
+ * out — making them invisible to overlap checks. (May 2026 fix.)
  */
 
 const OCCUPYING_STATUSES = ['soft', 'confirmed', 'booked_out', 'active'] as const;
@@ -118,7 +125,8 @@ export async function findOverlappingAssignments(
        COALESCE(vha.hire_start, j.job_date::DATE) AS effective_start,
        COALESCE(vha.hire_end, j.job_end::DATE) AS effective_end
      FROM vehicle_hire_assignments vha
-     LEFT JOIN jobs j ON j.id = vha.job_id
+     LEFT JOIN jobs j ON (vha.job_id IS NOT NULL AND j.id = vha.job_id)
+                      OR (vha.job_id IS NULL AND j.hh_job_number = vha.hirehop_job_id)
      LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
      LEFT JOIN drivers d ON d.id = vha.driver_id
      WHERE vha.vehicle_id = $1
