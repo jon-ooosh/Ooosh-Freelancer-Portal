@@ -28,6 +28,8 @@ interface MoneySummary {
     vat_adjusted: boolean;
     vat_saved: number | string;
     original_hire_value_inc_vat?: number | string;
+    total_hire_deposits: number | string;
+    total_deposits: number | string;
   };
 }
 
@@ -65,6 +67,7 @@ interface Props {
     transport_charges: number;
     breakdown: string;
     cancelled_at?: string;
+    cancellation_outstanding_balance?: number;
     keep_requirement_ids?: string[];
   }) => void;
   onCancel: () => void;
@@ -155,9 +158,27 @@ export default function CancellationModal({
   }, [jobId, effectiveHireValueExVat, hireStartDate, totalHireDays, transportCharges, cancelledOn]);
 
   const effectiveFee = useManual && manualFee ? toNum(manualFee) : (calcResult?.fee ?? 0);
-  const effectiveRefund = calcResult
+
+  // The calculator returns the THEORETICAL refund (full hire ex-VAT minus
+  // retained fee). What actually needs to be returned to the client is
+  // capped at what they've already paid us — paying a £4.5k refund on a
+  // £1.8k deposit is nonsense, and was the wording confusion. Working in
+  // inc-VAT here because that's what cash actually moves in.
+  const calculatedRefundExVat = calcResult
     ? calcResult.refund
     : (useManual && manualFee ? Math.max(0, effectiveHireValueExVat - toNum(manualFee)) : 0);
+  const totalHireDepositsPaid = toNum(moneySummary?.financial.total_hire_deposits);
+  const feeIncVat = effectiveFee * 1.2;
+  const actualRefund = totalHireDepositsPaid > 0
+    ? Math.max(0, totalHireDepositsPaid - feeIncVat)
+    : calculatedRefundExVat;
+  const outstandingBalance = totalHireDepositsPaid > 0
+    ? Math.max(0, feeIncVat - totalHireDepositsPaid)
+    : 0;
+  const allSquare = effectiveFee > 0
+    && totalHireDepositsPaid > 0
+    && Math.abs(feeIncVat - totalHireDepositsPaid) < 0.5;
+  const haveDepositData = moneySummary !== null;
 
   // Type-to-confirm guard: kicks in for the 100% tier OR retained fee >= £500.
   // Big-money or short-notice cancellations are the ones we don't want misclicks on.
@@ -180,7 +201,8 @@ export default function CancellationModal({
       cancellation_reason: reason,
       cancellation_notes: notes,
       cancellation_fee: effectiveFee,
-      cancellation_refund: effectiveRefund,
+      cancellation_refund: actualRefund,
+      cancellation_outstanding_balance: outstandingBalance > 0 ? outstandingBalance : undefined,
       cancellation_tier: calcResult?.tier || 'manual',
       cancellation_notice_days: calcResult?.noticeDays || 0,
       transport_charges: transportCharges,
@@ -483,19 +505,49 @@ export default function CancellationModal({
                 )}
               </div>
 
-              {/* Summary */}
-              <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm">
-                <p className="font-medium text-gray-700 mb-1">Cancellation Summary</p>
+              {/* Summary — shows the actual cash position based on what the
+                  client has paid (from the Money summary), not the theoretical
+                  refund the calculator assumes from full hire value. */}
+              <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm space-y-2">
+                <p className="font-medium text-gray-700">Cancellation Summary</p>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <span className="text-gray-500">Fee retained:</span>
+                    <span className="text-gray-500">Fee retained (ex-VAT):</span>
                     <span className="ml-1 font-bold text-red-700">{fmtMoney(effectiveFee)}</span>
+                    <div className="text-xs text-gray-500">inc-VAT {fmtMoney(feeIncVat)}</div>
                   </div>
                   <div>
-                    <span className="text-gray-500">Refund due:</span>
-                    <span className="ml-1 font-bold text-green-700">{fmtMoney(effectiveRefund)}</span>
+                    <span className="text-gray-500">Paid by client:</span>
+                    <span className="ml-1 font-bold text-gray-700">{haveDepositData ? fmtMoney(totalHireDepositsPaid) : '—'}</span>
+                    {!haveDepositData && <div className="text-xs text-amber-600">Money summary unavailable</div>}
                   </div>
                 </div>
+                {haveDepositData && (
+                  <div className="border-t border-gray-200 pt-2">
+                    {allSquare && (
+                      <div className="text-emerald-700 font-medium">
+                        ✓ All square — deposit covers the cancellation fee. Nobody owes anybody anything.
+                      </div>
+                    )}
+                    {!allSquare && actualRefund > 0 && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Refund to client:</span>
+                        <span className="font-bold text-green-700">{fmtMoney(actualRefund)}</span>
+                      </div>
+                    )}
+                    {!allSquare && outstandingBalance > 0 && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Client still owes:</span>
+                        <span className="font-bold text-amber-700">{fmtMoney(outstandingBalance)}</span>
+                      </div>
+                    )}
+                    {actualRefund > 0 && actualRefund < calculatedRefundExVat - 0.5 && (
+                      <p className="text-xs text-gray-500 mt-1">
+                        Capped at amount paid. T&C-calculated refund was {fmtMoney(calculatedRefundExVat)} (ex-VAT).
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Actions preview */}
@@ -513,7 +565,12 @@ export default function CancellationModal({
                   {excessHeldRecords.length > 0 && (
                     <li>Flag {fmtMoney(totalExcessHeld)} excess for refund processing</li>
                   )}
-                  <li>Create pending refund record on Money tab</li>
+                  {actualRefund > 0 && (
+                    <li>Create pending refund record on Money tab ({fmtMoney(actualRefund)})</li>
+                  )}
+                  {outstandingBalance > 0 && (
+                    <li>Note {fmtMoney(outstandingBalance)} outstanding balance — invoice the client for this</li>
+                  )}
                   <li>Log cancellation on activity timeline</li>
                 </ul>
               </div>

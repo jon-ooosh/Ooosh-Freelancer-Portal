@@ -130,6 +130,12 @@ const processSchema = z.object({
   // cancellation (e.g. client emailed yesterday, we're processing today).
   // Sent as ISO string from the modal date picker (UTC noon to dodge tz edges).
   cancelled_at: z.string().datetime().optional().nullable(),
+  // Optional — what the client still owes us after the cancellation fee
+  // is applied to what they've already paid. Computed by the modal from
+  // the live Money summary; passed through so the email template can show
+  // the right state (refund / all-square / outstanding) without the route
+  // having to re-fetch billing.
+  cancellation_outstanding_balance: z.number().min(0).optional(),
   // Requirement IDs the user explicitly chose to KEEP alive past cancellation.
   // Everything else open on the job is auto-cancelled below. Kept items get
   // keep_after_close=true so background scanners still fire them. See
@@ -150,6 +156,7 @@ router.post(
         cancellation_fee, cancellation_refund,
         cancellation_tier, cancellation_notice_days,
         breakdown, keep_requirement_ids, cancelled_at,
+        cancellation_outstanding_balance,
       } = req.body;
 
       // Verify job exists and is in a cancellable state (confirmed+)
@@ -436,13 +443,21 @@ router.post(
         try {
           const target = await resolveClientEmailTarget(jobId);
 
-          const refundSection = cancellation_refund > 0
-            ? `<p style="margin:0 0 4px;font-size:13px;color:#64748b;">Refund</p>
-               <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">£${cancellation_refund.toFixed(2)} to be refunded within 10 working days</p>`
-            : '';
-          const invoiceNote = cancellation_fee > 0
-            ? `<p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">A cancellation fee of <strong>£${cancellation_fee.toFixed(2)} + VAT</strong> applies per our <a href="https://www.oooshtours.co.uk/files/Ooosh_vehicle_hire_terms.pdf" style="color:#7B5EA7;text-decoration:none;font-weight:600;">hire terms</a>. An invoice will follow shortly if not already sent.</p>`
-            : '';
+          // Three balance states the email needs to convey, mutually exclusive:
+          //   1. refundAmount > 0      — we owe the client
+          //   2. outstandingBalance > 0 — client still owes us
+          //   3. all-square            — deposit paid covers the fee exactly
+          // Variables are passed as plain strings (empty = falsy for the
+          // {{#if}} block resolver), so the template renders the right panel.
+          // Markup lives in the template — variables are NEVER raw HTML; the
+          // substituter HTML-escapes everything.
+          const feeIncVat = cancellation_fee * 1.2;
+          const outstandingBalance = Number(cancellation_outstanding_balance || 0);
+          const refundAmount = cancellation_refund > 0 ? cancellation_refund.toFixed(2) : '';
+          const outstandingStr = outstandingBalance > 0 ? outstandingBalance.toFixed(2) : '';
+          const allSquare = cancellation_fee > 0 && cancellation_refund <= 0 && outstandingBalance <= 0;
+          const feeAmountStr = cancellation_fee > 0 ? cancellation_fee.toFixed(2) : '';
+          const feeIncVatStr = cancellation_fee > 0 ? feeIncVat.toFixed(2) : '';
 
           await emailService.send('job_cancelled_client', {
             to: target.primaryEmail,
@@ -460,9 +475,12 @@ router.post(
               jobNumber,
               jobName,
               jobDates,
-              refundSection,
-              invoiceNote,
               clientIntro,
+              refundAmount,
+              outstandingBalance: outstandingStr,
+              showAllSquare: allSquare ? '1' : '',
+              feeAmount: feeAmountStr,
+              feeIncVat: feeIncVatStr,
             },
           });
           if (target.isFallback) {
