@@ -10,7 +10,7 @@
  * Data: HireHop jobs (API) + fleet vehicles (Monday) + allocations (R2).
  */
 
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
@@ -37,6 +37,7 @@ export function AllocationsPage() {
 
   const [dateFilter, setDateFilter] = useState<DateFilter>('this-week')
   const [viewMode, setViewMode] = useState<ViewMode>('going-out')
+  const [searchTerm, setSearchTerm] = useState('')
 
   const { data: upcomingJobs, isLoading: upcomingLoading, error: upcomingError } = useUpcomingJobs(ALLOCATIONS_DAYS_AHEAD)
   const { data: dueBackJobs, isLoading: dueBackLoading, error: dueBackError } = useUpcomingDueBackJobs(ALLOCATIONS_DAYS_AHEAD)
@@ -94,6 +95,23 @@ export function AllocationsPage() {
       return dateCmp !== 0 ? dateCmp : a.id - b.id
     })
   }, [viewMode, upcomingJobs, dueBackJobs, dateFilter, today, tomorrow, endOfWeek])
+
+  // Search filter — matches HH job number, job name, client/company, or any
+  // allocated van reg on the job. Case-insensitive substring. Empty string =
+  // pass-through. Reg match means staff can type "RX22SWU" to find every job
+  // currently holding that van — useful when triaging an overlap.
+  const searchedJobs = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase()
+    if (!q) return filteredJobs
+    return filteredJobs.filter(job => {
+      if (String(job.id).includes(q)) return true
+      if ((job.jobName || '').toLowerCase().includes(q)) return true
+      if ((job.company || '').toLowerCase().includes(q)) return true
+      const jobAllocs = allocationsList.filter(a => a.hireHopJobId === job.id)
+      if (jobAllocs.some(a => (a.vehicleReg || '').toLowerCase().includes(q))) return true
+      return false
+    })
+  }, [filteredJobs, searchTerm, allocationsList])
 
   // All visible job IDs — sent to backend so it knows which jobs are "in scope"
   // for cancellation (even if they have zero allocations)
@@ -175,6 +193,30 @@ export function AllocationsPage() {
         </button>
       </div>
 
+      {/* Search box — matches HH job number, job name, client, or van reg.
+          Useful for jumping to a specific job (especially when arriving from
+          the Job Detail "Allocate Van" deep-link) and for triaging overlap
+          cases by reg ("which jobs are holding RX22SWU right now?"). */}
+      <div className="relative">
+        <input
+          type="text"
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          placeholder="Search by job number, name, client, or van reg…"
+          className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 pr-8 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+        />
+        {searchTerm && (
+          <button
+            type="button"
+            onClick={() => setSearchTerm('')}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+            aria-label="Clear search"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
       {/* Date filter pills */}
       <div className="flex gap-2">
         {([
@@ -218,14 +260,20 @@ export function AllocationsPage() {
             <div key={i} className="h-32 animate-pulse rounded-lg bg-gray-100" />
           ))}
         </div>
-      ) : filteredJobs.length === 0 ? (
+      ) : searchedJobs.length === 0 ? (
         <div className="rounded-lg border border-gray-200 bg-white p-8 text-center text-sm text-gray-400">
-          No jobs {viewMode === 'going-out' ? 'going out' : 'due back'}{' '}
-          {dateFilter === 'today' ? 'today' : dateFilter === 'tomorrow' ? 'tomorrow' : dateFilter === 'this-week' ? 'this week' : 'in the next 2 weeks'}
+          {searchTerm ? (
+            <>No jobs match "{searchTerm}".</>
+          ) : (
+            <>
+              No jobs {viewMode === 'going-out' ? 'going out' : 'due back'}{' '}
+              {dateFilter === 'today' ? 'today' : dateFilter === 'tomorrow' ? 'tomorrow' : dateFilter === 'this-week' ? 'this week' : 'in the next 2 weeks'}
+            </>
+          )}
         </div>
       ) : (
         <div className="space-y-4">
-          {filteredJobs.map(job => (
+          {searchedJobs.map(job => (
             <JobAllocationCard
               key={job.id}
               job={job}
@@ -268,6 +316,19 @@ function JobAllocationCard({
   saving: boolean
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded)
+  const cardRef = useRef<HTMLDivElement>(null)
+
+  // Scroll the card into view on mount when arriving via the ?job=<hh>
+  // deep-link from Job Detail. Only fires once per mount; subsequent
+  // expand/collapse interactions don't re-scroll. Guarded on
+  // defaultExpanded so cards that aren't the focus target don't move.
+  useEffect(() => {
+    if (defaultExpanded && cardRef.current) {
+      cardRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const requirements = extractVanRequirements(job)
   const jobAllocations = allocations.filter(a => a.hireHopJobId === job.id)
   const totalNeeded = requirements.reduce((sum, r) => sum + r.quantity, 0)
@@ -292,7 +353,7 @@ function JobAllocationCard({
       : 'border-red-200'
 
   return (
-    <div className={`rounded-lg border ${borderColour} bg-white`}>
+    <div ref={cardRef} className={`rounded-lg border ${borderColour} bg-white scroll-mt-4`}>
       {/* Header — always visible, click to expand */}
       <button
         onClick={() => setExpanded(!expanded)}
