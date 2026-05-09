@@ -11,6 +11,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { MobileFilterSheet } from '../components/mobile/MobileFilterSheet';
 
 const STATUS_MAP: Record<number, string> = {
   6: 'Returned Incomplete', 7: 'Returned', 8: 'Requires Attention', 11: 'Completed',
@@ -118,6 +119,7 @@ export default function ReturnsPage() {
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
   const [pageInput, setPageInput] = useState('');
+  const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
 
   const [reqProgress, setReqProgress] = useState<Record<string, ReqProgress>>({});
   const [retros, setRetros] = useState<Record<string, RetroSnippet>>({});
@@ -302,8 +304,31 @@ export default function ReturnsPage() {
         </div>
       </div>
 
-      {/* ── Filters ── */}
-      <div className="space-y-3 mb-4">
+      {/* Mobile compact filter bar — search + Filters button. Desktop
+          filters live in the .hidden md:block block below. */}
+      <div className="md:hidden mb-3 flex gap-2">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search returns…"
+          className="flex-1 min-w-0 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        />
+        <button
+          type="button"
+          onClick={() => setMobileFilterOpen(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50 flex-shrink-0"
+          aria-label="Open filters"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+          </svg>
+          Filters
+        </button>
+      </div>
+
+      {/* ── Filters (desktop) ── */}
+      <div className="space-y-3 mb-4 hidden md:block">
         {/* Search + status */}
         <div className="flex flex-col sm:flex-row gap-3">
           <input
@@ -462,6 +487,113 @@ export default function ReturnsPage() {
           </div>
         </div>
       )}
+
+      {/* Mobile filter sheet — mirrors the desktop filter row. State changes
+          live; Done just closes. */}
+      <MobileFilterSheet
+        open={mobileFilterOpen}
+        onClose={() => setMobileFilterOpen(false)}
+        title="Filter returns"
+        applyLabel="Done"
+      >
+        <div className="space-y-5">
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Status</h4>
+            <div className="flex flex-wrap gap-1.5">
+              {STATUS_PILLS.map((p) => (
+                <button
+                  key={p.key}
+                  onClick={() => setStatusFilter(p.key)}
+                  className={`px-3 py-1.5 text-sm rounded-lg border ${
+                    statusFilter === p.key
+                      ? 'bg-ooosh-600 text-white border-ooosh-700'
+                      : 'bg-white text-gray-700 border-gray-300'
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Type</h4>
+            <div className="flex flex-wrap gap-2">
+              {TYPE_OPTIONS.map((opt) => {
+                const active = typeFilter.includes(opt.key);
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setTypeFilter((prev) =>
+                      prev.includes(opt.key) ? prev.filter((p) => p !== opt.key) : [...prev, opt.key]
+                    )}
+                    className={`px-3 py-1.5 text-sm font-medium rounded-full border transition-colors ${
+                      active
+                        ? 'bg-ooosh-600 text-white border-ooosh-600'
+                        : 'bg-white text-gray-600 border-gray-300'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Returned date range</h4>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
+              <span className="text-xs text-gray-400">→</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Quick filters</h4>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={overdueOnly}
+                  onChange={(e) => setOverdueOnly(e.target.checked)}
+                  className="rounded border-gray-300 w-4 h-4"
+                />
+                ⚠ Overdue only
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hasIssuesOnly}
+                  onChange={(e) => setHasIssuesOnly(e.target.checked)}
+                  className="rounded border-gray-300 w-4 h-4"
+                />
+                ⚠ Has issues
+              </label>
+            </div>
+          </div>
+
+          {hasFilters && (
+            <button
+              onClick={() => { clearFilters(); setMobileFilterOpen(false); }}
+              className="w-full text-sm text-gray-600 hover:text-gray-900 underline py-2"
+            >
+              Clear all filters
+            </button>
+          )}
+        </div>
+      </MobileFilterSheet>
     </div>
   );
 }

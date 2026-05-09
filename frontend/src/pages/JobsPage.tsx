@@ -1,6 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
+import { MobileListCard } from '../components/mobile/MobileListCard';
+import { MobileFilterSheet } from '../components/mobile/MobileFilterSheet';
 import {
   PIPELINE_STATUS_CONFIG,
   OPERATIONAL_STATUS_CONFIG,
@@ -254,6 +256,7 @@ export default function JobsPage() {
   const [managerFilter, setManagerFilter] = useState('');
   const [serviceTypeFilter, setServiceTypeFilter] = useState<string[]>([]);
   const [managerOptions, setManagerOptions] = useState<{ id: string; first_name: string; last_name: string }[]>([]);
+  const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
   const navigate = useNavigate();
 
   // Load manager dropdown options once
@@ -571,6 +574,91 @@ export default function JobsPage() {
     );
   }
 
+  // Mobile counterpart to renderJobRow — same data, card layout, used under
+  // the md breakpoint. Wraps MobileListCard from the shared mobile primitives.
+  function renderMobileJobCard(job: Job, showRequirements = false, happeningBadge?: { text: string; colour: string }) {
+    const progress = showRequirements ? reqProgress[job.id] : undefined;
+    const overdue = isOverdueReturn(job);
+    const overdueDays = overdue
+      ? Math.floor((Date.now() - new Date(job.return_date || job.job_end || '').getTime()) / 86400000)
+      : 0;
+    const badge = getStatusBadge(job);
+
+    return (
+      <MobileListCard
+        key={job.id}
+        leftBorderClass={overdue ? 'border-l-4 border-l-red-500' : ''}
+        onToggle={() => navigate(`/jobs/${job.id}`)}
+        leadingBadge={
+          job.hh_job_number ? (
+            <a
+              href={`https://myhirehop.com/job.php?id=${job.hh_job_number}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="font-mono text-xs px-1.5 py-0.5 rounded bg-ooosh-50 text-ooosh-700 hover:bg-ooosh-100"
+            >
+              J-{job.hh_job_number}
+            </a>
+          ) : (
+            <span className="font-mono text-xs text-gray-400">—</span>
+          )
+        }
+        primary={job.job_name || job.client_name || job.company_name || '—'}
+        primarySuffix={
+          job.has_ooh_return ? (
+            <span
+              className="text-xs px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 flex-shrink-0"
+              title="Out-of-hours return flagged"
+            >
+              🌙
+            </span>
+          ) : null
+        }
+        trailing={
+          badge.colour ? (
+            <span
+              className="inline-flex px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap"
+              style={{ backgroundColor: badge.colour + '20', color: badge.colour }}
+            >
+              {badge.label}
+            </span>
+          ) : (
+            <span className={`inline-flex px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap ${badge.fallbackClass}`}>
+              {badge.label}
+            </span>
+          )
+        }
+        secondary={job.client_name || job.company_name || ''}
+        meta={
+          <>
+            <span className="text-gray-700 font-medium">{formatDateRange(job.job_date, job.job_end)}</span>
+            {job.out_time && <span className="text-blue-500">· {job.out_time.slice(0, 5)}</span>}
+            {job.job_value != null && <span>· {formatCurrency(job.job_value)}</span>}
+            {job.manager1_name && <span>· {job.manager1_name}</span>}
+          </>
+        }
+        chips={
+          <>
+            {happeningBadge && (
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${happeningBadge.colour}`}>
+                {happeningBadge.text}
+              </span>
+            )}
+            {overdue && (
+              <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-semibold">
+                ⚠ {overdueDays}d overdue
+              </span>
+            )}
+            {showRequirements && progress && progress.total > 0 && (
+              <RequirementsProgress progress={progress} />
+            )}
+          </>
+        }
+      />
+    );
+  }
+
   function renderTableHeader() {
     return (
       <thead className="bg-gray-50">
@@ -594,7 +682,7 @@ export default function JobsPage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-2 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Jobs</h1>
           <p className="mt-1 text-sm text-gray-500">
@@ -603,22 +691,44 @@ export default function JobsPage() {
         </div>
         <div className="flex items-center gap-3">
           {lastSync?.completed_at && (
-            <span className="text-xs text-gray-400">
+            <span className="text-xs text-gray-400 hidden sm:inline">
               Last sync: {formatSyncTime(lastSync.completed_at)}
             </span>
           )}
           <button
             onClick={handleSyncNow}
             disabled={syncing}
-            className="px-4 py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors text-gray-700 disabled:opacity-50"
+            className="px-3 py-1.5 sm:px-4 sm:py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors text-gray-700 disabled:opacity-50"
           >
-            {syncing ? 'Syncing...' : 'Sync Now'}
+            {syncing ? 'Syncing...' : 'Sync'}
           </button>
         </div>
       </div>
 
-      {/* Search + Filters */}
-      <div className="mt-6 flex flex-col sm:flex-row sm:flex-wrap gap-3">
+      {/* Search (visible on mobile + desktop) + mobile Filters button */}
+      <div className="mt-6 flex gap-2 md:hidden">
+        <input
+          type="text"
+          placeholder="Search jobs…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="flex-1 min-w-0 rounded border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        />
+        <button
+          type="button"
+          onClick={() => setMobileFilterOpen(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50 flex-shrink-0"
+          aria-label="Open filters"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+          </svg>
+          Filters
+        </button>
+      </div>
+
+      {/* Search + Filters (desktop only — mobile uses the sheet drawer above) */}
+      <div className="mt-6 hidden md:flex flex-col sm:flex-row sm:flex-wrap gap-3">
         <input
           type="text"
           placeholder="Search by job name, client, venue, or job number..."
@@ -767,7 +877,8 @@ export default function JobsPage() {
               </div>
 
               <div className="bg-white rounded-xl shadow-md border border-green-200 border-l-4 border-l-green-500 overflow-hidden">
-                <div className="overflow-x-auto">
+                {/* Desktop table */}
+                <div className="hidden md:block overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200">
                     {renderTableHeader()}
                     <tbody className="bg-white divide-y divide-gray-100">
@@ -805,6 +916,34 @@ export default function JobsPage() {
                     </tbody>
                   </table>
                 </div>
+
+                {/* Mobile card list — same data, card layout */}
+                <div className="md:hidden">
+                  {goingOut.length > 0 && (
+                    <>
+                      <div className="px-3 py-1.5 bg-orange-50 text-xs font-semibold text-orange-700 uppercase tracking-wide">
+                        Going Out ({goingOut.length})
+                      </div>
+                      <div className="divide-y divide-gray-100">
+                        {goingOut.map((h: HappeningJob) =>
+                          renderMobileJobCard(h.job, true, happeningLabel(h.categories))
+                        )}
+                      </div>
+                    </>
+                  )}
+                  {returning.length > 0 && (
+                    <>
+                      <div className="px-3 py-1.5 bg-teal-50 text-xs font-semibold text-teal-700 uppercase tracking-wide">
+                        Returning ({returning.length})
+                      </div>
+                      <div className="divide-y divide-gray-100">
+                        {returning.map((h: HappeningJob) =>
+                          renderMobileJobCard(h.job, true, happeningLabel(h.categories))
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -821,7 +960,8 @@ export default function JobsPage() {
               </div>
 
               <div className="bg-white rounded-xl shadow-md border border-indigo-200 border-l-4 border-l-indigo-500 overflow-hidden">
-                <div className="overflow-x-auto">
+                {/* Desktop table */}
+                <div className="hidden md:block overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200">
                     {renderTableHeader()}
                     <tbody className="bg-white divide-y divide-gray-100">
@@ -830,6 +970,12 @@ export default function JobsPage() {
                       )}
                     </tbody>
                   </table>
+                </div>
+                {/* Mobile cards */}
+                <div className="md:hidden divide-y divide-gray-100">
+                  {currentlyOut.map((h: HappeningJob) =>
+                    renderMobileJobCard(h.job, true, happeningLabel(h.categories))
+                  )}
                 </div>
               </div>
             </div>
@@ -849,13 +995,18 @@ export default function JobsPage() {
                   </span>
                 </div>
                 <div className={`bg-white rounded-xl shadow-sm border border-gray-200 border-l-4 ${SECTION_COLOURS[section] || 'border-l-gray-300'} overflow-hidden`}>
-                  <div className="overflow-x-auto">
+                  {/* Desktop table */}
+                  <div className="hidden md:block overflow-x-auto">
                     <table className="min-w-full divide-y divide-gray-200">
                       {renderTableHeader()}
                       <tbody className="bg-white divide-y divide-gray-200">
                         {sectionJobs.map((job) => renderJobRow(job, true))}
                       </tbody>
                     </table>
+                  </div>
+                  {/* Mobile cards */}
+                  <div className="md:hidden divide-y divide-gray-100">
+                    {sectionJobs.map((job) => renderMobileJobCard(job, true))}
                   </div>
                 </div>
               </div>
@@ -888,6 +1039,119 @@ export default function JobsPage() {
           </div>
         </div>
       )}
+
+      {/* Mobile filter sheet — mirrors the desktop filter row. State changes
+          live so the list reflows immediately; Done just closes the sheet. */}
+      <MobileFilterSheet
+        open={mobileFilterOpen}
+        onClose={() => setMobileFilterOpen(false)}
+        title="Filter & sort jobs"
+        applyLabel="Done"
+      >
+        <div className="space-y-5">
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Status</h4>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="w-full rounded border border-gray-300 px-3 py-2.5 text-sm bg-white"
+            >
+              {STATUS_FILTER_OPTIONS.map((opt) => (
+                <option key={opt.label} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Time period</h4>
+            <select
+              value={timeFilter}
+              onChange={(e) => setTimeFilter(e.target.value as TimeFilter)}
+              className="w-full rounded border border-gray-300 px-3 py-2.5 text-sm bg-white"
+            >
+              {TIME_FILTER_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Manager</h4>
+            <select
+              value={managerFilter}
+              onChange={(e) => setManagerFilter(e.target.value)}
+              className="w-full rounded border border-gray-300 px-3 py-2.5 text-sm bg-white"
+            >
+              <option value="">All managers</option>
+              {managerOptions.map((m) => (
+                <option key={m.id} value={m.id}>{m.first_name} {m.last_name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Service type</h4>
+            <div className="flex flex-wrap gap-2">
+              {([
+                { key: 'vehicle', label: 'Vehicles' },
+                { key: 'backline', label: 'Backline' },
+                { key: 'rehearsal', label: 'Rehearsals' },
+              ] as const).map((opt) => {
+                const active = serviceTypeFilter.includes(opt.key);
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setServiceTypeFilter((prev) =>
+                      prev.includes(opt.key) ? prev.filter((p) => p !== opt.key) : [...prev, opt.key]
+                    )}
+                    className={`px-3 py-1.5 text-sm font-medium rounded-full border transition-colors ${
+                      active
+                        ? 'bg-ooosh-600 text-white border-ooosh-600'
+                        : 'bg-white text-gray-600 border-gray-300'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Quick filters</h4>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={oohOnly}
+                  onChange={(e) => setOohOnly(e.target.checked)}
+                  className="rounded border-gray-300 w-4 h-4"
+                />
+                🌙 Out-of-hours returns only
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={overdueOnly}
+                  onChange={(e) => setOverdueOnly(e.target.checked)}
+                  className="rounded border-gray-300 w-4 h-4"
+                />
+                ⚠ Overdue only
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={hasIssuesOnly}
+                  onChange={(e) => setHasIssuesOnly(e.target.checked)}
+                  className="rounded border-gray-300 w-4 h-4"
+                />
+                ⚠ Has issues
+              </label>
+            </div>
+          </div>
+        </div>
+      </MobileFilterSheet>
     </div>
   );
 }
