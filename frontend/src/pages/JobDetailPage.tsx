@@ -3529,11 +3529,39 @@ export default function JobDetailPage() {
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-ooosh-600" />
             </div>
           ) : vehicleAssignments.length === 0 ? (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
-              <p className="text-gray-400 text-4xl mb-3">🚐</p>
-              <p className="text-gray-600 font-medium">No vehicle assignments yet</p>
-              <p className="text-sm text-gray-400 mt-1">Vehicle assignments from the Allocations page will appear here</p>
-            </div>
+            (() => {
+              // For self-drive jobs, an assignment row is created automatically
+              // when the customer submits a hire form — the empty state is the
+              // expected pre-arrival state. For V&D jobs no hire form ever
+              // lands, so the row only exists once staff allocates a van. In
+              // both cases an "Allocate Van" deep-link gives staff a way to
+              // seed the row from Job Detail (V&D) or pre-allocate early
+              // (self-drive). Only render when the job actually has vehicle
+              // slots — no point on jobs with no vehicle requirement.
+              const slots = hhSyncResult?.derivation?.flags?.vehicle_slots || [];
+              const hasSlots = slots.length > 0;
+              const hasVdSlot = slots.some(s => s.mode === 'van_and_driver');
+              const hhJobNum = job.hh_job_number;
+              return (
+                <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+                  <p className="text-gray-400 text-4xl mb-3">🚐</p>
+                  <p className="text-gray-600 font-medium">No vehicle assignments yet</p>
+                  <p className="text-sm text-gray-400 mt-1">
+                    {hasVdSlot
+                      ? 'Van & Driver job — allocate a van to get started.'
+                      : 'Vehicle assignments from the Allocations page will appear here.'}
+                  </p>
+                  {hasSlots && hhJobNum && (
+                    <Link
+                      to={`/vehicles/allocations?job=${hhJobNum}`}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 mt-4 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium"
+                    >
+                      🚐 Allocate Van
+                    </Link>
+                  )}
+                </div>
+              );
+            })()
           ) : (
             <div className="space-y-3">
               {vehicleAssignments.map((a) => {
