@@ -5,6 +5,10 @@ import { api } from '../services/api';
 import DatePicker from '../components/DatePicker';
 import { VenuePicker } from '../components/VenuePicker';
 import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
+import { MobileListCard } from '../components/mobile/MobileListCard';
+import { MobileFilterSheet } from '../components/mobile/MobileFilterSheet';
+import { MobileAgendaList, type AgendaDay } from '../components/mobile/MobileAgendaList';
+import { MapLink } from '../components/mobile/TapTargets';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -347,6 +351,7 @@ export default function TransportOpsPage() {
   );
   const [searchTerm, setSearchTerm] = useState(initialParams.get('q') || '');
   const [sortBy, setSortBy] = useState<SortKey>((initialParams.get('sort') as SortKey) || 'date');
+  const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
   // When the user clicks a driver / venue in a row, pin the page to just
   // that entity. null means no pin.
   const [personPin, setPersonPin] = useState<{ id: string; name: string } | null>(() => {
@@ -691,6 +696,30 @@ export default function TransportOpsPage() {
     return byDate;
   }, [filteredQuotes, showCompleted, showCancelled]);
 
+  // Agenda data: same source as calendar but flattened to a sorted day list
+  // for the mobile MobileAgendaList. Skips the 'unscheduled' bucket — those
+  // already render as "No date" badges in the regular list view.
+  const agendaDays = useMemo<AgendaDay<OpsQuote>[]>(() => {
+    return Object.entries(calendarData)
+      .filter(([key]) => key !== 'unscheduled')
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([dateKey, items]) => {
+        const d = new Date(dateKey + 'T00:00:00');
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const isToday = dateKey === todayKey;
+        return {
+          dateKey,
+          label: d.toLocaleDateString('en-GB', {
+            weekday: 'short',
+            day: 'numeric',
+            month: 'short',
+          }),
+          sublabel: isToday ? 'Today' : undefined,
+          items: [...items].sort((x, y) => (x.arrival_time || '').localeCompare(y.arrival_time || '')),
+        };
+      });
+  }, [calendarData]);
+
   // Top-of-page summary counts, computed against the raw operational quotes
   // (not filteredQuotes) so clicking a chip doesn't then change the chip
   // count. Speculative buckets (provisional / enquiry / lost / cancelled
@@ -725,14 +754,29 @@ export default function TransportOpsPage() {
     <div className="space-y-4">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Crew & Transport</h1>
-          <p className="text-sm text-gray-500">
-            {filteredQuotes.length} of {quotes.length} shown
-          </p>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Crew & Transport</h1>
+            <p className="text-sm text-gray-500">
+              {filteredQuotes.length} of {quotes.length} shown
+            </p>
+          </div>
+          {/* Mobile Filters trigger — opens bottom sheet with the desktop-side
+              cluster (job type / view / sort / date window / dead-stage toggles). */}
+          <button
+            type="button"
+            onClick={() => setMobileFilterOpen(true)}
+            className="md:hidden inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50"
+            aria-label="Open filters"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+            </svg>
+            Filters
+          </button>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
+        <div className="hidden md:flex items-center gap-2 flex-wrap">
           {/* Job type pills */}
           <div className="flex rounded-lg border border-gray-300 overflow-hidden text-sm">
             {(['all', 'transport', 'crewed'] as const).map((f) => (
@@ -789,13 +833,16 @@ export default function TransportOpsPage() {
 
       {/* Filter row — summary chips (click-to-filter) on the left, Show:
           pill group (heads-up planning toggles for speculative / dead-stage
-          jobs) on the right. flex-wrap stacks them on narrow screens. */}
+          jobs) on the right. flex-wrap stacks them on narrow screens. On
+          mobile the chip strip becomes horizontally scrollable to keep the
+          page from ballooning vertically. */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 justify-between">
-        {/* Summary chips — click any count to jump to that view */}
-        <div className="flex flex-wrap gap-2">
+        {/* Summary chips — click any count to jump to that view.
+            On mobile: horizontal scroll, no wrap. On md+: wraps as before. */}
+        <div className="flex md:flex-wrap gap-2 overflow-x-auto md:overflow-visible -mx-4 px-4 md:mx-0 md:px-0 scrollbar-hide flex-nowrap md:flex-wrap">
           <button
             onClick={() => setDateWindow(dateWindow === 'overdue' ? 'all' : 'overdue')}
-            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors whitespace-nowrap flex-shrink-0 ${
               summary.overdue === 0
                 ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-default'
                 : dateWindow === 'overdue'
@@ -809,7 +856,7 @@ export default function TransportOpsPage() {
           </button>
           <button
             onClick={() => setDateWindow(dateWindow === 'today_tomorrow' ? 'all' : 'today_tomorrow')}
-            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors whitespace-nowrap flex-shrink-0 ${
               dateWindow === 'today_tomorrow'
                 ? 'bg-blue-600 text-white border-blue-700'
                 : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
@@ -820,7 +867,7 @@ export default function TransportOpsPage() {
           </button>
           <button
             onClick={() => setDateWindow(dateWindow === 'this_week' ? 'all' : 'this_week')}
-            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors whitespace-nowrap flex-shrink-0 ${
               dateWindow === 'this_week'
                 ? 'bg-purple-600 text-white border-purple-700'
                 : 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100'
@@ -831,7 +878,7 @@ export default function TransportOpsPage() {
           </button>
           <button
             onClick={() => setNeedsCrewOnly(!needsCrewOnly)}
-            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors whitespace-nowrap flex-shrink-0 ${
               needsCrewOnly
                 ? 'bg-amber-600 text-white border-amber-700'
                 : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
@@ -842,7 +889,7 @@ export default function TransportOpsPage() {
           </button>
           <button
             onClick={() => setNeedsIntroOnly(!needsIntroOnly)}
-            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors ${
+            className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors whitespace-nowrap flex-shrink-0 ${
               needsIntroOnly
                 ? 'bg-blue-600 text-white border-blue-700'
                 : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
@@ -856,8 +903,8 @@ export default function TransportOpsPage() {
         {/* Job-stage toggles — heads-up planning. Off by default; speculative
             and dead-stage jobs render in their own collapsible sections below
             the operational lists. Headline stat chips above stay scoped to
-            operational work. */}
-        <div className="flex flex-wrap items-center gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+            operational work. Hidden on mobile (lives in the Filter sheet). */}
+        <div className="hidden md:flex flex-wrap items-center gap-1 bg-gray-100 rounded-lg p-1 w-fit">
           <span className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">
             Show:
           </span>
@@ -908,10 +955,11 @@ export default function TransportOpsPage() {
         </div>
       </div>
 
-      {/* Filter bar — search + date window pills + sort */}
+      {/* Filter bar — search + date window pills + sort. On mobile, only
+          search shows (the rest moves to the Filter sheet). */}
       <div className="flex flex-col lg:flex-row gap-3 bg-white rounded-lg border border-gray-200 p-3">
         {/* Search */}
-        <div className="relative flex-1 min-w-[240px]">
+        <div className="relative flex-1 min-w-0 md:min-w-[240px]">
           <input
             type="search"
             value={searchTerm}
@@ -931,8 +979,8 @@ export default function TransportOpsPage() {
           )}
         </div>
 
-        {/* Date window pills */}
-        <div className="flex rounded-lg border border-gray-300 overflow-hidden text-sm flex-wrap">
+        {/* Date window pills — hidden on mobile, lives in the filter sheet */}
+        <div className="hidden md:flex rounded-lg border border-gray-300 overflow-hidden text-sm flex-wrap">
           {([
             ['all', 'All dates'],
             ['overdue', 'Overdue'],
@@ -953,8 +1001,8 @@ export default function TransportOpsPage() {
           ))}
         </div>
 
-        {/* Sort */}
-        <div className="flex items-center gap-2 text-sm">
+        {/* Sort — hidden on mobile, lives in the filter sheet */}
+        <div className="hidden md:flex items-center gap-2 text-sm">
           <label className="text-gray-500">Sort</label>
           <select
             value={sortBy}
@@ -1156,19 +1204,50 @@ export default function TransportOpsPage() {
         </div>
       )}
 
-      {/* Calendar view */}
+      {/* Calendar view — desktop renders the month/week/day grid; mobile
+          renders an agenda list with sticky day headers. The mobile agenda
+          reuses QuoteRow so the card layout, expand state, and inline
+          actions all match the regular list view. */}
       {viewMode === 'calendar' && (
-        <CalendarView
-          data={calendarData}
-          allQuotes={quotes}
-          onStatusChange={updateOpsStatus}
-          onAssign={openAssignModal}
-          onRemoveAssignment={removeAssignment}
-          onUpdateDetails={updateOpsDetails}
-          onEdit={openEditModal}
-          onUpdateRunGroup={updateRunGroup}
-          onUpdateRunCombinedFee={updateRunCombinedFee}
-        />
+        <>
+          <div className="md:hidden">
+            <MobileAgendaList
+              days={agendaDays}
+              renderItem={(q) => (
+                <QuoteRow
+                  key={q.id}
+                  quote={q}
+                  expanded={expandedId === q.id}
+                  onToggle={() => setExpandedId(expandedId === q.id ? null : q.id)}
+                  onStatusChange={updateOpsStatus}
+                  onAssign={openAssignModal}
+                  onRemoveAssignment={removeAssignment}
+                  onUpdateDetails={updateOpsDetails}
+                  onEdit={openEditModal}
+                  onUpdateRunGroup={updateRunGroup}
+                  onUpdateRunCombinedFee={updateRunCombinedFee}
+                  onPinPerson={(id, name) => setPersonPin({ id, name })}
+                  onPinVenue={(name) => setVenuePin({ name })}
+                  allQuotes={quotes}
+                />
+              )}
+              emptyLabel="No scheduled quotes in this filter."
+            />
+          </div>
+          <div className="hidden md:block">
+            <CalendarView
+              data={calendarData}
+              allQuotes={quotes}
+              onStatusChange={updateOpsStatus}
+              onAssign={openAssignModal}
+              onRemoveAssignment={removeAssignment}
+              onUpdateDetails={updateOpsDetails}
+              onEdit={openEditModal}
+              onUpdateRunGroup={updateRunGroup}
+              onUpdateRunCombinedFee={updateRunCombinedFee}
+            />
+          </div>
+        </>
       )}
 
       {/* Assign Crew Modal */}
@@ -1336,6 +1415,158 @@ export default function TransportOpsPage() {
           }}
         />
       )}
+
+      {/* Mobile filter sheet — mirrors the desktop right-hand cluster +
+          search-row controls. Selecting changes state in real time so the
+          list reflows live; the Apply button just closes the sheet. */}
+      <MobileFilterSheet
+        open={mobileFilterOpen}
+        onClose={() => setMobileFilterOpen(false)}
+        title="Filters & sort"
+        applyLabel="Done"
+      >
+        <div className="space-y-5">
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Job type</h4>
+            <div className="flex rounded-lg border border-gray-300 overflow-hidden text-sm">
+              {(['all', 'transport', 'crewed'] as const).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setFilter(f)}
+                  className={`flex-1 px-3 py-2 ${filter === f ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700'}`}
+                >
+                  {f === 'all' ? 'All' : f === 'transport' ? 'D&C' : 'Crewed'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">View</h4>
+            <div className="flex rounded-lg border border-gray-300 overflow-hidden text-sm">
+              <button
+                onClick={() => setViewMode('table')}
+                className={`flex-1 px-3 py-2 ${viewMode === 'table' ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700'}`}
+              >
+                List
+              </button>
+              <button
+                onClick={() => setViewMode('calendar')}
+                className={`flex-1 px-3 py-2 ${viewMode === 'calendar' ? 'bg-ooosh-600 text-white' : 'bg-white text-gray-700'}`}
+              >
+                Agenda
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Date window</h4>
+            <div className="grid grid-cols-2 gap-1.5">
+              {([
+                ['all', 'All dates'],
+                ['overdue', 'Overdue'],
+                ['today_tomorrow', 'Today & tomorrow'],
+                ['this_week', 'This week'],
+                ['next_week', 'Next week'],
+                ['upcoming', 'All upcoming'],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setDateWindow(key)}
+                  className={`px-3 py-2 text-sm rounded-lg border ${
+                    dateWindow === key
+                      ? 'bg-ooosh-600 text-white border-ooosh-700'
+                      : 'bg-white text-gray-700 border-gray-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Sort by</h4>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as SortKey)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm bg-white"
+            >
+              <option value="date">Date</option>
+              <option value="client">Client</option>
+              <option value="freelancer">Freelancer</option>
+              <option value="status">Status</option>
+            </select>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Show ops status</h4>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showCompleted}
+                  onChange={(e) => setShowCompleted(e.target.checked)}
+                  className="rounded border-gray-300 text-green-600 focus:ring-green-500 w-4 h-4"
+                />
+                Completed quotes
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showCancelled}
+                  onChange={(e) => setShowCancelled(e.target.checked)}
+                  className="rounded border-gray-300 text-gray-400 focus:ring-gray-400 w-4 h-4"
+                />
+                Cancelled quotes
+              </label>
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Show job stages</h4>
+            <p className="text-xs text-gray-500 mb-2">Heads-up planning toggles for non-confirmed jobs.</p>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showProvisional}
+                  onChange={(e) => setShowProvisional(e.target.checked)}
+                  className="rounded border-gray-300 text-blue-500 focus:ring-blue-500 w-4 h-4"
+                />
+                <span className="w-2 h-2 rounded-full bg-blue-400" /> Provisional
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showEnquiry}
+                  onChange={(e) => setShowEnquiry(e.target.checked)}
+                  className="rounded border-gray-300 text-purple-500 focus:ring-purple-500 w-4 h-4"
+                />
+                <span className="w-2 h-2 rounded-full bg-purple-400" /> Enquiry
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showLostJobs}
+                  onChange={(e) => setShowLostJobs(e.target.checked)}
+                  className="rounded border-gray-300 text-gray-500 focus:ring-gray-500 w-4 h-4"
+                />
+                <span className="w-2 h-2 rounded-full bg-gray-500" /> Lost
+              </label>
+              <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={showCancelledJobs}
+                  onChange={(e) => setShowCancelledJobs(e.target.checked)}
+                  className="rounded border-gray-300 text-rose-500 focus:ring-rose-500 w-4 h-4"
+                />
+                <span className="w-2 h-2 rounded-full bg-rose-500" /> Cancelled
+              </label>
+            </div>
+          </div>
+        </div>
+      </MobileFilterSheet>
     </div>
   );
 }
@@ -1412,10 +1643,17 @@ function QuoteRow({
       ? `border-l-4 ${RUN_PILL_STYLES[runInfo.colourIdx].border}`
       : '';
 
+  const dateBlock = q.job_date ? (
+    q.is_multi_day && q.job_finish_date ? (
+      <>{formatDate(q.job_date)} – {formatDate(q.job_finish_date)}</>
+    ) : formatDate(q.job_date)
+  ) : <span className="text-gray-400">No date</span>;
+
   return (
     <div>
+      {/* Desktop row layout — hidden below md */}
       <div
-        className={`px-4 py-3 flex items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${leftBorderClass}`}
+        className={`hidden md:flex px-4 py-3 items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${leftBorderClass}`}
         onClick={onToggle}
       >
         {/* Expand chevron */}
@@ -1433,13 +1671,7 @@ function QuoteRow({
 
         {/* Date & time */}
         <div className="w-32 flex-shrink-0">
-          <div className="text-sm font-medium text-gray-900">
-            {q.job_date ? (
-              q.is_multi_day && q.job_finish_date ? (
-                <>{formatDate(q.job_date)} – {formatDate(q.job_finish_date)}</>
-              ) : formatDate(q.job_date)
-            ) : <span className="text-gray-400">No date</span>}
-          </div>
+          <div className="text-sm font-medium text-gray-900">{dateBlock}</div>
           <div className="text-xs text-gray-500 flex items-center gap-1.5">
             {q.arrival_time && <span>{q.arrival_time}</span>}
             {q.is_multi_day && q.num_days && q.num_days > 1 && (
@@ -1586,7 +1818,134 @@ function QuoteRow({
         </div>
       </div>
 
-      {/* Expanded detail */}
+      {/* Mobile card layout — shown below md */}
+      <div className="md:hidden">
+        <MobileListCard
+          leftBorderClass={leftBorderClass}
+          expanded={expanded}
+          onToggle={onToggle}
+          leadingBadge={
+            <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'}`}>
+              {JOB_TYPE_LABELS[q.job_type] || q.job_type}
+            </span>
+          }
+          primary={
+            venueName ? (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onEdit(q); }}
+                className="text-sm font-medium text-gray-900 hover:text-ooosh-600 hover:underline text-left break-words"
+              >
+                {venueName}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onEdit(q); }}
+                className="text-sm font-medium text-red-500 hover:text-red-700 hover:underline text-left"
+              >
+                No venue — tap to add
+              </button>
+            )
+          }
+          primarySuffix={
+            venueName ? (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onPinVenue(venueName); }}
+                className="flex-shrink-0 text-gray-400 hover:text-ooosh-600 p-0.5"
+                title={`Show all quotes for ${venueName}`}
+                aria-label="Pin venue filter"
+              >
+                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                </svg>
+              </button>
+            ) : null
+          }
+          trailing={
+            <div className="w-32">
+              <StatusDropdown
+                value={q.ops_status || 'todo'}
+                onChange={(v) => onStatusChange(q.id, v)}
+              />
+            </div>
+          }
+          secondary={q.client_name || q.job_name || ''}
+          meta={
+            <>
+              <span className="text-gray-700 font-medium">{dateBlock}</span>
+              {q.arrival_time && <span>· {q.arrival_time}</span>}
+              {q.is_multi_day && q.num_days && q.num_days > 1 && (
+                <span className="text-purple-600 font-medium">· {q.num_days}d</span>
+              )}
+              {q.hh_job_number && <span>· HH#{q.hh_job_number}</span>}
+            </>
+          }
+          chips={
+            <>
+              {/* Crew chip */}
+              {assignments.length > 0 ? (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onAssign(q.id); }}
+                  className="text-xs px-2 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 font-medium inline-flex items-center gap-1 max-w-full"
+                  title="Tap to add or change crew"
+                >
+                  <svg className="w-3 h-3 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM17 6a3 3 0 11-6 0 3 3 0 016 0zM12.93 17c.046-.327.07-.66.07-1a6.97 6.97 0 00-1.5-4.33A5 5 0 0119 16v1h-6.07zM6 11a5 5 0 015 5v1H1v-1a5 5 0 015-5z" />
+                  </svg>
+                  <span className="truncate">
+                    {assignments.length === 1
+                      ? (assignments[0].is_ooosh_crew
+                          ? 'Ooosh Staff'
+                          : `${assignments[0].first_name || ''} ${assignments[0].last_name || ''}`.trim() || 'Unknown')
+                      : `${assignments.length} crew`}
+                  </span>
+                  {(q.crew_count || 1) > assignments.length && (
+                    <span className="text-amber-600">{assignments.length}/{q.crew_count}</span>
+                  )}
+                </button>
+              ) : (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onAssign(q.id); }}
+                  className="text-xs px-2 py-1 rounded-full bg-red-50 text-red-700 border border-red-200 font-medium"
+                >
+                  + Assign crew{(q.crew_count || 1) > 1 ? ` (${q.crew_count})` : ''}
+                </button>
+              )}
+
+              {/* Fee chip */}
+              {(q.run_group && q.run_combined_client_fee != null) ? (
+                <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium" title={`Combined run charge (individual £${q.client_charge_rounded ?? 0})`}>
+                  £{Number(q.run_combined_client_fee).toFixed(0)}
+                  <span className="text-[9px] text-gray-400 ml-0.5">run</span>
+                </span>
+              ) : q.client_charge_rounded ? (
+                <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-medium">
+                  £{q.client_charge_rounded}
+                </span>
+              ) : null}
+
+              {/* State chips */}
+              {q.is_local && (
+                <span className="text-xs px-2 py-1 rounded-full bg-teal-100 text-teal-700 font-medium">Local</span>
+              )}
+              {q.run_group && runInfo && (
+                <span className={`text-xs px-2 py-1 rounded-full font-medium ${RUN_PILL_STYLES[runInfo.colourIdx].pill}`}>
+                  Run {runInfo.letter}
+                </span>
+              )}
+              {isOverdue && (
+                <span className="text-xs px-2 py-1 rounded-full bg-red-100 text-red-700 font-semibold">
+                  {daysOverdue ? `${daysOverdue}d overdue` : 'Overdue'}
+                </span>
+              )}
+            </>
+          }
+        />
+      </div>
+
+      {/* Expanded detail (shared between desktop + mobile) */}
       {expanded && (
         <ExpandedDetail
           q={q}
@@ -2016,8 +2375,9 @@ function ExpandedDetail({
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-        {/* Column 1: Details */}
-        <div className="space-y-2">
+        {/* Column 1: Details
+            Mobile order: 3 (least-used while on the move). Desktop: 1. */}
+        <div className="space-y-2 order-3 md:order-1">
           <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Details</h4>
           {q.job_id && (
             <div>
@@ -2027,7 +2387,11 @@ function ExpandedDetail({
             </div>
           )}
           {q.venue_address && (
-            <div className="text-gray-600">{q.venue_address}{q.venue_city ? `, ${q.venue_city}` : ''}</div>
+            <div className="text-gray-600 break-words">
+              <MapLink address={`${q.venue_address}${q.venue_city ? `, ${q.venue_city}` : ''}`}>
+                {q.venue_address}{q.venue_city ? `, ${q.venue_city}` : ''}
+              </MapLink>
+            </div>
           )}
           {q.distance_miles != null && q.distance_miles > 0 && (
             <div className="text-gray-500">{q.distance_miles} miles</div>
@@ -2118,8 +2482,9 @@ function ExpandedDetail({
           )}
         </div>
 
-        {/* Column 2: Arranging (inline-editable) */}
-        <div className="space-y-2">
+        {/* Column 2: Arranging (inline-editable)
+            Mobile + desktop both order 2 — middle of both stacks. */}
+        <div className="space-y-2 order-2 md:order-2">
           <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Arranging</h4>
 
           {/* Client introduction — status pill */}
@@ -2177,8 +2542,9 @@ function ExpandedDetail({
           />
         </div>
 
-        {/* Column 3: Crew & Financials */}
-        <div className="space-y-2">
+        {/* Column 3: Crew & Financials
+            Mobile order: 1 (highest-touch — see crew + cost first). Desktop: 3. */}
+        <div className="space-y-2 order-1 md:order-3">
           <div className="flex items-center gap-2">
             <h4 className="font-semibold text-gray-700 text-xs uppercase tracking-wider">Crew & Costs</h4>
             <button
@@ -2434,10 +2800,13 @@ function ClickableStatusPill({
   return (
     <button
       onClick={onClick}
-      className={`text-xs px-2 py-0.5 rounded-full cursor-pointer hover:opacity-80 transition-opacity ${colours[status] || 'bg-gray-100 text-gray-600'}`}
-      title={`Click to cycle: ${cycleLabels}`}
+      className={`text-xs px-2.5 py-1 rounded-full cursor-pointer hover:opacity-80 active:scale-95 transition-all border border-current/20 inline-flex items-center gap-1 ${colours[status] || 'bg-gray-100 text-gray-600'}`}
+      title={`Tap to cycle: ${cycleLabels}`}
     >
-      {label}: {statusLabels[status] || status}
+      <span>{label}: {statusLabels[status] || status}</span>
+      <svg className="w-3 h-3 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+      </svg>
     </button>
   );
 }
