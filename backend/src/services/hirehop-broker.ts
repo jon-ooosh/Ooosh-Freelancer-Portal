@@ -61,6 +61,20 @@ const RATE_LIMIT = {
   minDelayMs: 350,        // Min delay between requests (~3/sec max)
 };
 
+/**
+ * Retry config for transient HireHop failures (HH error 327/329, HTTP 429,
+ * 5xx, network throws, malformed responses). Three attempts at 1s/3s/9s
+ * backoff covers a full per-second-bucket reset on HH's side without
+ * holding the queue too long.
+ */
+const RETRY_CONFIG = {
+  maxAttempts: 3,
+  delaysMs: [1_000, 3_000], // before attempt 2 and attempt 3
+};
+
+/** HireHop's own rate-limit error codes (returned in body, not via 429). */
+const TRANSIENT_HH_ERROR_CODES = new Set(['327', '329']);
+
 const CACHE_KEY_PREFIX = 'hh:cache:';
 const METRICS_KEY = 'hh:broker:metrics';
 
@@ -168,6 +182,11 @@ class PriorityRequestQueue {
   get availableTokens(): number {
     return this.rateLimiter.availableTokens;
   }
+
+  /** Acquire a rate-limit token outside the queue (used by retry logic). */
+  async acquireToken(): Promise<void> {
+    await this.rateLimiter.acquire();
+  }
 }
 
 // ── Cache Helpers ────────────────────────────────────────────────────────
@@ -244,8 +263,12 @@ class HireHopBroker {
         enqueuedAt: Date.now(),
         execute: async () => {
           try {
-            const result = await this.executeGet<T>(endpoint, params);
+            const result = await this.withRetry<T>(
+              () => this.executeGet<T>(endpoint, params),
+              `GET ${endpoint}`,
+            );
             this.metrics.lastRequestAt = new Date().toISOString();
+            if (!result.success) this.metrics.errors++;
 
             // Cache successful responses
             if (result.success && cacheTTL > 0) {
@@ -282,8 +305,12 @@ class HireHopBroker {
         enqueuedAt: Date.now(),
         execute: async () => {
           try {
-            const result = await this.executePost<T>(endpoint, body);
+            const result = await this.withRetry<T>(
+              () => this.executePost<T>(endpoint, body),
+              `POST ${endpoint}`,
+            );
             this.metrics.lastRequestAt = new Date().toISOString();
+            if (!result.success) this.metrics.errors++;
             resolve(result);
           } catch (err) {
             this.metrics.errors++;
@@ -391,6 +418,58 @@ class HireHopBroker {
     }
   }
 
+  /**
+   * Decide whether a non-success response looks transient and worth retrying.
+   * Auth failures + permanent validation errors fall through as final.
+   */
+  private isRetryableError(resp: HireHopResponse<unknown>): boolean {
+    if (resp.success) return false;
+    if (resp.isAuthError) return false;
+    const err = String(resp.error || '');
+    if (TRANSIENT_HH_ERROR_CODES.has(err)) return true;
+    if (err.includes('Rate limited')) return true;       // HTTP 429 path
+    if (err.includes('HTTP 5')) return true;             // 5xx (see parseResponse)
+    if (err.includes('Invalid response format')) return true; // empty / malformed
+    if (err.includes('fetch failed') || err.includes('ETIMEDOUT') ||
+        err.includes('ECONNRESET') || err.includes('ENOTFOUND')) return true;
+    return false;
+  }
+
+  /**
+   * Run an HH operation with exponential backoff on transient failures.
+   * Subsequent attempts re-acquire a rate-limit token so retry traffic
+   * stays within our 50/min cap.
+   */
+  private async withRetry<T>(
+    op: () => Promise<HireHopResponse<T>>,
+    label: string,
+  ): Promise<HireHopResponse<T>> {
+    let lastResp: HireHopResponse<T> = { success: false, error: 'No attempts made' };
+    for (let attempt = 1; attempt <= RETRY_CONFIG.maxAttempts; attempt++) {
+      if (attempt > 1) {
+        const delay = RETRY_CONFIG.delaysMs[attempt - 2] ?? 9_000;
+        console.warn(`[HH Broker] ${label} transient failure (${lastResp.error}); retrying in ${delay}ms (attempt ${attempt}/${RETRY_CONFIG.maxAttempts})`);
+        await new Promise(r => setTimeout(r, delay));
+        await this.queue.acquireToken();
+      }
+      try {
+        const resp = await op();
+        if (resp.success || !this.isRetryableError(resp)) {
+          if (attempt > 1 && resp.success) {
+            console.log(`[HH Broker] ${label} succeeded on attempt ${attempt}`);
+          }
+          return resp;
+        }
+        lastResp = resp;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lastResp = { success: false, error: `fetch failed: ${msg}` };
+      }
+    }
+    console.error(`[HH Broker] ${label} failed after ${RETRY_CONFIG.maxAttempts} attempts: ${lastResp.error}`);
+    return lastResp;
+  }
+
   private async executeGet<T>(
     endpoint: string,
     params: Record<string, string | number>,
@@ -444,6 +523,11 @@ class HireHopBroker {
     // Rate limited
     if (response.status === 429) {
       return { success: false, error: 'Rate limited — max 60 requests/minute' };
+    }
+
+    // Transient server-side hiccup
+    if (response.status >= 500 && response.status < 600) {
+      return { success: false, error: `HTTP ${response.status} from HireHop` };
     }
 
     try {
