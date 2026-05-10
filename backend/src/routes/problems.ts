@@ -137,6 +137,75 @@ async function logEvent(
   );
 }
 
+// Severity → notification priority (CLAUDE.md Stage 3 Phase F spec):
+//   urgent → 'urgent' (immediate email regardless of working hours)
+//   normal → 'normal' (4h escalation in working hours)
+//   low    → 'low'    (bell only, no email escalation)
+function severityToPriority(severity: string | null | undefined): 'urgent' | 'normal' | 'low' {
+  if (severity === 'urgent') return 'urgent';
+  if (severity === 'low') return 'low';
+  return 'normal';
+}
+
+/**
+ * Fire inbox notifications for an issue event.
+ *
+ * Recipients: watchers + assignee (deduped), excluding the actor.
+ * `includeReporter` adds the reporter to the set — used for reflag and
+ * status-change events where the reporter cares about updates. NOT
+ * used on initial creation (the reporter IS the actor).
+ *
+ * Best-effort: failures are logged but don't roll back the issue
+ * operation. Notifications are derived signal.
+ */
+async function notifyIssueRecipients(
+  issueId: string,
+  actorUserId: string,
+  severity: string | null | undefined,
+  title: string,
+  content: string,
+  opts: { includeReporter?: boolean } = {}
+): Promise<void> {
+  try {
+    const issueRow = await query(
+      `SELECT ji.watchers, ji.assigned_to, ji.reported_by, ji.summary,
+              j.hh_job_number
+       FROM job_issues ji
+       LEFT JOIN jobs j ON j.id = ji.job_id
+       WHERE ji.id = $1`,
+      [issueId]
+    );
+    if (issueRow.rowCount === 0) return;
+
+    const row = issueRow.rows[0];
+    const recipients: Set<string> = new Set();
+    for (const w of (row.watchers as string[] | null) || []) recipients.add(w);
+    if (row.assigned_to) recipients.add(row.assigned_to);
+    if (opts.includeReporter && row.reported_by) recipients.add(row.reported_by);
+    recipients.delete(actorUserId);
+
+    if (recipients.size === 0) return;
+
+    const priority = severityToPriority(severity);
+    const actionUrl = `/operations/problems/${issueId}`;
+
+    for (const userId of recipients) {
+      // The 15-min escalation scheduler picks these up based on
+      // priority — 'urgent' fires email immediately regardless of
+      // working hours, 'normal' after 4h within working hours, 'low'
+      // never fires email (bell only).
+      await query(
+        `INSERT INTO notifications
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
+         VALUES ($1, 'system', $2, $3, 'job_issues', $4, $5, $6, $7)`,
+        [userId, title, content, issueId, actionUrl, priority, actorUserId]
+      );
+    }
+  } catch (err) {
+    console.error('Issue notification fire failed (non-fatal):', err);
+  }
+}
+
 const ISSUE_SELECT = `
   ji.id, ji.job_id, ji.vehicle_id, ji.driver_id, ji.person_id,
   ji.client_organisation_id, ji.hh_stock_item_id, ji.hh_stock_item_name, ji.barcode,
@@ -316,6 +385,12 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       category: body.category, severity: body.severity, source_module: body.source_module,
     });
 
+    await notifyIssueRecipients(
+      issueId, req.user!.id, body.severity,
+      `New issue: ${body.summary.slice(0, 80)}`,
+      `${body.category} — ${body.severity}`,
+    );
+
     // Activity Timeline echo so the issue shows on the job's timeline.
     // Skipped for vehicle-only issues (no job to anchor against).
     if (body.job_id) {
@@ -406,6 +481,39 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
       });
     }
 
+    // Notifications on meaningful state changes. Watchers + assignee +
+    // reporter get pinged when status flips, severity bumps, or
+    // assignment changes — they're the people tracking this issue.
+    const effectiveSeverity = body.severity || before.severity;
+    if ('status' in body && body.status && body.status !== before.status) {
+      const title = isResolvedStatus(body.status)
+        ? `Issue resolved: ${before.summary?.slice(0, 80) || 'Issue'}`
+        : `Issue status changed: ${body.status}`;
+      await notifyIssueRecipients(
+        id, req.user!.id, effectiveSeverity, title,
+        `Was ${before.status} → now ${body.status}`,
+        { includeReporter: true }
+      );
+    }
+    if ('severity' in body && body.severity && body.severity !== before.severity) {
+      await notifyIssueRecipients(
+        id, req.user!.id, body.severity,
+        `Issue severity changed: ${body.severity}`,
+        `Was ${before.severity} → now ${body.severity}`,
+        { includeReporter: true }
+      );
+    }
+    if ('assigned_to' in body && body.assigned_to !== before.assigned_to && body.assigned_to) {
+      // Notify the NEW assignee specifically — they may not have been
+      // on the watchers/reporter list yet. notifyIssueRecipients reads
+      // the post-update row so the new assignee is now in the set.
+      await notifyIssueRecipients(
+        id, req.user!.id, effectiveSeverity,
+        `You've been assigned an issue: ${before.summary?.slice(0, 80) || 'Issue'}`,
+        `Assigned by issue update`,
+      );
+    }
+
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [id]);
     res.json({ data: full.rows[0] });
   } catch (err) {
@@ -482,6 +590,15 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       });
       await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
 
+      // Reflag pings watchers + assignee + reporter — the original
+      // reporter cares that "their" issue is still happening.
+      await notifyIssueRecipients(
+        issueId, req.user!.id, body.severity,
+        `Issue re-flagged: ${body.summary.slice(0, 80)}`,
+        eventBody,
+        { includeReporter: true }
+      );
+
       const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
       return res.status(200).json({ data: full.rows[0], was_existing: true });
     }
@@ -513,6 +630,12 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       category: body.category, severity: body.severity, source_module: body.source_module,
       component_key: body.component_key,
     });
+
+    await notifyIssueRecipients(
+      issueId, req.user!.id, body.severity,
+      `New issue: ${body.summary.slice(0, 80)}`,
+      `${body.category} — flagged from ${body.source_module}`,
+    );
 
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
     res.status(201).json({ data: full.rows[0], was_existing: false });
