@@ -35,6 +35,7 @@ import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
 import systemSettingsRouter from './system-settings';
 import oohReturnRouter from './ooh-return';
+import preHireBriefingRouter from './pre-hire-briefing';
 
 const router = Router();
 
@@ -72,6 +73,7 @@ router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-
 router.use('/system-settings', systemSettingsRouter);
 router.use('/ooh-return', oohReturnRouter);  // Public parking-form (token auth) + staff endpoints
 router.use('/data-cleanup', dataCleanupRouter);
+router.use('/pre-hire-briefing', preHireBriefingRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
 router.use('/driver-verification', driverVerificationRouter);  // Public-facing — hire form auth (not OP JWT)
 

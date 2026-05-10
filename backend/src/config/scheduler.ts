@@ -589,4 +589,68 @@ export function startScheduler() {
     }
   });
   console.log('Scheduler: Arranging chaser scheduled daily at 08:30');
+
+  // ── Pre-Hire Briefing ────────────────────────────────────────────────
+  // Daily at 09:55 — every confirmed job approaching its hire date gets a
+  // structured briefing email sent to info@oooshtours.co.uk. Replaces the
+  // Monday.com automation. Triggers (any one):
+  //   - 3 days to out_date (standard)
+  //   - 5 days to out_date AND has D&C quote or crew (transport-heavy / earlier)
+  //   - 1 day to out_date AND any hire form missing (urgent)
+  // Each job sent at most once per day per trigger reason; email_log
+  // dedupes naturally if the cron is restarted within the same day.
+  cron.schedule('55 9 * * *', async () => {
+    try {
+      const { findEligibleJobs, buildBriefing } = await import('../services/pre-hire-briefing');
+      const { renderBriefingHtml, buildSubject } = await import('../services/email-templates/pre-hire-briefing');
+
+      const recipient = process.env.PRE_HIRE_BRIEFING_RECIPIENT
+        || 'info@oooshtours.co.uk';
+      const eligible = await findEligibleJobs();
+      if (eligible.length === 0) {
+        console.log('Scheduler: Pre-hire briefing — no eligible jobs today');
+        return;
+      }
+
+      // Skip jobs that already received a briefing today (audit-log dedup).
+      const today = new Date().toISOString().slice(0, 10);
+      const sentResult = await query(
+        `SELECT subject FROM email_log
+          WHERE template_id = 'pre_hire_briefing'
+            AND status = 'sent'
+            AND sent_at::date = $1::date`,
+        [today],
+      );
+      const sentSubjects = new Set<string>(
+        (sentResult.rows as Array<{ subject: string }>).map(r => r.subject),
+      );
+
+      let sent = 0; let skipped = 0; let failed = 0;
+      for (const e of eligible) {
+        try {
+          const briefing = await buildBriefing(e.id);
+          if (!briefing) { failed++; continue; }
+          const subject = buildSubject(briefing);
+          if (sentSubjects.has(subject)) { skipped++; continue; }
+          const html = renderBriefingHtml(briefing);
+          const result = await emailService.send('pre_hire_briefing', {
+            to: recipient,
+            subjectOverride: subject,
+            bodyHtmlOverride: html,
+          });
+          if (result.success) sent++;
+          else failed++;
+        } catch (err) {
+          console.error(`Scheduler: Pre-hire briefing failed for job ${e.id}:`, err);
+          failed++;
+        }
+      }
+      console.log(
+        `Scheduler: Pre-hire briefing — eligible ${eligible.length}, sent ${sent}, skipped (already sent today) ${skipped}, failed ${failed}`
+      );
+    } catch (err) {
+      console.error('Scheduler: Pre-hire briefing run failed:', err);
+    }
+  });
+  console.log('Scheduler: Pre-hire briefing scheduled daily at 09:55');
 }
