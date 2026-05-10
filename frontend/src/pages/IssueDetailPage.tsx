@@ -10,6 +10,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
+import ThreadView from '../components/messaging/ThreadView';
+import {
+  PendingAttachmentStrip,
+  useAttachments,
+  type InteractionAttachment,
+} from '../components/messaging/Attachments';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -33,6 +39,21 @@ interface IssueFile {
   comment: string | null;
   uploaded_at: string;
   uploaded_by_name: string | null;
+}
+
+// Comments are now full interactions (Phase F repointing — May 2026).
+// Each top-level comment renders via <ThreadView>, which fetches its
+// own thread (root + replies + attachments + reactions).
+interface IssueComment {
+  id: string;
+  content: string;
+  created_at: string;
+  created_by: string;
+  created_by_name: string | null;
+  parent_interaction_id: string | null;
+  mentioned_user_ids: string[] | null;
+  files: InteractionAttachment[] | null;
+  reactions: Record<string, string[]> | null;
 }
 
 interface Issue {
@@ -75,6 +96,7 @@ interface Issue {
   client_name: string | null;
   events: IssueEvent[];
   files: IssueFile[];
+  comments: IssueComment[];
 }
 
 const STATUS_LABELS: Record<IssueStatus, string> = {
@@ -121,6 +143,7 @@ export default function IssueDetailPage() {
   const [loading, setLoading] = useState(true);
   const [comment, setComment] = useState('');
   const [posting, setPosting] = useState(false);
+  const attach = useAttachments();
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -157,11 +180,20 @@ export default function IssueDetailPage() {
   }
 
   async function postComment() {
-    if (!id || !comment.trim()) return;
+    if (!id) return;
+    const trimmed = comment.trim();
+    // Allow attachment-only posts (e.g. dragging in a photo with no text).
+    if (!trimmed && attach.pending.length === 0) return;
     setPosting(true);
     try {
-      await api.post(`/problems/${id}/comments`, { body: comment.trim() });
+      await api.post('/interactions', {
+        type: 'note',
+        content: trimmed || '(attachment)',
+        issue_id: id,
+        attachments: attach.payload(),
+      });
       setComment('');
+      attach.clear();
       load();
     } catch (err) {
       console.error('Comment failed:', err);
@@ -274,10 +306,34 @@ export default function IssueDetailPage() {
           <div className="bg-white rounded-xl border border-gray-200 p-4">
             <h3 className="text-sm font-semibold text-gray-900 mb-3">Timeline</h3>
             <div className="space-y-2">
-              {issue.events.map(e => <EventRow key={e.id} e={e} />)}
-              {issue.events.length === 0 && (
-                <div className="text-xs text-gray-400 italic">No events yet.</div>
-              )}
+              {(() => {
+                // Merge typed audit events + top-level comments
+                // chronologically. Replies on a comment render nested inside
+                // its <ThreadView> — we don't surface them at top level here.
+                const topComments = (issue.comments ?? []).filter(
+                  c => !c.parent_interaction_id
+                );
+                const items: Array<
+                  | { kind: 'event'; ts: string; event: IssueEvent }
+                  | { kind: 'comment'; ts: string; comment: IssueComment }
+                > = [
+                  ...issue.events.map(e => ({ kind: 'event' as const, ts: e.created_at, event: e })),
+                  ...topComments.map(c => ({ kind: 'comment' as const, ts: c.created_at, comment: c })),
+                ].sort((a, b) => a.ts.localeCompare(b.ts));
+
+                if (items.length === 0) {
+                  return <div className="text-xs text-gray-400 italic">No events yet.</div>;
+                }
+                return items.map(item =>
+                  item.kind === 'event'
+                    ? <EventRow key={`e-${item.event.id}`} e={item.event} />
+                    : (
+                      <div key={`c-${item.comment.id}`} className="border border-gray-200 rounded-lg p-3 bg-gray-50/40">
+                        <ThreadView interactionId={item.comment.id} onReplied={load} />
+                      </div>
+                    )
+                );
+              })()}
             </div>
 
             {/* Comment box */}
@@ -285,17 +341,31 @@ export default function IssueDetailPage() {
               <textarea
                 value={comment}
                 onChange={e => setComment(e.target.value)}
-                placeholder="Add a comment, update, or note…"
+                onPaste={e => { if (attach.pasteFromEvent(e)) e.preventDefault(); }}
+                placeholder="Add a comment, update, or note… (paste images to attach)"
                 rows={2}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                className="w-full border border-gray-300 rounded px-3 py-2 text-sm resize-y min-h-[64px]"
               />
-              <div className="flex justify-end mt-2">
+              <PendingAttachmentStrip items={attach.pending} onRemove={attach.remove} />
+              <div className="flex justify-between items-center mt-2 gap-2">
+                <label className="text-[11px] text-gray-500 cursor-pointer hover:text-gray-700">
+                  📎 Attach file
+                  <input
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={e => {
+                      if (e.target.files) attach.addFiles(e.target.files);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
                 <button
                   onClick={postComment}
-                  disabled={!comment.trim() || posting}
+                  disabled={(!comment.trim() && attach.pending.length === 0) || posting || attach.hasInFlight}
                   className="px-3 py-1.5 text-xs bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
                 >
-                  {posting ? 'Posting…' : 'Post comment'}
+                  {posting ? 'Posting…' : attach.hasInFlight ? 'Uploading…' : 'Post comment'}
                 </button>
               </div>
             </div>

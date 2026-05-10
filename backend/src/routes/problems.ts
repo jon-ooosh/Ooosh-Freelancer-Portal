@@ -517,11 +517,30 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       [id]
     );
 
+    // Comments (interactions filtered to this issue). The legacy
+    // `events` array carries TYPED audit transitions (created /
+    // status_change / etc.); comments now live in `interactions` with
+    // issue_id set — repointed from job_issue_events.event_type='comment'
+    // by Phase F. IssueDetailPage merges both streams at render time.
+    const commentsResult = await query(
+      `SELECT i.id, i.content, i.created_at, i.created_by, i.parent_interaction_id,
+              i.mentioned_user_ids, i.files, i.reactions,
+              CONCAT(p.first_name, ' ', p.last_name) AS created_by_name,
+              u.email AS created_by_email
+       FROM interactions i
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE i.issue_id = $1
+       ORDER BY i.created_at ASC`,
+      [id]
+    );
+
     res.json({
       data: {
         ...issueResult.rows[0],
         events: eventsResult.rows,
         files: filesResult.rows,
+        comments: commentsResult.rows,
       },
     });
   } catch (err) {
