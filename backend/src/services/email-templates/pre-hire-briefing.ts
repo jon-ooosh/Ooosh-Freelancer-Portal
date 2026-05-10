@@ -1,8 +1,8 @@
 /**
- * Pre-Hire Briefing email rendering.
+ * Pre-Hire Review email rendering.
  *
- * Internal email — goes to info@oooshtours.co.uk every morning at 10am for
- * each confirmed job approaching its hire date. Replaces the Monday.com
+ * Internal email — goes to info@oooshtours.co.uk every morning for each
+ * confirmed job approaching its hire date. Replaces the Monday.com
  * automation that did the same thing with much less context.
  *
  * The renderer takes a structured JobBriefing (built by
@@ -59,11 +59,34 @@ function escapeHtml(s: string | null | undefined): string {
     .replace(/'/g, '&#39;');
 }
 
+/** Header-style date: "Tue, 12 May 2026". For the briefing card. */
 function formatDate(iso: string | null): string {
   if (!iso) return '—';
   try {
     const d = new Date(iso);
     return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric' });
+  } catch {
+    return iso;
+  }
+}
+
+/** Friendly client-facing date: "Tuesday 12 May" (no year for near-term). */
+function formatFriendlyDate(iso: string | null): string {
+  if (!iso) return 'soon';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  } catch {
+    return iso;
+  }
+}
+
+/** Short date with year (used inside paragraphs alongside other dates). */
+function formatShortDate(iso: string | null): string {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
   } catch {
     return iso;
   }
@@ -79,6 +102,10 @@ function daysToOutLabel(days: number): string {
   if (days === 0) return 'today';
   if (days === 1) return 'tomorrow';
   return `in ${days} days`;
+}
+
+function pluralise(n: number, single: string, plural?: string): string {
+  return n === 1 ? single : (plural || `${single}s`);
 }
 
 // ── Subject line ────────────────────────────────────────────────────────
@@ -99,10 +126,21 @@ export function buildSubject(b: JobBriefing): string {
 // ── Component renderers ─────────────────────────────────────────────────
 
 function renderHeader(b: JobBriefing): string {
-  const startBits = [formatDate(b.job.out_date || b.job.job_date)];
-  if (b.job.out_time) startBits.push(formatTime(b.job.out_time));
-  const endBits = [formatDate(b.job.return_date || b.job.job_end)];
-  if (b.job.return_time) endBits.push(formatTime(b.job.return_time));
+  // Pickup line: out_date + out_time. If out_time is the system default
+  // (null/09:00), show the date but flag with "(time TBC)".
+  const startDate = formatDate(b.job.out_date || b.job.job_date);
+  const startTime = formatTime(b.job.out_time);
+  const startBits = [startDate];
+  if (startTime && !b.job.is_default_pickup_time) startBits.push(startTime);
+  else if (b.job.is_default_pickup_time) startBits.push('time TBC');
+
+  // CLIENT-FACING return reference uses job_end (the real end of charge).
+  // return_date is OP's +1 buffer for warehouse turnaround — internal only.
+  const endDate = formatDate(b.job.job_end || b.job.return_date);
+  const endTime = formatTime(b.job.return_time);
+  const endBits = [endDate];
+  if (endTime) endBits.push(endTime);
+
   return `
     <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 20px;">
       <tr>
@@ -196,10 +234,45 @@ function renderOutstanding(b: JobBriefing): string {
   `;
 }
 
+function renderTransportSummary(b: JobBriefing): string {
+  if (b.transport.length === 0) return '';
+  const rows: string[] = [];
+  for (const t of b.transport) {
+    const venue = t.venue || 'venue TBC';
+    const dateStr = t.job_date ? formatDate(t.job_date) : '';
+    const timeStr = t.arrival_time ? formatTime(t.arrival_time) : '';
+    const when = [dateStr, timeStr].filter(Boolean).join(' · ');
+    const opsLabel = t.ops_status ? ` <span style="color:#64748b;">(${escapeHtml(t.ops_status)})</span>` : '';
+    const introWarning = t.client_intro_status === 'todo' || t.client_intro_status === 'working_on_it'
+      ? ` <span style="color:#a16207;font-weight:600;">— intro to client not yet done</span>`
+      : '';
+    const verb = t.job_type === 'collection' ? 'Collecting from' : t.job_type === 'crewed' ? 'Crewed at' : 'Delivering to';
+    rows.push(`<li style="margin:0 0 4px;"><strong>${escapeHtml(verb)}</strong> ${escapeHtml(venue)}${when ? ` — ${escapeHtml(when)}` : ''}${opsLabel}${introWarning}</li>`);
+  }
+  return `
+    <p style="margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#64748b;font-weight:600;">
+      Transport
+    </p>
+    <ul style="margin:0 0 20px;padding-left:20px;font-size:14px;color:#1e293b;line-height:1.5;">
+      ${rows.join('')}
+    </ul>
+  `;
+}
+
 function renderMoneyAndPeople(b: JobBriefing): string {
   const m = b.money;
   const moneyLines: string[] = [];
-  if (m.hire_value > 0) moneyLines.push(`<strong>Hire fee:</strong> £${m.hire_value.toFixed(2)} (check HireHop for current balance)`);
+  if (m.hire_value > 0) {
+    if (m.hh_billing_loaded) {
+      if (m.balance_outstanding > 0) {
+        moneyLines.push(`<strong>Hire fee:</strong> £${m.balance_outstanding.toFixed(2)} due (£${m.deposits_paid.toFixed(2)} paid of £${m.hire_value.toFixed(2)})`);
+      } else {
+        moneyLines.push(`<strong>Hire fee:</strong> £${m.hire_value.toFixed(2)} paid in full ✓`);
+      }
+    } else {
+      moneyLines.push(`<strong>Hire fee:</strong> £${m.hire_value.toFixed(2)} (live HireHop balance unavailable — check HH)`);
+    }
+  }
   if (m.excess_required > 0) {
     if (m.excess_outstanding > 0) {
       moneyLines.push(`<strong>Excess:</strong> £${m.excess_outstanding.toFixed(0)} outstanding (£${m.excess_taken.toFixed(0)} of £${m.excess_required.toFixed(0)} taken)`);
@@ -251,7 +324,12 @@ function renderDriver(d: BriefingDriver): string {
     ? ` <span style="color:#b45309;font-weight:600;">[REFERRAL PENDING]</span>`
     : '';
   const reg = d.vehicle_reg ? ` (${escapeHtml(d.vehicle_reg)})` : '';
-  return `<div>${escapeHtml(d.name)}${reg} — <span style="color:${formColor[d.hire_form_status]};font-weight:600;">${formMap[d.hire_form_status]}</span>${referralBadge}</div>`;
+  // Surface sent-to-email + date when status is 'sent' so staff can see
+  // exactly what we asked for and from whom.
+  const sentMeta = d.hire_form_status === 'sent' && d.hire_form_emailed_at
+    ? ` <span style="color:#64748b;font-size:12px;">— sent to ${escapeHtml(d.hire_form_emailed_to || '?')} on ${escapeHtml(formatShortDate(d.hire_form_emailed_at))}</span>`
+    : '';
+  return `<div>${escapeHtml(d.name)}${reg} — <span style="color:${formColor[d.hire_form_status]};font-weight:600;">${formMap[d.hire_form_status]}</span>${referralBadge}${sentMeta}</div>`;
 }
 
 function renderCrew(c: BriefingCrew): string {
@@ -293,64 +371,142 @@ function renderLastInteraction(b: JobBriefing): string {
   `;
 }
 
-function renderClientEmailDraft(b: JobBriefing): string {
+/**
+ * Build the client-facing draft message.
+ *
+ * Uses jon's actual sent-email patterns as the model. Conditional
+ * paragraphs based on:
+ *   - Whether transport is delivering (no "what time would you collect?")
+ *   - Default pickup time (ask for time)
+ *   - Live balance position (paid in full / deposit + balance / TBC)
+ *   - Hire form status per driver (sent / received / pending)
+ *   - Excess outstanding
+ */
+function buildClientDraft(b: JobBriefing): string {
   const greeting = b.job.client_name?.split(' ')[0] || 'there';
   const startDay = b.job.out_date || b.job.job_date;
-  const startDayLabel = startDay
-    ? new Date(startDay).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })
-    : 'soon';
-
-  // Build conditional sentences from briefing data
-  const bullets: string[] = [];
-  const driversNeedingForm = b.drivers.filter(d => d.hire_form_status !== 'received');
-  if (driversNeedingForm.length > 0) {
-    bullets.push(`We're still waiting on hire form${driversNeedingForm.length === 1 ? '' : 's'} from ${driversNeedingForm.map(d => d.name).join(', ')}. The link is the same one used previously — let me know if you need it sent again.`);
-  }
-  if (b.money.excess_outstanding > 0) {
-    bullets.push(`Insurance excess of £${b.money.excess_outstanding.toFixed(0)} still to be collected before the hire begins.`);
-  }
-  if (b.money.hire_value > 0) {
-    bullets.push(`Quick check on the balance for the hire fee — please confirm payment is in train.`);
-  }
-  const introsTodo = b.transport.filter(t => t.client_intro_status === 'todo' || t.client_intro_status === 'working_on_it');
-  if (introsTodo.length > 0) {
-    bullets.push(`Have we introduced you to the driver(s) yet? Happy to make that intro now if not.`);
-  }
-
-  const returnLine = (b.job.return_date || b.job.job_end)
-    ? `\nThe hire is back with us by ${formatDate(b.job.return_date || b.job.job_end)}.`
-    : '';
-
+  const startDayLabel = formatFriendlyDate(startDay);
   const ref = b.job.hh_job_number ? `#${b.job.hh_job_number}` : 'your hire';
 
-  // Plain text — staff copy-pastes into a fresh email. Do NOT HTML-escape
-  // the body since they'll paste it into their own email client which
-  // expects plain text.
-  const draftPlain = `Hi ${greeting},
+  const paragraphs: string[] = [];
 
-Hope you're well. Just checking in re ${ref}, which starts on ${startDayLabel}.${returnLine}
+  paragraphs.push(`Hi ${greeting},`);
+  paragraphs.push(`Hope you're well. Just checking in re your hire ${ref}, which starts on ${startDayLabel}.`);
 
-${bullets.length > 0
-    ? bullets.map(b => `- ${b}`).join('\n')
-    : 'Everything looks in good shape from our end — just touching base ahead of the hire.'}
+  // Transport delivery vs collection-time-ask vs known-time
+  const deliveryQuotes = b.transport.filter(t => t.job_type === 'delivery' || t.job_type === 'crewed');
+  const collectionQuotes = b.transport.filter(t => t.job_type === 'collection');
 
-Lastly, if you have any questions for us in the meantime, do please let me know.
+  if (deliveryQuotes.length > 0) {
+    const lines: string[] = [];
+    for (const d of deliveryQuotes) {
+      const venue = d.venue || 'the venue';
+      const when = d.job_date && d.arrival_time
+        ? `at ${formatTime(d.arrival_time)} on ${formatFriendlyDate(d.job_date)}`
+        : d.arrival_time
+          ? `at ${formatTime(d.arrival_time)}`
+          : d.job_date
+            ? `on ${formatFriendlyDate(d.job_date)}`
+            : '';
+      const verb = d.job_type === 'crewed' ? "We'll be on site at" : "We're delivering the van and backline to";
+      lines.push(`${verb} ${venue}${when ? ' ' + when : ''} - please can you confirm the name and number of who we're meeting there?`);
+    }
+    paragraphs.push(lines.join(' '));
+  } else if (b.job.is_default_pickup_time) {
+    paragraphs.push(`Do you have a collection time in mind?`);
+  }
 
-Look forward to hearing back from you.
+  if (collectionQuotes.length > 0) {
+    for (const c of collectionQuotes) {
+      const venue = c.venue || 'the venue';
+      const when = c.job_date ? ` on ${formatFriendlyDate(c.job_date)}${c.arrival_time ? ` at ${formatTime(c.arrival_time)}` : ''}` : '';
+      paragraphs.push(`We'll be picking up from ${venue}${when}.`);
+    }
+  }
 
-Many thanks,`;
+  // Return reference uses job_end (the inside / real end date), not return_date
+  const returnRef = b.job.job_end || b.job.return_date;
+  if (returnRef) {
+    paragraphs.push(`To confirm the hire must be returned to us by 9am on ${formatShortDate(returnRef)}.`);
+  }
 
+  // Money paragraph — combines balance + excess
+  const moneyBits: string[] = [];
+  if (b.money.hh_billing_loaded && b.money.hire_value > 0) {
+    if (b.money.balance_outstanding > 0) {
+      const depositPart = b.money.deposits_paid > 0
+        ? `You've paid £${b.money.deposits_paid.toFixed(2)} so far, leaving a balance of £${b.money.balance_outstanding.toFixed(2)} due before the hire`
+        : `Hire fee of £${b.money.hire_value.toFixed(2)} is still to be paid before the hire`;
+      moneyBits.push(depositPart);
+    } else {
+      moneyBits.push(`Hire fee of £${b.money.hire_value.toFixed(2)} is paid in full, thanks`);
+    }
+  }
+  if (b.money.excess_outstanding > 0) {
+    if (moneyBits.length > 0) {
+      moneyBits.push(`along with the insurance excess of £${b.money.excess_outstanding.toFixed(0)}`);
+    } else {
+      moneyBits.push(`Insurance excess of £${b.money.excess_outstanding.toFixed(0)} still to be collected before the hire`);
+    }
+  }
+  if (moneyBits.length > 0) {
+    paragraphs.push(`${moneyBits.join(', ')}. Payment options through the blue link at the bottom of the quote.`);
+  }
+
+  // Hire form status — per-driver
+  const driversReceived = b.drivers.filter(d => d.hire_form_status === 'received');
+  const driversSent = b.drivers.filter(d => d.hire_form_status === 'sent');
+  const driversPending = b.drivers.filter(d => d.hire_form_status === 'pending');
+  const totalDrivers = b.drivers.length;
+  if (totalDrivers > 0) {
+    if (driversReceived.length === totalDrivers) {
+      paragraphs.push(`We've received hire form${pluralise(totalDrivers, '')} from ${driversReceived.map(d => d.name).join(', ')}, all approved. Please let us know if any other drivers will be on the hire so we can get their details too.`);
+    } else if (driversReceived.length > 0 && (driversSent.length > 0 || driversPending.length > 0)) {
+      const stillNeeded = [...driversSent, ...driversPending].map(d => d.name).join(', ');
+      paragraphs.push(`We've received hire form${pluralise(driversReceived.length, '')} from ${driversReceived.map(d => d.name).join(', ')} so far. Still waiting on ${stillNeeded} — happy to resend the link if needed.`);
+    } else if (driversSent.length > 0) {
+      const sentTo = driversSent
+        .filter(d => d.hire_form_emailed_to)
+        .map(d => `${d.hire_form_emailed_to}${d.hire_form_emailed_at ? ` on ${formatShortDate(d.hire_form_emailed_at)}` : ''}`)
+        .join(' and ');
+      const recipientPart = sentTo ? ` (sent to ${sentTo})` : '';
+      paragraphs.push(`We've sent the hire form link${recipientPart} but haven't had ${pluralise(driversSent.length, 'it', 'them')} back yet — could you confirm receipt or let us know if you need ${pluralise(driversSent.length, 'it', 'them')} resent? Worth getting these in asap in case of any referrals.`);
+    } else {
+      paragraphs.push(`We don't have any hire forms in yet — let me know who'll be driving and I'll send the link across.`);
+    }
+  }
+
+  // Closing — quote attachment + invitation to ask
+  paragraphs.push(`Lastly, please see attached a copy of the latest pick list / quote. Please can you confirm that everything is as you are expecting? And of course, if you have any questions for us in the meantime, do please let me know.`);
+  paragraphs.push(`Look forward to hearing back from you.`);
+  paragraphs.push(`Many thanks,`);
+
+  return paragraphs.join('\n\n');
+}
+
+function renderClientEmailDraft(b: JobBriefing): string {
+  const draftPlain = buildClientDraft(b);
+  // Render as paragraphs in the body's normal font (NOT <pre>, no monospace).
+  // Triple-click selects a paragraph, Ctrl+A selects everything inside the
+  // surrounding <td> when focused. Yellow background keeps it visually
+  // distinct as "the draft".
+  const paragraphs = draftPlain.split(/\n\n+/);
+  const paragraphHtml = paragraphs
+    .map(p => `<p style="margin:0 0 12px;font-size:14px;color:#1e293b;line-height:1.55;white-space:pre-wrap;">${escapeHtml(p)}</p>`)
+    .join('');
   return `
     <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 20px;">
       <tr>
         <td style="padding:14px 18px;background:#fffbeb;border:1px solid #fde68a;border-radius:10px;">
-          <p style="margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#92400e;font-weight:700;">
-            ✉️ Copy-paste this to the client
+          <p style="margin:0 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#92400e;font-weight:700;">
+            ✉️ Suggested message to the client
           </p>
-          <p style="margin:0 0 8px;font-size:11px;color:#a16207;">
-            Edit as you see fit, then send from your own inbox. This is a starting point only.
+          <p style="margin:0 0 12px;font-size:11px;color:#a16207;">
+            Triple-click a paragraph (or Ctrl+A inside the box) to select, then paste into your reply. Edit as you see fit.
           </p>
-          <pre style="margin:0;padding:12px 14px;background:#fff;border:1px solid #fef3c7;border-radius:8px;font-family:Menlo,Monaco,Consolas,monospace;font-size:12.5px;line-height:1.5;color:#1e293b;white-space:pre-wrap;word-wrap:break-word;">${escapeHtml(draftPlain)}</pre>
+          <div style="padding:14px 16px;background:#fff;border:1px solid #fef3c7;border-radius:8px;">
+            ${paragraphHtml}
+          </div>
         </td>
       </tr>
     </table>
@@ -378,6 +534,7 @@ export function renderBriefingHtml(b: JobBriefing): string {
     ${renderRedFlags(b.red_flags)}
     ${renderProgressStrip(b.progress_strip)}
     ${renderOutstanding(b)}
+    ${renderTransportSummary(b)}
     ${renderMoneyAndPeople(b)}
     ${renderLastInteraction(b)}
     ${renderDiscussionPoints(b)}

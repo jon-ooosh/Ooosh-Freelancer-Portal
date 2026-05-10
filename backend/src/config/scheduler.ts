@@ -601,18 +601,17 @@ export function startScheduler() {
   // dedupes naturally if the cron is restarted within the same day.
   cron.schedule('55 9 * * *', async () => {
     try {
-      const { findEligibleJobs, buildBriefing } = await import('../services/pre-hire-briefing');
-      const { renderBriefingHtml, buildSubject } = await import('../services/email-templates/pre-hire-briefing');
+      const { findEligibleJobs, sendBriefingEmail } = await import('../services/pre-hire-briefing');
 
-      const recipient = process.env.PRE_HIRE_BRIEFING_RECIPIENT
-        || 'info@oooshtours.co.uk';
       const eligible = await findEligibleJobs();
       if (eligible.length === 0) {
-        console.log('Scheduler: Pre-hire briefing — no eligible jobs today');
+        console.log('Scheduler: Pre-hire review — no eligible jobs today');
         return;
       }
 
-      // Skip jobs that already received a briefing today (audit-log dedup).
+      // Skip jobs that already received a briefing today by HH job number
+      // (the email_log subject contains "#NNNN ..."). The dedup is across
+      // ANY trigger reason — if we sent today, we don't send again today.
       const today = new Date().toISOString().slice(0, 10);
       const sentResult = await query(
         `SELECT subject FROM email_log
@@ -621,36 +620,31 @@ export function startScheduler() {
             AND sent_at::date = $1::date`,
         [today],
       );
-      const sentSubjects = new Set<string>(
-        (sentResult.rows as Array<{ subject: string }>).map(r => r.subject),
-      );
+      const sentJobNumbers = new Set<number>();
+      for (const row of (sentResult.rows as Array<{ subject: string }>)) {
+        const m = /#(\d+)/.exec(row.subject || '');
+        if (m) sentJobNumbers.add(parseInt(m[1], 10));
+      }
 
       let sent = 0; let skipped = 0; let failed = 0;
       for (const e of eligible) {
+        if (e.hh_job_number && sentJobNumbers.has(e.hh_job_number)) { skipped++; continue; }
         try {
-          const briefing = await buildBriefing(e.id);
-          if (!briefing) { failed++; continue; }
-          const subject = buildSubject(briefing);
-          if (sentSubjects.has(subject)) { skipped++; continue; }
-          const html = renderBriefingHtml(briefing);
-          const result = await emailService.send('pre_hire_briefing', {
-            to: recipient,
-            subjectOverride: subject,
-            bodyHtmlOverride: html,
-          });
+          // Triggered-by null = scheduler attribution (system user).
+          const result = await sendBriefingEmail(e.id, undefined, null);
           if (result.success) sent++;
-          else failed++;
+          else { failed++; console.warn(`Scheduler: Pre-hire review send failed for ${e.id}:`, result.error); }
         } catch (err) {
-          console.error(`Scheduler: Pre-hire briefing failed for job ${e.id}:`, err);
+          console.error(`Scheduler: Pre-hire review failed for job ${e.id}:`, err);
           failed++;
         }
       }
       console.log(
-        `Scheduler: Pre-hire briefing — eligible ${eligible.length}, sent ${sent}, skipped (already sent today) ${skipped}, failed ${failed}`
+        `Scheduler: Pre-hire review — eligible ${eligible.length}, sent ${sent}, skipped (already sent today) ${skipped}, failed ${failed}`
       );
     } catch (err) {
-      console.error('Scheduler: Pre-hire briefing run failed:', err);
+      console.error('Scheduler: Pre-hire review run failed:', err);
     }
   });
-  console.log('Scheduler: Pre-hire briefing scheduled daily at 09:55');
+  console.log('Scheduler: Pre-hire review scheduled daily at 09:55');
 }
