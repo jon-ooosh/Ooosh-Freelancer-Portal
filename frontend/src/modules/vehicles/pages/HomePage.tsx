@@ -54,7 +54,6 @@ export function HomePage() {
 
   const openIssueCount = Number(issueSummary?.open_total ?? 0)
   const topOpenIssues = useMemo(() => issueSummary?.items ?? [], [issueSummary])
-  }, [openIssues])
 
   const prepQueue = useMemo(
     () => enrichedVehicles.filter(v => v.liveStatus === 'prep-needed' || v.liveStatus === 'returning'),
