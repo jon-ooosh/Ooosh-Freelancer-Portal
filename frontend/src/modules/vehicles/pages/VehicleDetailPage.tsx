@@ -1,11 +1,10 @@
-import { useState, useMemo, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useParams, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
 import { useVehicle } from '../hooks/useVehicles'
-import { useVehicleIssues } from '../hooks/useVehicleIssues'
+import { apiFetch } from '../config/api-config'
 import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrackerAssignments'
-import { IssueCard } from '../components/issues/IssueCard'
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
@@ -125,7 +124,6 @@ function EditableRow({
 export function VehicleDetailPage() {
   const { id } = useParams()
   const { data: vehicle, isLoading, isError } = useVehicle(id)
-  const { data: vehicleIssues } = useVehicleIssues(vehicle?.reg)
   const { trackerNumber } = useVehicleTracker(vehicle?.reg)
   const { assign: assignTracker, isSaving: isAssigningTracker } = useUpdateTrackerAssignment()
   const { data: complianceSettings } = useQuery({
@@ -163,16 +161,6 @@ export function VehicleDetailPage() {
       alert(err instanceof Error ? err.message : 'Failed to save')
     }
   }
-
-  const openIssues = useMemo(
-    () => (vehicleIssues || []).filter(i => i.status !== 'Resolved'),
-    [vehicleIssues],
-  )
-
-  const resolvedIssues = useMemo(
-    () => (vehicleIssues || []).filter(i => i.status === 'Resolved'),
-    [vehicleIssues],
-  )
 
   if (isLoading) {
     return (
@@ -557,12 +545,12 @@ export function VehicleDetailPage() {
           inline "Regenerate PDF" action on condition-report events. */}
       <VehicleEventsHistory vehicleReg={vehicle.reg} />
 
-      {/* Issues */}
-      <VehicleIssuesSection
-        vehicleId={vehicle.id}
-        openIssues={openIssues}
-        resolvedIssues={resolvedIssues}
-      />
+      {/* Issues — OP job_issues backed (Stage 3, May 2026).
+          Replaces the legacy R2-blob VehicleIssuesSection; same place
+          on the page, same compact-list layout, but new dedup model
+          means recurring problems append events instead of breeding
+          duplicate rows. */}
+      <VehicleIssuesSectionOp vehicleId={vehicle.id} />
 
       </>}
     </div>
@@ -928,18 +916,60 @@ function VehicleFilesSection({ vehicleId, files }: { vehicleId: string; files: V
   )
 }
 
-/** Full issues section for vehicle detail — shows open, then resolved (collapsible) */
-function VehicleIssuesSection({
-  vehicleId,
-  openIssues,
-  resolvedIssues,
-}: {
-  vehicleId: string
-  openIssues: import('../types/issue').VehicleIssue[]
-  resolvedIssues: import('../types/issue').VehicleIssue[]
-}) {
+// OP-backed issues section for vehicle detail.
+//
+// Reads from /api/problems/by-vehicle/:vehicleId (already provided by
+// the problems backend — endpoint returns OP-shaped job_issues rows
+// including the vehicle / driver / job linkage fields). Each row links
+// to /operations/problems/:id for the full control panel. Recurring
+// flags from PrepPage / CheckInPage now dedup via component_key so
+// you'll see ONE "Fire extinguisher" row with a growing event timeline
+// instead of five duplicates.
+
+interface OpIssueRow {
+  id: string
+  category: string
+  severity: 'low' | 'normal' | 'urgent'
+  status: string
+  summary: string
+  hh_job_number: number | null
+  created_at: string
+  updated_at: string
+}
+
+const OP_TERMINAL = new Set(['resolved', 'written_off', 'cancelled'])
+const OP_SEVERITY_CHIP: Record<string, string> = {
+  urgent: 'bg-red-100 text-red-700',
+  normal: 'bg-amber-100 text-amber-700',
+  low: 'bg-gray-100 text-gray-600',
+}
+const OP_CATEGORY_LABEL: Record<string, string> = {
+  damaged: 'Damaged',
+  missing: 'Missing',
+  broken: 'Broken',
+  dispute: 'Dispute',
+  breakdown: 'Breakdown',
+  other: 'Other',
+}
+
+function VehicleIssuesSectionOp({ vehicleId }: { vehicleId: string }) {
   const [showResolved, setShowResolved] = useState(false)
-  const totalIssues = openIssues.length + resolvedIssues.length
+
+  const { data: issues = [], isLoading } = useQuery({
+    queryKey: ['op-vehicle-issues', vehicleId],
+    enabled: Boolean(vehicleId),
+    queryFn: async (): Promise<OpIssueRow[]> => {
+      const resp = await apiFetch(`/api/problems/by-vehicle/${vehicleId}`)
+      if (!resp.ok) throw new Error(`Failed to fetch issues: ${resp.status}`)
+      const body = await resp.json() as { data: OpIssueRow[] }
+      return body.data || []
+    },
+    staleTime: 60_000,
+  })
+
+  const openIssues = issues.filter(i => !OP_TERMINAL.has(i.status))
+  const resolvedIssues = issues.filter(i => OP_TERMINAL.has(i.status))
+  const totalIssues = issues.length
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -952,23 +982,20 @@ function VehicleIssuesSection({
         </Link>
       </div>
 
-      {totalIssues === 0 ? (
+      {isLoading ? (
+        <p className="text-sm text-gray-400 text-center py-4">Loading…</p>
+      ) : totalIssues === 0 ? (
         <p className="text-sm text-gray-400 text-center py-4">No issues recorded</p>
       ) : (
         <div className="space-y-2">
-          {/* Open issues */}
           {openIssues.length > 0 && (
             <>
               <p className="text-[11px] font-medium uppercase tracking-wide text-amber-600">
                 Open ({openIssues.length})
               </p>
-              {openIssues.map(issue => (
-                <IssueCard key={issue.id} issue={issue} compact />
-              ))}
+              {openIssues.map(issue => <OpIssueRowCard key={issue.id} issue={issue} />)}
             </>
           )}
-
-          {/* Resolved issues (collapsible) */}
           {resolvedIssues.length > 0 && (
             <>
               <button
@@ -979,13 +1006,37 @@ function VehicleIssuesSection({
                 <span>Resolved ({resolvedIssues.length})</span>
                 <span className="text-gray-400">{showResolved ? 'Hide' : 'Show'}</span>
               </button>
-              {showResolved && resolvedIssues.map(issue => (
-                <IssueCard key={issue.id} issue={issue} compact />
-              ))}
+              {showResolved && resolvedIssues.map(issue => <OpIssueRowCard key={issue.id} issue={issue} />)}
             </>
           )}
         </div>
       )}
     </div>
+  )
+}
+
+function OpIssueRowCard({ issue }: { issue: OpIssueRow }) {
+  const sevClass = OP_SEVERITY_CHIP[issue.severity] || OP_SEVERITY_CHIP.normal
+  const catLabel = OP_CATEGORY_LABEL[issue.category] || issue.category
+  return (
+    <Link
+      to={`/operations/problems/${issue.id}`}
+      className="block rounded border border-gray-200 bg-white px-2.5 py-2 text-sm hover:border-ooosh-300 hover:bg-ooosh-50/40"
+    >
+      <div className="flex items-start gap-2">
+        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${sevClass}`}>
+          {issue.severity === 'urgent' ? '⚠ Urgent' : issue.severity === 'low' ? 'Low' : 'Normal'}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="font-medium text-gray-900 truncate">{issue.summary}</div>
+          <div className="text-[10px] text-gray-500 mt-0.5">
+            {catLabel}
+            {issue.hh_job_number ? ` · J-${issue.hh_job_number}` : ''}
+            {' · '}
+            {new Date(issue.updated_at).toLocaleDateString('en-GB')}
+          </div>
+        </div>
+      </div>
+    </Link>
   )
 }
