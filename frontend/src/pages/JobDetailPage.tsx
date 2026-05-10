@@ -1163,6 +1163,25 @@ export default function JobDetailPage() {
   // (API path stays as /pre-hire-briefing for stability; UI label is the
   // user-facing name.)
   const [briefingSending, setBriefingSending] = useState(false);
+  const [briefingLastSent, setBriefingLastSent] = useState<{
+    sent_at: string;
+    sent_by_name: string | null;
+    trigger: 'manual' | 'scheduled' | null;
+  } | null>(null);
+
+  // Fetch last-sent on page load (and after each send) so the button can
+  // show "Sent {time} ago" and staff don't double-send by accident.
+  useEffect(() => {
+    if (!job) return;
+    let cancelled = false;
+    api.get<{ data: { sent_at: string; sent_by_name: string | null; trigger: 'manual' | 'scheduled' | null } | null }>(
+      `/pre-hire-briefing/${job.id}/last-sent`
+    )
+      .then(r => { if (!cancelled) setBriefingLastSent(r.data); })
+      .catch(() => { /* silent — button still works */ });
+    return () => { cancelled = true; };
+  }, [job?.id]);
+
   async function sendPreHireBriefing() {
     if (!job) return;
     setBriefingSending(true);
@@ -1171,11 +1190,32 @@ export default function JobDetailPage() {
         `/pre-hire-briefing/${job.id}/send`, {}
       );
       alert(`Pre-Hire Review sent to ${res.sent_to}.\n\nSubject: ${res.subject}`);
+      // Refresh last-sent so the button label updates without a page reload.
+      try {
+        const r = await api.get<{ data: typeof briefingLastSent }>(`/pre-hire-briefing/${job.id}/last-sent`);
+        setBriefingLastSent(r.data);
+      } catch { /* non-critical */ }
     } catch (err: any) {
       alert(`Failed to send review: ${err?.message || 'unknown error'}`);
     } finally {
       setBriefingSending(false);
     }
+  }
+
+  function formatBriefingLastSent(): string | null {
+    if (!briefingLastSent) return null;
+    const d = new Date(briefingLastSent.sent_at);
+    const diffMs = Date.now() - d.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    const diffHrs = Math.floor(diffMin / 60);
+    const diffDays = Math.floor(diffHrs / 24);
+    let when: string;
+    if (diffMin < 1) when = 'just now';
+    else if (diffMin < 60) when = `${diffMin}m ago`;
+    else if (diffHrs < 24) when = `${diffHrs}h ago`;
+    else if (diffDays === 1) when = 'yesterday';
+    else when = `${diffDays}d ago`;
+    return when;
   }
 
   // ── HH Sync & Derived Requirements ──────────────────────────────────────
@@ -3236,9 +3276,17 @@ export default function JobDetailPage() {
                 onClick={sendPreHireBriefing}
                 disabled={briefingSending}
                 className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
-                title="Send a pre-hire review email for this job to info@oooshtours.co.uk now"
+                title={
+                  briefingLastSent
+                    ? `Last sent ${formatBriefingLastSent()}${briefingLastSent.sent_by_name ? ` by ${briefingLastSent.sent_by_name}` : briefingLastSent.trigger === 'scheduled' ? ' by scheduler' : ''}. Click to send again.`
+                    : 'Send a pre-hire review email for this job to info@oooshtours.co.uk now'
+                }
               >
-                {briefingSending ? 'Sending…' : '✉ Pre-Hire Review'}
+                {briefingSending
+                  ? 'Sending…'
+                  : briefingLastSent
+                    ? <>✉ Pre-Hire Review <span className="text-purple-400 text-xs ml-1">· sent {formatBriefingLastSent()}</span></>
+                    : '✉ Pre-Hire Review'}
               </button>
             )}
           </div>
