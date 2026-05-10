@@ -2,7 +2,8 @@ import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { vmPath } from '../config/route-paths'
 import { getDateUrgency } from '../types/vehicle'
-import { useAllIssues } from '../hooks/useAllIssues'
+import { useQuery } from '@tanstack/react-query'
+import { apiFetch } from '../config/api-config'
 import { useRecentEvents } from '../hooks/useRecentEvents'
 import { useGoingOutJobs, useDueBackJobs } from '../hooks/useHireHopJobs'
 import { useAllocations } from '../hooks/useAllocations'
@@ -10,7 +11,6 @@ import { useFleetWithHireStatus } from '../hooks/useFleetWithHireStatus'
 import { HireHopJobCard } from '../components/dashboard/HireHopJobCard'
 import { HireHopCacheStatus } from '../components/HireHopCacheStatus'
 import { LowStockBanner } from '../components/stock/LowStockBanner'
-import { IssueCard } from '../components/issues/IssueCard'
 import { RecentActivityFeed } from '../components/dashboard/RecentActivityFeed'
 import { extractVanRequirements } from '../lib/hirehop-api'
 
@@ -25,28 +25,35 @@ const quickActions = [
 
 export function HomePage() {
   const { vehicles: enrichedVehicles, stats, isLoading } = useFleetWithHireStatus()
-  const { data: allIssues } = useAllIssues()
+  // OP-backed issues (May 2026 — Stage 3 migration). Reads from
+  // /api/problems/summary which returns the bucket totals + top 5
+  // already sorted by severity + recency. No need for the legacy
+  // useAllIssues hook + client-side sort.
+  const { data: issueSummary } = useQuery({
+    queryKey: ['op-issue-summary'],
+    queryFn: async () => {
+      const resp = await apiFetch('/api/problems/summary')
+      if (!resp.ok) throw new Error(`Failed: ${resp.status}`)
+      const body = await resp.json() as { data: {
+        open_total: string | number;
+        urgent_total: string | number;
+        items: Array<{
+          id: string; job_id: string | null; category: string; severity: string;
+          summary: string; created_at: string;
+          hh_job_number: number | null; job_name: string | null; client_name: string | null;
+        }>;
+      } }
+      return body.data
+    },
+    staleTime: 30_000,
+  })
   const { data: recentEvents, isLoading: eventsLoading } = useRecentEvents(10)
   const { data: goingOutJobs, isLoading: goingOutLoading, error: goingOutError } = useGoingOutJobs()
   const { data: dueBackJobs, isLoading: dueBackLoading, error: dueBackError } = useDueBackJobs()
   const { data: allocations } = useAllocations()
 
-  const openIssues = useMemo(
-    () => (allIssues || []).filter(i => i.status !== 'Resolved'),
-    [allIssues],
-  )
-
-  const openIssueCount = openIssues.length
-
-  // Top issues for dashboard: sorted by severity (Critical > High > Medium > Low), then most recent
-  const topOpenIssues = useMemo(() => {
-    const severityOrder: Record<string, number> = { Critical: 0, High: 1, Medium: 2, Low: 3 }
-    return [...openIssues]
-      .sort((a, b) => {
-        const sevCmp = (severityOrder[a.severity] ?? 4) - (severityOrder[b.severity] ?? 4)
-        return sevCmp !== 0 ? sevCmp : b.reportedAt.localeCompare(a.reportedAt)
-      })
-      .slice(0, 5)
+  const openIssueCount = Number(issueSummary?.open_total ?? 0)
+  const topOpenIssues = useMemo(() => issueSummary?.items ?? [], [issueSummary])
   }, [openIssues])
 
   const prepQueue = useMemo(
@@ -140,7 +147,7 @@ export function HomePage() {
             <p className="text-2xl font-bold text-amber-700">{stats.prepNeeded}</p>
             <p className="text-xs font-medium text-amber-600">Prep Needed</p>
           </Link>
-          <Link to={vmPath('/issues')} className="rounded-lg border border-red-200 bg-red-50 p-3 text-center">
+          <Link to={'/operations/problems'} className="rounded-lg border border-red-200 bg-red-50 p-3 text-center">
             <p className="text-2xl font-bold text-red-700">{openIssueCount}</p>
             <p className="text-xs font-medium text-red-600">Open Issues</p>
           </Link>
@@ -479,7 +486,7 @@ export function HomePage() {
             Open Issues
           </h3>
           {openIssueCount > 0 && (
-            <Link to={vmPath('/issues')} className="text-xs font-medium text-blue-600">
+            <Link to={'/operations/problems'} className="text-xs font-medium text-blue-600">
               View all ({openIssueCount}) →
             </Link>
           )}
@@ -494,11 +501,32 @@ export function HomePage() {
         {topOpenIssues.length > 0 && (
           <div className="space-y-2">
             {topOpenIssues.map(issue => (
-              <IssueCard key={issue.id} issue={issue} showVehicleReg compact />
+              <Link
+                key={issue.id}
+                to={`/operations/problems/${issue.id}`}
+                className="block rounded-lg border border-gray-200 bg-white p-3 hover:border-ooosh-300 hover:bg-ooosh-50/40"
+              >
+                <div className="flex items-start gap-2">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                    issue.severity === 'urgent' ? 'bg-red-100 text-red-700' :
+                    issue.severity === 'low' ? 'bg-gray-100 text-gray-600' :
+                    'bg-amber-100 text-amber-700'
+                  }`}>
+                    {issue.severity === 'urgent' ? '⚠ Urgent' : issue.severity === 'low' ? 'Low' : 'Normal'}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-gray-900 truncate">{issue.summary}</div>
+                    <div className="text-[10px] text-gray-500 mt-0.5">
+                      {issue.category}
+                      {issue.hh_job_number ? ` · J-${issue.hh_job_number}` : ''}
+                    </div>
+                  </div>
+                </div>
+              </Link>
             ))}
             {openIssueCount > 5 && (
               <Link
-                to={vmPath('/issues')}
+                to={'/operations/problems'}
                 className="block rounded-lg border border-gray-200 bg-white py-2 text-center text-xs font-medium text-gray-500 active:bg-gray-50"
               >
                 +{openIssueCount - 5} more — view all issues

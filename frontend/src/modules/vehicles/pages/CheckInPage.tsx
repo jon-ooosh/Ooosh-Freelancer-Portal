@@ -17,7 +17,7 @@ import { findDeviceByReg, getPositions } from '../lib/traccar-api'
 import { knotsToMph } from '../types/traccar'
 import type { IssueLocation } from '../types/issue'
 import { withRetry } from '../lib/retry'
-import { saveIssue } from '../lib/issues-r2-api'
+import { mapSeverityToOpSeverity } from '../lib/op-issue-mapping'
 import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoComparison } from '../components/check-in/PhotoComparison'
 import { PhotoLightbox } from '../components/shared/PhotoLightbox'
@@ -514,53 +514,64 @@ export function CheckInPage() {
         console.warn('[check-in] Failed to fetch Traccar location for issues:', err)
       }
 
+      // Check-in damage flags route to POST /api/problems/auto-create.
+      // component_key is per-damage-location (e.g. "bodywork_front_left"
+      // for "Front left"), so different locations on the same van create
+      // separate issues but a re-flag of the SAME location on a later
+      // hire dedups onto the existing one. issueLocation (capturedLocation)
+      // is stashed in the reflag_context note for audit; not used as the
+      // key because the same dent gets flagged from different lat/lngs.
+      let issuesReflagged = 0
       for (const damage of form.damageItems) {
         if (!damage.description.trim()) continue
-
-        // R2 (source of truth for issues tracker)
         try {
-          const r2Issue = {
-            id: crypto.randomUUID(),
-            vehicleReg: form.vehicleReg,
-            vehicleId: form.vehicleId || '',
-            vehicleMake: checkInVehicle?.make || '',
-            vehicleModel: checkInVehicle?.model || '',
-            vehicleType: checkInVehicle?.simpleType || form.vehicleSimpleType || '',
-            mileageAtReport: form.mileage ? parseInt(form.mileage, 10) : null,
-            hireHopJob: form.bookOutHireHopJob || null,
-            location: issueLocation,
-            category: 'Bodywork' as const,
-            component: 'Bodywork panels' as const,
-            severity: damage.severity === 'Critical' ? 'Critical' as const : damage.severity === 'Major' ? 'High' as const : 'Medium' as const,
-            summary: `${damage.location}: ${damage.description}`.slice(0, 100),
-            status: 'Open' as const,
-            reportedBy: 'Check-in',
-            reportedAt: new Date().toISOString(),
-            reportedDuring: 'Check-in' as const,
-            resolvedAt: null,
-            photos: [] as string[],
-            activity: [{
-              id: crypto.randomUUID(),
-              timestamp: new Date().toISOString(),
-              author: 'Check-in',
-              action: 'Reported',
-              note: damage.description,
-            }],
-          }
-          const saveResult = await saveIssue(r2Issue)
-          if (saveResult.success) {
-            issuesCreated++
-          } else {
+          const componentKey = `bodywork_${damage.location.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 50) || 'general'}`
+          const locationNote = issueLocation
+            ? `${damage.description} [GPS: ${issueLocation.lat.toFixed(5)}, ${issueLocation.lng.toFixed(5)}]`
+            : damage.description
+          const resp = await apiFetch('/api/problems/auto-create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vehicle_id: form.vehicleId || null,
+              component_key: componentKey,
+              category: 'damaged',
+              source_module: 'vehicle',
+              severity: mapSeverityToOpSeverity(damage.severity),
+              summary: `${damage.location}: ${damage.description}`.slice(0, 250),
+              description: locationNote,
+              reflag_context: {
+                source: 'checkin',
+                mileage: form.mileage ? parseInt(form.mileage, 10) : null,
+                reported_by_name: 'Check-in',
+                note: locationNote,
+              },
+            }),
+          })
+          if (!resp.ok) {
             issuesFailed++
+            console.warn(`[check-in] auto-create failed for ${damage.location}:`, resp.status)
+            continue
           }
+          const body = await resp.json() as { was_existing?: boolean }
+          if (body.was_existing) issuesReflagged++
+          else issuesCreated++
         } catch (err) {
           issuesFailed++
-          console.warn(`[check-in] Failed to save issue for ${damage.location}:`, err)
+          console.warn(`[check-in] auto-create error for ${damage.location}:`, err)
         }
       }
 
-      if (issuesCreated > 0) {
-        results.push({ label: 'Issues created', success: issuesFailed === 0, detail: `${issuesCreated} damage issue(s)${issuesFailed > 0 ? `, ${issuesFailed} failed` : ''}` })
+      if (issuesCreated > 0 || issuesReflagged > 0 || issuesFailed > 0) {
+        const parts: string[] = []
+        if (issuesCreated) parts.push(`${issuesCreated} new`)
+        if (issuesReflagged) parts.push(`${issuesReflagged} re-flagged`)
+        if (issuesFailed) parts.push(`${issuesFailed} failed`)
+        results.push({
+          label: 'Damage issues logged',
+          success: issuesFailed === 0,
+          detail: parts.join(' · '),
+        })
       }
     }
 

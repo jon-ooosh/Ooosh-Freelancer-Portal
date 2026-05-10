@@ -7,6 +7,7 @@ import OrganisationMergeModal from '../components/OrganisationMergeModal';
 import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
+import { IssuesListSection } from '../components/IssuesListSection';
 import HireHistoryTab from '../components/HireHistoryTab';
 import { ORG_RELATIONSHIP_LABELS, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
@@ -98,7 +99,8 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess'>('people');
+  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues'>('people');
+  const [issuesCount, setIssuesCount] = useState<number | null>(null);
 
   // Edit/delete
   const [showEdit, setShowEdit] = useState(false);
@@ -144,6 +146,7 @@ export default function OrganisationDetailPage() {
   // "drags across".
   useEffect(() => {
     setActiveTab('people');
+    setIssuesCount(null);
   }, [id]);
 
   async function loadOrg() {
@@ -543,7 +546,7 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess'] as const).map((tab) => {
+          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
             // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
             // matching the Hire History tab content. Falls back to local linked_jobs.length only
@@ -556,6 +559,7 @@ export default function OrganisationDetailPage() {
               : tab === 'hire_history' ? `Hire History${linkedJobCount ? ` (${linkedJobCount})` : ''}`
               : tab === 'timeline' ? 'Activity Timeline'
               : tab === 'excess' ? 'Excess History'
+              : tab === 'issues' ? `Issues${issuesCount ? ` (${issuesCount})` : ''}`
               : 'Details';
             return (
               <button
@@ -1173,6 +1177,13 @@ export default function OrganisationDetailPage() {
       {/* Excess History Tab */}
       {activeTab === 'excess' && id && (
         <ExcessHistorySection entityType="organisation" entityId={id} />
+      )}
+
+      {/* Issues Tab — OP job_issues backed (Stage 3, May 2026).
+          Endpoint /api/problems/by-organisation/:id already provided
+          by the backend. Reuses the shared IssuesListSection. */}
+      {activeTab === 'issues' && id && (
+        <IssuesListSection entityType="organisation" entityId={id} onCount={setIssuesCount} />
       )}
 
       {/* Edit Panel */}

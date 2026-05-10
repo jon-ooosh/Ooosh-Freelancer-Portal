@@ -20,14 +20,33 @@
  * trail in job_issue_events records who did what.
  */
 import { Router, Response } from 'express';
+import multer from 'multer';
+import path from 'path';
+import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { uploadToR2, deleteFromR2, isR2Configured } from '../config/r2';
 
 const router = Router();
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
+
+// Multer for issue-level file uploads (job_issue_files table — distinct
+// from interaction-level attachments which live in interactions.files
+// JSONB and are handled by /api/files/upload?attachment_only=true).
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+});
+
+function detectFileType(ext: string): 'photo' | 'pdf' | 'other' {
+  const e = ext.toLowerCase();
+  if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic'].includes(e)) return 'photo';
+  if (e === '.pdf') return 'pdf';
+  return 'other';
+}
 
 const VALID_CATEGORIES = ['damaged', 'missing', 'broken', 'dispute', 'breakdown', 'other'] as const;
 const VALID_STATUSES = ['open', 'investigating', 'awaiting_quote', 'quoted', 'actioned', 'resolved', 'written_off', 'cancelled'] as const;
@@ -37,7 +56,11 @@ const VALID_RESOLUTION = ['claim_excess', 'charge_client', 'write_off', 'replace
 const VALID_SURFACES = ['vehicle_check_in', 'next_hire', 'next_book_out', 'job_close_out'] as const;
 
 const createSchema = z.object({
-  job_id: z.string().uuid(),
+  // job_id is now optional (migration 081). Vehicle-only issues — prep
+  // flags between hires — have no active job. Validation below enforces
+  // "at least one of job_id or vehicle_id must be set" to match the
+  // job_issues_anchor_check DB constraint.
+  job_id: z.string().uuid().optional().nullable(),
   category: z.enum(VALID_CATEGORIES),
   source_module: z.enum(VALID_SOURCES).default('manual'),
   severity: z.enum(VALID_SEVERITY).default('normal'),
@@ -51,12 +74,20 @@ const createSchema = z.object({
   hh_stock_item_id: z.number().int().optional().nullable(),
   hh_stock_item_name: z.string().max(255).optional().nullable(),
   barcode: z.string().max(100).optional().nullable(),
+  // Stable identifier for "the same thing" — used by the auto-create
+  // dedup helper (find-or-append) to recognise recurring problems.
+  // Prep checklist items have stable IDs (e.g. fire_extinguisher).
+  // Manual entry / check-in damage with no checklist context can omit.
+  component_key: z.string().max(100).optional().nullable(),
   // Behaviour
   due_date: z.string().optional().nullable(),
   surface_on: z.enum(VALID_SURFACES).optional().nullable(),
   watchers: z.array(z.string().uuid()).optional(),
   assigned_to: z.string().uuid().optional().nullable(),
-});
+}).refine(
+  (data) => Boolean(data.job_id) || Boolean(data.vehicle_id),
+  { message: 'At least one of job_id or vehicle_id is required', path: ['job_id'] }
+);
 
 const updateSchema = z.object({
   status: z.enum(VALID_STATUSES).optional(),
@@ -64,7 +95,9 @@ const updateSchema = z.object({
   severity: z.enum(VALID_SEVERITY).optional(),
   summary: z.string().trim().min(2).max(255).optional(),
   description: z.string().trim().max(10000).optional().nullable(),
-  // Anchors editable
+  // Anchors editable. job_id can be set on a vehicle-only issue when
+  // a hire surfaces it (staff manually links from IssueDetailPage).
+  job_id: z.string().uuid().optional().nullable(),
   vehicle_id: z.string().uuid().optional().nullable(),
   driver_id: z.string().uuid().optional().nullable(),
   person_id: z.string().uuid().optional().nullable(),
@@ -72,6 +105,7 @@ const updateSchema = z.object({
   hh_stock_item_id: z.number().int().optional().nullable(),
   hh_stock_item_name: z.string().max(255).optional().nullable(),
   barcode: z.string().max(100).optional().nullable(),
+  component_key: z.string().max(100).optional().nullable(),
   // Workflow
   assigned_to: z.string().uuid().optional().nullable(),
   due_date: z.string().optional().nullable(),
@@ -103,9 +137,79 @@ async function logEvent(
   );
 }
 
+// Severity → notification priority (CLAUDE.md Stage 3 Phase F spec):
+//   urgent → 'urgent' (immediate email regardless of working hours)
+//   normal → 'normal' (4h escalation in working hours)
+//   low    → 'low'    (bell only, no email escalation)
+function severityToPriority(severity: string | null | undefined): 'urgent' | 'normal' | 'low' {
+  if (severity === 'urgent') return 'urgent';
+  if (severity === 'low') return 'low';
+  return 'normal';
+}
+
+/**
+ * Fire inbox notifications for an issue event.
+ *
+ * Recipients: watchers + assignee (deduped), excluding the actor.
+ * `includeReporter` adds the reporter to the set — used for reflag and
+ * status-change events where the reporter cares about updates. NOT
+ * used on initial creation (the reporter IS the actor).
+ *
+ * Best-effort: failures are logged but don't roll back the issue
+ * operation. Notifications are derived signal.
+ */
+async function notifyIssueRecipients(
+  issueId: string,
+  actorUserId: string,
+  severity: string | null | undefined,
+  title: string,
+  content: string,
+  opts: { includeReporter?: boolean } = {}
+): Promise<void> {
+  try {
+    const issueRow = await query(
+      `SELECT ji.watchers, ji.assigned_to, ji.reported_by, ji.summary,
+              j.hh_job_number
+       FROM job_issues ji
+       LEFT JOIN jobs j ON j.id = ji.job_id
+       WHERE ji.id = $1`,
+      [issueId]
+    );
+    if (issueRow.rowCount === 0) return;
+
+    const row = issueRow.rows[0];
+    const recipients: Set<string> = new Set();
+    for (const w of (row.watchers as string[] | null) || []) recipients.add(w);
+    if (row.assigned_to) recipients.add(row.assigned_to);
+    if (opts.includeReporter && row.reported_by) recipients.add(row.reported_by);
+    recipients.delete(actorUserId);
+
+    if (recipients.size === 0) return;
+
+    const priority = severityToPriority(severity);
+    const actionUrl = `/operations/problems/${issueId}`;
+
+    for (const userId of recipients) {
+      // The 15-min escalation scheduler picks these up based on
+      // priority — 'urgent' fires email immediately regardless of
+      // working hours, 'normal' after 4h within working hours, 'low'
+      // never fires email (bell only).
+      await query(
+        `INSERT INTO notifications
+           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
+         VALUES ($1, 'system', $2, $3, 'job_issues', $4, $5, $6, $7)`,
+        [userId, title, content, issueId, actionUrl, priority, actorUserId]
+      );
+    }
+  } catch (err) {
+    console.error('Issue notification fire failed (non-fatal):', err);
+  }
+}
+
 const ISSUE_SELECT = `
   ji.id, ji.job_id, ji.vehicle_id, ji.driver_id, ji.person_id,
   ji.client_organisation_id, ji.hh_stock_item_id, ji.hh_stock_item_name, ji.barcode,
+  ji.component_key,
   ji.category, ji.source_module, ji.severity, ji.status, ji.resolution_path,
   ji.summary, ji.description,
   ji.reported_by, ji.assigned_to, ji.watchers,
@@ -238,32 +342,38 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
   try {
     const body = req.body as z.infer<typeof createSchema>;
 
-    const job = await query(
-      `SELECT id, client_id FROM jobs WHERE id = $1 AND is_deleted = false`,
-      [body.job_id]
-    );
-    if (job.rowCount === 0) return res.status(404).json({ error: 'Job not found' });
+    // job_id is optional (vehicle-only issues). When supplied, validate it
+    // and use its client_id as a default for client_organisation_id. When
+    // omitted, the issue must be vehicle-anchored — refine() on the schema
+    // already enforced that; the DB CHECK constraint is the belt-and-braces.
+    let clientOrgId: string | null = body.client_organisation_id ?? null;
+    if (body.job_id) {
+      const job = await query(
+        `SELECT id, client_id FROM jobs WHERE id = $1 AND is_deleted = false`,
+        [body.job_id]
+      );
+      if (job.rowCount === 0) return res.status(404).json({ error: 'Job not found' });
+      clientOrgId = body.client_organisation_id ?? job.rows[0].client_id ?? null;
+    }
 
-    // Default the client org to the job's client_id if the caller didn't supply one.
-    const clientOrgId = body.client_organisation_id ?? job.rows[0].client_id ?? null;
     const watchers = body.watchers ?? [];
 
     const insert = await query(
       `INSERT INTO job_issues (
          job_id, vehicle_id, driver_id, person_id, client_organisation_id,
-         hh_stock_item_id, hh_stock_item_name, barcode,
+         hh_stock_item_id, hh_stock_item_name, barcode, component_key,
          category, source_module, severity, summary, description,
          reported_by, assigned_to, watchers, due_date, surface_on
        ) VALUES (
          $1, $2, $3, $4, $5,
-         $6, $7, $8,
-         $9, $10, $11, $12, $13,
-         $14, $15, $16, $17, $18
+         $6, $7, $8, $9,
+         $10, $11, $12, $13, $14,
+         $15, $16, $17, $18, $19
        )
        RETURNING id`,
       [
-        body.job_id, body.vehicle_id ?? null, body.driver_id ?? null, body.person_id ?? null, clientOrgId,
-        body.hh_stock_item_id ?? null, body.hh_stock_item_name ?? null, body.barcode ?? null,
+        body.job_id ?? null, body.vehicle_id ?? null, body.driver_id ?? null, body.person_id ?? null, clientOrgId,
+        body.hh_stock_item_id ?? null, body.hh_stock_item_name ?? null, body.barcode ?? null, body.component_key ?? null,
         body.category, body.source_module, body.severity, body.summary, body.description ?? null,
         req.user!.id, body.assigned_to ?? null, watchers, body.due_date ?? null, body.surface_on ?? null,
       ]
@@ -275,15 +385,24 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       category: body.category, severity: body.severity, source_module: body.source_module,
     });
 
-    // Activity Timeline echo so the issue shows on the job's timeline.
-    await query(
-      `INSERT INTO interactions (type, content, job_id, created_by)
-       VALUES ('note', $1, $2, $3)`,
-      [
-        `⚠️ Issue logged (${body.category}${body.severity === 'urgent' ? ', urgent' : ''}): ${body.summary}`,
-        body.job_id, req.user!.id,
-      ]
+    await notifyIssueRecipients(
+      issueId, req.user!.id, body.severity,
+      `New issue: ${body.summary.slice(0, 80)}`,
+      `${body.category} — ${body.severity}`,
     );
+
+    // Activity Timeline echo so the issue shows on the job's timeline.
+    // Skipped for vehicle-only issues (no job to anchor against).
+    if (body.job_id) {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by)
+         VALUES ('note', $1, $2, $3)`,
+        [
+          `⚠️ Issue logged (${body.category}${body.severity === 'urgent' ? ', urgent' : ''}): ${body.summary}`,
+          body.job_id, req.user!.id,
+        ]
+      );
+    }
 
     // Fetch the full row for the response (with all the joined names).
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
@@ -362,11 +481,253 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
       });
     }
 
+    // Notifications on meaningful state changes. Watchers + assignee +
+    // reporter get pinged when status flips, severity bumps, or
+    // assignment changes — they're the people tracking this issue.
+    const effectiveSeverity = body.severity || before.severity;
+    if ('status' in body && body.status && body.status !== before.status) {
+      const title = isResolvedStatus(body.status)
+        ? `Issue resolved: ${before.summary?.slice(0, 80) || 'Issue'}`
+        : `Issue status changed: ${body.status}`;
+      await notifyIssueRecipients(
+        id, req.user!.id, effectiveSeverity, title,
+        `Was ${before.status} → now ${body.status}`,
+        { includeReporter: true }
+      );
+    }
+    if ('severity' in body && body.severity && body.severity !== before.severity) {
+      await notifyIssueRecipients(
+        id, req.user!.id, body.severity,
+        `Issue severity changed: ${body.severity}`,
+        `Was ${before.severity} → now ${body.severity}`,
+        { includeReporter: true }
+      );
+    }
+    if ('assigned_to' in body && body.assigned_to !== before.assigned_to && body.assigned_to) {
+      // Notify the NEW assignee specifically — they may not have been
+      // on the watchers/reporter list yet. notifyIssueRecipients reads
+      // the post-update row so the new assignee is now in the set.
+      await notifyIssueRecipients(
+        id, req.user!.id, effectiveSeverity,
+        `You've been assigned an issue: ${before.summary?.slice(0, 80) || 'Issue'}`,
+        `Assigned by issue update`,
+      );
+    }
+
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [id]);
     res.json({ data: full.rows[0] });
   } catch (err) {
     console.error('Update issue error:', err);
     res.status(500).json({ error: 'Failed to update issue' });
+  }
+});
+
+// ── Auto-create with dedup ───────────────────────────────────────────────
+//
+// For modules that automatically flag problems (PrepPage / CheckInPage
+// / backline de-prep / etc.) where the same component can recur across
+// sessions. Matches against (vehicle_id, component_key, status NOT IN
+// terminal); if found, appends a `reflagged` event and returns the
+// existing issue. If not, creates a new issue.
+//
+// Manual creates from a human-driven form continue to use POST /api/
+// problems (no dedup) — staff intentionally creating a fresh issue
+// shouldn't be silently merged into an existing one.
+
+const autoCreateSchema = z.object({
+  // Required for dedup
+  vehicle_id: z.string().uuid(),
+  component_key: z.string().min(1).max(100),
+  // Classification
+  category: z.enum(VALID_CATEGORIES),
+  source_module: z.enum(VALID_SOURCES),
+  severity: z.enum(VALID_SEVERITY).default('normal'),
+  summary: z.string().trim().min(2).max(255),
+  description: z.string().trim().max(10000).optional().nullable(),
+  // Optional anchor extras
+  job_id: z.string().uuid().optional().nullable(),
+  driver_id: z.string().uuid().optional().nullable(),
+  hh_stock_item_id: z.number().int().optional().nullable(),
+  hh_stock_item_name: z.string().max(255).optional().nullable(),
+  barcode: z.string().max(100).optional().nullable(),
+  // Context for the reflag event when an existing issue matches
+  reflag_context: z.object({
+    source: z.string().max(50).optional(),    // e.g. 'prep', 'checkin'
+    mileage: z.number().int().optional().nullable(),
+    reported_by_name: z.string().max(200).optional().nullable(),
+    note: z.string().max(1000).optional().nullable(),
+  }).optional().nullable(),
+});
+
+router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = req.body as z.infer<typeof autoCreateSchema>;
+
+    // Look for an open issue matching (vehicle, component). Pick the most
+    // recently updated if somehow more than one exists (shouldn't, but the
+    // dedup index is partial not unique — favour latest).
+    const existing = await query(
+      `SELECT id FROM job_issues
+       WHERE vehicle_id = $1
+         AND component_key = $2
+         AND status NOT IN ('resolved', 'written_off', 'cancelled')
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [body.vehicle_id, body.component_key]
+    );
+
+    if (existing.rowCount && existing.rowCount > 0) {
+      // Append reflag event + bump updated_at.
+      const issueId = existing.rows[0].id;
+      const ctx = body.reflag_context ?? {};
+      const eventBody = `Re-flagged${ctx.source ? ` during ${ctx.source}` : ''}${
+        ctx.reported_by_name ? ` by ${ctx.reported_by_name}` : ''
+      }${ctx.mileage ? ` at ${ctx.mileage} miles` : ''}${ctx.note ? `: ${ctx.note}` : ''}`;
+      await logEvent(issueId, req.user!.id, 'reflagged', eventBody, {
+        source_module: body.source_module,
+        reflag_context: ctx,
+        new_summary: body.summary,
+      });
+      await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+
+      // Reflag pings watchers + assignee + reporter — the original
+      // reporter cares that "their" issue is still happening.
+      await notifyIssueRecipients(
+        issueId, req.user!.id, body.severity,
+        `Issue re-flagged: ${body.summary.slice(0, 80)}`,
+        eventBody,
+        { includeReporter: true }
+      );
+
+      const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
+      return res.status(200).json({ data: full.rows[0], was_existing: true });
+    }
+
+    // No match — fresh insert.
+    const insert = await query(
+      `INSERT INTO job_issues (
+         job_id, vehicle_id, driver_id, client_organisation_id,
+         hh_stock_item_id, hh_stock_item_name, barcode, component_key,
+         category, source_module, severity, summary, description,
+         reported_by, watchers
+       ) VALUES (
+         $1, $2, $3, $4,
+         $5, $6, $7, $8,
+         $9, $10, $11, $12, $13,
+         $14, '{}'::uuid[]
+       )
+       RETURNING id`,
+      [
+        body.job_id ?? null, body.vehicle_id, body.driver_id ?? null, null,
+        body.hh_stock_item_id ?? null, body.hh_stock_item_name ?? null, body.barcode ?? null, body.component_key,
+        body.category, body.source_module, body.severity, body.summary, body.description ?? null,
+        req.user!.id,
+      ]
+    );
+
+    const issueId = insert.rows[0].id;
+    await logEvent(issueId, req.user!.id, 'created', body.summary, {
+      category: body.category, severity: body.severity, source_module: body.source_module,
+      component_key: body.component_key,
+    });
+
+    await notifyIssueRecipients(
+      issueId, req.user!.id, body.severity,
+      `New issue: ${body.summary.slice(0, 80)}`,
+      `${body.category} — flagged from ${body.source_module}`,
+    );
+
+    const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
+    res.status(201).json({ data: full.rows[0], was_existing: false });
+  } catch (err) {
+    console.error('Auto-create issue error:', err);
+    res.status(500).json({ error: 'Failed to auto-create issue' });
+  }
+});
+
+// ── Files ────────────────────────────────────────────────────────────────
+//
+// Issue-level files (job_issue_files table). DISTINCT from interaction
+// attachments — these are documents/photos attached to the issue itself
+// (e.g. a contractor's quote PDF, an insurer letter, a damage photo
+// taken outside a comment thread). Interaction attachments handle the
+// "this comment has a photo" case.
+
+router.post('/:id/files', upload.single('file'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isR2Configured()) {
+      return res.status(503).json({ error: 'File storage not configured' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    const issueId = req.params.id as string;
+    const exists = await query(`SELECT 1 FROM job_issues WHERE id = $1`, [issueId]);
+    if (exists.rowCount === 0) return res.status(404).json({ error: 'Issue not found' });
+
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const fileId = uuid();
+    const key = `files/job_issues/${issueId}/${fileId}${ext}`;
+
+    await uploadToR2(key, req.file.buffer, req.file.mimetype);
+
+    const comment = typeof req.body.comment === 'string' ? req.body.comment.trim() : null;
+    const fileTypeOverride = typeof req.body.file_type === 'string' ? req.body.file_type.trim() : null;
+    const fileType = fileTypeOverride || detectFileType(ext);
+
+    const insert = await query(
+      `INSERT INTO job_issue_files
+         (id, issue_id, r2_key, filename, file_type, content_type, size_bytes, comment, uploaded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, r2_key, filename, file_type, content_type, size_bytes, comment, uploaded_at`,
+      [
+        fileId, issueId, key, req.file.originalname, fileType,
+        req.file.mimetype, req.file.size, comment, req.user!.id,
+      ]
+    );
+
+    await logEvent(issueId, req.user!.id, 'file_added', req.file.originalname, {
+      file_id: fileId, file_type: fileType, size_bytes: req.file.size,
+    });
+    await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+
+    res.status(201).json({ data: insert.rows[0] });
+  } catch (err) {
+    console.error('Issue file upload error:', err);
+    res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+router.delete('/:id/files/:fileId', async (req: AuthRequest, res: Response) => {
+  try {
+    const issueId = req.params.id as string;
+    const fileId = req.params.fileId as string;
+
+    const row = await query(
+      `SELECT r2_key, filename FROM job_issue_files WHERE id = $1 AND issue_id = $2`,
+      [fileId, issueId]
+    );
+    if (row.rowCount === 0) return res.status(404).json({ error: 'File not found' });
+
+    await deleteFromR2(row.rows[0].r2_key).catch(err => {
+      // Best-effort R2 cleanup. If R2 fails, log but still remove the DB row
+      // — the alternative leaves an orphan row pointing at a key that may
+      // or may not exist, which is worse.
+      console.error('R2 delete failed (continuing):', err);
+    });
+
+    await query(`DELETE FROM job_issue_files WHERE id = $1`, [fileId]);
+
+    await logEvent(issueId, req.user!.id, 'file_removed', row.rows[0].filename, {
+      file_id: fileId,
+    });
+    await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Issue file delete error:', err);
+    res.status(500).json({ error: 'Failed to delete file' });
   }
 });
 
@@ -492,11 +853,30 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       [id]
     );
 
+    // Comments (interactions filtered to this issue). The legacy
+    // `events` array carries TYPED audit transitions (created /
+    // status_change / etc.); comments now live in `interactions` with
+    // issue_id set — repointed from job_issue_events.event_type='comment'
+    // by Phase F. IssueDetailPage merges both streams at render time.
+    const commentsResult = await query(
+      `SELECT i.id, i.content, i.created_at, i.created_by, i.parent_interaction_id,
+              i.mentioned_user_ids, i.files, i.reactions,
+              CONCAT(p.first_name, ' ', p.last_name) AS created_by_name,
+              u.email AS created_by_email
+       FROM interactions i
+       LEFT JOIN users u ON u.id = i.created_by
+       LEFT JOIN people p ON p.id = u.person_id
+       WHERE i.issue_id = $1
+       ORDER BY i.created_at ASC`,
+      [id]
+    );
+
     res.json({
       data: {
         ...issueResult.rows[0],
         events: eventsResult.rows,
         files: filesResult.rows,
+        comments: commentsResult.rows,
       },
     });
   } catch (err) {
