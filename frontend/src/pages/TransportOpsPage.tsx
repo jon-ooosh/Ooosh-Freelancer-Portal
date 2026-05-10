@@ -363,7 +363,14 @@ export default function TransportOpsPage() {
     const name = initialParams.get('venue_name');
     return name ? { name } : null;
   });
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(() => initialParams.get('quote'));
+  // When the page is opened with ?quote=<id> (deep-link from a Job Detail card),
+  // we widen the API query (show_all=1) and any necessary client-side toggles
+  // so the target row is guaranteed to be visible regardless of date window
+  // / job stage / quote status. The id stays in state for the page lifetime so
+  // refreshes preserve the link, and is reflected back into the URL.
+  const [deepLinkQuoteId] = useState<string | null>(() => initialParams.get('quote'));
+  const [deepLinkResolved, setDeepLinkResolved] = useState(false);
   const [assignModalQuoteId, setAssignModalQuoteId] = useState<string | null>(null);
   const [assignRole, setAssignRole] = useState('driver');
   const [peopleSearch, setPeopleSearch] = useState('');
@@ -400,6 +407,7 @@ export default function TransportOpsPage() {
       params.set('person_name', personPin.name);
     }
     if (venuePin) params.set('venue_name', venuePin.name);
+    if (deepLinkQuoteId) params.set('quote', deepLinkQuoteId);
     const qs = params.toString();
     const newUrl = qs ? `${window.location.pathname}?${qs}` : window.location.pathname;
     const timer = window.setTimeout(() => {
@@ -410,7 +418,62 @@ export default function TransportOpsPage() {
     filter, viewMode, showCompleted, showCancelled,
     showProvisional, showEnquiry, showLostJobs, showCancelledJobs,
     needsCrewOnly, needsIntroOnly, dateWindow, searchTerm, sortBy, personPin, venuePin,
+    deepLinkQuoteId,
   ]);
+
+  // Deep-link resolver: when the page is opened with ?quote=<id>, fetch that
+  // quote so we know what view-state to widen so it's visible. Runs once.
+  // - status='cancelled'/'completed' → flip the matching showCancelled / showCompleted toggle
+  // - linked job in any non-operational stage → flip the matching include toggle
+  // - dateWindow forced to 'all' so client-side filter doesn't hide it
+  // - show_all=1 on the API call (handled in buildOverviewQuery) so the
+  //   backend doesn't strip rows older than 14 days
+  // After resolve, the row is auto-expanded + scrolled into view by the
+  // separate effect below once `quotes` actually contains it.
+  useEffect(() => {
+    if (!deepLinkQuoteId || deepLinkResolved) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const q = await api.get<Record<string, unknown>>(`/quotes/${deepLinkQuoteId}`);
+        if (cancelled) return;
+        setDateWindow('all');
+        const status = String(q.status || 'draft');
+        if (status === 'cancelled') setShowCancelled(true);
+        if (status === 'completed') setShowCompleted(true);
+        const pipelineStatus = String(q.pipeline_status || '');
+        const jobStatus = q.job_status as number | null | undefined;
+        const isProvisional = pipelineStatus === 'provisional' || (!pipelineStatus && jobStatus === 1);
+        const isEnquiry = ['new_enquiry', 'quoting', 'paused'].includes(pipelineStatus) || (!pipelineStatus && jobStatus === 0);
+        const isLost = pipelineStatus === 'lost' || (!pipelineStatus && jobStatus === 10);
+        const isCancelledJob = pipelineStatus === 'cancelled' || (!pipelineStatus && jobStatus === 9);
+        if (isProvisional) setShowProvisional(true);
+        if (isEnquiry) setShowEnquiry(true);
+        if (isLost) setShowLostJobs(true);
+        if (isCancelledJob) setShowCancelledJobs(true);
+      } catch {
+        // Quote not found / 404 — leave filters untouched, the row simply
+        // won't appear and the user can use search to confirm.
+      } finally {
+        if (!cancelled) setDeepLinkResolved(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [deepLinkQuoteId, deepLinkResolved]);
+
+  // Once the deep-linked quote is in the loaded list, expand it and scroll
+  // it into view. Runs whenever `quotes` changes after resolve so a slow
+  // network or filter widening still hits it.
+  useEffect(() => {
+    if (!deepLinkQuoteId || !deepLinkResolved) return;
+    if (!quotes.some((q) => q.id === deepLinkQuoteId)) return;
+    setExpandedId(deepLinkQuoteId);
+    const t = window.setTimeout(() => {
+      const el = document.getElementById(`ops-quote-${deepLinkQuoteId}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 100);
+    return () => window.clearTimeout(t);
+  }, [deepLinkQuoteId, deepLinkResolved, quotes]);
 
   // Toggle a collapsible section's collapsed state and persist to
   // localStorage. Section keys are namespaced per render bucket — see the
@@ -438,9 +501,12 @@ export default function TransportOpsPage() {
     if (showEnquiry) params.set('include_enquiry', 'true');
     if (showLostJobs) params.set('include_lost', 'true');
     if (showCancelledJobs) params.set('include_cancelled', 'true');
+    // Deep-link mode: lift the backend's default 14-day-back window so an
+    // older quote referenced by ?quote=<id> can still be found.
+    if (deepLinkQuoteId) params.set('show_all', '1');
     const qs = params.toString();
     return qs ? `?${qs}` : '';
-  }, [filter, showProvisional, showEnquiry, showLostJobs, showCancelledJobs]);
+  }, [filter, showProvisional, showEnquiry, showLostJobs, showCancelledJobs, deepLinkQuoteId]);
 
   // Escape key to close assign modal
   useEffect(() => {
@@ -1650,7 +1716,7 @@ function QuoteRow({
   ) : <span className="text-gray-400">No date</span>;
 
   return (
-    <div>
+    <div id={`ops-quote-${q.id}`} className={expanded ? 'scroll-mt-32' : undefined}>
       {/* Desktop row layout — hidden below md */}
       <div
         className={`hidden md:flex px-4 py-3 items-center gap-3 hover:bg-gray-50 cursor-pointer transition-colors ${leftBorderClass}`}

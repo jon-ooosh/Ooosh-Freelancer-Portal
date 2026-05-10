@@ -97,6 +97,7 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
         rg.combined_freelancer_fee as run_combined_freelancer_fee,
         rg.combined_client_fee as run_combined_client_fee,
         rg.notes as run_notes,
+        CONCAT(scp.first_name, ' ', scp.last_name) as status_changed_by_name,
         COALESCE(
           (SELECT json_agg(json_build_object(
             'id', qa.id,
@@ -121,6 +122,8 @@ router.get('/ops/overview', async (req: AuthRequest, res: Response) => {
        LEFT JOIN jobs j ON j.id = q.job_id
        LEFT JOIN venues v ON v.id = q.venue_id
        LEFT JOIN run_groups rg ON rg.id = q.run_group
+       LEFT JOIN users scu ON scu.id = q.status_changed_by
+       LEFT JOIN people scp ON scp.id = scu.person_id
        ${whereClause}
        ORDER BY
          CASE WHEN q.status = 'cancelled' THEN 7
@@ -503,6 +506,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
         rg.combined_client_fee as run_combined_client_fee,
         rg.notes as run_notes,
         CONCAT(p.first_name, ' ', p.last_name) as created_by_name,
+        CONCAT(scp.first_name, ' ', scp.last_name) as status_changed_by_name,
         COALESCE(
           (SELECT json_agg(json_build_object(
             'id', qa.id,
@@ -521,6 +525,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
        FROM quotes q
        LEFT JOIN users u ON u.id = q.created_by
        LEFT JOIN people p ON p.id = u.person_id
+       LEFT JOIN users scu ON scu.id = q.status_changed_by
+       LEFT JOIN people scp ON scp.id = scu.person_id
        LEFT JOIN run_groups rg ON rg.id = q.run_group
        ${whereClause}
        ORDER BY q.created_at DESC
@@ -548,10 +554,15 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
       `SELECT q.*,
-        CONCAT(p.first_name, ' ', p.last_name) as created_by_name
+        CONCAT(p.first_name, ' ', p.last_name) as created_by_name,
+        CONCAT(scp.first_name, ' ', scp.last_name) as status_changed_by_name,
+        j.pipeline_status, j.status as job_status
        FROM quotes q
        LEFT JOIN users u ON u.id = q.created_by
        LEFT JOIN people p ON p.id = u.person_id
+       LEFT JOIN users scu ON scu.id = q.status_changed_by
+       LEFT JOIN people scp ON scp.id = scu.person_id
+       LEFT JOIN jobs j ON j.id = q.job_id
        WHERE q.id = $1 AND q.is_deleted = false`,
       [req.params.id]
     );
