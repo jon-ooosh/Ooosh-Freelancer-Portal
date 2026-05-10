@@ -175,12 +175,28 @@ router.get('/inbox', async (req: AuthRequest, res: Response) => {
       const limitParam = nextParam;
       const offsetParam = nextParam + 1;
 
+      // Thread root preview: when the notification points at a reply
+      // ("Pete replied in a thread you're in"), surface a snippet of the
+      // root message + the root author's name so the inbox card has
+      // context without forcing the user to expand the thread. The two
+      // LEFT JOINs walk reply → root → author; we COALESCE so non-thread
+      // notifications just see NULL.
       const [dataResult, countResult] = await Promise.all([
         query(`
-          SELECT n.*, sp.first_name AS source_first_name, sp.last_name AS source_last_name
+          SELECT n.*,
+                 sp.first_name AS source_first_name,
+                 sp.last_name  AS source_last_name,
+                 root.content  AS thread_root_preview,
+                 root.id       AS thread_root_id,
+                 COALESCE(NULLIF(CONCAT(rootp.first_name, ' ', rootp.last_name), ' '), rootu.email)
+                   AS thread_root_author
           FROM notifications n
-          LEFT JOIN users su ON su.id = n.source_user_id
+          LEFT JOIN users  su ON su.id = n.source_user_id
           LEFT JOIN people sp ON sp.id = su.person_id
+          LEFT JOIN interactions reply ON reply.id = n.interaction_id
+          LEFT JOIN interactions root  ON root.id = COALESCE(reply.parent_interaction_id, reply.id)
+          LEFT JOIN users  rootu ON rootu.id = root.created_by
+          LEFT JOIN people rootp ON rootp.id = rootu.person_id
           WHERE ${fullWhere}
           ORDER BY ${orderBy}
           LIMIT $${limitParam} OFFSET $${offsetParam}
@@ -569,12 +585,92 @@ router.post('/bulk-acknowledge', async (req: AuthRequest, res: Response) => {
       params
     );
 
-    res.json({ cleared: result.rows.length });
+    // Return the actual IDs that were just touched so the frontend can
+    // hand them back to /bulk-unacknowledge if the user undoes.
+    res.json({
+      cleared: result.rows.length,
+      ids: result.rows.map((r: { id: string }) => r.id),
+    });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Invalid request', details: error.errors });
     }
     console.error('Bulk-acknowledge error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/notifications/:id/unacknowledge — undo a Done click ──────────
+//
+// Revert a single notification's acknowledged state (clears
+// acknowledged_at). Pairs with the existing /:id/acknowledge — the inbox
+// shows a 5-second "Undo" toast after Done so a fat-finger tap doesn't
+// permanently bury something.
+//
+// Mirror behaviour for the reminder cascade: if the original ack flipped
+// a `reminder` requirement to status='done', we restore it to 'in_progress'
+// (we don't know the prior status with certainty, but in_progress is the
+// non-terminal default — staff can adjust if it was something else).
+router.post('/:id/unacknowledge', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `UPDATE notifications
+       SET acknowledged_at = NULL
+       WHERE id = $1 AND user_id = $2 AND acknowledged_at IS NOT NULL
+       RETURNING *`,
+      [req.params.id, req.user!.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Notification not found or not acknowledged' });
+    }
+    const notif = result.rows[0];
+
+    // Reverse the reminder cascade if applicable.
+    if (notif.entity_type === 'job_requirements' && notif.entity_id) {
+      try {
+        await query(
+          `UPDATE job_requirements
+           SET status = 'in_progress',
+               notes = REGEXP_REPLACE(COALESCE(notes, ''), E'\\n?\\[Marked done via inbox acknowledgement\\]', '', 'g'),
+               updated_at = NOW()
+           WHERE id = $1
+             AND requirement_type = 'reminder'
+             AND status = 'done'`,
+          [notif.entity_id]
+        );
+      } catch (cascadeErr) {
+        console.warn('[Notifications] Reminder un-ack cascade failed:', cascadeErr);
+      }
+    }
+
+    res.json({ data: notif });
+  } catch (error) {
+    console.error('Unacknowledge error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ── POST /api/notifications/bulk-unacknowledge — undo a Clear-read ────────
+const bulkUnackSchema = z.object({
+  ids: z.array(z.string().uuid()).min(1).max(500),
+});
+
+router.post('/bulk-unacknowledge', async (req: AuthRequest, res: Response) => {
+  try {
+    const { ids } = bulkUnackSchema.parse(req.body);
+    const result = await query(
+      `UPDATE notifications
+       SET acknowledged_at = NULL
+       WHERE id = ANY($1::uuid[]) AND user_id = $2 AND acknowledged_at IS NOT NULL
+       RETURNING id`,
+      [ids, req.user!.id]
+    );
+    res.json({ restored: result.rows.length });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Invalid request', details: error.errors });
+    }
+    console.error('Bulk-unacknowledge error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

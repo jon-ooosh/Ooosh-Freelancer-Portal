@@ -198,9 +198,80 @@ router.get('/:id/thread', async (req: AuthRequest, res: Response) => {
       participants = partResult.rows;
     }
 
-    res.json({ root, replies, participants });
+    // Has the requesting user muted this thread? Returned to the client so
+    // the UI can render the right toggle state. Tolerate the table not
+    // existing yet (pre-migration deploy).
+    let isMuted = false;
+    try {
+      const muteResult = await query(
+        `SELECT 1 FROM user_muted_threads WHERE user_id = $1 AND root_interaction_id = $2`,
+        [req.user!.id, rootId]
+      );
+      isMuted = muteResult.rows.length > 0;
+    } catch { /* table not yet created */ }
+
+    res.json({ root, replies, participants, is_muted: isMuted });
   } catch (error) {
     console.error('Get thread error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/interactions/:id/mute — silence further re-notifies on this thread
+//
+// Toggles the current user's mute state for the thread root that contains
+// :id (which can be any interaction in the thread — server walks to root).
+// Body: { muted: boolean }. Idempotent.
+//
+// Only suppresses LOW-priority "replied in a thread" re-notifies. Explicit
+// @mentions on the thread still notify the user — direct calls for
+// attention always get through.
+const muteSchema = z.object({ muted: z.boolean() });
+
+router.post('/:id/mute', async (req: AuthRequest, res: Response) => {
+  try {
+    const { muted } = muteSchema.parse(req.body);
+
+    // Walk to root the same way /thread does.
+    const rootResult = await query(
+      `WITH RECURSIVE chain AS (
+         SELECT id, parent_interaction_id, 0 AS depth
+         FROM interactions WHERE id = $1
+         UNION ALL
+         SELECT i.id, i.parent_interaction_id, c.depth + 1
+         FROM interactions i
+         JOIN chain c ON i.id = c.parent_interaction_id
+         WHERE c.depth < 10
+       )
+       SELECT id FROM chain WHERE parent_interaction_id IS NULL LIMIT 1`,
+      [req.params.id]
+    );
+    if (rootResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Interaction not found' });
+    }
+    const rootId = rootResult.rows[0].id;
+
+    if (muted) {
+      await query(
+        `INSERT INTO user_muted_threads (user_id, root_interaction_id)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id, root_interaction_id) DO NOTHING`,
+        [req.user!.id, rootId]
+      );
+    } else {
+      await query(
+        `DELETE FROM user_muted_threads
+         WHERE user_id = $1 AND root_interaction_id = $2`,
+        [req.user!.id, rootId]
+      );
+    }
+
+    res.json({ is_muted: muted, root_interaction_id: rootId });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Invalid request', details: error.errors });
+    }
+    console.error('Toggle mute error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -521,8 +592,30 @@ router.post('/', validate(createInteractionSchema), async (req: AuthRequest, res
 
       const replyPreview = content.length > 200 ? content.slice(0, 200) + '...' : content;
 
+      // Suppress re-notifies for users who have muted this thread root.
+      // (Explicit @mentions above are NOT muted by this — if someone @s
+      // you directly, you still see it.)
+      const candidateIds = [...priorParticipants].filter((u) => !notifiedUserIds.has(u));
+      let mutedSet = new Set<string>();
+      if (candidateIds.length > 0) {
+        try {
+          const mutedResult = await query(
+            `SELECT user_id FROM user_muted_threads
+             WHERE root_interaction_id = $1 AND user_id = ANY($2::uuid[])`,
+            [parent_interaction_id, candidateIds]
+          );
+          mutedSet = new Set(mutedResult.rows.map((r) => r.user_id as string));
+        } catch (err) {
+          // Table missing on a freshly-deployed instance pre-migration —
+          // fall back to "not muted" so re-notifies still fire. Will
+          // self-correct as soon as migration 080 lands.
+          console.warn('[Interactions] user_muted_threads lookup failed (pre-migration?):', (err as Error).message);
+        }
+      }
+
       for (const userId of priorParticipants) {
         if (notifiedUserIds.has(userId)) continue;
+        if (mutedSet.has(userId)) continue;
         notifiedUserIds.add(userId);
 
         const notifResult = await query(
