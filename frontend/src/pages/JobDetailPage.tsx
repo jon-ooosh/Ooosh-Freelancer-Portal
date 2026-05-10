@@ -192,6 +192,7 @@ interface SavedQuote {
   // Status
   status: string;
   status_changed_at: string | null;
+  status_changed_by_name: string | null;
   cancelled_reason: string | null;
   // Run grouping
   run_group: string | null;
@@ -4376,8 +4377,17 @@ export default function JobDetailPage() {
 
                     </div>
                   </div>
-                  {/* Created by — bottom right */}
-                  <div className="flex justify-end mt-2">
+                  {/* Created by + Transport Ops deep link — bottom right */}
+                  <div className="flex justify-between items-center mt-2 gap-3">
+                    <Link
+                      to={`/operations/transport?quote=${q.id}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[11px] text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                      title="Open this quote on the Crew & Transport ops page (new tab) to see what else is going on around the same time"
+                    >
+                      View in Transport Ops ↗
+                    </Link>
                     <span className="text-[11px] text-gray-400">
                       Created: {new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
                       {q.created_by_name && ` / ${q.created_by_name}`}
@@ -4445,9 +4455,27 @@ export default function JobDetailPage() {
                                   >
                                     Restore
                                   </button>
-                                  <div className="text-gray-400 text-[11px]">
-                                    Created: {new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
-                                    {q.created_by_name && ` / ${q.created_by_name}`}
+                                  <Link
+                                    to={`/operations/transport?quote=${q.id}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-[11px] text-ooosh-600 hover:text-ooosh-700 hover:underline"
+                                    title="Open this quote on the Crew & Transport ops page (new tab)"
+                                  >
+                                    View in Transport Ops ↗
+                                  </Link>
+                                  <div className="text-gray-400 text-[11px] leading-snug">
+                                    <div>
+                                      Created: {new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                                      {q.created_by_name && ` / ${q.created_by_name}`}
+                                    </div>
+                                    {q.status_changed_at && (
+                                      <div className="text-red-500">
+                                        Cancelled: {new Date(q.status_changed_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                                        {' '}{new Date(q.status_changed_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                                        {q.status_changed_by_name && ` / ${q.status_changed_by_name}`}
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               </div>

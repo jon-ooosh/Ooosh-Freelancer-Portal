@@ -535,6 +535,7 @@ export interface SavedQuote {
   // Status
   status: QuoteStatusType;
   status_changed_at: string | null;
+  status_changed_by_name: string | null;
   cancelled_reason: string | null;
   // Crew assignments (populated via subquery)
   assignments: QuoteAssignment[];
