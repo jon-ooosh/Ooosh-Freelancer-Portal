@@ -14,8 +14,12 @@ import { useVehicles } from '../hooks/useVehicles'
 import { useTraccarDevice, useTraccarPosition } from '../hooks/useTraccar'
 import { getAllocations } from '../lib/allocations-api'
 import { knotsToMph } from '../types/traccar'
-import { saveIssue } from '../lib/issues-r2-api'
-import { uploadIssuePhotos } from '../lib/photo-upload'
+import { apiFetch } from '../config/api-config'
+import {
+  mapLegacyCategoryToOpCategory,
+  mapPrepItemToComponentKey,
+  mapSeverityToOpSeverity,
+} from '../lib/op-issue-mapping'
 import {
   ISSUE_CATEGORIES,
   COMPONENTS_BY_CATEGORY,
@@ -28,7 +32,6 @@ import type {
   IssueComponent,
   IssueSeverity,
   IssueContext,
-  VehicleIssue,
   IssueLocation,
 } from '../types/issue'
 import type { Vehicle } from '../types/vehicle'
@@ -239,61 +242,70 @@ export function NewIssuePage() {
     setIsSaving(true)
 
     try {
-      const issueId = crypto.randomUUID()
-      const now = new Date().toISOString()
+      const summaryText = summary.trim()
+      const componentKey = mapPrepItemToComponentKey(component) || 'other'
+      const locationNote = capturedLocation
+        ? `${initialNote.trim()}${initialNote.trim() ? ' ' : ''}[GPS: ${capturedLocation.lat.toFixed(5)}, ${capturedLocation.lng.toFixed(5)}]`
+        : initialNote.trim()
 
-      // Upload photos first (if any)
-      let photoUrls: string[] = []
-      if (photos.length > 0) {
-        const blobs = photos.map(f => f as Blob)
-        const uploadResult = await uploadIssuePhotos(blobs, issueId, selectedVehicle.reg)
-        photoUrls = uploadResult.urls
-      }
+      // POST /api/problems (manual create — no dedup; staff intentionally
+      // creates fresh). Returns the OP issue with its UUID; we then upload
+      // photos as issue files and navigate to the new detail page.
+      const createResp = await apiFetch('/api/problems', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vehicle_id: selectedVehicle.id,
+          // job_id intentionally null for manual vehicle-anchored issues.
+          // If staff supplies an HH job number we COULD look it up here,
+          // but that's a separate round-trip — keep manual create simple.
+          category: mapLegacyCategoryToOpCategory(category, component),
+          source_module: 'manual',
+          severity: mapSeverityToOpSeverity(severity),
+          summary: summaryText,
+          description: locationNote || null,
+          component_key: componentKey,
+        }),
+      })
 
-      const issue: VehicleIssue = {
-        id: issueId,
-        vehicleReg: selectedVehicle.reg,
-        vehicleId: selectedVehicle.id,
-        vehicleMake: selectedVehicle.make,
-        vehicleModel: selectedVehicle.model,
-        vehicleType: selectedVehicle.simpleType || selectedVehicle.vehicleType,
-        mileageAtReport: mileage ? parseInt(mileage, 10) : null,
-        hireHopJob: hireHopJob.trim() || null,
-        location: capturedLocation,
-        category,
-        component,
-        severity,
-        summary: summary.trim(),
-        status: 'Open',
-        reportedBy: reportedBy.trim(),
-        reportedAt: now,
-        reportedDuring,
-        resolvedAt: null,
-        photos: photoUrls,
-        activity: [
-          {
-            id: crypto.randomUUID(),
-            timestamp: now,
-            author: reportedBy.trim(),
-            action: 'Reported',
-            note: initialNote.trim(),
-          },
-        ],
-      }
-
-      // Save to R2
-      const result = await saveIssue(issue)
-
-      if (result.success) {
-        // Invalidate caches
-        await queryClient.invalidateQueries({ queryKey: ['vehicle-issues', selectedVehicle.reg] })
-        await queryClient.invalidateQueries({ queryKey: ['all-issues'] })
-
-        navigate(vmPath(`/issues/${encodeURIComponent(selectedVehicle.reg)}/${issueId}`))
-      } else {
-        console.error('[NewIssuePage] Save failed:', result.error)
+      if (!createResp.ok) {
+        const errText = await createResp.text()
+        console.error('[NewIssuePage] Create failed:', createResp.status, errText)
         setIsSaving(false)
+        return
       }
+      const created = await createResp.json() as { data: { id: string } }
+      const issueId = created.data.id
+
+      // Upload photos as issue files. Best-effort — failures don't roll
+      // back the issue create (the issue is already a real row at this
+      // point), but we surface a console warn so it's not silent.
+      if (photos.length > 0) {
+        for (let i = 0; i < photos.length; i++) {
+          try {
+            const fd = new FormData()
+            fd.append('file', photos[i]! as Blob, `photo_${i}.jpg`)
+            const resp = await apiFetch(`/api/problems/${issueId}/files`, {
+              method: 'POST',
+              body: fd,
+            })
+            if (!resp.ok) {
+              console.warn(`[NewIssuePage] Photo ${i} upload failed:`, resp.status)
+            }
+          } catch (err) {
+            console.warn(`[NewIssuePage] Photo ${i} upload error:`, err)
+          }
+        }
+      }
+
+      // Invalidate caches so the new issue appears on listing pages.
+      await queryClient.invalidateQueries({ queryKey: ['vehicle-issues', selectedVehicle.reg] })
+      await queryClient.invalidateQueries({ queryKey: ['all-issues'] })
+
+      // Navigate to the new OP issue detail page. The legacy
+      // /issues/:reg/:id route is being retired; we go straight to
+      // /operations/problems/:id which uses the OP table.
+      navigate(`/operations/problems/${issueId}`)
     } catch (err) {
       console.error('[NewIssuePage] Error:', err)
       setIsSaving(false)

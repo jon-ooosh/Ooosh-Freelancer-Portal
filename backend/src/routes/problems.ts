@@ -414,6 +414,114 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
   }
 });
 
+// ── Auto-create with dedup ───────────────────────────────────────────────
+//
+// For modules that automatically flag problems (PrepPage / CheckInPage
+// / backline de-prep / etc.) where the same component can recur across
+// sessions. Matches against (vehicle_id, component_key, status NOT IN
+// terminal); if found, appends a `reflagged` event and returns the
+// existing issue. If not, creates a new issue.
+//
+// Manual creates from a human-driven form continue to use POST /api/
+// problems (no dedup) — staff intentionally creating a fresh issue
+// shouldn't be silently merged into an existing one.
+
+const autoCreateSchema = z.object({
+  // Required for dedup
+  vehicle_id: z.string().uuid(),
+  component_key: z.string().min(1).max(100),
+  // Classification
+  category: z.enum(VALID_CATEGORIES),
+  source_module: z.enum(VALID_SOURCES),
+  severity: z.enum(VALID_SEVERITY).default('normal'),
+  summary: z.string().trim().min(2).max(255),
+  description: z.string().trim().max(10000).optional().nullable(),
+  // Optional anchor extras
+  job_id: z.string().uuid().optional().nullable(),
+  driver_id: z.string().uuid().optional().nullable(),
+  hh_stock_item_id: z.number().int().optional().nullable(),
+  hh_stock_item_name: z.string().max(255).optional().nullable(),
+  barcode: z.string().max(100).optional().nullable(),
+  // Context for the reflag event when an existing issue matches
+  reflag_context: z.object({
+    source: z.string().max(50).optional(),    // e.g. 'prep', 'checkin'
+    mileage: z.number().int().optional().nullable(),
+    reported_by_name: z.string().max(200).optional().nullable(),
+    note: z.string().max(1000).optional().nullable(),
+  }).optional().nullable(),
+});
+
+router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const body = req.body as z.infer<typeof autoCreateSchema>;
+
+    // Look for an open issue matching (vehicle, component). Pick the most
+    // recently updated if somehow more than one exists (shouldn't, but the
+    // dedup index is partial not unique — favour latest).
+    const existing = await query(
+      `SELECT id FROM job_issues
+       WHERE vehicle_id = $1
+         AND component_key = $2
+         AND status NOT IN ('resolved', 'written_off', 'cancelled')
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [body.vehicle_id, body.component_key]
+    );
+
+    if (existing.rowCount && existing.rowCount > 0) {
+      // Append reflag event + bump updated_at.
+      const issueId = existing.rows[0].id;
+      const ctx = body.reflag_context ?? {};
+      const eventBody = `Re-flagged${ctx.source ? ` during ${ctx.source}` : ''}${
+        ctx.reported_by_name ? ` by ${ctx.reported_by_name}` : ''
+      }${ctx.mileage ? ` at ${ctx.mileage} miles` : ''}${ctx.note ? `: ${ctx.note}` : ''}`;
+      await logEvent(issueId, req.user!.id, 'reflagged', eventBody, {
+        source_module: body.source_module,
+        reflag_context: ctx,
+        new_summary: body.summary,
+      });
+      await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+
+      const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
+      return res.status(200).json({ data: full.rows[0], was_existing: true });
+    }
+
+    // No match — fresh insert.
+    const insert = await query(
+      `INSERT INTO job_issues (
+         job_id, vehicle_id, driver_id, client_organisation_id,
+         hh_stock_item_id, hh_stock_item_name, barcode, component_key,
+         category, source_module, severity, summary, description,
+         reported_by, watchers
+       ) VALUES (
+         $1, $2, $3, $4,
+         $5, $6, $7, $8,
+         $9, $10, $11, $12, $13,
+         $14, '{}'::uuid[]
+       )
+       RETURNING id`,
+      [
+        body.job_id ?? null, body.vehicle_id, body.driver_id ?? null, null,
+        body.hh_stock_item_id ?? null, body.hh_stock_item_name ?? null, body.barcode ?? null, body.component_key,
+        body.category, body.source_module, body.severity, body.summary, body.description ?? null,
+        req.user!.id,
+      ]
+    );
+
+    const issueId = insert.rows[0].id;
+    await logEvent(issueId, req.user!.id, 'created', body.summary, {
+      category: body.category, severity: body.severity, source_module: body.source_module,
+      component_key: body.component_key,
+    });
+
+    const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
+    res.status(201).json({ data: full.rows[0], was_existing: false });
+  } catch (err) {
+    console.error('Auto-create issue error:', err);
+    res.status(500).json({ error: 'Failed to auto-create issue' });
+  }
+});
+
 // ── Files ────────────────────────────────────────────────────────────────
 //
 // Issue-level files (job_issue_files table). DISTINCT from interaction

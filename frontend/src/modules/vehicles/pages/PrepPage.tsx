@@ -15,8 +15,11 @@ import { fetchLastPrepSession, extractTyreValues } from '../lib/prep-history'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { uploadAllPhotos } from '../lib/photo-upload'
 import { withRetry } from '../lib/retry'
-import { saveIssue } from '../lib/issues-r2-api'
-import { mapPrepItemToCategory, mapPrepItemToComponent, mapMondaySeverityToIssueSeverity } from '../lib/issue-mapping'
+import {
+  mapPrepItemToComponentKey,
+  mapPrepItemToOpCategory,
+  mapSeverityToOpSeverity,
+} from '../lib/op-issue-mapping'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import { getStock } from '../lib/stock-api'
 import { recordPrepConsumption } from '../lib/stock-api'
@@ -411,50 +414,64 @@ export function PrepPage() {
       }
     }
 
-    // Step 3: Create Issues for each flagged item (Monday.com + R2)
+    // Step 3: Create / re-flag issues for each flagged prep item.
+    //
+    // Repointed from the legacy R2-blob saveIssue path to the OP
+    // job_issues table via POST /api/problems/auto-create — which
+    // dedups against (vehicle_id, component_key, status NOT IN terminal)
+    // and appends a `reflagged` event to the existing open issue if
+    // present, instead of breeding duplicates ("Fire extinguisher:
+    // Problem" × 5 on the same van).
     if (flaggedItems.length > 0) {
-      setUploadProgress('Creating issues...')
+      setUploadProgress('Logging issues...')
+      let createdCount = 0
+      let reflaggedCount = 0
+      let failedCount = 0
+      const mileageInt = mileage ? parseInt(mileage, 10) : null
+
       for (const flagged of flaggedItems) {
-        // R2 (source of truth for the issues tracker)
         try {
-          const r2Issue = {
-            id: crypto.randomUUID(),
-            vehicleReg: selectedVehicle.reg,
-            vehicleId: selectedVehicle.id,
-            vehicleMake: selectedVehicle.make,
-            vehicleModel: selectedVehicle.model,
-            vehicleType: selectedVehicle.simpleType || selectedVehicle.vehicleType,
-            mileageAtReport: mileage ? parseInt(mileage, 10) : null,
-            hireHopJob: null,
-            category: mapPrepItemToCategory(flagged.itemName),
-            component: mapPrepItemToComponent(flagged.itemName),
-            severity: mapMondaySeverityToIssueSeverity(flagged.severity),
-            summary: `${flagged.itemName}: ${flagged.selectedOption}`,
-            status: 'Open' as const,
-            reportedBy: preparedBy || 'Prep',
-            reportedAt: new Date().toISOString(),
-            reportedDuring: 'Prep' as const,
-            resolvedAt: null,
-            photos: [] as string[],
-            activity: [{
-              id: crypto.randomUUID(),
-              timestamp: new Date().toISOString(),
-              author: preparedBy || 'Prep',
-              action: 'Reported',
-              note: flagged.description || '',
-            }],
+          const resp = await apiFetch('/api/problems/auto-create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vehicle_id: selectedVehicle.id,
+              component_key: mapPrepItemToComponentKey(flagged.itemName),
+              category: mapPrepItemToOpCategory(flagged.itemName),
+              source_module: 'vehicle',
+              severity: mapSeverityToOpSeverity(flagged.severity),
+              summary: `${flagged.itemName}: ${flagged.selectedOption}`,
+              description: flagged.description || null,
+              reflag_context: {
+                source: 'prep',
+                mileage: mileageInt,
+                reported_by_name: preparedBy || null,
+                note: flagged.description || null,
+              },
+            }),
+          })
+          if (!resp.ok) {
+            failedCount++
+            console.warn(`[prep] auto-create failed for ${flagged.itemName}:`, resp.status)
+            continue
           }
-          await saveIssue(r2Issue).catch(err =>
-            console.warn(`[prep] Failed to save R2 issue for ${flagged.itemName}:`, err),
-          )
+          const body = await resp.json() as { was_existing?: boolean }
+          if (body.was_existing) reflaggedCount++
+          else createdCount++
         } catch (err) {
-          console.warn(`[prep] Failed to build R2 issue for ${flagged.itemName}:`, err)
+          failedCount++
+          console.warn(`[prep] auto-create error for ${flagged.itemName}:`, err)
         }
       }
+
+      const parts: string[] = []
+      if (createdCount) parts.push(`${createdCount} new`)
+      if (reflaggedCount) parts.push(`${reflaggedCount} re-flagged`)
+      if (failedCount) parts.push(`${failedCount} failed`)
       results.push({
-        label: 'Issues created',
-        success: true,
-        detail: `${flaggedItems.length} issue${flaggedItems.length !== 1 ? 's' : ''} logged`,
+        label: 'Issues logged',
+        success: failedCount === 0,
+        detail: parts.join(' · ') || 'No issues logged',
       })
     }
 
