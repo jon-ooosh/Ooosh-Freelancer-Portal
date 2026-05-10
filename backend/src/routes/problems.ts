@@ -37,7 +37,11 @@ const VALID_RESOLUTION = ['claim_excess', 'charge_client', 'write_off', 'replace
 const VALID_SURFACES = ['vehicle_check_in', 'next_hire', 'next_book_out', 'job_close_out'] as const;
 
 const createSchema = z.object({
-  job_id: z.string().uuid(),
+  // job_id is now optional (migration 081). Vehicle-only issues — prep
+  // flags between hires — have no active job. Validation below enforces
+  // "at least one of job_id or vehicle_id must be set" to match the
+  // job_issues_anchor_check DB constraint.
+  job_id: z.string().uuid().optional().nullable(),
   category: z.enum(VALID_CATEGORIES),
   source_module: z.enum(VALID_SOURCES).default('manual'),
   severity: z.enum(VALID_SEVERITY).default('normal'),
@@ -51,12 +55,20 @@ const createSchema = z.object({
   hh_stock_item_id: z.number().int().optional().nullable(),
   hh_stock_item_name: z.string().max(255).optional().nullable(),
   barcode: z.string().max(100).optional().nullable(),
+  // Stable identifier for "the same thing" — used by the auto-create
+  // dedup helper (find-or-append) to recognise recurring problems.
+  // Prep checklist items have stable IDs (e.g. fire_extinguisher).
+  // Manual entry / check-in damage with no checklist context can omit.
+  component_key: z.string().max(100).optional().nullable(),
   // Behaviour
   due_date: z.string().optional().nullable(),
   surface_on: z.enum(VALID_SURFACES).optional().nullable(),
   watchers: z.array(z.string().uuid()).optional(),
   assigned_to: z.string().uuid().optional().nullable(),
-});
+}).refine(
+  (data) => Boolean(data.job_id) || Boolean(data.vehicle_id),
+  { message: 'At least one of job_id or vehicle_id is required', path: ['job_id'] }
+);
 
 const updateSchema = z.object({
   status: z.enum(VALID_STATUSES).optional(),
@@ -64,7 +76,9 @@ const updateSchema = z.object({
   severity: z.enum(VALID_SEVERITY).optional(),
   summary: z.string().trim().min(2).max(255).optional(),
   description: z.string().trim().max(10000).optional().nullable(),
-  // Anchors editable
+  // Anchors editable. job_id can be set on a vehicle-only issue when
+  // a hire surfaces it (staff manually links from IssueDetailPage).
+  job_id: z.string().uuid().optional().nullable(),
   vehicle_id: z.string().uuid().optional().nullable(),
   driver_id: z.string().uuid().optional().nullable(),
   person_id: z.string().uuid().optional().nullable(),
@@ -72,6 +86,7 @@ const updateSchema = z.object({
   hh_stock_item_id: z.number().int().optional().nullable(),
   hh_stock_item_name: z.string().max(255).optional().nullable(),
   barcode: z.string().max(100).optional().nullable(),
+  component_key: z.string().max(100).optional().nullable(),
   // Workflow
   assigned_to: z.string().uuid().optional().nullable(),
   due_date: z.string().optional().nullable(),
@@ -106,6 +121,7 @@ async function logEvent(
 const ISSUE_SELECT = `
   ji.id, ji.job_id, ji.vehicle_id, ji.driver_id, ji.person_id,
   ji.client_organisation_id, ji.hh_stock_item_id, ji.hh_stock_item_name, ji.barcode,
+  ji.component_key,
   ji.category, ji.source_module, ji.severity, ji.status, ji.resolution_path,
   ji.summary, ji.description,
   ji.reported_by, ji.assigned_to, ji.watchers,
@@ -238,32 +254,38 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
   try {
     const body = req.body as z.infer<typeof createSchema>;
 
-    const job = await query(
-      `SELECT id, client_id FROM jobs WHERE id = $1 AND is_deleted = false`,
-      [body.job_id]
-    );
-    if (job.rowCount === 0) return res.status(404).json({ error: 'Job not found' });
+    // job_id is optional (vehicle-only issues). When supplied, validate it
+    // and use its client_id as a default for client_organisation_id. When
+    // omitted, the issue must be vehicle-anchored — refine() on the schema
+    // already enforced that; the DB CHECK constraint is the belt-and-braces.
+    let clientOrgId: string | null = body.client_organisation_id ?? null;
+    if (body.job_id) {
+      const job = await query(
+        `SELECT id, client_id FROM jobs WHERE id = $1 AND is_deleted = false`,
+        [body.job_id]
+      );
+      if (job.rowCount === 0) return res.status(404).json({ error: 'Job not found' });
+      clientOrgId = body.client_organisation_id ?? job.rows[0].client_id ?? null;
+    }
 
-    // Default the client org to the job's client_id if the caller didn't supply one.
-    const clientOrgId = body.client_organisation_id ?? job.rows[0].client_id ?? null;
     const watchers = body.watchers ?? [];
 
     const insert = await query(
       `INSERT INTO job_issues (
          job_id, vehicle_id, driver_id, person_id, client_organisation_id,
-         hh_stock_item_id, hh_stock_item_name, barcode,
+         hh_stock_item_id, hh_stock_item_name, barcode, component_key,
          category, source_module, severity, summary, description,
          reported_by, assigned_to, watchers, due_date, surface_on
        ) VALUES (
          $1, $2, $3, $4, $5,
-         $6, $7, $8,
-         $9, $10, $11, $12, $13,
-         $14, $15, $16, $17, $18
+         $6, $7, $8, $9,
+         $10, $11, $12, $13, $14,
+         $15, $16, $17, $18, $19
        )
        RETURNING id`,
       [
-        body.job_id, body.vehicle_id ?? null, body.driver_id ?? null, body.person_id ?? null, clientOrgId,
-        body.hh_stock_item_id ?? null, body.hh_stock_item_name ?? null, body.barcode ?? null,
+        body.job_id ?? null, body.vehicle_id ?? null, body.driver_id ?? null, body.person_id ?? null, clientOrgId,
+        body.hh_stock_item_id ?? null, body.hh_stock_item_name ?? null, body.barcode ?? null, body.component_key ?? null,
         body.category, body.source_module, body.severity, body.summary, body.description ?? null,
         req.user!.id, body.assigned_to ?? null, watchers, body.due_date ?? null, body.surface_on ?? null,
       ]
@@ -276,14 +298,17 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
     });
 
     // Activity Timeline echo so the issue shows on the job's timeline.
-    await query(
-      `INSERT INTO interactions (type, content, job_id, created_by)
-       VALUES ('note', $1, $2, $3)`,
-      [
-        `⚠️ Issue logged (${body.category}${body.severity === 'urgent' ? ', urgent' : ''}): ${body.summary}`,
-        body.job_id, req.user!.id,
-      ]
-    );
+    // Skipped for vehicle-only issues (no job to anchor against).
+    if (body.job_id) {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by)
+         VALUES ('note', $1, $2, $3)`,
+        [
+          `⚠️ Issue logged (${body.category}${body.severity === 'urgent' ? ', urgent' : ''}): ${body.summary}`,
+          body.job_id, req.user!.id,
+        ]
+      );
+    }
 
     // Fetch the full row for the response (with all the joined names).
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
