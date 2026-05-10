@@ -47,6 +47,12 @@ export interface SendEmailOptions {
   /** Optional HTML snippet prepended to the body (after the test-mode banner if in test mode).
    *  Used by senders to inject contextual banners like "no client email on file — redirected to info@". */
   prependBanner?: string;
+  /** Optional pre-rendered HTML body. Bypasses template body + variable
+   *  substitution (which HTML-escapes values). Use this when the caller
+   *  wants to render the body itself — e.g. the pre-hire briefing builds
+   *  HTML from structured data. Template registration still controls
+   *  variant + preheader + EMAIL_LIVE_TEMPLATES allowlist + audit log. */
+  bodyHtmlOverride?: string;
 }
 
 export interface SendEmailResult {
@@ -174,7 +180,9 @@ class EmailService {
 
     // Build subject and body from template
     const subject = options.subjectOverride || substituteVariables(template.subject, variables);
-    let bodyHtml = substituteVariables(template.body, variables);
+    let bodyHtml = options.bodyHtmlOverride !== undefined
+      ? options.bodyHtmlOverride
+      : substituteVariables(template.body, variables);
 
     // Decide whether THIS template is going live or being redirected.
     // EMAIL_MODE=live → always live. EMAIL_MODE=test → live only if the

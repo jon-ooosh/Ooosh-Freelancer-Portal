@@ -73,6 +73,22 @@ const templates: Record<string, EmailTemplate> = {
 
   // ── Internal / operational templates ───────────────────────────────────
 
+  /**
+   * Pre-hire briefing — internal email to info@ for each confirmed job
+   * approaching its hire date. Sender renders the full HTML body via
+   * `renderBriefingHtml(briefing)` from email-templates/pre-hire-briefing.ts
+   * and passes it as `bodyHtmlOverride` on the send call (bypasses
+   * variable substitution which would HTML-escape the rendered HTML).
+   * Subject is computed by `buildSubject()` and passed via
+   * `subjectOverride`. Template registration here exists for variant +
+   * EMAIL_LIVE_TEMPLATES allowlist semantics + audit logging.
+   */
+  pre_hire_briefing: {
+    variant: 'internal',
+    subject: 'Pre-Hire Briefing',
+    body: `<p>This template should be sent with bodyHtmlOverride. If you're seeing this, the caller forgot.</p>`,
+  },
+
   compliance_reminder: {
     variant: 'internal',
     subject: '{{dueType}} {{urgency}} — {{vehicleReg}}',

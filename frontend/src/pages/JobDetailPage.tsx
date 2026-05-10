@@ -1158,6 +1158,23 @@ export default function JobDetailPage() {
   const [syncingDatesToHH, setSyncingDatesToHH] = useState(false);
   const [hhDatesSyncSuccess, setHhDatesSyncSuccess] = useState(false);
 
+  // ── Pre-Hire Briefing manual send ───────────────────────────────────────
+  const [briefingSending, setBriefingSending] = useState(false);
+  async function sendPreHireBriefing() {
+    if (!job) return;
+    setBriefingSending(true);
+    try {
+      const res = await api.post<{ sent_to: string; subject: string }>(
+        `/pre-hire-briefing/${job.id}/send`, {}
+      );
+      alert(`Pre-hire briefing sent to ${res.sent_to}.\n\nSubject: ${res.subject}`);
+    } catch (err: any) {
+      alert(`Failed to send briefing: ${err?.message || 'unknown error'}`);
+    } finally {
+      setBriefingSending(false);
+    }
+  }
+
   // ── HH Sync & Derived Requirements ──────────────────────────────────────
   const [hhSyncing, setHhSyncing] = useState(false);
   const [hhSyncResult, setHhSyncResult] = useState<{
@@ -3203,6 +3220,23 @@ export default function JobDetailPage() {
               >
                 Open in HireHop &rarr;
               </a>
+            )}
+            {/* Pre-Hire Briefing — manual send to info@. Admin/manager only.
+                 Hidden for lost/cancelled/completed jobs (briefing is useless
+                 there). The same content goes out automatically via the daily
+                 09:55 cron for confirmed jobs at T-3d / T-5d / T-1d. */}
+            {(user?.role === 'admin' || user?.role === 'manager')
+              && job.pipeline_status !== 'lost'
+              && job.pipeline_status !== 'cancelled'
+              && job.pipeline_status !== 'completed' && (
+              <button
+                onClick={sendPreHireBriefing}
+                disabled={briefingSending}
+                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
+                title="Send a pre-hire briefing email for this job to info@oooshtours.co.uk now"
+              >
+                {briefingSending ? 'Sending…' : '✉ Pre-Hire Briefing'}
+              </button>
             )}
           </div>
         </div>
