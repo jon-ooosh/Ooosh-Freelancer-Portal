@@ -2395,6 +2395,51 @@ for (const userId of targets.bellUserIds) {
 
 **Escalation duplicate-prevention pattern:** when both a direct email AND a bell fire for the same event, set `email_sent_at = NOW()` on the bell INSERT. The 15-min escalation scheduler skips notifications where `email_sent_at IS NOT NULL`, so Will doesn't get the same content twice.
 
+### Portal Notification Preferences ✅ COMPLETE (May 2026)
+
+**File:** `backend/src/services/portal-notification-prefs.ts`
+
+Single source of truth for "should this informational portal notification be sent?". The freelancer/staff D&C portal splits notifications into two classes with distinct mute behaviour:
+
+| Class | Examples | Respects mute? |
+|---|---|---|
+| **Informational** | `freelancer_assignment` (new allocation), `job_change_notification` (date / time / venue change) | Yes — global mute (`people.portal_notifications_paused_until`) AND per-job mute (`people.portal_muted_quote_ids`) |
+| **Accountability** | completion-chaser ladder (2h / 6h / 14h), staff L3 escalation | **No — always sends, by design** |
+
+**Why two classes:** the staff shared account (info@) keeps its global mute set permanently to suppress new-allocation/time-change spam (D&C is a high-volume internal flow). But "you haven't marked the job complete yet" chases MUST still land — that's the accountability loop. A single all-or-nothing mute couldn't do both. Same applies to freelancers going on holiday — they can mute informational comms but completion accountability survives.
+
+**Usage pattern:**
+```typescript
+import { shouldSuppressInformational } from '../services/portal-notification-prefs';
+
+const { suppress } = await shouldSuppressInformational(personId, String(quoteId));
+if (suppress) return;  // or `continue` inside a loop
+```
+
+**The rule:** every NEW informational sender to the portal MUST call this helper before sending. Accountability senders MUST NOT — chases bypass mute by design. The helper logs every suppression to console for debugging (`[notify] suppressed for person {id}: {reason}`).
+
+**Wired into:**
+- `routes/quotes.ts` PUT `/:id` — `job_change_notification` (refactored from inline mute check)
+- `routes/quotes.ts` PATCH `/:id/status` — `freelancer_assignment` on draft → confirmed (also sets `qa.confirmed_at` on suppression so a future re-confirm doesn't replay if mute later expires)
+- `routes/quotes.ts` POST `/:id/assignments` — `freelancer_assignment` on new assignment to confirmed quote
+
+**NOT wired into (deliberately):**
+- `services/completion-chaser.ts` — accountability class, always fires. Also dropped its `qa.is_ooosh_crew = false` filter so info@ assignments get chased on the same ladder. L3 staff escalation is suppressed when chasee email IS info@oooshtours.co.uk (avoids self-CC since L1+L2+L3 already landed there).
+- `src/app/api/webhooks/monday/job-updated/route.ts` — Next.js, Monday-shaped data (comma-separated string, not UUID array), on the deprecation path under `PORTAL_MONDAY_FALLBACK_ENABLED`. Refactoring would create new cross-service coupling that's about to be torn down.
+
+**Storage** (migration 067):
+- `people.portal_notifications_paused_until` — TIMESTAMPTZ, future = muted, year-2125 sentinel = "indefinite". info@ seeded muted indefinitely.
+- `people.portal_muted_quote_ids` — UUID[], per-job mutes for "stop bugging me about THIS specific hire I already know about".
+
+**UI surfaces:**
+- **Portal banner:** `src/components/MuteBanner.tsx` mounted in root portal layout (`src/app/layout.tsx`). Sticky red strip across top of every authenticated page with inline Resume button. Mobile-first (44px tap targets). Hidden on 401 / no mute / fetch error.
+- **Portal settings:** `src/app/settings/page.tsx` — 4 mute durations (end of today / 7 days / specific date / indefinite), per-job mutes managed from each job's detail page.
+- **Staff address book:** `frontend/src/pages/PersonDetailPage.tsx` — small amber 🔕 chip in the freelancer details block when `portal_notifications_paused_until` is in the future. Read-only context for staff.
+
+**Watch list:**
+- Staff report "stopped getting allocation emails" → check `portal_notifications_paused_until` on their `people` row. Pre-May-2026, `freelancer_assignment` ignored mute entirely; the May 2026 fix correctly stops sending when muted.
+- Staff report "didn't get a completion chase" → NOT mute-related. Check `qa.is_ooosh_crew`, `qa.status`, `q.ops_status`, `q.completion_reminder_level` and the `completion-chaser.ts` query.
+
 ### Hire Date Resolution
 
 **Canonical hire-window source for PDFs / emails / overlap checks:**
