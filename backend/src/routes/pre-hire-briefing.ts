@@ -37,8 +37,9 @@ router.get('/:jobId', async (req: AuthRequest, res: Response) => {
     }
     res.json({ data: briefing });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     console.error('[pre-hire-briefing] build failed:', err);
-    res.status(500).json({ error: 'Failed to build briefing' });
+    res.status(500).json({ error: `Failed to build briefing: ${msg}` });
   }
 });
 
@@ -70,8 +71,9 @@ router.post('/:jobId/send', async (req: AuthRequest, res: Response) => {
       message_id: result.messageId,
     });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     console.error('[pre-hire-briefing] send failed:', err);
-    res.status(500).json({ error: 'Failed to send briefing' });
+    res.status(500).json({ error: `Failed to send briefing: ${msg}` });
   }
 });
 
@@ -82,8 +84,9 @@ router.get('/_debug/eligible', async (_req: AuthRequest, res: Response) => {
     const eligible = await findEligibleJobs();
     res.json({ data: eligible });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     console.error('[pre-hire-briefing] eligible lookup failed:', err);
-    res.status(500).json({ error: 'Failed to list eligible jobs' });
+    res.status(500).json({ error: `Failed to list eligible jobs: ${msg}` });
   }
 });
 

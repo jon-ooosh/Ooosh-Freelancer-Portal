@@ -1158,7 +1158,9 @@ export default function JobDetailPage() {
   const [syncingDatesToHH, setSyncingDatesToHH] = useState(false);
   const [hhDatesSyncSuccess, setHhDatesSyncSuccess] = useState(false);
 
-  // ── Pre-Hire Briefing manual send ───────────────────────────────────────
+  // ── Pre-Hire Review manual send ─────────────────────────────────────────
+  // (API path stays as /pre-hire-briefing for stability; UI label is the
+  // user-facing name.)
   const [briefingSending, setBriefingSending] = useState(false);
   async function sendPreHireBriefing() {
     if (!job) return;
@@ -1167,9 +1169,9 @@ export default function JobDetailPage() {
       const res = await api.post<{ sent_to: string; subject: string }>(
         `/pre-hire-briefing/${job.id}/send`, {}
       );
-      alert(`Pre-hire briefing sent to ${res.sent_to}.\n\nSubject: ${res.subject}`);
+      alert(`Pre-Hire Review sent to ${res.sent_to}.\n\nSubject: ${res.subject}`);
     } catch (err: any) {
-      alert(`Failed to send briefing: ${err?.message || 'unknown error'}`);
+      alert(`Failed to send review: ${err?.message || 'unknown error'}`);
     } finally {
       setBriefingSending(false);
     }
@@ -3221,8 +3223,8 @@ export default function JobDetailPage() {
                 Open in HireHop &rarr;
               </a>
             )}
-            {/* Pre-Hire Briefing — manual send to info@. Admin/manager only.
-                 Hidden for lost/cancelled/completed jobs (briefing is useless
+            {/* Pre-Hire Review — manual send to info@. Admin/manager only.
+                 Hidden for lost/cancelled/completed jobs (review is useless
                  there). The same content goes out automatically via the daily
                  09:55 cron for confirmed jobs at T-3d / T-5d / T-1d. */}
             {(user?.role === 'admin' || user?.role === 'manager')
@@ -3233,9 +3235,9 @@ export default function JobDetailPage() {
                 onClick={sendPreHireBriefing}
                 disabled={briefingSending}
                 className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
-                title="Send a pre-hire briefing email for this job to info@oooshtours.co.uk now"
+                title="Send a pre-hire review email for this job to info@oooshtours.co.uk now"
               >
-                {briefingSending ? 'Sending…' : '✉ Pre-Hire Briefing'}
+                {briefingSending ? 'Sending…' : '✉ Pre-Hire Review'}
               </button>
             )}
           </div>
