@@ -370,6 +370,13 @@ export default function IssueDetailPage() {
               </div>
             </div>
           </div>
+
+          {/* ── Files attached to this issue ── */}
+          <IssueFilesCard
+            issueId={issue.id}
+            files={issue.files}
+            onChange={load}
+          />
         </div>
 
         {/* ── Sidebar (right, 1/3) ── */}
@@ -574,6 +581,136 @@ function EventRow({ e }: { e: IssueEvent }) {
         <div className="text-[10px] text-gray-400 mt-0.5">
           {e.created_by_name || 'system'} · {new Date(e.created_at).toLocaleString('en-GB')}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Issue-level files: documents and photos attached to the issue itself
+ * (e.g. contractor quote PDF, insurer letter, photos taken outside a
+ * comment). DISTINCT from interaction attachments — those live with the
+ * specific comment they were posted with and render via <ThreadView>.
+ *
+ * The download link routes through /api/files/download with the R2 key so
+ * the JWT travels with the request — direct R2 URLs would 401.
+ */
+function IssueFilesCard({
+  issueId, files, onChange,
+}: {
+  issueId: string;
+  files: IssueFile[];
+  onChange: () => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [comment, setComment] = useState('');
+
+  async function handleUpload(file: File) {
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      if (comment.trim()) fd.append('comment', comment.trim());
+      await api.upload(`/problems/${issueId}/files`, fd);
+      setComment('');
+      onChange();
+    } catch (err) {
+      console.error('File upload failed:', err);
+      alert('File upload failed. Please try again.');
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function handleDelete(fileId: string, filename: string | null) {
+    if (!confirm(`Delete ${filename || 'this file'}?`)) return;
+    try {
+      await api.delete(`/problems/${issueId}/files/${fileId}`);
+      onChange();
+    } catch (err) {
+      console.error('File delete failed:', err);
+    }
+  }
+
+  async function viewFile(r2Key: string, filename: string | null) {
+    // Fetch the file as a blob via the authenticated download endpoint, then
+    // open it via a generated object URL — same pattern as the messaging
+    // image lightbox. Plain <a href=/api/files/download> 401s because the
+    // browser doesn't carry the JWT on direct navigation.
+    try {
+      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(r2Key)}`);
+      void filename;
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      // Revoke after a delay so the new tab has time to load.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      console.error('File view failed:', err);
+    }
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-4">
+      <h3 className="text-sm font-semibold text-gray-900 mb-3">
+        Files <span className="text-xs font-normal text-gray-400">({files.length})</span>
+      </h3>
+
+      {files.length > 0 && (
+        <div className="space-y-1.5 mb-3">
+          {files.map(f => (
+            <div key={f.id} className="flex items-center gap-2 text-xs p-2 bg-gray-50 rounded border border-gray-100">
+              <span className="flex-shrink-0">
+                {f.file_type === 'photo' ? '🖼️' : f.file_type === 'pdf' ? '📄' : '📎'}
+              </span>
+              <div className="min-w-0 flex-1">
+                <button
+                  onClick={() => viewFile(f.r2_key, f.filename)}
+                  className="font-medium text-gray-900 hover:text-ooosh-700 hover:underline truncate block w-full text-left"
+                >
+                  {f.filename || 'Untitled'}
+                </button>
+                {f.comment && (
+                  <div className="text-[10px] text-gray-600 mt-0.5 italic">{f.comment}</div>
+                )}
+                <div className="text-[10px] text-gray-400 mt-0.5">
+                  {f.uploaded_by_name || 'unknown'} · {new Date(f.uploaded_at).toLocaleString('en-GB')}
+                </div>
+              </div>
+              <button
+                onClick={() => handleDelete(f.id, f.filename)}
+                className="flex-shrink-0 text-gray-400 hover:text-red-600 text-sm"
+                aria-label="Delete file"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="pt-3 border-t border-gray-100 space-y-2">
+        <input
+          type="text"
+          value={comment}
+          onChange={e => setComment(e.target.value)}
+          placeholder="Comment for next upload (optional)"
+          className="w-full border border-gray-300 rounded px-2 py-1 text-xs"
+        />
+        <label className={`block text-xs text-center py-2 border-2 border-dashed border-gray-300 rounded cursor-pointer ${
+          uploading ? 'opacity-50' : 'hover:border-ooosh-300 hover:bg-ooosh-50/30'
+        }`}>
+          {uploading ? 'Uploading…' : '📎 Upload file (PDF, photo, etc.)'}
+          <input
+            type="file"
+            className="hidden"
+            disabled={uploading}
+            onChange={e => {
+              const f = e.target.files?.[0];
+              if (f) handleUpload(f);
+              e.target.value = '';
+            }}
+          />
+        </label>
       </div>
     </div>
   );

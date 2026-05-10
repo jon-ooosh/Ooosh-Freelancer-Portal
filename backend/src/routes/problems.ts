@@ -20,14 +20,33 @@
  * trail in job_issue_events records who did what.
  */
 import { Router, Response } from 'express';
+import multer from 'multer';
+import path from 'path';
+import { v4 as uuid } from 'uuid';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
+import { uploadToR2, deleteFromR2, isR2Configured } from '../config/r2';
 
 const router = Router();
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
+
+// Multer for issue-level file uploads (job_issue_files table — distinct
+// from interaction-level attachments which live in interactions.files
+// JSONB and are handled by /api/files/upload?attachment_only=true).
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+});
+
+function detectFileType(ext: string): 'photo' | 'pdf' | 'other' {
+  const e = ext.toLowerCase();
+  if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic'].includes(e)) return 'photo';
+  if (e === '.pdf') return 'pdf';
+  return 'other';
+}
 
 const VALID_CATEGORIES = ['damaged', 'missing', 'broken', 'dispute', 'breakdown', 'other'] as const;
 const VALID_STATUSES = ['open', 'investigating', 'awaiting_quote', 'quoted', 'actioned', 'resolved', 'written_off', 'cancelled'] as const;
@@ -392,6 +411,92 @@ router.patch('/:id', validate(updateSchema), async (req: AuthRequest, res: Respo
   } catch (err) {
     console.error('Update issue error:', err);
     res.status(500).json({ error: 'Failed to update issue' });
+  }
+});
+
+// ── Files ────────────────────────────────────────────────────────────────
+//
+// Issue-level files (job_issue_files table). DISTINCT from interaction
+// attachments — these are documents/photos attached to the issue itself
+// (e.g. a contractor's quote PDF, an insurer letter, a damage photo
+// taken outside a comment thread). Interaction attachments handle the
+// "this comment has a photo" case.
+
+router.post('/:id/files', upload.single('file'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!isR2Configured()) {
+      return res.status(503).json({ error: 'File storage not configured' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    const issueId = req.params.id as string;
+    const exists = await query(`SELECT 1 FROM job_issues WHERE id = $1`, [issueId]);
+    if (exists.rowCount === 0) return res.status(404).json({ error: 'Issue not found' });
+
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const fileId = uuid();
+    const key = `files/job_issues/${issueId}/${fileId}${ext}`;
+
+    await uploadToR2(key, req.file.buffer, req.file.mimetype);
+
+    const comment = typeof req.body.comment === 'string' ? req.body.comment.trim() : null;
+    const fileTypeOverride = typeof req.body.file_type === 'string' ? req.body.file_type.trim() : null;
+    const fileType = fileTypeOverride || detectFileType(ext);
+
+    const insert = await query(
+      `INSERT INTO job_issue_files
+         (id, issue_id, r2_key, filename, file_type, content_type, size_bytes, comment, uploaded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, r2_key, filename, file_type, content_type, size_bytes, comment, uploaded_at`,
+      [
+        fileId, issueId, key, req.file.originalname, fileType,
+        req.file.mimetype, req.file.size, comment, req.user!.id,
+      ]
+    );
+
+    await logEvent(issueId, req.user!.id, 'file_added', req.file.originalname, {
+      file_id: fileId, file_type: fileType, size_bytes: req.file.size,
+    });
+    await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+
+    res.status(201).json({ data: insert.rows[0] });
+  } catch (err) {
+    console.error('Issue file upload error:', err);
+    res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+router.delete('/:id/files/:fileId', async (req: AuthRequest, res: Response) => {
+  try {
+    const issueId = req.params.id as string;
+    const fileId = req.params.fileId as string;
+
+    const row = await query(
+      `SELECT r2_key, filename FROM job_issue_files WHERE id = $1 AND issue_id = $2`,
+      [fileId, issueId]
+    );
+    if (row.rowCount === 0) return res.status(404).json({ error: 'File not found' });
+
+    await deleteFromR2(row.rows[0].r2_key).catch(err => {
+      // Best-effort R2 cleanup. If R2 fails, log but still remove the DB row
+      // — the alternative leaves an orphan row pointing at a key that may
+      // or may not exist, which is worse.
+      console.error('R2 delete failed (continuing):', err);
+    });
+
+    await query(`DELETE FROM job_issue_files WHERE id = $1`, [fileId]);
+
+    await logEvent(issueId, req.user!.id, 'file_removed', row.rows[0].filename, {
+      file_id: fileId,
+    });
+    await query(`UPDATE job_issues SET updated_at = NOW() WHERE id = $1`, [issueId]);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Issue file delete error:', err);
+    res.status(500).json({ error: 'Failed to delete file' });
   }
 });
 
