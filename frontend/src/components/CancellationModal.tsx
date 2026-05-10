@@ -68,6 +68,7 @@ interface Props {
     breakdown: string;
     cancelled_at?: string;
     cancellation_outstanding_balance?: number;
+    send_client_email?: boolean;
     keep_requirement_ids?: string[];
   }) => void;
   onCancel: () => void;
@@ -100,6 +101,10 @@ export default function CancellationModal({
   const [keepRequirementIds, setKeepRequirementIds] = useState<Set<string>>(new Set());
   const [cancelledOn, setCancelledOn] = useState<string>(isoDate(new Date()));
   const [confirmText, setConfirmText] = useState('');
+  // Default: send the email. The opt-out is here for the cases where
+  // staff have already had the conversation by phone / out-of-band and
+  // a templated confirmation would be redundant or odd.
+  const [sendClientEmail, setSendClientEmail] = useState(true);
 
   const today = isoDate(new Date());
   const minDate = isoDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
@@ -208,6 +213,7 @@ export default function CancellationModal({
       transport_charges: transportCharges,
       breakdown: calcResult?.breakdown || `Manual fee: ${fmtMoney(effectiveFee)}`,
       cancelled_at: cancelledOn !== today ? `${cancelledOn}T12:00:00Z` : undefined,
+      send_client_email: sendClientEmail,
       keep_requirement_ids: keepRequirementIds.size > 0 ? Array.from(keepRequirementIds) : undefined,
     });
   };
@@ -471,36 +477,58 @@ export default function CancellationModal({
                 onChange={setKeepRequirementIds}
               />
 
-              {/* Email recipient preview */}
+              {/* Client email opt-out + recipient preview. Crew emails fire
+                  regardless — they're operational, not customer-comms. */}
               <div className="border border-gray-200 rounded-lg p-3 text-sm">
-                <button
-                  type="button"
-                  onClick={() => setShowRecipients(s => !s)}
-                  className="w-full flex items-center justify-between text-gray-700 hover:text-gray-900"
-                >
-                  <span className="font-medium">
-                    Client cancellation email — {contacts.length} recipient{contacts.length !== 1 ? 's' : ''}
-                    {contacts.length === 0 && ' (info@ fallback will be used)'}
-                  </span>
-                  <span className="text-xs text-gray-500">{showRecipients ? 'Hide' : 'Show'}</span>
-                </button>
-                {showRecipients && (
-                  <ul className="mt-2 space-y-0.5 text-xs text-gray-600">
-                    {contacts.length === 0 ? (
-                      <li className="text-amber-700">No client contacts on file — email will be routed to info@oooshtours.co.uk with an amber banner.</li>
+                <label className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sendClientEmail}
+                    onChange={e => setSendClientEmail(e.target.checked)}
+                    className="mt-0.5 rounded border-gray-300"
+                  />
+                  <span className="flex-1">
+                    <span className="font-medium text-gray-700">Send cancellation email to client</span>
+                    {sendClientEmail ? (
+                      <span className="block text-xs text-gray-500 mt-0.5">
+                        {contacts.length} recipient{contacts.length !== 1 ? 's' : ''}
+                        {contacts.length === 0 && ' — info@ fallback will be used'}
+                      </span>
                     ) : (
-                      contacts.map((c, i) => (
-                        <li key={i}>
-                          {c.name} &lt;{c.email}&gt;
-                          {c.source && <span className="text-gray-400 ml-1">· {c.source}</span>}
-                        </li>
-                      ))
+                      <span className="block text-xs text-amber-700 mt-0.5">
+                        Skipped — handle the client comms out-of-band.
+                      </span>
                     )}
-                  </ul>
+                  </span>
+                </label>
+                {sendClientEmail && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setShowRecipients(s => !s)}
+                      className="mt-2 text-xs text-gray-500 hover:text-gray-700"
+                    >
+                      {showRecipients ? 'Hide recipients' : 'Show recipients'}
+                    </button>
+                    {showRecipients && (
+                      <ul className="mt-1 space-y-0.5 text-xs text-gray-600">
+                        {contacts.length === 0 ? (
+                          <li className="text-amber-700">No client contacts on file — email will be routed to info@oooshtours.co.uk with an amber banner.</li>
+                        ) : (
+                          contacts.map((c, i) => (
+                            <li key={i}>
+                              {c.name} &lt;{c.email}&gt;
+                              {c.source && <span className="text-gray-400 ml-1">· {c.source}</span>}
+                            </li>
+                          ))
+                        )}
+                      </ul>
+                    )}
+                  </>
                 )}
                 {transportCrew && transportCrew.crew.length > 0 && (
                   <p className="text-xs text-gray-500 mt-2">
-                    Plus {transportCrew.crew.filter(c => c.email).length} crew email{transportCrew.crew.filter(c => c.email).length !== 1 ? 's' : ''}.
+                    Plus {transportCrew.crew.filter(c => c.email).length} crew email{transportCrew.crew.filter(c => c.email).length !== 1 ? 's' : ''} (always sent).
                   </p>
                 )}
               </div>
