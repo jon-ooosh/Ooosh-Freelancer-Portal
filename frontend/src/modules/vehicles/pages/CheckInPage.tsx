@@ -491,7 +491,6 @@ export function CheckInPage() {
       setUploadProgress('Creating damage issues...')
       let issuesCreated = 0
       let issuesFailed = 0
-      const checkInVehicle = vehicles.find(v => v.id === form.vehicleId)
 
       // Try to capture Traccar GPS location for the damage issues
       let issueLocation: IssueLocation | null = null

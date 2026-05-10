@@ -746,7 +746,7 @@ export function PrepPage() {
 
         {/* Open issues banner */}
         <div className="px-4 pt-3">
-          <VehicleIssuesBanner vehicleReg={selectedVehicle.reg} />
+          <VehicleIssuesBanner vehicleId={selectedVehicle.id} />
         </div>
 
         {/* Validation toast */}
