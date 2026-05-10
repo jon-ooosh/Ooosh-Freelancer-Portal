@@ -136,6 +136,12 @@ const processSchema = z.object({
   // the right state (refund / all-square / outstanding) without the route
   // having to re-fetch billing.
   cancellation_outstanding_balance: z.number().min(0).optional(),
+  // Whether to email the client a cancellation confirmation. Default true.
+  // Opt-out is for cases where staff have already had the conversation
+  // out-of-band (phone / face-to-face) and the templated email would be
+  // redundant. Internal info@ alert + crew emails fire regardless — those
+  // are operational, not customer-facing.
+  send_client_email: z.boolean().optional().default(true),
   // Requirement IDs the user explicitly chose to KEEP alive past cancellation.
   // Everything else open on the job is auto-cancelled below. Kept items get
   // keep_after_close=true so background scanners still fire them. See
@@ -157,6 +163,7 @@ router.post(
         cancellation_tier, cancellation_notice_days,
         breakdown, keep_requirement_ids, cancelled_at,
         cancellation_outstanding_balance,
+        send_client_email,
       } = req.body;
 
       // Verify job exists and is in a cancellable state (confirmed+)
@@ -439,7 +446,22 @@ router.post(
       };
       const clientIntro = clientIntroByReason[cancellation_reason] || clientIntroByReason['Other'];
 
-      (async () => {
+      // Opt-out via the modal checkbox. Default true (Zod default applies).
+      // When skipped we still log a timeline note so the audit trail records
+      // the deliberate decision — not just an email that silently didn't send.
+      if (send_client_email === false) {
+        await query(
+          `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
+           VALUES ('note', $1, $2, $3, 'cancelled')`,
+          [
+            `Client cancellation email skipped (opt-out at cancellation by ${req.user!.email}).`,
+            jobId,
+            userId,
+          ]
+        ).catch(err => console.warn('[Cancellation] Failed to log email-skip:', err));
+      }
+
+      if (send_client_email !== false) (async () => {
         try {
           const target = await resolveClientEmailTarget(jobId);
 
