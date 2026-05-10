@@ -825,14 +825,26 @@ function DocumentCategoryRow({
   }
 
   return (
-    <div className="flex items-center gap-3 py-2.5 border-b border-gray-50 last:border-0">
-      <div className="w-40 flex-shrink-0">
-        <span className="text-xs font-medium text-gray-700">{category.label}</span>
+    <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 py-3 border-b border-gray-50 last:border-0">
+      {/* Single hidden file input — both the mobile-inline and desktop-rail
+          buttons trigger it via the shared ref. */}
+      <input ref={fileInputRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.doc,.docx" />
+      <div className="sm:w-40 sm:flex-shrink-0 flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-gray-700 sm:font-medium">{category.label}</span>
+        {/* Upload button shown inline next to label on mobile, moved to the
+            right rail on desktop (see flex-shrink-0 wrapper below). */}
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          className="sm:hidden text-xs px-2.5 py-1.5 rounded border border-gray-300 text-gray-600 hover:border-ooosh-400 hover:text-ooosh-600 transition-colors disabled:opacity-50"
+        >
+          {uploading ? 'Uploading...' : latestFile ? 'Replace' : 'Upload'}
+        </button>
       </div>
       <div className="flex-1 min-w-0">
         {latestFile ? (
-          <div className="flex items-center gap-2">
-            <button onClick={() => handleDownload(latestFile)} className="text-sm text-ooosh-600 hover:text-ooosh-700 truncate" title={latestFile.name}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={() => handleDownload(latestFile)} className="text-sm text-ooosh-600 hover:text-ooosh-700 truncate max-w-[60vw] sm:max-w-none" title={latestFile.name}>
               {latestFile.name}
             </button>
             <span className="text-xs text-gray-400 whitespace-nowrap">{formatDate(latestFile.uploaded_at)}</span>
@@ -841,8 +853,8 @@ function DocumentCategoryRow({
                 +{olderFiles.length} older
               </button>
             )}
-            <button onClick={() => handleDelete(latestFile)} className="text-gray-300 hover:text-red-500 ml-1" title="Delete">
-              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <button onClick={() => handleDelete(latestFile)} className="text-gray-400 hover:text-red-500 p-1 -m-1" title="Delete" aria-label="Delete file">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
@@ -853,11 +865,11 @@ function DocumentCategoryRow({
         {showHistory && olderFiles.length > 0 && (
           <div className="mt-1.5 ml-2 space-y-1 border-l-2 border-gray-100 pl-2">
             {olderFiles.sort((a, b) => new Date(b.uploaded_at).getTime() - new Date(a.uploaded_at).getTime()).map((f, i) => (
-              <div key={i} className="flex items-center gap-2 text-xs text-gray-400">
-                <button onClick={() => handleDownload(f)} className="hover:text-ooosh-600 truncate">{f.name}</button>
+              <div key={i} className="flex items-center gap-2 text-xs text-gray-400 flex-wrap">
+                <button onClick={() => handleDownload(f)} className="hover:text-ooosh-600 truncate max-w-[55vw] sm:max-w-none">{f.name}</button>
                 <span>{formatDate(f.uploaded_at)}</span>
-                <button onClick={() => handleDelete(f)} className="hover:text-red-500">
-                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <button onClick={() => handleDelete(f)} className="hover:text-red-500 p-1 -m-1" aria-label="Delete file">
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>
                 </button>
@@ -867,12 +879,15 @@ function DocumentCategoryRow({
         )}
         {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
       </div>
-      <div className="flex-shrink-0">
-        <input ref={fileInputRef} type="file" onChange={handleUpload} className="hidden" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp,.doc,.docx" />
-        <button onClick={() => fileInputRef.current?.click()} disabled={uploading} className="text-xs px-2.5 py-1 rounded border border-gray-200 text-gray-500 hover:border-ooosh-400 hover:text-ooosh-600 transition-colors disabled:opacity-50">
-          {uploading ? 'Uploading...' : latestFile ? 'Replace' : 'Upload'}
-        </button>
-      </div>
+      {/* Desktop-only Upload button on the right rail. Mobile shows it inline
+          with the label above to keep the row compact and tap targets large. */}
+      <button
+        onClick={() => fileInputRef.current?.click()}
+        disabled={uploading}
+        className="hidden sm:inline-block flex-shrink-0 text-xs px-2.5 py-1 rounded border border-gray-200 text-gray-500 hover:border-ooosh-400 hover:text-ooosh-600 transition-colors disabled:opacity-50"
+      >
+        {uploading ? 'Uploading...' : latestFile ? 'Replace' : 'Upload'}
+      </button>
     </div>
   );
 }
@@ -1480,7 +1495,7 @@ function DetailsTab({
       </div>
 
       {/* Documents — categorised file slots */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-6">
         <h3 className="text-sm font-semibold text-gray-700 mb-4">Documents</h3>
         <div className="divide-y divide-gray-50">
           {DOCUMENT_CATEGORIES.map((cat) => (
@@ -1506,7 +1521,7 @@ function DetailsTab({
               <h4 className="text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Other Files</h4>
               <div className="space-y-1.5">
                 {uncategorised.map((file, idx) => (
-                  <div key={idx} className="flex items-center gap-2 text-sm">
+                  <div key={idx} className="flex items-center gap-2 text-sm flex-wrap">
                     <span className="text-gray-400 text-xs">{file.label || 'Unlabelled'}</span>
                     <button
                       onClick={async () => {
@@ -1517,7 +1532,7 @@ function DetailsTab({
                           setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
                         } catch { /* ignore */ }
                       }}
-                      className="text-ooosh-600 hover:text-ooosh-700 truncate"
+                      className="text-ooosh-600 hover:text-ooosh-700 truncate max-w-[60vw] sm:max-w-none"
                     >
                       {file.name}
                     </button>
