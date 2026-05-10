@@ -180,17 +180,20 @@ export async function buildBriefing(
            OR vha.job_id = $1`,
       [jobId],
     ),
-    // Drivers linked via vehicle_hire_assignments
+    // Drivers linked via vehicle_hire_assignments. Hire-form status is
+    // tracked on the assignment row itself (no separate hire_forms table):
+    // hire_form_emailed_at / hire_form_generated_at = sent, driver
+    // signature_date = received.
     query(
       `SELECT d.id, d.full_name, d.requires_referral, d.referral_status,
               d.signature_date,
               vha.status AS assignment_status,
-              fv.reg AS vehicle_reg,
-              hf.id AS hire_form_id
+              vha.hire_form_emailed_at,
+              vha.hire_form_generated_at,
+              fv.reg AS vehicle_reg
          FROM vehicle_hire_assignments vha
          JOIN drivers d ON d.id = vha.driver_id
          LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
-         LEFT JOIN hire_forms hf ON hf.assignment_id = vha.id
         WHERE vha.job_id = $1
           AND vha.status NOT IN ('cancelled', 'returned')
         ORDER BY d.full_name ASC`,
@@ -274,9 +277,12 @@ export async function buildBriefing(
 
   // ── Drivers ────────────────────────────────────────────────────────
   const drivers: BriefingDriver[] = (driversResult.rows as Array<Record<string, unknown>>).map(r => {
+    // Hire-form status precedence: signature_date wins (received).
+    // Otherwise, emailed_at or generated_at means we've at least sent
+    // them the link / PDF. Anything else = pending.
     let hire_form_status: 'received' | 'sent' | 'pending' = 'pending';
     if (r.signature_date) hire_form_status = 'received';
-    else if (r.hire_form_id) hire_form_status = 'sent';
+    else if (r.hire_form_emailed_at || r.hire_form_generated_at) hire_form_status = 'sent';
     return {
       id: r.id as string,
       name: (r.full_name as string) || 'Unknown',
