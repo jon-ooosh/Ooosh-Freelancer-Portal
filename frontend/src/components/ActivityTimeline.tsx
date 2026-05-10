@@ -625,7 +625,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
             onPaste={(e) => handlePaste(e, 'top')}
             placeholder={interactionType === 'chase' ? 'What happened on the chase?...' : `Add a ${interactionType}... (type @ to mention someone, paste a screenshot, or drop a file)`}
             rows={3}
-            className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
           />
 
           {/* @mention dropdown */}
@@ -838,7 +838,7 @@ export default function ActivityTimeline({ entityType, entityId, interactions, o
                         placeholder="Write a reply… (type @ to mention, paste a screenshot, or drop a file)"
                         rows={2}
                         autoFocus
-                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+                        className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
                       />
                       {replyShowMentions && replyFilteredUsers.length > 0 && (
                         <div className="absolute left-0 right-0 bottom-full mb-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">

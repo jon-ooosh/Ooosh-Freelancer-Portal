@@ -1,6 +1,29 @@
 # Messaging & Inbox Upgrade — Spec
 
-**Status:** Spec drafted May 2026, build not yet started.
+**Status (May 2026):**
+- **Phase A (threading) — SHIPPED.** Migration 076; `parent_interaction_id` + `attachments` on `POST /api/interactions`; `GET /api/interactions/:id/thread`; thread re-notify (low priority).
+- **Phase B (attachments + render polish) — SHIPPED.** `attachment_only=true` upload mode; `useAttachments()` hook; markdown-lite linkification.
+- **Phase C (threaded ActivityTimeline) — SHIPPED.** Nested replies, collapsed-by-default threads, inline reply composer.
+- **Phase D (Inbox thread view) — SHIPPED.** `<ThreadView>` component; "View thread" expansion replaces single-line reply.
+- **Phase E (actionable notifications) — SHIPPED.** `POST /api/notifications/:id/action` with three server kinds (`mark_chased`, `complete_requirement`, `mark_handled`).
+- **Phase F (Problems integration) — TODO, BLOCKED ON PARALLEL ISSUES WORK.** Concrete plan now in `CLAUDE.md` §Step 7 Phase F "Still TODO" subsection.
+- **Phase G (email reply ingestion) — DEFERRED.** Captured in §7 below; no plans to build until a clear pain point lands.
+
+**Beyond the original spec, also shipped:**
+- Lightweight emoji reactions (migration 077, `<Reactions>` component, curated 6-emoji palette) — no notifications fire on reactions; the lightweight "I saw it" pattern.
+- Mention emails fire at notification creation time when the recipient's pref allows (not via the 15-min escalator) — the escalator was being silently skipped because users read mentions via the bell within seconds.
+- Inbox tooling: search across title/content, sort dropdown (Priority / Newest / Oldest), default-hide acknowledged with "Show done" toggle, "Clear read" bulk-acknowledge action (scope='read' to stay safe).
+- Real-time inbox updates via the same Socket.io channel the bell uses.
+- Thread root preview rendered as a dim quote on "replied in a thread" cards.
+- Date headings on inbox list when sorted by date.
+- Smarter snooze presets (Tomorrow morning / Monday morning / 2h / 1w / 2w / pick exact moment).
+- Group-by-entity toggle (collapse adjacent same-entity rows into one card with show/hide).
+- Mute thread (migration 080, `user_muted_threads` table, per-user toggle in `<ThreadView>`). Suppresses thread re-notifies only — direct @mentions still fire.
+- Undo toast (5-second window) on Done + Clear-read; new `POST /api/notifications/:id/unacknowledge` and `/bulk-unacknowledge` endpoints.
+- Composer textarea resize handle (`resize-y` + `min-h-[64px]` on all message composers).
+
+The narrative below is the original design doc — preserved for context. Up-to-date implementation status lives in CLAUDE.md.
+
 **Owner of this doc:** the next Claude / engineer who picks this up.
 **Related:** CLAUDE.md §Step 7 (Inbox & Notification System), §Step 4 Job Issues / Problems register.
 

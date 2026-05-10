@@ -1,6 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { io, Socket } from 'socket.io-client';
 import { api } from '../services/api';
+import { useAuthStore } from '../hooks/useAuthStore';
 import ThreadView from '../components/messaging/ThreadView';
 
 type Tab = 'all' | 'mentions' | 'follow_ups' | 'system' | 'sent';
@@ -34,6 +36,13 @@ interface Notification {
   source_first_name: string | null;
   source_last_name: string | null;
   actions?: NotificationAction[];
+  // Thread context for "replied in a thread" re-notifications. Server
+  // joins back to the thread root so the inbox card can show what the
+  // conversation is about without forcing the user to expand. NULL on
+  // notifications that aren't thread-anchored.
+  thread_root_preview?: string | null;
+  thread_root_id?: string | null;
+  thread_root_author?: string | null;
 }
 
 interface SentNotification {
@@ -117,6 +126,59 @@ function formatDate(dateStr: string): string {
   });
 }
 
+// ── Date bucketing for inbox section headings ─────────────────────────────
+// Only used when sort is by date (newest/oldest). Priority sort interleaves
+// dates so headings would be confusing.
+type DateBucket = 'today' | 'yesterday' | 'this_week' | 'this_month' | 'older';
+const DATE_BUCKET_LABELS: Record<DateBucket, string> = {
+  today: 'Today',
+  yesterday: 'Yesterday',
+  this_week: 'Earlier this week',
+  this_month: 'Earlier this month',
+  older: 'Older',
+};
+
+function dateBucket(dateStr: string): DateBucket {
+  const now = new Date();
+  const d = new Date(dateStr);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diffMs = startOfToday.getTime() - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diffDays = Math.floor(diffMs / 86400000);
+  if (diffDays <= 0) return 'today';
+  if (diffDays === 1) return 'yesterday';
+  if (diffDays <= 6) return 'this_week';
+  if (diffDays <= 30) return 'this_month';
+  return 'older';
+}
+
+// ── Snooze preset helpers ─────────────────────────────────────────────────
+// Calculate concrete future timestamps for the friendly "Tomorrow morning",
+// "Monday morning" presets the user wanted. All return ISO strings so the
+// existing snooze endpoint (which expects snooze_until) takes them as-is.
+
+function nextWorkdayMorningISO(targetWeekday: number | null = null): string {
+  // Returns the next 08:00 LOCAL time that's after now. If targetWeekday is
+  // set (0=Sun..6=Sat), advances to that weekday. Otherwise just to next day.
+  const d = new Date();
+  d.setHours(8, 0, 0, 0);
+  // If 8am today is in the past, move to tomorrow.
+  if (d.getTime() <= Date.now()) d.setDate(d.getDate() + 1);
+  if (targetWeekday !== null) {
+    while (d.getDay() !== targetWeekday) {
+      d.setDate(d.getDate() + 1);
+    }
+  }
+  return d.toISOString();
+}
+
+function inHoursISO(hours: number): string {
+  return new Date(Date.now() + hours * 3600_000).toISOString();
+}
+
+function inDaysISO(days: number): string {
+  return new Date(Date.now() + days * 86400_000).toISOString();
+}
+
 type SortMode = 'priority' | 'newest' | 'oldest';
 
 export default function InboxPage() {
@@ -132,7 +194,6 @@ export default function InboxPage() {
   const [prefs, setPrefs] = useState<Preferences>({});
   const [savingPrefs, setSavingPrefs] = useState(false);
   const [snoozeId, setSnoozeId] = useState<string | null>(null);
-  const [snoozeDays, setSnoozeDays] = useState(7);
   // Search + sort + show-acknowledged controls. Acknowledged are hidden by
   // default — once dealt with, they're noise.
   const [searchQ, setSearchQ] = useState('');
@@ -140,7 +201,23 @@ export default function InboxPage() {
   const [sortMode, setSortMode] = useState<SortMode>('priority');
   const [showAcknowledged, setShowAcknowledged] = useState(false);
   const [bulkClearing, setBulkClearing] = useState(false);
+  const [groupByEntity, setGroupByEntity] = useState(false);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  // Snooze modal — accepts a free-form ISO timestamp from the new preset
+  // helpers (was previously a number-of-days only).
+  const [snoozeUntilIso, setSnoozeUntilIso] = useState<string | null>(null);
+  const [snoozeCustomDate, setSnoozeCustomDate] = useState('');
+  // Undo toast: shown for 5 seconds after Done / Clear-read so the user
+  // can revert a fat-finger tap.
+  const [undoState, setUndoState] = useState<{
+    kind: 'single' | 'bulk';
+    ids: string[];
+    label: string;
+  } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const navigate = useNavigate();
+  const user = useAuthStore((s) => s.user);
+  const socketRef = useRef<Socket | null>(null);
 
   // Debounce search input so we don't hit the API on every keystroke.
   useEffect(() => {
@@ -193,6 +270,66 @@ export default function InboxPage() {
     loadInbox(1);
   }, [tab, loadInbox]);
 
+  // Real-time inbox updates — mirrors the NotificationBell socket
+  // subscription. New mention / chase / system notifications appear at
+  // the top of the list without a manual refresh. When the user is on
+  // a filtered tab/search/page>1, we just bump the unread count in
+  // tab_counts and let them refresh manually rather than splicing a
+  // filtered item into a non-matching view.
+  useEffect(() => {
+    if (!user) return;
+
+    const socket = io(window.location.origin, {
+      path: '/socket.io',
+      transports: ['websocket', 'polling'],
+      auth: { token: useAuthStore.getState().accessToken },
+    });
+
+    socket.on('notification', (notif: Notification) => {
+      // Only splice into the visible list when:
+      //  - we're on page 1 (otherwise the pagination invariant breaks)
+      //  - no active search
+      //  - tab matches the notification's type
+      const onPageOne = page === 1;
+      const noSearch = !debouncedQ;
+      const tabMatches = (() => {
+        if (tab === 'all') return true;
+        if (tab === 'mentions') return notif.type === 'mention';
+        if (tab === 'follow_ups') return notif.type === 'follow_up';
+        if (tab === 'system') return ['compliance', 'chase_alert', 'hire_form', 'referral', 'system'].includes(notif.type);
+        return false;
+      })();
+
+      if (onPageOne && noSearch && tabMatches && tab !== 'sent') {
+        setNotifications((prev) => {
+          // Avoid double-insert if echo arrives twice.
+          if (prev.some((n) => n.id === notif.id)) return prev;
+          return [notif, ...prev];
+        });
+      }
+
+      // Always bump tab counts so unread badges stay accurate even when
+      // the new item didn't splice into the visible list.
+      setTabCounts((prev) => {
+        if (!prev) return prev;
+        const next = { ...prev };
+        if (!notif.is_read) {
+          next.all_unread = String(parseInt(next.all_unread || '0') + 1);
+          if (notif.type === 'mention') {
+            next.mentions_unread = String(parseInt(next.mentions_unread || '0') + 1);
+          }
+          if (['compliance', 'chase_alert', 'hire_form', 'referral', 'system'].includes(notif.type)) {
+            next.system_unread = String(parseInt(next.system_unread || '0') + 1);
+          }
+        }
+        return next;
+      });
+    });
+
+    socketRef.current = socket;
+    return () => { socket.disconnect(); };
+  }, [user, tab, page, debouncedQ]);
+
   async function markRead(id: string) {
     try {
       await api.post('/notifications/read', { notification_ids: [id] });
@@ -207,17 +344,54 @@ export default function InboxPage() {
         ? { ...n, is_read: true, acknowledged_at: new Date().toISOString() }
         : n
       ));
+      // Surface 5-second Undo toast.
+      showUndo({ kind: 'single', ids: [id], label: 'Marked as Done' });
     } catch (err) { console.error(err); }
   }
 
-  async function snooze(id: string, days: number) {
+  async function snoozeUntil(id: string, untilIso: string) {
     try {
-      const until = new Date(Date.now() + days * 86400000).toISOString();
-      await api.post(`/notifications/${id}/snooze`, { snooze_until: until });
+      await api.post(`/notifications/${id}/snooze`, { snooze_until: untilIso });
       setNotifications(prev => prev.filter(n => n.id !== id));
       setSnoozeId(null);
+      setSnoozeUntilIso(null);
+      setSnoozeCustomDate('');
     } catch (err) { console.error(err); }
   }
+
+  // ── Undo toast lifecycle ─────────────────────────────────────────────────
+  function clearUndoTimer() {
+    if (undoTimerRef.current) {
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+  }
+  function showUndo(state: { kind: 'single' | 'bulk'; ids: string[]; label: string }) {
+    clearUndoTimer();
+    setUndoState(state);
+    undoTimerRef.current = setTimeout(() => setUndoState(null), 5000);
+  }
+  async function performUndo() {
+    if (!undoState) return;
+    const snapshot = undoState;
+    clearUndoTimer();
+    setUndoState(null);
+    try {
+      if (snapshot.kind === 'single') {
+        await api.post(`/notifications/${snapshot.ids[0]}/unacknowledge`, {});
+      } else {
+        await api.post('/notifications/bulk-unacknowledge', { ids: snapshot.ids });
+      }
+      // Refetch — both single + bulk cases need fresh data because tab
+      // counts change and items may move back into "show done"-hidden
+      // territory.
+      await loadInbox(1);
+    } catch (err) {
+      console.error('Undo failed:', err);
+    }
+  }
+
+  useEffect(() => () => clearUndoTimer(), []);
 
   async function nudge(id: string) {
     try {
@@ -303,7 +477,14 @@ export default function InboxPage() {
     try {
       const body: Record<string, unknown> = { scope: 'read' };
       if (tab !== 'all') body.tab = tab;
-      await api.post<{ cleared: number }>('/notifications/bulk-acknowledge', body);
+      const result = await api.post<{ cleared: number; ids: string[] }>('/notifications/bulk-acknowledge', body);
+      if (result.ids && result.ids.length > 0) {
+        showUndo({
+          kind: 'bulk',
+          ids: result.ids,
+          label: `${result.cleared} cleared`,
+        });
+      }
       // Refetch — simpler + safer than mutating the visible list, and
       // the tab counts need updating too.
       await loadInbox(1);
@@ -420,6 +601,18 @@ export default function InboxPage() {
             />
             Show done
           </label>
+          <label
+            className="inline-flex items-center gap-1.5 text-gray-600 cursor-pointer select-none"
+            title="Collapse adjacent notifications on the same job/person/etc. into a single card"
+          >
+            <input
+              type="checkbox"
+              checked={groupByEntity}
+              onChange={(e) => setGroupByEntity(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            Group by job
+          </label>
           <button
             onClick={bulkClear}
             disabled={bulkClearing || notifications.length === 0}
@@ -449,17 +642,131 @@ export default function InboxPage() {
         </div>
       ) : (
         <div className="space-y-2">
-          {notifications.map(notif => (
-            <NotificationRow
-              key={notif.id}
-              notif={notif}
-              onMarkRead={markRead}
-              onAcknowledge={acknowledge}
-              onSnoozeClick={(id) => { setSnoozeId(id); setSnoozeDays(7); }}
-              onNavigate={navigateToEntity}
-              onRunAction={runAction}
-            />
-          ))}
+          {(() => {
+            // Build a flat render plan that handles three features at once:
+            //   - date headings (between bucket boundaries) when sort is by date
+            //   - entity grouping (collapse adjacent same-entity rows into one card)
+            //   - the default flat render
+            // Single pass keeps the JSX readable.
+            const showDateHeadings = sortMode === 'newest' || sortMode === 'oldest';
+            const items: React.ReactNode[] = [];
+            let currentBucket: DateBucket | null = null;
+            let i = 0;
+            while (i < notifications.length) {
+              const n = notifications[i];
+
+              // Date heading?
+              if (showDateHeadings) {
+                const b = dateBucket(n.created_at);
+                if (b !== currentBucket) {
+                  currentBucket = b;
+                  items.push(
+                    <div key={`hdr-${b}-${i}`} className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 pt-2 pb-0.5">
+                      {DATE_BUCKET_LABELS[b]}
+                    </div>
+                  );
+                }
+              }
+
+              // Entity grouping: gather an adjacent run of same-entity items.
+              if (groupByEntity && n.entity_type && n.entity_id) {
+                const groupKey = `${n.entity_type}:${n.entity_id}`;
+                const runEnd = (() => {
+                  let j = i;
+                  while (
+                    j < notifications.length
+                    && notifications[j].entity_type === n.entity_type
+                    && notifications[j].entity_id === n.entity_id
+                  ) j++;
+                  return j;
+                })();
+                const run = notifications.slice(i, runEnd);
+                if (run.length > 1) {
+                  const collapsed = collapsedGroups.has(groupKey);
+                  const unreadInGroup = run.filter(r => !r.is_read).length;
+                  items.push(
+                    <div key={`grp-${groupKey}-${i}`}>
+                      <button
+                        type="button"
+                        onClick={() => setCollapsedGroups(prev => {
+                          const next = new Set(prev);
+                          if (next.has(groupKey)) next.delete(groupKey); else next.add(groupKey);
+                          return next;
+                        })}
+                        className="w-full text-left rounded-lg border border-dashed border-gray-300 bg-gray-50 hover:bg-gray-100 px-3 py-2 text-xs text-gray-600 flex items-center justify-between transition-colors"
+                      >
+                        <span>
+                          {collapsed ? '▸' : '▾'} {run.length} notifications on this {n.entity_type === 'jobs' ? 'job' : n.entity_type?.replace(/s$/, '')}
+                          {unreadInGroup > 0 && (
+                            <span className="ml-2 bg-red-100 text-red-600 text-[10px] font-bold px-1.5 py-0.5 rounded-full">
+                              {unreadInGroup} unread
+                            </span>
+                          )}
+                        </span>
+                        <span className="text-gray-400">{collapsed ? 'Show' : 'Hide'}</span>
+                      </button>
+                      {!collapsed && (
+                        <div className="space-y-2 mt-2 pl-3 border-l-2 border-gray-100">
+                          {run.map(rn => (
+                            <NotificationRow
+                              key={rn.id}
+                              notif={rn}
+                              onMarkRead={markRead}
+                              onAcknowledge={acknowledge}
+                              onSnoozeClick={(id) => { setSnoozeId(id); setSnoozeUntilIso(nextWorkdayMorningISO()); setSnoozeCustomDate(''); }}
+                              onNavigate={navigateToEntity}
+                              onRunAction={runAction}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                  i = runEnd;
+                  continue;
+                }
+              }
+
+              // Default: single row.
+              items.push(
+                <NotificationRow
+                  key={n.id}
+                  notif={n}
+                  onMarkRead={markRead}
+                  onAcknowledge={acknowledge}
+                  onSnoozeClick={(id) => { setSnoozeId(id); setSnoozeUntilIso(nextWorkdayMorningISO()); setSnoozeCustomDate(''); }}
+                  onNavigate={navigateToEntity}
+                  onRunAction={runAction}
+                />
+              );
+              i++;
+            }
+            return items;
+          })()}
+        </div>
+      )}
+
+      {/* Undo toast — appears for 5 seconds after Done / Clear-read */}
+      {undoState && (
+        <div
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg shadow-lg flex items-center gap-3"
+          role="status"
+          aria-live="polite"
+        >
+          <span>{undoState.label}</span>
+          <button
+            onClick={performUndo}
+            className="text-ooosh-200 hover:text-white font-medium underline underline-offset-2"
+          >
+            Undo
+          </button>
+          <button
+            onClick={() => { clearUndoTimer(); setUndoState(null); }}
+            className="text-gray-400 hover:text-white text-xs"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
         </div>
       )}
 
@@ -480,34 +787,93 @@ export default function InboxPage() {
         </div>
       )}
 
-      {/* Snooze modal */}
-      {snoozeId && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setSnoozeId(null)}>
-          <div className="bg-white rounded-xl shadow-xl p-6 w-80" onClick={e => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-900 mb-3">Snooze notification</h3>
-            <p className="text-sm text-gray-500 mb-4">Remind me in:</p>
-            <div className="flex gap-2 flex-wrap mb-4">
-              {[1, 3, 7, 14, 30].map(d => (
-                <button key={d} onClick={() => setSnoozeDays(d)}
-                  className={`px-3 py-1.5 rounded text-sm border transition-colors ${
-                    snoozeDays === d ? 'bg-ooosh-600 text-white border-ooosh-600' : 'border-gray-300 text-gray-700 hover:bg-gray-50'
-                  }`}>
-                  {d === 1 ? 'Tomorrow' : `${d} days`}
-                </button>
-              ))}
-            </div>
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setSnoozeId(null)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">
-                Cancel
-              </button>
-              <button onClick={() => snooze(snoozeId, snoozeDays)}
-                className="px-4 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 transition-colors">
-                Snooze
-              </button>
+      {/* Snooze modal — friendlier presets + a date+time picker for the
+          "Pick exact moment" case. All presets resolve to ISO timestamps
+          on click; the Snooze button just submits whatever's selected. */}
+      {snoozeId && (() => {
+        const presets: Array<{ key: string; label: string; iso: () => string }> = [
+          { key: '2h',  label: '2 hours',           iso: () => inHoursISO(2) },
+          { key: 'tom', label: 'Tomorrow morning',  iso: () => nextWorkdayMorningISO() },
+          { key: 'mon', label: 'Monday morning',    iso: () => nextWorkdayMorningISO(1) },
+          { key: '3d',  label: '3 days',            iso: () => inDaysISO(3) },
+          { key: '1w',  label: '1 week',            iso: () => inDaysISO(7) },
+          { key: '2w',  label: '2 weeks',           iso: () => inDaysISO(14) },
+        ];
+        // Resolve the chosen ISO: explicit custom date wins, otherwise
+        // whichever preset was last clicked.
+        function resolveIso(): string | null {
+          if (snoozeCustomDate) {
+            // datetime-local gives a value like "2026-05-19T08:30" without
+            // timezone — interpret in local TZ.
+            const d = new Date(snoozeCustomDate);
+            if (!isNaN(d.getTime())) return d.toISOString();
+          }
+          return snoozeUntilIso;
+        }
+        const chosenIso = resolveIso();
+        return (
+          <div
+            className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
+            onClick={() => { setSnoozeId(null); setSnoozeUntilIso(null); setSnoozeCustomDate(''); }}
+          >
+            <div className="bg-white rounded-xl shadow-xl p-6 w-96" onClick={e => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-gray-900 mb-3">Snooze notification</h3>
+              <p className="text-sm text-gray-500 mb-4">Remind me…</p>
+              <div className="grid grid-cols-2 gap-2 mb-4">
+                {presets.map(p => {
+                  const active = !snoozeCustomDate && snoozeUntilIso === p.iso.toString();
+                  // We can't compare ISO strings directly because each call
+                  // to .iso() produces a fresh "now+offset" — track by key
+                  // instead via a derived label match.
+                  const isActive = !snoozeCustomDate
+                    && snoozeUntilIso !== null
+                    && p.iso().slice(0, 13) === snoozeUntilIso.slice(0, 13);
+                  return (
+                    <button
+                      key={p.key}
+                      onClick={() => { setSnoozeUntilIso(p.iso()); setSnoozeCustomDate(''); }}
+                      className={`px-3 py-1.5 rounded text-sm border text-left transition-colors ${
+                        (isActive || active)
+                          ? 'bg-ooosh-600 text-white border-ooosh-600'
+                          : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+              <label className="block text-xs text-gray-500 mb-1">Or pick a moment:</label>
+              <input
+                type="datetime-local"
+                value={snoozeCustomDate}
+                onChange={(e) => { setSnoozeCustomDate(e.target.value); setSnoozeUntilIso(null); }}
+                className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:border-ooosh-500 focus:outline-none mb-4"
+              />
+              <div className="flex justify-between items-center gap-2">
+                <span className="text-xs text-gray-400">
+                  {chosenIso ? `Until ${new Date(chosenIso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}` : 'Pick an option'}
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => { setSnoozeId(null); setSnoozeUntilIso(null); setSnoozeCustomDate(''); }}
+                    className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => { if (chosenIso) snoozeUntil(snoozeId, chosenIso); }}
+                    disabled={!chosenIso}
+                    className="px-4 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+                  >
+                    Snooze
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Preferences modal */}
       {showPrefs && (
@@ -616,6 +982,19 @@ function NotificationRow({ notif, onMarkRead, onAcknowledge, onSnoozeClick, onNa
           </div>
 
           <div className="text-sm font-medium text-gray-900 mt-0.5">{notif.title}</div>
+
+          {/* Thread root preview — for "replied in a thread" re-notifies the
+              card title is "Pete replied in a thread" but the content is
+              Pete's REPLY. Surface a dim quote of what the thread is
+              ABOUT so you don't have to expand to find out. */}
+          {notif.thread_root_preview && notif.thread_root_id !== (notif.interaction_id || '') && (
+            <div className="text-[11px] text-gray-400 mt-1 pl-2 border-l-2 border-gray-200 italic line-clamp-2">
+              {notif.thread_root_author ? <span className="not-italic font-medium">{notif.thread_root_author}: </span> : null}
+              {notif.thread_root_preview.length > 160
+                ? notif.thread_root_preview.slice(0, 160) + '…'
+                : notif.thread_root_preview}
+            </div>
+          )}
 
           {notif.content && (
             <div className="text-xs text-gray-500 mt-0.5 line-clamp-2">{notif.content}</div>

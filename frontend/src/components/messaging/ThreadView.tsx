@@ -57,6 +57,7 @@ interface ThreadResponse {
   root: ThreadInteraction;
   replies: ThreadInteraction[];
   participants: ThreadParticipant[];
+  is_muted?: boolean;
 }
 
 interface UserOption {
@@ -327,7 +328,7 @@ export default function ThreadView({ interactionId, onAcknowledge, onSnooze, onR
             onPaste={(e) => { if (attach.pasteFromEvent(e)) e.preventDefault(); }}
             placeholder="Write a reply… (type @ to mention, paste a screenshot, or drop a file)"
             rows={3}
-            className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-none"
+            className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500 resize-y min-h-[64px]"
           />
           {showMentions && filteredUsers.length > 0 && (
             <div className="absolute left-0 right-0 bottom-full mb-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto z-50">
@@ -395,6 +396,32 @@ export default function ThreadView({ interactionId, onAcknowledge, onSnooze, onR
           </label>
 
           <div className="flex items-center gap-2">
+            {/* Mute toggle: stops further low-priority "replied in a thread"
+                re-notifications for THIS user only. Direct @mentions still
+                fire. Per-user state, not global. */}
+            <button
+              type="button"
+              onClick={async () => {
+                if (!thread) return;
+                const targetMuted = !thread.is_muted;
+                try {
+                  await api.post(`/interactions/${thread.root.id}/mute`, { muted: targetMuted });
+                  setThread((prev) => prev ? { ...prev, is_muted: targetMuted } : prev);
+                } catch (err) {
+                  console.error('Mute toggle failed:', err);
+                }
+              }}
+              className={`text-xs px-2 py-1 rounded border transition-colors ${
+                thread?.is_muted
+                  ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
+                  : 'text-gray-500 border-gray-200 hover:bg-gray-50'
+              }`}
+              title={thread?.is_muted
+                ? 'Thread is muted — only direct @mentions will notify you. Click to unmute.'
+                : 'Stop further "replied in a thread" alerts for you (direct mentions still notify)'}
+            >
+              {thread?.is_muted ? '🔕 Muted' : '🔔 Mute'}
+            </button>
             {onSnooze && (
               <button
                 type="button"
