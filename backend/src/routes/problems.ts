@@ -421,6 +421,47 @@ router.post('/:id/unwatch', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// ── Summary (dashboard NeedsAttention bucket) ────────────────────────────
+// MUST be registered before the `/:id` route, otherwise Express matches
+// `GET /api/problems/summary` against `/:id` and tries to UUID-cast 'summary'.
+
+router.get('/summary', async (_req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT
+         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')) AS open_total,
+         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+                            AND ji.severity = 'urgent') AS urgent_total,
+         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+                            AND ji.category = 'damaged') AS damaged_open,
+         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+                            AND ji.category = 'missing') AS missing_open,
+         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+                            AND ji.category = 'broken') AS broken_open,
+         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+                            AND ji.category = 'dispute') AS dispute_open,
+         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+                            AND ji.category = 'breakdown') AS breakdown_open
+       FROM job_issues ji`
+    );
+    const top = await query(
+      `SELECT ji.id, ji.job_id, ji.category, ji.severity, ji.summary, ji.created_at,
+              j.hh_job_number, j.job_name, j.client_name
+       FROM job_issues ji
+       LEFT JOIN jobs j ON j.id = ji.job_id
+       WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
+       ORDER BY
+         CASE WHEN ji.severity = 'urgent' THEN 0 ELSE 1 END,
+         ji.created_at DESC
+       LIMIT 5`
+    );
+    res.json({ data: { ...result.rows[0], items: top.rows } });
+  } catch (err) {
+    console.error('Issue summary error:', err);
+    res.status(500).json({ error: 'Failed to fetch summary' });
+  }
+});
+
 // ── Get one (with timeline) ──────────────────────────────────────────────
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {
@@ -441,7 +482,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
     );
 
     const filesResult = await query(
-      `SELECT id, r2_key, filename, file_type, content_type, size_bytes, comment, uploaded_at,
+      `SELECT f.id, f.r2_key, f.filename, f.file_type, f.content_type, f.size_bytes, f.comment, f.uploaded_at,
               CONCAT(p.first_name, ' ', p.last_name) AS uploaded_by_name
        FROM job_issue_files f
        LEFT JOIN users u ON u.id = f.uploaded_by
@@ -617,45 +658,6 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('List issues error:', err);
     res.status(500).json({ error: 'Failed to fetch issues' });
-  }
-});
-
-// ── Summary (dashboard NeedsAttention bucket) ────────────────────────────
-
-router.get('/summary', async (_req: AuthRequest, res: Response) => {
-  try {
-    const result = await query(
-      `SELECT
-         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')) AS open_total,
-         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
-                            AND ji.severity = 'urgent') AS urgent_total,
-         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
-                            AND ji.category = 'damaged') AS damaged_open,
-         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
-                            AND ji.category = 'missing') AS missing_open,
-         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
-                            AND ji.category = 'broken') AS broken_open,
-         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
-                            AND ji.category = 'dispute') AS dispute_open,
-         COUNT(*) FILTER (WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
-                            AND ji.category = 'breakdown') AS breakdown_open
-       FROM job_issues ji`
-    );
-    const top = await query(
-      `SELECT ji.id, ji.job_id, ji.category, ji.severity, ji.summary, ji.created_at,
-              j.hh_job_number, j.job_name, j.client_name
-       FROM job_issues ji
-       LEFT JOIN jobs j ON j.id = ji.job_id
-       WHERE ji.status NOT IN ('resolved', 'written_off', 'cancelled')
-       ORDER BY
-         CASE WHEN ji.severity = 'urgent' THEN 0 ELSE 1 END,
-         ji.created_at DESC
-       LIMIT 5`
-    );
-    res.json({ data: { ...result.rows[0], items: top.rows } });
-  } catch (err) {
-    console.error('Issue summary error:', err);
-    res.status(500).json({ error: 'Failed to fetch summary' });
   }
 });
 
