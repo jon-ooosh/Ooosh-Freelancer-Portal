@@ -11,11 +11,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import ThreadView from '../components/messaging/ThreadView';
-import {
-  PendingAttachmentStrip,
-  useAttachments,
-  type InteractionAttachment,
-} from '../components/messaging/Attachments';
+import { useAttachments, type InteractionAttachment } from '../components/messaging/Attachments';
+import { MentionComposer } from '../components/messaging/MentionComposer';
 
 type IssueStatus = 'open' | 'investigating' | 'awaiting_quote' | 'quoted' | 'actioned' | 'resolved' | 'written_off' | 'cancelled';
 type IssueCategory = 'damaged' | 'missing' | 'broken' | 'dispute' | 'breakdown' | 'other';
@@ -142,6 +139,7 @@ export default function IssueDetailPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [comment, setComment] = useState('');
+  const [mentionedIds, setMentionedIds] = useState<string[]>([]);
   const [posting, setPosting] = useState(false);
   const attach = useAttachments();
 
@@ -191,8 +189,10 @@ export default function IssueDetailPage() {
         content: trimmed || '(attachment)',
         issue_id: id,
         attachments: attach.payload(),
+        mentioned_user_ids: mentionedIds,
       });
       setComment('');
+      setMentionedIds([]);
       attach.clear();
       load();
     } catch (err) {
@@ -336,38 +336,45 @@ export default function IssueDetailPage() {
               })()}
             </div>
 
-            {/* Comment box */}
+            {/* Comment composer — full mention picker + attachments via the
+                shared <MentionComposer> primitive. Mentions on an issue
+                comment fire the standard mention notification (priority
+                based on the @-mentioned user's preference, default normal)
+                with action_url pointing back at this page. */}
             <div className="mt-4 pt-3 border-t border-gray-100">
-              <textarea
+              <MentionComposer
                 value={comment}
-                onChange={e => setComment(e.target.value)}
-                onPaste={e => { if (attach.pasteFromEvent(e)) e.preventDefault(); }}
-                placeholder="Add a comment, update, or note… (paste images to attach)"
+                onChange={setComment}
+                mentionedIds={mentionedIds}
+                onMentionedIdsChange={setMentionedIds}
+                attach={attach}
+                placeholder="Add a comment, update, or note… (type @ to mention, paste images to attach)"
                 rows={2}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm resize-y min-h-[64px]"
+                disabled={posting}
+                footer={
+                  <div className="flex justify-between items-center mt-2 gap-2">
+                    <label className="text-[11px] text-gray-500 cursor-pointer hover:text-gray-700">
+                      📎 Attach file
+                      <input
+                        type="file"
+                        multiple
+                        className="hidden"
+                        onChange={e => {
+                          if (e.target.files) attach.addFiles(e.target.files);
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                    <button
+                      onClick={postComment}
+                      disabled={(!comment.trim() && attach.pending.length === 0) || posting || attach.hasInFlight}
+                      className="px-3 py-1.5 text-xs bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
+                    >
+                      {posting ? 'Posting…' : attach.hasInFlight ? 'Uploading…' : 'Post comment'}
+                    </button>
+                  </div>
+                }
               />
-              <PendingAttachmentStrip items={attach.pending} onRemove={attach.remove} />
-              <div className="flex justify-between items-center mt-2 gap-2">
-                <label className="text-[11px] text-gray-500 cursor-pointer hover:text-gray-700">
-                  📎 Attach file
-                  <input
-                    type="file"
-                    multiple
-                    className="hidden"
-                    onChange={e => {
-                      if (e.target.files) attach.addFiles(e.target.files);
-                      e.target.value = '';
-                    }}
-                  />
-                </label>
-                <button
-                  onClick={postComment}
-                  disabled={(!comment.trim() && attach.pending.length === 0) || posting || attach.hasInFlight}
-                  className="px-3 py-1.5 text-xs bg-ooosh-600 text-white rounded hover:bg-ooosh-700 disabled:opacity-50"
-                >
-                  {posting ? 'Posting…' : attach.hasInFlight ? 'Uploading…' : 'Post comment'}
-                </button>
-              </div>
             </div>
           </div>
 
