@@ -66,6 +66,7 @@ const INITIAL_FORM: CheckInFormState = {
   bookOutClientEmail: null,
   bookOutNotes: null,
   bookOutPhotos: new Map(),
+  bookOutPhotoLabels: new Map(),
   mileage: '',
   fuelLevel: null,
   photos: [],
@@ -104,6 +105,8 @@ export function CheckInPage() {
     // Convert Map to plain object for IDB storage
     const bookOutPhotosObj: Record<string, string> = {}
     form.bookOutPhotos.forEach((v, k) => { bookOutPhotosObj[k] = v })
+    const bookOutPhotoLabelsObj: Record<string, string> = {}
+    form.bookOutPhotoLabels.forEach((v, k) => { bookOutPhotoLabelsObj[k] = v })
     autosave({
       step,
       formData: {
@@ -120,6 +123,7 @@ export function CheckInPage() {
         bookOutClientEmail: form.bookOutClientEmail,
         bookOutNotes: form.bookOutNotes,
         bookOutPhotos: bookOutPhotosObj,
+        bookOutPhotoLabels: bookOutPhotoLabelsObj,
         mileage: form.mileage,
         fuelLevel: form.fuelLevel,
         damageItems: form.damageItems.map(d => ({
@@ -141,6 +145,7 @@ export function CheckInPage() {
     if (!draftLoaded) return
     const d = draftLoaded.formData as Record<string, unknown>
     const photosObj = (d.bookOutPhotos as Record<string, string>) || {}
+    const labelsObj = (d.bookOutPhotoLabels as Record<string, string>) || {}
     setForm({
       vehicleId: (d.vehicleId as string) || null,
       vehicleReg: (d.vehicleReg as string) || '',
@@ -155,6 +160,7 @@ export function CheckInPage() {
       bookOutClientEmail: (d.bookOutClientEmail as string) || null,
       bookOutNotes: (d.bookOutNotes as string) || null,
       bookOutPhotos: new Map(Object.entries(photosObj)),
+      bookOutPhotoLabels: new Map(Object.entries(labelsObj)),
       mileage: (d.mileage as string) || '',
       fuelLevel: (d.fuelLevel as FuelLevel) || null,
       photos: draftLoaded.photos,
@@ -305,6 +311,7 @@ export function CheckInPage() {
             bookOutClientEmail: bookOut.clientEmail,
             bookOutNotes: bookOut.notes,
             bookOutPhotos: photos,
+            bookOutPhotoLabels: bookOut.photoLabels,
           }))
         } else {
           setForm(f => ({ ...f, bookOutEventId: '' })) // Empty string = "looked but none found"
@@ -1078,6 +1085,7 @@ export function CheckInPage() {
         {STEPS[step] === 'Photos' && (
           <PhotoComparison
             bookOutPhotos={form.bookOutPhotos}
+            bookOutPhotoLabels={form.bookOutPhotoLabels}
             currentPhotos={form.photos}
             onCapture={handlePhotoCapture}
             onRemove={handlePhotoRemove}

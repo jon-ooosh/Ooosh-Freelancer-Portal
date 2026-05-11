@@ -2977,10 +2977,45 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
       y += rowH + 12;
     }
 
-    addText(photos.length + ' photos captured', margin, y, { size: 8, color: [120, 120, 120] });
+    // Honest count: walk-around photos render here; damage photos
+    // render in the Damage Report section above. When both exist, say
+    // so explicitly rather than just printing the walk-around count
+    // and silently dropping the damage figure on the floor.
+    const damagePhotoCountWithBody = (data.damageItems || []).reduce(
+      (sum: number, d: { photos?: unknown[] }) => sum + ((d.photos && d.photos.length) || 0),
+      0,
+    );
+    if (damagePhotoCountWithBody > 0) {
+      addText(
+        `${photos.length} walk-around photo${photos.length === 1 ? '' : 's'} + `
+          + `${damagePhotoCountWithBody} damage photo${damagePhotoCountWithBody === 1 ? '' : 's'} (see Damage Report above)`,
+        margin,
+        y,
+        { size: 8, color: [120, 120, 120] },
+      );
+    } else {
+      addText(photos.length + ' photos captured', margin, y, { size: 8, color: [120, 120, 120] });
+    }
     y += 6;
   } else {
-    addText('No photos captured', margin, y, { size: 9, color: [180, 180, 180] });
+    // No walk-around photos. If damage photos exist, surface that —
+    // "No photos captured" right under a section full of damage thumbs
+    // (as in the 11 May 2026 screenshot) is misleading.
+    const damagePhotoCountEmpty = (data.damageItems || []).reduce(
+      (sum: number, d: { photos?: unknown[] }) => sum + ((d.photos && d.photos.length) || 0),
+      0,
+    );
+    if (damagePhotoCountEmpty > 0) {
+      addText(
+        `No walk-around photos captured — `
+          + `${damagePhotoCountEmpty} damage photo${damagePhotoCountEmpty === 1 ? '' : 's'} in the Damage Report above`,
+        margin,
+        y,
+        { size: 9, color: [120, 120, 120] },
+      );
+    } else {
+      addText('No photos captured', margin, y, { size: 9, color: [180, 180, 180] });
+    }
     y += 6;
   }
 

@@ -9,6 +9,8 @@ interface PhotoCaptureProps {
   photos: CapturedPhoto[]
   onCapture: (photo: CapturedPhoto) => void
   onRemove: (angle: string) => void
+  /** Optional — update a photo's metadata (currently used for editing extras' labels). */
+  onUpdate?: (angle: string, partial: Partial<Pick<CapturedPhoto, 'label'>>) => void
 }
 
 const GUIDES_KEY = 'ooosh_photo_guides_enabled'
@@ -30,11 +32,18 @@ function getGuidesEnabled(): boolean {
  * full-screen guide overlay with a van diagram and framing instructions
  * before opening the camera. Experienced users can toggle guides off.
  */
-export function PhotoCapture({ photos, onCapture, onRemove }: PhotoCaptureProps) {
+export function PhotoCapture({ photos, onCapture, onRemove, onUpdate }: PhotoCaptureProps) {
   const [activeAngle, setActiveAngle] = useState<ExtendedAngle | null>(null)
   const [activeLabel, setActiveLabel] = useState<string | null>(null)
   const [showGuide, setShowGuide] = useState<PhotoAngle | null>(null)
   const [guidesEnabled, setGuidesEnabled] = useState(getGuidesEnabled)
+  /**
+   * Inline label-edit state for extras. When non-null, the matching extra
+   * card renders a text input in place of its caption. Mobile-friendly:
+   * no modal, no prompt() — just a tap-to-edit affordance.
+   */
+  const [editingLabelFor, setEditingLabelFor] = useState<string | null>(null)
+  const [editingLabelValue, setEditingLabelValue] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Persist guide preference
@@ -226,39 +235,93 @@ export function PhotoCapture({ photos, onCapture, onRemove }: PhotoCaptureProps)
       {/* Extra / damage photos */}
       {extraPhotos.length > 0 && (
         <div className="mt-4">
-          <p className="mb-2 text-xs font-medium text-gray-600">Extra / Damage Photos ({extraPhotos.length})</p>
-          <div className="grid grid-cols-3 gap-2">
-            {extraPhotos.map(photo => (
-              <div key={photo.angle} className="group relative aspect-[4/3] overflow-hidden rounded-lg border-2 border-amber-300">
-                <img src={photo.blobUrl} alt={photo.label} className="h-full w-full object-cover" />
-                <button
-                  onClick={() => onRemove(photo.angle)}
-                  className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-white"
+          <p className="mb-2 text-xs font-medium text-gray-600">Extra Photos ({extraPhotos.length})</p>
+          <p className="mb-2 text-[10px] text-gray-400">
+            Tap a label to add a description (optional) — e.g. "Pre-existing chip — driver side"
+          </p>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {extraPhotos.map(photo => {
+              const isEditing = editingLabelFor === photo.angle
+              const placeholder = 'Add label (optional)'
+              const hasCustomLabel =
+                photo.label && !/^Extra Photo \d+$/i.test(photo.label) && photo.label.trim() !== ''
+              const displayLabel = hasCustomLabel ? photo.label : placeholder
+
+              return (
+                <div
+                  key={photo.angle}
+                  className="group relative aspect-[4/3] overflow-hidden rounded-lg border-2 border-amber-300"
                 >
-                  <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                  </svg>
-                </button>
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent px-1.5 pb-1 pt-3">
-                  <p className="text-[10px] font-medium text-white">{photo.label}</p>
+                  <img src={photo.blobUrl} alt={photo.label} className="h-full w-full object-cover" />
+                  <button
+                    onClick={() => onRemove(photo.angle)}
+                    className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-white"
+                    aria-label="Remove photo"
+                  >
+                    <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                    </svg>
+                  </button>
+                  <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent px-1.5 pb-1.5 pt-3">
+                    {isEditing && onUpdate ? (
+                      <input
+                        autoFocus
+                        type="text"
+                        maxLength={60}
+                        value={editingLabelValue}
+                        onChange={(e) => setEditingLabelValue(e.target.value)}
+                        onBlur={() => {
+                          const next = editingLabelValue.trim()
+                          if (next && next !== photo.label) onUpdate(photo.angle, { label: next })
+                          setEditingLabelFor(null)
+                          setEditingLabelValue('')
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            ;(e.target as HTMLInputElement).blur()
+                          } else if (e.key === 'Escape') {
+                            setEditingLabelFor(null)
+                            setEditingLabelValue('')
+                          }
+                        }}
+                        className="w-full rounded bg-white/95 px-1.5 py-0.5 text-[11px] text-gray-900 outline-none ring-1 ring-amber-400"
+                        placeholder={placeholder}
+                      />
+                    ) : (
+                      <button
+                        onClick={() => {
+                          if (!onUpdate) return
+                          setEditingLabelFor(photo.angle)
+                          setEditingLabelValue(hasCustomLabel ? photo.label : '')
+                        }}
+                        className={`w-full truncate text-left text-[11px] font-medium ${
+                          hasCustomLabel ? 'text-white' : 'italic text-white/70'
+                        }`}
+                        title="Tap to edit label"
+                      >
+                        {displayLabel}
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
 
-      {/* Add extra damage photo */}
+      {/* Add an extra photo (e.g. pre-existing damage, close-up, additional angle) */}
       <button
         onClick={() => {
-          const existingCount = extraPhotos.length
-          const angle = `damage_${existingCount + 1}` as CapturedPhoto['angle']
-          const label = `Extra Photo ${existingCount + 1}`
+          // Unique angle per capture so check-in can match retakes 1:1 against
+          // the right book-out extra without colliding with siblings.
+          const angle = `extra_${Date.now()}` as CapturedPhoto['angle']
+          const label = `Extra Photo ${extraPhotos.length + 1}`
           openCamera(angle, label)
         }}
         className="mt-3 w-full rounded-lg border border-dashed border-gray-300 py-2.5 text-center text-xs font-medium text-gray-500 active:bg-gray-50"
       >
-        + Add damage / extra photo
+        + Add extra photo (optional)
       </button>
 
       {/* Full-screen guide overlay */}

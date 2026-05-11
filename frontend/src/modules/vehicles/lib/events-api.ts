@@ -44,6 +44,11 @@ export async function createVehicleEvent(params: {
   // captures who physically did the walkaround. Doesn't appear on the PDF
   // — kept on the event JSON for activity timeline / audit trail.
   deliveredBy?: string | null
+  // Per-photo label index — angle slug → human label. Lets check-in
+  // surface a meaningful caption against each book-out photo (especially
+  // optional extras like "Pre-existing chip — driver side"), since the
+  // R2 keys only encode the angle slug.
+  photoMeta?: Array<{ angle: string; label: string }> | null
 }): Promise<{ id: string; error?: string }> {
   const dateStr = params.eventDate || new Date().toISOString().split('T')[0]!
   const eventId = `evt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -65,6 +70,7 @@ export async function createVehicleEvent(params: {
     briefingItems: params.briefingItems ?? null,
     signatureBase64: params.signatureBase64 ?? null,
     deliveredBy: params.deliveredBy ?? null,
+    photoMeta: params.photoMeta ?? null,
     createdAt: new Date().toISOString(),
   }
 

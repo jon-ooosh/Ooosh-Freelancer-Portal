@@ -1,13 +1,25 @@
 import { useState, useRef, useCallback } from 'react'
-import { REQUIRED_PHOTOS } from '../../types/vehicle-event'
+import { LEGACY_WINDSCREEN_ANGLE, REQUIRED_PHOTOS } from '../../types/vehicle-event'
 import { compressImage } from '../../lib/image-utils'
 import { PhotoLightbox } from '../shared/PhotoLightbox'
 import { AuthImage } from '../shared/AuthImage'
 import type { CapturedPhoto, PhotoAngle } from '../../types/vehicle-event'
 
+/**
+ * Capture-slot angle — anything that can drive a check-in photo capture.
+ * Mirrors `CapturedPhoto.angle`: required angles plus the runtime tags
+ * for damage and book-out extras.
+ */
+type CaptureAngle = CapturedPhoto['angle']
+
 interface PhotoComparisonProps {
   /** Book-out photos: angle -> R2 URL */
   bookOutPhotos: Map<string, string>
+  /**
+   * Book-out photo labels: angle -> human label, recovered from the
+   * book-out event's `photoMeta` field. Empty for legacy events.
+   */
+  bookOutPhotoLabels?: Map<string, string>
   /** Current check-in photos */
   currentPhotos: CapturedPhoto[]
   onCapture: (photo: CapturedPhoto) => void
@@ -17,21 +29,60 @@ interface PhotoComparisonProps {
 
 /**
  * Side-by-side photo comparison for check-in.
- * Shows each required angle with the book-out photo alongside a capture slot.
- * Mobile-optimised: stacked vertically per angle.
+ * Shows each required angle with the book-out photo alongside a capture
+ * slot. Below the required angles, surfaces any book-out "extras"
+ * (optional photos staff took at book-out — e.g. pre-existing chips,
+ * damage close-ups) so they can be retaken or flagged 1:1 at check-in.
+ *
+ * Legacy compat: book-outs saved before the windscreen split carry a
+ * single `'windscreen'` photo. We alias it onto the `windscreen_left`
+ * slot — the centre and right slots show "No photo" honestly rather
+ * than pretending the legacy single shot covers all three zones.
  */
 export function PhotoComparison({
   bookOutPhotos,
+  bookOutPhotoLabels,
   currentPhotos,
   onCapture,
   onRemove,
   onFlagDamage,
 }: PhotoComparisonProps) {
-  const [activeAngle, setActiveAngle] = useState<PhotoAngle | null>(null)
+  const [activeAngle, setActiveAngle] = useState<CaptureAngle | null>(null)
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const capturedMap = new Map(currentPhotos.map(p => [p.angle, p]))
+
+  /**
+   * Resolve a book-out photo URL for a required-angle slot, with the
+   * legacy windscreen shim: if `windscreen_left` is missing but the
+   * legacy `'windscreen'` key exists, surface the legacy photo on the
+   * Driver Side card only.
+   */
+  const resolveRequiredBookOutUrl = (angle: PhotoAngle): string | undefined => {
+    const direct = bookOutPhotos.get(angle)
+    if (direct) return direct
+    if (angle === 'windscreen_left') return bookOutPhotos.get(LEGACY_WINDSCREEN_ANGLE)
+    return undefined
+  }
+
+  /**
+   * Book-out extras = anything in the photo map that isn't (a) a current
+   * required angle and isn't (b) the legacy windscreen key already
+   * aliased into the `windscreen_left` slot. Sorted by angle so the
+   * order is stable across renders (extras carry timestamp-based slugs
+   * like `extra_1715512345678`).
+   */
+  const requiredAngleSet = new Set(REQUIRED_PHOTOS.map(r => r.angle as string))
+  const legacyWindscreenAliased =
+    bookOutPhotos.has(LEGACY_WINDSCREEN_ANGLE) && !bookOutPhotos.has('windscreen_left')
+  const extraAngles = Array.from(bookOutPhotos.keys())
+    .filter(angle => {
+      if (requiredAngleSet.has(angle)) return false
+      if (angle === LEGACY_WINDSCREEN_ANGLE && legacyWindscreenAliased) return false
+      return true
+    })
+    .sort()
 
   const handleFileChange = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -40,7 +91,11 @@ export function PhotoComparison({
 
       const compressed = await compressImage(file, 2048, 0.85)
       const blobUrl = URL.createObjectURL(compressed)
-      const label = REQUIRED_PHOTOS.find(r => r.angle === activeAngle)?.label || activeAngle
+      // Prefer the explicit required-angle label, otherwise the book-out
+      // label from the event's photoMeta, otherwise the angle slug.
+      const requiredLabel = REQUIRED_PHOTOS.find(r => r.angle === activeAngle)?.label
+      const extraLabel = bookOutPhotoLabels?.get(String(activeAngle))
+      const label = requiredLabel || extraLabel || String(activeAngle)
 
       onCapture({
         angle: activeAngle,
@@ -52,10 +107,10 @@ export function PhotoComparison({
 
       if (fileInputRef.current) fileInputRef.current.value = ''
     },
-    [activeAngle, onCapture],
+    [activeAngle, onCapture, bookOutPhotoLabels],
   )
 
-  const triggerCapture = (angle: PhotoAngle) => {
+  const triggerCapture = (angle: CaptureAngle) => {
     setActiveAngle(angle)
     setTimeout(() => fileInputRef.current?.click(), 50)
   }
@@ -76,110 +131,70 @@ export function PhotoComparison({
         className="hidden"
       />
 
-      {/* Progress */}
+      {/* Progress — required-angle counter only; extras + damage are optional */}
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-gray-700">Condition Photos</p>
         <span className={`text-xs font-medium ${
-          capturedCount >= REQUIRED_PHOTOS.length ? 'text-green-600' : 'text-amber-600'
+          capturedCount >= REQUIRED_PHOTOS.length ? 'text-green-600' : 'text-gray-500'
         }`}>
-          {capturedCount} / {REQUIRED_PHOTOS.length} captured
+          {capturedCount} / {REQUIRED_PHOTOS.length} retaken (optional)
         </span>
       </div>
 
-      {/* Comparison grid — one card per angle */}
-      {REQUIRED_PHOTOS.map(({ angle, label }) => {
-        const bookOutUrl = bookOutPhotos.get(angle)
-        const captured = capturedMap.get(angle)
+      {/* Required-angle comparison grid */}
+      {REQUIRED_PHOTOS.map(({ angle, label }) => (
+        <ComparisonCard
+          key={angle}
+          angle={angle}
+          label={label}
+          bookOutUrl={resolveRequiredBookOutUrl(angle)}
+          captured={capturedMap.get(angle)}
+          onCapture={triggerCapture}
+          onRemove={onRemove}
+          onFlagDamage={onFlagDamage}
+          onLightbox={setLightbox}
+          useAuthImageForBookOut
+        />
+      ))}
 
-        return (
-          <div key={angle} className="rounded-lg border border-gray-200 bg-white overflow-hidden">
-            {/* Angle header */}
-            <div className="flex items-center justify-between bg-gray-50 px-3 py-1.5">
-              <span className="text-xs font-semibold text-gray-700">{label}</span>
-              {captured && (
-                <button
-                  onClick={() => onFlagDamage(angle)}
-                  className="rounded bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600 active:bg-red-100"
-                >
-                  Flag Damage
-                </button>
-              )}
-            </div>
-
-            {/* Photo pair */}
-            <div className="grid grid-cols-2 gap-px bg-gray-100">
-              {/* Book-out photo (left) */}
-              <div className="bg-white p-1.5">
-                <p className="mb-1 text-center text-[10px] font-medium text-gray-400 uppercase tracking-wide">Book-Out</p>
-                {bookOutUrl ? (
-                  <div
-                    className="aspect-[4/3] cursor-pointer overflow-hidden rounded border border-gray-200"
-                    onClick={() => setLightbox({ src: bookOutUrl, alt: `Book-out ${label}` })}
-                  >
-                    <AuthImage
-                      src={bookOutUrl}
-                      alt={`Book-out ${label}`}
-                      className="h-full w-full object-cover"
-                      loading="lazy"
-                    />
-                  </div>
-                ) : (
-                  <div className="flex aspect-[4/3] items-center justify-center rounded border border-dashed border-gray-200 bg-gray-50">
-                    <span className="text-[10px] text-gray-300">No photo</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Current photo (right) — capture slot */}
-              <div className="bg-white p-1.5">
-                <p className="mb-1 text-center text-[10px] font-medium text-ooosh-navy uppercase tracking-wide">Now</p>
-                {captured ? (
-                  <div className="group relative aspect-[4/3] overflow-hidden rounded border-2 border-green-300">
-                    <img
-                      src={captured.blobUrl}
-                      alt={`Check-in ${label}`}
-                      className="h-full w-full cursor-pointer object-cover"
-                      onClick={() => setLightbox({ src: captured.blobUrl, alt: `Check-in ${label}` })}
-                    />
-                    {/* Overlay on tap */}
-                    <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/0 opacity-0 transition-all group-active:bg-black/40 group-active:opacity-100">
-                      <button
-                        onClick={() => triggerCapture(angle)}
-                        className="rounded bg-white/90 px-2.5 py-1 text-xs font-medium text-gray-700"
-                      >
-                        Retake
-                      </button>
-                      <button
-                        onClick={() => onRemove(angle)}
-                        className="rounded bg-white/90 px-2.5 py-1 text-xs font-medium text-red-600"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                    {/* Green tick */}
-                    <div className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-green-500">
-                      <svg className="h-3 w-3 text-white" fill="currentColor" viewBox="0 0 20 20">
-                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                      </svg>
-                    </div>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => triggerCapture(angle)}
-                    className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-1 rounded border-2 border-dashed border-gray-300 bg-gray-50 active:bg-gray-100"
-                  >
-                    <svg className="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                    </svg>
-                    <span className="text-[10px] font-medium text-gray-400">Capture</span>
-                  </button>
-                )}
-              </div>
-            </div>
+      {/* Additional book-out photos — extras taken at book-out, plus
+          legacy `'damage'` / `'other'` buckets for older data. Same card
+          shape so retake + flag damage feel familiar. */}
+      {extraAngles.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/40 px-3 py-3">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-800">
+            Additional Book-Out Photos ({extraAngles.length})
+          </p>
+          <p className="mb-3 text-[11px] text-amber-700/80">
+            Optional shots from book-out (e.g. pre-existing chips). Retake or flag damage as needed.
+          </p>
+          <div className="space-y-3">
+            {extraAngles.map((angle, idx) => {
+              const persistedLabel = bookOutPhotoLabels?.get(angle)
+              const fallback = `Extra ${idx + 1}`
+              const label =
+                persistedLabel && persistedLabel.trim() !== '' && persistedLabel !== `Extra Photo ${idx + 1}`
+                  ? persistedLabel
+                  : fallback
+              const bookOutUrl = bookOutPhotos.get(angle)
+              return (
+                <ComparisonCard
+                  key={angle}
+                  angle={angle as CaptureAngle}
+                  label={label}
+                  bookOutUrl={bookOutUrl}
+                  captured={capturedMap.get(angle as CaptureAngle)}
+                  onCapture={triggerCapture}
+                  onRemove={onRemove}
+                  onFlagDamage={onFlagDamage}
+                  onLightbox={setLightbox}
+                  useAuthImageForBookOut
+                />
+              )
+            })}
           </div>
-        )
-      })}
+        </div>
+      )}
 
       {/* Lightbox */}
       {lightbox && (
@@ -189,6 +204,130 @@ export function PhotoComparison({
           onClose={() => setLightbox(null)}
         />
       )}
+    </div>
+  )
+}
+
+/* ──────────────────────────────────────────────
+ * Per-angle comparison card
+ * ────────────────────────────────────────────── */
+
+interface ComparisonCardProps {
+  angle: CaptureAngle
+  label: string
+  bookOutUrl: string | undefined
+  captured: CapturedPhoto | undefined
+  onCapture: (angle: CaptureAngle) => void
+  onRemove: (angle: string) => void
+  onFlagDamage: (angle: string) => void
+  onLightbox: (state: { src: string; alt: string }) => void
+  useAuthImageForBookOut: boolean
+}
+
+function ComparisonCard({
+  angle,
+  label,
+  bookOutUrl,
+  captured,
+  onCapture,
+  onRemove,
+  onFlagDamage,
+  onLightbox,
+  useAuthImageForBookOut,
+}: ComparisonCardProps) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+      {/* Angle header */}
+      <div className="flex items-center justify-between gap-2 bg-gray-50 px-3 py-1.5">
+        <span className="truncate text-xs font-semibold text-gray-700">{label}</span>
+        {captured && (
+          <button
+            onClick={() => onFlagDamage(String(angle))}
+            className="shrink-0 rounded bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600 active:bg-red-100"
+          >
+            Flag Damage
+          </button>
+        )}
+      </div>
+
+      {/* Photo pair */}
+      <div className="grid grid-cols-2 gap-px bg-gray-100">
+        {/* Book-out photo (left) */}
+        <div className="bg-white p-1.5">
+          <p className="mb-1 text-center text-[10px] font-medium text-gray-400 uppercase tracking-wide">Book-Out</p>
+          {bookOutUrl ? (
+            <div
+              className="aspect-[4/3] cursor-pointer overflow-hidden rounded border border-gray-200"
+              onClick={() => onLightbox({ src: bookOutUrl, alt: `Book-out ${label}` })}
+            >
+              {useAuthImageForBookOut ? (
+                <AuthImage
+                  src={bookOutUrl}
+                  alt={`Book-out ${label}`}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+              ) : (
+                <img
+                  src={bookOutUrl}
+                  alt={`Book-out ${label}`}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+              )}
+            </div>
+          ) : (
+            <div className="flex aspect-[4/3] items-center justify-center rounded border border-dashed border-gray-200 bg-gray-50">
+              <span className="text-[10px] text-gray-300">No book-out photo</span>
+            </div>
+          )}
+        </div>
+
+        {/* Current photo (right) — capture slot */}
+        <div className="bg-white p-1.5">
+          <p className="mb-1 text-center text-[10px] font-medium text-ooosh-navy uppercase tracking-wide">Now</p>
+          {captured ? (
+            <div className="group relative aspect-[4/3] overflow-hidden rounded border-2 border-green-300">
+              <img
+                src={captured.blobUrl}
+                alt={`Check-in ${label}`}
+                className="h-full w-full cursor-pointer object-cover"
+                onClick={() => onLightbox({ src: captured.blobUrl, alt: `Check-in ${label}` })}
+              />
+              <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/0 opacity-0 transition-all group-active:bg-black/40 group-active:opacity-100">
+                <button
+                  onClick={() => onCapture(angle)}
+                  className="rounded bg-white/90 px-2.5 py-1 text-xs font-medium text-gray-700"
+                >
+                  Retake
+                </button>
+                <button
+                  onClick={() => onRemove(String(angle))}
+                  className="rounded bg-white/90 px-2.5 py-1 text-xs font-medium text-red-600"
+                >
+                  Remove
+                </button>
+              </div>
+              <div className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-green-500">
+                <svg className="h-3 w-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                </svg>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => onCapture(angle)}
+              className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-1 rounded border-2 border-dashed border-gray-300 bg-gray-50 active:bg-gray-100"
+            >
+              <svg className="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              <span className="text-[10px] font-medium text-gray-400">Capture</span>
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

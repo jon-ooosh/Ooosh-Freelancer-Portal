@@ -72,7 +72,9 @@ export type PhotoAngle =
   | 'left_panel'
   | 'driver_door'
   | 'front_left'
-  | 'windscreen'
+  | 'windscreen_left'
+  | 'windscreen_middle'
+  | 'windscreen_right'
   | 'dashboard'
 
 export const REQUIRED_PHOTOS: { angle: PhotoAngle; label: string }[] = [
@@ -88,15 +90,31 @@ export const REQUIRED_PHOTOS: { angle: PhotoAngle; label: string }[] = [
   { angle: 'left_panel', label: 'Left Panel' },
   { angle: 'driver_door', label: 'Driver Door' },
   { angle: 'front_left', label: 'Front Left' },
-  { angle: 'windscreen', label: 'Windscreen' },
+  { angle: 'windscreen_left', label: 'Windscreen — Driver Side' },
+  { angle: 'windscreen_middle', label: 'Windscreen — Centre' },
+  { angle: 'windscreen_right', label: 'Windscreen — Passenger Side' },
   { angle: 'dashboard', label: 'Dashboard' },
 ]
 
 /**
+ * Legacy single-angle key used by older book-outs before the windscreen
+ * split. Surfaced via `LEGACY_WINDSCREEN_ANGLE` so loaders / comparison
+ * UIs can alias the old single-shot into the new `windscreen_left` slot
+ * without polluting the canonical PhotoAngle union.
+ */
+export const LEGACY_WINDSCREEN_ANGLE = 'windscreen'
+
+/**
  * Captured photo — stored as blob URL until uploaded to R2.
+ *
+ * `extra_${number}` is the canonical shape for an optional book-out
+ * extra: a unique angle per capture so a check-in retake can target the
+ * same slot without colliding with sibling extras. `'other'` / `'damage'`
+ * / `damage_${number}` are kept for backwards compatibility with legacy
+ * data and the in-progress damage flow on check-in.
  */
 export interface CapturedPhoto {
-  angle: PhotoAngle | 'damage' | 'other' | `damage_${number}`
+  angle: PhotoAngle | 'damage' | 'other' | `damage_${number}` | `extra_${number}`
   label: string
   blobUrl: string        // Object URL for preview
   blob: Blob             // Actual image data
@@ -194,7 +212,8 @@ export interface CheckInFormState {
   bookOutHireHopJob: string | null
   bookOutClientEmail: string | null
   bookOutNotes: string | null
-  bookOutPhotos: Map<string, string>  // angle -> R2 URL
+  bookOutPhotos: Map<string, string>          // angle -> R2 URL
+  bookOutPhotoLabels: Map<string, string>     // angle -> human label (extras only carry these)
 
   // Current state
   mileage: string
