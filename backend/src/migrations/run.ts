@@ -116,6 +116,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '079_quote_pairs_and_notes_consolidation.sql',
         '080_user_muted_threads.sql',
         '081_job_issues_vehicle_anchor.sql',
+        '082_vehicle_issue_default_watchers.sql',
       ];
 
       for (const migration of migrations) {
