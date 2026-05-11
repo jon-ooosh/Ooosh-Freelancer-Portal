@@ -4169,11 +4169,18 @@ export default function JobDetailPage() {
                         <span className="text-lg">
                           {q.job_type === 'delivery' ? '📦' : q.job_type === 'collection' ? '📥' : '👷'}
                         </span>
-                        <span className="font-semibold text-gray-900 capitalize">
+                        <Link
+                          to={`/operations/transport?quote=${q.id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-semibold text-gray-900 capitalize hover:text-ooosh-600 hover:underline"
+                          title="Open this quote on the Crew & Transport ops page (new tab) to see what else is going on around the same time"
+                        >
                           {q.job_type}
                           {q.what_is_it ? ` (${q.what_is_it})` : ''}
                           {q.add_collection ? ' + Collection' : ''}
-                        </span>
+                          <span className="ml-1 text-xs text-ooosh-600">↗</span>
+                        </Link>
                         <span className={`text-xs px-2 py-0.5 rounded-full ${
                           q.calculation_mode === 'dayrate' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
                         }`}>
@@ -4221,7 +4228,9 @@ export default function JobDetailPage() {
                       {(q.venue_name || q.job_date || q.arrival_time) && (
                         <div className="flex flex-wrap gap-x-3 gap-y-0.5 mb-2 text-sm text-gray-700">
                           {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
-                          {q.arrival_time && <span>🕐 {q.arrival_time}</span>}
+                          {q.arrival_time
+                            ? <span>🕐 {q.arrival_time}</span>
+                            : q.job_date && <span className="text-gray-400 italic">🕐 Time TBC</span>}
                           {q.venue_name && (
                             q.venue_id ? (
                               <Link to={`/venues/${q.venue_id}`} className="text-ooosh-600 hover:text-ooosh-700 hover:underline">📍 {q.venue_name}</Link>
@@ -4429,17 +4438,8 @@ export default function JobDetailPage() {
 
                     </div>
                   </div>
-                  {/* Created by + Transport Ops deep link — bottom right */}
-                  <div className="flex justify-between items-center mt-2 gap-3">
-                    <Link
-                      to={`/operations/transport?quote=${q.id}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[11px] text-ooosh-600 hover:text-ooosh-700 hover:underline"
-                      title="Open this quote on the Crew & Transport ops page (new tab) to see what else is going on around the same time"
-                    >
-                      View in Transport Ops ↗
-                    </Link>
+                  {/* Created by — bottom right */}
+                  <div className="flex justify-end items-center mt-2">
                     <span className="text-[11px] text-gray-400">
                       Created: {new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
                       {q.created_by_name && ` / ${q.created_by_name}`}
@@ -4478,16 +4478,25 @@ export default function JobDetailPage() {
                                     <span className="text-lg">
                                       {q.job_type === 'delivery' ? '📦' : q.job_type === 'collection' ? '📥' : '👷'}
                                     </span>
-                                    <span className="font-semibold text-gray-900 capitalize">
+                                    <Link
+                                      to={`/operations/transport?quote=${q.id}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="font-semibold text-gray-900 capitalize hover:text-ooosh-600 hover:underline"
+                                      title="Open this quote on the Crew & Transport ops page (new tab)"
+                                    >
                                       {q.job_type}{q.what_is_it ? ` (${q.what_is_it})` : ''}{q.add_collection ? ' + Collection' : ''}
-                                    </span>
+                                      <span className="ml-1 text-xs text-ooosh-600">↗</span>
+                                    </Link>
                                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>{sc.label}</span>
                                   </div>
                                   {(q.venue_name || q.job_date || q.arrival_time) && (
                                     <div className="flex flex-wrap gap-x-3 text-sm text-gray-600 mb-2">
                                       {q.venue_name && <span>📍 {q.venue_name}</span>}
                                       {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
-                                      {q.arrival_time && <span>🕐 {q.arrival_time}</span>}
+                                      {q.arrival_time
+                                        ? <span>🕐 {q.arrival_time}</span>
+                                        : q.job_date && <span className="text-gray-400 italic">🕐 Time TBC</span>}
                                     </div>
                                   )}
                                   <div className="text-sm text-gray-500">
@@ -4507,15 +4516,6 @@ export default function JobDetailPage() {
                                   >
                                     Restore
                                   </button>
-                                  <Link
-                                    to={`/operations/transport?quote=${q.id}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="text-[11px] text-ooosh-600 hover:text-ooosh-700 hover:underline"
-                                    title="Open this quote on the Crew & Transport ops page (new tab)"
-                                  >
-                                    View in Transport Ops ↗
-                                  </Link>
                                   <div className="text-gray-400 text-[11px] leading-snug">
                                     <div>
                                       Created: {new Date(q.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}

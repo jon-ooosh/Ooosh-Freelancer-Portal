@@ -111,6 +111,9 @@ export interface ClientIntroJob {
   job_date: string;
   arrival_time: string | null;
   client_introduction: string;
+  tolls_status: string | null;
+  accommodation_status: string | null;
+  flight_status: string | null;
   ops_status: string | null;
 }
 

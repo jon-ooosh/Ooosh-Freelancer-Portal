@@ -237,18 +237,14 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     })),
     viewAllHref: '/money/excess',
   };
-  // Transport introductions to arrange — quotes in next 7 days on a
-  // confirmed/pre-dispatch job where the intro pill is still 'todo' or
-  // 'working_on_it'. Replaces the old "Chases Due" bucket: chases now live
-  // solely on the stat-card row, and post-confirmation follow-ups belong
-  // to the reminders system.
-  const introLabel: Record<string, string> = {
-    todo: 'to do',
-    working_on_it: 'working on it',
-  };
-  const transportIntros: NABucket = {
-    key: 'transport_intros',
-    title: 'Transport Introductions',
+  // Transport arrangements to action — quotes in next 7 days on a
+  // confirmed/pre-dispatch job where any arranging pill (client intro /
+  // tolls / accommodation / flights) is still outstanding. Replaces the
+  // old "Chases Due" bucket: chases now live solely on the stat-card row,
+  // and post-confirmation follow-ups belong to the reminders system.
+  const transportArrangements: NABucket = {
+    key: 'transport_arrangements',
+    title: 'Transport Arrangements',
     accent: 'blue',
     count: na.client_intros?.length || 0,
     items: (na.client_intros || []).map((q) => {
@@ -258,15 +254,21 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
       const dateLabel = days <= 0 ? 'today' : days === 1 ? 'tomorrow' : `in ${days}d`;
       const who = q.client_name || q.company_name || 'Unknown';
       const where = q.venue_name || q.job_name || 'Untitled';
+      const outstanding: string[] = [];
+      if (q.client_introduction === 'todo') outstanding.push('intro');
+      else if (q.client_introduction === 'working_on_it') outstanding.push('intro (wip)');
+      if (q.tolls_status === 'todo') outstanding.push('tolls');
+      if (q.accommodation_status === 'todo') outstanding.push('accom');
+      if (q.flight_status === 'todo') outstanding.push('flights');
       return {
         id: q.quote_id,
         label: `${who} — ${where}`.slice(0, 80),
         age: dateLabel,
-        sub: introLabel[q.client_introduction] || q.client_introduction,
-        href: '/operations/transport?needs_intro=1',
+        sub: outstanding.join(' · ') || 'to do',
+        href: '/operations/transport?needs_arranging=1',
       };
     }),
-    viewAllHref: '/operations/transport?needs_intro=1',
+    viewAllHref: '/operations/transport?needs_arranging=1',
   };
 
   const fleetItems: NACardItem[] = [];
@@ -318,8 +320,8 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   };
 
   const allClear = overdueTotal === 0;
-  const overdueBuckets = [completions, departures, backline, transport];
-  const secondaryBuckets = [referrals, excess, transportIntros, fleetBucket, problemsBucket];
+  const overdueBuckets = [departures, completions, backline, transport];
+  const secondaryBuckets = [referrals, excess, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (
