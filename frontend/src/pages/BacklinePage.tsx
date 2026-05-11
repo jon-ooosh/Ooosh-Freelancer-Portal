@@ -285,7 +285,7 @@ export default function BacklinePage() {
         </div>
       </div>
 
-      {/* ── Row 2: Period + Direction (what am I looking at, when) ── */}
+      {/* ── Row 2: Period + Direction + Status, all on one line ── */}
       <div className="flex flex-wrap gap-2">
         <div className="flex bg-gray-100 rounded-lg p-0.5">
           {PERIOD_OPTIONS.map(opt => (
@@ -315,10 +315,6 @@ export default function BacklinePage() {
             </button>
           ))}
         </div>
-      </div>
-
-      {/* ── Row 3: Status filter — Outstanding is the default ── */}
-      <div className="flex flex-wrap gap-2">
         <div className="flex bg-gray-100 rounded-lg p-0.5">
           <button
             onClick={() => setStatusFilter('outstanding')}
