@@ -36,6 +36,7 @@ import warehouseRouter from './warehouse';
 import systemSettingsRouter from './system-settings';
 import oohReturnRouter from './ooh-return';
 import preHireBriefingRouter from './pre-hire-briefing';
+import fillGapRouter from './fill-gap';
 
 const router = Router();
 
@@ -64,6 +65,7 @@ router.use('/money', moneyRouter);
 router.use('/ve103b', ve103bRouter);
 router.use('/backline', backlineRouter);
 router.use('/cancellations', cancellationsRouter);
+router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled / lost jobs (Phase 1 — SQL only)
 router.use('/issues', issuesRouter);
 router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute) — distinct from /issues platform tracker
 router.use('/hire-forms', hireFormsRouter);
