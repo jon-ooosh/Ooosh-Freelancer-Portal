@@ -50,14 +50,8 @@ export default function ChaseModal({
 
   useEffect(() => {
     if (isOpen && job) {
-      const existing = job.next_chase_date;
-      if (existing) {
-        setNextChaseDate(existing.slice(0, 10));
-        setSelectedChasePreset(null);
-      } else {
-        setNextChaseDate(addDaysToDate(5));
-        setSelectedChasePreset('5 days');
-      }
+      setNextChaseDate(addDaysToDate(5));
+      setSelectedChasePreset('5 days');
       setMode('log');
       setContent('');
       setChaseResponse('');
