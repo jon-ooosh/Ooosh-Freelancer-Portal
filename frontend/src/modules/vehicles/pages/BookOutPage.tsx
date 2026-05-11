@@ -45,8 +45,10 @@ interface OpResult {
   detail?: string
 }
 
-// Testing mode: set to true to skip photo minimum requirement
-const TESTING_MODE = true  // TEMP: skip photo requirement for testing
+// Testing mode: set to true to skip photo minimum requirement.
+// Must stay false in production — book-out's required walkaround photos
+// are the source of truth that check-in compares against.
+const TESTING_MODE = false
 
 const STEPS = [
   'Select Vehicle',
@@ -455,16 +457,13 @@ export function BookOutPage() {
   }
 
   const handlePhotoCapture = useCallback((photo: CapturedPhoto) => {
-    setForm(f => {
-      // For required angles, replace existing (retake). For extras, always append.
-      const isRequired = REQUIRED_PHOTOS.some(r => r.angle === photo.angle)
-      return {
-        ...f,
-        photos: isRequired
-          ? [...f.photos.filter(p => p.angle !== photo.angle), photo]
-          : [...f.photos, photo],
-      }
-    })
+    // Dedupe by angle — required angles are fixed strings, extras now use
+    // a unique `extra_<timestamp>` angle so retake-of-extra also lands on
+    // the same key. Result: either pattern just replaces in place.
+    setForm(f => ({
+      ...f,
+      photos: [...f.photos.filter(p => p.angle !== photo.angle), photo],
+    }))
   }, [])
 
   const handlePhotoRemove = useCallback((angle: string) => {
@@ -473,6 +472,16 @@ export function BookOutPage() {
       photos: f.photos.filter(p => p.angle !== angle),
     }))
   }, [])
+
+  const handlePhotoUpdate = useCallback(
+    (angle: string, partial: Partial<Pick<CapturedPhoto, 'label'>>) => {
+      setForm(f => ({
+        ...f,
+        photos: f.photos.map(p => (p.angle === angle ? { ...p, ...partial } : p)),
+      }))
+    },
+    [],
+  )
 
   // Briefing items: merge "All" + type-specific from R2 settings, defaults fallback
   const briefingItems: ChecklistItem[] = useMemo(() => {
@@ -594,6 +603,12 @@ export function BookOutPage() {
           // walkaround. driverName is the customer (on the agreement);
           // deliveredBy is the freelancer.
           deliveredBy: isFreelancer ? freelancerContext?.driverName ?? null : null,
+          // Persist per-photo labels so check-in's side-by-side can show
+          // meaningful captions on optional extras (e.g. user-typed
+          // "Pre-existing chip — driver side"). Required photos use their
+          // built-in labels; extras default to "Extra Photo N" unless the
+          // staff member tapped to edit.
+          photoMeta: form.photos.map(p => ({ angle: String(p.angle), label: p.label })),
         }),
       'R2 event creation',
     )
@@ -1416,6 +1431,7 @@ export function BookOutPage() {
             photos={form.photos}
             onCapture={handlePhotoCapture}
             onRemove={handlePhotoRemove}
+            onUpdatePhoto={handlePhotoUpdate}
             requiredCount={requiredPhotoCount}
             capturedCount={capturedRequiredCount}
           />
@@ -2594,12 +2610,14 @@ function StepPhotos({
   photos,
   onCapture,
   onRemove,
+  onUpdatePhoto,
   requiredCount,
   capturedCount,
 }: {
   photos: CapturedPhoto[]
   onCapture: (photo: CapturedPhoto) => void
   onRemove: (angle: string) => void
+  onUpdatePhoto: (angle: string, partial: Partial<Pick<CapturedPhoto, 'label'>>) => void
   requiredCount: number
   capturedCount: number
 }) {
@@ -2622,6 +2640,7 @@ function StepPhotos({
         photos={photos}
         onCapture={onCapture}
         onRemove={onRemove}
+        onUpdate={onUpdatePhoto}
       />
     </div>
   )

@@ -21,6 +21,12 @@ export interface BookOutEventData {
   clientEmail: string | null
   driverName: string | null
   notes: string | null
+  /**
+   * Per-photo label index recovered from the event JSON's `photoMeta`
+   * field. Maps `angle slug → human label`. Empty for events saved
+   * before label persistence was added (legacy data).
+   */
+  photoLabels: Map<string, string>
 }
 
 export interface EventIndexEntry {
@@ -103,6 +109,14 @@ export async function fetchBookOutForVehicle(
     const notesMatch = details.match(/Notes:\s*([\s\S]+?)(?=\n[A-Z]|$)/i)
     const notesValue = notesMatch?.[1]?.trim() || null
 
+    const photoMetaRaw = fullEvent?.photoMeta as Array<{ angle: string; label: string }> | null | undefined
+    const photoLabels = new Map<string, string>()
+    if (Array.isArray(photoMetaRaw)) {
+      for (const entry of photoMetaRaw) {
+        if (entry?.angle && entry?.label) photoLabels.set(entry.angle, entry.label)
+      }
+    }
+
     const eventData: BookOutEventData = {
       id: latest.id,
       eventDate: latest.eventDate,
@@ -112,6 +126,7 @@ export async function fetchBookOutForVehicle(
       clientEmail: (fullEvent?.clientEmail as string) || null,
       driverName,
       notes: notesValue,
+      photoLabels,
     }
 
     console.log('[events-query] Found book-out event:', eventData.id, 'date:', eventData.eventDate)

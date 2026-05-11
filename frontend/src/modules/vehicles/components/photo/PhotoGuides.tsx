@@ -3,10 +3,10 @@
  * Shows a simplified van outline with the camera position indicated,
  * helping users frame their photos consistently.
  *
- * 14 angles in clockwise walk-around order:
+ * 16 angles in clockwise walk-around order:
  * Front → Front Right → Passenger Door → Interior Front → Sliding Door →
  * Interior Rear → Rear Right → Rear Doors → Rear Left → Left Panel →
- * Driver Door → Front Left → Windscreen → Dashboard
+ * Driver Door → Front Left → Windscreen L → Windscreen M → Windscreen R → Dashboard
  */
 
 import React from 'react'
@@ -335,22 +335,85 @@ function FrontLeftGuide({ className }: GuideProps) {
   )
 }
 
-function WindscreenGuide({ className }: GuideProps) {
+/**
+ * Windscreen zone guides — left / middle / right.
+ *
+ * The three guides share the same windscreen outline and reg-plate
+ * reference; only the highlighted zone differs. Each capture should
+ * be a close-up framing of the named zone so chips and cracks can be
+ * located accurately at check-in.
+ */
+function WindscreenZoneGuide({
+  className,
+  zone,
+  caption,
+}: GuideProps & { zone: 'left' | 'middle' | 'right'; caption: string }) {
+  // Windscreen trapezoid points (top-left, top-right, bottom-right, bottom-left)
+  // and the two vertical splits at thirds.
+  const left = { topX: 100, botX: 60 }
+  const right = { topX: 300, botX: 340 }
+  // Split lines run from top edge to bottom edge at 1/3 and 2/3 across.
+  // Top edge spans 100→300 (width 200), bottom edge 60→340 (width 280).
+  const split1Top = 100 + 200 / 3        // ≈ 166.67
+  const split2Top = 100 + (200 * 2) / 3  // ≈ 233.33
+  const split1Bot = 60 + 280 / 3         // ≈ 153.33
+  const split2Bot = 60 + (280 * 2) / 3   // ≈ 246.67
+
+  const zonePath =
+    zone === 'left'
+      ? `M${left.botX} 250 L${left.topX} 60 L${split1Top} 60 L${split1Bot} 250 Z`
+      : zone === 'middle'
+        ? `M${split1Bot} 250 L${split1Top} 60 L${split2Top} 60 L${split2Bot} 250 Z`
+        : `M${split2Bot} 250 L${split2Top} 60 L${right.topX} 60 L${right.botX} 250 Z`
+
   return (
     <svg viewBox="0 0 400 300" className={className} fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M60 250 L100 60 L300 60 L340 250 Z" stroke="white" strokeWidth="2" opacity="0.5" fill="white" fillOpacity="0.05" />
-      <path d="M60 250 L100 60" stroke="white" strokeWidth="3" opacity="0.4" />
-      <path d="M340 250 L300 60" stroke="white" strokeWidth="3" opacity="0.4" />
-      <path d="M100 60 L300 60" stroke="white" strokeWidth="2" opacity="0.4" />
-      <path d="M120 230 Q200 100 280 230" stroke="white" strokeWidth="1" opacity="0.2" strokeDasharray="6 4" />
+      {/* Full windscreen outline — dim reference */}
+      <path d="M60 250 L100 60 L300 60 L340 250 Z" stroke="white" strokeWidth="2" opacity="0.35" fill="white" fillOpacity="0.03" />
+      {/* Zone split lines */}
+      <path d={`M${split1Bot} 250 L${split1Top} 60`} stroke="white" strokeWidth="1" opacity="0.25" strokeDasharray="4 4" />
+      <path d={`M${split2Bot} 250 L${split2Top} 60`} stroke="white" strokeWidth="1" opacity="0.25" strokeDasharray="4 4" />
+      {/* Highlighted zone */}
+      <path d={zonePath} stroke="white" strokeWidth="2.5" opacity="0.85" fill="white" fillOpacity="0.15" />
+      {/* Reg plate reference for orientation */}
       <rect x="150" y="255" width="100" height="20" rx="3" stroke="white" strokeWidth="1" opacity="0.3" />
       <text x="200" y="30" textAnchor="middle" fill="white" opacity="0.7" fontSize="14" fontFamily="sans-serif">
-        Stand directly in front, close up
+        Windscreen — {zone === 'left' ? 'Driver Side' : zone === 'middle' ? 'Centre' : 'Passenger Side'}
       </text>
       <text x="200" y="50" textAnchor="middle" fill="white" opacity="0.5" fontSize="12" fontFamily="sans-serif">
-        Full windscreen visible, show any chips/cracks
+        {caption}
       </text>
     </svg>
+  )
+}
+
+function WindscreenLeftGuide({ className }: GuideProps) {
+  return (
+    <WindscreenZoneGuide
+      className={className}
+      zone="left"
+      caption="Close-up of the driver-side third — show any chips or cracks"
+    />
+  )
+}
+
+function WindscreenMiddleGuide({ className }: GuideProps) {
+  return (
+    <WindscreenZoneGuide
+      className={className}
+      zone="middle"
+      caption="Close-up of the centre third — show any chips or cracks"
+    />
+  )
+}
+
+function WindscreenRightGuide({ className }: GuideProps) {
+  return (
+    <WindscreenZoneGuide
+      className={className}
+      zone="right"
+      caption="Close-up of the passenger-side third — show any chips or cracks"
+    />
   )
 }
 
@@ -395,7 +458,9 @@ export function getPhotoGuide(angle: PhotoAngle): ((props: GuideProps) => React.
     left_panel: LeftPanelGuide,
     driver_door: DriverDoorGuide,
     front_left: FrontLeftGuide,
-    windscreen: WindscreenGuide,
+    windscreen_left: WindscreenLeftGuide,
+    windscreen_middle: WindscreenMiddleGuide,
+    windscreen_right: WindscreenRightGuide,
     dashboard: DashboardGuide,
   }
   return guides[angle] || null
@@ -415,6 +480,8 @@ export const PHOTO_GUIDE_TIPS: Record<PhotoAngle, string> = {
   left_panel: 'Stand level with the left side panel. Full panel visible between wheel arches.',
   driver_door: 'Stand level with the driver door. Full door visible including wing mirror.',
   front_left: 'Stand 2-3 metres away at the front-left corner. Include the full front bumper and left side panel.',
-  windscreen: 'Stand directly in front, closer. Full windscreen visible — show any chips or cracks clearly.',
+  windscreen_left: 'Close-up of the driver-side third of the windscreen. Show any chips or cracks clearly.',
+  windscreen_middle: 'Close-up of the centre third of the windscreen. Show any chips or cracks clearly.',
+  windscreen_right: 'Close-up of the passenger-side third of the windscreen. Show any chips or cracks clearly.',
   dashboard: 'Close-up of the instrument panel. Make sure the mileage reading and fuel gauge are clearly visible.',
 }
