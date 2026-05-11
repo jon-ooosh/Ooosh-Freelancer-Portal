@@ -43,7 +43,7 @@ export default function ChaseModal({
   const [nextChaseDate, setNextChaseDate] = useState('');
   const [selectedChasePreset, setSelectedChasePreset] = useState<string | null>(null);
   const [chaseAlertUserId, setChaseAlertUserId] = useState('');
-  const [delivery, setDelivery] = useState<Delivery>('bell');
+  const [delivery, setDelivery] = useState<Delivery>('none');
   const [teamUsers, setTeamUsers] = useState<{ id: string; email: string; first_name: string; last_name: string }[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -63,7 +63,7 @@ export default function ChaseModal({
       setChaseResponse('');
       setChaseMethod('phone');
       setChaseAlertUserId(job.chase_alert_user_id || '');
-      setDelivery(job.chase_alert_delivery || 'bell');
+      setDelivery(job.chase_alert_delivery || 'none');
       setError('');
     }
   }, [isOpen, job]);
