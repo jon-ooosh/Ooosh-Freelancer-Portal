@@ -64,7 +64,7 @@ interface Row {
   client_name: string | null;
   job_date: string | null;
   return_date: string | null;
-  last_synced_at: string | null;
+  synced_at: string | null;
 }
 
 async function main() {
@@ -73,7 +73,7 @@ async function main() {
   console.log('Fetching all non-deleted jobs with HH + pipeline status...\n');
   const result = await query(
     `SELECT id, hh_job_number, pipeline_status, status AS hh_status,
-            job_name, client_name, job_date, return_date, last_synced_at
+            job_name, client_name, job_date, return_date, synced_at
      FROM jobs
      WHERE is_deleted = false
        AND pipeline_status IS NOT NULL
@@ -171,7 +171,7 @@ async function main() {
   if (csvMode) {
     const csvPath = path.resolve(process.cwd(), 'status-mismatch.csv');
     const lines: string[] = [
-      'hh_job_number,op_uuid,pipeline_status,hh_status,hh_label,client_name,job_name,job_date,return_date,last_synced_at',
+      'hh_job_number,op_uuid,pipeline_status,hh_status,hh_label,client_name,job_name,job_date,return_date,synced_at',
     ];
     for (const r of mismatches) {
       const cells = [
@@ -184,7 +184,7 @@ async function main() {
         csvCell(r.job_name),
         r.job_date ? r.job_date.slice(0, 10) : '',
         r.return_date ? r.return_date.slice(0, 10) : '',
-        r.last_synced_at ?? '',
+        r.synced_at ?? '',
       ];
       lines.push(cells.join(','));
     }
