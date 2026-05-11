@@ -18,6 +18,7 @@ import { hhBroker } from './hirehop-broker';
 import { buildProgressStrips, JobProgressStrip, RequirementRow } from './job-progress-strip';
 import { emailService } from './email-service';
 import { renderBriefingHtml, buildSubject } from './email-templates/pre-hire-briefing';
+import { resolveHireFormContacts, ResolvedContact } from './hire-form-contacts';
 
 // SYSTEM_USER_ID matches the value used elsewhere for system-attributed
 // interactions (cron jobs, automated logs). See migration 031.
@@ -49,6 +50,15 @@ export interface BriefingJob {
    *  pickup time has been set, so we should ask the client what time
    *  they want to collect (skipped when transport delivery exists). */
   is_default_pickup_time: boolean;
+  /** Human-readable summary of what's being hired, derived from
+   *  hh_derived_flags. e.g. "the van and backline" / "the backline" /
+   *  "the staging" / "the hire" (fallback). Used in the client draft. */
+  equipment_summary: string;
+  /** True if the job has any self-drive vans — drives whether the
+   *  briefing renders Drivers/Excess/Hire-Forms sections at all. */
+  has_self_drive: boolean;
+  /** True if the job has any backline items. */
+  has_backline: boolean;
 }
 
 export interface BriefingRequirement {
@@ -132,6 +142,11 @@ export interface JobBriefing {
   red_flags: BriefingFlag[];
   discussion_points: string[];
   links: { job_detail: string; hirehop: string | null };
+  /** People associated with the job — names + emails for the staff to
+   *  copy-paste into their To: field. Sourced via the same canonical
+   *  resolver the hire-form picker uses (org-level + person-level +
+   *  job_organisations chain). */
+  contacts: ResolvedContact[];
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -156,6 +171,55 @@ function isDefaultPickupTime(outTime: string | null): boolean {
   return trimmed === '09:00' || trimmed === '';
 }
 
+interface DerivedFlagsLite {
+  has_vehicle?: boolean;
+  vehicle_count?: number;
+  self_drive_count?: number;
+  has_backline?: boolean;
+  has_rehearsal?: boolean;
+  has_staging?: boolean;
+  has_pa?: boolean;
+  has_lighting?: boolean;
+}
+
+/**
+ * Build a client-friendly summary of what's on the hire, from hh_derived_flags.
+ *
+ * Used to replace the hard-coded "the van and backline" in the draft —
+ * a backline-only / staging-only / rehearsal-only job should read
+ * correctly without the staff having to edit.
+ *
+ * Priority: van + backline both → "the van and backline" (most common
+ * common-case phrasing). Otherwise list whatever's present; fallback to
+ * a generic "the hire" if we can't determine anything.
+ */
+function summariseEquipment(flags: DerivedFlagsLite | null | undefined): string {
+  if (!flags) return 'the hire';
+  const hasVan = !!flags.has_vehicle && (flags.vehicle_count ?? 0) > 0;
+  const hasBackline = !!flags.has_backline;
+  const hasStaging = !!flags.has_staging;
+  const hasPA = !!flags.has_pa;
+  const hasLighting = !!flags.has_lighting;
+  const hasRehearsal = !!flags.has_rehearsal;
+
+  // Common-case shortcut for the most frequent phrasing.
+  if (hasVan && hasBackline) return 'the van and backline';
+  if (hasVan && !hasBackline && !hasStaging && !hasPA && !hasLighting) return 'the van';
+  if (hasRehearsal && !hasVan) return 'the rehearsal kit';
+
+  const parts: string[] = [];
+  if (hasVan) parts.push('van');
+  if (hasBackline) parts.push('backline');
+  if (hasStaging) parts.push('staging');
+  if (hasPA) parts.push('PA');
+  if (hasLighting) parts.push('lighting');
+  if (parts.length === 0) return 'the hire';
+  if (parts.length === 1) return `the ${parts[0]}`;
+  if (parts.length === 2) return `the ${parts[0]} and ${parts[1]}`;
+  const last = parts.pop();
+  return `the ${parts.join(', ')} and ${last}`;
+}
+
 // ── Main builder ────────────────────────────────────────────────────────
 
 /**
@@ -178,7 +242,8 @@ export async function buildBriefing(
   const jobResult = await query(
     `SELECT id, hh_job_number, job_name, client_name, company_name, venue_name,
             out_date, job_date, job_end, return_date, out_time, return_time,
-            pipeline_status, status as hh_status, job_value
+            pipeline_status, status as hh_status, job_value,
+            hh_derived_flags
        FROM jobs
       WHERE id = $1 AND is_deleted = false`,
     [jobId],
@@ -215,6 +280,7 @@ export async function buildBriefing(
     transportResult,
     lastInteractionResult,
     hhBillingRes,
+    contacts,
   ] = await Promise.all([
     // All pre-hire requirements with their labels
     query(
@@ -299,6 +365,11 @@ export async function buildBriefing(
       [jobId],
     ),
     hhBillingPromise,
+    // Contacts for the To: copy block — same resolver hire forms use.
+    resolveHireFormContacts(jobId).catch((err: unknown) => {
+      console.warn(`[pre-hire-briefing] contacts resolve failed for job ${jobId}:`, err);
+      return [] as ResolvedContact[];
+    }),
   ]);
 
   // ── Progress strip (pre-hire phase) ─────────────────────────────────
@@ -442,9 +513,27 @@ export async function buildBriefing(
       })()
     : null;
 
+  // ── Derived equipment summary + self-drive flag ────────────────────
+  const derivedFlags = (j.hh_derived_flags as DerivedFlagsLite | null) || null;
+  const has_self_drive = !!derivedFlags?.has_vehicle
+    && (derivedFlags?.self_drive_count ?? derivedFlags?.vehicle_count ?? 0) > 0;
+  const has_backline = !!derivedFlags?.has_backline;
+  const equipment_summary = summariseEquipment(derivedFlags);
+
   // ── Red flags & discussion points ──────────────────────────────────
   const red_flags: BriefingFlag[] = [];
   const discussion_points: string[] = [];
+
+  // WARNING: HH billing fetch failed. Without it we can't compute live
+  // balance, so the email's money paragraph is suppressed. Make the
+  // failure explicit so staff verify in HH before sending the draft.
+  if (hhJobNumber && !hh_billing_loaded) {
+    red_flags.push({
+      severity: 'warning',
+      label: 'HireHop balance fetch failed — please verify payment position in HH before sending the draft',
+    });
+    discussion_points.push('Live HireHop balance unavailable — confirm hire-fee position before drafting money paragraph');
+  }
 
   const driversNeedingForm = drivers.filter(d => d.hire_form_status !== 'received');
 
@@ -534,6 +623,9 @@ export async function buildBriefing(
     days_to_out,
     is_transport_heavy,
     is_default_pickup_time: isDefaultPickupTime((j.out_time as string) || null),
+    equipment_summary,
+    has_self_drive,
+    has_backline,
   };
 
   return {
@@ -553,6 +645,7 @@ export async function buildBriefing(
         ? `https://myhirehop.com/job.php?id=${briefingJob.hh_job_number}`
         : null,
     },
+    contacts,
   };
 }
 
