@@ -55,6 +55,9 @@ const HH_LABEL: Record<number, string> = {
   11: 'Completed',
 };
 
+// pg returns TIMESTAMPTZ as Date objects, not strings
+type PgDate = Date | string | null;
+
 interface Row {
   id: string;
   hh_job_number: number | null;
@@ -62,9 +65,22 @@ interface Row {
   hh_status: number;
   job_name: string | null;
   client_name: string | null;
-  job_date: string | null;
-  return_date: string | null;
-  updated_at: string | null;
+  job_date: PgDate;
+  return_date: PgDate;
+  updated_at: PgDate;
+}
+
+function toDateString(d: PgDate): string {
+  if (!d) return '';
+  if (d instanceof Date) return d.toISOString().slice(0, 10);
+  return String(d).slice(0, 10);
+}
+
+function toMs(d: PgDate): number {
+  if (!d) return 0;
+  if (d instanceof Date) return d.getTime();
+  const parsed = new Date(String(d));
+  return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
 }
 
 async function main() {
@@ -103,15 +119,15 @@ async function main() {
   console.log('');
 
   // Group by (pipeline_status, hh_status) pair
-  const groups = new Map<string, { count: number; pipeline_status: string; hh_status: number; oldest_return: string | null; newest_return: string | null }>();
+  const groups = new Map<string, { count: number; pipeline_status: string; hh_status: number; oldest_return: PgDate; newest_return: PgDate }>();
   for (const r of mismatches) {
     const key = `${r.pipeline_status}::${r.hh_status}`;
     const entry = groups.get(key);
     const ret = r.return_date;
     if (entry) {
       entry.count++;
-      if (ret && (!entry.oldest_return || ret < entry.oldest_return)) entry.oldest_return = ret;
-      if (ret && (!entry.newest_return || ret > entry.newest_return)) entry.newest_return = ret;
+      if (ret && (!entry.oldest_return || toMs(ret) < toMs(entry.oldest_return))) entry.oldest_return = ret;
+      if (ret && (!entry.newest_return || toMs(ret) > toMs(entry.newest_return))) entry.newest_return = ret;
     } else {
       groups.set(key, {
         count: 1,
@@ -131,7 +147,7 @@ async function main() {
   console.log('-'.repeat(95));
   for (const g of sorted) {
     const range = g.oldest_return && g.newest_return
-      ? `${g.oldest_return.slice(0, 10)} → ${g.newest_return.slice(0, 10)}`
+      ? `${toDateString(g.oldest_return)} → ${toDateString(g.newest_return)}`
       : '(no return_date)';
     console.log(
       String(g.count).padEnd(7) +
@@ -154,7 +170,7 @@ async function main() {
   );
   console.log('-'.repeat(120));
   for (const r of mismatches.slice(0, 200)) {
-    const ret = r.return_date ? r.return_date.slice(0, 10) : '—';
+    const ret = r.return_date ? toDateString(r.return_date) : '—';
     const label = `${r.client_name || '?'} — ${r.job_name || '?'}`.slice(0, 60);
     console.log(
       String(r.hh_job_number ?? '?').padEnd(8) +
@@ -182,9 +198,9 @@ async function main() {
         HH_LABEL[r.hh_status] || '',
         csvCell(r.client_name),
         csvCell(r.job_name),
-        r.job_date ? r.job_date.slice(0, 10) : '',
-        r.return_date ? r.return_date.slice(0, 10) : '',
-        r.updated_at ?? '',
+        toDateString(r.job_date),
+        toDateString(r.return_date),
+        r.updated_at ? (r.updated_at instanceof Date ? r.updated_at.toISOString() : String(r.updated_at)) : '',
       ];
       lines.push(cells.join(','));
     }
