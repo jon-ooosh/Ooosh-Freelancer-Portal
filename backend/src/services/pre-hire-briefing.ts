@@ -735,10 +735,11 @@ export interface LastSentInfo {
 
 export async function getLastBriefingSend(jobId: string): Promise<LastSentInfo | null> {
   // Source the timestamp from email_log (authoritative — captures both
-  // manual + scheduled). Cross-reference the interactions row for the
-  // attribution name (who clicked / system).
+  // manual + scheduled). The column on email_log is `created_at` (set
+  // at send time — there's no separate sent_at). Cross-reference the
+  // interactions row for the attribution name (who clicked / system).
   const result = await query(
-    `SELECT el.sent_at, el.actual_recipient, el.subject,
+    `SELECT el.created_at AS sent_at, el.actual_recipient, el.subject,
             i.created_by AS interaction_user_id,
             CONCAT(p.first_name, ' ', p.last_name) AS sent_by_name,
             i.content AS interaction_content
@@ -747,14 +748,14 @@ export async function getLastBriefingSend(jobId: string): Promise<LastSentInfo |
          ON i.job_id = $1
         AND i.type = 'note'
         AND i.content LIKE '%Pre-Hire Review email sent%'
-        AND i.created_at >= el.sent_at - INTERVAL '5 seconds'
-        AND i.created_at <= el.sent_at + INTERVAL '60 seconds'
+        AND i.created_at >= el.created_at - INTERVAL '5 seconds'
+        AND i.created_at <= el.created_at + INTERVAL '60 seconds'
        LEFT JOIN users u ON u.id = i.created_by
        LEFT JOIN people p ON p.id = u.person_id
       WHERE el.template_id = 'pre_hire_briefing'
         AND el.status = 'sent'
         AND el.subject LIKE '%' || COALESCE((SELECT '#' || hh_job_number::text FROM jobs WHERE id = $1), '~no-match~') || '%'
-      ORDER BY el.sent_at DESC
+      ORDER BY el.created_at DESC
       LIMIT 1`,
     [jobId],
   );

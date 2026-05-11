@@ -3269,28 +3269,41 @@ export default function JobDetailPage() {
                  Provisional and earlier: review isn't meaningful yet.
                  Dispatched (on hire) onwards: the hire's gone, review's done.
                  The same content goes out automatically via the daily
-                 09:55 cron for confirmed jobs at T-3d / T-5d / T-1d. */}
+                 09:55 cron for confirmed jobs at T-3d / T-5d / T-1d.
+                 Visual state: faded grey when a recent send exists (within
+                 the last 24h) so staff can see at-a-glance it's been
+                 actioned. Still clickable — sometimes you want to resend. */}
             {(user?.role === 'admin' || user?.role === 'manager')
               && (job.pipeline_status === 'confirmed'
                   || job.pipeline_status === 'prepping'
-                  || job.pipeline_status === 'prepped') && (
-              <button
-                onClick={sendPreHireBriefing}
-                disabled={briefingSending}
-                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
-                title={
-                  briefingLastSent
-                    ? `Last sent ${formatBriefingLastSent()}${briefingLastSent.sent_by_name ? ` by ${briefingLastSent.sent_by_name}` : briefingLastSent.trigger === 'scheduled' ? ' by scheduler' : ''}. Click to send again.`
-                    : 'Send a pre-hire review email for this job to info@oooshtours.co.uk now'
-                }
-              >
-                {briefingSending
-                  ? 'Sending…'
-                  : briefingLastSent
-                    ? <>✉ Pre-Hire Review <span className="text-purple-400 text-xs ml-1">· sent {formatBriefingLastSent()}</span></>
-                    : '✉ Pre-Hire Review'}
-              </button>
-            )}
+                  || job.pipeline_status === 'prepped') && (() => {
+                const sentRecently = briefingLastSent
+                  && (Date.now() - new Date(briefingLastSent.sent_at).getTime()) < 24 * 60 * 60_000;
+                return (
+                  <button
+                    onClick={sendPreHireBriefing}
+                    disabled={briefingSending}
+                    className={
+                      sentRecently
+                        ? "hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-200 bg-gray-50 rounded-lg hover:bg-gray-100 text-gray-500 disabled:opacity-50 transition-colors"
+                        : "hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-purple-300 rounded-lg hover:bg-purple-50 text-purple-700 disabled:opacity-50 transition-colors"
+                    }
+                    title={
+                      briefingLastSent
+                        ? `Last sent ${formatBriefingLastSent()}${briefingLastSent.sent_by_name ? ` by ${briefingLastSent.sent_by_name}` : briefingLastSent.trigger === 'scheduled' ? ' by scheduler' : ''}. Click to send again.`
+                        : 'Send a pre-hire review email for this job to info@oooshtours.co.uk now'
+                    }
+                  >
+                    {briefingSending
+                      ? 'Sending…'
+                      : sentRecently
+                        ? <>✓ Pre-Hire Review <span className="text-gray-400 text-xs ml-1">· sent {formatBriefingLastSent()}</span></>
+                        : briefingLastSent
+                          ? <>✉ Pre-Hire Review <span className="text-purple-400 text-xs ml-1">· last sent {formatBriefingLastSent()}</span></>
+                          : '✉ Pre-Hire Review'}
+                  </button>
+                );
+              })()}
           </div>
         </div>
 
