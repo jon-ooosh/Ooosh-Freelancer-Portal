@@ -319,6 +319,10 @@ export default function TransportOpsPage() {
   );
   const [needsCrewOnly, setNeedsCrewOnly] = useState(() => initialParams.get('needs_crew') === '1');
   const [needsIntroOnly, setNeedsIntroOnly] = useState(() => initialParams.get('needs_intro') === '1');
+  // Broader filter: any of the four arranging pills (client intro / tolls /
+  // accommodation / flights) outstanding. Deep-linked from the dashboard
+  // Transport Arrangements bucket.
+  const [needsArrangingOnly, setNeedsArrangingOnly] = useState(() => initialParams.get('needs_arranging') === '1');
   const [viewMode, setViewMode] = useState<'table' | 'calendar'>(
     initialParams.get('view') === 'calendar' ? 'calendar' : 'table'
   );
@@ -399,6 +403,7 @@ export default function TransportOpsPage() {
     if (showCancelledJobs) params.set('cancelled_jobs', '1');
     if (needsCrewOnly) params.set('needs_crew', '1');
     if (needsIntroOnly) params.set('needs_intro', '1');
+    if (needsArrangingOnly) params.set('needs_arranging', '1');
     if (dateWindow !== 'all') params.set('when', dateWindow);
     if (searchTerm) params.set('q', searchTerm);
     if (sortBy !== 'date') params.set('sort', sortBy);
@@ -417,7 +422,7 @@ export default function TransportOpsPage() {
   }, [
     filter, viewMode, showCompleted, showCancelled,
     showProvisional, showEnquiry, showLostJobs, showCancelledJobs,
-    needsCrewOnly, needsIntroOnly, dateWindow, searchTerm, sortBy, personPin, venuePin,
+    needsCrewOnly, needsIntroOnly, needsArrangingOnly, dateWindow, searchTerm, sortBy, personPin, venuePin,
     deepLinkQuoteId,
   ]);
 
@@ -684,6 +689,16 @@ export default function TransportOpsPage() {
         return intro === 'todo' || intro === 'working_on_it';
       });
     }
+    if (needsArrangingOnly) {
+      out = out.filter((q) => {
+        const intro = q.client_introduction || 'not_needed';
+        if (intro === 'todo' || intro === 'working_on_it') return true;
+        if (q.tolls_status === 'todo') return true;
+        if (q.accommodation_status === 'todo') return true;
+        if (q.flight_status === 'todo') return true;
+        return false;
+      });
+    }
     if (dateWindow !== 'all') {
       out = out.filter((q) => inDateWindow(q, dateWindow));
     }
@@ -701,7 +716,7 @@ export default function TransportOpsPage() {
       out = out.filter((q) => matchesSearch(q, searchTerm));
     }
     return out;
-  }, [quotes, needsCrewOnly, needsIntroOnly, dateWindow, personPin, venuePin, searchTerm]);
+  }, [quotes, needsCrewOnly, needsIntroOnly, needsArrangingOnly, dateWindow, personPin, venuePin, searchTerm]);
 
   // Split filtered pool by job-stage bucket. Operational drives the main
   // grouped-by-ops_status table; the four speculative buckets render as
@@ -1126,6 +1141,18 @@ export default function TransportOpsPage() {
           <span>Showing quotes where the client introduction is still to-do or working-on-it.</span>
           <button
             onClick={() => setNeedsIntroOnly(false)}
+            className="text-blue-700 hover:text-blue-900 font-medium"
+          >
+            Clear filter &times;
+          </button>
+        </div>
+      )}
+
+      {needsArrangingOnly && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800 flex items-center justify-between">
+          <span>Showing quotes with outstanding arrangements (client intro, tolls, accommodation, or flights).</span>
+          <button
+            onClick={() => setNeedsArrangingOnly(false)}
             className="text-blue-700 hover:text-blue-900 font-medium"
           >
             Clear filter &times;
