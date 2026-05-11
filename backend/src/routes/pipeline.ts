@@ -543,6 +543,11 @@ const updateStatusSchema = z.object({
   // Context fields depending on status
   hold_reason: z.string().optional().nullable(),
   hold_reason_detail: z.string().optional().nullable(),
+  // Optional revisit date when pausing. By default a transition to `paused`
+  // clears next_chase_date — staff can opt-in to a future revisit via the
+  // pause modal, which sends an ISO date here. Survives the sacred-future
+  // rule on any subsequent contact-type interaction.
+  revisit_date: z.string().optional().nullable(),
   confirmed_method: z.enum(['deposit', 'full_payment', 'po', 'manual']).optional().nullable(),
   lost_reason: z.string().optional().nullable(),
   lost_detail: z.string().optional().nullable(),
@@ -571,7 +576,7 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
   try {
     const jobId = req.params.id as string;
     const {
-      pipeline_status, hold_reason, hold_reason_detail,
+      pipeline_status, hold_reason, hold_reason_detail, revisit_date,
       confirmed_method, lost_reason, lost_detail, transition_note,
       retro_rating, retro_notes, retro_follow_up, retro_follow_up_date,
       retro_reminders, keep_requirement_ids,
@@ -607,6 +612,20 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updates.push(`hold_reason_detail = $${pIdx}`);
       updateParams.push(hold_reason_detail || null);
       pIdx++;
+      // Chase-clearing rule on pause: by default a paused enquiry drops out
+      // of the chase pile (matches lost/cancelled/confirmed). Staff can
+      // opt-in to a future revisit via the pause modal — that date survives
+      // here and re-enters Chasing naturally when it falls due (existing
+      // is_chasing derivation already includes 'paused'). The sacred-future
+      // rule then protects it from accidental shortening on subsequent
+      // contact-type interactions.
+      if (revisit_date) {
+        updates.push(`next_chase_date = $${pIdx}::date`);
+        updateParams.push(revisit_date);
+        pIdx++;
+      } else {
+        updates.push(`next_chase_date = NULL`);
+      }
     } else if (pipeline_status === 'confirmed') {
       updates.push(`confirmed_method = $${pIdx}`);
       updateParams.push(confirmed_method || null);

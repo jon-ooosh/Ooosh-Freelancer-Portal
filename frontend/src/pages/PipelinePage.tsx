@@ -7,7 +7,7 @@ import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsS
 import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
-import { PIPELINE_STATUS_CONFIG, HOLD_REASON_LABELS, LOST_REASON_OPTIONS } from '@shared/index';
+import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -535,8 +535,10 @@ function TransitionModal({
   onConfirm: (data: Record<string, unknown>) => void;
   onCancel: () => void;
 }) {
-  const [holdReason, setHoldReason] = useState<HoldReason>('client_undecided');
+  const [holdReason, setHoldReason] = useState<HoldReason>('fully_booked');
   const [holdDetail, setHoldDetail] = useState('');
+  const [setRevisit, setSetRevisit] = useState(false);
+  const [revisitDate, setRevisitDate] = useState('');
   const [confirmedMethod, setConfirmedMethod] = useState<ConfirmedMethod>('deposit');
   const [lostReason, setLostReason] = useState('Price');
   const [lostDetail, setLostDetail] = useState('');
@@ -550,6 +552,8 @@ function TransitionModal({
     if (targetStatus === 'paused') {
       data.hold_reason = holdReason;
       if (holdDetail) data.hold_reason_detail = holdDetail;
+      // Optional revisit date — clears chase by default; staff opt-in here.
+      if (setRevisit && revisitDate) data.revisit_date = revisitDate;
     } else if (targetStatus === 'confirmed') {
       data.confirmed_method = confirmedMethod;
     } else if (targetStatus === 'lost') {
@@ -580,8 +584,8 @@ function TransitionModal({
               onChange={(e) => setHoldReason(e.target.value as HoldReason)}
               className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
             >
-              {Object.entries(HOLD_REASON_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
+              {PAUSED_REASON_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
             {holdReason === 'other' && (
@@ -593,6 +597,29 @@ function TransitionModal({
                 className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
               />
             )}
+            <div className="border-t border-gray-200 pt-3 mt-2">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={setRevisit}
+                  onChange={(e) => setSetRevisit(e.target.checked)}
+                  className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+                />
+                Set a revisit date?
+              </label>
+              <p className="text-xs text-gray-500 mt-1">
+                By default, paused jobs drop out of the Chasing pile. Set a date here and it'll come back when due — useful if you want another swing later (e.g. quieter period than expected).
+              </p>
+              {setRevisit && (
+                <input
+                  type="date"
+                  value={revisitDate}
+                  onChange={(e) => setRevisitDate(e.target.value)}
+                  min={new Date().toISOString().split('T')[0]}
+                  className="mt-2 w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                />
+              )}
+            </div>
           </div>
         )}
 
