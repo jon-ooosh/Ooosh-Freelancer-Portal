@@ -270,23 +270,31 @@ function renderMoneyAndPeople(b: JobBriefing): string {
         moneyLines.push(`<strong>Hire fee:</strong> £${m.hire_value.toFixed(2)} paid in full ✓`);
       }
     } else {
-      moneyLines.push(`<strong>Hire fee:</strong> £${m.hire_value.toFixed(2)} (live HireHop balance unavailable — check HH)`);
+      moneyLines.push(`<strong>Hire fee:</strong> £${m.hire_value.toFixed(2)} (cached — ⚠ live HireHop balance unavailable, please verify)`);
     }
   }
-  if (m.excess_required > 0) {
-    if (m.excess_outstanding > 0) {
-      moneyLines.push(`<strong>Excess:</strong> £${m.excess_outstanding.toFixed(0)} outstanding (£${m.excess_taken.toFixed(0)} of £${m.excess_required.toFixed(0)} taken)`);
-    } else {
-      moneyLines.push(`<strong>Excess:</strong> £${m.excess_required.toFixed(0)} fully collected ✓`);
+  // Excess line: only show when self-drive (avoid "no excess required" noise
+  // on backline-only / staging-only hires).
+  if (b.job.has_self_drive) {
+    if (m.excess_required > 0) {
+      if (m.excess_outstanding > 0) {
+        moneyLines.push(`<strong>Excess:</strong> £${m.excess_outstanding.toFixed(0)} outstanding (£${m.excess_taken.toFixed(0)} of £${m.excess_required.toFixed(0)} taken)`);
+      } else {
+        moneyLines.push(`<strong>Excess:</strong> £${m.excess_required.toFixed(0)} fully collected ✓`);
+      }
     }
-  } else {
-    moneyLines.push(`<strong>Excess:</strong> none required (no self-drive)`);
   }
 
+  // Drivers section: only show for self-drive hires. Otherwise "No drivers
+  // linked yet" is just noise on backline-only jobs.
+  const showDrivers = b.job.has_self_drive;
   const driverRows = b.drivers.length === 0
     ? '<em style="color:#94a3b8;">No drivers linked yet.</em>'
     : b.drivers.map(renderDriver).join('');
 
+  // Crew section: show when there are crew, or when transport quotes
+  // exist (so staff can spot "we need crew here"). Hide if neither.
+  const showCrew = b.crew.length > 0 || b.transport.some(t => t.crew_count === 0 || ['delivery', 'collection', 'crewed'].includes(t.job_type));
   const crewRows = b.crew.length === 0
     ? '<em style="color:#94a3b8;">No crew assigned.</em>'
     : b.crew.map(renderCrew).join('');
@@ -299,10 +307,52 @@ function renderMoneyAndPeople(b: JobBriefing): string {
           <ul style="margin:0 0 12px;padding-left:18px;font-size:13px;color:#1e293b;line-height:1.6;">
             ${moneyLines.map(l => `<li>${l}</li>`).join('')}
           </ul>
-          <p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#475569;font-weight:600;">Drivers</p>
-          <div style="font-size:13px;color:#1e293b;line-height:1.6;margin-bottom:10px;">${driverRows}</div>
-          <p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#475569;font-weight:600;">Crew</p>
-          <div style="font-size:13px;color:#1e293b;line-height:1.6;">${crewRows}</div>
+          ${showDrivers ? `
+            <p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#475569;font-weight:600;">Drivers</p>
+            <div style="font-size:13px;color:#1e293b;line-height:1.6;margin-bottom:10px;">${driverRows}</div>
+          ` : ''}
+          ${showCrew ? `
+            <p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#475569;font-weight:600;">Crew</p>
+            <div style="font-size:13px;color:#1e293b;line-height:1.6;">${crewRows}</div>
+          ` : ''}
+        </td>
+      </tr>
+    </table>
+  `;
+}
+
+function renderContacts(b: JobBriefing): string {
+  if (!b.contacts || b.contacts.length === 0) return '';
+  // Render a To: row staff can copy: "Name <email>, Name <email>".
+  // Email-only fallback for contacts with no name. Each contact also
+  // listed below with its source label for trust/audit.
+  const toLine = b.contacts
+    .map(c => c.name && c.name.trim() ? `${c.name.trim()} <${c.email}>` : c.email)
+    .join(', ');
+  const sourceLabel: Record<string, string> = {
+    'client_org': 'Client org email',
+    'client_org_people': 'Client org person',
+    'job_org_people': 'Linked org person',
+    'job_org': 'Linked org email',
+    'name_match': 'HH contact-name match',
+  };
+  const rows = b.contacts.map(c => {
+    const label = sourceLabel[c.source] || c.source;
+    return `<li style="margin:0 0 3px;"><strong>${escapeHtml(c.name || '—')}</strong> &lt;${escapeHtml(c.email)}&gt; <span style="color:#94a3b8;font-size:11px;">— ${escapeHtml(label)}</span></li>`;
+  }).join('');
+  return `
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 20px;">
+      <tr>
+        <td style="padding:14px 18px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:10px;">
+          <p style="margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;color:#075985;font-weight:700;">
+            ✉️ Contacts (copy into To: field)
+          </p>
+          <div style="padding:8px 12px;background:#fff;border:1px solid #e0f2fe;border-radius:6px;font-size:13px;color:#0f172a;margin-bottom:8px;word-break:break-word;">
+            ${escapeHtml(toLine)}
+          </div>
+          <ul style="margin:0;padding-left:18px;font-size:12px;color:#475569;line-height:1.5;">
+            ${rows}
+          </ul>
         </td>
       </tr>
     </table>
@@ -387,6 +437,10 @@ function buildClientDraft(b: JobBriefing): string {
   const startDay = b.job.out_date || b.job.job_date;
   const startDayLabel = formatFriendlyDate(startDay);
   const ref = b.job.hh_job_number ? `#${b.job.hh_job_number}` : 'your hire';
+  // What's actually on the hire (van+backline / backline / staging / etc.)
+  // Used in the delivery verb so backline-only jobs don't say "the van and
+  // backline". Falls back to "the hire" generic if flags are unknown.
+  const equipment = b.job.equipment_summary || 'the hire';
 
   const paragraphs: string[] = [];
 
@@ -408,7 +462,9 @@ function buildClientDraft(b: JobBriefing): string {
           : d.job_date
             ? `on ${formatFriendlyDate(d.job_date)}`
             : '';
-      const verb = d.job_type === 'crewed' ? "We'll be on site at" : "We're delivering the van and backline to";
+      const verb = d.job_type === 'crewed'
+        ? "We'll be on site at"
+        : `We're delivering ${equipment} to`;
       lines.push(`${verb} ${venue}${when ? ' ' + when : ''} - please can you confirm the name and number of who we're meeting there?`);
     }
     paragraphs.push(lines.join(' '));
@@ -416,6 +472,8 @@ function buildClientDraft(b: JobBriefing): string {
     paragraphs.push(`Do you have a collection time in mind?`);
   }
 
+  // Collection paragraph — note this changes the end-of-hire framing
+  // (we're picking up, not them returning). Detected below.
   if (collectionQuotes.length > 0) {
     for (const c of collectionQuotes) {
       const venue = c.venue || 'the venue';
@@ -424,55 +482,81 @@ function buildClientDraft(b: JobBriefing): string {
     }
   }
 
-  // Return reference uses job_end (the inside / real end date), not return_date
-  const returnRef = b.job.job_end || b.job.return_date;
-  if (returnRef) {
-    paragraphs.push(`To confirm the hire must be returned to us by 9am on ${formatShortDate(returnRef)}.`);
-  }
-
-  // Money paragraph — combines balance + excess
-  const moneyBits: string[] = [];
-  if (b.money.hh_billing_loaded && b.money.hire_value > 0) {
-    if (b.money.balance_outstanding > 0) {
-      const depositPart = b.money.deposits_paid > 0
-        ? `You've paid £${b.money.deposits_paid.toFixed(2)} so far, leaving a balance of £${b.money.balance_outstanding.toFixed(2)} due before the hire`
-        : `Hire fee of £${b.money.hire_value.toFixed(2)} is still to be paid before the hire`;
-      moneyBits.push(depositPart);
-    } else {
-      moneyBits.push(`Hire fee of £${b.money.hire_value.toFixed(2)} is paid in full, thanks`);
+  // End-of-hire reference — uses job_end (the inside / real end date).
+  // Skip when we're collecting (the collection paragraph already covers
+  // it) so we don't tell the client to "return it to us" when we're
+  // physically picking up.
+  if (collectionQuotes.length === 0) {
+    const returnRef = b.job.job_end || b.job.return_date;
+    if (returnRef) {
+      paragraphs.push(`To confirm the hire must be returned to us by 9am on ${formatShortDate(returnRef)}.`);
     }
   }
-  if (b.money.excess_outstanding > 0) {
+
+  // Money paragraph — combines balance + excess. Skipped entirely if HH
+  // billing fetch failed (we can't be specific) — staff fills in manually
+  // (red flag at top of briefing prompts them).
+  if (b.money.hh_billing_loaded) {
+    const moneyBits: string[] = [];
+    let hasOutstanding = false;
+    if (b.money.hire_value > 0) {
+      if (b.money.balance_outstanding > 0) {
+        hasOutstanding = true;
+        const depositPart = b.money.deposits_paid > 0
+          ? `You've paid £${b.money.deposits_paid.toFixed(2)} so far, leaving a balance of £${b.money.balance_outstanding.toFixed(2)} due before the hire`
+          : `Hire fee of £${b.money.hire_value.toFixed(2)} is still to be paid before the hire`;
+        moneyBits.push(depositPart);
+      } else {
+        moneyBits.push(`Hire fee of £${b.money.hire_value.toFixed(2)} is paid in full, thanks`);
+      }
+    }
+    if (b.money.excess_outstanding > 0) {
+      hasOutstanding = true;
+      if (moneyBits.length > 0) {
+        moneyBits.push(`along with the insurance excess of £${b.money.excess_outstanding.toFixed(0)}`);
+      } else {
+        moneyBits.push(`Insurance excess of £${b.money.excess_outstanding.toFixed(0)} still to be collected before the hire`);
+      }
+    }
     if (moneyBits.length > 0) {
-      moneyBits.push(`along with the insurance excess of £${b.money.excess_outstanding.toFixed(0)}`);
-    } else {
-      moneyBits.push(`Insurance excess of £${b.money.excess_outstanding.toFixed(0)} still to be collected before the hire`);
+      // Only point at payment link when there's actually something to pay.
+      const trailing = hasOutstanding
+        ? ' Payment options through the blue link at the bottom of the quote.'
+        : '';
+      paragraphs.push(`${moneyBits.join(', ')}.${trailing}`);
     }
   }
-  if (moneyBits.length > 0) {
-    paragraphs.push(`${moneyBits.join(', ')}. Payment options through the blue link at the bottom of the quote.`);
-  }
+  // If HH billing didn't load, leave the money paragraph out — the
+  // briefing's red-flag panel + discussion points tell staff to fill in
+  // the balance position themselves before sending. Better than auto-
+  // stating a stale or wrong number.
 
-  // Hire form status — per-driver
-  const driversReceived = b.drivers.filter(d => d.hire_form_status === 'received');
-  const driversSent = b.drivers.filter(d => d.hire_form_status === 'sent');
-  const driversPending = b.drivers.filter(d => d.hire_form_status === 'pending');
-  const totalDrivers = b.drivers.length;
-  if (totalDrivers > 0) {
-    if (driversReceived.length === totalDrivers) {
-      paragraphs.push(`We've received hire form${pluralise(totalDrivers, '')} from ${driversReceived.map(d => d.name).join(', ')}, all approved. Please let us know if any other drivers will be on the hire so we can get their details too.`);
-    } else if (driversReceived.length > 0 && (driversSent.length > 0 || driversPending.length > 0)) {
-      const stillNeeded = [...driversSent, ...driversPending].map(d => d.name).join(', ');
-      paragraphs.push(`We've received hire form${pluralise(driversReceived.length, '')} from ${driversReceived.map(d => d.name).join(', ')} so far. Still waiting on ${stillNeeded} — happy to resend the link if needed.`);
-    } else if (driversSent.length > 0) {
-      const sentTo = driversSent
-        .filter(d => d.hire_form_emailed_to)
-        .map(d => `${d.hire_form_emailed_to}${d.hire_form_emailed_at ? ` on ${formatShortDate(d.hire_form_emailed_at)}` : ''}`)
-        .join(' and ');
-      const recipientPart = sentTo ? ` (sent to ${sentTo})` : '';
-      paragraphs.push(`We've sent the hire form link${recipientPart} but haven't had ${pluralise(driversSent.length, 'it', 'them')} back yet — could you confirm receipt or let us know if you need ${pluralise(driversSent.length, 'it', 'them')} resent? Worth getting these in asap in case of any referrals.`);
+  // Hire form status — per-driver. Only relevant for self-drive hires;
+  // backline-only / D&C jobs don't have drivers and shouldn't see this.
+  if (b.job.has_self_drive) {
+    const driversReceived = b.drivers.filter(d => d.hire_form_status === 'received');
+    const driversSent = b.drivers.filter(d => d.hire_form_status === 'sent');
+    const driversPending = b.drivers.filter(d => d.hire_form_status === 'pending');
+    const totalDrivers = b.drivers.length;
+    if (totalDrivers > 0) {
+      if (driversReceived.length === totalDrivers) {
+        paragraphs.push(`We've received hire form${pluralise(totalDrivers, '')} from ${driversReceived.map(d => d.name).join(', ')}, all approved. Please let us know if any other drivers will be on the hire so we can get their details too.`);
+      } else if (driversReceived.length > 0 && (driversSent.length > 0 || driversPending.length > 0)) {
+        const stillNeeded = [...driversSent, ...driversPending].map(d => d.name).join(', ');
+        paragraphs.push(`We've received hire form${pluralise(driversReceived.length, '')} from ${driversReceived.map(d => d.name).join(', ')} so far. Still waiting on ${stillNeeded} — happy to resend the link if needed.`);
+      } else if (driversSent.length > 0) {
+        const sentTo = driversSent
+          .filter(d => d.hire_form_emailed_to)
+          .map(d => `${d.hire_form_emailed_to}${d.hire_form_emailed_at ? ` on ${formatShortDate(d.hire_form_emailed_at)}` : ''}`)
+          .join(' and ');
+        const recipientPart = sentTo ? ` (sent to ${sentTo})` : '';
+        paragraphs.push(`We've sent the hire form link${recipientPart} but haven't had ${pluralise(driversSent.length, 'it', 'them')} back yet — could you confirm receipt or let us know if you need ${pluralise(driversSent.length, 'it', 'them')} resent? Worth getting these in asap in case of any referrals.`);
+      } else {
+        paragraphs.push(`We don't have any hire forms in yet — let me know who'll be driving and I'll send the link across.`);
+      }
     } else {
-      paragraphs.push(`We don't have any hire forms in yet — let me know who'll be driving and I'll send the link across.`);
+      // Self-drive hire but no drivers linked yet.
+      paragraphs.push(`Could you send us the names + contact details for whoever will be driving? I'll get the hire form link across as soon as we have those.`);
     }
   }
 
@@ -538,6 +622,7 @@ export function renderBriefingHtml(b: JobBriefing): string {
     ${renderMoneyAndPeople(b)}
     ${renderLastInteraction(b)}
     ${renderDiscussionPoints(b)}
+    ${renderContacts(b)}
     ${renderClientEmailDraft(b)}
     ${renderLinks(b)}
   `;

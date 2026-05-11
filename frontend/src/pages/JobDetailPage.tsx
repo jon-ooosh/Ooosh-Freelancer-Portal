@@ -3265,13 +3265,15 @@ export default function JobDetailPage() {
               </a>
             )}
             {/* Pre-Hire Review — manual send to info@. Admin/manager only.
-                 Hidden for lost/cancelled/completed jobs (review is useless
-                 there). The same content goes out automatically via the daily
+                 Visibility whitelist: confirmed / prepping / prepped only.
+                 Provisional and earlier: review isn't meaningful yet.
+                 Dispatched (on hire) onwards: the hire's gone, review's done.
+                 The same content goes out automatically via the daily
                  09:55 cron for confirmed jobs at T-3d / T-5d / T-1d. */}
             {(user?.role === 'admin' || user?.role === 'manager')
-              && job.pipeline_status !== 'lost'
-              && job.pipeline_status !== 'cancelled'
-              && job.pipeline_status !== 'completed' && (
+              && (job.pipeline_status === 'confirmed'
+                  || job.pipeline_status === 'prepping'
+                  || job.pipeline_status === 'prepped') && (
               <button
                 onClick={sendPreHireBriefing}
                 disabled={briefingSending}
