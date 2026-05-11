@@ -433,6 +433,11 @@ export default function TransportOpsPage() {
   // - dateWindow forced to 'all' so client-side filter doesn't hide it
   // - show_all=1 on the API call (handled in buildOverviewQuery) so the
   //   backend doesn't strip rows older than 14 days
+  // - filter (all/transport/crewed) realigned to 'all' if it would exclude
+  //   the target's job_type; other narrowing pills cleared unconditionally
+  //   for this session so the user lands on the target without having to
+  //   guess which saved filter is hiding it. Persisted saved state in
+  //   localStorage is left untouched — only the in-memory render state.
   // After resolve, the row is auto-expanded + scrolled into view by the
   // separate effect below once `quotes` actually contains it.
   useEffect(() => {
@@ -456,6 +461,31 @@ export default function TransportOpsPage() {
         if (isEnquiry) setShowEnquiry(true);
         if (isLost) setShowLostJobs(true);
         if (isCancelledJob) setShowCancelledJobs(true);
+        // Realign the type filter if the saved value would exclude the target.
+        // 'crewed' filter keeps only job_type='crewed'; 'transport' keeps the
+        // delivery/collection pair.
+        const jobType = String(q.job_type || '');
+        const isCrewed = jobType === 'crewed';
+        setFilter((current) => {
+          if (current === 'crewed' && !isCrewed) return 'all';
+          if (current === 'transport' && isCrewed) return 'all';
+          return current;
+        });
+        // Clear narrowing pills that could hide an arbitrary deep-linked row.
+        // No persistence call — saved localStorage state isn't touched, so
+        // navigating back to the page without a deep-link restores the user's
+        // chosen view. The URL-sync effect picks the cleared values up.
+        setNeedsCrewOnly(false);
+        setNeedsIntroOnly(false);
+        setNeedsArrangingOnly(false);
+        setSearchTerm('');
+        setPersonPin(null);
+        setVenuePin(null);
+        // Wipe collapsed-section memory in-memory only (toggleSection is the
+        // only path that writes to localStorage, so the saved layout for a
+        // non-deep-link visit survives). Otherwise the target row can sit
+        // inside a section the user previously collapsed and stay hidden.
+        setCollapsedSections(new Set());
       } catch {
         // Quote not found / 404 — leave filters untouched, the row simply
         // won't appear and the user can use search to confirm.

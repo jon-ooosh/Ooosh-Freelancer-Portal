@@ -1809,9 +1809,15 @@ export default function JobDetailPage() {
     const finishDateStr = q.job_finish_date
       ? (typeof q.job_finish_date === 'string' && q.job_finish_date.includes('T') ? q.job_finish_date.split('T')[0] : String(q.job_finish_date))
       : '';
+    // Prefer the joined venues-table name over q.venue_name. The quotes row
+    // can carry NULL venue_name even when venue_id is set (Monday-migrated
+    // rows, HH-derived auto-creates, older OP-native rows). The backend
+    // GETs always JOIN venues v ON v.id = q.venue_id and expose v.name as
+    // linked_venue_name — TransportOpsPage uses the same fallback.
+    const linkedVenueName = (q as { linked_venue_name?: string | null }).linked_venue_name || null;
     setEditForm({
       job_type: q.job_type,
-      venue_name: q.venue_name || '',
+      venue_name: linkedVenueName || q.venue_name || '',
       venue_id: q.venue_id || null,
       job_date: dateStr,
       job_finish_date: finishDateStr,
@@ -4215,6 +4221,12 @@ export default function JobDetailPage() {
                   completed: { label: 'Completed', bg: 'bg-emerald-100', text: 'text-emerald-700' },
                 };
                 const sc = statusConfig[quoteStatus] || statusConfig.draft;
+                // Effective venue name — prefer joined venues.name (linked_venue_name)
+                // over q.venue_name, which can be NULL on quotes that have venue_id
+                // set (Monday-migrated, HH-derived, older OP-native). Matches the
+                // fallback TransportOpsPage uses everywhere.
+                const venueDisplayName =
+                  (q as { linked_venue_name?: string | null }).linked_venue_name || q.venue_name || '';
 
                 return (
                 <div key={q.id} className={`bg-white rounded-xl shadow-sm border ${isCancelled ? 'border-red-200 opacity-60' : 'border-gray-200'} p-5`}>
@@ -4281,17 +4293,17 @@ export default function JobDetailPage() {
                       </div>
 
                       {/* Date, time, venue — top line */}
-                      {(q.venue_name || q.job_date || q.arrival_time) && (
+                      {(venueDisplayName || q.job_date || q.arrival_time) && (
                         <div className="flex flex-wrap gap-x-3 gap-y-0.5 mb-2 text-sm text-gray-700">
                           {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
                           {q.arrival_time
                             ? <span>🕐 {q.arrival_time}</span>
                             : q.job_date && <span className="text-gray-400 italic">🕐 Time TBC</span>}
-                          {q.venue_name && (
+                          {venueDisplayName && (
                             q.venue_id ? (
-                              <Link to={`/venues/${q.venue_id}`} className="text-ooosh-600 hover:text-ooosh-700 hover:underline">📍 {q.venue_name}</Link>
+                              <Link to={`/venues/${q.venue_id}`} className="text-ooosh-600 hover:text-ooosh-700 hover:underline">📍 {venueDisplayName}</Link>
                             ) : (
-                              <span>📍 {q.venue_name}</span>
+                              <span>📍 {venueDisplayName}</span>
                             )
                           )}
                           {q.distance_miles && <span className="text-gray-500 text-xs self-center">{q.distance_miles}mi · {q.drive_time_mins}min</span>}
@@ -4526,6 +4538,8 @@ export default function JobDetailPage() {
                           const clientCharge = Number(q.client_charge_rounded ?? q.client_charge_total ?? 0);
                           const freelancerFee = Number(q.freelancer_fee_rounded ?? q.freelancer_fee ?? 0);
                           const sc = { label: 'Cancelled', bg: 'bg-red-100', text: 'text-red-700' };
+                          const venueDisplayName =
+                            (q as { linked_venue_name?: string | null }).linked_venue_name || q.venue_name || '';
                           return (
                             <div key={q.id} className="bg-white rounded-xl shadow-sm border border-red-200 opacity-60 p-5">
                               <div className="flex items-start justify-between">
@@ -4546,9 +4560,9 @@ export default function JobDetailPage() {
                                     </Link>
                                     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${sc.bg} ${sc.text}`}>{sc.label}</span>
                                   </div>
-                                  {(q.venue_name || q.job_date || q.arrival_time) && (
+                                  {(venueDisplayName || q.job_date || q.arrival_time) && (
                                     <div className="flex flex-wrap gap-x-3 text-sm text-gray-600 mb-2">
-                                      {q.venue_name && <span>📍 {q.venue_name}</span>}
+                                      {venueDisplayName && <span>📍 {venueDisplayName}</span>}
                                       {q.job_date && <span>📅 {new Date(q.job_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</span>}
                                       {q.arrival_time
                                         ? <span>🕐 {q.arrival_time}</span>
