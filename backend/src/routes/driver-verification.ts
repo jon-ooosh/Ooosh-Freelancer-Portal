@@ -862,15 +862,15 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
     analysis.dvla.expiryDate = (driver.dvla_valid_until as string);
   }
 
-  // Passport: 30 days from iDenfy check (non-UK), or stored value
+  // Passport: only valid when explicitly recorded. The licence Idenfy session
+  // does NOT verify a passport — a separate passport-upload step is required.
+  // Earlier fallback to idenfy_check_date + 30 days here marked every non-UK
+  // driver as having a valid passport after their licence Idenfy check, which
+  // caused the routing engine to skip the passport-upload step entirely.
   if (driver.passport_valid_until) {
     const passDate = new Date(driver.passport_valid_until as string);
     analysis.passport.valid = passDate > today;
     analysis.passport.expiryDate = (driver.passport_valid_until as string);
-  } else if (!analysis.isUkDriver && driver.idenfy_check_date) {
-    const passEnd = addDays(driver.idenfy_check_date as string, 30);
-    analysis.passport.valid = passEnd > today;
-    analysis.passport.expiryDate = passEnd.toISOString().split('T')[0];
   }
 
   // All valid check
@@ -1099,6 +1099,10 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
     boardAId: driver.id || null,
     lastUpdated: driver.updated_at || null,
     licenseNextCheckDue: analysis.licence.expiryDate || driver.licence_next_check_due || null,
+    // Raw licence card expiry — separate from the 90-day re-check rotation
+    // window so the confirmation email can show the driver's actual licence
+    // validity rather than our internal rotation date.
+    licenseValidTo: driver.licence_valid_to || null,
     poa1ValidUntil: driver.poa1_valid_until || null,
     poa2ValidUntil: driver.poa2_valid_until || null,
     dvlaValidUntil: driver.dvla_valid_until || null,
@@ -1136,6 +1140,7 @@ function buildNewDriverStatus(email: string) {
     boardAId: null,
     lastUpdated: null,
     licenseNextCheckDue: null,
+    licenseValidTo: null,
     poa1ValidUntil: null,
     poa2ValidUntil: null,
     dvlaValidUntil: null,
