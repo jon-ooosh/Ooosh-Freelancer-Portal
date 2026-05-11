@@ -599,6 +599,10 @@ export function startScheduler() {
   //   - 1 day to out_date AND any hire form missing (urgent)
   // Each job sent at most once per day per trigger reason; email_log
   // dedupes naturally if the cron is restarted within the same day.
+  // Explicit Europe/London timezone — server runs in UTC, so without
+  // this the cron would fire at 09:55 UTC = 10:55 BST in summer / 09:55
+  // GMT in winter. Pinning the zone makes "9:55am UK time" mean exactly
+  // that, year-round, regardless of DST.
   cron.schedule('55 9 * * *', async () => {
     try {
       const { findEligibleJobs, sendBriefingEmail } = await import('../services/pre-hire-briefing');
@@ -612,18 +616,29 @@ export function startScheduler() {
       // Skip jobs that already received a briefing today by HH job number
       // (the email_log subject contains "#NNNN ..."). The dedup is across
       // ANY trigger reason — if we sent today, we don't send again today.
+      //
+      // The column on email_log is `created_at`, NOT `sent_at` — there's
+      // no separate sent_at column. Wrapped in its own try/catch so a
+      // future schema drift here doesn't tank the whole cron run silently
+      // (which is exactly what bit us on the first scheduled run).
       const today = new Date().toISOString().slice(0, 10);
-      const sentResult = await query(
-        `SELECT subject FROM email_log
-          WHERE template_id = 'pre_hire_briefing'
-            AND status = 'sent'
-            AND sent_at::date = $1::date`,
-        [today],
-      );
       const sentJobNumbers = new Set<number>();
-      for (const row of (sentResult.rows as Array<{ subject: string }>)) {
-        const m = /#(\d+)/.exec(row.subject || '');
-        if (m) sentJobNumbers.add(parseInt(m[1], 10));
+      try {
+        const sentResult = await query(
+          `SELECT subject FROM email_log
+            WHERE template_id = 'pre_hire_briefing'
+              AND status = 'sent'
+              AND created_at::date = $1::date`,
+          [today],
+        );
+        for (const row of (sentResult.rows as Array<{ subject: string }>)) {
+          const m = /#(\d+)/.exec(row.subject || '');
+          if (m) sentJobNumbers.add(parseInt(m[1], 10));
+        }
+      } catch (err) {
+        // Don't let dedup failure block sends. Worst case we send twice
+        // on a same-day cron restart — much better than silent zero-send.
+        console.error('Scheduler: Pre-hire review dedup query failed, proceeding without dedup:', err);
       }
 
       let sent = 0; let skipped = 0; let failed = 0;
@@ -645,6 +660,6 @@ export function startScheduler() {
     } catch (err) {
       console.error('Scheduler: Pre-hire review run failed:', err);
     }
-  });
-  console.log('Scheduler: Pre-hire review scheduled daily at 09:55');
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Pre-hire review scheduled daily at 09:55 Europe/London');
 }
