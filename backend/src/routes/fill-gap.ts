@@ -32,6 +32,59 @@ const CANDIDATE_STATUSES = ['paused', 'new_enquiry', 'quoting'] as const;
 // further.
 const MAX_CANDIDATES = 25;
 
+// ── Backline category buckets ───────────────────────────────────────────
+// "Has any backline" is too coarse — a keys-only tour shouldn't appear as
+// a top match for a drums-only freed slot. We split the HH backline
+// categories into operational buckets (instruments by family + the
+// non-instrument sound/light/staging groups) and score on bucket
+// SET-OVERLAP, not on the binary "has_backline" flag.
+//
+// Source: CLAUDE.md HireHop category ranges. PA / DJ / Lighting / Power /
+// Staging / Video already exist as arrays on the derivation engine but
+// the instrument families (guitars / basses / drums / keys / woodwind /
+// backline accessories) only live as comments there. Listing them
+// inline here avoids polluting the wider DerivedFlags shape until other
+// callers need them.
+const BACKLINE_BUCKETS: Record<string, number[]> = {
+  guitars:    [372, 373, 374, 375, 376, 377, 378],
+  basses:     [379, 380, 381, 382, 383, 384],
+  drums:      [385, 386, 387, 388, 389, 390, 391, 392, 393, 394, 395, 396, 397, 398],
+  keys:       [399, 400, 401, 402, 403, 404],
+  woodwind:   [405],
+  accessories:[406, 407, 408, 409, 410],
+  pa:         [411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 424, 425, 426, 427, 428],
+  dj:         [429, 430, 431],
+  lighting:   [432, 433, 434, 435, 436, 437, 438],
+  power:      [439, 440, 441, 442, 443],
+  staging:    [444, 445, 446, 447, 448],
+  video:      [451, 452, 453],
+};
+
+const BUCKET_LABEL: Record<string, string> = {
+  guitars: 'Guitars', basses: 'Basses', drums: 'Drums', keys: 'Keys',
+  woodwind: 'Woodwind', accessories: 'Backline acc.',
+  pa: 'PA/Sound', dj: 'DJ', lighting: 'Lighting', power: 'Power',
+  staging: 'Staging', video: 'Video',
+};
+
+function extractBacklineBuckets(items: HHLineItem[] | null | undefined): string[] {
+  if (!items || items.length === 0) return [];
+  const present = new Set<string>();
+  for (const item of items) {
+    // Only count "real" stock items (kind:2, not virtual prompt parents)
+    if (item.kind !== 2 || item.VIRTUAL) continue;
+    const cat = Number(item.CATEGORY_ID);
+    if (!cat) continue;
+    for (const [bucket, ids] of Object.entries(BACKLINE_BUCKETS)) {
+      if (ids.includes(cat)) {
+        present.add(bucket);
+        break;
+      }
+    }
+  }
+  return Array.from(present).sort();
+}
+
 interface JobRow {
   id: string;
   hh_job_number: number | null;
@@ -146,10 +199,12 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
     );
 
     const freedFlags = rowToFlags(freed);
+    const freedBuckets = extractBacklineBuckets(freed.line_items);
     const freedHireDays = hireDays(freed.job_date, freed.job_end);
 
     const scored = (candResult.rows as JobRow[]).map(row => {
       const flags = rowToFlags(row);
+      const candBuckets = extractBacklineBuckets(row.line_items);
       const candHireDays = hireDays(row.job_date, row.job_end);
       const overlap = dateOverlapDays(
         freed.job_date, freed.job_end,
@@ -158,28 +213,51 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
       const bucket: 'paused' | 'open_enquiry' =
         row.pipeline_status === 'paused' ? 'paused' : 'open_enquiry';
 
-      // Resource match flags
+      // Vehicle match stays binary — a Premium LWB is broadly fungible
+      // (any candidate needing a van benefits from a freed van slot).
+      // Backline is the picky one: bucket-set overlap, not "any has any".
       const vehicleMatch = freedFlags.has_vehicle && flags.has_vehicle;
-      const backlineMatch = freedFlags.has_backline && flags.has_backline;
+      const matchedBuckets = freedBuckets.filter(b => candBuckets.includes(b));
+      const backlineMatch = matchedBuckets.length > 0;
       const rehearsalMatch = freedFlags.has_rehearsal && flags.has_rehearsal;
-      // Bundle: both jobs have BOTH van + backline. The high-value case
-      // jon flagged — bundling van + backline on a long tour is the best
-      // outcome.
+      // Bundle = van + at least one matching backline bucket. The
+      // headline-value case jon flagged: van + backline on a long tour
+      // is the best outcome. Without bucket-overlap a "bundle" was
+      // firing on anything with any backline, which made keys-tour
+      // candidates rank top for drums-tour gaps. Now it's specific.
       const bundleMatch = vehicleMatch && backlineMatch;
 
       // Score components (composite, normalised to ~100 at the end)
       let score = 0;
       const rationale: string[] = [];
 
+      // Backline bucket overlap (replaces the old binary "backline match"
+      // bonus). Scales with overlap count, caps at 3+ buckets so a giant
+      // 8-bucket tour doesn't completely outrank a 2-bucket exact match.
+      let backlineScore = 0;
+      if (matchedBuckets.length >= 3) backlineScore = 25;
+      else if (matchedBuckets.length === 2) backlineScore = 20;
+      else if (matchedBuckets.length === 1) backlineScore = 12;
+
       if (bundleMatch) {
-        score += 35;
-        rationale.push('Van + backline bundle match');
+        // Bundle bonus is the +35 headline. The backline portion of it
+        // scales with bucket overlap so a single-bucket bundle doesn't
+        // get the same weight as a multi-bucket one.
+        score += 25 + Math.min(15, matchedBuckets.length * 5);
+        const bucketLabels = matchedBuckets.map(b => BUCKET_LABEL[b]).join(', ');
+        rationale.push(`Van + backline bundle (${bucketLabels})`);
       } else if (vehicleMatch) {
         score += 25;
         rationale.push(`Vehicle match (${flags.vehicle_count} van${flags.vehicle_count !== 1 ? 's' : ''})`);
       } else if (backlineMatch) {
-        score += 15;
-        rationale.push('Backline match');
+        score += backlineScore;
+        const bucketLabels = matchedBuckets.map(b => BUCKET_LABEL[b]).join(', ');
+        rationale.push(`Backline match (${bucketLabels})`);
+      } else if (freedFlags.has_backline && flags.has_backline) {
+        // Both have backline but ZERO bucket overlap — useful context
+        // but not a score win. Surfaces in rationale so staff understand
+        // why a "has backline" job scored low.
+        rationale.push('Has backline but no category overlap');
       }
 
       if (rehearsalMatch) {
@@ -246,6 +324,7 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
           vehicle_types: flags.vehicle_types,
           has_backline: flags.has_backline,
           backline_item_count: flags.backline_item_count,
+          backline_buckets: candBuckets,
           has_rehearsal: flags.has_rehearsal,
         },
         match: {
@@ -254,6 +333,7 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
           bundle_match: bundleMatch,
           vehicle_match: vehicleMatch,
           backline_match: backlineMatch,
+          backline_matched_buckets: matchedBuckets,
           rehearsal_match: rehearsalMatch,
           rationale,
         },
@@ -297,6 +377,7 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
 
 function buildSlotSummary(row: JobRow) {
   const flags = rowToFlags(row);
+  const buckets = extractBacklineBuckets(row.line_items);
   return {
     job_id: row.id,
     hh_job_number: row.hh_job_number,
@@ -316,6 +397,7 @@ function buildSlotSummary(row: JobRow) {
       vehicle_types: flags.vehicle_types,
       has_backline: flags.has_backline,
       backline_item_count: flags.backline_item_count,
+      backline_buckets: buckets,
       has_rehearsal: flags.has_rehearsal,
     },
   };

@@ -432,7 +432,7 @@ export default function LostCancelledPage() {
                 >
                   <td className="px-4 py-3">
                     <div className="text-sm font-medium text-gray-900">{job.job_name || 'Untitled'}</div>
-                    <div className="text-xs font-mono">
+                    <div className="text-xs font-mono flex items-center gap-2 flex-wrap">
                       {job.hh_job_number ? (
                         <a
                           href={`https://myhirehop.com/job.php?id=${job.hh_job_number}`}
@@ -446,6 +446,21 @@ export default function LostCancelledPage() {
                       ) : (
                         <span className="text-gray-400">NEW</span>
                       )}
+                      {/* Fill-a-Gap shortcut — same destination as the Job
+                          Detail banner button, surfaced inline so staff can
+                          jump straight from the list view rather than
+                          drilling into each job. */}
+                      <button
+                        type="button"
+                        onClick={e => {
+                          e.stopPropagation();
+                          navigate(`/operations/fill-gap/${job.id}`);
+                        }}
+                        className="text-[11px] px-1.5 py-0.5 bg-purple-50 text-purple-700 border border-purple-200 rounded hover:bg-purple-100"
+                        title="Find replacement candidates for this freed slot"
+                      >
+                        Fill →
+                      </button>
                     </div>
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-600">

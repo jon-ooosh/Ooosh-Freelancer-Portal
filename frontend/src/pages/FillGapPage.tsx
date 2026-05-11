@@ -22,8 +22,17 @@ interface SlotFlags {
   vehicle_types: string[];
   has_backline: boolean;
   backline_item_count: number;
+  backline_buckets: string[];   // ['drums', 'keys', 'pa', ...]
   has_rehearsal: boolean;
 }
+
+const BUCKET_LABEL: Record<string, string> = {
+  guitars: 'Guitars', basses: 'Basses', drums: 'Drums', keys: 'Keys',
+  woodwind: 'Woodwind', accessories: 'Backline acc.',
+  pa: 'PA/Sound', dj: 'DJ', lighting: 'Lighting', power: 'Power',
+  staging: 'Staging', video: 'Video',
+};
+const bucketLabelFor = (b: string) => BUCKET_LABEL[b] || b;
 
 interface FreedSlot {
   job_id: string;
@@ -55,6 +64,7 @@ interface Candidate {
     bundle_match: boolean;
     vehicle_match: boolean;
     backline_match: boolean;
+    backline_matched_buckets: string[];
     rehearsal_match: boolean;
     rationale: string[];
   };
@@ -222,17 +232,19 @@ export default function FillGapPage() {
                   🚐 {freed_slot.flags.vehicle_count} van{freed_slot.flags.vehicle_count !== 1 ? 's' : ''}
                 </span>
               )}
-              {freed_slot.flags.has_backline && (
-                <span className="inline-flex items-center px-1.5 py-0.5 text-xs bg-amber-200 text-amber-900 rounded">
-                  🎸 Backline
-                </span>
-              )}
               {freed_slot.flags.has_rehearsal && (
                 <span className="inline-flex items-center px-1.5 py-0.5 text-xs bg-amber-200 text-amber-900 rounded">
                   🏠 Rehearsal
                 </span>
               )}
-              {!freed_slot.flags.has_vehicle && !freed_slot.flags.has_backline && !freed_slot.flags.has_rehearsal && (
+              {freed_slot.flags.backline_buckets.map(b => (
+                <span key={b} className="inline-flex items-center px-1.5 py-0.5 text-xs bg-amber-200 text-amber-900 rounded">
+                  🎸 {bucketLabelFor(b)}
+                </span>
+              ))}
+              {!freed_slot.flags.has_vehicle &&
+                freed_slot.flags.backline_buckets.length === 0 &&
+                !freed_slot.flags.has_rehearsal && (
                 <span className="text-xs text-amber-700">No resources detected</span>
               )}
             </div>
@@ -351,13 +363,6 @@ export default function FillGapPage() {
                         🚐 {c.flags.vehicle_count}
                       </span>
                     )}
-                    {c.flags.has_backline && (
-                      <span className={`inline-flex items-center px-1.5 py-0.5 text-xs rounded ${
-                        c.match.backline_match ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'
-                      }`}>
-                        🎸
-                      </span>
-                    )}
                     {c.flags.has_rehearsal && (
                       <span className={`inline-flex items-center px-1.5 py-0.5 text-xs rounded ${
                         c.match.rehearsal_match ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'
@@ -365,7 +370,26 @@ export default function FillGapPage() {
                         🏠
                       </span>
                     )}
-                    {!c.flags.has_vehicle && !c.flags.has_backline && !c.flags.has_rehearsal && (
+                    {/* Backline buckets — green pill if this bucket overlaps
+                        with the freed slot's buckets, grey otherwise. Lets
+                        staff see at a glance which categories actually line
+                        up rather than just "has backline / doesn't". */}
+                    {c.flags.backline_buckets.map(b => {
+                      const matched = c.match.backline_matched_buckets.includes(b);
+                      return (
+                        <span
+                          key={b}
+                          className={`inline-flex items-center px-1.5 py-0.5 text-xs rounded ${
+                            matched ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'
+                          }`}
+                        >
+                          🎸 {bucketLabelFor(b)}
+                        </span>
+                      );
+                    })}
+                    {!c.flags.has_vehicle &&
+                      c.flags.backline_buckets.length === 0 &&
+                      !c.flags.has_rehearsal && (
                       <span className="text-xs text-gray-500">—</span>
                     )}
                   </div>
