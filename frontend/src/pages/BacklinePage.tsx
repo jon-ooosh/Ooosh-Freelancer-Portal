@@ -67,6 +67,10 @@ const STATUS_CONFIG: Record<string, { label: string; colour: string; bg: string;
 
 const STATUS_ORDER: string[] = ['not_started', 'in_progress', 'done', 'blocked'];
 
+// 'outstanding' = anything still on the to-do pile (not_started + in_progress + blocked).
+// Default view — once a job's done, the warehouse doesn't need it cluttering the list.
+type StatusFilter = 'outstanding' | 'all' | 'not_started' | 'in_progress' | 'done' | 'blocked';
+
 const PERIOD_OPTIONS = [
   { value: 2, label: 'Today & Tomorrow' },
   { value: 7, label: 'Next 7 Days' },
@@ -102,7 +106,7 @@ export default function BacklinePage() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [days, setDays] = useState(7);
-  const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('outstanding');
   const [direction, setDirection] = useState<'both' | 'out' | 'return'>('both');
   const [search, setSearch] = useState('');
   // Heads-up planning toggles — surface speculative work alongside operational
@@ -164,9 +168,11 @@ export default function BacklinePage() {
 
   const { goingOut, returning, overdueOut, overdueReturning, unconfirmed } = data;
 
-  // Apply status filter — "done" includes effectivelyDone (HH prepped/dispatched)
+  // Apply status filter — "done" includes effectivelyDone (HH prepped/dispatched).
+  // "outstanding" is the default — hides done jobs so staff see only what's left to action.
   function matchesStatusFilter(j: BacklineJob): boolean {
-    if (!statusFilter) return true;
+    if (statusFilter === 'all') return true;
+    if (statusFilter === 'outstanding') return !j.effectivelyDone && j.backlineStatus !== 'done';
     if (statusFilter === 'done') return j.effectivelyDone;
     if (statusFilter === 'not_started') return j.backlineStatus === 'not_started' && !j.effectivelyDone;
     return j.backlineStatus === statusFilter;
@@ -245,76 +251,17 @@ export default function BacklinePage() {
         </button>
       </div>
 
-      {/* ── Search ── */}
-      <input
-        type="text"
-        value={search}
-        onChange={e => setSearch(e.target.value)}
-        placeholder="Search by job name, client, or job number…"
-        className="w-full max-w-md border border-gray-300 rounded-lg px-4 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-      />
-
-      {/* ── Filters — wrap on small screens ── */}
-      <div className="flex flex-wrap gap-2">
-        {/* Period */}
-        <div className="flex bg-gray-100 rounded-lg p-0.5">
-          {PERIOD_OPTIONS.map(opt => (
-            <button
-              key={opt.value}
-              onClick={() => setDays(opt.value)}
-              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                days === opt.value
-                  ? 'bg-white text-gray-900 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-        {/* Direction */}
-        <div className="flex bg-gray-100 rounded-lg p-0.5">
-          {([['both', 'Both'], ['out', 'Going Out'], ['return', 'Coming Back']] as const).map(([val, lbl]) => (
-            <button
-              key={val}
-              onClick={() => setDirection(val)}
-              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                direction === val ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {lbl}
-            </button>
-          ))}
-        </div>
-        {/* Status */}
-        <div className="flex bg-gray-100 rounded-lg p-0.5">
-          <button
-            onClick={() => setStatusFilter(null)}
-            className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors ${
-              !statusFilter ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            All
-          </button>
-          {STATUS_ORDER.map(s => {
-            const sc = STATUS_CONFIG[s];
-            return (
-              <button
-                key={s}
-                onClick={() => setStatusFilter(statusFilter === s ? null : s)}
-                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
-                  statusFilter === s ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sc.dot}`} />
-                {sc.label}
-              </button>
-            );
-          })}
-        </div>
+      {/* ── Row 1: Search (left, grow) + Heads-up chips (right) ── */}
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          type="text"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search by job name, client, or job number…"
+          className="flex-1 min-w-[240px] max-w-md border border-gray-300 rounded-lg px-4 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+        />
         {/* Heads-up: include speculative jobs (separate sections, headline stats unaffected) */}
-        <div className="flex bg-gray-100 rounded-lg p-0.5">
-          <span className="px-2 py-1.5 text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Heads-up:</span>
+        <div className="flex bg-gray-100 rounded-lg p-0.5 ml-auto">
           <button
             onClick={() => setShowProvisional(v => !v)}
             title="Show jobs awaiting deposit (Provisional). Stats stay scoped to confirmed work."
@@ -335,6 +282,76 @@ export default function BacklinePage() {
             <span className={`w-2 h-2 rounded-full flex-shrink-0 ${showEnquiry ? 'bg-purple-400' : 'bg-gray-300'}`} />
             Enquiries
           </button>
+        </div>
+      </div>
+
+      {/* ── Row 2: Period + Direction (what am I looking at, when) ── */}
+      <div className="flex flex-wrap gap-2">
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          {PERIOD_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              onClick={() => setDays(opt.value)}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                days === opt.value
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          {([['both', 'Both'], ['out', 'Going Out'], ['return', 'Coming Back']] as const).map(([val, lbl]) => (
+            <button
+              key={val}
+              onClick={() => setDirection(val)}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                direction === val ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {lbl}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Row 3: Status filter — Outstanding is the default ── */}
+      <div className="flex flex-wrap gap-2">
+        <div className="flex bg-gray-100 rounded-lg p-0.5">
+          <button
+            onClick={() => setStatusFilter('outstanding')}
+            className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+              statusFilter === 'outstanding' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+            title="Hide jobs that are already done"
+          >
+            Outstanding
+          </button>
+          <button
+            onClick={() => setStatusFilter('all')}
+            className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              statusFilter === 'all' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            All
+          </button>
+          {STATUS_ORDER.map(s => {
+            const sc = STATUS_CONFIG[s];
+            return (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(statusFilter === s ? 'outstanding' : (s as StatusFilter))}
+                className={`px-2 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 whitespace-nowrap ${
+                  statusFilter === s ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sc.dot}`} />
+                {sc.label}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -560,10 +577,18 @@ export default function BacklinePage() {
         <div className="text-center py-12 text-gray-400">
           <span className="text-4xl mb-3 block">🎸</span>
           <p className="text-lg font-medium">
-            {statusFilter ? 'No jobs match this filter' : 'All quiet on the backline front'}
+            {statusFilter === 'outstanding'
+              ? 'Nothing outstanding — all caught up'
+              : statusFilter !== 'all'
+              ? 'No jobs match this filter'
+              : 'All quiet on the backline front'}
           </p>
           <p className="text-sm">
-            {statusFilter ? 'Try a different status filter' : 'No backline prep or de-prep needed'}
+            {statusFilter === 'outstanding'
+              ? 'Switch to "All" to see jobs that are already done'
+              : statusFilter !== 'all'
+              ? 'Try a different status filter'
+              : 'No backline prep or de-prep needed'}
           </p>
         </div>
       )}
