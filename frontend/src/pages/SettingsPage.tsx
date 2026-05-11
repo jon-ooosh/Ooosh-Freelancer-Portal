@@ -529,6 +529,9 @@ function SettingsContent() {
       {/* Out-of-Hours return settings — admin & manager */}
       <OohSettingsSection />
 
+      {/* Vehicle Issues settings — admin & manager */}
+      <VehicleIssueSettingsSection />
+
       {/* Email Service section — admin only */}
       {currentUser?.role === 'admin' && <EmailSection />}
 
@@ -1384,6 +1387,157 @@ function BackupsSection() {
             )}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Vehicle Issues Settings ──────────────────────────────────────────────
+//
+// Manages the fleet-wide default watcher list for new vehicle issues
+// (migration 082 — vehicle_issue_default_watchers in system_settings).
+// Issues auto-created from PrepPage / CheckInPage flags otherwise have
+// no watchers + no assignee, so nobody gets pinged on the initial flag.
+// Adding staff here means every new vehicle issue lands in their inbox.
+
+function VehicleIssueSettingsSection() {
+  const [rawValue, setRawValue] = useState<string>('[]');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [users, setUsers] = useState<TeamUser[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  useEffect(() => {
+    Promise.all([
+      api.get<{ data: SystemSetting[] }>('/system-settings?category=vehicle_issues'),
+      api.get<{ data: TeamUser[] }>('/users'),
+    ]).then(([settingsRes, usersRes]) => {
+      setUsers(usersRes.data);
+      const setting = settingsRes.data.find(s => s.key === 'vehicle_issue_default_watchers');
+      const initial = setting?.value ?? '[]';
+      setRawValue(initial);
+      try {
+        const parsed = JSON.parse(initial);
+        if (Array.isArray(parsed)) {
+          setSelectedIds(parsed.filter((v): v is string => typeof v === 'string'));
+        }
+      } catch {
+        setSelectedIds([]);
+      }
+    }).catch(err => {
+      console.error('Failed to load vehicle issue settings:', err);
+      setError('Could not load settings.');
+    }).finally(() => setLoading(false));
+  }, []);
+
+  function toggleUser(userId: string) {
+    setSelectedIds(prev =>
+      prev.includes(userId)
+        ? prev.filter(id => id !== userId)
+        : [...prev, userId]
+    );
+  }
+
+  function hasChanges(): boolean {
+    const currentJson = JSON.stringify(selectedIds);
+    let existingJson = '[]';
+    try {
+      const parsed = JSON.parse(rawValue);
+      existingJson = JSON.stringify(Array.isArray(parsed) ? parsed : []);
+    } catch { /* ignore */ }
+    return currentJson !== existingJson;
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      const newValue = JSON.stringify(selectedIds);
+      await api.put('/system-settings', {
+        settings: { vehicle_issue_default_watchers: newValue },
+      });
+      setRawValue(newValue);
+      setSuccess(`Saved — ${selectedIds.length} default watcher${selectedIds.length === 1 ? '' : 's'} set.`);
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (err) {
+      console.error('Save failed:', err);
+      setError('Save failed — try again.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-2">Vehicle Issues</h2>
+        <p className="text-sm text-gray-500">Loading…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Vehicle Issues</h2>
+      <p className="text-xs text-gray-500 mb-4">
+        Staff selected here are added as watchers on every new vehicle
+        issue (auto-flagged from prep / check-in, or manually logged).
+        They get a bell + email notification on the initial flag and
+        every subsequent re-flag, status change, or assignment.
+      </p>
+
+      <div className="mb-3">
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+          Default watchers
+        </label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto border border-gray-200 rounded p-2">
+          {users.map(u => {
+            const checked = selectedIds.includes(u.id);
+            return (
+              <label
+                key={u.id}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer ${
+                  checked ? 'bg-ooosh-50' : 'hover:bg-gray-50'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleUser(u.id)}
+                  className="rounded"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-gray-900 truncate">
+                    {u.first_name} {u.last_name}
+                  </div>
+                  <div className="text-[10px] text-gray-500 truncate">{u.email}</div>
+                </div>
+              </label>
+            );
+          })}
+        </div>
+        <p className="text-[11px] text-gray-400 mt-1.5">
+          {selectedIds.length === 0
+            ? 'No default watchers — new vehicle issues will fire no initial notifications.'
+            : `${selectedIds.length} user${selectedIds.length === 1 ? '' : 's'} will be added to every new vehicle issue.`}
+        </p>
+      </div>
+
+      {error && <div className="text-sm text-red-600 mb-2">{error}</div>}
+      {success && <div className="text-sm text-green-600 mb-2">{success}</div>}
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          disabled={!hasChanges() || saving}
+          onClick={handleSave}
+          className="px-4 py-2 bg-ooosh-600 text-white rounded text-sm font-medium hover:bg-ooosh-700 disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
       </div>
     </div>
   );

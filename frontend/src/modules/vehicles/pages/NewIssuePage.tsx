@@ -171,6 +171,10 @@ export function NewIssuePage() {
   const [mileage, setMileage] = useState('')
   const [hireHopJob, setHireHopJob] = useState('')
   const [initialNote, setInitialNote] = useState('')
+  // surface_on — when staff wants this issue to re-surface as a banner
+  // in a downstream workflow (vehicle check-in, next hire, next book-out,
+  // job close-out). Empty = just lives in the Problems register.
+  const [surfaceOn, setSurfaceOn] = useState<string>('')
   const [photos, setPhotos] = useState<File[]>([])
   const [isSaving, setIsSaving] = useState(false)
   const [capturedLocation, setCapturedLocation] = useState<IssueLocation | null>(null)
@@ -265,6 +269,7 @@ export function NewIssuePage() {
           summary: summaryText,
           description: locationNote || null,
           component_key: componentKey,
+          surface_on: surfaceOn || null,
         }),
       })
 
@@ -435,6 +440,27 @@ export function NewIssuePage() {
             onChange={setReportedDuring}
             columns={3}
           />
+
+          <div>
+            <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">
+              Surface this issue at… <span className="text-gray-400 normal-case">(optional)</span>
+            </label>
+            <select
+              value={surfaceOn}
+              onChange={(e) => setSurfaceOn(e.target.value)}
+              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-300"
+            >
+              <option value="">Just live in the register</option>
+              <option value="vehicle_check_in">Banner on this vehicle&apos;s next check-in</option>
+              <option value="next_hire">Banner on this vehicle&apos;s next hire</option>
+              <option value="next_book_out">Banner on next book-out</option>
+              <option value="job_close_out">Banner on next job close-out</option>
+            </select>
+            <p className="mt-1 text-[11px] text-gray-400">
+              Re-surfaces this issue as a prominent banner when the chosen workflow runs.
+              Leave as &quot;Just live in the register&quot; for issues that don&apos;t need re-prompting.
+            </p>
+          </div>
 
           <div>
             <label className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-gray-500">

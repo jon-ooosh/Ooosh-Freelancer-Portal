@@ -18,6 +18,7 @@ import { knotsToMph } from '../types/traccar'
 import type { IssueLocation } from '../types/issue'
 import { withRetry } from '../lib/retry'
 import { mapSeverityToOpSeverity } from '../lib/op-issue-mapping'
+import { VehicleIssuesSurfaceBanner } from '../components/issues/VehicleIssuesSurfaceBanner'
 import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoComparison } from '../components/check-in/PhotoComparison'
 import { PhotoLightbox } from '../components/shared/PhotoLightbox'
@@ -1041,6 +1042,15 @@ export function CheckInPage() {
 
       {/* Step content */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
+        {/* Surface-on banner: shows open issues tagged surface_on='vehicle_check_in'
+            for the selected vehicle. Re-surfaces deliberate-followup
+            items at the point where staff can act on them. */}
+        {form.vehicleId && (
+          <div className="mb-4">
+            <VehicleIssuesSurfaceBanner vehicleId={form.vehicleId} surfaceOn="vehicle_check_in" />
+          </div>
+        )}
+
         {STEPS[step] === 'Select Vehicle' && (
           <StepSelectVehicle
             vehicles={vehicles}

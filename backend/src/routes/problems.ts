@@ -28,6 +28,7 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { uploadToR2, deleteFromR2, isR2Configured } from '../config/r2';
+import { getSystemSetting } from './system-settings';
 
 const router = Router();
 router.use(authenticate);
@@ -137,6 +138,29 @@ async function logEvent(
   );
 }
 
+// Read fleet-wide default watchers from system_settings (migration 082).
+// Returns the parsed UUID array, or [] on missing / invalid JSON. Used at
+// two points:
+//   1. INSERT path on POST /api/problems + /auto-create — seeds the
+//      watchers column on new issues so any subsequent event hits the
+//      default set even if the actor doesn't explicitly add watchers.
+//   2. notifyIssueRecipients — merges the defaults into the recipient
+//      set as a safety net so the FIRST event (creation) fires bells
+//      even on issues that were already in the table before this
+//      setting landed (i.e. pre-migration-082 historical rows).
+async function getDefaultVehicleIssueWatchers(): Promise<string[]> {
+  const raw = await getSystemSetting('vehicle_issue_default_watchers');
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((v): v is string => typeof v === 'string');
+  } catch {
+    console.warn('vehicle_issue_default_watchers: invalid JSON, ignoring');
+    return [];
+  }
+}
+
 // Severity → notification priority (CLAUDE.md Stage 3 Phase F spec):
 //   urgent → 'urgent' (immediate email regardless of working hours)
 //   normal → 'normal' (4h escalation in working hours)
@@ -182,6 +206,15 @@ async function notifyIssueRecipients(
     for (const w of (row.watchers as string[] | null) || []) recipients.add(w);
     if (row.assigned_to) recipients.add(row.assigned_to);
     if (opts.includeReporter && row.reported_by) recipients.add(row.reported_by);
+
+    // Belt-and-braces: pull in the fleet-wide default watchers too.
+    // Most new issues already carry these in the watchers column (the
+    // INSERT path seeds them), so this branch usually just re-adds
+    // already-included IDs. Matters for historical rows pre-migration
+    // 082, manual issues created with explicit watchers=[], or rows
+    // where the actor cleared the array.
+    for (const w of await getDefaultVehicleIssueWatchers()) recipients.add(w);
+
     recipients.delete(actorUserId);
 
     if (recipients.size === 0) return;
@@ -356,7 +389,12 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
       clientOrgId = body.client_organisation_id ?? job.rows[0].client_id ?? null;
     }
 
-    const watchers = body.watchers ?? [];
+    // Seed fleet-wide default watchers (migration 082). Dedup so an
+    // explicit `body.watchers` containing one of the defaults doesn't
+    // double up. Skip when the actor is in the default set — they're
+    // implicitly tracking via being the reporter.
+    const defaultWatchers = await getDefaultVehicleIssueWatchers();
+    const watchers = Array.from(new Set([...(body.watchers ?? []), ...defaultWatchers]));
 
     const insert = await query(
       `INSERT INTO job_issues (
@@ -603,7 +641,11 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       return res.status(200).json({ data: full.rows[0], was_existing: true });
     }
 
-    // No match — fresh insert.
+    // No match — fresh insert. Seed fleet-wide default watchers
+    // (migration 082) so PrepPage / CheckInPage auto-creates reach
+    // whoever's watching the fleet without staff having to add
+    // watchers manually each time.
+    const defaultWatchers = await getDefaultVehicleIssueWatchers();
     const insert = await query(
       `INSERT INTO job_issues (
          job_id, vehicle_id, driver_id, client_organisation_id,
@@ -614,14 +656,14 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
          $1, $2, $3, $4,
          $5, $6, $7, $8,
          $9, $10, $11, $12, $13,
-         $14, '{}'::uuid[]
+         $14, $15::uuid[]
        )
        RETURNING id`,
       [
         body.job_id ?? null, body.vehicle_id, body.driver_id ?? null, null,
         body.hh_stock_item_id ?? null, body.hh_stock_item_name ?? null, body.barcode ?? null, body.component_key,
         body.category, body.source_module, body.severity, body.summary, body.description ?? null,
-        req.user!.id,
+        req.user!.id, defaultWatchers,
       ]
     );
 
