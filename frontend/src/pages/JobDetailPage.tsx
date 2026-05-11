@@ -129,6 +129,10 @@ interface JobDetail {
   cancellation_tier: string | null;
   reopened_from_job_id: string | null;
   reopened_to_job_id: string | null;
+  // Lost-job fields (mirror of cancellation, populated by pipeline transition)
+  lost_at?: string | null;
+  lost_reason?: string | null;
+  lost_detail?: string | null;
   has_client_email?: boolean;
 }
 
@@ -2490,31 +2494,70 @@ export default function JobDetailPage() {
                 <p className="text-xs text-red-600 mt-1">{job.cancellation_notes}</p>
               )}
             </div>
-            {job.reopened_to_job_id ? (
+            <div className="flex flex-col gap-2 shrink-0">
+              {job.reopened_to_job_id ? (
+                <Link
+                  to={`/jobs/${job.reopened_to_job_id}`}
+                  className="text-xs px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 whitespace-nowrap text-center"
+                >
+                  Already reopened &rarr; View new booking
+                </Link>
+              ) : (user?.role === 'admin' || user?.role === 'manager') ? (
+                <button
+                  onClick={async () => {
+                    if (!window.confirm('Re-open this cancelled job as a new booking? The original job will stay cancelled for audit purposes.')) return;
+                    try {
+                      const result = await api.post<{ newJobId: string; message: string }>(`/cancellations/${job.id}/reopen`, {});
+                      alert(result.message);
+                      navigate(`/jobs/${result.newJobId}`);
+                    } catch (err) {
+                      console.error('Re-open failed:', err);
+                      alert('Failed to re-open job');
+                    }
+                  }}
+                  className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 whitespace-nowrap"
+                >
+                  Re-open as New Booking
+                </button>
+              ) : null}
+              {/* Fill-a-Gap link — surfaces paused/open enquiries that could
+                  take the freed slot. Phase 1 SQL-only; AI rationale + draft
+                  emails layer in Phase 2 (pending Claude API key). */}
               <Link
-                to={`/jobs/${job.reopened_to_job_id}`}
-                className="text-xs px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 whitespace-nowrap"
+                to={`/operations/fill-gap/${job.id}`}
+                className="text-xs px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 whitespace-nowrap text-center"
               >
-                Already reopened &rarr; View new booking
+                Find replacement booking &rarr;
               </Link>
-            ) : (user?.role === 'admin' || user?.role === 'manager') ? (
-              <button
-                onClick={async () => {
-                  if (!window.confirm('Re-open this cancelled job as a new booking? The original job will stay cancelled for audit purposes.')) return;
-                  try {
-                    const result = await api.post<{ newJobId: string; message: string }>(`/cancellations/${job.id}/reopen`, {});
-                    alert(result.message);
-                    navigate(`/jobs/${result.newJobId}`);
-                  } catch (err) {
-                    console.error('Re-open failed:', err);
-                    alert('Failed to re-open job');
-                  }
-                }}
-                className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 whitespace-nowrap"
-              >
-                Re-open as New Booking
-              </button>
-            ) : null}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Lost banner — surfaces the Fill-a-Gap button mostly for the
+          provisional → lost case, where a booking we were holding fell
+          through. The same button renders for any-status → lost; an
+          enquiry that never had capacity allocated will just hit a
+          zero-candidate page (cheap). */}
+      {job.pipeline_status === 'lost' && (
+        <div className="bg-orange-50 border border-orange-200 rounded-xl p-4 mb-4">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-orange-700">
+                This job was marked lost
+                {job.lost_at ? ` on ${new Date(job.lost_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}
+                {job.lost_reason ? ` — ${job.lost_reason}` : ''}
+              </p>
+              {job.lost_detail && (
+                <p className="text-xs text-orange-600 mt-1">{job.lost_detail}</p>
+              )}
+            </div>
+            <Link
+              to={`/operations/fill-gap/${job.id}`}
+              className="text-xs px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 whitespace-nowrap text-center shrink-0"
+            >
+              Find replacement booking &rarr;
+            </Link>
           </div>
         </div>
       )}

@@ -27,6 +27,7 @@ import ExcessLedgerPage from './pages/ExcessLedgerPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import LostCancelledPage from './pages/LostCancelledPage';
+import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
@@ -144,6 +145,7 @@ export default function App() {
                 <Route path="/pipeline" element={<PipelinePage />} />
                 <Route path="/operations/transport" element={<TransportOpsPage />} />
                 <Route path="/operations/backline" element={<BacklinePage />} />
+                <Route path="/operations/fill-gap/:jobId" element={<FillGapPage />} />
                 <Route path="/operations/issues" element={<IssuesPage />} />
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
