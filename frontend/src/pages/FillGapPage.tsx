@@ -55,6 +55,7 @@ interface Candidate {
   manager_name: string | null;
   pipeline_status: string;
   bucket: 'paused' | 'open_enquiry';
+  hold_reason: string | null;
   dates: { job_date: string | null; job_end: string | null; hire_days: number };
   hire_value_ex_vat: number;
   flags: SlotFlags;
@@ -97,6 +98,21 @@ function daysAgo(iso: string | null): string {
 
 function bucketLabel(b: 'paused' | 'open_enquiry'): string {
   return b === 'paused' ? 'Paused enquiry' : 'Open enquiry';
+}
+
+// Surface the pause reason next to the bucket pill so staff see at-a-glance
+// why a candidate was paused. "No availability" → emerald (gold candidates —
+// we *wanted* the work). "Under 4-day window" → amber (judgement call).
+// "Other" / legacy / unset → not shown to keep the card uncluttered.
+function pausedReasonBadge(reason: string | null): { label: string; classes: string } | null {
+  if (!reason) return null;
+  if (reason === 'fully_booked') {
+    return { label: 'No availability', classes: 'bg-emerald-100 text-emerald-800' };
+  }
+  if (reason === 'under_minimum') {
+    return { label: 'Under 4-day window', classes: 'bg-amber-100 text-amber-800' };
+  }
+  return null;
 }
 
 function statusBadgeColour(status: string): string {
@@ -323,6 +339,14 @@ export default function FillGapPage() {
                     <span className={`text-xs px-2 py-0.5 rounded ${statusBadgeColour(c.pipeline_status)}`}>
                       {bucketLabel(c.bucket)}
                     </span>
+                    {c.bucket === 'paused' && (() => {
+                      const badge = pausedReasonBadge(c.hold_reason);
+                      return badge ? (
+                        <span className={`text-xs px-2 py-0.5 rounded ${badge.classes}`}>
+                          {badge.label}
+                        </span>
+                      ) : null;
+                    })()}
                     {c.match.bundle_match && (
                       <span className="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-medium">
                         🎯 Bundle

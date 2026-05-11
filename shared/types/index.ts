@@ -241,13 +241,25 @@ export const OPERATIONAL_STATUS_CONFIG: Record<OperationalStatus, { label: strin
   completed:           { label: 'Completed',           colour: '#059669', hhStatus: 11 }, // Emerald
 };
 
+// Labels shown for legacy HoldReason values. Two `HoldReason` values
+// (`client_undecided`, `too_early`) are retained in the enum for backwards
+// compatibility with historical data but are NOT offered in the pause modal
+// picker. New paused enquiries must pick from PAUSED_REASON_OPTIONS below.
 export const HOLD_REASON_LABELS: Record<HoldReason, string> = {
-  under_minimum:    'Under minimum terms',
-  fully_booked:     'Fully booked',
-  client_undecided: 'Client undecided',
-  too_early:        'Too early to confirm',
+  fully_booked:     'No availability',
+  under_minimum:    'Under 4-day window',
+  client_undecided: 'Client undecided (legacy)',
+  too_early:        'Too early to confirm (legacy)',
   other:            'Other',
 };
+
+// The three options shown when pausing a new enquiry. Keep in sync with the
+// fill-gap scoring weights in `routes/fill-gap.ts` (PAUSED_REASON_WEIGHTS).
+export const PAUSED_REASON_OPTIONS: Array<{ value: HoldReason; label: string }> = [
+  { value: 'fully_booked', label: 'No availability' },
+  { value: 'under_minimum', label: 'Under 4-day window' },
+  { value: 'other', label: 'Other' },
+];
 
 export const LOST_REASON_OPTIONS = [
   'Price',

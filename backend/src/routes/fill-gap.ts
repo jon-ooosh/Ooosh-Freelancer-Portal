@@ -97,10 +97,24 @@ interface JobRow {
   job_value: number | string | null;
   line_items: HHLineItem[] | null;
   vehicle_slot_modes: Record<string, ('self_drive' | 'van_and_driver')[]> | null;
+  hold_reason: string | null;
   manager_name: string | null;
   last_interaction_at: string | null;
   last_interaction_snippet: string | null;
 }
+
+// Per-reason bonus when a candidate is in the `paused` bucket. "No availability"
+// = `fully_booked` is the gold case — we *wanted* this work and were forced to
+// turn it away; surfacing it in a freed-up slot is the highest-value match.
+// "Under 4-day window" = `under_minimum` is a softer match (the 4-day rule's
+// reason to exist weakens as we approach the dates, but still warrants a look).
+// "Other" + legacy values fall through to the default. Keep this aligned with
+// the picker options in shared/types/index.ts → PAUSED_REASON_OPTIONS.
+const PAUSED_REASON_WEIGHTS: Record<string, { score: number; label: string }> = {
+  fully_booked:  { score: 15, label: 'Paused: no availability' },
+  under_minimum: { score: 8,  label: 'Paused: under 4-day window' },
+};
+const PAUSED_DEFAULT_WEIGHT = { score: 8, label: 'Paused enquiry' };
 
 function rowToFlags(row: JobRow) {
   // Defensive — pre-derivation jobs may have empty/missing line_items.
@@ -140,7 +154,7 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
       `SELECT
          j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
          j.pipeline_status, j.job_date, j.job_end, j.job_value,
-         j.line_items, j.vehicle_slot_modes,
+         j.line_items, j.vehicle_slot_modes, j.hold_reason,
          (SELECT p.first_name || ' ' || p.last_name FROM people p WHERE p.id = j.manager1_person_id) AS manager_name,
          NULL::timestamptz AS last_interaction_at,
          NULL::text AS last_interaction_snippet
@@ -173,7 +187,7 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
       `SELECT
          j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
          j.pipeline_status, j.job_date, j.job_end, j.job_value,
-         j.line_items, j.vehicle_slot_modes,
+         j.line_items, j.vehicle_slot_modes, j.hold_reason,
          (SELECT p.first_name || ' ' || p.last_name FROM people p WHERE p.id = j.manager1_person_id) AS manager_name,
          i.created_at AS last_interaction_at,
          i.content AS last_interaction_snippet
@@ -281,10 +295,17 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
         rationale.push(`${candHireDays}-day hire`);
       }
 
-      // Bucket priority — paused enquiries first
+      // Bucket priority — paused enquiries first, weighted by pause reason.
+      // "No availability" gets the +15 headline (we wanted this work and
+      // couldn't fit it — a freed slot is gold). "Under 4-day window" stays
+      // at +8 (decent candidate, judgement call). Other / legacy reasons
+      // get the default +8.
       if (bucket === 'paused') {
-        score += 8;
-        rationale.push('Paused enquiry');
+        const reasonWeight =
+          (row.hold_reason && PAUSED_REASON_WEIGHTS[row.hold_reason]) ||
+          PAUSED_DEFAULT_WEIGHT;
+        score += reasonWeight.score;
+        rationale.push(reasonWeight.label);
       }
 
       // Job value (defensive: NUMERIC from pg comes back as string)
@@ -312,6 +333,7 @@ router.get('/:jobId/candidates', async (req: AuthRequest, res: Response) => {
         manager_name: row.manager_name,
         pipeline_status: row.pipeline_status,
         bucket,
+        hold_reason: row.hold_reason || null,
         dates: {
           job_date: row.job_date,
           job_end: row.job_end,
