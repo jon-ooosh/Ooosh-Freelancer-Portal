@@ -33,6 +33,33 @@
  *   npx tsx src/scripts/import-r2-issues-to-op.ts --commit       # apply
  *   npx tsx src/scripts/import-r2-issues-to-op.ts --commit --vehicle RX22SWJ
  *                                                                # one reg only
+ *   npx tsx src/scripts/import-r2-issues-to-op.ts --reset --commit
+ *                                                                # WIPE any
+ *                                                                # previously-imported
+ *                                                                # OP issues
+ *                                                                # (metadata.imported_from_r2
+ *                                                                # = true on the
+ *                                                                # 'created' event)
+ *                                                                # then re-import.
+ *                                                                # Use when re-running
+ *                                                                # to fix a botched run.
+ *
+ * IDEMPOTENCY:
+ *   Without --reset the script is NOT idempotent — re-running with --commit
+ *   on the same data will create a SECOND set of OP rows for everything it
+ *   sees, because the in-script dedup grouping only collapses blobs within
+ *   one invocation, not across runs. If you suspect that's happened, run
+ *   with --reset --commit to wipe + start over. The diagnostic this catches:
+ *
+ *     SELECT fv.reg, ji.component_key, COUNT(*) AS dupes
+ *     FROM job_issues ji
+ *     LEFT JOIN fleet_vehicles fv ON fv.id = ji.vehicle_id
+ *     WHERE ji.source_module = 'vehicle'
+ *     GROUP BY 1, 2
+ *     HAVING COUNT(*) > 1;
+ *
+ *   Multiple rows with the same (reg, component_key) and the same
+ *   legacy_seed_id on their 'created' events = a double-imported run.
  */
 
 import { Pool } from 'pg';
@@ -43,6 +70,7 @@ dotenv.config();
 
 const args = process.argv.slice(2);
 const commit = args.includes('--commit');
+const reset = args.includes('--reset');
 const vehicleArgIdx = args.indexOf('--vehicle');
 const vehicleFilter = vehicleArgIdx >= 0 ? args[vehicleArgIdx + 1]?.toUpperCase() : null;
 
@@ -153,9 +181,57 @@ async function main() {
   const client = await pool.connect();
 
   try {
-    console.log(`Mode: ${commit ? 'COMMIT (will write)' : 'DRY RUN (no changes)'}`);
+    console.log(`Mode: ${commit ? 'COMMIT (will write)' : 'DRY RUN (no changes)'}${reset ? ' + RESET' : ''}`);
     if (vehicleFilter) console.log(`Filter: vehicleReg = ${vehicleFilter}`);
     console.log('');
+
+    // ── 0. Reset previously-imported rows (when --reset is set) ──
+    //
+    // Finds every job_issues row whose 'created' event has
+    // metadata.imported_from_r2 = true and deletes it. The CASCADE on
+    // job_issue_events / job_issue_files takes care of the child rows.
+    // Without --reset the script ADDS to the existing table, which —
+    // combined with the cross-run dedup gap — leads to doubled imports
+    // on re-runs. With --reset it's a clean slate.
+    //
+    // Honours --vehicle: only resets rows for that vehicle if a filter
+    // is set, so you can re-import a single vehicle without nuking the
+    // rest of the fleet.
+    if (reset) {
+      console.log('Reset mode — wiping previously-imported issues…');
+      const conditions: string[] = [
+        `EXISTS (
+           SELECT 1 FROM job_issue_events e
+           WHERE e.issue_id = ji.id
+             AND e.event_type = 'created'
+             AND e.metadata->>'imported_from_r2' = 'true'
+         )`,
+      ];
+      const params: unknown[] = [];
+      if (vehicleFilter) {
+        params.push(vehicleFilter);
+        conditions.push(`ji.vehicle_id IN (SELECT id FROM fleet_vehicles WHERE UPPER(reg) = UPPER($${params.length}))`);
+      }
+      const countResult = await client.query(
+        `SELECT COUNT(*)::int AS n FROM job_issues ji WHERE ${conditions.join(' AND ')}`,
+        params
+      );
+      const toDelete = countResult.rows[0].n as number;
+      console.log(`  Found ${toDelete} previously-imported issue(s) to wipe`);
+
+      if (toDelete > 0) {
+        if (commit) {
+          const del = await client.query(
+            `DELETE FROM job_issues ji WHERE ${conditions.join(' AND ')}`,
+            params
+          );
+          console.log(`  Deleted ${del.rowCount} row(s) (events + files cascaded)`);
+        } else {
+          console.log('  (dry run — re-run with --commit to actually wipe)');
+        }
+      }
+      console.log('');
+    }
 
     // ── 1. Discover all legacy issue blobs ──
     console.log('Scanning R2 for legacy issue blobs…');
