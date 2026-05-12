@@ -1016,6 +1016,18 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
 
   const licenceEnding = (driver.licence_number as string)?.slice(-8) || null;
 
+  // node-postgres returns DATE columns as JS Date objects, which JSON.stringify
+  // renders as ISO 8601 timestamps ("1986-05-12T00:00:00.000Z"). Downstream
+  // consumers (Idenfy COMPARE, confirmation emails, SignaturePage) expect plain
+  // YYYY-MM-DD. Normalise on the way out so this class of bug stops surfacing
+  // (was the 12 May 2026 Idenfy passport BAD_VALUE — Ernie at job 15644).
+  const toYmd = (v: unknown): string | null => {
+    if (!v) return null;
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    const s = String(v);
+    return s.length >= 10 ? s.slice(0, 10) : s;
+  };
+
   // Determine overall status
   let status = 'new';
   if (driver.overall_status === 'Insurance Review') status = 'insurance_review';
@@ -1050,7 +1062,7 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
     name: driver.full_name || null,
     phoneNumber: driver.phone || null,
     phoneCountry: driver.phone_country || null,
-    dateOfBirth: driver.date_of_birth || null,
+    dateOfBirth: toYmd(driver.date_of_birth),
     licenseNumber: driver.licence_number || null,
     licenseEnding: licenceEnding,
     licenseIssuedBy: driver.licence_issued_by || null,
@@ -1098,15 +1110,15 @@ function buildDriverStatusResponse(driver: Record<string, unknown>) {
     },
     boardAId: driver.id || null,
     lastUpdated: driver.updated_at || null,
-    licenseNextCheckDue: analysis.licence.expiryDate || driver.licence_next_check_due || null,
+    licenseNextCheckDue: analysis.licence.expiryDate || toYmd(driver.licence_next_check_due),
     // Raw licence card expiry — separate from the 90-day re-check rotation
     // window so the confirmation email can show the driver's actual licence
     // validity rather than our internal rotation date.
-    licenseValidTo: driver.licence_valid_to || null,
-    poa1ValidUntil: driver.poa1_valid_until || null,
-    poa2ValidUntil: driver.poa2_valid_until || null,
-    dvlaValidUntil: driver.dvla_valid_until || null,
-    passportValidUntil: driver.passport_valid_until || null,
+    licenseValidTo: toYmd(driver.licence_valid_to),
+    poa1ValidUntil: toYmd(driver.poa1_valid_until),
+    poa2ValidUntil: toYmd(driver.poa2_valid_until),
+    dvlaValidUntil: toYmd(driver.dvla_valid_until),
+    passportValidUntil: toYmd(driver.passport_valid_until),
     poa1Provider: driver.poa1_provider || null,
     poa2Provider: driver.poa2_provider || null,
     dvlaPoints: (driver.licence_points as number) || 0,
