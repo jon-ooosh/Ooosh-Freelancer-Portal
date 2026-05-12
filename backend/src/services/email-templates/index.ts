@@ -1282,6 +1282,21 @@ const templates: Record<string, EmailTemplate> = {
   // photo, anything) to a chosen recipient. Body adapts to whether
   // staff supplied a custom message.
 
+  /**
+   * Damage repair quote request to TTS360 (or whichever engineering contact
+   * is configured in system_settings). Sent from the check-in flow when
+   * staff tick "Also send damage photos to TTS360 for repair quote", or
+   * later from the issue detail page when staff missed the tick.
+   *
+   * Sender renders the photo grid + damage descriptions via
+   * bodyHtmlOverride (variable substitution would HTML-escape the grid).
+   */
+  damage_repair_quote_request: {
+    variant: 'internal',
+    subject: 'Damage repair quote request — {{vanRegistration}} (job #{{hhJobNumber}})',
+    body: `<p>This template should be sent with bodyHtmlOverride. If you're seeing this, the caller forgot.</p>`,
+  },
+
   file_resend: {
     variant: 'client',
     preheader: 'Document from Ooosh Tours',

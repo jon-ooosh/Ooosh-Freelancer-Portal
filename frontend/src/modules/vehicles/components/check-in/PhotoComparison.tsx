@@ -22,6 +22,12 @@ interface PhotoComparisonProps {
   bookOutPhotoLabels?: Map<string, string>
   /** Current check-in photos */
   currentPhotos: CapturedPhoto[]
+  /**
+   * Angles that already have a damage item flagged from them. The flag
+   * button on those angles renders as "Edit damage" so a second click
+   * re-opens the existing item instead of feeling like a fresh log.
+   */
+  damageFlaggedAngles?: Set<string>
   onCapture: (photo: CapturedPhoto) => void
   onRemove: (angle: string) => void
   onFlagDamage: (angle: string) => void
@@ -43,6 +49,7 @@ export function PhotoComparison({
   bookOutPhotos,
   bookOutPhotoLabels,
   currentPhotos,
+  damageFlaggedAngles,
   onCapture,
   onRemove,
   onFlagDamage,
@@ -149,6 +156,7 @@ export function PhotoComparison({
           label={label}
           bookOutUrl={resolveRequiredBookOutUrl(angle)}
           captured={capturedMap.get(angle)}
+          damageFlagged={damageFlaggedAngles?.has(angle) ?? false}
           onCapture={triggerCapture}
           onRemove={onRemove}
           onFlagDamage={onFlagDamage}
@@ -184,6 +192,7 @@ export function PhotoComparison({
                   label={label}
                   bookOutUrl={bookOutUrl}
                   captured={capturedMap.get(angle as CaptureAngle)}
+                  damageFlagged={damageFlaggedAngles?.has(angle) ?? false}
                   onCapture={triggerCapture}
                   onRemove={onRemove}
                   onFlagDamage={onFlagDamage}
@@ -217,6 +226,7 @@ interface ComparisonCardProps {
   label: string
   bookOutUrl: string | undefined
   captured: CapturedPhoto | undefined
+  damageFlagged: boolean
   onCapture: (angle: CaptureAngle) => void
   onRemove: (angle: string) => void
   onFlagDamage: (angle: string) => void
@@ -229,6 +239,7 @@ function ComparisonCard({
   label,
   bookOutUrl,
   captured,
+  damageFlagged,
   onCapture,
   onRemove,
   onFlagDamage,
@@ -243,9 +254,14 @@ function ComparisonCard({
         {captured && (
           <button
             onClick={() => onFlagDamage(String(angle))}
-            className="shrink-0 rounded bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600 active:bg-red-100"
+            className={
+              damageFlagged
+                ? 'shrink-0 rounded bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 active:bg-amber-100'
+                : 'shrink-0 rounded bg-red-50 px-2 py-0.5 text-xs font-medium text-red-600 active:bg-red-100'
+            }
+            title={damageFlagged ? 'Edit the damage you flagged from this photo' : 'Flag damage on this photo'}
           >
-            Flag Damage
+            {damageFlagged ? '✓ Edit Damage' : 'Flag Damage'}
           </button>
         )}
       </div>

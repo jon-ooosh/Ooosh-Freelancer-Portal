@@ -141,6 +141,11 @@ export default function IssueDetailPage() {
   const [comment, setComment] = useState('');
   const [mentionedIds, setMentionedIds] = useState<string[]>([]);
   const [posting, setPosting] = useState(false);
+  const [sendingQuote, setSendingQuote] = useState(false);
+  const [quoteResult, setQuoteResult] = useState<{
+    kind: 'success' | 'error';
+    text: string;
+  } | null>(null);
   const attach = useAttachments();
 
   const load = useCallback(async () => {
@@ -177,6 +182,31 @@ export default function IssueDetailPage() {
     }
   }
 
+  async function sendRepairQuote() {
+    if (!id || sendingQuote) return;
+    setSendingQuote(true);
+    setQuoteResult(null);
+    try {
+      const res = await api.post<{
+        success: boolean;
+        recipients?: { to: string; cc: string[] };
+        photo_count?: number;
+      }>('/problems/send-repair-quote-request', { issue_ids: [id] });
+      const to = res.recipients?.to || 'TTS360';
+      const count = res.photo_count ?? 0;
+      setQuoteResult({
+        kind: 'success',
+        text: `Sent to ${to}${count ? ` · ${count} photo(s)` : ''}`,
+      });
+      load();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Send failed';
+      setQuoteResult({ kind: 'error', text: msg });
+    } finally {
+      setSendingQuote(false);
+    }
+  }
+
   async function postComment() {
     if (!id) return;
     const trimmed = comment.trim();
@@ -207,6 +237,13 @@ export default function IssueDetailPage() {
   }
 
   const isResolved = ['resolved', 'written_off', 'cancelled'].includes(issue.status);
+
+  // TTS360 repair-quote send history — derived from events. Each call to
+  // /problems/send-repair-quote-request inserts one event per issue, so
+  // count + last timestamp come straight from the timeline.
+  const quoteEvents = issue.events.filter(e => e.event_type === 'quote_requested');
+  const quoteSent = quoteEvents.length > 0;
+  const lastQuoteSentAt = quoteSent ? quoteEvents[quoteEvents.length - 1]!.created_at : null;
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -416,6 +453,53 @@ export default function IssueDetailPage() {
             </div>
           </div>
 
+          {/* TTS360 repair-quote panel — only for damage issues. Surfaces
+              the "Not sent to TTS360" amber state with a Send button, and
+              flips to a green Sent state + Resend after the first send. */}
+          {issue.category === 'damaged' && (
+            <div className={`rounded-xl border p-4 ${
+              quoteSent ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'
+            }`}>
+              <div className="flex items-start gap-2">
+                <span className="text-base leading-none mt-0.5">{quoteSent ? '✓' : '⚠'}</span>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-xs font-semibold ${quoteSent ? 'text-green-800' : 'text-amber-900'}`}>
+                    {quoteSent ? 'Repair quote requested from TTS360' : 'Not sent to TTS360'}
+                  </p>
+                  {quoteSent && lastQuoteSentAt && (
+                    <p className="text-[11px] text-green-700 mt-0.5">
+                      Last sent {new Date(lastQuoteSentAt).toLocaleString('en-GB')}
+                      {quoteEvents.length > 1 && ` · ${quoteEvents.length} sends`}
+                    </p>
+                  )}
+                  {!quoteSent && (
+                    <p className="text-[11px] text-amber-800/80 mt-0.5">
+                      Email TTS360 engineering with the damage photos and our notes for a repair quote.
+                    </p>
+                  )}
+                  <button
+                    onClick={sendRepairQuote}
+                    disabled={sendingQuote}
+                    className={`mt-2 px-3 py-1.5 rounded text-xs font-medium text-white disabled:opacity-60 ${
+                      quoteSent ? 'bg-green-700 hover:bg-green-800' : 'bg-amber-600 hover:bg-amber-700'
+                    }`}
+                  >
+                    {sendingQuote
+                      ? 'Sending…'
+                      : quoteSent ? 'Resend to TTS360' : 'Send for repair quote'}
+                  </button>
+                  {quoteResult && (
+                    <p className={`mt-2 text-[11px] ${
+                      quoteResult.kind === 'success' ? 'text-green-700' : 'text-red-700'
+                    }`}>
+                      {quoteResult.text}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Assignee + watchers + due date */}
           <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
             <div>
@@ -575,6 +659,19 @@ function EventRow({ e }: { e: IssueEvent }) {
     case 'resolved':
       icon = '✅';
       body = body || 'Resolved';
+      break;
+    case 'quote_requested': {
+      icon = '📧';
+      // The audit body already names the recipient ("Sent damage repair
+      // quote request to engineering@tts360.co.uk…") so use it as-is.
+      body = body || 'Repair quote requested';
+      break;
+    }
+    case 'reflagged':
+      icon = '🔁';
+      break;
+    case 'file_added':
+      icon = '📎';
       break;
     default:
       icon = '·';
