@@ -3289,30 +3289,32 @@ export default function JobDetailPage() {
               </div>
             )}
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 flex-shrink-0 max-w-full">
-            {job.hh_job_number && (
-              <button
-                onClick={() => syncFromHireHop(true)}
-                disabled={hhSyncing}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
-                title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
-              >
-                <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                <span className="hidden sm:inline">{hhSyncing ? 'Syncing...' : 'Sync HH'}</span>
-              </button>
-            )}
-            {hhJobUrl && (
-              <a
-                href={hhJobUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
-              >
-                Open in HireHop &rarr;
-              </a>
-            )}
+          <div className="flex flex-col items-end gap-2 flex-shrink-0 max-w-full">
+            <div className="flex items-center gap-2">
+              {job.hh_job_number && (
+                <button
+                  onClick={() => syncFromHireHop(true)}
+                  disabled={hhSyncing}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs sm:text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 disabled:opacity-50 transition-colors"
+                  title={hhLastSynced ? `Last synced: ${new Date(hhLastSynced).toLocaleTimeString()}` : 'Sync items from HireHop'}
+                >
+                  <svg className={`w-3.5 h-3.5 ${hhSyncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  <span className="hidden sm:inline">{hhSyncing ? 'Syncing...' : 'Sync HH'}</span>
+                </button>
+              )}
+              {hhJobUrl && (
+                <a
+                  href={hhJobUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600"
+                >
+                  Open in HireHop &rarr;
+                </a>
+              )}
+            </div>
             {/* Pre-Hire Review — manual send to info@. Admin/manager only.
                  Visibility whitelist: confirmed / prepping / prepped only.
                  Provisional and earlier: review isn't meaningful yet.
@@ -3321,7 +3323,10 @@ export default function JobDetailPage() {
                  09:55 cron for confirmed jobs at T-3d / T-5d / T-1d.
                  Visual state: faded grey when a recent send exists (within
                  the last 24h) so staff can see at-a-glance it's been
-                 actioned. Still clickable — sometimes you want to resend. */}
+                 actioned. Still clickable — sometimes you want to resend.
+                 Sits on its own row beneath Sync HH / Open in HireHop so
+                 the optional "· last sent X" subtitle can't squash the
+                 job title on the left. */}
             {(user?.role === 'admin' || user?.role === 'manager')
               && (job.pipeline_status === 'confirmed'
                   || job.pipeline_status === 'prepping'
