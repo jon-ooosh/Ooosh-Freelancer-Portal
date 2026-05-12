@@ -174,7 +174,7 @@ export function calculatePreHireCancellation(input: PreHireCancellationInput): C
     tier === '2_to_7_days' ? `${noticeText} days' notice` :
     `less than 2 days' notice`;
   const summary = refundRounded > 0
-    ? `Cancelled with ${tierText}. £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 7.1). Refund of £${refundRounded.toFixed(2)} to be processed.`
+    ? `Cancelled with ${tierText}. £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 7.1). See Cancellation Summary below for refund or balance owed.`
     : `Cancelled with ${tierText}. Full hire charge of £${feeRounded.toFixed(2)} retained as cancellation fee per hire terms (clause 7.1).`;
 
   return {

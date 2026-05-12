@@ -3289,7 +3289,7 @@ export default function JobDetailPage() {
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex flex-wrap items-center justify-end gap-2 flex-shrink-0 max-w-full">
             {job.hh_job_number && (
               <button
                 onClick={() => syncFromHireHop(true)}

@@ -307,16 +307,13 @@ export default function CancellationModal({
                           <span className="font-medium">{fmtMoney(line.amount)}</span>
                         </div>
                       ))}
-                      <div className="flex justify-between text-sm pt-1 border-t border-red-200 mt-1">
+                      <div className="flex justify-between items-baseline text-sm pt-1 border-t border-red-200 mt-1">
                         <span className="font-semibold text-red-800">Fee to retain (ex-VAT)</span>
-                        <span className="font-bold text-red-700">{fmtMoney(calcResult.fee)}</span>
+                        <span className="text-right">
+                          <span className="font-bold text-red-700">{fmtMoney(calcResult.fee)}</span>
+                          <span className="block text-xs text-gray-500">inc-VAT {fmtMoney(calcResult.fee * 1.2)}</span>
+                        </span>
                       </div>
-                      {calcResult.refund > 0 && (
-                        <div className="flex justify-between text-sm pt-0.5">
-                          <span className="font-semibold text-green-800">Refund due</span>
-                          <span className="font-bold text-green-700">{fmtMoney(calcResult.refund)}</span>
-                        </div>
-                      )}
                     </div>
                   )}
 
