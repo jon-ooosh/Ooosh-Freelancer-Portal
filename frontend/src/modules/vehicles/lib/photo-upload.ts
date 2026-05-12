@@ -93,7 +93,17 @@ export async function uploadDamagePhotos(
   eventId: string,
   vehicleReg: string,
   onProgress?: (completed: number, total: number) => void,
-): Promise<{ uploadedCount: number; failedCount: number }> {
+): Promise<{
+  uploadedCount: number
+  failedCount: number
+  /**
+   * R2 keys that successfully uploaded, grouped by the DamageItem.id
+   * they belong to. Lets the caller pass the right photo set into
+   * `POST /api/problems/auto-create` so the issue carries its photos
+   * for downstream consumers (e.g. the TTS360 repair-quote send).
+   */
+  keysByDamageId: Record<string, string[]>
+}> {
   const safeReg = vehicleReg.replace(/\s+/g, '-').toUpperCase()
   const allPhotos: Array<{ damageId: string; index: number; photo: CapturedPhoto }> = []
 
@@ -104,11 +114,12 @@ export async function uploadDamagePhotos(
   }
 
   if (allPhotos.length === 0) {
-    return { uploadedCount: 0, failedCount: 0 }
+    return { uploadedCount: 0, failedCount: 0, keysByDamageId: {} }
   }
 
   let completed = 0
   let failedCount = 0
+  const keysByDamageId: Record<string, string[]> = {}
 
   for (const { damageId, index, photo } of allPhotos) {
     const key = `events/${eventId}/${safeReg}/damage/${damageId}/${index}.jpg`
@@ -122,6 +133,7 @@ export async function uploadDamagePhotos(
         body: formData,
       })
       if (!response.ok) throw new Error(`Upload failed: ${response.status}`)
+      ;(keysByDamageId[damageId] ||= []).push(key)
       completed++
     } catch (err) {
       console.error(`Failed to upload damage photo ${damageId}/${index}:`, err)
@@ -134,6 +146,7 @@ export async function uploadDamagePhotos(
   return {
     uploadedCount: completed - failedCount,
     failedCount,
+    keysByDamageId,
   }
 }
 

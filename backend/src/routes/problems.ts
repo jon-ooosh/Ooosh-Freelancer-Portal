@@ -138,6 +138,46 @@ async function logEvent(
   );
 }
 
+/**
+ * Attach already-uploaded R2 photos to an issue. Skips keys that are
+ * already linked to the issue so a reflag carrying the same photo set
+ * doesn't duplicate. Photos referenced here are uploaded outside the
+ * usual /:id/files endpoint (e.g. by the check-in flow which writes to
+ * the public vehicle-photos bucket under `events/...`), so we just
+ * record the key + a sensible filename and let downstream consumers
+ * resolve the URL via R2_PUBLIC_URL.
+ */
+async function attachExternalIssuePhotos(
+  issueId: string, userId: string, r2Keys: string[],
+): Promise<number> {
+  if (!r2Keys.length) return 0;
+  let added = 0;
+  for (const key of r2Keys) {
+    const trimmed = key.trim();
+    if (!trimmed) continue;
+    // Dedup against existing rows on this issue with the same r2_key.
+    const exists = await query(
+      `SELECT 1 FROM job_issue_files WHERE issue_id = $1 AND r2_key = $2 LIMIT 1`,
+      [issueId, trimmed]
+    );
+    if (exists.rowCount && exists.rowCount > 0) continue;
+    const filename = trimmed.split('/').pop() || 'damage.jpg';
+    await query(
+      `INSERT INTO job_issue_files
+         (issue_id, r2_key, filename, file_type, content_type, uploaded_by)
+       VALUES ($1, $2, $3, 'photo', 'image/jpeg', $4)`,
+      [issueId, trimmed, filename, userId]
+    );
+    added++;
+  }
+  if (added > 0) {
+    await logEvent(issueId, userId, 'file_added', `${added} damage photo(s) attached`, {
+      source: 'auto_attach', count: added,
+    });
+  }
+  return added;
+}
+
 // Read fleet-wide default watchers from system_settings (migration 082).
 // Returns the parsed UUID array, or [] on missing / invalid JSON. Used at
 // two points:
@@ -595,6 +635,13 @@ const autoCreateSchema = z.object({
     reported_by_name: z.string().max(200).optional().nullable(),
     note: z.string().max(1000).optional().nullable(),
   }).optional().nullable(),
+  // R2 keys for damage photos already uploaded by the caller. Persisted
+  // into job_issue_files so the issue carries its photos for later use
+  // (e.g. the TTS360 repair-quote send path, which reads from
+  // job_issue_files rather than knowing about the original event keys).
+  // Idempotent: existing rows with the same r2_key on the same issue are
+  // skipped, so a reflag with the same photo set doesn't duplicate.
+  r2_photo_keys: z.array(z.string().max(500)).max(20).optional().nullable(),
 });
 
 router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest, res: Response) => {
@@ -636,6 +683,12 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
         eventBody,
         { includeReporter: true }
       );
+
+      // Persist any photos the caller already uploaded to R2 (e.g. the
+      // check-in flow's damage-photo keys). Dedup'd by r2_key.
+      if (body.r2_photo_keys?.length) {
+        await attachExternalIssuePhotos(issueId, req.user!.id, body.r2_photo_keys);
+      }
 
       const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
       return res.status(200).json({ data: full.rows[0], was_existing: true });
@@ -679,6 +732,10 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
       `${body.category} — flagged from ${body.source_module}`,
     );
 
+    if (body.r2_photo_keys?.length) {
+      await attachExternalIssuePhotos(issueId, req.user!.id, body.r2_photo_keys);
+    }
+
     const full = await query(`SELECT ${ISSUE_SELECT} ${ISSUE_JOIN} WHERE ji.id = $1`, [issueId]);
     res.status(201).json({ data: full.rows[0], was_existing: false });
   } catch (err) {
@@ -686,6 +743,76 @@ router.post('/auto-create', validate(autoCreateSchema), async (req: AuthRequest,
     res.status(500).json({ error: 'Failed to auto-create issue' });
   }
 });
+
+// ── Damage repair quote (TTS360) ─────────────────────────────────────────
+//
+// One email per call, covering one or more issues that share a single
+// vehicle. Called from two places:
+//   1. The check-in submit flow when staff tick "Also send damage photos
+//      to TTS360 for repair quote" — bulk send across all damage issues
+//      just created.
+//   2. The IssueDetailPage "Send for repair quote" / "Resend" buttons
+//      — single-issue send for the recovery / resend path.
+//
+// On success: each issue gets a `quote_requested` event in
+// job_issue_events and (if not already past the quote stage) its
+// status flips to `awaiting_quote`. See services/damage-repair-quote.ts.
+
+const repairQuoteSchema = z.object({
+  issue_ids: z.array(z.string().uuid()).min(1).max(20),
+  notes_override: z.string().trim().max(5000).optional().nullable(),
+});
+
+router.post(
+  '/send-repair-quote-request',
+  validate(repairQuoteSchema),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { sendDamageRepairQuote } = await import('../services/damage-repair-quote');
+      const body = req.body as z.infer<typeof repairQuoteSchema>;
+
+      // Resolve display name for the "Sent by" metadata. Cheap join
+      // through users → people; if it fails we fall back to the email.
+      let sentByName: string | null = null;
+      try {
+        const nameResult = await query(
+          `SELECT CONCAT(p.first_name, ' ', p.last_name) AS name, u.email
+             FROM users u LEFT JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
+          [req.user!.id]
+        );
+        const row = nameResult.rows[0] as { name: string | null; email: string | null } | undefined;
+        sentByName = row?.name?.trim() || row?.email || null;
+      } catch {
+        // ignore — sender attribution is nice-to-have, not essential.
+      }
+
+      const result = await sendDamageRepairQuote({
+        issueIds: body.issue_ids,
+        sentByUserId: req.user!.id,
+        sentByName,
+        notesOverride: body.notes_override ?? null,
+      });
+
+      if (!result.success) {
+        return res.status(result.error?.includes('not configured') ? 503 : 502).json({
+          error: result.error || 'Email send failed',
+          recipients: result.recipients,
+        });
+      }
+
+      res.json({
+        success: true,
+        email_log_id: result.email_log_id,
+        recipients: result.recipients,
+        issue_ids: result.issue_ids,
+        photo_count: result.photo_count,
+      });
+    } catch (err) {
+      console.error('Send damage repair quote error:', err);
+      res.status(500).json({ error: 'Failed to send damage repair quote' });
+    }
+  }
+);
 
 // ── Files ────────────────────────────────────────────────────────────────
 //

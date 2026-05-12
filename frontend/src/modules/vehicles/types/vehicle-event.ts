@@ -191,6 +191,10 @@ export interface DamageItem {
   severity: 'Critical' | 'Major' | 'Minor'
   description: string
   photos: CapturedPhoto[]    // Extra damage detail photos
+  // Walkaround photo angle this damage was originated from (e.g. 'front_left').
+  // Lets the check-in flow re-open the same damage item when the red flag on
+  // that photo is clicked again, instead of creating a duplicate.
+  originAngle?: string | null
 }
 
 /**
@@ -227,6 +231,12 @@ export interface CheckInFormState {
 
   // Driver present at check-in (false for overnight returns)
   driverPresent: boolean
+
+  // Optional: send damage photos to TTS360 for a repair quote at submit.
+  // Only meaningful when `damageItems.length > 0`; ignored otherwise.
+  // Defaults to `true` whenever a damage item exists — staff have just
+  // flagged damage, the assumption is they want a quote.
+  sendToTts360: boolean
 
   // Signature
   signatureBlob: Blob | null

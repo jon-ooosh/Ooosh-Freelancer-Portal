@@ -72,6 +72,7 @@ const INITIAL_FORM: CheckInFormState = {
   photos: [],
   damageItems: [],
   driverPresent: true,
+  sendToTts360: true,
   signatureBlob: null,
 }
 
@@ -131,8 +132,10 @@ export function CheckInPage() {
           location: d.location,
           severity: d.severity,
           description: d.description,
+          originAngle: d.originAngle ?? null,
         })),
         driverPresent: form.driverPresent,
+        sendToTts360: form.sendToTts360,
       },
       photos: form.photos,
       signatureBlob: form.signatureBlob,
@@ -169,6 +172,7 @@ export function CheckInPage() {
         photos: [], // Damage photos can't be restored from draft
       })),
       driverPresent: (d.driverPresent as boolean) ?? true,
+      sendToTts360: (d.sendToTts360 as boolean) ?? true,
       signatureBlob: draftLoaded.signatureBlob,
     })
     setStep(draftLoaded.step)
@@ -238,6 +242,12 @@ export function CheckInPage() {
     const location = locationMap[angle] || 'Front Left'
 
     setForm(f => {
+      // If a damage item was already created from this photo angle, re-open it
+      // instead of appending a duplicate. Users can still add multiple photos
+      // / extra detail from within the damage step itself.
+      const existing = f.damageItems.find(d => d.originAngle === angle)
+      if (existing) return f
+
       // Copy the triggering check-in photo into the damage item
       const triggeringPhoto = f.photos.find(p => p.angle === angle)
       const damagePhotos: CapturedPhoto[] = triggeringPhoto
@@ -259,6 +269,7 @@ export function CheckInPage() {
             severity: 'Minor' as const,
             description: '',
             photos: damagePhotos,
+            originAngle: angle,
           },
         ],
       }
@@ -469,6 +480,10 @@ export function CheckInPage() {
     }
 
     // ── Step 2b: Upload damage photos to R2 ──
+    // Persisted upload keys (grouped by DamageItem.id) feed into the
+    // auto-create payload below so each issue carries its photos —
+    // needed for the optional TTS360 repair-quote send at submit time.
+    let damageKeysByItemId: Record<string, string[]> = {}
     const hasDamagePhotos = form.damageItems.some(d => d.photos.length > 0)
     if (hasDamagePhotos) {
       setUploadProgress('Uploading damage photos...')
@@ -485,7 +500,8 @@ export function CheckInPage() {
       )
 
       if (dmgUpload.success && dmgUpload.data) {
-        const { uploadedCount, failedCount } = dmgUpload.data
+        const { uploadedCount, failedCount, keysByDamageId } = dmgUpload.data
+        damageKeysByItemId = keysByDamageId
         if (failedCount === 0 && uploadedCount > 0) {
           results.push({ label: 'Damage photos', success: true, detail: `${uploadedCount} uploaded` })
         } else if (failedCount > 0) {
@@ -529,6 +545,7 @@ export function CheckInPage() {
       // is stashed in the reflag_context note for audit; not used as the
       // key because the same dent gets flagged from different lat/lngs.
       let issuesReflagged = 0
+      const createdIssueIds: string[] = []
       for (const damage of form.damageItems) {
         if (!damage.description.trim()) continue
         try {
@@ -536,6 +553,7 @@ export function CheckInPage() {
           const locationNote = issueLocation
             ? `${damage.description} [GPS: ${issueLocation.lat.toFixed(5)}, ${issueLocation.lng.toFixed(5)}]`
             : damage.description
+          const damagePhotoKeys = damageKeysByItemId[damage.id] || []
           const resp = await apiFetch('/api/problems/auto-create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -547,6 +565,7 @@ export function CheckInPage() {
               severity: mapSeverityToOpSeverity(damage.severity),
               summary: `${damage.location}: ${damage.description}`.slice(0, 250),
               description: locationNote,
+              r2_photo_keys: damagePhotoKeys.length > 0 ? damagePhotoKeys : undefined,
               reflag_context: {
                 source: 'checkin',
                 mileage: form.mileage ? parseInt(form.mileage, 10) : null,
@@ -560,9 +579,10 @@ export function CheckInPage() {
             console.warn(`[check-in] auto-create failed for ${damage.location}:`, resp.status)
             continue
           }
-          const body = await resp.json() as { was_existing?: boolean }
+          const body = await resp.json() as { was_existing?: boolean; data?: { id?: string } }
           if (body.was_existing) issuesReflagged++
           else issuesCreated++
+          if (body.data?.id) createdIssueIds.push(body.data.id)
         } catch (err) {
           issuesFailed++
           console.warn(`[check-in] auto-create error for ${damage.location}:`, err)
@@ -579,6 +599,43 @@ export function CheckInPage() {
           success: issuesFailed === 0,
           detail: parts.join(' · '),
         })
+      }
+
+      // ── Step 3b: TTS360 repair quote (optional) ──
+      // Fires AFTER the auto-create loop so we have all the issue IDs.
+      // Failure here is surfaced as a result row but does not roll back
+      // the check-in — staff can resend later from the issue page.
+      if (form.sendToTts360 && createdIssueIds.length > 0) {
+        setUploadProgress('Sending repair quote to TTS360...')
+        try {
+          const resp = await apiFetch('/api/problems/send-repair-quote-request', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ issue_ids: createdIssueIds }),
+          })
+          if (resp.ok) {
+            const body = await resp.json() as { recipients?: { to?: string }; photo_count?: number }
+            results.push({
+              label: 'TTS360 repair quote',
+              success: true,
+              detail: `Sent to ${body.recipients?.to || 'TTS360'}${body.photo_count ? ` · ${body.photo_count} photo(s)` : ''}`,
+            })
+          } else {
+            const errBody = await resp.json().catch(() => ({} as { error?: string }))
+            results.push({
+              label: 'TTS360 repair quote',
+              success: false,
+              detail: `${errBody.error || 'Send failed'} — retry from issue page`,
+            })
+          }
+        } catch (err) {
+          console.warn('[check-in] TTS360 send error:', err)
+          results.push({
+            label: 'TTS360 repair quote',
+            success: false,
+            detail: 'Network error — retry from issue page',
+          })
+        }
       }
     }
 
@@ -1087,6 +1144,13 @@ export function CheckInPage() {
             bookOutPhotos={form.bookOutPhotos}
             bookOutPhotoLabels={form.bookOutPhotoLabels}
             currentPhotos={form.photos}
+            damageFlaggedAngles={
+              new Set(
+                form.damageItems
+                  .map(d => d.originAngle)
+                  .filter((a): a is string => !!a),
+              )
+            }
             onCapture={handlePhotoCapture}
             onRemove={handlePhotoRemove}
             onFlagDamage={handleFlagDamage}
@@ -1106,6 +1170,8 @@ export function CheckInPage() {
             signatureRef={signatureRef}
             driverPresent={form.driverPresent}
             onDriverPresentChange={(v) => updateForm('driverPresent', v)}
+            sendToTts360={form.sendToTts360}
+            onSendToTts360Change={(v) => updateForm('sendToTts360', v)}
           />
         )}
       </div>
@@ -1744,11 +1810,15 @@ function StepConfirm({
   signatureRef,
   driverPresent,
   onDriverPresentChange,
+  sendToTts360,
+  onSendToTts360Change,
 }: {
   form: CheckInFormState
   signatureRef: React.RefObject<SignatureCaptureHandle>
   driverPresent: boolean
   onDriverPresentChange: (value: boolean) => void
+  sendToTts360: boolean
+  onSendToTts360Change: (value: boolean) => void
 }) {
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null)
   const currentMileage = parseInt(form.mileage, 10)
@@ -1789,6 +1859,29 @@ function StepConfirm({
               onClick={() => setLightbox({ src: p.blobUrl, alt: p.label })}
             />
           ))}
+        </div>
+      )}
+
+      {/* Send damage photos to TTS360 for repair quote — only shown
+          when damage has been flagged. Defaults on; staff opt-out here. */}
+      {form.damageItems.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-3">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              checked={sendToTts360}
+              onChange={e => onSendToTts360Change(e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 rounded border-amber-300 text-amber-600 focus:ring-amber-400"
+            />
+            <span className="flex-1">
+              <span className="block text-sm font-medium text-amber-900">
+                Also send damage photos to TTS360 for repair quote
+              </span>
+              <span className="mt-0.5 block text-xs text-amber-800/80">
+                Emails engineering@tts360.co.uk (cc Will) with the {form.damageItems.length === 1 ? 'damage photo and description' : `${form.damageItems.length} damage records`}. You can also send (or re-send) later from the issue page.
+              </span>
+            </span>
+          </label>
         </div>
       )}
 
