@@ -774,6 +774,8 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
             // Informational notification — respect global / per-job mute.
             const { suppress } = await shouldSuppressInformational(crew.person_id, quoteId);
             if (suppress) continue;
+            const portalBase = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
+            const portalUrl = `${portalBase}/job/${quoteId}`;
             try {
               await emailService.send('job_change_notification', {
                 to: crew.email,
@@ -783,6 +785,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
                   jobDate: formattedDate,
                   venueName: updatedQuote.venue_name || 'TBC',
                   changeDescription: keyFieldsChanged.join('. '),
+                  portalUrl,
                 },
               });
             } catch (emailErr) {
@@ -891,10 +894,12 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
             const rateDisplay = a.agreed_rate
               ? `£${Number(a.agreed_rate).toFixed(2)}${a.rate_type === 'hourly' ? '/hr' : a.rate_type === 'dayrate' ? ' per day' : ''}`
               : 'To be confirmed';
+            const portalBase = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
+            const portalUrl = `${portalBase}/job/${req.params.id}`;
             try {
               await emailService.send('freelancer_assignment', {
                 to: a.email,
-                variables: { freelancerName, jobName, jobDate, role: a.role || 'Crew', rate: rateDisplay },
+                variables: { freelancerName, jobName, jobDate, role: a.role || 'Crew', rate: rateDisplay, portalUrl },
               });
               // Record that we've notified so we don't re-send on re-confirm
               await query(
@@ -1085,6 +1090,8 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
             ? `£${Number(agreedRate).toFixed(2)}${rateType === 'hourly' ? '/hr' : rateType === 'dayrate' ? ' per day' : ''}`
             : 'To be confirmed';
 
+          const portalBase = (process.env.FRONTEND_PORTAL_URL || 'https://freelancer.oooshtours.co.uk').replace(/\/$/, '');
+          const portalUrl = `${portalBase}/job/${req.params.id}`;
           await emailService.send('freelancer_assignment', {
             to: row.email,
             variables: {
@@ -1093,6 +1100,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
               jobDate,
               role: role || 'Crew',
               rate: rateDisplay,
+              portalUrl,
             },
           });
         } catch (emailErr) {
