@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
+import { TimeInput, normalizeTimeInput } from './TimeInput';
 import type { QuoteJobType, QuoteCalcMode, QuoteWhatIsIt, QuoteExpenseItem } from '@shared/index';
 
 // =============================================================================
@@ -135,24 +136,6 @@ function formatDurationHM(minutes: number): string {
   if (h === 0) return `${m}m`;
   if (m === 0) return `${h}h`;
   return `${h}h ${m}m`;
-}
-
-function normalizeTimeInput(value: string): string {
-  if (!value) return '';
-  const cleaned = value.replace(/[^\d:]/g, '');
-  if (/^\d{2}:\d{2}$/.test(cleaned)) return cleaned;
-  if (/^\d{1,2}$/.test(cleaned)) {
-    const hour = parseInt(cleaned);
-    if (hour >= 0 && hour <= 23) return hour.toString().padStart(2, '0') + ':00';
-  }
-  if (/^\d{3,4}$/.test(cleaned)) {
-    const hour = cleaned.length === 3 ? parseInt(cleaned[0]) : parseInt(cleaned.slice(0, 2));
-    const mins = cleaned.length === 3 ? cleaned.slice(1) : cleaned.slice(2);
-    if (hour >= 0 && hour <= 23 && parseInt(mins) >= 0 && parseInt(mins) <= 59) {
-      return hour.toString().padStart(2, '0') + ':' + mins.padStart(2, '0');
-    }
-  }
-  return '';
 }
 
 /** Extract YYYY-MM-DD from ISO date string or date string */
@@ -1397,25 +1380,6 @@ export default function TransportCalculator({
 // =============================================================================
 // SUB-COMPONENTS
 // =============================================================================
-
-function TimeInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const [localValue, setLocalValue] = useState(value);
-  useEffect(() => { setLocalValue(value); }, [value]);
-  const handleBlur = () => {
-    const normalized = normalizeTimeInput(localValue);
-    if (normalized !== localValue) { setLocalValue(normalized); onChange(normalized); }
-  };
-  return (
-    <input
-      type="text"
-      value={localValue}
-      onChange={(e) => { setLocalValue(e.target.value); if (/^\d{2}:\d{2}$/.test(e.target.value)) onChange(e.target.value); }}
-      onBlur={handleBlur}
-      placeholder="HH:MM (e.g. 11 or 11:30)"
-      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-    />
-  );
-}
 
 function ExpenseRow({ expense, fuelCost, numberOfDays, onChange, onRemove }: {
   expense: QuoteExpenseItem; fuelCost?: number; numberOfDays: number;

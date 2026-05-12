@@ -10,6 +10,7 @@ import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { withRetry } from '../lib/retry'
 import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoCapture } from '../components/book-out/PhotoCapture'
+import { TimeInput } from '../../../components/TimeInput'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
 import type { SignatureCaptureHandle } from '../components/book-out/SignatureCapture'
 import type { Vehicle } from '../types/vehicle'
@@ -2010,10 +2011,9 @@ function StepDriverHire({
                       Now
                     </button>
                   </div>
-                  <input
-                    type="time"
+                  <TimeInput
                     value={form.hireStartTime || '09:00'}
-                    onChange={e => onUpdate('hireStartTime', e.target.value || null)}
+                    onChange={v => onUpdate('hireStartTime', v || null)}
                     className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
                   />
                 </div>
@@ -2035,10 +2035,9 @@ function StepDriverHire({
                       Now
                     </button>
                   </div>
-                  <input
-                    type="time"
+                  <TimeInput
                     value={form.hireEndTime || '09:00'}
-                    onChange={e => onUpdate('hireEndTime', e.target.value || null)}
+                    onChange={v => onUpdate('hireEndTime', v || null)}
                     className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
                   />
                 </div>
