@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import DatePicker from '../components/DatePicker';
+import { TimeInput } from '../components/TimeInput';
 import { VenuePicker } from '../components/VenuePicker';
 import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
 import { MobileListCard } from '../components/mobile/MobileListCard';
@@ -3057,10 +3058,9 @@ function EditQuoteModal({
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Arrival Time</label>
-              <input
-                type="time"
+              <TimeInput
                 value={form.arrival_time}
-                onChange={(e) => setForm((p) => ({ ...p, arrival_time: e.target.value }))}
+                onChange={(v) => setForm((p) => ({ ...p, arrival_time: v }))}
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
               />
             </div>

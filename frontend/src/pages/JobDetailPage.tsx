@@ -16,6 +16,7 @@ import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsS
 import { useAuthStore } from '../hooks/useAuthStore';
 import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
+import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
 import { VenuePicker } from '../components/VenuePicker';
 import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
@@ -3131,11 +3132,9 @@ export default function JobDetailPage() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">Out Time</label>
-                    <input
-                      type="time"
+                    <TimeInput
                       value={editOutTime}
-                      onChange={(e) => {
-                        const v = e.target.value;
+                      onChange={(v) => {
                         setEditOutTime(v);
                         if (outTimeLinked) setEditStartTime(v);
                       }}
@@ -3144,11 +3143,10 @@ export default function JobDetailPage() {
                   </div>
                   <div className="relative">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Start Time</label>
-                    <input
-                      type="time"
+                    <TimeInput
                       value={editStartTime}
                       disabled={outTimeLinked}
-                      onChange={(e) => setEditStartTime(e.target.value)}
+                      onChange={(v) => setEditStartTime(v)}
                       className={`w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500 ${outTimeLinked ? 'bg-gray-50 text-gray-400' : ''}`}
                     />
                     <button
@@ -3175,11 +3173,9 @@ export default function JobDetailPage() {
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-500 mb-1">End Time</label>
-                    <input
-                      type="time"
+                    <TimeInput
                       value={editEndTime}
-                      onChange={(e) => {
-                        const v = e.target.value;
+                      onChange={(v) => {
                         setEditEndTime(v);
                         if (endTimeLinked) setEditReturnTime(v);
                       }}
@@ -3188,11 +3184,10 @@ export default function JobDetailPage() {
                   </div>
                   <div className="relative">
                     <label className="block text-xs font-medium text-gray-500 mb-1">Return Time</label>
-                    <input
-                      type="time"
+                    <TimeInput
                       value={editReturnTime}
                       disabled={endTimeLinked}
-                      onChange={(e) => setEditReturnTime(e.target.value)}
+                      onChange={(v) => setEditReturnTime(v)}
                       className={`w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-ooosh-500 focus:border-ooosh-500 ${endTimeLinked ? 'bg-gray-50 text-gray-400' : ''}`}
                     />
                     <button
@@ -4668,10 +4663,9 @@ export default function JobDetailPage() {
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Arrival Time</label>
-                      <input
-                        type="time"
+                      <TimeInput
                         value={String(editForm.arrival_time || '')}
-                        onChange={(e) => setEditForm((p) => ({ ...p, arrival_time: e.target.value }))}
+                        onChange={(v) => setEditForm((p) => ({ ...p, arrival_time: v }))}
                         className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                       />
                     </div>
