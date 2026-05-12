@@ -4239,6 +4239,426 @@ router.get('/fleet-costs', async (req: AuthRequest, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// 7b. FLEET TURNAROUND SCHEDULE — /api/vehicles/turnaround-schedule
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/vehicles/turnaround-schedule
+ *
+ * Van-centric forward-facing view. For each active vehicle, surface its
+ * current commitment (if on hire), its next upcoming hire (if any), and the
+ * prep window between the two — colour-coded by how comfortable that window
+ * is. Compliance flags (MOT/Tax/Insurance/TFL) falling inside the visible
+ * range are surfaced alongside.
+ *
+ * Read-only. Does NOT mutate state. Pairs with AllocationsPage rather than
+ * replacing it: allocation lives there (job-centric), prep planning lives
+ * here (van-centric). Same underlying data.
+ *
+ * Query params (all optional):
+ *   days        — window length, 7 / 14 / 28 (default 14)
+ *   state       — all | on_hire | prep_needed | available (default all)
+ *   compliance  — all | flagged (default all — has any MOT/Tax/Insurance/TFL in window)
+ *   has_next    — all | yes | no (default all — has a future assignment)
+ *   sort        — urgency | returning_soonest | going_out_soonest | reg (default urgency)
+ *   q           — partial reg search (case-insensitive)
+ *
+ * "Forward commitment" statuses on an assignment (per assignment-overlap.ts):
+ *   soft, confirmed, booked_out, active
+ *
+ * Prep window measured against the LINKED job's `return_date` (which already
+ * includes Ooosh's +1 day turnaround buffer) — falling back to the
+ * assignment's own `hire_end` if no linked job. This matches the realistic
+ * warehouse window staff live with, not the theoretical end of charge.
+ */
+router.get('/turnaround-schedule', async (req: AuthRequest, res: Response) => {
+  try {
+    const daysParam = Math.max(1, Math.min(60, parseInt(String(req.query.days || '14'), 10) || 14));
+    const stateFilter = String(req.query.state || 'all');
+    const complianceFilter = String(req.query.compliance || 'all');
+    const hasNextFilter = String(req.query.has_next || 'all');
+    const sortMode = String(req.query.sort || 'urgency');
+    const searchQuery = String(req.query.q || '').trim().toLowerCase();
+
+    // Fetch threshold settings (with fallback defaults if not seeded yet).
+    const thresholdResult = await query(
+      `SELECT key, value FROM vehicle_compliance_settings
+       WHERE key IN (
+         'prep_window_amber_threshold_days',
+         'prep_window_orange_threshold_days',
+         'prep_window_red_threshold_days',
+         'mot_warning_days',
+         'tax_warning_days',
+         'insurance_warning_days'
+       )`,
+    );
+    const settings: Record<string, number> = {
+      prep_window_amber_threshold_days: 2,
+      prep_window_orange_threshold_days: 1,
+      prep_window_red_threshold_days: 0,
+      mot_warning_days: 30,
+      tax_warning_days: 30,
+      insurance_warning_days: 30,
+    };
+    for (const row of thresholdResult.rows) {
+      try {
+        const parsed = JSON.parse(row.value as string);
+        if (typeof parsed === 'number') settings[row.key as string] = parsed;
+      } catch {
+        // ignore — fallback already set
+      }
+    }
+
+    // Pull active vehicles + forward-looking assignments in a single query.
+    // The LEFT JOIN to jobs uses the dual match pattern (job_id OR hh_job_number)
+    // so V&D staff-allocation rows (which carry only hirehop_job_id) surface
+    // alongside hire-form rows.
+    const vehiclesResult = await query(`
+      SELECT
+        fv.id,
+        fv.reg,
+        fv.simple_type,
+        fv.hire_status,
+        fv.mot_due,
+        fv.tax_due,
+        fv.insurance_due,
+        fv.tfl_due,
+        fv.current_mileage,
+        fv.next_service_due
+      FROM fleet_vehicles fv
+      WHERE fv.is_active = true
+        AND COALESCE(fv.fleet_group, 'active') = 'active'
+      ORDER BY fv.reg
+    `);
+
+    type VehicleRow = {
+      id: string;
+      reg: string;
+      simple_type: string | null;
+      hire_status: string | null;
+      mot_due: string | null;
+      tax_due: string | null;
+      insurance_due: string | null;
+      tfl_due: string | null;
+      current_mileage: number | null;
+      next_service_due: number | null;
+    };
+    const vehicles = vehiclesResult.rows as VehicleRow[];
+    if (vehicles.length === 0) {
+      res.json({ data: [], thresholds: settings, total: 0 });
+      return;
+    }
+
+    const vehicleIds = vehicles.map(v => v.id);
+
+    // Forward-looking assignments per van. Include anything whose effective
+    // end is today or later — this captures both "currently out" (booked_out
+    // / active) and "upcoming" (soft / confirmed) rows.
+    const assignmentsResult = await query(`
+      SELECT
+        vha.id            AS assignment_id,
+        vha.vehicle_id    AS vehicle_id,
+        vha.status        AS status,
+        vha.hire_start    AS asg_hire_start,
+        vha.hire_end      AS asg_hire_end,
+        vha.booked_out_at AS booked_out_at,
+        vha.checked_in_at AS checked_in_at,
+        vha.status_changed_at AS status_changed_at,
+        vha.job_id        AS job_id,
+        vha.hirehop_job_id AS hirehop_job_id,
+        j.id              AS job_uuid,
+        j.hh_job_number   AS job_number,
+        j.job_name        AS job_name,
+        j.client_name     AS client_name,
+        j.job_date        AS job_date,
+        j.job_end         AS job_end_date,
+        j.return_date     AS job_return_date,
+        j.pipeline_status AS pipeline_status
+      FROM vehicle_hire_assignments vha
+      LEFT JOIN jobs j ON (
+        (vha.job_id IS NOT NULL AND j.id = vha.job_id)
+        OR (vha.job_id IS NULL AND j.hh_job_number = vha.hirehop_job_id)
+      )
+      WHERE vha.vehicle_id = ANY($1::uuid[])
+        AND vha.status IN ('soft', 'confirmed', 'booked_out', 'active')
+        AND COALESCE(j.return_date, j.job_end, vha.hire_end) >= CURRENT_DATE
+      ORDER BY vha.vehicle_id, COALESCE(vha.hire_start, j.job_date) ASC NULLS LAST
+    `, [vehicleIds]);
+
+    type AssignmentRow = {
+      assignment_id: string;
+      vehicle_id: string;
+      status: 'soft' | 'confirmed' | 'booked_out' | 'active';
+      asg_hire_start: string | null;
+      asg_hire_end: string | null;
+      booked_out_at: string | null;
+      checked_in_at: string | null;
+      status_changed_at: string | null;
+      job_id: string | null;
+      hirehop_job_id: number | null;
+      job_uuid: string | null;
+      job_number: number | null;
+      job_name: string | null;
+      client_name: string | null;
+      job_date: string | null;
+      job_end_date: string | null;
+      job_return_date: string | null;
+      pipeline_status: string | null;
+    };
+
+    // Group assignments by vehicle.
+    const byVehicle = new Map<string, AssignmentRow[]>();
+    for (const row of assignmentsResult.rows as AssignmentRow[]) {
+      const list = byVehicle.get(row.vehicle_id) || [];
+      list.push(row);
+      byVehicle.set(row.vehicle_id, list);
+    }
+
+    // Helpers for date math.
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const windowEnd = new Date(today);
+    windowEnd.setDate(windowEnd.getDate() + daysParam);
+
+    function parseDate(s: string | null): Date | null {
+      if (!s) return null;
+      const d = new Date(s);
+      return isNaN(d.getTime()) ? null : d;
+    }
+    function diffDays(later: Date, earlier: Date): number {
+      const ms = later.getTime() - earlier.getTime();
+      return Math.round(ms / (1000 * 60 * 60 * 24));
+    }
+    function fmtDate(d: Date): string {
+      return d.toISOString().slice(0, 10);
+    }
+
+    // Resolve per-assignment effective dates (assignment override > job).
+    function resolveAssignmentDates(a: AssignmentRow): { start: Date | null; end: Date | null } {
+      const start = parseDate(a.asg_hire_start) || parseDate(a.job_date);
+      // For end: prefer job.return_date (includes +1 buffer) → job_end → asg.hire_end
+      const end = parseDate(a.job_return_date) || parseDate(a.job_end_date) || parseDate(a.asg_hire_end);
+      return { start, end };
+    }
+
+    // Compute prep window urgency.
+    function urgencyForWindow(days: number | null): 'green' | 'amber' | 'orange' | 'red' | 'none' {
+      if (days === null) return 'none';
+      if (days <= settings.prep_window_red_threshold_days) return 'red';
+      if (days <= settings.prep_window_orange_threshold_days) return 'orange';
+      if (days <= settings.prep_window_amber_threshold_days) return 'amber';
+      return 'green';
+    }
+
+    type Assignment = {
+      id: string;
+      status: AssignmentRow['status'];
+      jobId: string | null;
+      hhJobNumber: number | null;
+      jobName: string | null;
+      clientName: string | null;
+      pipelineStatus: string | null;
+      hireStart: string | null;
+      hireEnd: string | null;
+    };
+
+    type ComplianceFlag = {
+      kind: 'MOT' | 'Tax' | 'Insurance' | 'TFL';
+      date: string;
+      daysUntil: number;
+      urgency: 'soon' | 'overdue';
+    };
+
+    type Row = {
+      vehicleId: string;
+      reg: string;
+      simpleType: string | null;
+      hireStatus: string | null;
+      currentHire: Assignment | null;
+      nextHire: Assignment | null;
+      comingBack: string | null; // ISO date
+      goingOutNext: string | null; // ISO date
+      prepWindowDays: number | null;
+      prepUrgency: 'green' | 'amber' | 'orange' | 'red' | 'none';
+      complianceFlags: ComplianceFlag[];
+    };
+
+    const rows: Row[] = vehicles.map((v) => {
+      const assignments = byVehicle.get(v.id) || [];
+
+      // Categorise into current (booked_out / active) and upcoming (everything else).
+      // There should be at most one current per van.
+      let currentRow: AssignmentRow | null = null;
+      const upcomingRows: AssignmentRow[] = [];
+      for (const a of assignments) {
+        if (a.status === 'booked_out' || a.status === 'active') {
+          // If multiple current somehow, pick the one with the latest status_changed_at.
+          if (!currentRow) currentRow = a;
+          else if (a.status_changed_at && currentRow.status_changed_at
+            && new Date(a.status_changed_at) > new Date(currentRow.status_changed_at)) {
+            currentRow = a;
+          }
+        } else {
+          upcomingRows.push(a);
+        }
+      }
+
+      // Pick the earliest upcoming (already sorted by hire_start ASC).
+      const nextRow = upcomingRows[0] || null;
+
+      const current = currentRow ? (() => {
+        const { start, end } = resolveAssignmentDates(currentRow);
+        const a: Assignment = {
+          id: currentRow.assignment_id,
+          status: currentRow.status,
+          jobId: currentRow.job_uuid,
+          hhJobNumber: currentRow.job_number,
+          jobName: currentRow.job_name,
+          clientName: currentRow.client_name,
+          pipelineStatus: currentRow.pipeline_status,
+          hireStart: start ? fmtDate(start) : null,
+          hireEnd: end ? fmtDate(end) : null,
+        };
+        return a;
+      })() : null;
+
+      const next = nextRow ? (() => {
+        const { start, end } = resolveAssignmentDates(nextRow);
+        const a: Assignment = {
+          id: nextRow.assignment_id,
+          status: nextRow.status,
+          jobId: nextRow.job_uuid,
+          hhJobNumber: nextRow.job_number,
+          jobName: nextRow.job_name,
+          clientName: nextRow.client_name,
+          pipelineStatus: nextRow.pipeline_status,
+          hireStart: start ? fmtDate(start) : null,
+          hireEnd: end ? fmtDate(end) : null,
+        };
+        return a;
+      })() : null;
+
+      // Compute prep window. Only meaningful when we have both a current
+      // return date and a next hire start.
+      let prepWindowDays: number | null = null;
+      if (current?.hireEnd && next?.hireStart) {
+        const returnDate = parseDate(current.hireEnd)!;
+        const nextStart = parseDate(next.hireStart)!;
+        prepWindowDays = diffDays(nextStart, returnDate);
+      }
+      // If no current hire (van is here now) but has a next, the "prep
+      // window" is from today to next start — still useful operationally.
+      if (!current && next?.hireStart) {
+        const nextStart = parseDate(next.hireStart)!;
+        prepWindowDays = diffDays(nextStart, today);
+      }
+
+      // Compliance flags within the visible window.
+      const complianceChecks: { kind: ComplianceFlag['kind']; date: string | null }[] = [
+        { kind: 'MOT', date: v.mot_due },
+        { kind: 'Tax', date: v.tax_due },
+        { kind: 'Insurance', date: v.insurance_due },
+        { kind: 'TFL', date: v.tfl_due },
+      ];
+      const flags: ComplianceFlag[] = [];
+      for (const check of complianceChecks) {
+        const d = parseDate(check.date);
+        if (!d) continue;
+        const days = diffDays(d, today);
+        // Show if overdue OR falls within the visible window.
+        if (days < 0) {
+          flags.push({ kind: check.kind, date: check.date!, daysUntil: days, urgency: 'overdue' });
+        } else if (days <= daysParam) {
+          flags.push({ kind: check.kind, date: check.date!, daysUntil: days, urgency: 'soon' });
+        }
+      }
+
+      return {
+        vehicleId: v.id,
+        reg: v.reg,
+        simpleType: v.simple_type,
+        hireStatus: v.hire_status,
+        currentHire: current,
+        nextHire: next,
+        comingBack: current?.hireEnd || null,
+        goingOutNext: next?.hireStart || null,
+        prepWindowDays,
+        prepUrgency: urgencyForWindow(prepWindowDays),
+        complianceFlags: flags,
+      } as Row;
+    });
+
+    // Apply filters.
+    let filtered = rows;
+    if (stateFilter !== 'all') {
+      const stateMap: Record<string, string> = {
+        on_hire: 'On Hire',
+        prep_needed: 'Prep Needed',
+        available: 'Available',
+      };
+      const target = stateMap[stateFilter];
+      if (target) filtered = filtered.filter(r => r.hireStatus === target);
+    }
+    if (complianceFilter === 'flagged') {
+      filtered = filtered.filter(r => r.complianceFlags.length > 0);
+    }
+    if (hasNextFilter === 'yes') {
+      filtered = filtered.filter(r => r.nextHire !== null);
+    } else if (hasNextFilter === 'no') {
+      filtered = filtered.filter(r => r.nextHire === null);
+    }
+    if (searchQuery) {
+      filtered = filtered.filter(r => r.reg.toLowerCase().includes(searchQuery));
+    }
+
+    // Sort.
+    function dateAsc(a: string | null, b: string | null): number {
+      if (!a && !b) return 0;
+      if (!a) return 1;
+      if (!b) return -1;
+      return a.localeCompare(b);
+    }
+    if (sortMode === 'returning_soonest') {
+      filtered.sort((a, b) => dateAsc(a.comingBack, b.comingBack) || a.reg.localeCompare(b.reg));
+    } else if (sortMode === 'going_out_soonest') {
+      filtered.sort((a, b) => dateAsc(a.goingOutNext, b.goingOutNext) || a.reg.localeCompare(b.reg));
+    } else if (sortMode === 'reg') {
+      filtered.sort((a, b) => a.reg.localeCompare(b.reg));
+    } else {
+      // urgency (default): shortest prep window first, NULLs last. Ties → next hire start.
+      filtered.sort((a, b) => {
+        const aw = a.prepWindowDays;
+        const bw = b.prepWindowDays;
+        if (aw === null && bw === null) return dateAsc(a.goingOutNext, b.goingOutNext) || a.reg.localeCompare(b.reg);
+        if (aw === null) return 1;
+        if (bw === null) return -1;
+        if (aw !== bw) return aw - bw;
+        return dateAsc(a.goingOutNext, b.goingOutNext) || a.reg.localeCompare(b.reg);
+      });
+    }
+
+    res.json({
+      data: filtered,
+      thresholds: {
+        amber: settings.prep_window_amber_threshold_days,
+        orange: settings.prep_window_orange_threshold_days,
+        red: settings.prep_window_red_threshold_days,
+      },
+      window: {
+        days: daysParam,
+        startISO: fmtDate(today),
+        endISO: fmtDate(windowEnd),
+      },
+      total: rows.length,
+      filtered: filtered.length,
+    });
+  } catch (error) {
+    console.error('[vehicles/turnaround-schedule] Error:', error);
+    res.status(500).json({ error: 'Failed to load turnaround schedule' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // 8. COMPLIANCE SETTINGS — /api/vehicles/compliance/*
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -350,6 +350,94 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 - [x] Vehicle file uploads (V5 copy, insurance cert, wifi docs, finance docs, etc.) with labels + comments
 - [x] Migration 015: oil_type, coolant_type, tyre_size, rossetts fields, service_plan_status, files JSONB
 
+**Phase F — Fleet Turnaround Schedule** ← IN PROGRESS (May 2026)
+
+Van-centric forward-facing view answering "which vans need prep, and when do I need them ready?". Solves the long-standing manual workaround where staff typed regs into job names and eyeballed it. Complements (does NOT replace) AllocationsPage — same data, different lens. AllocationsPage stays the allocation workflow (job-centric); Turnaround is the prep planning surface (van-centric).
+
+**Where it lives:** New section on `/vehicles` (Vehicles homepage), below the existing compliance overview widget. Same pattern, same page — no new top-level nav, keeps in line with the "streamline rather than expand" principle.
+
+**Data:** Read-only from existing tables — no new schema needed.
+- `vehicle_hire_assignments` — forward-looking rows per van (`vehicle_id IS NOT NULL`, `status IN ('soft', 'confirmed', 'booked_out', 'active')`, future `hire_end`)
+- `fleet_vehicles` — compliance fields (MOT, tax, insurance, TFL, service due) + cached `hire_status`
+- Joins to `jobs` via the dual match pattern (vha.job_id OR vha.hirehop_job_id) so V&D staff-allocation rows surface alongside hire-form rows
+
+**Row shape per van** (read as table + mini horizontal strip):
+
+| Column | Source | Notes |
+|---|---|---|
+| Reg | `fleet_vehicles.reg` | Click → Vehicle Detail |
+| State now | `fleet_vehicles.hire_status` | Available / On Hire / Prep Needed / Not Ready / Sold |
+| Coming back | Active assignment's `hire_end` + linked job ref | If state = On Hire / Active |
+| Prep window (days) | `next_hire_start - return_date` | Colour-coded (see thresholds) |
+| Going out next | Next future assignment's `hire_start` + linked job ref | "No next allocation" with green pill if empty |
+| Flags | Compliance + breakdown markers | MOT/Tax/Insurance/TFL due within window, mid-tour swap, etc. |
+
+**Prep window colour thresholds** (configurable via `calculator_settings`):
+- `> 2 days` 🟢 green — Comfortable
+- `1–2 days` 🟡 amber — Standard turnaround, within Ooosh's +1 day buffer
+- `< 1 day` 🟠 orange — Eating into the buffer (physical-only window, ~90 min real prep)
+- `≤ 0 days` 🔴 red — Stored dates overlap, needs human review
+
+Prep window is computed against `jobs.return_date` (the inflated +1 day buffer), NOT `jobs.job_end`. Matches what staff actually live with.
+
+**Edge cases:**
+
+| Scenario | Display |
+|---|---|
+| No next allocation | "Available from [return date]" with green pill — positive signal, van could absorb an unallocated hire |
+| Deallocations (`status='cancelled'`) | Drop out entirely. Timeline shows current commitment state, not history. Audit lives on Vehicle Detail event history. |
+| Mid-tour swap (broken van) | Strip shortens to `swapped_at`, marked "↪ Swapped to RX22XYZ on …". Bubbles into a separate **"Needs assessment"** bucket pinned above prep priority — different team, different urgency (repair, not prep) |
+| Mid-tour swap (replacement van) | Strip starts mid-stream from `swapped_at`, marked "↩ Swap-in from RX17ABC". Counts toward replacement's prep window from there on |
+| `Sold` / `Not Ready` | Hidden by default, toggleable filter to surface |
+
+**Filter + sort** (per jon's amendment, May 2026):
+- **Search by reg** — narrow to one van or a partial match
+- **Filter pills:**
+  - State: All / On Hire / Prep Needed / Available
+  - Compliance: All / Has flag (any of MOT/Tax/Insurance/TFL/Service)
+  - Has next allocation: All / Yes / No (lets staff find vans free to take work)
+- **Sort modes** (dropdown):
+  - **Urgency** (default) — shortest prep window first, "Needs assessment" bucket pinned above
+  - **Returning soonest** — what's coming back today vs next week (useful when planning warehouse workload by day)
+  - **Going out soonest** — when's the next departure
+  - **Reg A–Z** — alphabetical fallback
+- **Range presets:** 7 / 14 / 28 days (default 14)
+
+**Non-blocking:** all warnings, no hard gates. Red prep windows don't prevent allocation or book-out. Consistent with the OP convention — dispatch is the only hard gate, and even that has manager override.
+
+**Deep-links** (when staff want to act on what they see):
+- Click reg → Vehicle Detail
+- Click hire block → Job Detail for that hire
+- **Click a gap on the strip** → AllocationsPage with date range filter pre-applied to that gap window. Lets staff discover "this van is free 17–21 May, what unallocated jobs could fit?" without rebuilding allocation logic in this surface.
+
+**Compliance pip overlay:** Above each strip's time axis, small chevrons mark MOT / Tax / Insurance / TFL / Service-by-miles thresholds falling in the visible window. Tooltip on hover shows the exact date or mileage. Reuses existing compliance threshold settings (warning/urgent days). This is the bonus the user flagged — same surface answers "should I prioritise prepping this one because the MOT clears tomorrow but it goes out Friday?".
+
+**Backend endpoint:**
+```
+GET /api/vehicles/turnaround-schedule?days=14&state=all&compliance=all&has_next=all&sort=urgency&q=
+```
+Returns one row per active vehicle. Cached briefly (5–10s) since the underlying data only changes on assignment writes. Auth: any staff role (STAFF_ROLES).
+
+**Settings (admin-editable):**
+- `prep_window_amber_threshold` (default 2 days)
+- `prep_window_red_threshold` (default 0 days — i.e. overlap = red)
+- `prep_window_orange_threshold` (default 1 day — eats buffer)
+
+Stored on `calculator_settings` for now (or move to `fleet_settings` if other fleet-specific knobs accumulate). Matches the "Allocation turnaround buffer" item flagged in Future Enhancements — both should eventually read from one source.
+
+**Build order:**
+1. Backend endpoint with filter/sort
+2. Frontend section on `/vehicles` (table + mini-strip)
+3. Settings page entries for thresholds
+4. Deep-link from gaps to AllocationsPage
+5. Compliance pip overlay
+6. *(Future)* Drag-to-allocate from the strip, bundled with the deferred van-centric AllocationsPage rebuild
+
+**Out of scope (deliberately):**
+- Drag-to-allocate from the Turnaround surface (deferred — would multiply allocation logic surface area)
+- Past-history view (not the question staff are asking; audit lives on Vehicle Detail)
+- True Gantt with overlapping hires per van (overlaps mean a data error — surfaced via red prep window, not a UI feature)
+
 **Phase B — AI Document Extraction** (deferred — nice-to-have, end of build)
 - [ ] POST /extract endpoint: upload invoice/service record → Claude extracts fields → returns JSON
 - [ ] "Upload & Extract" mode in service record form — preview extracted data, user confirms
