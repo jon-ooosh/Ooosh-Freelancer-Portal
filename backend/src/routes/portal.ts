@@ -1609,7 +1609,8 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // Always send staff alert when the driver has notes
       if (fullNotes.trim()) {
         try {
-          const jobUrl = ctx.job_id ? `/jobs/${ctx.job_id}` : '#';
+          const frontendUrl = (process.env.FRONTEND_URL || 'https://staff.oooshtours.co.uk').replace(/\/$/, '');
+          const jobUrl = `${frontendUrl}/operations/transport?quote=${quoteId}`;
           await emailService.send('completion_driver_notes', {
             to: 'info@oooshtours.co.uk',
             variables: {

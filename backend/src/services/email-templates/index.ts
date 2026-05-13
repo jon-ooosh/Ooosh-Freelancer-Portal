@@ -179,9 +179,17 @@ const templates: Record<string, EmailTemplate> = {
       <p style="margin:0 0 8px;font-size:14px;color:#334155;">
         <strong>Rate:</strong> {{rate}}
       </p>
-      <p style="margin:0;font-size:14px;color:#334155;">
-        Please confirm your availability as soon as possible.
+      <p style="margin:0 0 16px;font-size:14px;color:#334155;">
+        Please confirm your availability as soon as possible. Latest details
+        are always on the freelancer portal:
       </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="background-color:#7B5EA7;border-radius:6px;">
+            <a href="{{portalUrl}}" style="display:inline-block;padding:10px 20px;font-size:14px;color:#ffffff;text-decoration:none;font-weight:600;">Open in freelancer portal &rarr;</a>
+          </td>
+        </tr>
+      </table>
     `,
   },
   hire_form: {
@@ -254,7 +262,7 @@ const templates: Record<string, EmailTemplate> = {
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
         <tr>
           <td style="background-color:#7B5EA7;border-radius:6px;">
-            <a href="https://freelancer.oooshtours.co.uk/" style="display:inline-block;padding:10px 20px;font-size:14px;color:#ffffff;text-decoration:none;font-weight:600;">Open freelancer portal &rarr;</a>
+            <a href="{{portalUrl}}" style="display:inline-block;padding:10px 20px;font-size:14px;color:#ffffff;text-decoration:none;font-weight:600;">Open in freelancer portal &rarr;</a>
           </td>
         </tr>
       </table>
@@ -1281,6 +1289,21 @@ const templates: Record<string, EmailTemplate> = {
   // attachment (delivery note, hire agreement, condition report, jpg
   // photo, anything) to a chosen recipient. Body adapts to whether
   // staff supplied a custom message.
+
+  /**
+   * Damage repair quote request to TTS360 (or whichever engineering contact
+   * is configured in system_settings). Sent from the check-in flow when
+   * staff tick "Also send damage photos to TTS360 for repair quote", or
+   * later from the issue detail page when staff missed the tick.
+   *
+   * Sender renders the photo grid + damage descriptions via
+   * bodyHtmlOverride (variable substitution would HTML-escape the grid).
+   */
+  damage_repair_quote_request: {
+    variant: 'internal',
+    subject: 'Damage repair quote request — {{vanRegistration}} (job #{{hhJobNumber}})',
+    body: `<p>This template should be sent with bodyHtmlOverride. If you're seeing this, the caller forgot.</p>`,
+  },
 
   file_resend: {
     variant: 'client',

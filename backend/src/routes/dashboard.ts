@@ -420,7 +420,13 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
           )) as coming_back_count,
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND status IN (4, 5) AND return_date IS NOT NULL AND return_date::date < CURRENT_DATE) as overdue_count,
           (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status NOT IN ('confirmed', 'lost') AND next_chase_date IS NOT NULL AND next_chase_date <= CURRENT_DATE) as chases_due_count,
-          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IS NOT NULL AND pipeline_status NOT IN ('confirmed', 'lost')) as open_enquiries_count
+          -- Pre-confirmation statuses only. Whitelist matches the Pipeline page
+          -- columns (Enquiries / Chasing-derived / Provisional / Paused) and the
+          -- chase-model definition in CLAUDE.md. The previous blacklist swept in
+          -- every operational + historical job (prepping / prepped / dispatched /
+          -- returned / completed / cancelled) and reported ~1100+ on a fleet
+          -- with ~40 actual open enquiries.
+          (SELECT COUNT(*) FROM jobs WHERE is_deleted = false AND pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')) as open_enquiries_count
       `),
 
       // 16. Today's transport quotes (departures with crew/vehicle info)

@@ -63,11 +63,20 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
     let vehicles = { rows: [] as any[] };
     let excess = { rows: [] as any[] };
 
+    // Already-cancelled quotes / crew assignments are a SEPARATE concern —
+    // they were cancelled at some earlier point and have nothing to do with
+    // the cancellation being actioned now. Surfacing them here misleads
+    // staff into thinking they're live commitments and inflates the
+    // Transport & Crew Commitments panel. Filter at the SQL boundary in
+    // both places: the quote list itself, and the parent-quote subquery
+    // that drives crew. The processing path further down already short-
+    // circuits cancelled rows, so this is purely a display fix.
     try {
       quotes = await query(
         `SELECT q.id, q.job_type, q.venue_name, q.client_charge_total, q.ops_status,
                 q.job_date, q.collection_date
-         FROM quotes q WHERE q.job_id = $1 AND q.is_deleted = false`,
+         FROM quotes q WHERE q.job_id = $1 AND q.is_deleted = false
+           AND q.status != 'cancelled'`,
         [jobId]
       );
     } catch (e) { console.warn('[Cancellation] quotes query failed:', e); }
@@ -78,7 +87,10 @@ router.get('/:jobId/transport-crew', async (req: AuthRequest, res: Response) => 
                 p.first_name, p.last_name, p.email, p.phone
          FROM quote_assignments qa
          JOIN people p ON p.id = qa.person_id
-         WHERE qa.quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND is_deleted = false)
+         WHERE qa.quote_id IN (
+           SELECT id FROM quotes
+           WHERE job_id = $1 AND is_deleted = false AND status != 'cancelled'
+         )
            AND qa.status NOT IN ('cancelled', 'declined')`,
         [jobId]
       );
