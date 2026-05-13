@@ -302,8 +302,9 @@ function RowCard({
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-3 hover:shadow-sm transition-shadow">
-      {/* Top row: reg + type + state + prep window */}
-      <div className="flex flex-wrap items-center gap-2 mb-2">
+      {/* Top row: reg + type + state + prep window — all inline so mobile
+          doesn't waste a row on a separate PREP label/pill block. */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mb-2">
         <Link
           to={vmPath(`/vehicles/${row.vehicleId}`)}
           className="font-mono text-sm font-bold text-ooosh-navy hover:underline"
@@ -316,28 +317,26 @@ function RowCard({
           </span>
         )}
         <StatePill status={row.hireStatus} />
-        <div className="ml-auto flex items-center gap-2">
-          <span className="text-[10px] uppercase tracking-wide text-gray-400">Prep</span>
-          <PrepWindowBadge row={row} />
-        </div>
+        <PrepWindowBadge row={row} />
       </div>
 
-      {/* Detail row: coming back / going out next */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2 text-xs">
-        <div>
-          <span className="text-gray-400">Coming back: </span>
-          {row.currentHire ? (
+      {/* Detail rows: only render lines that carry actual info — staff already
+          see the state from the top pill, no need to repeat "Coming back: —"
+          when the van is here. Going-out line stays whenever there's a next
+          hire OR when we want to show the "No next allocation" green pill. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-2 gap-y-1 mb-2 text-xs">
+        {row.currentHire && (
+          <div>
+            <span className="text-gray-400">Coming back: </span>
             <JobHireSummary
               jobId={row.currentHire.jobId}
               hhJobNumber={row.currentHire.hhJobNumber}
               clientName={row.currentHire.clientName}
               dateLabel={relativeDayLabel(row.comingBack)}
             />
-          ) : (
-            <span className="text-gray-500">{isAvailable ? 'Already here' : '—'}</span>
-          )}
-        </div>
-        <div>
+          </div>
+        )}
+        <div className={row.currentHire ? '' : 'sm:col-span-2'}>
           <span className="text-gray-400">Going out next: </span>
           {row.nextHire ? (
             <JobHireSummary
@@ -348,7 +347,7 @@ function RowCard({
             />
           ) : (
             <span className="rounded-full bg-green-50 px-1.5 py-0.5 text-[10px] font-medium text-green-700">
-              No next allocation
+              {isAvailable ? 'Available — no next allocation' : 'No next allocation'}
             </span>
           )}
         </div>
@@ -446,6 +445,20 @@ export function TurnaroundSchedule({ onStartPrep }: { onStartPrep?: (reg: string
     r.prepUrgency === 'red' || r.prepUrgency === 'orange' || r.complianceFlags.some(f => f.urgency === 'overdue')
   ).length : 0
 
+  // Count how many secondary filters differ from defaults — drives the
+  // "(N active)" badge on the mobile filter toggle so users can see at a
+  // glance whether something's hidden behind it.
+  const activeFilterCount = [
+    days !== 14,
+    stateFilter !== 'all',
+    hasNextFilter !== 'all',
+    complianceFilter !== 'all',
+  ].filter(Boolean).length
+
+  // Mobile drawer for the heavy filter pills. Desktop ignores this and
+  // always renders them via `sm:block` override below.
+  const [filtersExpanded, setFiltersExpanded] = useState(false)
+
   return (
     <section className="rounded-lg border border-gray-200 bg-white">
       {/* Collapsible header — toggle + refresh as siblings (avoids invalid nested <button>) */}
@@ -483,11 +496,53 @@ export function TurnaroundSchedule({ onStartPrep }: { onStartPrep?: (reg: string
       {collapsed ? null : (
         <div className="px-3 pb-3">
 
-      {/* Filters + sort */}
+      {/* Filters + sort.
+          Mobile-first: always-visible top row carries search + sort + a
+          "Show filters" toggle. Secondary filters (range, state, has-next,
+          compliance) collapse behind the toggle on mobile to free up vertical
+          space, but stay always-visible on desktop via `sm:block`. */}
       <div className="mb-3 space-y-2">
-        {/* Range + sort row */}
+        {/* Always-visible top row: search + sort + mobile filter toggle */}
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex gap-1">
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="Filter by reg…"
+            className="w-full sm:w-60 rounded-md border border-gray-300 px-3 py-1.5 text-sm placeholder:text-gray-400 focus:border-ooosh-blue focus:outline-none focus:ring-1 focus:ring-ooosh-blue"
+          />
+          <select
+            value={sortMode}
+            onChange={e => setSortMode(e.target.value as SortMode)}
+            className="flex-1 sm:flex-none rounded-md border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-700"
+          >
+            <option value="urgency">Sort: Urgency (default)</option>
+            <option value="returning_soonest">Sort: Returning soonest</option>
+            <option value="going_out_soonest">Sort: Going out soonest</option>
+            <option value="reg">Sort: Reg A–Z</option>
+          </select>
+          {/* Mobile-only toggle for the secondary filter pills */}
+          <button
+            type="button"
+            onClick={() => setFiltersExpanded(v => !v)}
+            className="sm:hidden inline-flex items-center gap-1 rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            aria-expanded={filtersExpanded}
+          >
+            <span className={`inline-block transition-transform ${filtersExpanded ? 'rotate-90' : ''}`}>▶</span>
+            Filters
+            {activeFilterCount > 0 && (
+              <span className="rounded-full bg-ooosh-navy px-1.5 py-0.5 text-[10px] font-bold text-white">
+                {activeFilterCount}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Secondary filters — collapsible on mobile, always shown on desktop */}
+        <div className={`${filtersExpanded ? 'block' : 'hidden'} sm:block space-y-2`}>
+          {/* Range presets */}
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-gray-400 mr-1">Range</span>
             {([7, 14, 28] as RangeDays[]).map(n => (
               <button
                 key={n}
@@ -500,82 +555,64 @@ export function TurnaroundSchedule({ onStartPrep }: { onStartPrep?: (reg: string
               </button>
             ))}
           </div>
-          <span className="text-gray-300">·</span>
-          <select
-            value={sortMode}
-            onChange={e => setSortMode(e.target.value as SortMode)}
-            className="rounded border border-gray-200 bg-white px-2 py-0.5 text-xs text-gray-600"
-          >
-            <option value="urgency">Sort: Urgency (default)</option>
-            <option value="returning_soonest">Sort: Returning soonest</option>
-            <option value="going_out_soonest">Sort: Going out soonest</option>
-            <option value="reg">Sort: Reg A–Z</option>
-          </select>
-          <input
-            type="search"
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Filter by reg…"
-            className="ml-auto w-44 sm:w-60 rounded-md border border-gray-300 px-3 py-1.5 text-sm placeholder:text-gray-400 focus:border-ooosh-blue focus:outline-none focus:ring-1 focus:ring-ooosh-blue"
-          />
-        </div>
 
-        {/* Filter pills */}
-        <div className="flex flex-wrap gap-1.5">
-          {/* State filter */}
-          {([
-            { value: 'all', label: 'All states' },
-            { value: 'on_hire', label: 'On Hire' },
-            { value: 'prep_needed', label: 'Prep Needed' },
-            { value: 'available', label: 'Available' },
-          ] as { value: StateFilter; label: string }[]).map(opt => (
+          {/* Filter pills */}
+          <div className="flex flex-wrap gap-1.5">
+            {/* State filter */}
+            {([
+              { value: 'all', label: 'All states' },
+              { value: 'on_hire', label: 'On Hire' },
+              { value: 'prep_needed', label: 'Prep Needed' },
+              { value: 'available', label: 'Available' },
+            ] as { value: StateFilter; label: string }[]).map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => setStateFilter(opt.value)}
+                className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  stateFilter === opt.value
+                    ? 'bg-ooosh-navy text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+
+            <span className="self-center text-gray-300">|</span>
+
+            {/* Has next */}
+            {([
+              { value: 'all', label: 'Any' },
+              { value: 'yes', label: 'Has next hire' },
+              { value: 'no', label: 'No next allocation' },
+            ] as { value: HasNextFilter; label: string }[]).map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => setHasNextFilter(opt.value)}
+                className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  hasNextFilter === opt.value
+                    ? 'bg-ooosh-navy text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+
+            <span className="self-center text-gray-300">|</span>
+
+            {/* Compliance filter */}
             <button
-              key={opt.value}
-              onClick={() => setStateFilter(opt.value)}
+              onClick={() => setComplianceFilter(complianceFilter === 'flagged' ? 'all' : 'flagged')}
               className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                stateFilter === opt.value
-                  ? 'bg-ooosh-navy text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                complianceFilter === 'flagged'
+                  ? 'bg-red-600 text-white'
+                  : 'bg-red-100 text-red-700 hover:opacity-80'
               }`}
             >
-              {opt.label}
+              ⚠ Compliance flagged
             </button>
-          ))}
-
-          <span className="self-center text-gray-300">|</span>
-
-          {/* Has next */}
-          {([
-            { value: 'all', label: 'Any' },
-            { value: 'yes', label: 'Has next hire' },
-            { value: 'no', label: 'No next allocation' },
-          ] as { value: HasNextFilter; label: string }[]).map(opt => (
-            <button
-              key={opt.value}
-              onClick={() => setHasNextFilter(opt.value)}
-              className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                hasNextFilter === opt.value
-                  ? 'bg-ooosh-navy text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-
-          <span className="self-center text-gray-300">|</span>
-
-          {/* Compliance filter */}
-          <button
-            onClick={() => setComplianceFilter(complianceFilter === 'flagged' ? 'all' : 'flagged')}
-            className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-              complianceFilter === 'flagged'
-                ? 'bg-red-600 text-white'
-                : 'bg-red-100 text-red-700 hover:opacity-80'
-            }`}
-          >
-            ⚠ Compliance flagged
-          </button>
+          </div>
         </div>
       </div>
 
