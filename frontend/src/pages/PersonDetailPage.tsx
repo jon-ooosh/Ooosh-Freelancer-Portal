@@ -8,6 +8,7 @@ import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import HireHistoryTab from '../components/HireHistoryTab';
+import { PERSON_ORG_ROLES } from '@shared/index';
 
 interface FileAttachment {
   name: string;
@@ -643,20 +644,9 @@ export default function PersonDetailPage() {
                       className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                     >
                       <option value="">Select a role...</option>
-                      <option value="Tour Manager">Tour Manager</option>
-                      <option value="Manager">Manager</option>
-                      <option value="Production Manager">Production Manager</option>
-                      <option value="Engineer">Engineer</option>
-                      <option value="Accountant">Accountant</option>
-                      <option value="Promoter">Promoter</option>
-                      <option value="Crew">Crew</option>
-                      <option value="Band Member">Band Member</option>
-                      <option value="Driver">Driver</option>
-                      <option value="Agent">Agent</option>
-                      <option value="Site Contact">Site Contact</option>
-                      <option value="Owner">Owner</option>
-                      <option value="General Contact">General Contact</option>
-                      <option value="Other">Other</option>
+                      {PERSON_ORG_ROLES.map(r => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
                     </select>
                   </div>
                   <label className="flex items-center gap-2 mt-3 cursor-pointer">
@@ -824,20 +814,9 @@ export default function PersonDetailPage() {
                       className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
                     >
                       <option value="">Select role at new org...</option>
-                      <option value="Tour Manager">Tour Manager</option>
-                      <option value="Manager">Manager</option>
-                      <option value="Production Manager">Production Manager</option>
-                      <option value="Engineer">Engineer</option>
-                      <option value="Accountant">Accountant</option>
-                      <option value="Promoter">Promoter</option>
-                      <option value="Crew">Crew</option>
-                      <option value="Band Member">Band Member</option>
-                      <option value="Driver">Driver</option>
-                      <option value="Agent">Agent</option>
-                      <option value="Site Contact">Site Contact</option>
-                      <option value="Owner">Owner</option>
-                      <option value="General Contact">General Contact</option>
-                      <option value="Other">Other</option>
+                      {PERSON_ORG_ROLES.map(r => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
                     </select>
                   )}
                 </div>

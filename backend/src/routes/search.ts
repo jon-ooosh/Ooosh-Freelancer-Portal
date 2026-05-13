@@ -15,8 +15,11 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     }
 
     const searchTerm = `%${(q as string).trim()}%`;
-    const resultLimit = Math.min(parseInt(limit as string), 50);
-    const perType = Math.ceil(resultLimit / 4);
+    // `limit` is interpreted per-entity-type (people / orgs / venues / jobs).
+    // Previously we divided by 4, which capped each type to ~3 rows when callers
+    // sent limit=10 — e.g. the New Enquiry client picker truncated partial-match
+    // orgs out of view ("Urne" lost to alphabetically-earlier "Urn*" matches).
+    const perType = Math.min(parseInt(limit as string), 50);
 
     // Search people
     const peopleResults = await query(
@@ -32,6 +35,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     );
 
     // Search organisations
+    // (no change to limit logic — perType applies per-entity-type)
     const orgResults = await query(
       `SELECT id, name, type as subtitle, 'organisation' as type
        FROM organisations

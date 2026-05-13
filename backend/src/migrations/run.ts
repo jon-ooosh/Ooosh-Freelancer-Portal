@@ -119,6 +119,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '082_vehicle_issue_default_watchers.sql',
         '083_tts360_repair_quote_settings.sql',
         '084_fleet_turnaround_settings.sql',
+        '085_person_org_role_picklist.sql',
       ];
 
       for (const migration of migrations) {

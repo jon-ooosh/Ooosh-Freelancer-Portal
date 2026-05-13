@@ -9,7 +9,7 @@ import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import { IssuesListSection } from '../components/IssuesListSection';
 import HireHistoryTab from '../components/HireHistoryTab';
-import { ORG_RELATIONSHIP_LABELS, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
+import { ORG_RELATIONSHIP_LABELS, PERSON_ORG_ROLES_WITH_MAIN_CONTACT, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
 
 interface OrgDetail {
@@ -706,21 +706,9 @@ export default function OrganisationDetailPage() {
                   className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
                 >
                   <option value="">Select a role...</option>
-                  <option value="Main Contact">Main Contact</option>
-                  <option value="Tour Manager">Tour Manager</option>
-                  <option value="Manager">Manager</option>
-                  <option value="Production Manager">Production Manager</option>
-                  <option value="Engineer">Engineer</option>
-                  <option value="Accountant">Accountant</option>
-                  <option value="Promoter">Promoter</option>
-                  <option value="Crew">Crew</option>
-                  <option value="Band Member">Band Member</option>
-                  <option value="Driver">Driver</option>
-                  <option value="Agent">Agent</option>
-                  <option value="Site Contact">Site Contact</option>
-                  <option value="Owner">Owner</option>
-                  <option value="General Contact">General Contact</option>
-                  <option value="Other">Other</option>
+                  {PERSON_ORG_ROLES_WITH_MAIN_CONTACT.map(r => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
                 </select>
               </div>
 
