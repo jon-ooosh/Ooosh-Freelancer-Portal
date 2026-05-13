@@ -270,10 +270,11 @@ function ComplianceFlagBadge({ flag }: { flag: ComplianceFlagDto }) {
 
 /**
  * The section lives on /vehicles/prep, so the per-row primary CTA is "Prep
- * this van" — a hash anchor that scrolls down to the matching card in the
- * page's Prep Queue (each VehiclePrepCard renders inside a wrapper with
- * id=`prep-card-${reg}`). No URL routing, no auto-actions, no surprises.
- * The user clicks Start Prep on the queue card explicitly.
+ * this van". When the parent (PrepPage) passes an `onStartPrep` callback,
+ * the click triggers the real prep flow exactly like the Start Prep button
+ * on a queue card. As a fallback (e.g. if this component is reused
+ * elsewhere with no callback), it falls back to a hash anchor that scrolls
+ * to the matching queue card — staff then click Start Prep manually.
  */
 function prepAnchor(reg: string): string {
   return `#prep-card-${reg}`
@@ -287,7 +288,15 @@ function shouldShowPrepCta(row: Row): boolean {
   return row.hireStatus === 'Prep Needed'
 }
 
-function RowCard({ row, windowDays }: { row: Row; windowDays: number }) {
+function RowCard({
+  row,
+  windowDays,
+  onStartPrep,
+}: {
+  row: Row
+  windowDays: number
+  onStartPrep?: (reg: string) => void
+}) {
   const isAvailable = !row.currentHire && !row.nextHire
   const showPrep = shouldShowPrepCta(row)
 
@@ -357,17 +366,27 @@ function RowCard({ row, windowDays }: { row: Row; windowDays: number }) {
         </div>
       )}
 
-      {/* Prep action — on-page anchor scrolls to this van's card in the Prep
-          Queue below. Promoted to a proper button so it's the obvious next
-          step on Prep Needed rows. */}
+      {/* Prep action — fires handleStartPrep directly when on /vehicles/prep
+          (passed in via onStartPrep). Falls back to a hash anchor when no
+          callback is supplied (e.g. if this section is reused elsewhere). */}
       {showPrep && (
         <div className="mt-3 flex justify-end">
-          <a
-            href={prepAnchor(row.reg)}
-            className="inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-amber-600 active:bg-amber-700"
-          >
-            🔧 Prep this van →
-          </a>
+          {onStartPrep ? (
+            <button
+              type="button"
+              onClick={() => onStartPrep(row.reg)}
+              className="inline-flex items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-amber-600 active:bg-amber-700"
+            >
+              🔧 Prep this van →
+            </button>
+          ) : (
+            <a
+              href={prepAnchor(row.reg)}
+              className="inline-flex items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-amber-600 active:bg-amber-700"
+            >
+              🔧 Prep this van →
+            </a>
+          )}
         </div>
       )}
     </div>
@@ -376,7 +395,7 @@ function RowCard({ row, windowDays }: { row: Row; windowDays: number }) {
 
 const COLLAPSE_KEY = 'turnaround-schedule-collapsed'
 
-export function TurnaroundSchedule() {
+export function TurnaroundSchedule({ onStartPrep }: { onStartPrep?: (reg: string) => void } = {}) {
   const [days, setDays] = useState<RangeDays>(14)
   const [stateFilter, setStateFilter] = useState<StateFilter>('all')
   const [complianceFilter, setComplianceFilter] = useState<ComplianceFilter>('all')
@@ -591,7 +610,7 @@ export function TurnaroundSchedule() {
       {!isLoading && !isError && data && data.data.length > 0 && (
         <div className="space-y-2">
           {data.data.map(row => (
-            <RowCard key={row.vehicleId} row={row} windowDays={days} />
+            <RowCard key={row.vehicleId} row={row} windowDays={days} onStartPrep={onStartPrep} />
           ))}
           <div className="text-right text-[10px] text-gray-400">
             Showing {data.filtered} of {data.total} active vehicles
