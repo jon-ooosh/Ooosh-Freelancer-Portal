@@ -944,9 +944,17 @@ export function PrepPage() {
   // ── Queue screen ──
   return (
     <div className="space-y-4 px-4 py-6">
-      {/* Forward-facing fleet turnaround view. Per-van prep windows, compliance
-          pips, "Prep this van" CTAs anchor down to the queue cards below. */}
-      <TurnaroundSchedule />
+      {/* Forward-facing fleet turnaround view. The "Prep this van" CTAs fire
+          handleStartPrep directly — same behaviour as the Start Prep button
+          on a queue card below. */}
+      <TurnaroundSchedule
+        onStartPrep={(reg) => {
+          const v = (allVehicles || []).find(
+            x => x.reg.toUpperCase() === reg.toUpperCase(),
+          )
+          if (v) handleStartPrep(v)
+        }}
+      />
 
       <div className="flex items-center justify-between">
         <div>
