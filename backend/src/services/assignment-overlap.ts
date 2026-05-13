@@ -3,11 +3,20 @@ import { query } from '../config/database';
 /**
  * Allocation overlap detection.
  *
- * A van is considered "occupied" for a hire from its start date up to and
- * including Job Finish (`jobs.job_end`). The +1-day turnaround buffer
- * encoded in `jobs.return_date` is deliberately ignored here — per product
- * decision, overlap checks use the real end-of-charge date. The buffer may
- * become a configurable setting in future (see CLAUDE.md).
+ * A van is considered "occupied" for a hire from its start instant up to
+ * (but NOT including) its end instant — half-open interval `[start, end)`.
+ * Combined with the Ooosh 9am-to-9am convention this means a hire ending
+ * 09:00 on day D and another starting 09:00 on day D are back-to-back, not
+ * overlapping. The +1-day turnaround buffer encoded in `jobs.return_date`
+ * is deliberately ignored here — overlap uses the real end-of-charge
+ * (`jobs.job_end`). HireHop's own buffer is the physical safety net; this
+ * check is forward-planning UX only.
+ *
+ * Time resolution: `vehicle_hire_assignments.hire_start` / `hire_end` are
+ * DATE columns (no time component), so the effective timestamp is built
+ * from the chosen date + the job's `out_time` / `end_time`, falling back
+ * to 09:00 (the operational default — out_time is 09:00 on ~98% of jobs,
+ * end_time is mostly NULL but where set is also overwhelmingly 09:00).
  *
  * Statuses that DO occupy a van (block further overlapping allocations):
  *   soft, confirmed, booked_out, active
@@ -107,10 +116,20 @@ export async function findOverlappingAssignments(
   // If we still can't establish a date window, we can't check — let it through.
   if (!start || !end) return [];
 
-  // The overlap predicate uses effective dates (vha dates, falling back to
-  // the linked job's job_date/job_end). Self-job assignments are excluded
-  // so multi-driver single-van rows don't self-conflict. `excludeAssignmentId`
-  // handles the PATCH case where we're updating an existing row.
+  // Reduce the target window to YYYY-MM-DD strings; SQL applies the 09:00
+  // convention symmetrically on both sides so back-to-back 9am-to-9am
+  // hires are not treated as overlapping.
+  const startDate = toIsoDate(start);
+  const endDate = toIsoDate(end);
+
+  // Half-open interval overlap on timestamps:
+  //   existing.start < new.end  AND  existing.end > new.start
+  // Effective timestamps combine the date (vha row wins over the job
+  // fallback) with the time (job's out_time / end_time, falling back to
+  // 09:00 — the Ooosh operational default). The target side uses the
+  // same 09:00 default; staff can model non-9am hires by adjusting the
+  // dates passed in if needed. Existing-row times are honoured exactly,
+  // so the small number of 16:00-start / 22:00-end rows are correct.
   const result = await query(
     `SELECT
        vha.id,
@@ -137,16 +156,18 @@ export async function findOverlappingAssignments(
          OR
          ($5::integer IS NOT NULL AND vha.hirehop_job_id = $5::integer)
        )
-       AND COALESCE(vha.hire_start, j.job_date::DATE) <= $7::DATE
-       AND COALESCE(vha.hire_end, j.job_end::DATE) >= $6::DATE`,
+       AND (COALESCE(vha.hire_start, j.job_date::DATE) + COALESCE(j.out_time, TIME '09:00'))
+             < ($7::DATE + TIME '09:00')
+       AND (COALESCE(vha.hire_end,   j.job_end::DATE)  + COALESCE(j.end_time, TIME '09:00'))
+             > ($6::DATE + TIME '09:00')`,
     [
       target.vehicleId,
       OCCUPYING_STATUSES,
       target.excludeAssignmentId || null,
       target.jobId || null,
       target.hirehopJobId || null,
-      start,
-      end,
+      startDate,
+      endDate,
     ],
   );
 

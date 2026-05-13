@@ -199,6 +199,12 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'start and end dates required (YYYY-MM-DD)' });
     }
 
+    // Half-open interval overlap on timestamps: existing.start < new.end
+    // AND existing.end > new.start. Times come from the job's out_time /
+    // end_time (default 09:00 — Ooosh's 9am-to-9am hire convention). Target
+    // window uses the same 09:00 default so back-to-back hires (one ending
+    // 9am, next starting 9am) are not treated as overlapping. See
+    // services/assignment-overlap.ts for the full rationale.
     const result = await query(
       `SELECT DISTINCT ON (vha.vehicle_id)
          vha.vehicle_id,
@@ -221,8 +227,10 @@ router.get('/availability', async (req: AuthRequest, res: Response) => {
          AND vha.vehicle_id IS NOT NULL
          AND ($3::integer IS NULL OR vha.hirehop_job_id IS DISTINCT FROM $3::integer)
          AND ($4::uuid IS NULL OR vha.job_id IS DISTINCT FROM $4::uuid)
-         AND COALESCE(vha.hire_start, j.job_date::DATE) <= $2::DATE
-         AND COALESCE(vha.hire_end, j.job_end::DATE) >= $1::DATE
+         AND (COALESCE(vha.hire_start, j.job_date::DATE) + COALESCE(j.out_time, TIME '09:00'))
+               < ($2::DATE + TIME '09:00')
+         AND (COALESCE(vha.hire_end,   j.job_end::DATE)  + COALESCE(j.end_time, TIME '09:00'))
+               > ($1::DATE + TIME '09:00')
        ORDER BY vha.vehicle_id, vha.hire_start DESC NULLS LAST`,
       [startParam, endParam, excludeHhJobId, excludeJobId],
     );
