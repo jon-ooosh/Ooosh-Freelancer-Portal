@@ -97,6 +97,16 @@ const prepColours: Record<Row['prepUrgency'], { bg: string; text: string; label:
 }
 
 function PrepWindowBadge({ row }: { row: Row }) {
+  // Van is already prepped — turnaround indicator is moot, render a positive
+  // "Ready" pill instead. Avoids the misleading "1 day red" appearing next to
+  // a van whose Vehicle Detail page reads "Prep Completed".
+  if (row.hireStatus === 'Available') {
+    return (
+      <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
+        Ready
+      </span>
+    )
+  }
   const colour = prepColours[row.prepUrgency]
   if (row.prepWindowDays === null) {
     return (
@@ -269,17 +279,12 @@ function prepAnchor(reg: string): string {
   return `#prep-card-${reg}`
 }
 
-/** Show the prep CTA on rows where the van is actually here (or imminently
- *  coming back today). Skip when the van is mid-hire and won't be in the yard
- *  in the visible window. */
+/** Show the prep CTA only when there's actually prep to do. State is the
+ *  source of truth: 'Prep Needed' = surface CTA; 'Available' = already done;
+ *  'On Hire' / 'Not Ready' = van isn't here. Keeps the surface focused on
+ *  things staff can actually action right now. */
 function shouldShowPrepCta(row: Row): boolean {
-  // Van is currently here (no current hire row) — always relevant.
-  if (!row.currentHire) return true
-  // Van returns today or earlier — operationally here.
-  if (row.comingBack && diffDaysFromToday(row.comingBack) <= 0) return true
-  // Van returns in the visible window AND has a next hire approaching.
-  if (row.comingBack && row.nextHire) return true
-  return false
+  return row.hireStatus === 'Prep Needed'
 }
 
 function RowCard({ row, windowDays }: { row: Row; windowDays: number }) {
@@ -352,12 +357,14 @@ function RowCard({ row, windowDays }: { row: Row; windowDays: number }) {
         </div>
       )}
 
-      {/* Prep action — on-page anchor scrolls to this van's card in the Prep Queue */}
+      {/* Prep action — on-page anchor scrolls to this van's card in the Prep
+          Queue below. Promoted to a proper button so it's the obvious next
+          step on Prep Needed rows. */}
       {showPrep && (
-        <div className="mt-2 text-right">
+        <div className="mt-3 flex justify-end">
           <a
             href={prepAnchor(row.reg)}
-            className="text-[10px] font-medium text-amber-600 hover:underline"
+            className="inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-amber-600 active:bg-amber-700"
           >
             🔧 Prep this van →
           </a>
@@ -490,7 +497,7 @@ export function TurnaroundSchedule() {
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder="Filter by reg…"
-            className="ml-auto w-32 rounded border border-gray-200 px-2 py-0.5 text-xs placeholder:text-gray-400 focus:border-ooosh-blue focus:outline-none"
+            className="ml-auto w-44 sm:w-60 rounded-md border border-gray-300 px-3 py-1.5 text-sm placeholder:text-gray-400 focus:border-ooosh-blue focus:outline-none focus:ring-1 focus:ring-ooosh-blue"
           />
         </div>
 
