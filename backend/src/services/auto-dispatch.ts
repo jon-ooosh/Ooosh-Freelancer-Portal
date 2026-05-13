@@ -101,6 +101,7 @@ export async function autoDispatchJob(opts: AutoDispatchOptions): Promise<AutoDi
         variables: {
           jobRef,
           jobName: job.job_name || '',
+          jobNumber: job.hh_job_number ? String(job.hh_job_number) : '',
           source: SOURCE_LABELS[opts.source],
           actorLabel: opts.actorLabel,
           hhStatusLabel,

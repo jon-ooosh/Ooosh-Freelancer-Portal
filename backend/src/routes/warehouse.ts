@@ -481,6 +481,7 @@ router.post('/collections/:jobId/complete', async (req: WarehouseRequest, res: R
             variables: {
               clientName: effectiveClientName || 'there',
               jobName: effectiveJobName,
+              jobNumber: effectiveHhRef && effectiveHhRef !== 'N/A' ? effectiveHhRef : '',
               venueName: 'Ooosh Warehouse',
               deliveryDate: dateLabel,
               driverName: collectedBy,

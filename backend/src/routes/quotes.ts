@@ -605,7 +605,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
       `SELECT q.id, q.calculation_mode, q.is_local, q.job_date, q.arrival_time,
               q.venue_name, q.venue_id, q.status,
               q.job_type, q.num_days, q.is_multi_day, q.crew_count,
-              j.job_name as linked_job_name
+              j.job_name as linked_job_name, j.hh_job_number as linked_hh_job_number
        FROM quotes q
        LEFT JOIN jobs j ON j.id = q.job_id
        WHERE q.id = $1 AND q.is_deleted = false`,
@@ -782,6 +782,7 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
                 variables: {
                   freelancerName: crew.first_name || 'there',
                   jobName,
+                  jobNumber: String(oldQuote.linked_hh_job_number || ''),
                   jobDate: formattedDate,
                   venueName: updatedQuote.venue_name || 'TBC',
                   changeDescription: keyFieldsChanged.join('. '),
@@ -859,7 +860,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
           const assignees = await query(
             `SELECT qa.id AS assignment_id, qa.role, qa.agreed_rate, qa.rate_type,
                     p.id AS person_id, p.first_name, p.email, p.is_freelancer,
-                    q.job_date, q.venue_name, j.job_name
+                    q.job_date, q.venue_name, j.job_name, j.hh_job_number
              FROM quote_assignments qa
              JOIN people p ON p.id = qa.person_id
              JOIN quotes q ON q.id = qa.quote_id
@@ -899,7 +900,7 @@ router.patch('/:id/status', validate(statusSchema), async (req: AuthRequest, res
             try {
               await emailService.send('freelancer_assignment', {
                 to: a.email,
-                variables: { freelancerName, jobName, jobDate, role: a.role || 'Crew', rate: rateDisplay, portalUrl },
+                variables: { freelancerName, jobName, jobNumber: String(a.hh_job_number || ''), jobDate, role: a.role || 'Crew', rate: rateDisplay, portalUrl },
               });
               // Record that we've notified so we don't re-send on re-confirm
               await query(
@@ -1063,7 +1064,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
             `SELECT p.first_name, p.last_name, p.email, p.is_freelancer,
                     q.status AS quote_status, q.job_date, q.arrival_time,
                     q.venue_name, q.job_type,
-                    j.job_name
+                    j.job_name, j.hh_job_number
              FROM people p
              CROSS JOIN quotes q
              LEFT JOIN jobs j ON j.id = q.job_id
@@ -1097,6 +1098,7 @@ router.post('/:id/assignments', validate(assignSchema), async (req: AuthRequest,
             variables: {
               freelancerName,
               jobName,
+              jobNumber: String(row.hh_job_number || ''),
               jobDate,
               role: role || 'Crew',
               rate: rateDisplay,

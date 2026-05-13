@@ -1557,6 +1557,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
                 variables: {
                   clientName: clientName || 'there',
                   jobName,
+                  jobNumber: String(ctx.hirehop_id || ''),
                   venueName: venueName || 'your venue',
                   deliveryDate: completedDate,
                   driverName: completionName,
@@ -1590,6 +1591,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
               variables: {
                 clientName: clientName || 'there',
                 jobName,
+                jobNumber: String(ctx.hirehop_id || ''),
                 venueName: venueName || 'your venue',
                 driverName: completionName,
                 completedDate,
@@ -1615,6 +1617,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
             to: 'info@oooshtours.co.uk',
             variables: {
               jobName,
+              jobNumber: String(ctx.hirehop_id || ''),
               jobType: jobType === 'crewed' ? 'crew work' : jobType,
               driverName: completionName,
               venueName: venueName || 'N/A',

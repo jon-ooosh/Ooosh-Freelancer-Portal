@@ -135,16 +135,16 @@ const templates: Record<string, EmailTemplate> = {
 
   new_enquiry_notification: {
     variant: 'internal',
-    subject: 'New Enquiry — {{jobName}}',
+    subject: 'New Enquiry — {{jobName}} (#{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">New Enquiry Received</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
-        A new enquiry has been created:
+        A new enquiry has been created (job <strong>#{{jobNumber}}</strong>):
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
           <td style="padding:12px 16px;background-color:#f0fdf4;border-radius:8px;border:1px solid #bbf7d0;">
-            <p style="margin:0 0 4px;font-size:12px;color:#166534;">{{jobName}}</p>
+            <p style="margin:0 0 4px;font-size:12px;color:#166534;">{{jobName}} (#{{jobNumber}})</p>
             <p style="margin:0;font-size:14px;color:#1e293b;">
               {{clientName}} &bull; {{jobDate}}
             </p>
@@ -159,14 +159,14 @@ const templates: Record<string, EmailTemplate> = {
 
   freelancer_assignment: {
     variant: 'internal',
-    subject: 'Job Assignment — {{jobName}} ({{jobDate}})',
+    subject: 'Job Assignment — {{jobName}} (#{{jobNumber}}) ({{jobDate}})',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">You've Been Assigned</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
         Hi {{freelancerName}},
       </p>
       <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
-        You've been assigned to <strong>{{jobName}}</strong> as <strong>{{role}}</strong>.
+        You've been assigned to <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>) as <strong>{{role}}</strong>.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
@@ -195,14 +195,14 @@ const templates: Record<string, EmailTemplate> = {
   hire_form: {
     variant: 'client' as const,
     preheader: 'Your vehicle hire agreement from Ooosh Tours',
-    subject: 'Your vehicle hire agreement for {{vehicleReg}}',
+    subject: 'Your vehicle hire agreement for {{vehicleReg}} (job #{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Vehicle Hire Agreement</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Hi {{driverName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        Please find attached your vehicle hire agreement for your current hire:
+        Please find attached your vehicle hire agreement for your current hire (job <strong>#{{jobNumber}}</strong>):
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
         <tr>
@@ -229,14 +229,14 @@ const templates: Record<string, EmailTemplate> = {
 
   job_change_notification: {
     variant: 'internal',
-    subject: 'Job Update — {{jobName}} ({{jobDate}})',
+    subject: 'Job Update — {{jobName}} (#{{jobNumber}}) ({{jobDate}})',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Job Details Updated</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
         Hi {{freelancerName}},
       </p>
       <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
-        There's been an update to <strong>{{jobName}}</strong> that you're assigned to:
+        There's been an update to <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>) that you're assigned to:
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
@@ -271,11 +271,11 @@ const templates: Record<string, EmailTemplate> = {
 
   referral_alert: {
     variant: 'internal',
-    subject: 'Insurer Referral Required — {{driverName}}',
+    subject: 'Insurer Referral Required — {{driverName}} (job #{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Insurer Referral Required</h2>
       <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.5;">
-        A driver requires manual referral to insurers before their hire can proceed.
+        A driver requires manual referral to insurers before their hire can proceed (triggered on job <strong>#{{jobNumber}}</strong>).
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
@@ -737,7 +737,7 @@ const templates: Record<string, EmailTemplate> = {
 
   arranging_reminder: {
     variant: 'internal',
-    subject: '{{jobTypeLabel}}: {{jobName}} — {{levelHeadline}}',
+    subject: '{{jobTypeLabel}}: {{jobName}} (#{{jobNumber}}) — {{levelHeadline}}',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">{{levelHeadline}}</h2>
       <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
@@ -853,20 +853,20 @@ const templates: Record<string, EmailTemplate> = {
   delivery_note: {
     variant: 'client',
     preheader: 'Your Ooosh Tours delivery note is attached',
-    subject: 'Delivery note — {{jobName}} ({{deliveryDate}})',
+    subject: 'Delivery note — {{jobName}} (#{{jobNumber}}) ({{deliveryDate}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Delivery Complete</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Hi {{clientName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        Your Ooosh delivery has been completed. Please find your delivery note attached.
+        Your Ooosh delivery for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>) has been completed. Please find your delivery note attached.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
           <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
             <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Job</p>
-            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}}</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}} (#{{jobNumber}})</p>
             <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Venue</p>
             <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{venueName}}</p>
             <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Delivered by</p>
@@ -890,21 +890,21 @@ const templates: Record<string, EmailTemplate> = {
   collection_confirmation: {
     variant: 'client',
     preheader: 'Your Ooosh Tours collection is complete',
-    subject: 'Collection complete — {{jobName}} ({{completedDate}})',
+    subject: 'Collection complete — {{jobName}} (#{{jobNumber}}) ({{completedDate}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Collection Complete</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Hi {{clientName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        Our team has collected your gear from <strong>{{venueName}}</strong>.
+        Our team has collected your gear from <strong>{{venueName}}</strong> for <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>).
         It's now on its way back to our warehouse.
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
           <td style="padding:16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
             <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Job</p>
-            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}}</p>
+            <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{jobName}} (#{{jobNumber}})</p>
             <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Collected by</p>
             <p style="margin:0 0 12px;font-size:15px;color:#1e293b;font-weight:600;">{{driverName}}</p>
             <p style="margin:0 0 4px;font-size:12px;color:#64748b;">Completed at</p>
@@ -920,12 +920,12 @@ const templates: Record<string, EmailTemplate> = {
 
   completion_driver_notes: {
     variant: 'internal',
-    subject: 'Driver notes — {{jobName}} ({{completedDate}})',
+    subject: 'Driver notes — {{jobName}} (#{{jobNumber}}) ({{completedDate}})',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#1e293b;">Driver notes logged</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.5;">
         <strong>{{driverName}}</strong> completed <strong>{{jobType}}</strong> for
-        <strong>{{jobName}}</strong> and left notes for the team:
+        <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>) and left notes for the team:
       </p>
       <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px;width:100%;">
         <tr>
@@ -1183,14 +1183,14 @@ const templates: Record<string, EmailTemplate> = {
   ooh_return_reminder: {
     variant: 'client',
     preheader: 'Reminder: returning your van overnight tomorrow',
-    subject: 'Reminder: out-of-hours van return tomorrow — {{vehicleReg}}',
+    subject: 'Reminder: out-of-hours van return tomorrow — {{vehicleReg}} (job #{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Returning your van tomorrow</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
         Hi {{driverName}},
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        Quick reminder — you're due to return <strong>{{vehicleReg}}</strong> overnight tonight or
+        Quick reminder — you're due to return <strong>{{vehicleReg}}</strong> (job <strong>#{{jobNumber}}</strong>) overnight tonight or
         tomorrow morning, before 9am.
       </p>
 
@@ -1227,11 +1227,11 @@ const templates: Record<string, EmailTemplate> = {
 
   under_dispatched_warning: {
     variant: 'internal',
-    subject: 'Sanity check: {{jobRef}} marked On Hire but HH not fully dispatched',
+    subject: 'Sanity check: {{jobName}} (#{{jobNumber}}) marked On Hire but HH not fully dispatched',
     body: `
       <h2 style="margin:0 0 12px;font-size:18px;color:#92400e;">⚠️ Under-dispatched warning</h2>
       <p style="margin:0 0 12px;font-size:14px;color:#334155;line-height:1.6;">
-        Job <strong>{{jobRef}}</strong> ({{jobName}}) has just been marked
+        Job <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>) has just been marked
         <strong>On Hire</strong> in OP via <strong>{{source}}</strong> by
         <strong>{{actorLabel}}</strong>, but HireHop status is still
         <strong>{{hhStatusLabel}}</strong> — not all items appear to be
