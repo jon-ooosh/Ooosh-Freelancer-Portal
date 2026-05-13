@@ -1610,6 +1610,7 @@ async function generateAndEmailHireFormPdf(assignmentId: string, trigger: string
       vehicleModel: formData.vehicleModel || 'TBC',
       hireStart: fmtDate(formData.hireStartDate),
       hireEnd: fmtDate(formData.hireEndDate),
+      jobNumber: formData.hhJobNumber || '',
     },
     attachments: [{
       filename,
@@ -1653,6 +1654,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
       COALESCE(vha.hire_end, j.job_end) AS resolved_hire_end,
       COALESCE(vha.start_time, '09:00') AS resolved_start_time,
       COALESCE(vha.end_time, '09:00') AS resolved_end_time,
+      COALESCE(j.hh_job_number, vha.hirehop_job_id) AS resolved_hh_job_number,
       fv.reg AS vehicle_reg,
       fv.vehicle_type AS vehicle_model,
       d.full_name AS driver_name,
@@ -1781,6 +1783,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
     hireFormNumber: `OT-HF-${assignmentId.substring(0, 8).toUpperCase()}`,
     contractNumber: row.hirehop_job_id ? String(row.hirehop_job_id) : '',
     signatureDate: toISODate(row.driver_signature_date),
+    hhJobNumber: row.resolved_hh_job_number ? String(row.resolved_hh_job_number) : '',
     signatureImage,
     logoImage,
   };
@@ -1905,6 +1908,7 @@ router.post('/:id/generate-pdf', authenticatePdfRoute, async (req: FlexibleVehic
             vehicleModel: formData.vehicleModel || 'TBC',
             hireStart: fmtDate(formData.hireStartDate),
             hireEnd: fmtDate(formData.hireEndDate),
+            jobNumber: formData.hhJobNumber || '',
           },
           attachments: [{
             filename,
@@ -1954,6 +1958,7 @@ router.post('/:id/send-email', authenticateOrApiKey, async (req: AuthRequest, re
       `SELECT vha.*,
         COALESCE(vha.hire_start, j.job_date) AS resolved_hire_start,
         COALESCE(vha.hire_end, j.job_end) AS resolved_hire_end,
+        COALESCE(j.hh_job_number, vha.hirehop_job_id) AS resolved_hh_job_number,
         d.full_name AS driver_name, d.email AS driver_email,
         fv.reg AS vehicle_reg, fv.vehicle_type AS vehicle_model
       FROM vehicle_hire_assignments vha
@@ -1997,6 +2002,7 @@ router.post('/:id/send-email', authenticateOrApiKey, async (req: AuthRequest, re
         vehicleModel: row.vehicle_model || 'TBC',
         hireStart: fmtDate(row.resolved_hire_start),
         hireEnd: fmtDate(row.resolved_hire_end),
+        jobNumber: row.resolved_hh_job_number ? String(row.resolved_hh_job_number) : '',
       },
       attachments: [{
         filename,
@@ -2160,6 +2166,7 @@ async function sendReferralNotification(
       variables: {
         driverName: driverName || 'Unknown',
         driverEmail: driverEmail || 'N/A',
+        jobNumber: hirehopJobId ? String(hirehopJobId) : 'N/A',
         referralReasons: reasons.map(r => `• ${r}`).join('<br/>'),
         linkedJobs: driver.linked_jobs || 'No active hires',
         driverUrl: `${frontendUrl}/drivers/${driverId}`,

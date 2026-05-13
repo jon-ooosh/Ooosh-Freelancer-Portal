@@ -2328,6 +2328,19 @@ SMTP_FROM=Ooosh Tours <notifications@oooshtours.co.uk>
 - Per-template: `backend/src/services/email-templates/{template-id}.ts` — subject + body
 - Variables injected via `{{variableName}}` substitution
 
+**Convention: include the HH job number on every job-scoped template** (May 2026). Any new email template that relates to a specific job MUST surface the HH job number in BOTH the subject line and the body, using the Katatonia pattern:
+
+| Surface | Format | Example |
+|---|---|---|
+| Subject | `<Headline> — <Job Name> (#{{jobNumber}})` (or `(job #{{jobNumber}})` if no jobName in subject) | `Payment Received — Katatonia - Van & backline hire (#15607)` |
+| Body (first mention of the job) | `<strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>)` | "Thank you for your payment for **Katatonia - Van & backline hire** (job **#15607**)" |
+
+The HH job number is the thread that ties any email back to the job in HireHop / OP without the recipient needing to click through. Without it, internal staff (and clients) end up hunting for the job ref every time they want to action a message. The convention is enforced across every existing job-scoped template — match it on new ones.
+
+**Caller responsibility:** the sending route must pass `jobNumber: String(job.hh_job_number || '')` in the `variables` object. If the job-scoped sender has no HH number to hand (e.g. an OP-only enquiry not yet pushed to HireHop), pass an empty string — the templates degrade gracefully to `(#)` / `(job #)`. Don't omit the variable entirely (renders as the literal `{{jobNumber}}` placeholder).
+
+**Templates this does NOT apply to:** auth flows (`portal_verification_code`, `portal_password_reset`), system alerts not tied to a specific job (`hire_form_fallback_alert`, `monday_fallback_alert`, `platform_issue_reported`), vehicle-scoped templates (`compliance_reminder`), and multi-entity templates (`file_resend`). Use judgement — if the email is about one job, the number goes in; if it's about a person/vehicle/system event with no job context, it doesn't.
+
 ### Fleet Hire-Status Sync ✅ COMPLETE
 
 **File:** `backend/src/services/fleet-hire-status-sync.ts`

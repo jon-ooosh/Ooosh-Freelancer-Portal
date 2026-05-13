@@ -176,6 +176,7 @@ export async function runArrangingChase(): Promise<{ scanned: number; sent: numb
           jobTypeSummary,
           jobLabel,
           jobName: row.job_name || '(no job name)',
+          jobNumber: String(row.hh_job_number || ''),
           venue,
           jobDateFormatted,
           clientLine,

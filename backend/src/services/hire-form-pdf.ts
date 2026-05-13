@@ -39,6 +39,9 @@ export interface HireFormData {
   contractNumber?: string;
   signatureDate?: string;
 
+  // Job context (HH job number — used in client emails to thread back to HireHop)
+  hhJobNumber?: string;
+
   // Signature image (PNG buffer)
   signatureImage?: Buffer | null;
   // Logo image (PNG buffer)
