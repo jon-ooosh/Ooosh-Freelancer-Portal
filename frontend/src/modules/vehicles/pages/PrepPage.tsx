@@ -25,6 +25,7 @@ import { getStock } from '../lib/stock-api'
 import { recordPrepConsumption } from '../lib/stock-api'
 import { buildConsumptionTransactions } from '../lib/stock-consumption'
 import { VehicleIssuesBanner } from '../components/issues/VehicleIssuesBanner'
+import { TurnaroundSchedule } from '../components/dashboard/TurnaroundSchedule'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
 import type { SignatureCaptureHandle } from '../components/book-out/SignatureCapture'
 import type { Vehicle } from '../types/vehicle'
@@ -943,6 +944,10 @@ export function PrepPage() {
   // ── Queue screen ──
   return (
     <div className="space-y-4 px-4 py-6">
+      {/* Forward-facing fleet turnaround view. Per-van prep windows, compliance
+          pips, "Prep this van" CTAs anchor down to the queue cards below. */}
+      <TurnaroundSchedule />
+
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold text-ooosh-navy">Prep Queue</h2>
@@ -968,7 +973,9 @@ export function PrepPage() {
         <div className="space-y-3">
           <p className="text-xs font-semibold text-amber-600 uppercase tracking-wide">Prep Needed</p>
           {prepQueue.map(v => (
-            <VehiclePrepCard key={v.id} vehicle={v} onStartPrep={handleStartPrep} />
+            <div key={v.id} id={`prep-card-${v.reg}`} className="scroll-mt-4">
+              <VehiclePrepCard vehicle={v} onStartPrep={handleStartPrep} />
+            </div>
           ))}
         </div>
       )}
@@ -980,7 +987,9 @@ export function PrepPage() {
             {prepQueue.length > 0 ? 'Other Vehicles' : 'All Vehicles'}
           </p>
           {otherVehicles.map(v => (
-            <VehiclePrepCard key={v.id} vehicle={v} onStartPrep={handleStartPrep} />
+            <div key={v.id} id={`prep-card-${v.reg}`} className="scroll-mt-4">
+              <VehiclePrepCard vehicle={v} onStartPrep={handleStartPrep} />
+            </div>
           ))}
         </div>
       )}

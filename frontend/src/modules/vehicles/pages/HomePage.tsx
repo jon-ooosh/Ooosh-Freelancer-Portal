@@ -12,7 +12,6 @@ import { HireHopJobCard } from '../components/dashboard/HireHopJobCard'
 import { HireHopCacheStatus } from '../components/HireHopCacheStatus'
 import { LowStockBanner } from '../components/stock/LowStockBanner'
 import { RecentActivityFeed } from '../components/dashboard/RecentActivityFeed'
-import { TurnaroundSchedule } from '../components/dashboard/TurnaroundSchedule'
 import { extractVanRequirements } from '../lib/hirehop-api'
 
 const quickActions = [
@@ -226,9 +225,6 @@ export function HomePage() {
           </div>
         </section>
       )}
-
-      {/* Turnaround Schedule — van-centric forward-facing prep planning */}
-      <TurnaroundSchedule />
 
       {/* Quick actions */}
       <section>

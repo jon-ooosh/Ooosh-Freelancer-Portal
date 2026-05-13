@@ -354,7 +354,7 @@ Full maintenance tracking, compliance monitoring, and cost reporting for the fle
 
 Van-centric forward-facing view answering "which vans need prep, and when do I need them ready?". Solves the long-standing manual workaround where staff typed regs into job names and eyeballed it. Complements (does NOT replace) AllocationsPage — same data, different lens. AllocationsPage stays the allocation workflow (job-centric); Turnaround is the prep planning surface (van-centric).
 
-**Where it lives:** New section on `/vehicles` (Vehicles homepage), below the existing compliance overview widget. Same pattern, same page — no new top-level nav, keeps in line with the "streamline rather than expand" principle.
+**Where it lives:** Collapsible section at the top of `/vehicles/prep` (Prep Queue page). Default expanded, state persisted in localStorage (`turnaround-schedule-collapsed`). Initial mount was on `/vehicles` (HomePage) — moved May 2026 to keep the prep planning concern co-located with the prep workflow. No new top-level nav, keeps in line with the "streamline rather than expand" principle.
 
 **Data:** Read-only from existing tables — no new schema needed.
 - `vehicle_hire_assignments` — forward-looking rows per van (`vehicle_id IS NOT NULL`, `status IN ('soft', 'confirmed', 'booked_out', 'active')`, future `hire_end`)
@@ -408,7 +408,9 @@ Prep window is computed against `jobs.return_date` (the inflated +1 day buffer),
 **Deep-links** (when staff want to act on what they see):
 - Click reg → Vehicle Detail
 - Click hire block → Job Detail for that hire
-- **Click a gap on the strip** → AllocationsPage with date range filter pre-applied to that gap window. Lets staff discover "this van is free 17–21 May, what unallocated jobs could fit?" without rebuilding allocation logic in this surface.
+- **"🔧 Prep this van →"** per-row CTA → on-page hash anchor (`#prep-card-<reg>`) that scrolls to the matching card in the Prep Queue below the section. Staff click "Start Prep" on the card explicitly — no surprise auto-actions. CTA hidden on rows where the van is currently out and won't be back in the visible window.
+
+The original "Find a job for this gap →" link (deep to AllocationsPage with date-range hint) was removed May 2026 — the section's home moved to `/vehicles/prep` and the CTA changed to focus exclusively on prep, not allocation. If "fill a gap with an unallocated job" surfaces operationally as a need again, that's a separate Allocations-side feature, not a Turnaround responsibility.
 
 **Compliance pip overlay:** Above each strip's time axis, small chevrons mark MOT / Tax / Insurance / TFL / Service-by-miles thresholds falling in the visible window. Tooltip on hover shows the exact date or mileage. Reuses existing compliance threshold settings (warning/urgent days). This is the bonus the user flagged — same surface answers "should I prioritise prepping this one because the MOT clears tomorrow but it goes out Friday?".
 
@@ -432,6 +434,8 @@ Stored on `calculator_settings` for now (or move to `fleet_settings` if other fl
 4. Deep-link from gaps to AllocationsPage
 5. Compliance pip overlay
 6. *(Future)* Drag-to-allocate from the strip, bundled with the deferred van-centric AllocationsPage rebuild
+
+**Dedup contract (May 2026):** Self-drive client hires can land TWO `vehicle_hire_assignments` rows for the same `(vehicle_id, job)` pair — one staff-allocation row (status='confirmed') and one hire-form row (status='booked_out'). Both pass the "forward commitment" filter. Without dedup the booked-out row becomes "current" and the confirmed row becomes "next" — same job appears in both columns. The endpoint dedupes per `(vehicle, jobKey)` where `jobKey = uuid:<job_uuid> | hh:<hh_job_number> | asg:<assignment_id>` (last fallback keeps unlinked rows distinct). Winner is the most-progressed status (active > booked_out > confirmed > soft), tied by latest `status_changed_at`. Any future "forward commitment" SQL touching `vehicle_hire_assignments` that aggregates per van should apply the same dedup rule.
 
 **Out of scope (deliberately):**
 - Drag-to-allocate from the Turnaround surface (deferred — would multiply allocation logic surface area)

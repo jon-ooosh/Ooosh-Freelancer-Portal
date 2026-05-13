@@ -4406,12 +4406,62 @@ router.get('/turnaround-schedule', async (req: AuthRequest, res: Response) => {
       pipeline_status: string | null;
     };
 
-    // Group assignments by vehicle.
+    // Group assignments by vehicle, then dedupe by job within each van.
+    //
+    // BUG GUARD (May 2026): self-drive client hires can land TWO assignment
+    // rows for the same (vehicle, job) pair — one created when staff
+    // allocated the van (status='confirmed') and one when the customer
+    // submitted their hire form (status='booked_out'). Both pass the
+    // "forward commitment" filter. Without dedup, the booked_out row
+    // becomes "current" and the confirmed row becomes "next" — surfacing
+    // the SAME job as both "coming back" and "going out next".
+    //
+    // Dedup rule: per (vehicle, job-key), keep one row. Job-key is the
+    // OP UUID when present, otherwise the HH job number, otherwise fall
+    // back to the assignment ID (so unlinked rows stay distinct). Winner
+    // is the most-progressed status (active > booked_out > confirmed > soft),
+    // tie-broken by latest status_changed_at.
+    const STATUS_RANK: Record<AssignmentRow['status'], number> = {
+      active: 4,
+      booked_out: 3,
+      confirmed: 2,
+      soft: 1,
+    };
+    function jobKey(a: AssignmentRow): string {
+      if (a.job_uuid) return `uuid:${a.job_uuid}`;
+      if (a.hirehop_job_id) return `hh:${a.hirehop_job_id}`;
+      return `asg:${a.assignment_id}`;
+    }
+    function pickWinner(a: AssignmentRow, b: AssignmentRow): AssignmentRow {
+      if (STATUS_RANK[a.status] !== STATUS_RANK[b.status]) {
+        return STATUS_RANK[a.status] > STATUS_RANK[b.status] ? a : b;
+      }
+      const at = a.status_changed_at ? new Date(a.status_changed_at).getTime() : 0;
+      const bt = b.status_changed_at ? new Date(b.status_changed_at).getTime() : 0;
+      return at >= bt ? a : b;
+    }
+
     const byVehicle = new Map<string, AssignmentRow[]>();
     for (const row of assignmentsResult.rows as AssignmentRow[]) {
       const list = byVehicle.get(row.vehicle_id) || [];
       list.push(row);
       byVehicle.set(row.vehicle_id, list);
+    }
+    // Dedup pass per van.
+    for (const [vid, rows] of byVehicle.entries()) {
+      const byJob = new Map<string, AssignmentRow>();
+      for (const r of rows) {
+        const k = jobKey(r);
+        const existing = byJob.get(k);
+        byJob.set(k, existing ? pickWinner(existing, r) : r);
+      }
+      // Preserve hire_start ordering (the original SQL ORDER BY).
+      const deduped = Array.from(byJob.values()).sort((a, b) => {
+        const as = a.asg_hire_start || a.job_date || '';
+        const bs = b.asg_hire_start || b.job_date || '';
+        return as.localeCompare(bs);
+      });
+      byVehicle.set(vid, deduped);
     }
 
     // Helpers for date math.

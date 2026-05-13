@@ -259,20 +259,32 @@ function ComplianceFlagBadge({ flag }: { flag: ComplianceFlagDto }) {
 }
 
 /**
- * Build a deep-link to AllocationsPage filtered to the gap window when
- * staff want to act on "this van has a gap from X to Y, what can fit?".
- * AllocationsPage already supports ?job=<hh>; we add ?date_from/date_to as
- * a hint — page may or may not consume yet, but the URL is durable.
+ * The section lives on /vehicles/prep, so the per-row primary CTA is "Prep
+ * this van" — a hash anchor that scrolls down to the matching card in the
+ * page's Prep Queue (each VehiclePrepCard renders inside a wrapper with
+ * id=`prep-card-${reg}`). No URL routing, no auto-actions, no surprises.
+ * The user clicks Start Prep on the queue card explicitly.
  */
-function gapDeepLink(row: Row): string | null {
-  if (!row.comingBack || !row.goingOutNext) return null
-  return vmPath(`/allocations?date_from=${row.comingBack}&date_to=${row.goingOutNext}`)
+function prepAnchor(reg: string): string {
+  return `#prep-card-${reg}`
+}
+
+/** Show the prep CTA on rows where the van is actually here (or imminently
+ *  coming back today). Skip when the van is mid-hire and won't be in the yard
+ *  in the visible window. */
+function shouldShowPrepCta(row: Row): boolean {
+  // Van is currently here (no current hire row) — always relevant.
+  if (!row.currentHire) return true
+  // Van returns today or earlier — operationally here.
+  if (row.comingBack && diffDaysFromToday(row.comingBack) <= 0) return true
+  // Van returns in the visible window AND has a next hire approaching.
+  if (row.comingBack && row.nextHire) return true
+  return false
 }
 
 function RowCard({ row, windowDays }: { row: Row; windowDays: number }) {
   const isAvailable = !row.currentHire && !row.nextHire
-  const noNext = !row.nextHire
-  const gapLink = gapDeepLink(row)
+  const showPrep = shouldShowPrepCta(row)
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-3 hover:shadow-sm transition-shadow">
@@ -321,18 +333,8 @@ function RowCard({ row, windowDays }: { row: Row; windowDays: number }) {
               dateLabel={relativeDayLabel(row.goingOutNext)}
             />
           ) : (
-            <span className="inline-flex items-center gap-1">
-              <span className="rounded-full bg-green-50 px-1.5 py-0.5 text-[10px] font-medium text-green-700">
-                No next allocation
-              </span>
-              {row.comingBack && (
-                <Link
-                  to={vmPath(`/allocations?date_from=${row.comingBack}`)}
-                  className="text-[10px] font-medium text-blue-600 hover:underline"
-                >
-                  Find a job →
-                </Link>
-              )}
+            <span className="rounded-full bg-green-50 px-1.5 py-0.5 text-[10px] font-medium text-green-700">
+              No next allocation
             </span>
           )}
         </div>
@@ -350,17 +352,22 @@ function RowCard({ row, windowDays }: { row: Row; windowDays: number }) {
         </div>
       )}
 
-      {/* Gap action link */}
-      {gapLink && !noNext && (
+      {/* Prep action — on-page anchor scrolls to this van's card in the Prep Queue */}
+      {showPrep && (
         <div className="mt-2 text-right">
-          <Link to={gapLink} className="text-[10px] font-medium text-blue-600 hover:underline">
-            Find a job for this gap →
-          </Link>
+          <a
+            href={prepAnchor(row.reg)}
+            className="text-[10px] font-medium text-amber-600 hover:underline"
+          >
+            🔧 Prep this van →
+          </a>
         </div>
       )}
     </div>
   )
 }
+
+const COLLAPSE_KEY = 'turnaround-schedule-collapsed'
 
 export function TurnaroundSchedule() {
   const [days, setDays] = useState<RangeDays>(14)
@@ -369,6 +376,21 @@ export function TurnaroundSchedule() {
   const [hasNextFilter, setHasNextFilter] = useState<HasNextFilter>('all')
   const [sortMode, setSortMode] = useState<SortMode>('urgency')
   const [searchQuery, setSearchQuery] = useState('')
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(COLLAPSE_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+
+  function toggleCollapsed() {
+    setCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0') } catch { /* ignore */ }
+      return next
+    })
+  }
 
   const queryString = useMemo(() => {
     const params = new URLSearchParams({
@@ -390,25 +412,50 @@ export function TurnaroundSchedule() {
       return resp.json() as Promise<Response>
     },
     staleTime: 15_000,
+    enabled: !collapsed,
   })
 
+  // Headline count for the collapsed header — show overdue compliance + tight prep windows
+  const headlineCount = data ? data.data.filter(r =>
+    r.prepUrgency === 'red' || r.prepUrgency === 'orange' || r.complianceFlags.some(f => f.urgency === 'overdue')
+  ).length : 0
+
   return (
-    <section>
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-sm font-medium uppercase tracking-wide text-gray-500">
-          Turnaround Schedule
-          <span className="ml-2 text-[10px] font-normal normal-case text-gray-400">
+    <section className="rounded-lg border border-gray-200 bg-white">
+      {/* Collapsible header — toggle + refresh as siblings (avoids invalid nested <button>) */}
+      <div className="flex w-full items-center justify-between gap-2 px-3 py-2.5">
+        <button
+          type="button"
+          onClick={toggleCollapsed}
+          className="flex flex-1 items-center gap-2 text-left hover:opacity-80"
+          aria-expanded={!collapsed}
+        >
+          <span className={`inline-block transition-transform text-gray-400 ${collapsed ? '' : 'rotate-90'}`}>▶</span>
+          <h3 className="text-sm font-medium uppercase tracking-wide text-gray-500">
+            Turnaround Schedule
+          </h3>
+          <span className="text-[10px] font-normal normal-case text-gray-400">
             Next {days} days · prep priority
           </span>
-        </h3>
-        <button
-          onClick={() => refetch()}
-          disabled={isLoading}
-          className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-50"
-        >
-          {isLoading ? 'Loading…' : 'Refresh'}
+          {collapsed && headlineCount > 0 && (
+            <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">
+              {headlineCount} need attention
+            </span>
+          )}
         </button>
+        {!collapsed && (
+          <button
+            onClick={() => refetch()}
+            disabled={isLoading}
+            className="text-xs text-gray-400 hover:text-gray-600 disabled:opacity-50"
+          >
+            {isLoading ? 'Loading…' : 'Refresh'}
+          </button>
+        )}
       </div>
+
+      {collapsed ? null : (
+        <div className="px-3 pb-3">
 
       {/* Filters + sort */}
       <div className="mb-3 space-y-2">
@@ -547,6 +594,9 @@ export function TurnaroundSchedule() {
               </span>
             )}
           </div>
+        </div>
+      )}
+
         </div>
       )}
     </section>
