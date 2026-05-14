@@ -82,6 +82,45 @@ export interface PersonOrganisationRole {
   updated_at: string;
 }
 
+// Person↔Organisation role picklist — single source of truth for every
+// dropdown that asks "what's this person's role at this org?" Stored as
+// free-text VARCHAR(255) on `person_organisation_roles.role`, so adding new
+// values here works without a migration. Renaming a value requires a
+// migration (see 085_person_org_role_picklist.sql for the Agent→Booking Agent
+// example). When changing this list, also update the priority CASE in
+// `backend/src/services/money-emails.ts` if a new "primary contact" role
+// belongs in the routing fallback chain.
+export const PERSON_ORG_ROLES: readonly string[] = [
+  'Tour Manager',
+  'Manager',
+  'Production Manager',
+  'Stage Manager',
+  'Engineer',
+  'Accountant',
+  'Booker',
+  'Booking Agent',
+  'Promoter',
+  'Label Manager',
+  'Venue Rep',
+  'Show Rep',
+  'Crew',
+  'Band Member',
+  'Driver',
+  'Site Contact',
+  'Owner',
+  'General Contact',
+  'Other',
+] as const;
+
+// Variant used by the Organisation Detail page, which prepends "Main Contact"
+// as a generic "primary rep at this org" option above the job-title list.
+// "Main Contact" maps to is_primary=true in practice but staff like having
+// the explicit picklist entry.
+export const PERSON_ORG_ROLES_WITH_MAIN_CONTACT: readonly string[] = [
+  'Main Contact',
+  ...PERSON_ORG_ROLES,
+] as const;
+
 // Organisation-to-Organisation relationship types
 export type OrgRelationshipType = 'manages' | 'books_for' | 'does_accounts_for' | 'promotes' | 'supplies' | 'represents' | 'other';
 

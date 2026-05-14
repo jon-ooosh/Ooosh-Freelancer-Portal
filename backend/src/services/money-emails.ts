@@ -47,7 +47,7 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   const result = await query(
     `SELECT DISTINCT p.email, p.first_name, p.last_name,
        CASE
-         WHEN por.role IN ('Tour Manager', 'Manager', 'Accountant', 'Agent') THEN 1
+         WHEN por.role IN ('Tour Manager', 'Manager', 'Production Manager', 'Accountant', 'Booking Agent') THEN 1
          WHEN por.role = 'General Contact' THEN 2
          ELSE 3
        END AS priority

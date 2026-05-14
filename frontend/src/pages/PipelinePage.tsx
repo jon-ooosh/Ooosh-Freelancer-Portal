@@ -7,7 +7,21 @@ import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsS
 import type {
   Job, PipelineStatus, Likelihood, HoldReason, ConfirmedMethod,
 } from '@shared/index';
-import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
+import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS, PERSON_ORG_ROLES } from '@shared/index';
+
+// Roles available for the "Linked organisations" picker on a job. These map
+// to `job_organisations.role` (VARCHAR(50), free-text). Keep aligned with the
+// comment in migration 027 listing band / client / promoter / venue_operator
+// / supplier / management / label / other.
+const LINKED_ORG_ROLES: Array<{ value: string; label: string }> = [
+  { value: 'band', label: 'Band / Act' },
+  { value: 'management', label: 'Management Company' },
+  { value: 'promoter', label: 'Promoter' },
+  { value: 'label', label: 'Label' },
+  { value: 'venue_operator', label: 'Venue Operator' },
+  { value: 'supplier', label: 'Supplier' },
+  { value: 'other', label: 'Other' },
+];
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -743,8 +757,6 @@ function NewEnquiryModal({
   const [clientName, setClientName] = useState('');
   const [clientId, setClientId] = useState<string | null>(null);
   const [isNewClient, setIsNewClient] = useState(false);
-  const [newClientEmail, setNewClientEmail] = useState('');
-  const [newClientPhone, setNewClientPhone] = useState('');
   const [details, setDetails] = useState('');
   const [serviceTypes, setServiceTypes] = useState<string[]>([]);
   const [outDate, setOutDate] = useState('');
@@ -762,11 +774,58 @@ function NewEnquiryModal({
   const [error, setError] = useState('');
   const [showOptional, setShowOptional] = useState(false);
 
-  // Band picker
-  const [bandName, setBandName] = useState('');
-  const [bandId, setBandId] = useState<string | null>(null);
-  const [bandSearch, setBandSearch] = useState('');
-  const [bandResults, setBandResults] = useState<Array<{ id: string; name: string; type: string; email?: string | null }>>([]);
+  // Contacts cascade — once a client org is picked we surface the people
+  // already linked to it (read-only chip list), and let staff add new ones
+  // inline without leaving the modal. Contacts entered for a NEW client are
+  // staged and created in sequence after the org itself is created on
+  // submit. Phase 3 doesn't yet write a per-job contact link (that's the
+  // Phase 4 `job_contacts` work) — for now everything attaches to the org
+  // via `person_organisation_roles`. The cascade is the UX win on its own.
+  const [clientPeople, setClientPeople] = useState<Array<{
+    id: string; person_id: string; person_name: string; person_email: string | null;
+    role: string; is_primary: boolean; status: string;
+  }>>([]);
+  const [clientPeopleLoading, setClientPeopleLoading] = useState(false);
+  const [pendingContacts, setPendingContacts] = useState<Array<{
+    _tempId: string;
+    target: 'client' | string;        // 'client' or a linked-org tempId
+    first_name: string; last_name: string;
+    email: string; phone: string;
+    role: string; is_primary: boolean;
+  }>>([]);
+  const [showAddContact, setShowAddContact] = useState(false);
+  const [contactFirstName, setContactFirstName] = useState('');
+  const [contactLastName, setContactLastName] = useState('');
+  const [contactEmail, setContactEmail] = useState('');
+  const [contactPhone, setContactPhone] = useState('');
+  const [contactRole, setContactRole] = useState('General Contact');
+  const [contactIsPrimary, setContactIsPrimary] = useState(false);
+
+  // Linked organisations — replaces the old single-org "Band / Act" picker.
+  // A job can now have N linked orgs (band, management, promoter, label,
+  // venue operator, supplier...) — same place sales used to type the band
+  // name. Existing orgs get a `orgId`; orgs typed for the first time get
+  // `isNew=true` and are created on submit. The first linked org with
+  // role='band' is used for band trading history (preserves existing UX).
+  const [linkedOrgs, setLinkedOrgs] = useState<Array<{
+    _tempId: string;
+    orgId: string | null;
+    orgName: string;
+    role: string;
+    isNew: boolean;
+  }>>([]);
+  const [showAddLinkedOrg, setShowAddLinkedOrg] = useState(false);
+  const [linkedOrgSearch, setLinkedOrgSearch] = useState('');
+  const [linkedOrgResults, setLinkedOrgResults] = useState<Array<{ id: string; name: string; type: string; email?: string | null }>>([]);
+  const [linkedOrgPickedId, setLinkedOrgPickedId] = useState<string | null>(null);
+  const [linkedOrgPickedName, setLinkedOrgPickedName] = useState('');
+  const [linkedOrgRole, setLinkedOrgRole] = useState<string>('band');
+
+  // Backwards-compat shims for client history (which keys off the band's
+  // org_id). Derived from linkedOrgs — first band wins.
+  const bandLink = linkedOrgs.find(l => l.role === 'band' && l.orgId);
+  const bandId = bandLink?.orgId ?? null;
+  const bandName = bandLink?.orgName ?? '';
 
   // Person-picked-as-client prompt. Clients must be organisations; if the
   // user selects a person, we show their orgs as quick-picks rather than
@@ -848,19 +907,40 @@ function NewEnquiryModal({
     }
   }, [isOpen]);
 
-  // Band search
+  // Linked-organisation search (replaces the old band-only search). Same
+  // org-only filter as before — we don't want people surfaced here, since
+  // a linked entity on a job is always an organisation.
   useEffect(() => {
-    if (bandSearch.length < 2) { setBandResults([]); return; }
+    if (linkedOrgSearch.length < 2) { setLinkedOrgResults([]); return; }
     const timeout = setTimeout(async () => {
       try {
         const data = await api.get<{ data: Array<{ id: string; name: string; type: string; email?: string | null }> }>(
-          `/organisations?search=${encodeURIComponent(bandSearch)}&limit=8`
+          `/organisations?search=${encodeURIComponent(linkedOrgSearch)}&limit=10`
         );
-        setBandResults(data.data);
+        setLinkedOrgResults(data.data);
       } catch { /* ignore */ }
     }, 250);
     return () => clearTimeout(timeout);
-  }, [bandSearch]);
+  }, [linkedOrgSearch]);
+
+  // Cascade: when a client org is picked, fetch its existing people so we
+  // can surface "Contacts at [Client]" without staff having to leave the
+  // modal. Skipped for new-client mode (no org exists yet) and when the
+  // field is cleared.
+  useEffect(() => {
+    if (!clientId) { setClientPeople([]); return; }
+    let cancelled = false;
+    setClientPeopleLoading(true);
+    api.get<{ people?: Array<{ id: string; person_id: string; person_name: string; person_email: string | null; role: string; is_primary: boolean; status: string }> | null }>(`/organisations/${clientId}`)
+      .then(data => {
+        if (cancelled) return;
+        const active = (data.people || []).filter(p => p.status === 'active');
+        setClientPeople(active);
+      })
+      .catch(() => { if (!cancelled) setClientPeople([]); })
+      .finally(() => { if (!cancelled) setClientPeopleLoading(false); });
+    return () => { cancelled = true; };
+  }, [clientId]);
 
   // Escape key to close
   useEffect(() => {
@@ -872,10 +952,16 @@ function NewEnquiryModal({
 
   if (!isOpen) return null;
 
+  // Drop client-target pending contacts whenever the client identity
+  // changes. Otherwise a contact staged for ATC Live could end up attached
+  // to a different org if staff switch the client mid-modal.
+  const clearClientContacts = () => {
+    setPendingContacts(prev => prev.filter(c => c.target !== 'client'));
+  };
+
   const handleClientSelect = async (result: SearchResult) => {
     setIsNewClient(false);
-    setNewClientEmail('');
-    setNewClientPhone('');
+    clearClientContacts();
     if (result.type === 'organisation') {
       setPendingPerson(null);
       setClientName(result.name);
@@ -904,8 +990,7 @@ function NewEnquiryModal({
     setClientName(name);
     setClientId(null);
     setIsNewClient(true);
-    setNewClientEmail('');
-    setNewClientPhone('');
+    clearClientContacts();
     // Fetch history by name in case there are jobs under this name already
     fetchClientHistory(null, name, bandId);
   };
@@ -1016,28 +1101,49 @@ function NewEnquiryModal({
       setError('Client and description are required');
       return;
     }
-    if (isNewClient && newClientEmail.trim() && !EMAIL_REGEX.test(newClientEmail.trim())) {
-      setError('Please enter a valid email address for the new client');
-      return;
-    }
     setSaving(true);
     setError('');
     try {
-      // Create new client organisation if needed
+      // Create new client organisation if needed.
+      // Email + phone are deliberately NOT collected here any more — those
+      // belong on a Person, not the Org. Staff add org-level catchall comms
+      // via Org Detail later if needed. (See discussion 13 May 2026.)
       let resolvedClientId = clientId;
       if (isNewClient && clientName.trim()) {
         try {
           const newOrg = await api.post<{ id: string }>('/organisations', {
             name: clientName.trim(),
             type: 'client',
-            email: newClientEmail.trim() || undefined,
-            phone: newClientPhone.trim() || undefined,
           });
           resolvedClientId = newOrg.id;
         } catch (orgErr) {
           setError(orgErr instanceof Error ? orgErr.message : 'Failed to create client organisation');
           setSaving(false);
           return;
+        }
+      }
+
+      // Create any staged contacts attached to the client org. Doing this
+      // BEFORE the enquiry is created means the org-level routing in Phase
+      // 4 will find them on day one of the new job's life.
+      if (resolvedClientId) {
+        const clientContacts = pendingContacts.filter(c => c.target === 'client');
+        for (const c of clientContacts) {
+          try {
+            await api.post(`/organisations/${resolvedClientId}/people`, {
+              new_person: {
+                first_name: c.first_name,
+                last_name: c.last_name,
+                email: c.email || undefined,
+                mobile: c.phone || undefined,
+              },
+              role: c.role,
+              is_primary: c.is_primary,
+            });
+          } catch (contactErr) {
+            console.error('Failed to create contact:', contactErr);
+            // Non-fatal — enquiry still goes ahead. Staff can re-add from Org Detail.
+          }
         }
       }
 
@@ -1061,15 +1167,40 @@ function NewEnquiryModal({
         band_name: bandName || undefined,
       });
 
-      // Link band if selected
-      if (bandId && created.id) {
-        try {
-          await api.post(`/pipeline/${created.id}/organisations`, {
-            organisation_id: bandId,
-            role: 'band',
-          });
-        } catch (err) {
-          console.error('Failed to link band:', err);
+      // Link any organisations the user added — bands, promoters, labels,
+      // venue operators, suppliers. New orgs get created here too.
+      if (created.id && linkedOrgs.length > 0) {
+        for (const lo of linkedOrgs) {
+          try {
+            let resolvedLinkedOrgId = lo.orgId;
+            if (!resolvedLinkedOrgId && lo.orgName.trim()) {
+              // Map the linked-org role to the most sensible default org type.
+              // Free-text orgs typed here usually need their type set later
+              // anyway, so we pick a coarse default rather than asking.
+              const orgTypeForRole: Record<string, string> = {
+                band: 'band',
+                management: 'management',
+                promoter: 'promoter',
+                label: 'label',
+                venue_operator: 'venue_operator',
+                supplier: 'supplier',
+                other: 'other',
+              };
+              const newOrg = await api.post<{ id: string }>('/organisations', {
+                name: lo.orgName.trim(),
+                type: orgTypeForRole[lo.role] || 'other',
+              });
+              resolvedLinkedOrgId = newOrg.id;
+            }
+            if (resolvedLinkedOrgId) {
+              await api.post(`/pipeline/${created.id}/organisations`, {
+                organisation_id: resolvedLinkedOrgId,
+                role: lo.role,
+              });
+            }
+          } catch (err) {
+            console.error('Failed to link organisation:', lo.orgName, err);
+          }
         }
       }
 
@@ -1105,12 +1236,18 @@ function NewEnquiryModal({
       }
 
       // Reset form
-      setClientName(''); setClientId(null); setIsNewClient(false); setNewClientEmail(''); setNewClientPhone(''); setDetails('');
+      setClientName(''); setClientId(null); setIsNewClient(false); setDetails('');
       setOutDate(''); setJobDate(''); setJobEnd(''); setReturnDate('');
       setOutLinked(true); setReturnLinked(true);
       setJobName(''); setJobValue(''); setLikelihood('warm');
       setClientHistory(null);
-      setBandName(''); setBandId(null); setBandSearch(''); setBandResults([]);
+      setLinkedOrgs([]); setShowAddLinkedOrg(false);
+      setLinkedOrgPickedId(null); setLinkedOrgPickedName('');
+      setLinkedOrgSearch(''); setLinkedOrgResults([]); setLinkedOrgRole('band');
+      setPendingContacts([]); setShowAddContact(false);
+      setContactFirstName(''); setContactLastName(''); setContactEmail('');
+      setContactPhone(''); setContactRole('General Contact'); setContactIsPrimary(false);
+      setClientPeople([]);
       setPendingPerson(null);
       setEnquirySource(''); setNotes(''); setShowOptional(false);
       setStagedFiles([]); setFileTag(''); setFileComment('');
@@ -1147,7 +1284,7 @@ function NewEnquiryModal({
             <label className="block text-sm font-medium text-gray-700 mb-1">Client *</label>
             <ClientPicker
               value={clientName}
-              onChange={(name) => { setClientName(name); setClientId(null); setIsNewClient(false); setPendingPerson(null); }}
+              onChange={(name) => { setClientName(name); setClientId(null); setIsNewClient(false); setPendingPerson(null); clearClientContacts(); }}
               onSelect={handleClientSelect}
               onCreateNew={handleCreateNewClient}
             />
@@ -1186,6 +1323,7 @@ function NewEnquiryModal({
                           setClientId(org.id);
                           setIsNewClient(false);
                           setPendingPerson(null);
+                          clearClientContacts();
                           fetchClientHistory(org.id, org.name, bandId);
                         }}
                         className="px-2.5 py-1 bg-white border border-amber-300 rounded text-xs text-amber-900 hover:bg-amber-100 transition-colors"
@@ -1202,100 +1340,375 @@ function NewEnquiryModal({
               <p className="text-xs text-green-600 mt-1">Linked to organisation</p>
             )}
             {isNewClient && (
-              <div className="mt-2 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-medium text-green-800">
-                    New client: <span className="font-semibold">{clientName}</span>
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => { setIsNewClient(false); setNewClientEmail(''); setNewClientPhone(''); }}
-                    className="text-xs text-green-500 hover:text-green-700"
-                  >
-                    &times; Cancel
-                  </button>
-                </div>
-                <div className="space-y-2">
-                  <input
-                    type="email"
-                    value={newClientEmail}
-                    onChange={(e) => setNewClientEmail(e.target.value)}
-                    placeholder="Email (optional)"
-                    className={`w-full border rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-1 bg-white ${newClientEmail.trim() && !EMAIL_REGEX.test(newClientEmail.trim()) ? 'border-red-400 focus:border-red-500 focus:ring-red-500' : 'border-green-200 focus:border-green-400 focus:ring-green-400'}`}
-                  />
-                  {newClientEmail.trim() && !EMAIL_REGEX.test(newClientEmail.trim()) && (
-                    <p className="text-xs text-red-500 mt-0.5">Please enter a valid email address</p>
-                  )}
-                  <input
-                    type="tel"
-                    value={newClientPhone}
-                    onChange={(e) => setNewClientPhone(e.target.value)}
-                    placeholder="Phone (optional)"
-                    className="w-full border border-green-200 rounded px-3 py-1.5 text-sm focus:border-green-400 focus:outline-none focus:ring-1 focus:ring-green-400 bg-white"
-                  />
-                </div>
+              <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded-lg flex items-center justify-between">
+                <p className="text-sm text-green-800">
+                  Will create new client: <span className="font-semibold">{clientName}</span>
+                </p>
+                <button
+                  type="button"
+                  onClick={() => { setIsNewClient(false); }}
+                  className="text-xs text-green-500 hover:text-green-700"
+                >
+                  &times; Cancel
+                </button>
               </div>
             )}
           </div>
 
-          {/* Band picker (optional) */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Band / Act <span className="text-gray-400 font-normal">(optional)</span>
-            </label>
-            {bandId ? (
-              <div className="flex items-center gap-2 bg-purple-50 border border-purple-200 rounded px-3 py-2">
-                <span className="text-sm font-medium text-purple-700">{bandName}</span>
-                <button
-                  onClick={() => { setBandId(null); setBandName(''); setBandSearch(''); if (clientName) fetchClientHistory(clientId, clientName, null); }}
-                  className="ml-auto text-xs text-purple-400 hover:text-purple-600"
-                >
-                  &times; Remove
-                </button>
+          {/* Contacts cascade — surface people at the picked client and let
+              staff add new ones without leaving the modal. Hidden until a
+              client is in play. Staged-then-created on submit for new
+              clients (org doesn't exist yet). */}
+          {(clientId || isNewClient) && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-gray-700">
+                  Contacts at {clientName || 'this client'} <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                {!showAddContact && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAddContact(true)}
+                    className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                  >
+                    + Add contact
+                  </button>
+                )}
               </div>
-            ) : (
-              <div className="relative">
-                <input
-                  type="text"
-                  value={bandSearch}
-                  onChange={(e) => setBandSearch(e.target.value)}
-                  placeholder="Search for band or organisation..."
-                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
-                />
-                {bandResults.length > 0 && (
-                  <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-48 overflow-y-auto">
-                    {bandResults.map((o) => (
+
+              {/* Existing people on the picked client (read-only here — the
+                  full contact-management lives on the Org Detail page). */}
+              {clientId && (
+                <>
+                  {clientPeopleLoading && (
+                    <p className="text-xs text-gray-400 italic">Loading contacts…</p>
+                  )}
+                  {!clientPeopleLoading && clientPeople.length === 0 && pendingContacts.filter(c => c.target === 'client').length === 0 && (
+                    <p className="text-xs text-gray-400 italic">No contacts on file yet — add one below or via the organisation page later.</p>
+                  )}
+                  {clientPeople.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {clientPeople.map(p => (
+                        <span key={p.id} className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 border border-gray-200 rounded text-xs text-gray-700">
+                          {p.is_primary && <span className="text-amber-500" title="Primary contact">★</span>}
+                          <span className="font-medium">{p.person_name}</span>
+                          {p.role && <span className="text-gray-400">({p.role})</span>}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Pending contacts (entered in modal, not yet created). For
+                  existing clients these are created immediately on submit;
+                  for new clients they're created after the org itself. */}
+              {pendingContacts.filter(c => c.target === 'client').length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {pendingContacts.filter(c => c.target === 'client').map(c => (
+                    <span key={c._tempId} className="inline-flex items-center gap-1 px-2 py-1 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+                      <span className="font-medium">{`${c.first_name} ${c.last_name}`.trim() || c.email || 'New contact'}</span>
+                      {c.role && <span className="text-blue-400">({c.role})</span>}
                       <button
-                        key={o.id}
-                        onClick={async () => {
-                          setBandId(o.id); setBandName(o.name); setBandResults([]); setBandSearch('');
-                          // Refresh history with band context
-                          if (clientName) fetchClientHistory(clientId, clientName, o.id);
-                          // Auto-suggest client from org graph if client is empty
-                          if (!clientName && !clientId) {
-                            try {
-                              const suggestions = await api.get<{ data: Array<{ org_id: string; org_name: string; suggested_role: string; relationship_type: string }> }>(`/organisations/${o.id}/suggestions`);
-                              const clientSuggestion = suggestions.data.find(s => s.suggested_role === 'client' || s.suggested_role === 'management');
-                              if (clientSuggestion) {
-                                setClientName(clientSuggestion.org_name);
-                                setClientId(clientSuggestion.org_id);
-                              }
-                            } catch { /* suggestions are nice-to-have */ }
+                        type="button"
+                        onClick={() => setPendingContacts(prev => prev.filter(x => x._tempId !== c._tempId))}
+                        className="text-blue-400 hover:text-blue-600 leading-none ml-0.5"
+                        title="Remove"
+                      >
+                        &times;
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* Inline add-contact form */}
+              {showAddContact && (
+                <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      value={contactFirstName}
+                      onChange={e => setContactFirstName(e.target.value)}
+                      placeholder="First name *"
+                      className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                    />
+                    <input
+                      type="text"
+                      value={contactLastName}
+                      onChange={e => setContactLastName(e.target.value)}
+                      placeholder="Last name *"
+                      className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="email"
+                      value={contactEmail}
+                      onChange={e => setContactEmail(e.target.value)}
+                      placeholder="Email"
+                      className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                    />
+                    <input
+                      type="tel"
+                      value={contactPhone}
+                      onChange={e => setContactPhone(e.target.value)}
+                      placeholder="Phone"
+                      className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={contactRole}
+                      onChange={e => setContactRole(e.target.value)}
+                      className="flex-1 border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                    >
+                      {PERSON_ORG_ROLES.map(r => (
+                        <option key={r} value={r}>{r}</option>
+                      ))}
+                    </select>
+                    <label className="flex items-center gap-1 text-xs text-blue-800 whitespace-nowrap cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={contactIsPrimary}
+                        onChange={e => setContactIsPrimary(e.target.checked)}
+                        className="rounded border-blue-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      Primary
+                    </label>
+                  </div>
+                  {contactEmail.trim() && !EMAIL_REGEX.test(contactEmail.trim()) && (
+                    <p className="text-xs text-red-500">Please enter a valid email address</p>
+                  )}
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowAddContact(false);
+                        setContactFirstName(''); setContactLastName('');
+                        setContactEmail(''); setContactPhone('');
+                        setContactRole('General Contact'); setContactIsPrimary(false);
+                      }}
+                      className="text-xs text-gray-500 hover:text-gray-700"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!contactFirstName.trim() || !contactLastName.trim()) {
+                          setError('Contact needs both a first and last name');
+                          return;
+                        }
+                        if (contactEmail.trim() && !EMAIL_REGEX.test(contactEmail.trim())) {
+                          setError('Please enter a valid email address for the contact');
+                          return;
+                        }
+                        setError('');
+                        setPendingContacts(prev => [...prev, {
+                          _tempId: `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                          target: 'client',
+                          first_name: contactFirstName.trim(),
+                          last_name: contactLastName.trim(),
+                          email: contactEmail.trim(),
+                          phone: contactPhone.trim(),
+                          role: contactRole,
+                          is_primary: contactIsPrimary,
+                        }]);
+                        setShowAddContact(false);
+                        setContactFirstName(''); setContactLastName('');
+                        setContactEmail(''); setContactPhone('');
+                        setContactRole('General Contact'); setContactIsPrimary(false);
+                      }}
+                      className="text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700"
+                    >
+                      Save contact
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Linked organisations — generalises the old single "Band / Act"
+              picker. A job can carry N linked orgs (band, management,
+              promoter, label, venue operator, supplier). The first linked
+              org with role='band' is used for band trading history, so the
+              old sidebar behaviour is preserved. New orgs typed here are
+              created on submit. */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-sm font-medium text-gray-700">
+                Linked organisations <span className="text-gray-400 font-normal">(band, promoter, label, etc — optional)</span>
+              </label>
+              {!showAddLinkedOrg && (
+                <button
+                  type="button"
+                  onClick={() => setShowAddLinkedOrg(true)}
+                  className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                >
+                  + Add organisation
+                </button>
+              )}
+            </div>
+
+            {/* Already-linked orgs */}
+            {linkedOrgs.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {linkedOrgs.map(lo => {
+                  const roleLabel = LINKED_ORG_ROLES.find(r => r.value === lo.role)?.label || lo.role;
+                  return (
+                    <span key={lo._tempId} className="inline-flex items-center gap-1 px-2 py-1 bg-purple-50 border border-purple-200 rounded text-xs text-purple-800">
+                      <span className="font-medium">{lo.orgName}</span>
+                      <span className="text-purple-400">({roleLabel}{lo.isNew ? ' — new' : ''})</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLinkedOrgs(prev => prev.filter(x => x._tempId !== lo._tempId));
+                          // If we removed the band link, refresh client history without band context
+                          if (lo.role === 'band' && clientName) {
+                            const remainingBand = linkedOrgs.find(x => x._tempId !== lo._tempId && x.role === 'band' && x.orgId);
+                            fetchClientHistory(clientId, clientName, remainingBand?.orgId ?? null);
                           }
                         }}
-                        className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm flex items-center gap-2 border-b border-gray-50 last:border-b-0"
+                        className="text-purple-400 hover:text-purple-600 leading-none ml-0.5"
+                        title="Remove"
                       >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium truncate">{o.name}</span>
-                            <span className="text-xs text-gray-400">{o.type}</span>
-                          </div>
-                          {o.email && <div className="text-xs text-gray-400 truncate">{o.email}</div>}
-                        </div>
+                        &times;
                       </button>
-                    ))}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Inline add-organisation form */}
+            {showAddLinkedOrg && (
+              <div className="mt-2 p-3 bg-purple-50 border border-purple-200 rounded-lg space-y-2">
+                {linkedOrgPickedId || (linkedOrgPickedName && !linkedOrgPickedId) ? (
+                  <div className="flex items-center gap-2 bg-white border border-purple-200 rounded px-2 py-1.5">
+                    <span className="text-sm font-medium text-purple-800 flex-1 truncate">{linkedOrgPickedName}</span>
+                    {!linkedOrgPickedId && <span className="text-xs text-purple-400">(new)</span>}
+                    <button
+                      type="button"
+                      onClick={() => { setLinkedOrgPickedId(null); setLinkedOrgPickedName(''); setLinkedOrgSearch(''); }}
+                      className="text-xs text-purple-400 hover:text-purple-600"
+                    >
+                      Change
+                    </button>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={linkedOrgSearch}
+                      onChange={e => setLinkedOrgSearch(e.target.value)}
+                      placeholder="Search for organisation, or type a new name…"
+                      className="w-full border border-purple-200 rounded px-2 py-1.5 text-sm focus:border-purple-400 focus:outline-none focus:ring-1 focus:ring-purple-400 bg-white"
+                    />
+                    {linkedOrgResults.length > 0 && (
+                      <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-48 overflow-y-auto">
+                        {linkedOrgResults.map(o => (
+                          <button
+                            key={o.id}
+                            type="button"
+                            onClick={() => {
+                              setLinkedOrgPickedId(o.id);
+                              setLinkedOrgPickedName(o.name);
+                              setLinkedOrgResults([]);
+                              setLinkedOrgSearch('');
+                            }}
+                            className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm border-b border-gray-50 last:border-b-0"
+                          >
+                            <span className="font-medium">{o.name}</span>
+                            <span className="text-xs text-gray-400 ml-2">{o.type}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {linkedOrgSearch.trim().length >= 2 && linkedOrgResults.length === 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLinkedOrgPickedName(linkedOrgSearch.trim());
+                          setLinkedOrgPickedId(null);
+                          setLinkedOrgSearch('');
+                        }}
+                        className="mt-1 text-xs text-purple-600 hover:text-purple-700 font-medium"
+                      >
+                        + Create "{linkedOrgSearch.trim()}" as a new organisation
+                      </button>
+                    )}
                   </div>
                 )}
+                <select
+                  value={linkedOrgRole}
+                  onChange={e => setLinkedOrgRole(e.target.value)}
+                  className="w-full border border-purple-200 rounded px-2 py-1.5 text-sm focus:border-purple-400 focus:outline-none focus:ring-1 focus:ring-purple-400 bg-white"
+                >
+                  {LINKED_ORG_ROLES.map(r => (
+                    <option key={r.value} value={r.value}>{r.label}</option>
+                  ))}
+                </select>
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddLinkedOrg(false);
+                      setLinkedOrgPickedId(null); setLinkedOrgPickedName('');
+                      setLinkedOrgSearch(''); setLinkedOrgRole('band');
+                      setLinkedOrgResults([]);
+                    }}
+                    className="text-xs text-gray-500 hover:text-gray-700"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const name = linkedOrgPickedName.trim();
+                      if (!name) { setError('Pick or type an organisation name'); return; }
+                      // Block duplicate role-pair (same org + same role)
+                      if (linkedOrgs.some(lo => lo.orgId && lo.orgId === linkedOrgPickedId && lo.role === linkedOrgRole)) {
+                        setError(`${name} is already linked as ${LINKED_ORG_ROLES.find(r => r.value === linkedOrgRole)?.label || linkedOrgRole}`);
+                        return;
+                      }
+                      setError('');
+                      const newLink = {
+                        _tempId: `lo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                        orgId: linkedOrgPickedId,
+                        orgName: name,
+                        role: linkedOrgRole,
+                        isNew: !linkedOrgPickedId,
+                      };
+                      setLinkedOrgs(prev => [...prev, newLink]);
+
+                      // Refresh band history if this is a band and we have a client
+                      if (linkedOrgRole === 'band' && linkedOrgPickedId && clientName) {
+                        fetchClientHistory(clientId, clientName, linkedOrgPickedId);
+                      }
+                      // Auto-suggest client from band's org graph when client is empty
+                      if (linkedOrgRole === 'band' && linkedOrgPickedId && !clientName && !clientId) {
+                        try {
+                          const suggestions = await api.get<{ data: Array<{ org_id: string; org_name: string; suggested_role: string; relationship_type: string }> }>(`/organisations/${linkedOrgPickedId}/suggestions`);
+                          const clientSuggestion = suggestions.data.find(s => s.suggested_role === 'client' || s.suggested_role === 'management');
+                          if (clientSuggestion) {
+                            setClientName(clientSuggestion.org_name);
+                            setClientId(clientSuggestion.org_id);
+                          }
+                        } catch { /* suggestions are nice-to-have */ }
+                      }
+
+                      setShowAddLinkedOrg(false);
+                      setLinkedOrgPickedId(null); setLinkedOrgPickedName('');
+                      setLinkedOrgSearch(''); setLinkedOrgRole('band');
+                      setLinkedOrgResults([]);
+                    }}
+                    className="text-xs bg-purple-600 text-white px-3 py-1 rounded hover:bg-purple-700"
+                  >
+                    Save organisation
+                  </button>
+                </div>
               </div>
             )}
           </div>
