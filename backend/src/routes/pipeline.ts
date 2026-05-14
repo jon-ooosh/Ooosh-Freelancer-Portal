@@ -335,6 +335,13 @@ const createEnquirySchema = z.object({
   chase_alert_user_id: z.string().uuid().optional().nullable(),
   service_types: z.array(z.enum(['self_drive_van', 'backline', 'rehearsal'])).optional().nullable(),
   band_name: z.string().optional().nullable(),
+  // Per-job contact selection — landed in migration 086. The modal sends
+  // the people staff ticked as contacts on this hire (a subset of the
+  // client org's people), with one optional `primary_contact_person_id`
+  // marking the lead. Routing graduation that ACTUALLY reads this lives
+  // in the next phase; this just persists the choice.
+  contact_person_ids: z.array(z.string().uuid()).optional().nullable(),
+  primary_contact_person_id: z.string().uuid().optional().nullable(),
 });
 
 router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, res: Response) => {
@@ -345,6 +352,7 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
       job_value, likelihood, notes, manager1_person_id,
       next_chase_date, chase_interval_days, chase_alert_user_id,
       service_types, band_name,
+      contact_person_ids, primary_contact_person_id,
       out_time, start_time, return_time, end_time,
     } = req.body;
     let { details } = req.body;
@@ -524,6 +532,28 @@ router.post('/enquiry', validate(createEnquirySchema), async (req: AuthRequest, 
           }
         } catch (reqErr) {
           console.error(`Failed to create requirement ${reqType} for job ${jobId}:`, reqErr);
+        }
+      }
+    }
+
+    // Per-job contact selection (migration 086). Stores which of the
+    // client org's people are actually on THIS hire. Routing graduation
+    // (Phase C) will read this; for now it's just the audit + display
+    // signal so the cascade picker in the modal has somewhere to land
+    // its ticks.
+    if (contact_person_ids && contact_person_ids.length > 0) {
+      const createdJobId = result.rows[0].id;
+      for (const personId of contact_person_ids) {
+        try {
+          const isPrimary = primary_contact_person_id === personId;
+          await query(
+            `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (job_id, person_id) DO NOTHING`,
+            [createdJobId, personId, isPrimary, req.user!.id]
+          );
+        } catch (contactErr) {
+          console.error(`Failed to link contact ${personId} to job ${createdJobId}:`, contactErr);
         }
       }
     }
