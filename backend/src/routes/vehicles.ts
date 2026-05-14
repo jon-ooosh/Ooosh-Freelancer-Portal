@@ -4456,10 +4456,15 @@ router.get('/turnaround-schedule', async (req: AuthRequest, res: Response) => {
         byJob.set(k, existing ? pickWinner(existing, r) : r);
       }
       // Preserve hire_start ordering (the original SQL ORDER BY).
+      // pg returns TIMESTAMPTZ as JS Date — sort numerically by epoch so the
+      // comparator works whether the column comes back as Date or string.
+      // NULL hire_start AND NULL job_date sorts last.
       const deduped = Array.from(byJob.values()).sort((a, b) => {
-        const as = a.asg_hire_start || a.job_date || '';
-        const bs = b.asg_hire_start || b.job_date || '';
-        return as.localeCompare(bs);
+        const at = a.asg_hire_start ? new Date(a.asg_hire_start).getTime()
+          : (a.job_date ? new Date(a.job_date).getTime() : Number.MAX_SAFE_INTEGER);
+        const bt = b.asg_hire_start ? new Date(b.asg_hire_start).getTime()
+          : (b.job_date ? new Date(b.job_date).getTime() : Number.MAX_SAFE_INTEGER);
+        return at - bt;
       });
       byVehicle.set(vid, deduped);
     }
