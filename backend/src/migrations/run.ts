@@ -120,6 +120,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '083_tts360_repair_quote_settings.sql',
         '084_fleet_turnaround_settings.sql',
         '085_person_org_role_picklist.sql',
+        '086_job_contacts.sql',
       ];
 
       for (const migration of migrations) {

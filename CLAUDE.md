@@ -191,6 +191,13 @@ journalctl -u ooosh-portal -n 50 --no-pager
 
 ```bash
 cd /var/www/ooosh-portal
+# Sanity check: if `git status` shows unexpected local changes on the server
+# (uncommitted edits, untracked files on tracked paths), the pull below will
+# abort with "your local changes would be overwritten". Investigate first
+# — those edits are usually leftover from a previous deploy or manual
+# hotfix. Once you're sure nothing on the server is precious, clear with
+# `git reset --hard origin/<current-branch>` and re-run the pull.
+git status
 git pull origin <current-branch>
 cd backend && npm run build
 cd ../frontend && npm run build

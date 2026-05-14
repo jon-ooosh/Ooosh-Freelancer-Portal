@@ -333,11 +333,18 @@ function ClientPicker({
               <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
                 r.type === 'organisation' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
               }`}>
-                {r.type === 'organisation' ? 'Org' : 'Person'}
+                {r.type === 'organisation' ? 'Org' : 'Contact'}
               </span>
               <div className="min-w-0">
                 <div className="text-sm font-medium text-gray-900 truncate">{r.name}</div>
-                {r.subtitle && <div className="text-xs text-gray-400 truncate">{r.subtitle}</div>}
+                {r.type === 'person' && (
+                  <div className="text-xs text-gray-400 truncate italic">
+                    Person — picks their organisation as client
+                  </div>
+                )}
+                {r.type === 'organisation' && r.subtitle && (
+                  <div className="text-xs text-gray-400 truncate">{r.subtitle}</div>
+                )}
               </div>
             </button>
           ))}
@@ -786,20 +793,49 @@ function NewEnquiryModal({
     role: string; is_primary: boolean; status: string;
   }>>([]);
   const [clientPeopleLoading, setClientPeopleLoading] = useState(false);
+
+  // Pending contacts staged in the modal. Two flavours both routed through
+  // POST /api/organisations/:orgId/people on submit:
+  //   - `existing_person_id` set → "link existing person to this org"
+  //     (search-first Add Contact path, when staff picks an existing person)
+  //   - `existing_person_id` null → "create + link new person"
+  //     (search-first Add Contact path, when staff clicks "Create new")
+  // Both end up as job contacts via job_contacts after the link succeeds.
   const [pendingContacts, setPendingContacts] = useState<Array<{
     _tempId: string;
     target: 'client' | string;        // 'client' or a linked-org tempId
+    existing_person_id: string | null;
     first_name: string; last_name: string;
     email: string; phone: string;
-    role: string; is_primary: boolean;
+    role: string;
   }>>([]);
+
+  // Per-job contact selection (writes to job_contacts on submit).
+  //   - tickedExistingPersonIds: of the client org's existing people, which
+  //     ones did staff tick as contacts on THIS hire.
+  //   - leadContactKey: stable key for the lead contact across both buckets.
+  //     For ticked existing people, key = person_id. For pending entries,
+  //     key = _tempId. Resolved to a real person_id at submit time.
+  //   - First-clicked auto-becomes lead. Subsequent clicks on a non-lead
+  //     selected chip promote it to lead. X removes.
+  const [tickedExistingPersonIds, setTickedExistingPersonIds] = useState<Set<string>>(new Set());
+  const [leadContactKey, setLeadContactKey] = useState<string | null>(null);
+
+  // Add-contact UX (search-first, mirrors Org Detail "Add Person")
   const [showAddContact, setShowAddContact] = useState(false);
+  const [addContactSearch, setAddContactSearch] = useState('');
+  const [addContactResults, setAddContactResults] = useState<Array<{
+    id: string; name: string; subtitle: string | null; type: string;
+  }>>([]);
+  const [addContactSearching, setAddContactSearching] = useState(false);
+  // Inline "create new" form (revealed when staff clicks the "+ Create new
+  // contact" affordance after a search)
+  const [showCreateContactForm, setShowCreateContactForm] = useState(false);
   const [contactFirstName, setContactFirstName] = useState('');
   const [contactLastName, setContactLastName] = useState('');
   const [contactEmail, setContactEmail] = useState('');
   const [contactPhone, setContactPhone] = useState('');
   const [contactRole, setContactRole] = useState('General Contact');
-  const [contactIsPrimary, setContactIsPrimary] = useState(false);
 
   // Linked organisations — replaces the old single-org "Band / Act" picker.
   // A job can now have N linked orgs (band, management, promoter, label,
@@ -950,13 +986,89 @@ function NewEnquiryModal({
     return () => window.removeEventListener('keydown', handleEsc);
   }, [isOpen, onClose]);
 
+  // Add-contact search — debounced /api/search lookup for the search-first
+  // affordance. People-only filter so staff land on a known person rather
+  // than misclicking an org.
+  useEffect(() => {
+    if (!showAddContact || addContactSearch.length < 2) {
+      setAddContactResults([]);
+      return;
+    }
+    setAddContactSearching(true);
+    const timeout = setTimeout(async () => {
+      try {
+        const data = await api.get<{ results: Array<{ id: string; name: string; subtitle: string | null; type: string }> }>(
+          `/search?q=${encodeURIComponent(addContactSearch)}&limit=10`
+        );
+        setAddContactResults((data.results || []).filter(r => r.type === 'person'));
+      } catch {
+        setAddContactResults([]);
+      } finally {
+        setAddContactSearching(false);
+      }
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [addContactSearch, showAddContact]);
+
   if (!isOpen) return null;
 
-  // Drop client-target pending contacts whenever the client identity
-  // changes. Otherwise a contact staged for ATC Live could end up attached
-  // to a different org if staff switch the client mid-modal.
+  // Drop client-target pending contacts AND ticks whenever the client
+  // identity changes. Otherwise a contact staged for ATC Live could end
+  // up attached to a different org if staff switch the client mid-modal.
   const clearClientContacts = () => {
     setPendingContacts(prev => prev.filter(c => c.target !== 'client'));
+    setTickedExistingPersonIds(new Set());
+    setLeadContactKey(null);
+  };
+
+  // Chip click handler — implements the click-once-select /
+  // click-again-promote-to-lead pattern. First-clicked auto-becomes lead
+  // (only if no lead exists yet). Subsequent clicks on a non-lead chip
+  // promote it. Click on the current lead is a no-op (use X to deselect).
+  const handleChipClick = (key: string) => {
+    // Is this an existing person (key looks like a UUID) or a pending entry
+    // (key looks like _tempId)? The toggle logic differs slightly.
+    const isPending = key.startsWith('c-');
+    const isTicked = isPending
+      ? pendingContacts.some(c => c._tempId === key)
+      : tickedExistingPersonIds.has(key);
+
+    if (!isTicked) {
+      // Select. Become lead if no current lead.
+      if (!isPending) {
+        setTickedExistingPersonIds(prev => new Set(prev).add(key));
+      }
+      // (Pending entries are already in the array; "selected" === "exists")
+      setLeadContactKey(prev => prev ?? key);
+      return;
+    }
+
+    // Already selected. If lead, no-op (use X to deselect).
+    if (leadContactKey === key) return;
+    // Promote to lead.
+    setLeadContactKey(key);
+  };
+
+  // Deselect a contact entirely (X button). If it was the lead, promote
+  // the next still-selected contact to lead.
+  const handleChipRemove = (key: string) => {
+    const isPending = key.startsWith('c-');
+    if (isPending) {
+      setPendingContacts(prev => prev.filter(c => c._tempId !== key));
+    } else {
+      setTickedExistingPersonIds(prev => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+    if (leadContactKey === key) {
+      // Pick next available lead — first remaining ticked existing or
+      // first remaining pending, in that order.
+      const nextExisting = [...tickedExistingPersonIds].find(id => id !== key);
+      const nextPending = pendingContacts.find(c => c.target === 'client' && c._tempId !== key);
+      setLeadContactKey(nextExisting ?? nextPending?._tempId ?? null);
+    }
   };
 
   const handleClientSelect = async (result: SearchResult) => {
@@ -1123,27 +1235,63 @@ function NewEnquiryModal({
         }
       }
 
-      // Create any staged contacts attached to the client org. Doing this
-      // BEFORE the enquiry is created means the org-level routing in Phase
-      // 4 will find them on day one of the new job's life.
+      // Create / link any staged contacts on the client org, and build a
+      // mapping from each contact's modal-time key (person_id for existing
+      // people, _tempId for staged ones) to the resolved real person_id.
+      // The job_contacts writes on the backend need real UUIDs.
+      const tempIdToPersonId = new Map<string, string>();
       if (resolvedClientId) {
         const clientContacts = pendingContacts.filter(c => c.target === 'client');
         for (const c of clientContacts) {
           try {
-            await api.post(`/organisations/${resolvedClientId}/people`, {
-              new_person: {
-                first_name: c.first_name,
-                last_name: c.last_name,
-                email: c.email || undefined,
-                mobile: c.phone || undefined,
-              },
-              role: c.role,
-              is_primary: c.is_primary,
-            });
+            // Existing-person link: pass person_id. Otherwise: create + link.
+            const body = c.existing_person_id
+              ? { person_id: c.existing_person_id, role: c.role, is_primary: false }
+              : {
+                  new_person: {
+                    first_name: c.first_name,
+                    last_name: c.last_name,
+                    email: c.email || undefined,
+                    mobile: c.phone || undefined,
+                  },
+                  role: c.role,
+                  is_primary: false,
+                };
+            const result = await api.post<{
+              role: { person_id: string };
+              person?: { id: string } | null;
+            }>(`/organisations/${resolvedClientId}/people`, body);
+            // Resolve the person_id from either the created person or the
+            // role row (which carries person_id whether new or existing).
+            const resolvedId = result.person?.id || result.role.person_id;
+            tempIdToPersonId.set(c._tempId, resolvedId);
           } catch (contactErr) {
-            console.error('Failed to create contact:', contactErr);
+            console.error('Failed to create/link contact:', contactErr);
             // Non-fatal — enquiry still goes ahead. Staff can re-add from Org Detail.
           }
+        }
+      }
+
+      // Build the per-job contact list. Existing-org-people who got ticked
+      // contribute their person_id directly; staged entries contribute the
+      // newly-resolved person_id (looked up via tempIdToPersonId).
+      const contactPersonIds: string[] = [
+        ...tickedExistingPersonIds,
+        ...pendingContacts
+          .filter(c => c.target === 'client')
+          .map(c => tempIdToPersonId.get(c._tempId))
+          .filter((id): id is string => !!id),
+      ];
+
+      // Resolve the lead contact key to a real person_id. The key is
+      // either a person_id directly (for existing-org chips) or a _tempId
+      // (for pending entries) — the latter needs the mapping built above.
+      let primaryContactPersonId: string | null = null;
+      if (leadContactKey) {
+        if (leadContactKey.startsWith('c-')) {
+          primaryContactPersonId = tempIdToPersonId.get(leadContactKey) ?? null;
+        } else {
+          primaryContactPersonId = leadContactKey;
         }
       }
 
@@ -1165,6 +1313,8 @@ function NewEnquiryModal({
         next_chase_date: nextChaseDate || undefined,
         chase_alert_user_id: chaseAlertUserId || undefined,
         band_name: bandName || undefined,
+        contact_person_ids: contactPersonIds.length > 0 ? contactPersonIds : undefined,
+        primary_contact_person_id: primaryContactPersonId || undefined,
       });
 
       // Link any organisations the user added — bands, promoters, labels,
@@ -1244,9 +1394,11 @@ function NewEnquiryModal({
       setLinkedOrgs([]); setShowAddLinkedOrg(false);
       setLinkedOrgPickedId(null); setLinkedOrgPickedName('');
       setLinkedOrgSearch(''); setLinkedOrgResults([]); setLinkedOrgRole('band');
-      setPendingContacts([]); setShowAddContact(false);
+      setPendingContacts([]); setShowAddContact(false); setShowCreateContactForm(false);
       setContactFirstName(''); setContactLastName(''); setContactEmail('');
-      setContactPhone(''); setContactRole('General Contact'); setContactIsPrimary(false);
+      setContactPhone(''); setContactRole('General Contact');
+      setAddContactSearch(''); setAddContactResults([]);
+      setTickedExistingPersonIds(new Set()); setLeadContactKey(null);
       setClientPeople([]);
       setPendingPerson(null);
       setEnquirySource(''); setNotes(''); setShowOptional(false);
@@ -1356,19 +1508,20 @@ function NewEnquiryModal({
           </div>
 
           {/* Contacts cascade — surface people at the picked client and let
-              staff add new ones without leaving the modal. Hidden until a
-              client is in play. Staged-then-created on submit for new
-              clients (org doesn't exist yet). */}
+              staff TICK who's on this hire (writes to job_contacts) +
+              "+ Add contact" to attach more (search-first to avoid
+              duplicates). First-clicked chip auto-becomes lead; click
+              another to promote it. X to deselect. */}
           {(clientId || isNewClient) && (
             <div>
               <div className="flex items-center justify-between mb-1">
                 <label className="block text-sm font-medium text-gray-700">
-                  Contacts at {clientName || 'this client'} <span className="text-gray-400 font-normal">(optional)</span>
+                  Contacts at {clientName || 'this client'} <span className="text-gray-400 font-normal">(optional — tick who's on this hire)</span>
                 </label>
                 {!showAddContact && (
                   <button
                     type="button"
-                    onClick={() => setShowAddContact(true)}
+                    onClick={() => { setShowAddContact(true); setAddContactSearch(''); setAddContactResults([]); setShowCreateContactForm(false); }}
                     className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
                   >
                     + Add contact
@@ -1376,55 +1529,181 @@ function NewEnquiryModal({
                 )}
               </div>
 
-              {/* Existing people on the picked client (read-only here — the
-                  full contact-management lives on the Org Detail page). */}
-              {clientId && (
-                <>
-                  {clientPeopleLoading && (
-                    <p className="text-xs text-gray-400 italic">Loading contacts…</p>
-                  )}
-                  {!clientPeopleLoading && clientPeople.length === 0 && pendingContacts.filter(c => c.target === 'client').length === 0 && (
-                    <p className="text-xs text-gray-400 italic">No contacts on file yet — add one below or via the organisation page later.</p>
-                  )}
-                  {clientPeople.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mb-2">
-                      {clientPeople.map(p => (
-                        <span key={p.id} className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 border border-gray-200 rounded text-xs text-gray-700">
-                          {p.is_primary && <span className="text-amber-500" title="Primary contact">★</span>}
-                          <span className="font-medium">{p.person_name}</span>
-                          {p.role && <span className="text-gray-400">({p.role})</span>}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </>
+              {/* Empty state */}
+              {clientId && !clientPeopleLoading && clientPeople.length === 0 && pendingContacts.filter(c => c.target === 'client').length === 0 && (
+                <p className="text-xs text-gray-400 italic">No contacts on file yet — add one here or via the organisation page later.</p>
+              )}
+              {clientId && clientPeopleLoading && (
+                <p className="text-xs text-gray-400 italic">Loading contacts…</p>
               )}
 
-              {/* Pending contacts (entered in modal, not yet created). For
-                  existing clients these are created immediately on submit;
-                  for new clients they're created after the org itself. */}
-              {pendingContacts.filter(c => c.target === 'client').length > 0 && (
+              {/* Tickable chips. Renders existing org people + any
+                  pending entries the user added in this session. */}
+              {(clientPeople.length > 0 || pendingContacts.filter(c => c.target === 'client').length > 0) && (
                 <div className="flex flex-wrap gap-1.5 mb-2">
-                  {pendingContacts.filter(c => c.target === 'client').map(c => (
-                    <span key={c._tempId} className="inline-flex items-center gap-1 px-2 py-1 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
-                      <span className="font-medium">{`${c.first_name} ${c.last_name}`.trim() || c.email || 'New contact'}</span>
-                      {c.role && <span className="text-blue-400">({c.role})</span>}
-                      <button
-                        type="button"
-                        onClick={() => setPendingContacts(prev => prev.filter(x => x._tempId !== c._tempId))}
-                        className="text-blue-400 hover:text-blue-600 leading-none ml-0.5"
-                        title="Remove"
+                  {clientPeople.map(p => {
+                    const ticked = tickedExistingPersonIds.has(p.person_id);
+                    const isLead = leadContactKey === p.person_id;
+                    return (
+                      <span
+                        key={p.id}
+                        className={`inline-flex items-center gap-1 px-2 py-1 border rounded text-xs cursor-pointer transition-colors ${
+                          isLead
+                            ? 'bg-blue-100 border-blue-400 text-blue-900'
+                            : ticked
+                              ? 'bg-blue-50 border-blue-200 text-blue-800'
+                              : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
+                        }`}
+                        onClick={() => handleChipClick(p.person_id)}
+                        title={isLead ? 'Lead contact' : ticked ? 'Click again to make lead contact' : 'Click to select for this hire'}
                       >
-                        &times;
-                      </button>
-                    </span>
-                  ))}
+                        {isLead && <span title="Lead contact">★</span>}
+                        <span className={isLead ? 'font-bold' : 'font-medium'}>{p.person_name}</span>
+                        {p.role && <span className="opacity-60">({p.role})</span>}
+                        {ticked && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handleChipRemove(p.person_id); }}
+                            className="ml-0.5 opacity-50 hover:opacity-100 leading-none"
+                            title="Remove from this hire"
+                          >
+                            &times;
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
+                  {pendingContacts.filter(c => c.target === 'client').map(c => {
+                    const isLead = leadContactKey === c._tempId;
+                    const displayName = c.existing_person_id
+                      ? `${c.first_name} ${c.last_name}`.trim()
+                      : `${c.first_name} ${c.last_name}`.trim() || c.email || 'New contact';
+                    return (
+                      <span
+                        key={c._tempId}
+                        className={`inline-flex items-center gap-1 px-2 py-1 border rounded text-xs cursor-pointer transition-colors ${
+                          isLead
+                            ? 'bg-blue-100 border-blue-400 text-blue-900'
+                            : 'bg-blue-50 border-blue-200 text-blue-800'
+                        }`}
+                        onClick={() => handleChipClick(c._tempId)}
+                        title={isLead ? 'Lead contact' : 'Click again to make lead contact'}
+                      >
+                        {isLead && <span title="Lead contact">★</span>}
+                        <span className={isLead ? 'font-bold' : 'font-medium'}>{displayName}</span>
+                        {!c.existing_person_id && <span className="opacity-50 italic">— new</span>}
+                        {c.role && <span className="opacity-60">({c.role})</span>}
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleChipRemove(c._tempId); }}
+                          className="ml-0.5 opacity-50 hover:opacity-100 leading-none"
+                          title="Remove"
+                        >
+                          &times;
+                        </button>
+                      </span>
+                    );
+                  })}
                 </div>
               )}
 
-              {/* Inline add-contact form */}
-              {showAddContact && (
+              {/* Search-first Add Contact. Mirrors the Org Detail "Add
+                  Person" pattern — type to find existing people first, so
+                  duplicates don't accumulate. "+ Create new" fallback if
+                  no match. */}
+              {showAddContact && !showCreateContactForm && (
                 <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-blue-800 font-medium">Add a contact to {clientName || 'this client'}</p>
+                    <button
+                      type="button"
+                      onClick={() => { setShowAddContact(false); setAddContactSearch(''); setAddContactResults([]); }}
+                      className="text-xs text-gray-500 hover:text-gray-700"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    value={addContactSearch}
+                    onChange={e => setAddContactSearch(e.target.value)}
+                    placeholder="Search existing people by name or email…"
+                    className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                    autoFocus
+                  />
+                  {addContactSearching && (
+                    <p className="text-xs text-blue-400 italic">Searching…</p>
+                  )}
+                  {!addContactSearching && addContactSearch.length >= 2 && addContactResults.length > 0 && (
+                    <div className="bg-white border border-blue-200 rounded max-h-48 overflow-y-auto">
+                      {addContactResults.map(p => {
+                        // Skip people already at this org (already shown as chips)
+                        const alreadyAtOrg = clientPeople.some(cp => cp.person_id === p.id);
+                        const alreadyStaged = pendingContacts.some(pc => pc.existing_person_id === p.id && pc.target === 'client');
+                        return (
+                          <button
+                            key={p.id}
+                            type="button"
+                            disabled={alreadyAtOrg || alreadyStaged}
+                            onClick={() => {
+                              const tempId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+                              const [firstName, ...rest] = p.name.split(' ');
+                              const entry = {
+                                _tempId: tempId,
+                                target: 'client' as const,
+                                existing_person_id: p.id,
+                                first_name: firstName || '',
+                                last_name: rest.join(' ') || '',
+                                email: p.subtitle || '',
+                                phone: '',
+                                role: 'General Contact',
+                              };
+                              setPendingContacts(prev => [...prev, entry]);
+                              setLeadContactKey(prev => prev ?? tempId);
+                              setShowAddContact(false);
+                              setAddContactSearch('');
+                              setAddContactResults([]);
+                            }}
+                            className={`w-full text-left px-3 py-2 text-sm border-b border-blue-50 last:border-b-0 ${
+                              alreadyAtOrg || alreadyStaged
+                                ? 'opacity-50 cursor-not-allowed'
+                                : 'hover:bg-blue-50'
+                            }`}
+                          >
+                            <div className="font-medium">{p.name}</div>
+                            {p.subtitle && <div className="text-xs text-gray-400">{p.subtitle}</div>}
+                            {alreadyAtOrg && <div className="text-xs text-gray-400 italic">already at this org</div>}
+                            {alreadyStaged && !alreadyAtOrg && <div className="text-xs text-gray-400 italic">already added</div>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {!addContactSearching && addContactSearch.length >= 2 && addContactResults.length === 0 && (
+                    <p className="text-xs text-gray-500 italic">No matching people found</p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCreateContactForm(true);
+                      // Pre-fill if user typed a name in the search
+                      if (addContactSearch.trim()) {
+                        const parts = addContactSearch.trim().split(/\s+/);
+                        setContactFirstName(parts[0] || '');
+                        setContactLastName(parts.slice(1).join(' ') || '');
+                      }
+                    }}
+                    className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    + Create new contact{addContactSearch.trim() ? ` "${addContactSearch.trim()}"` : ''}
+                  </button>
+                </div>
+              )}
+
+              {/* Create-new inline form (revealed from search step) */}
+              {showAddContact && showCreateContactForm && (
+                <div className="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-2">
+                  <p className="text-xs text-blue-800 font-medium">Create a new contact at {clientName || 'this client'}</p>
                   <div className="grid grid-cols-2 gap-2">
                     <input
                       type="text"
@@ -1432,6 +1711,7 @@ function NewEnquiryModal({
                       onChange={e => setContactFirstName(e.target.value)}
                       placeholder="First name *"
                       className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                      autoFocus
                     />
                     <input
                       type="text"
@@ -1457,26 +1737,15 @@ function NewEnquiryModal({
                       className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
                     />
                   </div>
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={contactRole}
-                      onChange={e => setContactRole(e.target.value)}
-                      className="flex-1 border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
-                    >
-                      {PERSON_ORG_ROLES.map(r => (
-                        <option key={r} value={r}>{r}</option>
-                      ))}
-                    </select>
-                    <label className="flex items-center gap-1 text-xs text-blue-800 whitespace-nowrap cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={contactIsPrimary}
-                        onChange={e => setContactIsPrimary(e.target.checked)}
-                        className="rounded border-blue-300 text-blue-600 focus:ring-blue-500"
-                      />
-                      Primary
-                    </label>
-                  </div>
+                  <select
+                    value={contactRole}
+                    onChange={e => setContactRole(e.target.value)}
+                    className="w-full border border-blue-200 rounded px-2 py-1.5 text-sm focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                  >
+                    {PERSON_ORG_ROLES.map(r => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                  </select>
                   {contactEmail.trim() && !EMAIL_REGEX.test(contactEmail.trim()) && (
                     <p className="text-xs text-red-500">Please enter a valid email address</p>
                   )}
@@ -1485,9 +1754,11 @@ function NewEnquiryModal({
                       type="button"
                       onClick={() => {
                         setShowAddContact(false);
+                        setShowCreateContactForm(false);
                         setContactFirstName(''); setContactLastName('');
                         setContactEmail(''); setContactPhone('');
-                        setContactRole('General Contact'); setContactIsPrimary(false);
+                        setContactRole('General Contact');
+                        setAddContactSearch(''); setAddContactResults([]);
                       }}
                       className="text-xs text-gray-500 hover:text-gray-700"
                     >
@@ -1505,20 +1776,25 @@ function NewEnquiryModal({
                           return;
                         }
                         setError('');
+                        const tempId = `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
                         setPendingContacts(prev => [...prev, {
-                          _tempId: `c-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                          _tempId: tempId,
                           target: 'client',
+                          existing_person_id: null,
                           first_name: contactFirstName.trim(),
                           last_name: contactLastName.trim(),
                           email: contactEmail.trim(),
                           phone: contactPhone.trim(),
                           role: contactRole,
-                          is_primary: contactIsPrimary,
                         }]);
+                        // First-added auto-becomes lead
+                        setLeadContactKey(prev => prev ?? tempId);
                         setShowAddContact(false);
+                        setShowCreateContactForm(false);
                         setContactFirstName(''); setContactLastName('');
                         setContactEmail(''); setContactPhone('');
-                        setContactRole('General Contact'); setContactIsPrimary(false);
+                        setContactRole('General Contact');
+                        setAddContactSearch(''); setAddContactResults([]);
                       }}
                       className="text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700"
                     >
@@ -1526,6 +1802,13 @@ function NewEnquiryModal({
                     </button>
                   </div>
                 </div>
+              )}
+
+              {/* Hint about the click-twice promote-to-lead pattern.
+                  Only shown when there's at least one selectable chip and
+                  no current lead. */}
+              {(tickedExistingPersonIds.size > 0 || pendingContacts.filter(c => c.target === 'client').length > 0) && leadContactKey && (
+                <p className="text-xs text-gray-400 italic mt-1">★ marks the lead contact. Click another chip to promote it.</p>
               )}
             </div>
           )}
