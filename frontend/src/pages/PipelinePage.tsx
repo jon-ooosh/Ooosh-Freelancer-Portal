@@ -820,6 +820,13 @@ function NewEnquiryModal({
   //     selected chip promote it to lead. X removes.
   const [tickedExistingPersonIds, setTickedExistingPersonIds] = useState<Set<string>>(new Set());
   const [leadContactKey, setLeadContactKey] = useState<string | null>(null);
+  // When staff arrives at the client via the person-first flow (searched
+  // a person → clicked → their org got promoted), remember which person
+  // they originally clicked so the cascade can auto-tick them when it
+  // loads. Otherwise the modal would surface their org's contacts but
+  // make staff manually pick the person they just searched for — one of
+  // those small UX gaps that's obvious in hindsight.
+  const [personFirstClickedId, setPersonFirstClickedId] = useState<string | null>(null);
 
   // Add-contact UX (search-first, mirrors Org Detail "Add Person")
   const [showAddContact, setShowAddContact] = useState(false);
@@ -963,6 +970,17 @@ function NewEnquiryModal({
   // can surface "Contacts at [Client]" without staff having to leave the
   // modal. Skipped for new-client mode (no org exists yet) and when the
   // field is cleared.
+  //
+  // Auto-tick a sensible default per cascade load (one-shot, not sticky):
+  //   1. Person-first flow → the originally-clicked person (most direct
+  //      signal of intent — staff literally just searched for them).
+  //   2. Org has exactly one contact → that one (no decision to make).
+  //   3. Org has multiple contacts AND one is marked primary at org
+  //      level → that one (the "main contact" signal).
+  //   4. Otherwise → no auto-tick, staff picks deliberately.
+  // Staff can always untick and pick a different one — auto-tick fires
+  // ONCE per client switch, not on every render. If they untick then
+  // submit, that's a deliberate "no lead" choice we respect.
   useEffect(() => {
     if (!clientId) { setClientPeople([]); return; }
     let cancelled = false;
@@ -972,10 +990,37 @@ function NewEnquiryModal({
         if (cancelled) return;
         const active = (data.people || []).filter(p => p.status === 'active');
         setClientPeople(active);
+
+        // Auto-tick default (only when nothing is currently ticked — don't
+        // override a manual selection mid-load if state somehow lingers).
+        if (tickedExistingPersonIds.size === 0 && pendingContacts.filter(c => c.target === 'client').length === 0) {
+          let defaultId: string | null = null;
+          // Rule 1: person-first flow
+          if (personFirstClickedId && active.some(p => p.person_id === personFirstClickedId)) {
+            defaultId = personFirstClickedId;
+          }
+          // Rule 2: single contact
+          else if (active.length === 1) {
+            defaultId = active[0].person_id;
+          }
+          // Rule 3: org-level primary
+          else if (active.length > 1) {
+            const primary = active.find(p => p.is_primary);
+            if (primary) defaultId = primary.person_id;
+          }
+          if (defaultId) {
+            setTickedExistingPersonIds(new Set([defaultId]));
+            setLeadContactKey(defaultId);
+          }
+        }
+        // Consume the person-first signal regardless of whether it matched —
+        // it's a one-shot per client switch.
+        if (personFirstClickedId) setPersonFirstClickedId(null);
       })
       .catch(() => { if (!cancelled) setClientPeople([]); })
       .finally(() => { if (!cancelled) setClientPeopleLoading(false); });
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);
 
   // Escape key to close
@@ -1019,6 +1064,7 @@ function NewEnquiryModal({
     setPendingContacts(prev => prev.filter(c => c.target !== 'client'));
     setTickedExistingPersonIds(new Set());
     setLeadContactKey(null);
+    setPersonFirstClickedId(null);
   };
 
   // Chip click handler — implements the click-once-select /
@@ -1082,7 +1128,9 @@ function NewEnquiryModal({
       return;
     }
     // Person selected — clients must be orgs. Clear the field and surface
-    // their orgs as quick-picks.
+    // their orgs as quick-picks. Stash the clicked person so the cascade
+    // auto-ticks them once their org is picked + people load.
+    setPersonFirstClickedId(result.id);
     setClientName('');
     setClientId(null);
     try {
@@ -1399,6 +1447,7 @@ function NewEnquiryModal({
       setContactPhone(''); setContactRole('General Contact');
       setAddContactSearch(''); setAddContactResults([]);
       setTickedExistingPersonIds(new Set()); setLeadContactKey(null);
+      setPersonFirstClickedId(null);
       setClientPeople([]);
       setPendingPerson(null);
       setEnquirySource(''); setNotes(''); setShowOptional(false);
@@ -2089,6 +2138,29 @@ function NewEnquiryModal({
                   disabled={returnLinked}
                   className="flex-1"
                 />
+                {/* +1 quick-action — most jobs return the day AFTER Job
+                    Finish, so this skips the two-click "unlink then pick
+                    tomorrow" dance. Unlinks the chain itself, since
+                    returning a day later is by definition a deviation
+                    from "same as job end". Disabled when there's no
+                    Job Finish to add a day to. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!jobEnd) return;
+                    setReturnLinked(false);
+                    setReturnDate(addDays(jobEnd, 1));
+                  }}
+                  disabled={!jobEnd}
+                  className={`text-xs px-2 py-1 rounded font-medium ${
+                    jobEnd
+                      ? 'text-ooosh-600 bg-white border border-ooosh-200 hover:bg-ooosh-50'
+                      : 'text-gray-300 bg-gray-50 border border-gray-200 cursor-not-allowed'
+                  }`}
+                  title={jobEnd ? 'Set Returning to Job Finish + 1 day' : 'Set a Job Finish date first'}
+                >
+                  +1
+                </button>
                 <button
                   type="button"
                   onClick={toggleReturnLink}
