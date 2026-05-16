@@ -268,6 +268,15 @@ interface VehicleAssignment {
     excess_amount_required: number | null;
     excess_amount_taken: number | null;
   } | null;
+  /**
+   * Driver's personal insurance liability — source of truth for "what is
+   * this person on the hook for". £1,200 floor, higher with referral.
+   * Distinct from `excess.excess_amount_required` which is the per-job
+   * REALISATION (£0 with status='not_required' for drivers covered by a
+   * sibling in the top-N slot). Display this on the card so the staff
+   * see the driver's actual liability rather than the "covered" zero.
+   */
+  driver_calculated_excess?: number | string | null;
   van_requirement_index?: number | null;
   /**
    * `vehicle_id` if directly linked, else the vehicle from a sibling staff
@@ -3878,16 +3887,35 @@ export default function JobDetailPage() {
                         </div>
 
                         {/* Excess status */}
-                        {a.excess && (
+                        {a.excess && (() => {
+                          // Display rule: prefer the driver's personal
+                          // liability (drivers.calculated_excess_amount).
+                          // The per-job excess_amount_required is the
+                          // REALISATION — it's £0 for drivers covered by a
+                          // sibling in the top-N slot, which is correct
+                          // accounting but misleading on the card (the
+                          // person IS liable for £1,200+ if they damage the
+                          // van; another driver's payment just satisfies it).
+                          // Same fix shape as the /drivers page got in
+                          // migration 065. Falls back to per-job amount for
+                          // pre-fix data, then to the £1,200 floor.
+                          const personalLiability = a.driver_calculated_excess
+                            ? Number(a.driver_calculated_excess)
+                            : null;
+                          const perJobRequired = a.excess?.excess_amount_required != null
+                            ? Number(a.excess.excess_amount_required)
+                            : null;
+                          const displayAmount = personalLiability && personalLiability >= 1200
+                            ? personalLiability
+                            : (perJobRequired && perJobRequired > 0 ? perJobRequired : 1200);
+                          return (
                           <div className="mt-2 pt-2 border-t border-gray-200">
                             <div className="flex items-center justify-between text-xs">
                               <span className="text-gray-500">Insurance Excess</span>
                               <div className="flex items-center gap-2">
-                                {a.excess.excess_amount_required != null && (
-                                  <span className="font-medium text-gray-700">
-                                    £{Number(a.excess.excess_amount_required).toFixed(2)}
-                                  </span>
-                                )}
+                                <span className="font-medium text-gray-700">
+                                  £{displayAmount.toFixed(2)}
+                                </span>
                                 <span className={`px-2 py-0.5 rounded-full font-medium ${
                                   a.excess.excess_status === 'taken' ? 'bg-green-100 text-green-700' :
                                   a.excess.excess_status === 'pre_auth' ? 'bg-sky-100 text-sky-700' :
@@ -3931,7 +3959,8 @@ export default function JobDetailPage() {
                               </div>
                             </div>
                           </div>
-                        )}
+                          );
+                        })()}
                       </div>
                     )}
 
