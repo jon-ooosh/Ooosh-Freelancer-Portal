@@ -1650,12 +1650,15 @@ router.post(
         is_clone: boolean;
       }> = [];
 
-      // First van: update source row
+      // First van: update source row. start_time is set to LOCALTIME (now)
+      // because the driver only became authorised at this moment — the
+      // original hire form's nominal 09:00 start no longer applies.
       const first = siblings[0];
       const firstUpdate = await dbClient.query(
         `UPDATE vehicle_hire_assignments
          SET vehicle_id = $1,
              hire_start = CURRENT_DATE,
+             start_time = LOCALTIME,
              hire_end = COALESCE($2, hire_end),
              return_overnight = $3,
              status = 'booked_out',
@@ -1696,10 +1699,10 @@ router.post(
              $5, $6, $7,
              $8, $9,
              'booked_out', NOW(),
-             CURRENT_DATE, $10, $11, $12, $13,
-             NOW(), $14,
-             $15,
-             $16, $17, $18
+             CURRENT_DATE, $10, LOCALTIME, $11, $12,
+             NOW(), $13,
+             $14,
+             $15, $16, $17
            )
            RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
           [
@@ -1713,7 +1716,6 @@ router.post(
             source.required_type,
             source.required_gearbox,
             sib.hire_end,
-            source.start_time,
             source.end_time,
             sib.return_overnight,
             req.user!.id,
@@ -1996,6 +1998,7 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
       d.date_passed_test AS driver_date_passed_test,
       d.signature_date AS driver_signature_date,
       d.files AS driver_files,
+      d.calculated_excess_amount AS driver_calculated_excess,
       je.excess_amount_required,
       je.excess_status
     FROM vehicle_hire_assignments vha
@@ -2017,11 +2020,29 @@ async function loadHireFormData(assignmentId: string): Promise<HireFormData | nu
     row.driver_city, row.driver_postcode,
   ].filter(Boolean).join(', ');
 
-  // Format excess amount
+  // Format excess amount \u2014 SOURCE OF TRUTH is the DRIVER's personal
+  // liability (drivers.calculated_excess_amount), NOT the per-job
+  // job_excess.excess_amount_required.
+  //
+  // job_excess is the per-job REALISATION \u2014 for drivers marked
+  // 'not_required' by the top-N-drivers algorithm (e.g. a second
+  // driver on a single van whose excess slot is covered by a sibling
+  // in the top slot) it carries \u00A30 and excess_status='not_required'.
+  // Using it on the PDF showed \u00A30 for those drivers and misrepresented
+  // their actual liability. Their personal liability stands at \u00A31,200+
+  // regardless \u2014 that's what the hire agreement legally commits them to.
+  //
+  // Same fix shape as the /drivers page got in migration 065 ("Driver-
+  // level liability model"). \u00A31,200 floor as defensive fallback for
+  // pre-migration-065 drivers whose calculated_excess_amount may be NULL.
   let excessStr = '';
-  if (row.excess_amount_required) {
-    excessStr = `\u00A3${parseFloat(row.excess_amount_required).toLocaleString('en-GB', { minimumFractionDigits: 0 })}`;
-  }
+  const personalLiability = row.driver_calculated_excess
+    ? parseFloat(row.driver_calculated_excess)
+    : null;
+  const excessAmount = personalLiability && personalLiability >= 1200
+    ? personalLiability
+    : 1200;
+  excessStr = `\u00A3${excessAmount.toLocaleString('en-GB', { minimumFractionDigits: 0 })}`;
 
   // Try to load signature from driver files. Files are stored via
   // driver-verification's /upload endpoint with the R2 key under `url`
