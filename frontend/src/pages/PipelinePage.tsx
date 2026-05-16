@@ -1261,6 +1261,57 @@ function NewEnquiryModal({
       setError('Client and description are required');
       return;
     }
+
+    // Auto-save any unsaved form data the user left dangling — the
+    // forgot-to-click-Save trap. If the contact form has data, treat
+    // staff's intent as "yes, save this contact" and roll it in. Same
+    // for the linked-org form. State setters are async (won't apply
+    // until next render), so we build local copies of the lists and
+    // use those for the remainder of this submit cycle.
+    const finalPendingContacts = [...pendingContacts];
+    let effectiveLeadKey = leadContactKey;
+    if (showAddContact && showCreateContactForm && (
+      contactFirstName.trim() || contactLastName.trim() ||
+      contactEmail.trim() || contactPhone.trim()
+    )) {
+      if (!contactFirstName.trim() || !contactLastName.trim()) {
+        setError('You have an unsaved contact missing first or last name. Click "Save contact" or Cancel before submitting.');
+        return;
+      }
+      if (contactEmail.trim() && !EMAIL_REGEX.test(contactEmail.trim())) {
+        setError('You have an unsaved contact with an invalid email. Fix or cancel it before submitting.');
+        return;
+      }
+      const tempId = `c-${Date.now()}-auto-${Math.random().toString(36).slice(2, 5)}`;
+      finalPendingContacts.push({
+        _tempId: tempId,
+        target: 'client',
+        existing_person_id: null,
+        first_name: contactFirstName.trim(),
+        last_name: contactLastName.trim(),
+        email: contactEmail.trim(),
+        phone: contactPhone.trim(),
+        role: contactRole,
+      });
+      if (!effectiveLeadKey) effectiveLeadKey = tempId;
+    }
+
+    const finalLinkedOrgs = [...linkedOrgs];
+    if (showAddLinkedOrg && linkedOrgPickedName.trim()) {
+      const dup = finalLinkedOrgs.some(lo =>
+        lo.orgId && lo.orgId === linkedOrgPickedId && lo.role === linkedOrgRole
+      );
+      if (!dup) {
+        finalLinkedOrgs.push({
+          _tempId: `lo-${Date.now()}-auto-${Math.random().toString(36).slice(2, 5)}`,
+          orgId: linkedOrgPickedId,
+          orgName: linkedOrgPickedName.trim(),
+          role: linkedOrgRole,
+          isNew: !linkedOrgPickedId,
+        });
+      }
+    }
+
     setSaving(true);
     setError('');
     try {
@@ -1288,8 +1339,9 @@ function NewEnquiryModal({
       // people, _tempId for staged ones) to the resolved real person_id.
       // The job_contacts writes on the backend need real UUIDs.
       const tempIdToPersonId = new Map<string, string>();
+      const failedContacts: string[] = [];
       if (resolvedClientId) {
-        const clientContacts = pendingContacts.filter(c => c.target === 'client');
+        const clientContacts = finalPendingContacts.filter(c => c.target === 'client');
         for (const c of clientContacts) {
           try {
             // Existing-person link: pass person_id. Otherwise: create + link.
@@ -1314,8 +1366,22 @@ function NewEnquiryModal({
             const resolvedId = result.person?.id || result.role.person_id;
             tempIdToPersonId.set(c._tempId, resolvedId);
           } catch (contactErr) {
-            console.error('Failed to create/link contact:', contactErr);
-            // Non-fatal — enquiry still goes ahead. Staff can re-add from Org Detail.
+            const errMsg = contactErr instanceof Error ? contactErr.message : String(contactErr);
+            const displayName = `${c.first_name} ${c.last_name}`.trim() || c.email || 'unknown';
+            failedContacts.push(displayName);
+            // Verbose log so the user → developer handoff has the
+            // request body + error if this surfaces again.
+            console.error('[New Enquiry] Failed to create/link contact:', {
+              contact: {
+                first_name: c.first_name,
+                last_name: c.last_name,
+                email: c.email,
+                role: c.role,
+                existing_person_id: c.existing_person_id,
+              },
+              orgId: resolvedClientId,
+              error: errMsg,
+            });
           }
         }
       }
@@ -1325,7 +1391,7 @@ function NewEnquiryModal({
       // newly-resolved person_id (looked up via tempIdToPersonId).
       const contactPersonIds: string[] = [
         ...tickedExistingPersonIds,
-        ...pendingContacts
+        ...finalPendingContacts
           .filter(c => c.target === 'client')
           .map(c => tempIdToPersonId.get(c._tempId))
           .filter((id): id is string => !!id),
@@ -1335,11 +1401,11 @@ function NewEnquiryModal({
       // either a person_id directly (for existing-org chips) or a _tempId
       // (for pending entries) — the latter needs the mapping built above.
       let primaryContactPersonId: string | null = null;
-      if (leadContactKey) {
-        if (leadContactKey.startsWith('c-')) {
-          primaryContactPersonId = tempIdToPersonId.get(leadContactKey) ?? null;
+      if (effectiveLeadKey) {
+        if (effectiveLeadKey.startsWith('c-')) {
+          primaryContactPersonId = tempIdToPersonId.get(effectiveLeadKey) ?? null;
         } else {
-          primaryContactPersonId = leadContactKey;
+          primaryContactPersonId = effectiveLeadKey;
         }
       }
 
@@ -1367,8 +1433,9 @@ function NewEnquiryModal({
 
       // Link any organisations the user added — bands, promoters, labels,
       // venue operators, suppliers. New orgs get created here too.
-      if (created.id && linkedOrgs.length > 0) {
-        for (const lo of linkedOrgs) {
+      const failedLinkedOrgs: string[] = [];
+      if (created.id && finalLinkedOrgs.length > 0) {
+        for (const lo of finalLinkedOrgs) {
           try {
             let resolvedLinkedOrgId = lo.orgId;
             if (!resolvedLinkedOrgId && lo.orgName.trim()) {
@@ -1397,7 +1464,9 @@ function NewEnquiryModal({
               });
             }
           } catch (err) {
-            console.error('Failed to link organisation:', lo.orgName, err);
+            const errMsg = err instanceof Error ? err.message : String(err);
+            failedLinkedOrgs.push(lo.orgName);
+            console.error('[New Enquiry] Failed to link organisation:', { org: lo, error: errMsg });
           }
         }
       }
@@ -1458,6 +1527,29 @@ function NewEnquiryModal({
       // can race with the navigate and bounce us back to /pipeline.
       onClose();
       onCreated(created.id);
+
+      // Defensive alert if any sub-creations silently failed (contacts /
+      // linked orgs). The enquiry itself was created, so we don't want to
+      // block the success path — but staff need to know to fix things up
+      // on the org page rather than assuming everything landed. The
+      // verbose console logs above carry the detail for diagnosis.
+      if (failedContacts.length > 0 || failedLinkedOrgs.length > 0) {
+        // setTimeout so the alert fires AFTER the modal closes — otherwise
+        // the alert and the modal transition compete for focus.
+        setTimeout(() => {
+          const lines: string[] = ['Enquiry created — but the following did NOT save:'];
+          if (failedContacts.length > 0) {
+            lines.push('', 'Contacts:');
+            failedContacts.forEach(n => lines.push(`  • ${n}`));
+          }
+          if (failedLinkedOrgs.length > 0) {
+            lines.push('', 'Linked organisations:');
+            failedLinkedOrgs.forEach(n => lines.push(`  • ${n}`));
+          }
+          lines.push('', 'Add them manually from the relevant page. Full details in browser console (F12).');
+          alert(lines.join('\n'));
+        }, 200);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create enquiry');
     } finally {
