@@ -10,6 +10,7 @@ import type { JobRequirement } from '../components/RequirementCard';
 import ExcessGateBanner from '../components/ExcessGateBanner';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
+import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
@@ -1085,6 +1086,10 @@ export default function JobDetailPage() {
   // to expose a one-click "Process refund" action straight into ExcessPaymentModal.
   const [cancelledExcessHeld, setCancelledExcessHeld] = useState<Array<{ id: string; excess_amount_taken: number; excess_status: string }>>([]);
   const [oohModalAssignmentId, setOohModalAssignmentId] = useState<string | null>(null);
+  // Mid-tour Add-to-Hire modal — opened from the per-card button when a
+  // driver's hire-form assignment has no van but other vans on the job
+  // are already booked out.
+  const [addToHireAssignmentId, setAddToHireAssignmentId] = useState<string | null>(null);
   const [vehicleAssignmentsLoading, setVehicleAssignmentsLoading] = useState(false);
   const [dispatchCheck, setDispatchCheck] = useState<DispatchCheckResult | null>(null);
   // Cross-job allocation conflicts — van also booked on another job over
@@ -4046,6 +4051,30 @@ export default function JobDetailPage() {
                         const baseClass = 'inline-flex items-center gap-1.5 px-3 py-2 bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 text-sm font-medium';
                         const effectiveVehicleId = a.effective_vehicle_id || a.vehicle_id;
                         if (a.status === 'soft' || a.status === 'confirmed') {
+                          // Mid-tour Add-to-Hire: this driver has signed a hire form
+                          // but isn't linked to a van, AND at least one van on the
+                          // job is already physically out (booked_out / active).
+                          // Takes precedence over Allocate Van / Book Out — those
+                          // assume the van is still in the warehouse.
+                          if (!a.vehicle_id) {
+                            const bookedOutSiblings = vehicleAssignments.filter(other =>
+                              other.id !== a.id &&
+                              other.vehicle_id &&
+                              (other.status === 'booked_out' || other.status === 'active')
+                            );
+                            if (bookedOutSiblings.length > 0) {
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => setAddToHireAssignmentId(a.id)}
+                                  className="inline-flex items-center gap-1.5 px-3 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium"
+                                  title="The van(s) on this job are already out. Link this driver mid-hire — no walkaround needed."
+                                >
+                                  🚐 Add to Hire
+                                </button>
+                              );
+                            }
+                          }
                           if (!effectiveVehicleId) {
                             return (
                               <Link
@@ -4830,6 +4859,45 @@ export default function JobDetailPage() {
           onUpdated={() => { loadVehicleAssignments(); loadCancelledExcessHeld(); }}
         />
       )}
+
+      {/* Mid-tour Add to Hire Modal */}
+      {addToHireAssignmentId && (() => {
+        const assignment = vehicleAssignments.find(v => v.id === addToHireAssignmentId);
+        if (!assignment) return null;
+        // Candidates = booked-out vans on the same job, dedup by vehicle_id
+        // (multiple drivers on one van = multiple rows for one candidate).
+        const candidateMap = new Map<string, AddToHireCandidate>();
+        for (const other of vehicleAssignments) {
+          if (other.id === assignment.id) continue;
+          if (!other.vehicle_id) continue;
+          if (other.status !== 'booked_out' && other.status !== 'active') continue;
+          if (candidateMap.has(other.vehicle_id)) continue;
+          candidateMap.set(other.vehicle_id, {
+            vehicle_id: other.vehicle_id,
+            vehicle_reg: other.vehicle_reg,
+            vehicle_type: other.vehicle_type,
+            hire_end: other.hire_end,
+            return_overnight: other.return_overnight ?? null,
+          });
+        }
+        const candidates = Array.from(candidateMap.values());
+        if (candidates.length === 0) {
+          // Shouldn't happen — button only renders when siblings exist —
+          // but if state has drifted, close the modal cleanly.
+          setAddToHireAssignmentId(null);
+          return null;
+        }
+        return (
+          <AddToHireModal
+            assignmentId={assignment.id}
+            driverName={assignment.driver_name || 'Driver'}
+            driverEmail={assignment.driver_email}
+            candidates={candidates}
+            onClose={() => setAddToHireAssignmentId(null)}
+            onSaved={() => { loadVehicleAssignments(); }}
+          />
+        );
+      })()}
 
       {/* Out-of-Hours Return Modal */}
       {oohModalAssignmentId && (() => {

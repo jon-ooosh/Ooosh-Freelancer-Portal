@@ -1165,6 +1165,147 @@ const FREELANCER_PATCH_ALLOW = new Set([
   've103b_ref',
 ]);
 
+/**
+ * Post-book-out hook chain. Fires fleet hire_status sync, requirement
+ * advance, hire agreement PDF + email, OOH info email, and auto-dispatch
+ * for an assignment that has just transitioned to status='booked_out'
+ * with vehicle_id linked.
+ *
+ * Used by both the PATCH /:id handler (standard book-out completion) and
+ * POST /:id/add-to-hire (mid-tour driver linked to an already-out van —
+ * same downstream effects). Extracting the chain into one place keeps the
+ * two paths in lockstep when new hooks are added.
+ *
+ * All hooks are fire-and-forget via setImmediate so the caller can
+ * respond immediately. runHookWithRecovery handles retries + alerting on
+ * permanent failure; each hook is independently idempotent so calling
+ * this twice on the same job (e.g. once per cloned assignment in a
+ * multi-van add-to-hire) is safe.
+ */
+function firePostBookOutHooks(opts: {
+  assignmentId: string;
+  vehicleId: string;
+  jobId: string | null;
+  hhJobNumber: number | null;
+  returnOvernight: boolean | null;
+  hireFormEmailedAt: Date | string | null;
+  actorLabel: string;
+  actorUserId: string | null;
+}): void {
+  const {
+    assignmentId,
+    vehicleId,
+    jobId,
+    hhJobNumber,
+    returnOvernight,
+    hireFormEmailedAt,
+    actorLabel,
+    actorUserId,
+  } = opts;
+
+  // Fleet hire_status sync (single source of truth helper). Non-blocking.
+  syncFleetHireStatus(vehicleId).catch((err) => {
+    console.warn(`[hire-forms] fleet hire_status sync failed for vehicle ${vehicleId}:`, err);
+  });
+
+  // Advance pre-hire requirement cards to 'done' — book-out by definition
+  // means the hire agreement has been executed and the van has left the
+  // warehouse. The excess sync helper is forward-only.
+  if (jobId) {
+    setImmediate(() => {
+      runHookWithRecovery(
+        {
+          hookLabel: 'Post-book-out requirement advance',
+          jobId,
+          hhJobNumber,
+          assignmentId,
+        },
+        async () => {
+          await query(
+            `UPDATE job_requirements
+             SET status = 'done', updated_at = NOW()
+             WHERE job_id = $1
+               AND requirement_type IN ('hire_forms', 'vehicle')
+               AND phase = 'pre_hire'
+               AND status IN ('not_started', 'in_progress')`,
+            [jobId]
+          );
+          const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+          await syncExcessRequirementStatus(jobId);
+        }
+      ).catch((err) => {
+        console.warn(`[hire-forms] Post-book-out requirement advance failed for job ${jobId}:`, err);
+      });
+    });
+  }
+
+  // Generate + email PDF if this is the first book-out email for this
+  // assignment (idempotent — a retry shouldn't re-spam).
+  if (!hireFormEmailedAt) {
+    setImmediate(() => {
+      runHookWithRecovery(
+        {
+          hookLabel: 'Hire form PDF + email',
+          jobId,
+          hhJobNumber,
+          assignmentId,
+        },
+        () => generateAndEmailHireFormPdf(assignmentId, 'book-out')
+      ).catch((err) => {
+        console.error(`[hire-forms] Post-book-out PDF+email failed for ${assignmentId}:`, err);
+      });
+    });
+  }
+
+  // Out-of-hours return info email (function dedupes per-assignment via
+  // ooh_info_sent_at, so safe to call when only some vans on the job are OOH).
+  if (returnOvernight === true && jobId) {
+    setImmediate(() => {
+      runHookWithRecovery(
+        {
+          hookLabel: 'OOH info email',
+          jobId,
+          hhJobNumber,
+          assignmentId,
+        },
+        async () => {
+          const { sendOohInfoEmailsForJob } = await import('../services/ooh-return');
+          await sendOohInfoEmailsForJob(jobId);
+        }
+      ).catch((err) => {
+        console.error(`[hire-forms] OOH info email send failed for job ${jobId}:`, err);
+      });
+    });
+  }
+
+  // Auto-dispatch — idempotent, short-circuits if HH already at status 5+.
+  // For add-to-hire this almost always no-ops (the job is already
+  // dispatched, which is what triggered the add-to-hire path), but we
+  // still call it so the standard book-out path's behaviour is preserved
+  // and so any "first van booked out" edge case still dispatches the job.
+  if (jobId) {
+    setImmediate(() => {
+      runHookWithRecovery(
+        {
+          hookLabel: 'Auto-dispatch',
+          jobId,
+          hhJobNumber,
+          assignmentId,
+        },
+        () => autoDispatchJob({
+          jobId,
+          source: 'staff-bookout',
+          actorLabel,
+          actorUserId,
+          interactionContent: `🚐 Job dispatched — booked out by ${actorLabel}.`,
+        }).then(() => undefined)
+      ).catch((err) => {
+        console.error(`[hire-forms] auto-dispatch failed for job ${jobId}:`, err);
+      });
+    });
+  }
+}
+
 router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (req: FlexibleVehicleRequest & AuthRequest, res: Response) => {
   try {
     const id = req.params.id as string;
@@ -1367,129 +1508,17 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       );
     }
     if (nowBookedOut && updated.vehicle_id) {
-      // Recompute fleet hire_status from current assignment state — single
-      // source of truth helper. Fire-and-forget, non-blocking. The just-flipped
-      // 'booked_out' assignment will be picked up and 'On Hire' written.
-      const vehicleId: string = updated.vehicle_id;
-      syncFleetHireStatus(vehicleId).catch((err) => {
-        console.warn(`[hire-forms] fleet hire_status sync failed for vehicle ${vehicleId}:`, err);
+      const isFreelancer = isFreelancerBookout(req);
+      firePostBookOutHooks({
+        assignmentId: id,
+        vehicleId: updated.vehicle_id,
+        jobId: updated.job_id ?? null,
+        hhJobNumber: updated.hirehop_job_id ?? null,
+        returnOvernight: updated.return_overnight,
+        hireFormEmailedAt: updated.hire_form_emailed_at,
+        actorLabel: isFreelancer ? 'freelancer book-out' : (req.user?.email || 'staff'),
+        actorUserId: isFreelancer ? null : (req.user?.id || null),
       });
-
-      // Advance pre-hire requirement cards to 'done' so the Job
-      // Requirements view flips from yellow (in progress) to green
-      // (complete) once the van is physically booked out. The excess
-      // sync helper is forward-only and respects coverage rules. The
-      // hire_forms and vehicle rows we flip directly — book-out by
-      // definition means the hire agreement has been executed and
-      // the van has left the warehouse.
-      // Shared identifiers for hook recovery alerts on this book-out
-      // transition. hhJobId surfaces the human-readable HH number in
-      // notification titles + alert emails.
-      const hhJobId: number | null = updated.hirehop_job_id ?? null;
-
-      if (updated.job_id) {
-        const jobId: string = updated.job_id;
-        setImmediate(() => {
-          runHookWithRecovery(
-            {
-              hookLabel: 'Post-book-out requirement advance',
-              jobId,
-              hhJobNumber: hhJobId,
-              assignmentId: id,
-            },
-            async () => {
-              await query(
-                `UPDATE job_requirements
-                 SET status = 'done', updated_at = NOW()
-                 WHERE job_id = $1
-                   AND requirement_type IN ('hire_forms', 'vehicle')
-                   AND phase = 'pre_hire'
-                   AND status IN ('not_started', 'in_progress')`,
-                [jobId]
-              );
-              const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
-              await syncExcessRequirementStatus(jobId);
-            }
-          ).catch((err) => {
-            console.warn(`[hire-forms] Post-book-out requirement advance failed for job ${jobId}:`, err);
-          });
-        });
-      }
-
-      // Generate + email PDF if this is the first book-out email for this
-      // assignment. Runs after we respond so the PATCH stays fast.
-      if (!updated.hire_form_emailed_at) {
-        const pdfJobId: string | null = updated.job_id ?? null;
-        setImmediate(() => {
-          runHookWithRecovery(
-            {
-              hookLabel: 'Hire form PDF + email',
-              jobId: pdfJobId,
-              hhJobNumber: hhJobId,
-              assignmentId: id,
-            },
-            () => generateAndEmailHireFormPdf(id, 'book-out')
-          ).catch((err) => {
-            console.error(`[hire-forms] Post-book-out PDF+email failed for ${id}:`, err);
-          });
-        });
-      }
-
-      // Out-of-hours return: if the driver flagged Yes during book-out, fire
-      // the info email (per van — function dedupes via ooh_info_sent_at).
-      // Non-blocking, runs after response.
-      if (updated.return_overnight === true && updated.job_id) {
-        const oohJobId: string = updated.job_id;
-        setImmediate(() => {
-          runHookWithRecovery(
-            {
-              hookLabel: 'OOH info email',
-              jobId: oohJobId,
-              hhJobNumber: hhJobId,
-              assignmentId: id,
-            },
-            async () => {
-              const { sendOohInfoEmailsForJob } = await import('../services/ooh-return');
-              await sendOohInfoEmailsForJob(oohJobId);
-            }
-          ).catch((err) => {
-            console.error(`[hire-forms] OOH info email send failed for job ${oohJobId}:`, err);
-          });
-        });
-      }
-
-      // Auto-dispatch: flip OP pipeline_status to 'dispatched' + writeback HH.
-      // Mirrors warehouse + portal completion flows. Includes a sanity-check
-      // email to info@ (and bell to staff) when HH is still < 5 (pre-Dispatched
-      // — i.e. items not all out yet). Idempotent — won't regress jobs past
-      // dispatched. Fire-and-forget after response.
-      if (updated.job_id) {
-        const dispatchJobId: string = updated.job_id;
-        const isFreelancer = isFreelancerBookout(req);
-        const actorUserId = isFreelancer ? null : (req.user?.id || null);
-        const actorLabel = isFreelancer
-          ? 'freelancer book-out'
-          : (req.user?.email || 'staff');
-        setImmediate(() => {
-          runHookWithRecovery(
-            {
-              hookLabel: 'Auto-dispatch',
-              jobId: dispatchJobId,
-              hhJobNumber: hhJobId,
-              assignmentId: id,
-            },
-            () => autoDispatchJob({
-              jobId: dispatchJobId,
-              source: 'staff-bookout',
-              actorLabel,
-              actorUserId,
-              interactionContent: `🚐 Job dispatched — booked out by ${actorLabel}.`,
-            }).then(() => undefined)
-          ).catch((err) => {
-            console.error(`[hire-forms] auto-dispatch failed for job ${dispatchJobId}:`, err);
-          });
-        });
-      }
     }
 
     res.json({ data: updated });
@@ -1498,6 +1527,299 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
     res.status(500).json({ error: 'Failed to update hire form' });
   }
 });
+
+// ── Add to Hire (mid-tour driver linking) ──
+//
+// When a job is already dispatched and a new driver submits a hire form,
+// their assignment row lands with vehicle_id NULL. The driver is on the
+// tour but isn't linked to any of the vans physically out on the road.
+// "Add to Hire" links them to one or more already-booked-out vans on the
+// same job WITHOUT a fresh walkaround (the sibling driver's book-out
+// record covers the van's physical handover).
+//
+// For each chosen van:
+//   - First van: updates the existing assignment row (hire_start=NOW,
+//     hire_end + return_overnight inherited from sibling, status=booked_out)
+//   - Additional vans: clones the row with the new vehicle_id
+// Each resulting assignment then fires the standard post-book-out hook
+// chain — fresh hire agreement PDF + email per van (vehicle reg is baked
+// into each PDF), OOH info if applicable, requirement advance.
+
+const addToHireSchema = z.object({
+  vehicle_ids: z.array(z.string().uuid()).min(1).max(10),
+});
+
+router.post(
+  '/:id/add-to-hire',
+  authenticate,
+  validate(addToHireSchema),
+  async (req: AuthRequest, res: Response) => {
+    const sourceId = req.params.id as string;
+    const requestedVehicleIds: string[] = Array.from(new Set(req.body.vehicle_ids));
+
+    const pool = getPool();
+    const dbClient = await pool.connect();
+
+    try {
+      // 1. Load source assignment with driver info
+      const sourceResult = await dbClient.query(
+        `SELECT a.*,
+                d.full_name AS driver_name,
+                d.email AS driver_email
+         FROM vehicle_hire_assignments a
+         LEFT JOIN drivers d ON d.id = a.driver_id
+         WHERE a.id = $1`,
+        [sourceId]
+      );
+
+      if (sourceResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Hire form not found' });
+      }
+
+      const source = sourceResult.rows[0];
+
+      // 2. Validate source is in a state to be added mid-tour
+      if (source.vehicle_id) {
+        return res.status(400).json({
+          error: 'Driver is already linked to a vehicle. Use Swap Vehicle if you need to change it.',
+        });
+      }
+      if (!['soft', 'confirmed'].includes(source.status)) {
+        return res.status(400).json({
+          error: `Assignment is in status '${source.status}' and cannot be added to a hire. ` +
+                 `Expected 'soft' or 'confirmed'.`,
+        });
+      }
+      if (source.assignment_type !== 'self_drive') {
+        return res.status(400).json({
+          error: `Add to Hire is only supported for self-drive customer hires (got '${source.assignment_type}').`,
+        });
+      }
+      if (!source.job_id && !source.hirehop_job_id) {
+        return res.status(400).json({
+          error: 'Assignment has no linked job — cannot identify booked-out siblings.',
+        });
+      }
+
+      // 3. For each requested van, find a sibling assignment in
+      //    booked_out/active on the same job. Used for hire_end +
+      //    return_overnight inheritance and as a hard validation that
+      //    the van is actually out on this job (not a free van).
+      const siblings: Array<{
+        vehicle_id: string;
+        vehicle_reg: string;
+        hire_end: Date | null;
+        return_overnight: boolean | null;
+      }> = [];
+
+      for (const vehicleId of requestedVehicleIds) {
+        const siblingResult = await dbClient.query(
+          `SELECT a.vehicle_id, a.hire_end, a.return_overnight, fv.reg AS vehicle_reg
+           FROM vehicle_hire_assignments a
+           JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
+           WHERE a.vehicle_id = $1
+             AND a.id != $2
+             AND a.status IN ('booked_out', 'active')
+             AND (
+               ($3::uuid IS NOT NULL AND a.job_id = $3::uuid)
+               OR
+               ($4::integer IS NOT NULL AND a.hirehop_job_id = $4::integer)
+             )
+           ORDER BY a.booked_out_at DESC NULLS LAST
+           LIMIT 1`,
+          [vehicleId, sourceId, source.job_id, source.hirehop_job_id]
+        );
+
+        if (siblingResult.rows.length === 0) {
+          return res.status(400).json({
+            error: `Vehicle ${vehicleId} is not currently booked out on this job — cannot add driver mid-hire.`,
+          });
+        }
+        siblings.push(siblingResult.rows[0]);
+      }
+
+      // 4. Transactional update + cloning
+      await dbClient.query('BEGIN');
+
+      const affected: Array<{
+        id: string;
+        vehicle_id: string;
+        vehicle_reg: string;
+        return_overnight: boolean | null;
+        hire_form_emailed_at: Date | null;
+        is_clone: boolean;
+      }> = [];
+
+      // First van: update source row
+      const first = siblings[0];
+      const firstUpdate = await dbClient.query(
+        `UPDATE vehicle_hire_assignments
+         SET vehicle_id = $1,
+             hire_start = CURRENT_DATE,
+             hire_end = COALESCE($2, hire_end),
+             return_overnight = $3,
+             status = 'booked_out',
+             status_changed_at = NOW(),
+             booked_out_at = NOW(),
+             booked_out_by = $4,
+             updated_at = NOW()
+         WHERE id = $5
+         RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
+        [first.vehicle_id, first.hire_end, first.return_overnight, req.user!.id, sourceId]
+      );
+      const firstRow = firstUpdate.rows[0];
+      affected.push({
+        id: firstRow.id,
+        vehicle_id: firstRow.vehicle_id,
+        vehicle_reg: first.vehicle_reg,
+        return_overnight: firstRow.return_overnight,
+        hire_form_emailed_at: firstRow.hire_form_emailed_at,
+        is_clone: false,
+      });
+
+      // Additional vans: clone source row, one per van
+      for (let i = 1; i < siblings.length; i++) {
+        const sib = siblings[i];
+        const cloneResult = await dbClient.query(
+          `INSERT INTO vehicle_hire_assignments (
+             vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
+             driver_id, assignment_type, van_requirement_index,
+             required_type, required_gearbox,
+             status, status_changed_at,
+             hire_start, hire_end, start_time, end_time, return_overnight,
+             booked_out_at, booked_out_by,
+             client_email,
+             notes, allocated_by_name, created_by
+           )
+           VALUES (
+             $1, $2, $3, $4,
+             $5, $6, $7,
+             $8, $9,
+             'booked_out', NOW(),
+             CURRENT_DATE, $10, $11, $12, $13,
+             NOW(), $14,
+             $15,
+             $16, $17, $18
+           )
+           RETURNING id, vehicle_id, return_overnight, hire_form_emailed_at`,
+          [
+            sib.vehicle_id,
+            source.job_id,
+            source.hirehop_job_id,
+            source.hirehop_job_name,
+            source.driver_id,
+            source.assignment_type,
+            source.van_requirement_index ?? 0,
+            source.required_type,
+            source.required_gearbox,
+            sib.hire_end,
+            source.start_time,
+            source.end_time,
+            sib.return_overnight,
+            req.user!.id,
+            source.client_email,
+            `Cloned from assignment ${sourceId} for mid-tour add-to-hire (multi-van).`,
+            source.allocated_by_name,
+            req.user!.id,
+          ]
+        );
+        const cloneRow = cloneResult.rows[0];
+        affected.push({
+          id: cloneRow.id,
+          vehicle_id: cloneRow.vehicle_id,
+          vehicle_reg: sib.vehicle_reg,
+          return_overnight: cloneRow.return_overnight,
+          hire_form_emailed_at: cloneRow.hire_form_emailed_at,
+          is_clone: true,
+        });
+      }
+
+      // 5. Log interaction(s) on the job timeline — one per van for an
+      //    auditable trail. created_by must be UUID; req.user.id is fine.
+      if (source.job_id) {
+        const regList = affected.map(a => a.vehicle_reg).join(', ');
+        const driverDisplay = source.driver_name || 'Driver';
+        await dbClient.query(
+          `INSERT INTO interactions (type, content, job_id, created_by)
+           VALUES ('note', $1, $2, $3)`,
+          [
+            `🚐 ${driverDisplay} added mid-hire to ${regList} (hire window inherited from existing booking; hire start set to ${new Date().toLocaleString('en-GB')}).`,
+            source.job_id,
+            req.user!.id,
+          ]
+        );
+      }
+
+      await dbClient.query('COMMIT');
+
+      // 6. Fire the post-book-out hook chain for each affected assignment.
+      //    Per-vehicle hooks (fleet status, PDF + email) need to fire per
+      //    row. Per-job hooks (requirement advance, OOH, auto-dispatch) are
+      //    idempotent so the cost of multiple calls is minimal.
+      const actorLabel = req.user?.email ? `${req.user.email} (add-to-hire)` : 'staff (add-to-hire)';
+      const actorUserId = req.user?.id || null;
+
+      for (const a of affected) {
+        firePostBookOutHooks({
+          assignmentId: a.id,
+          vehicleId: a.vehicle_id,
+          jobId: source.job_id ?? null,
+          hhJobNumber: source.hirehop_job_id ?? null,
+          returnOvernight: a.return_overnight,
+          hireFormEmailedAt: a.hire_form_emailed_at,
+          actorLabel,
+          actorUserId,
+        });
+      }
+
+      // 7. Vehicle requirement sync — same as standard PATCH does on any
+      //    vehicle state change. Once per job.
+      if (source.job_id) {
+        const jobIdForSync: string = source.job_id;
+        const hhJobIdForSync: number | null = source.hirehop_job_id ?? null;
+        const assignmentIdForSync: string = affected[0].id;
+        setImmediate(() => {
+          runHookWithRecovery(
+            {
+              hookLabel: 'Vehicle requirement sync',
+              jobId: jobIdForSync,
+              hhJobNumber: hhJobIdForSync,
+              assignmentId: assignmentIdForSync,
+            },
+            async () => {
+              const { syncVehicleRequirementStatus } = await import('../services/vehicle-requirement-sync');
+              await syncVehicleRequirementStatus(jobIdForSync);
+            }
+          ).catch((err) => {
+            console.warn(`[hire-forms] Vehicle requirement sync failed for job ${jobIdForSync}:`, err);
+          });
+        });
+      }
+
+      console.log(
+        `[hire-forms] Add-to-Hire: linked assignment ${sourceId} to ${affected.length} van(s): ${affected.map(a => a.vehicle_reg).join(', ')}`
+      );
+
+      res.json({
+        data: {
+          source_assignment_id: sourceId,
+          assignments: affected.map(a => ({
+            id: a.id,
+            vehicle_id: a.vehicle_id,
+            vehicle_reg: a.vehicle_reg,
+            is_clone: a.is_clone,
+          })),
+        },
+      });
+    } catch (error) {
+      try { await dbClient.query('ROLLBACK'); } catch { /* swallow */ }
+      console.error('[hire-forms] Add-to-Hire error:', error);
+      res.status(500).json({ error: 'Failed to add driver to hire' });
+    } finally {
+      dbClient.release();
+    }
+  }
+);
 
 /**
  * Look up the OP job_id for an assignment. Used by the email fallback
