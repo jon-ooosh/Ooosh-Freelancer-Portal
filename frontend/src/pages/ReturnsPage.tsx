@@ -69,10 +69,13 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'job_date_desc', label: 'Job date — newest' },
 ];
 
+// Tab order — "Returned (needs completing)" first because that's where staff
+// spend their time working through close-outs. Completed second (recent
+// finished jobs), All last as a fallback.
 const STATUS_PILLS: { key: StatusFilter; label: string; statusCsv: string }[] = [
-  { key: 'all',       label: 'All',                     statusCsv: '6,7,8,11' },
   { key: 'returned',  label: 'Returned (needs completing)', statusCsv: '6,7,8' },
   { key: 'completed', label: 'Completed',                   statusCsv: '11' },
+  { key: 'all',       label: 'All',                         statusCsv: '6,7,8,11' },
 ];
 
 function daysAgo(dateStr: string): number {
@@ -112,7 +115,7 @@ function ProgressBar({ progress }: { progress: ReqProgress | undefined }) {
 export default function ReturnsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialOverdue = searchParams.get('overdue') === '1';
-  const initialStatus = (searchParams.get('status_filter') as StatusFilter) || 'all';
+  const initialStatus = (searchParams.get('status_filter') as StatusFilter) || 'returned';
 
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
@@ -127,8 +130,8 @@ export default function ReturnsPage() {
     (searchParams.get('retro') as RetroFilter) || 'all'
   );
   // Default sort: "Most overdue first" on Returned tab (where you live when
-  // working through close-outs), "Return date newest" everywhere else (the
-  // Completed tab — newest finished jobs at the top).
+  // working through close-outs), "Return date newest" on Completed (newest
+  // finished jobs at the top). All tab defaults to overdue too.
   const [sort, setSort] = useState<SortKey>(
     (searchParams.get('sort') as SortKey) ||
       (initialStatus === 'completed' ? 'return_desc' : 'overdue')
@@ -159,22 +162,17 @@ export default function ReturnsPage() {
       if (hasIssuesOnly) params.set('has_issues', '1');
       if (retroFilter === 'has_retro') params.set('has_retro', '1');
       else if (retroFilter === 'no_retro') params.set('has_retro', '0');
+      // Overdue is server-side so it composes with pagination + the "All"
+      // status pill. Was previously a client-side post-filter, which broke
+      // when the first page filled with completed jobs (which then got
+      // filtered out, yielding an empty page).
+      if (overdueOnly) params.set('overdue', '1');
       params.set('sort', sort);
 
       const res = await api.get<{ data: Job[]; pagination: { totalPages: number; total: number } }>(
         `/hirehop/jobs?${params.toString()}`
       );
-      let rows = res.data;
-      // Overdue is computed client-side (return_date < today). Cheaper than
-      // adding more SQL — we already paginate server-side.
-      if (overdueOnly) {
-        const today = new Date().toISOString().split('T')[0];
-        rows = rows.filter(j => {
-          const ret = (j.return_date || j.job_end || '').split('T')[0];
-          return ret && ret < today && j.status !== 11;
-        });
-      }
-      setJobs(rows);
+      setJobs(res.data);
       setTotalPages(res.pagination.totalPages);
       setTotal(res.pagination.total);
     } catch (err) {
@@ -189,7 +187,7 @@ export default function ReturnsPage() {
   // Sync filter state into URL so links survive a refresh / share.
   useEffect(() => {
     const next = new URLSearchParams();
-    if (statusFilter !== 'all') next.set('status_filter', statusFilter);
+    if (statusFilter !== 'returned') next.set('status_filter', statusFilter);
     if (search.trim()) next.set('search', search.trim());
     if (dateFrom) next.set('date_from', dateFrom);
     if (dateTo) next.set('date_to', dateTo);
@@ -228,7 +226,7 @@ export default function ReturnsPage() {
   function clearFilters() {
     setSearch(''); setTypeFilter([]); setDateFrom(''); setDateTo('');
     setOverdueOnly(false); setHasIssuesOnly(false); setRetroFilter('all');
-    setSort('overdue'); setStatusFilter('all'); setPage(1);
+    setSort('overdue'); setStatusFilter('returned'); setPage(1);
   }
 
   function jumpToPage() {
@@ -314,7 +312,7 @@ export default function ReturnsPage() {
     { key: 'rehearsal', label: 'Rehearsals' },
   ];
 
-  const hasFilters = search.trim() !== '' || typeFilter.length > 0 || dateFrom !== '' || dateTo !== '' || overdueOnly || hasIssuesOnly || retroFilter !== 'all' || sort !== 'overdue' || statusFilter !== 'all';
+  const hasFilters = search.trim() !== '' || typeFilter.length > 0 || dateFrom !== '' || dateTo !== '' || overdueOnly || hasIssuesOnly || retroFilter !== 'all' || sort !== 'overdue' || statusFilter !== 'returned';
 
   return (
     <div>
@@ -354,14 +352,16 @@ export default function ReturnsPage() {
 
       {/* ── Filters (desktop) ── */}
       <div className="space-y-3 mb-4 hidden md:block">
-        {/* Search + status */}
-        <div className="flex flex-col sm:flex-row gap-3">
+        {/* Search + status + sort/clear (right-aligned via ml-auto so they
+            ride the same line as the status pills instead of dropping to a
+            row of their own). */}
+        <div className="flex flex-wrap items-center gap-3">
           <input
             type="text"
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder="Search by job name, client, or job number…"
-            className="flex-1 max-w-md border border-gray-300 rounded-lg px-4 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+            className="flex-1 min-w-[200px] max-w-md border border-gray-300 rounded-lg px-4 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
           />
           <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
             {STATUS_PILLS.map(p => (
@@ -376,6 +376,26 @@ export default function ReturnsPage() {
               </button>
             ))}
           </div>
+          <div className="inline-flex items-center gap-1.5 ml-auto">
+            <span className="text-xs text-gray-500">Sort:</span>
+            <select
+              value={sort}
+              onChange={e => setSort(e.target.value as SortKey)}
+              className="border border-gray-300 rounded px-2 py-1 text-xs bg-white"
+            >
+              {SORT_OPTIONS.map(opt => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+          {hasFilters && (
+            <button
+              onClick={clearFilters}
+              className="text-xs text-gray-500 hover:text-gray-700 underline whitespace-nowrap"
+            >
+              Clear filters
+            </button>
+          )}
         </div>
 
         {/* Type pills + date range + overdue toggle */}
@@ -474,29 +494,6 @@ export default function ReturnsPage() {
             ))}
           </div>
 
-          {/* Sort dropdown. Lives next to the filter pills so it's obvious
-              the list is ordered by something other than newest. */}
-          <div className="inline-flex items-center gap-1.5 ml-auto">
-            <span className="text-xs text-gray-500">Sort:</span>
-            <select
-              value={sort}
-              onChange={e => setSort(e.target.value as SortKey)}
-              className="border border-gray-300 rounded px-2 py-1 text-xs bg-white"
-            >
-              {SORT_OPTIONS.map(opt => (
-                <option key={opt.key} value={opt.key}>{opt.label}</option>
-              ))}
-            </select>
-          </div>
-
-          {hasFilters && (
-            <button
-              onClick={clearFilters}
-              className="text-xs text-gray-500 hover:text-gray-700 underline"
-            >
-              Clear filters
-            </button>
-          )}
         </div>
       </div>
 

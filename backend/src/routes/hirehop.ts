@@ -115,7 +115,7 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
     const {
       status, search, ooh_only, manager, service_type,
       date_from, date_to, date_field,
-      has_issues, has_retro,
+      has_issues, has_retro, overdue,
       sort,
       page = '1', limit = '50',
     } = req.query;
@@ -181,6 +181,15 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
           AND jr.requirement_type = 'issue'
           AND jr.status NOT IN ('done', 'cancelled')
       )`;
+    }
+
+    // Overdue filter — return_date in the past AND not completed. Server-side
+    // so it composes correctly with pagination + the "All" status pill. Was
+    // previously a client-side post-filter, which broke when the first page
+    // was dominated by completed jobs (overdue-by-definition can't be
+    // status=11, so the page would filter to empty).
+    if (overdue === '1' || overdue === 'true') {
+      whereClause += ` AND return_date::date < CURRENT_DATE AND status != 11`;
     }
 
     // Has-retro filter — only jobs that have had a "Job retro:" interaction
