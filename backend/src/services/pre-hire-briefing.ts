@@ -19,6 +19,16 @@ import { buildProgressStrips, JobProgressStrip, RequirementRow } from './job-pro
 import { emailService } from './email-service';
 import { renderBriefingHtml, buildSubject } from './email-templates/pre-hire-briefing';
 import { resolveHireFormContacts, ResolvedContact } from './hire-form-contacts';
+import { calculateVatAdjustment } from './vat-adjustment';
+
+/** Match the OP-wide convention pinned in CLAUDE.md: requirements with this
+ *  marker in `notes` are V&D-suspended (status='blocked' in the DB but
+ *  semantically "not required on this job"). Filter them out of every
+ *  aggregate / count / render so the email matches Dashboard / JobsPage /
+ *  Job Detail behaviour. */
+function isSuspendedByVD(notes: string | null | undefined): boolean {
+  return !!notes && notes.includes('[Suspended: Van & Driver]');
+}
 
 // SYSTEM_USER_ID matches the value used elsewhere for system-attributed
 // interactions (cron jobs, automated logs). See migration 031.
@@ -372,8 +382,16 @@ export async function buildBriefing(
     }),
   ]);
 
+  // Drop V&D-suspended rows up front — they are semantically "not required
+  // on this job" and the OP-wide convention is to exclude them from every
+  // count, status strip, and outstanding aggregate. Without this filter the
+  // email reports suspended hire_forms / excess as red 'Problem' cells and
+  // inflates the "X outstanding" count in the subject line.
+  const activeRequirementRows = (requirementsResult.rows as Array<Record<string, unknown>>)
+    .filter(r => !isSuspendedByVD(r.notes as string | null | undefined));
+
   // ── Progress strip (pre-hire phase) ─────────────────────────────────
-  const stripRows: RequirementRow[] = (requirementsResult.rows as Array<Record<string, unknown>>).map(r => ({
+  const stripRows: RequirementRow[] = activeRequirementRows.map(r => ({
     job_id: jobId,
     requirement_type: r.requirement_type as string,
     status: r.status as string | null,
@@ -383,7 +401,7 @@ export async function buildBriefing(
   const progress_strip = strips[jobId] || {};
 
   // ── Outstanding requirements (not 'done') ──────────────────────────
-  const outstanding: BriefingRequirement[] = (requirementsResult.rows as Array<Record<string, unknown>>)
+  const outstanding: BriefingRequirement[] = activeRequirementRows
     .filter(r => r.status !== 'done')
     .map(r => ({
       type: r.requirement_type as string,
@@ -401,12 +419,17 @@ export async function buildBriefing(
     excess_taken += parseFloat((row.excess_amount_taken as string | number | null) as string) || 0;
   }
 
-  // Hire value + deposits from HH billing_list when available. Same
-  // parsing pattern as routes/money.ts but simpler (we only need
-  // hire_value gross + total non-excess deposits).
+  // Hire value + deposits from HH billing_list when available. Mirrors the
+  // Money tab's logic in routes/money.ts so the briefing matches what staff
+  // see in the OP to the penny:
+  //   - kind=0 'accrued' is ex-VAT (HH's `total` on the same row also equals
+  //     accrued — i.e. ex-VAT — so we cannot trust it as gross).
+  //   - Standard inc-VAT = ex-VAT * 1.20.
+  //   - For international hires, calculateVatAdjustment() returns the
+  //     adjusted VAT amount (proportional / 0% rules per HMRC) and we use
+  //     ex-VAT + adjusted VAT instead. Same source of truth as Money tab.
   const cachedHireValue = parseFloat((j.job_value as string | number | null) as string) || 0;
   let hireValueExVat = 0;
-  let hireValueIncVat = 0;
   let hireDepositsTotal = 0;
   let hh_billing_loaded = false;
 
@@ -418,10 +441,7 @@ export async function buildBriefing(
       const kind = parseInt(((row.kind as string | number) ?? '0').toString(), 10);
       const data = (row.data as Record<string, unknown>) || {};
       if (kind === 0) {
-        // Job total — accrued = ex-VAT, total = inc-VAT (if present)
         hireValueExVat = parseFloat((row.accrued as string) || (data.accrued as string) || (data.ACCRUED as string) || '0');
-        const grossCandidate = parseFloat((row.total as string) || (data.total as string) || (data.TOTAL as string) || '0');
-        hireValueIncVat = grossCandidate || hireValueExVat * 1.2;
       } else if (kind === 6) {
         const credit = parseFloat((row.credit as string) || (data.credit as string) || '0');
         if (credit <= 0) continue; // refunds skipped
@@ -435,8 +455,32 @@ export async function buildBriefing(
     hh_billing_loaded = true;
   }
 
+  // International VAT adjustment — non-fatal if it fails (we fall through
+  // to the standard 20% rate). Only attempt when we have a real HH job id
+  // and a non-zero ex-VAT figure.
+  let adjustedVatAmount: number | null = null;
+  if (hhJobNumber && hireValueExVat > 0) {
+    try {
+      const startDate = (j.job_date as string) || (j.out_date as string) || null;
+      const endDate = (j.job_end as string) || (j.return_date as string) || null;
+      let hireDays = 1;
+      if (startDate && endDate) {
+        hireDays = Math.max(1, Math.ceil(
+          (new Date(endDate).getTime() - new Date(startDate).getTime()) / 86400000,
+        ));
+      }
+      const adj = await calculateVatAdjustment(hhJobNumber, hireDays);
+      if (adj) adjustedVatAmount = adj.adjustedVat;
+    } catch (err) {
+      console.warn(`[pre-hire-briefing] VAT adjustment lookup failed for job ${jobId} (HH#${hhJobNumber}):`, err);
+    }
+  }
+
+  const vatAmount = adjustedVatAmount !== null ? adjustedVatAmount : hireValueExVat * 0.20;
+  const hireValueIncVat = hireValueExVat + vatAmount;
+
   const moneyHireValue = hh_billing_loaded
-    ? (hireValueIncVat || hireValueExVat || cachedHireValue)
+    ? (hireValueIncVat || cachedHireValue)
     : cachedHireValue;
   const balanceOutstanding = Math.max(0, moneyHireValue - hireDepositsTotal);
 

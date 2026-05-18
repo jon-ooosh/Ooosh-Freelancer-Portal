@@ -321,7 +321,7 @@ export default function RequirementCard({
 
   return (
     <div
-      className={`group bg-white rounded-xl border ${req.hh_mismatch ? 'border-amber-300 bg-amber-50/30' : statusConfig.border} p-4 transition-all hover:shadow-sm ${isNested ? 'ml-8 border-l-4' : ''} ${isSuspendedByVD ? 'opacity-50' : ''}`}
+      className={`group bg-white rounded-xl border ${req.hh_mismatch && !isSuspendedByVD ? 'border-amber-300 bg-amber-50/30' : statusConfig.border} p-4 transition-all hover:shadow-sm ${isNested ? 'ml-8 border-l-4' : ''} ${isSuspendedByVD ? 'opacity-50' : ''}`}
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3 flex-1 min-w-0">
@@ -666,8 +666,11 @@ export default function RequirementCard({
               <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
             )}
 
-            {/* Mismatch warning */}
-            {req.hh_mismatch && req.hh_mismatch_detail && (
+            {/* Mismatch warning — suppressed for V&D-suspended rows, where the
+                "removed from HireHop" mismatch is expected (the van was
+                deliberately removed when the hire shifted to V&D / backline-only)
+                and an amber warning misleads staff into thinking there's a problem. */}
+            {req.hh_mismatch && req.hh_mismatch_detail && !isSuspendedByVD && (
               <div className="mt-1 text-xs text-amber-600 font-medium">
                 ⚠ {req.hh_mismatch_detail}
               </div>
@@ -702,9 +705,9 @@ export default function RequirementCard({
                   }
                   setShowStatusMenu(!showStatusMenu);
                 }}
-                className={`inline-flex px-3 py-1 rounded text-xs font-medium ${statusConfig.bg} ${statusConfig.colour} cursor-pointer hover:opacity-80 transition-opacity`}
+                className={`inline-flex px-3 py-1 rounded text-xs font-medium ${isSuspendedByVD ? 'bg-gray-100 text-gray-500' : `${statusConfig.bg} ${statusConfig.colour}`} cursor-pointer hover:opacity-80 transition-opacity`}
               >
-                {typeLabels?.[req.status] || statusConfig.label}
+                {isSuspendedByVD ? 'Not Required' : (typeLabels?.[req.status] || statusConfig.label)}
                 <svg className="w-3 h-3 ml-1 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                 </svg>
