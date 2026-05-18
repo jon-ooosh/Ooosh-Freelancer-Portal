@@ -1758,7 +1758,7 @@ function NewEnquiryModal({
                     <p className="text-xs text-blue-800 font-medium">Add a contact to {clientName || 'this client'}</p>
                     <button
                       type="button"
-                      onClick={() => { setShowAddContact(false); setAddContactSearch(''); setAddContactResults([]); }}
+                      onClick={() => { setShowAddContact(false); setAddContactSearch(''); setAddContactResults([]); setError(''); }}
                       className="text-xs text-gray-500 hover:text-gray-700"
                     >
                       Cancel
@@ -1900,6 +1900,7 @@ function NewEnquiryModal({
                         setContactEmail(''); setContactPhone('');
                         setContactRole('General Contact');
                         setAddContactSearch(''); setAddContactResults([]);
+                        setError('');
                       }}
                       className="text-xs text-gray-500 hover:text-gray-700"
                     >
@@ -2041,6 +2042,7 @@ function NewEnquiryModal({
                               setLinkedOrgPickedName(o.name);
                               setLinkedOrgResults([]);
                               setLinkedOrgSearch('');
+                              setError('');
                             }}
                             className="w-full text-left px-3 py-2 hover:bg-gray-50 text-sm border-b border-gray-50 last:border-b-0"
                           >
@@ -2057,6 +2059,7 @@ function NewEnquiryModal({
                           setLinkedOrgPickedName(linkedOrgSearch.trim());
                           setLinkedOrgPickedId(null);
                           setLinkedOrgSearch('');
+                          setError('');
                         }}
                         className="mt-1 text-xs text-purple-600 hover:text-purple-700 font-medium"
                       >
@@ -2082,6 +2085,7 @@ function NewEnquiryModal({
                       setLinkedOrgPickedId(null); setLinkedOrgPickedName('');
                       setLinkedOrgSearch(''); setLinkedOrgRole('band');
                       setLinkedOrgResults([]);
+                      setError('');
                     }}
                     className="text-xs text-gray-500 hover:text-gray-700"
                   >
