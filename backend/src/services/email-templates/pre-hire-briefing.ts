@@ -493,37 +493,56 @@ function buildClientDraft(b: JobBriefing): string {
     }
   }
 
-  // Money paragraph — combines balance + excess. Skipped entirely if HH
-  // billing fetch failed (we can't be specific) — staff fills in manually
-  // (red flag at top of briefing prompts them).
+  // Money paragraph — built from two independent halves (hire fee + excess)
+  // so the joining language matches their actual statuses. The previous
+  // implementation joined "Hire fee paid in full, thanks" with "along with
+  // the insurance excess of £1200" using a comma — which read as if the
+  // excess was ALSO paid in full. Now: when one is settled and the other
+  // outstanding, use two separate sentences. When both outstanding, join
+  // with "along with" so it's a single payment ask.
   if (b.money.hh_billing_loaded) {
-    const moneyBits: string[] = [];
-    let hasOutstanding = false;
-    if (b.money.hire_value > 0) {
-      if (b.money.balance_outstanding > 0) {
-        hasOutstanding = true;
-        const depositPart = b.money.deposits_paid > 0
-          ? `You've paid £${b.money.deposits_paid.toFixed(2)} so far, leaving a balance of £${b.money.balance_outstanding.toFixed(2)} due before the hire`
-          : `Hire fee of £${b.money.hire_value.toFixed(2)} is still to be paid before the hire`;
-        moneyBits.push(depositPart);
+    const m = b.money;
+    const hireFeeApplies = m.hire_value > 0;
+    const hireFeeOutstanding = hireFeeApplies && m.balance_outstanding > 0;
+    const excessOutstanding = m.excess_outstanding > 0;
+
+    // Build the hire fee clause (or null if no hire fee on the job).
+    let hireFeeClause: string | null = null;
+    if (hireFeeApplies) {
+      if (hireFeeOutstanding) {
+        hireFeeClause = m.deposits_paid > 0
+          ? `You've paid £${m.deposits_paid.toFixed(2)} so far, leaving a balance of £${m.balance_outstanding.toFixed(2)} due before the hire`
+          : `Hire fee of £${m.hire_value.toFixed(2)} is still to be paid before the hire`;
       } else {
-        moneyBits.push(`Hire fee of £${b.money.hire_value.toFixed(2)} is paid in full, thanks`);
+        hireFeeClause = `Hire fee of £${m.hire_value.toFixed(2)} is paid in full, thanks`;
       }
     }
-    if (b.money.excess_outstanding > 0) {
-      hasOutstanding = true;
-      if (moneyBits.length > 0) {
-        moneyBits.push(`along with the insurance excess of £${b.money.excess_outstanding.toFixed(0)}`);
+
+    const paymentLink = 'Payment options through the blue link at the bottom of the quote.';
+
+    if (hireFeeOutstanding && excessOutstanding) {
+      // Both due — single payment ask.
+      paragraphs.push(
+        `${hireFeeClause}, along with the insurance excess of £${m.excess_outstanding.toFixed(0)}. ${paymentLink}`
+      );
+    } else if (hireFeeOutstanding) {
+      // Only hire fee due.
+      paragraphs.push(`${hireFeeClause}. ${paymentLink}`);
+    } else if (excessOutstanding) {
+      // Hire fee settled (or n/a), excess still to collect — two sentences
+      // so "paid in full" doesn't bleed into the excess line.
+      if (hireFeeClause) {
+        paragraphs.push(
+          `${hireFeeClause}. We still need to collect the insurance excess of £${m.excess_outstanding.toFixed(0)} before the hire — ${paymentLink.charAt(0).toLowerCase() + paymentLink.slice(1)}`
+        );
       } else {
-        moneyBits.push(`Insurance excess of £${b.money.excess_outstanding.toFixed(0)} still to be collected before the hire`);
+        paragraphs.push(
+          `Insurance excess of £${m.excess_outstanding.toFixed(0)} still to be collected before the hire. ${paymentLink}`
+        );
       }
-    }
-    if (moneyBits.length > 0) {
-      // Only point at payment link when there's actually something to pay.
-      const trailing = hasOutstanding
-        ? ' Payment options through the blue link at the bottom of the quote.'
-        : '';
-      paragraphs.push(`${moneyBits.join(', ')}.${trailing}`);
+    } else if (hireFeeClause) {
+      // Everything settled — short positive sentence, no payment link.
+      paragraphs.push(`${hireFeeClause}.`);
     }
   }
   // If HH billing didn't load, leave the money paragraph out — the
@@ -533,30 +552,54 @@ function buildClientDraft(b: JobBriefing): string {
 
   // Hire form status — per-driver. Only relevant for self-drive hires;
   // backline-only / D&C jobs don't have drivers and shouldn't see this.
+  //
+  // Across all "still waiting" branches we never ask the client for driver
+  // names + contact details — that's the wrong ask: we just need them to
+  // fill in the form. Instead we always surface the hire-form link
+  // (https://hireforms.oooshtours.co.uk/?job=<n>) and, where we've already
+  // sent it via the auto-emailer, reference the send so the client knows
+  // we've already reached out.
   if (b.job.has_self_drive) {
     const driversReceived = b.drivers.filter(d => d.hire_form_status === 'received');
     const driversSent = b.drivers.filter(d => d.hire_form_status === 'sent');
     const driversPending = b.drivers.filter(d => d.hire_form_status === 'pending');
     const totalDrivers = b.drivers.length;
+    const link = b.hire_form_link;
+    const linkSuffix = link ? ` Here's the link: ${link.url}` : '';
+
     if (totalDrivers > 0) {
       if (driversReceived.length === totalDrivers) {
+        // All in — no need to re-share the link (the form journey is done).
         paragraphs.push(`We've received hire form${pluralise(totalDrivers, '')} from ${driversReceived.map(d => d.name).join(', ')}, all approved. Please let us know if any other drivers will be on the hire so we can get their details too.`);
       } else if (driversReceived.length > 0 && (driversSent.length > 0 || driversPending.length > 0)) {
         const stillNeeded = [...driversSent, ...driversPending].map(d => d.name).join(', ');
-        paragraphs.push(`We've received hire form${pluralise(driversReceived.length, '')} from ${driversReceived.map(d => d.name).join(', ')} so far. Still waiting on ${stillNeeded} — happy to resend the link if needed.`);
+        paragraphs.push(`We've received hire form${pluralise(driversReceived.length, '')} from ${driversReceived.map(d => d.name).join(', ')} so far. Still waiting on ${stillNeeded} — please could they fill in the hire form when they get a moment?${linkSuffix}`);
       } else if (driversSent.length > 0) {
         const sentTo = driversSent
           .filter(d => d.hire_form_emailed_to)
           .map(d => `${d.hire_form_emailed_to}${d.hire_form_emailed_at ? ` on ${formatShortDate(d.hire_form_emailed_at)}` : ''}`)
           .join(' and ');
         const recipientPart = sentTo ? ` (sent to ${sentTo})` : '';
-        paragraphs.push(`We've sent the hire form link${recipientPart} but haven't had ${pluralise(driversSent.length, 'it', 'them')} back yet — could you confirm receipt or let us know if you need ${pluralise(driversSent.length, 'it', 'them')} resent? Worth getting these in asap in case of any referrals.`);
+        paragraphs.push(`We've sent the hire form link${recipientPart} but haven't had ${pluralise(driversSent.length, 'it', 'them')} back yet — could you confirm receipt? Worth getting these in asap in case of any referrals.${linkSuffix}`);
       } else {
-        paragraphs.push(`We don't have any hire forms in yet — let me know who'll be driving and I'll send the link across.`);
+        paragraphs.push(`We don't have any hire forms in yet — please could each driver fill in the hire form when they get a moment?${linkSuffix}`);
       }
     } else {
-      // Self-drive hire but no drivers linked yet.
-      paragraphs.push(`Could you send us the names + contact details for whoever will be driving? I'll get the hire form link across as soon as we have those.`);
+      // Self-drive hire but no drivers linked yet. The auto-emailer should
+      // have sent the link to the client contacts ~10 days out — reference
+      // that send when we have a record of it, otherwise just give them
+      // the link with a light prompt.
+      if (link && link.last_sent_at && link.last_sent_to) {
+        const noun = link.last_send_was_reminder ? 'reminder' : 'link';
+        paragraphs.push(`We've already sent the hire form ${noun} to ${link.last_sent_to} on ${formatShortDate(link.last_sent_at)} — could you confirm you've received it? In case it's useful, here's the link again: ${link.url}`);
+      } else if (link) {
+        paragraphs.push(`Please could each driver fill in our hire form when they get a moment: ${link.url}`);
+      } else {
+        // No HH job number, no link to share. Fallback ask — but still
+        // not asking for names + contact details, which would put the
+        // admin overhead back on us.
+        paragraphs.push(`Please could each driver fill in our hire form when they get a moment? Let me know if you need me to resend the link.`);
+      }
     }
   }
 

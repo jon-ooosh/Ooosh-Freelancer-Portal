@@ -135,6 +135,21 @@ export interface BriefingInteraction {
   days_ago: number;
 }
 
+export interface BriefingHireFormLink {
+  /** Public hire-form URL for this job — staff can paste directly into
+   *  the client draft. Format: https://hireforms.oooshtours.co.uk/?job=<n>.
+   *  Only populated when the job has a HH number AND has_self_drive=true. */
+  url: string;
+  /** ISO date of the most recent auto-emailer send (initial OR reminder),
+   *  parsed from the `hire_forms` requirement notes. Null if never sent. */
+  last_sent_at: string | null;
+  /** Comma-separated recipient list from the most recent send. Null if
+   *  never sent or unparseable. */
+  last_sent_to: string | null;
+  /** True if the most recent send was a reminder rather than the initial. */
+  last_send_was_reminder: boolean;
+}
+
 export interface BriefingFlag {
   severity: 'urgent' | 'warning' | 'info';
   label: string;
@@ -157,6 +172,10 @@ export interface JobBriefing {
    *  resolver the hire-form picker uses (org-level + person-level +
    *  job_organisations chain). */
   contacts: ResolvedContact[];
+  /** Hire-form URL + last-send info, used by the client-draft builder to
+   *  reference the previous send and include the link. Null on non-self-
+   *  drive hires or when we don't have a HH job number. */
+  hire_form_link: BriefingHireFormLink | null;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -170,6 +189,39 @@ function daysBetween(a: Date, b: Date): number {
  *  deposit rows). Word-bounded to avoid false hits in Stripe URLs etc. */
 function isExcessKeyword(text: string): boolean {
   return /\bexcess\b|\binsurance\b|\bxs\b|\btop[- ]?up\b/.test(text.toLowerCase());
+}
+
+/**
+ * Parse the latest "Hire form email sent" / "Hire form reminder sent" entry
+ * from a hire_forms requirement's notes column.
+ *
+ * The auto-emailer (services/hire-form-auto-email.ts) appends a line of the
+ * form "Hire form (email|reminder) sent to <emails> on DD/MM/YYYY" every time
+ * it fires. We want the MOST RECENT entry — multiple may exist (initial +
+ * reminder) and we care about whichever happened last.
+ *
+ * Returns null if notes is empty / no parseable entry found.
+ */
+function parseLatestHireFormSend(notes: string | null | undefined): {
+  iso_date: string;
+  recipients: string;
+  is_reminder: boolean;
+} | null {
+  if (!notes) return null;
+  // Iterate all matches and keep the last one (auto-emailer appends, so
+  // textual order = chronological order).
+  const re = /Hire form (email sent|reminder sent) to ([^\n]+?) on (\d{2})\/(\d{2})\/(\d{4})/g;
+  let last: { iso_date: string; recipients: string; is_reminder: boolean } | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(notes)) !== null) {
+    const [, kind, recipients, dd, mm, yyyy] = m;
+    last = {
+      iso_date: `${yyyy}-${mm}-${dd}`,
+      recipients: recipients.trim(),
+      is_reminder: kind === 'reminder sent',
+    };
+  }
+  return last;
 }
 
 /** True if out_time string represents the system default (null/empty/09:00).
@@ -564,6 +616,27 @@ export async function buildBriefing(
   const has_backline = !!derivedFlags?.has_backline;
   const equipment_summary = summariseEquipment(derivedFlags);
 
+  // ── Hire form link + last-send metadata ────────────────────────────
+  // Only populate for self-drive hires with a HH number — these are the
+  // only jobs where the link is meaningful. Parses last-send info from the
+  // hire_forms requirement notes so the client draft can reference exactly
+  // when we last contacted them and re-share the link.
+  let hire_form_link: BriefingHireFormLink | null = null;
+  if (has_self_drive && hhJobNumber) {
+    const hireFormRow = activeRequirementRows.find(
+      r => (r.requirement_type as string) === 'hire_forms',
+    );
+    const parsed = parseLatestHireFormSend(
+      (hireFormRow?.notes as string | null | undefined) ?? null,
+    );
+    hire_form_link = {
+      url: `https://hireforms.oooshtours.co.uk/?job=${hhJobNumber}`,
+      last_sent_at: parsed?.iso_date ?? null,
+      last_sent_to: parsed?.recipients ?? null,
+      last_send_was_reminder: parsed?.is_reminder ?? false,
+    };
+  }
+
   // ── Red flags & discussion points ──────────────────────────────────
   const red_flags: BriefingFlag[] = [];
   const discussion_points: string[] = [];
@@ -690,6 +763,7 @@ export async function buildBriefing(
         : null,
     },
     contacts,
+    hire_form_link,
   };
 }
 
