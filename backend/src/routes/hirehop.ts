@@ -115,7 +115,8 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
     const {
       status, search, ooh_only, manager, service_type,
       date_from, date_to, date_field,
-      has_issues,
+      has_issues, has_retro,
+      sort,
       page = '1', limit = '50',
     } = req.query;
     const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
@@ -182,6 +183,22 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       )`;
     }
 
+    // Has-retro filter — only jobs that have had a "Job retro:" interaction
+    // logged. Distinct from has_issues; useful on Returns/Completed to find
+    // jobs the team has actually retrospected vs ones still pending one.
+    // Pass has_retro=0 to invert (jobs WITHOUT a retro yet).
+    if (has_retro === '1' || has_retro === 'true') {
+      whereClause += ` AND EXISTS (
+        SELECT 1 FROM interactions i
+        WHERE i.job_id = jobs.id AND i.content LIKE 'Job retro:%'
+      )`;
+    } else if (has_retro === '0' || has_retro === 'false') {
+      whereClause += ` AND NOT EXISTS (
+        SELECT 1 FROM interactions i
+        WHERE i.job_id = jobs.id AND i.content LIKE 'Job retro:%'
+      )`;
+    }
+
     // Service type filter — comma-separated requirement_type values
     // (vehicle, backline, rehearsal). Matches if the job has ANY listed
     // type as a non-cancelled pre-hire requirement.
@@ -202,6 +219,21 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
       params
     );
 
+    // Sort whitelist. Default keeps the historical "newest job_date first"
+    // behaviour the Jobs page relies on. Returns page passes one of the
+    // return_*-flavoured options to surface the longest-overdue close-outs
+    // first (or to walk return dates ascending/descending).
+    const allowedSorts: Record<string, string> = {
+      job_date_desc:  'job_date DESC NULLS LAST',
+      job_date_asc:   'job_date ASC NULLS LAST',
+      return_desc:    'return_date DESC NULLS LAST',
+      return_asc:     'return_date ASC NULLS LAST',
+      // "Most overdue first" — oldest return date wins. Excluded-completed
+      // jobs naturally fall in line with the rest. NULL last.
+      overdue:        'return_date ASC NULLS LAST',
+    };
+    const orderBy = allowedSorts[(sort as string) || 'job_date_desc'] || 'job_date DESC NULLS LAST';
+
     params.push(parseInt(limit as string));
     params.push(offset);
     // Surface has_ooh_return per row so the Out Now list can render the
@@ -216,7 +248,7 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
              AND vha.status NOT IN ('cancelled', 'returned')
          ) AS has_ooh_return
        FROM jobs ${whereClause}
-       ORDER BY job_date DESC NULLS LAST
+       ORDER BY ${orderBy}
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );

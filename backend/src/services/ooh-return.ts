@@ -250,7 +250,7 @@ export async function sendOohReminderEmails(): Promise<{ sent: number; skipped: 
        vha.job_id,
        j.hh_job_number,
        j.job_name,
-       vha.hire_end::text AS hire_end,
+       COALESCE(vha.hire_end, j.job_end::date)::text AS hire_end,
        d.email AS driver_email,
        d.full_name AS driver_name,
        vha.ooh_parking_token AS parking_token
@@ -261,7 +261,7 @@ export async function sendOohReminderEmails(): Promise<{ sent: number; skipped: 
      WHERE vha.return_overnight = TRUE
        AND vha.ooh_reminder_sent_at IS NULL
        AND vha.status IN ('booked_out', 'active')
-       AND vha.hire_end = (CURRENT_DATE + INTERVAL '1 day')::date
+       AND COALESCE(vha.hire_end, j.job_end::date) = (CURRENT_DATE + INTERVAL '1 day')::date
        AND vha.vehicle_id IS NOT NULL`
   );
 

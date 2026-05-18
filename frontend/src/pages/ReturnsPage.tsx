@@ -59,6 +59,15 @@ interface RetroSnippet { rating: string; notes: string; created_at: string }
 
 type StatusFilter = 'all' | 'returned' | 'completed';
 type TypeFilter = 'vehicle' | 'backline' | 'rehearsal';
+type SortKey = 'overdue' | 'return_desc' | 'return_asc' | 'job_date_desc';
+type RetroFilter = 'all' | 'has_retro' | 'no_retro';
+
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: 'overdue',       label: 'Most overdue first' },
+  { key: 'return_desc',   label: 'Return date — newest' },
+  { key: 'return_asc',    label: 'Return date — oldest' },
+  { key: 'job_date_desc', label: 'Job date — newest' },
+];
 
 const STATUS_PILLS: { key: StatusFilter; label: string; statusCsv: string }[] = [
   { key: 'all',       label: 'All',                     statusCsv: '6,7,8,11' },
@@ -114,6 +123,16 @@ export default function ReturnsPage() {
   const [dateTo, setDateTo] = useState(searchParams.get('date_to') || '');
   const [overdueOnly, setOverdueOnly] = useState(initialOverdue);
   const [hasIssuesOnly, setHasIssuesOnly] = useState(searchParams.get('has_issues') === '1');
+  const [retroFilter, setRetroFilter] = useState<RetroFilter>(
+    (searchParams.get('retro') as RetroFilter) || 'all'
+  );
+  // Default sort: "Most overdue first" on Returned tab (where you live when
+  // working through close-outs), "Return date newest" everywhere else (the
+  // Completed tab — newest finished jobs at the top).
+  const [sort, setSort] = useState<SortKey>(
+    (searchParams.get('sort') as SortKey) ||
+      (initialStatus === 'completed' ? 'return_desc' : 'overdue')
+  );
   const [page, setPage] = useState(parseInt(searchParams.get('page') || '1', 10));
   const [limit] = useState(50);
   const [totalPages, setTotalPages] = useState(1);
@@ -138,6 +157,9 @@ export default function ReturnsPage() {
       if (dateFrom) params.set('date_from', dateFrom);
       if (dateTo) params.set('date_to', dateTo);
       if (hasIssuesOnly) params.set('has_issues', '1');
+      if (retroFilter === 'has_retro') params.set('has_retro', '1');
+      else if (retroFilter === 'no_retro') params.set('has_retro', '0');
+      params.set('sort', sort);
 
       const res = await api.get<{ data: Job[]; pagination: { totalPages: number; total: number } }>(
         `/hirehop/jobs?${params.toString()}`
@@ -160,7 +182,7 @@ export default function ReturnsPage() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly, page, limit, search]);
+  }, [statusFilter, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly, retroFilter, sort, page, limit, search]);
 
   useEffect(() => { loadJobs(); }, [loadJobs]);
 
@@ -173,9 +195,11 @@ export default function ReturnsPage() {
     if (dateTo) next.set('date_to', dateTo);
     if (overdueOnly) next.set('overdue', '1');
     if (hasIssuesOnly) next.set('has_issues', '1');
+    if (retroFilter !== 'all') next.set('retro', retroFilter);
+    if (sort !== 'overdue') next.set('sort', sort);
     if (page > 1) next.set('page', String(page));
     setSearchParams(next, { replace: true });
-  }, [statusFilter, search, dateFrom, dateTo, overdueOnly, hasIssuesOnly, page, setSearchParams]);
+  }, [statusFilter, search, dateFrom, dateTo, overdueOnly, hasIssuesOnly, retroFilter, sort, page, setSearchParams]);
 
   // Load post-hire progress + retros after jobs change.
   useEffect(() => {
@@ -193,7 +217,7 @@ export default function ReturnsPage() {
   }, [jobs]);
 
   // Reset page when filters change so the user sees results from the start.
-  useEffect(() => { setPage(1); }, [statusFilter, search, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly]);
+  useEffect(() => { setPage(1); }, [statusFilter, search, typeFilter, dateFrom, dateTo, overdueOnly, hasIssuesOnly, retroFilter, sort]);
 
   const stats = useMemo(() => {
     const active = jobs.filter(j => [6, 7, 8].includes(j.status)).length;
@@ -203,7 +227,8 @@ export default function ReturnsPage() {
 
   function clearFilters() {
     setSearch(''); setTypeFilter([]); setDateFrom(''); setDateTo('');
-    setOverdueOnly(false); setHasIssuesOnly(false); setStatusFilter('all'); setPage(1);
+    setOverdueOnly(false); setHasIssuesOnly(false); setRetroFilter('all');
+    setSort('overdue'); setStatusFilter('all'); setPage(1);
   }
 
   function jumpToPage() {
@@ -289,7 +314,7 @@ export default function ReturnsPage() {
     { key: 'rehearsal', label: 'Rehearsals' },
   ];
 
-  const hasFilters = search.trim() !== '' || typeFilter.length > 0 || dateFrom !== '' || dateTo !== '' || overdueOnly || hasIssuesOnly || statusFilter !== 'all';
+  const hasFilters = search.trim() !== '' || typeFilter.length > 0 || dateFrom !== '' || dateTo !== '' || overdueOnly || hasIssuesOnly || retroFilter !== 'all' || sort !== 'overdue' || statusFilter !== 'all';
 
   return (
     <div>
@@ -428,6 +453,41 @@ export default function ReturnsPage() {
             />
             ⚠ Has issues
           </label>
+
+          {/* Retro filter — three states (all / has retro / no retro yet).
+              Useful for "which finished jobs haven't been retro'd". */}
+          <div className="inline-flex items-center gap-1">
+            <span className="text-xs text-gray-500 mr-1">Retro:</span>
+            {(['all', 'has_retro', 'no_retro'] as RetroFilter[]).map(key => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setRetroFilter(key)}
+                className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+                  retroFilter === key
+                    ? 'bg-ooosh-600 text-white border-ooosh-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                {key === 'all' ? 'All' : key === 'has_retro' ? 'Filed' : 'Not yet'}
+              </button>
+            ))}
+          </div>
+
+          {/* Sort dropdown. Lives next to the filter pills so it's obvious
+              the list is ordered by something other than newest. */}
+          <div className="inline-flex items-center gap-1.5 ml-auto">
+            <span className="text-xs text-gray-500">Sort:</span>
+            <select
+              value={sort}
+              onChange={e => setSort(e.target.value as SortKey)}
+              className="border border-gray-300 rounded px-2 py-1 text-xs bg-white"
+            >
+              {SORT_OPTIONS.map(opt => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
 
           {hasFilters && (
             <button
@@ -582,6 +642,39 @@ export default function ReturnsPage() {
                 ⚠ Has issues
               </label>
             </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Retro</h4>
+            <div className="flex flex-wrap gap-2">
+              {(['all', 'has_retro', 'no_retro'] as RetroFilter[]).map(key => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setRetroFilter(key)}
+                  className={`px-3 py-1.5 text-sm font-medium rounded-full border transition-colors ${
+                    retroFilter === key
+                      ? 'bg-ooosh-600 text-white border-ooosh-600'
+                      : 'bg-white text-gray-600 border-gray-300'
+                  }`}
+                >
+                  {key === 'all' ? 'All' : key === 'has_retro' ? 'Retro filed' : 'No retro yet'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Sort</h4>
+            <select
+              value={sort}
+              onChange={(e) => setSort(e.target.value as SortKey)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white"
+            >
+              {SORT_OPTIONS.map(opt => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
           </div>
 
           {hasFilters && (

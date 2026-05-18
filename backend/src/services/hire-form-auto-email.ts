@@ -68,7 +68,13 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
 
     // ── Chase + missed-initial backstop: jobs 4-5 days out, no forms received.
     //    Two cases:
-    //    a) Initial was sent → send chase (unless <24h since initial)
+    //    a) Initial was sent → send chase (unless <24h since initial). The
+    //       initial send flips requirement status to 'in_progress', so the
+    //       chase MUST match both 'not_started' and 'in_progress'. Pre-May
+    //       2026 this clause was `status = 'not_started'` and the chase loop
+    //       was effectively dead code in normal operation — only the
+    //       backstop case ever reached it. Forms submitted flips status to
+    //       'done', which is correctly excluded here.
     //    b) Initial was NEVER sent (slipped through the 8-11 day window) →
     //       send initial as a backstop. Surfaces any prior auto-emailer gap.
     const lateWindowJobs = await query(
@@ -80,7 +86,7 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
          AND j.is_van_and_driver = false
          AND j.hh_job_number IS NOT NULL
          AND j.job_date IS NOT NULL
-         AND jr.status = 'not_started'
+         AND jr.status IN ('not_started', 'in_progress')
          AND j.pipeline_status IN ('confirmed', 'provisional')
          AND j.job_date::date - CURRENT_DATE BETWEEN 4 AND 5
        ORDER BY j.job_date ASC`
