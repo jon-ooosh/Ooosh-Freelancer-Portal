@@ -17,6 +17,11 @@ type DbClient = { query: (text: string, params?: unknown[]) => Promise<{ rows: a
  *     manual overrides — vehicle out of service for damage repair, finance
  *     return, etc. The sync helper does not clobber them.
  *   - Any assignment in ('booked_out', 'active') → 'On Hire'.
+ *     Rows whose linked job is `lost` or `cancelled` are excluded from this
+ *     count — they're orphans from speculative allocations on dead jobs and
+ *     shouldn't block legitimate state transitions. (May 2026 fix: vehicle
+ *     RX22SWV was stuck on 'On Hire' for days because a `booked_out` row
+ *     on a long-dead test job 15534 kept the count > 0.)
  *   - Otherwise, if the current value is 'On Hire' (the van WAS out, but now
  *     no active assignment exists — i.e. it just came back) → 'Prep Needed'.
  *   - 'Prep Needed' → 'Available' transition is NOT handled here. That happens
@@ -50,11 +55,21 @@ export async function syncFleetHireStatus(
   }
 
   // Any non-terminal assignment with this van in the field?
+  // Defensive: ignore rows whose linked job is lost/cancelled — they're
+  // orphans from speculative allocations on dead jobs and shouldn't block
+  // legitimate state transitions. Dual job match handles V&D-style rows
+  // that carry only `hirehop_job_id` (`job_id IS NULL`).
   const activeCount = await run(
     `SELECT COUNT(*)::int AS c
-       FROM vehicle_hire_assignments
-      WHERE vehicle_id = $1
-        AND status IN ('booked_out', 'active')`,
+       FROM vehicle_hire_assignments vha
+      WHERE vha.vehicle_id = $1
+        AND vha.status IN ('booked_out', 'active')
+        AND NOT EXISTS (
+          SELECT 1 FROM jobs j
+           WHERE ((vha.job_id IS NOT NULL AND j.id = vha.job_id)
+                  OR (vha.job_id IS NULL AND j.hh_job_number = vha.hirehop_job_id))
+             AND j.pipeline_status IN ('lost', 'cancelled')
+        )`,
     [vehicleId],
   );
   const hasActive = activeCount.rows[0].c > 0;

@@ -331,12 +331,35 @@ router.post(
         [jobId]
       );
 
-      // 4. Cancel vehicle assignments
-      await query(
-        `UPDATE vehicle_hire_assignments SET status = 'cancelled', updated_at = NOW()
-         WHERE job_id = $1 AND status NOT IN ('cancelled')`,
-        [jobId]
+      // 4. Cancel vehicle assignments.
+      //    Dual job match catches V&D-style rows (`job_id IS NULL`,
+      //    only `hirehop_job_id` set). Exclude already-terminal states
+      //    (returned / swapped) to avoid re-marking historic rows.
+      //    Recompute fleet hire_status for each affected vehicle so the
+      //    cached projection catches up immediately.
+      const sweptVha = await query(
+        `UPDATE vehicle_hire_assignments
+           SET status = 'cancelled',
+               status_changed_at = NOW(),
+               notes = COALESCE(notes, '') || E'\n[Auto-cancelled: job cancelled]',
+               updated_at = NOW()
+         WHERE (job_id = $1
+                OR (job_id IS NULL AND hirehop_job_id = $2::integer))
+           AND status NOT IN ('cancelled', 'returned', 'swapped')
+         RETURNING id, vehicle_id`,
+        [jobId, job.hh_job_number ?? null]
       );
+      if (sweptVha.rows.length > 0) {
+        const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
+        const seen = new Set<string>();
+        for (const r of sweptVha.rows) {
+          if (r.vehicle_id && !seen.has(r.vehicle_id)) {
+            seen.add(r.vehicle_id);
+            try { await syncFleetHireStatus(r.vehicle_id); }
+            catch (e) { console.warn('[Cancellation] syncFleetHireStatus failed:', e); }
+          }
+        }
+      }
 
       // 5a. Cancel the transport/crew quotes themselves. Without this the
       // Transport Ops page keeps showing them in their pre-existing ops

@@ -984,6 +984,41 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
           [jobId]
         );
 
+        // Vehicle hire assignment sweep. Without this, speculative/orphan
+        // rows (derivation-engine pre-allocations, quick-assign, even stray
+        // booked_out rows on test jobs) get left behind on a lost job and
+        // keep blocking syncFleetHireStatus from transitioning the van to
+        // 'Prep Needed'. Mirrors the cancellations.ts /process flow.
+        // Dual job match catches V&D-style rows (job_id IS NULL).
+        const hhJobNumber = currentJob.hh_job_number ?? null;
+        const sweptVha = await query(
+          `UPDATE vehicle_hire_assignments
+             SET status = 'cancelled',
+                 status_changed_at = NOW(),
+                 notes = COALESCE(notes, '') ||
+                         E'\n[Auto-cancelled: job marked lost]',
+                 updated_at = NOW()
+           WHERE (job_id = $1
+                  OR (job_id IS NULL AND hirehop_job_id = $2::integer))
+             AND status NOT IN ('cancelled', 'returned', 'swapped')
+           RETURNING id, vehicle_id`,
+          [jobId, hhJobNumber]
+        );
+        if (sweptVha.rows.length > 0) {
+          console.log(`[Pipeline lost cascade] Cancelled ${sweptVha.rows.length} open vehicle_hire_assignment(s) for job ${jobId}`);
+          // Recompute fleet hire_status for each affected vehicle so the
+          // cached projection catches up immediately.
+          const { syncFleetHireStatus } = await import('../services/fleet-hire-status-sync');
+          const seen = new Set<string>();
+          for (const r of sweptVha.rows) {
+            if (r.vehicle_id && !seen.has(r.vehicle_id)) {
+              seen.add(r.vehicle_id);
+              try { await syncFleetHireStatus(r.vehicle_id); }
+              catch (e) { console.warn('[Pipeline lost cascade] syncFleetHireStatus failed:', e); }
+            }
+          }
+        }
+
         // Email only for future-dated jobs. currentJob.job_date is a Date
         // or ISO string; compare on calendar-day to be friendly to TZ.
         const rawJobDate = currentJob.job_date ? new Date(currentJob.job_date as string | Date) : null;
