@@ -20,9 +20,9 @@ import MoneyTab from '../components/MoneyTab';
 import DatePicker from '../components/DatePicker';
 import { TimeInput } from '../components/TimeInput';
 import ChaseModal from '../components/ChaseModal';
-import { VenuePicker } from '../components/VenuePicker';
 import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
 import FileEmailModal from '../components/FileEmailModal';
+import QuoteEditModal from '../components/QuoteEditModal';
 import type { FileAttachment, PipelineStatus, HoldReason, ConfirmedMethod } from '@shared/index';
 import { PIPELINE_STATUS_CONFIG, LOST_REASON_OPTIONS, PAUSED_REASON_OPTIONS } from '@shared/index';
 
@@ -1051,9 +1051,7 @@ export default function JobDetailPage() {
   const [peopleSearch, setPeopleSearch] = useState('');
   const [assignRole, setAssignRole] = useState('driver');
 
-  const [editingQuoteId, setEditingQuoteId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<Record<string, unknown>>({});
-  const [editSaving, setEditSaving] = useState(false);
+  const [editingQuote, setEditingQuote] = useState<SavedQuote | null>(null);
   const [completingQuote, setCompletingQuote] = useState<SavedQuote | null>(null);
   const [cancelledQuotesExpanded, setCancelledQuotesExpanded] = useState(false);
   const [showLocalForm, setShowLocalForm] = useState(false);
@@ -1819,51 +1817,7 @@ export default function JobDetailPage() {
 
 
   function startEditQuote(q: SavedQuote) {
-    const dateStr = q.job_date
-      ? (typeof q.job_date === 'string' && q.job_date.includes('T') ? q.job_date.split('T')[0] : String(q.job_date))
-      : '';
-    const finishDateStr = q.job_finish_date
-      ? (typeof q.job_finish_date === 'string' && q.job_finish_date.includes('T') ? q.job_finish_date.split('T')[0] : String(q.job_finish_date))
-      : '';
-    // Prefer the joined venues-table name over q.venue_name. The quotes row
-    // can carry NULL venue_name even when venue_id is set (Monday-migrated
-    // rows, HH-derived auto-creates, older OP-native rows). The backend
-    // GETs always JOIN venues v ON v.id = q.venue_id and expose v.name as
-    // linked_venue_name — TransportOpsPage uses the same fallback.
-    const linkedVenueName = (q as { linked_venue_name?: string | null }).linked_venue_name || null;
-    setEditForm({
-      job_type: q.job_type,
-      venue_name: linkedVenueName || q.venue_name || '',
-      venue_id: q.venue_id || null,
-      job_date: dateStr,
-      job_finish_date: finishDateStr,
-      is_multi_day: q.is_multi_day || false,
-      num_days: q.num_days || 1,
-      arrival_time: q.arrival_time || '',
-      what_is_it: q.what_is_it || '',
-      work_type: q.work_type || '',
-      work_description: q.work_description || '',
-      crew_count: q.crew_count || 1,
-      internal_notes: q.internal_notes || '',
-      freelancer_notes: q.freelancer_notes || '',
-      client_charge_rounded: Number(q.client_charge_rounded ?? 0),
-      freelancer_fee_rounded: Number(q.freelancer_fee_rounded ?? 0),
-    });
-    setEditingQuoteId(q.id);
-  }
-
-  async function saveEditQuote() {
-    if (!editingQuoteId) return;
-    setEditSaving(true);
-    try {
-      await api.put(`/quotes/${editingQuoteId}`, editForm);
-      await loadQuotes();
-      setEditingQuoteId(null);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save');
-    } finally {
-      setEditSaving(false);
-    }
+    setEditingQuote(q);
   }
 
   // Cycle client_introduction through not_needed → todo → working_on_it → done.
@@ -4675,187 +4629,37 @@ export default function JobDetailPage() {
             </div>
           )}
 
-          {/* Edit Quote Modal */}
-          {editingQuoteId && (() => {
-            const editingQuote = quotes.find((q) => q.id === editingQuoteId);
-            const wasPushedToHh = !!editingQuote?.hh_pushed_at;
-            return (
-            <div className="fixed inset-0 z-50 flex items-center justify-center">
-              <div className="absolute inset-0 bg-black/50" onClick={() => setEditingQuoteId(null)} />
-              <div className="relative bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[90vh] overflow-y-auto">
-                <h3 className="text-lg font-semibold text-gray-900 mb-4">Edit Quote</h3>
-                {wasPushedToHh && (
-                  <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                    <strong>Heads up:</strong> this quote has already been pushed to HireHop.
-                    Edits here will NOT update the HireHop line item — adjust it manually in HireHop if the price or details have changed.
-                  </div>
-                )}
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
-                    <select
-                      value={String(editForm.job_type || '')}
-                      onChange={(e) => setEditForm((p) => ({ ...p, job_type: e.target.value }))}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                    >
-                      <option value="delivery">Delivery</option>
-                      <option value="collection">Collection</option>
-                      <option value="crewed">Crewed</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
-                    <VenuePicker
-                      value={{
-                        venueId: (editForm.venue_id as string | null) || null,
-                        venueName: String(editForm.venue_name || ''),
-                      }}
-                      onChange={({ venueId, venueName }) =>
-                        setEditForm((p) => ({ ...p, venue_id: venueId, venue_name: venueName }))
-                      }
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">{editForm.is_multi_day ? 'Start Date' : 'Date'}</label>
-                      <DatePicker
-                        value={String(editForm.job_date || '')}
-                        onChange={(val) => setEditForm((p) => ({ ...p, job_date: val }))}
-                        min={new Date().toISOString().split('T')[0]}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Arrival Time</label>
-                      <TimeInput
-                        value={String(editForm.arrival_time || '')}
-                        onChange={(v) => setEditForm((p) => ({ ...p, arrival_time: v }))}
-                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                      />
-                    </div>
-                  </div>
-                  {/* Multi-day toggle */}
-                  <div className="flex items-center gap-3">
-                    <label className="flex items-center gap-2 text-sm text-gray-700">
-                      <input
-                        type="checkbox"
-                        checked={!!editForm.is_multi_day}
-                        onChange={(e) => setEditForm((p) => ({ ...p, is_multi_day: e.target.checked, num_days: e.target.checked ? Math.max(Number(p.num_days) || 1, 2) : 1 }))}
-                        className="w-4 h-4 text-ooosh-600 rounded"
-                      />
-                      Multi-day
-                    </label>
-                    {!!editForm.is_multi_day && (
-                      <>
-                        <DatePicker
-                          value={String(editForm.job_finish_date || '')}
-                          min={String(editForm.job_date || '')}
-                          onChange={(val) => {
-                            const end = val;
-                            const start = String(editForm.job_date || '');
-                            const days = start && end
-                              ? Math.max(1, Math.ceil((new Date(end + 'T00:00:00').getTime() - new Date(start + 'T00:00:00').getTime()) / 86400000) + 1)
-                              : Number(editForm.num_days) || 1;
-                            setEditForm((p) => ({ ...p, job_finish_date: end, num_days: days }));
-                          }}
-                        />
-                        <span className="text-xs text-purple-600 font-medium">{Number(editForm.num_days) || 1} days</span>
-                      </>
-                    )}
-                  </div>
-                  {/* Crewed-specific fields */}
-                  {editForm.job_type === 'crewed' && (
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Work Type</label>
-                        <select
-                          value={String(editForm.work_type || '')}
-                          onChange={(e) => setEditForm((p) => ({ ...p, work_type: e.target.value }))}
-                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                        >
-                          <option value="">--</option>
-                          <option value="backline_tech">Backline Tech</option>
-                          <option value="general_assist">General Assist</option>
-                          <option value="engineer_foh">Engineer - FOH</option>
-                          <option value="engineer_mons">Engineer - mons</option>
-                          <option value="driving_only">Driving Only</option>
-                          <option value="other">Other</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Crew Needed</label>
-                        <input
-                          type="number"
-                          min={1}
-                          max={20}
-                          value={Number(editForm.crew_count) || 1}
-                          onChange={(e) => setEditForm((p) => ({ ...p, crew_count: Math.max(1, parseInt(e.target.value) || 1) }))}
-                          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                        />
-                      </div>
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge</label>
-                      <input
-                        type="number"
-                        min={0}
-                        step={5}
-                        value={Number(editForm.client_charge_rounded ?? 0)}
-                        onChange={(e) => setEditForm((p) => ({ ...p, client_charge_rounded: parseFloat(e.target.value) || 0 }))}
-                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Fee</label>
-                      <input
-                        type="number"
-                        min={0}
-                        step={5}
-                        value={Number(editForm.freelancer_fee_rounded ?? 0)}
-                        onChange={(e) => setEditForm((p) => ({ ...p, freelancer_fee_rounded: parseFloat(e.target.value) || 0 }))}
-                        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Internal Notes</label>
-                    <textarea
-                      value={String(editForm.internal_notes || '')}
-                      onChange={(e) => setEditForm((p) => ({ ...p, internal_notes: e.target.value }))}
-                      rows={2}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Notes</label>
-                    <textarea
-                      value={String(editForm.freelancer_notes || '')}
-                      onChange={(e) => setEditForm((p) => ({ ...p, freelancer_notes: e.target.value }))}
-                      rows={2}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                    />
-                  </div>
-                </div>
-                <div className="mt-6 flex justify-end gap-2">
-                  <button
-                    onClick={() => setEditingQuoteId(null)}
-                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 font-medium"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={saveEditQuote}
-                    disabled={editSaving}
-                    className="px-4 py-2 bg-ooosh-600 text-white rounded-lg text-sm hover:bg-ooosh-700 font-medium disabled:opacity-50"
-                  >
-                    {editSaving ? 'Saving...' : 'Save Changes'}
-                  </button>
-                </div>
-              </div>
-            </div>
-            );
-          })()}
+          {/* Edit Quote Modal — shared component */}
+          {editingQuote && (
+            <QuoteEditModal
+              quote={{
+                id: editingQuote.id,
+                job_type: editingQuote.job_type as 'delivery' | 'collection' | 'crewed',
+                calculation_mode: editingQuote.calculation_mode,
+                venue_id: editingQuote.venue_id,
+                venue_name: editingQuote.venue_name,
+                linked_venue_name: (editingQuote as { linked_venue_name?: string | null }).linked_venue_name,
+                job_date: editingQuote.job_date,
+                job_finish_date: editingQuote.job_finish_date,
+                is_multi_day: editingQuote.is_multi_day,
+                num_days: editingQuote.num_days,
+                arrival_time: editingQuote.arrival_time,
+                what_is_it: editingQuote.what_is_it,
+                work_type: editingQuote.work_type,
+                work_description: editingQuote.work_description,
+                crew_count: editingQuote.crew_count,
+                internal_notes: editingQuote.internal_notes,
+                freelancer_notes: editingQuote.freelancer_notes,
+                client_charge_rounded: editingQuote.client_charge_rounded,
+                freelancer_fee_rounded: editingQuote.freelancer_fee_rounded,
+                hh_pushed_at: editingQuote.hh_pushed_at,
+                out_date: job?.out_date ?? null,
+                return_date: job?.return_date ?? null,
+              }}
+              onClose={() => setEditingQuote(null)}
+              onSaved={loadQuotes}
+            />
+          )}
 
           {/* Hire Forms Section (testing) */}
 
