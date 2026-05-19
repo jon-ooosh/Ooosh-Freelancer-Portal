@@ -40,6 +40,33 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   primaryFirstName: string | null;
   ccEmails: string[];
 }> {
+  // First pass: per-job contact selection (migration 086). When staff have
+  // explicitly ticked who's on THIS hire via the New Enquiry contact picker,
+  // those rows ARE the recipient list — primary becomes the `to`, the rest
+  // are CCs. Replaces the org-level lookup entirely when present (the whole
+  // point of per-job selection is "Sarah's at this org but THIS hire is Tom").
+  // Falls through to the org-level logic below when the job has no
+  // job_contacts rows (legacy jobs, HH-synced jobs, anything pre-migration-086).
+  const jobContactsResult = await query(
+    `SELECT p.email, p.first_name, p.last_name, jc.is_primary
+     FROM job_contacts jc
+     JOIN people p ON p.id = jc.person_id
+     WHERE jc.job_id = $1
+       AND p.email IS NOT NULL AND p.email <> ''
+       AND p.is_deleted = false
+     ORDER BY jc.is_primary DESC, p.first_name ASC`,
+    [jobId]
+  );
+  if (jobContactsResult.rows.length > 0) {
+    const primary = jobContactsResult.rows[0];
+    const ccEmails = jobContactsResult.rows.slice(1).map((r: any) => r.email).filter(Boolean);
+    return {
+      primaryEmail: primary.email,
+      primaryFirstName: primary.first_name || primary.email?.split('@')[0] || null,
+      ccEmails,
+    };
+  }
+
   // Get people associated with the job's client organisations.
   // Checks both job_organisations links AND the direct client_id on jobs table.
   // NOTE: manager1_person_id / manager2_person_id are INTERNAL Ooosh staff (account managers),
