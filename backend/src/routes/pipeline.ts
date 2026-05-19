@@ -1329,6 +1329,246 @@ router.delete('/:jobId/organisations/:linkId', async (req: AuthRequest, res: Res
 });
 
 // ============================================================================
+// JOB CONTACTS — per-job contact selection (job_contacts, migration 086)
+// ============================================================================
+// Round 6 (May 2026): writes from outside the New Enquiry form. Lets staff
+// manage per-hire contacts on existing jobs (including HH-synced ones with
+// zero job_contacts rows). The shape mirrors job_organisations: GET returns
+// current state + candidates, PUT does idempotent replace, POST adds a
+// person in one shot (search-existing or create-new + link to client org).
+
+// GET /api/pipeline/:jobId/contacts
+// Returns: { ticked: [{ person_id, name, email, is_primary, role }],
+//            candidates: [{ person_id, name, email, role, source_org_name, source_org_id, is_org_primary }] }
+// Candidates: all people via person_organisation_roles on client_id OR any
+// org linked via job_organisations. Deduped by person_id (ticked first source wins).
+router.get('/:jobId/contacts', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+
+    // Currently ticked
+    const tickedResult = await query(
+      `SELECT jc.person_id, jc.is_primary, jc.role_override,
+              p.first_name, p.last_name, p.email, p.phone
+       FROM job_contacts jc
+       JOIN people p ON p.id = jc.person_id AND p.is_deleted = false
+       WHERE jc.job_id = $1
+       ORDER BY jc.is_primary DESC, p.first_name ASC`,
+      [jobId]
+    );
+
+    // All candidate people from client org + any linked org. DISTINCT ON
+    // person_id keeps the first source per person (sorted so client wins
+    // over linked orgs, primary contacts surface ahead of generals).
+    const candidatesResult = await query(
+      `SELECT DISTINCT ON (p.id)
+              p.id AS person_id,
+              p.first_name, p.last_name, p.email, p.phone,
+              por.role, por.is_primary AS is_org_primary,
+              o.id AS source_org_id, o.name AS source_org_name,
+              CASE WHEN o.id = j.client_id THEN 0 ELSE 1 END AS source_priority
+       FROM jobs j
+       JOIN person_organisation_roles por ON por.status = 'active'
+       JOIN organisations o ON o.id = por.organisation_id AND o.is_deleted = false
+       JOIN people p ON p.id = por.person_id AND p.is_deleted = false
+       WHERE j.id = $1
+         AND (
+           o.id = j.client_id
+           OR o.id IN (SELECT organisation_id FROM job_organisations WHERE job_id = j.id)
+         )
+       ORDER BY p.id, source_priority, por.is_primary DESC`,
+      [jobId]
+    );
+
+    const ticked = tickedResult.rows.map((r: any) => ({
+      person_id: r.person_id,
+      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+      email: r.email,
+      phone: r.phone,
+      is_primary: r.is_primary,
+      role_override: r.role_override,
+    }));
+
+    const candidates = candidatesResult.rows.map((r: any) => ({
+      person_id: r.person_id,
+      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+      email: r.email,
+      phone: r.phone,
+      role: r.role,
+      is_org_primary: r.is_org_primary,
+      source_org_id: r.source_org_id,
+      source_org_name: r.source_org_name,
+    }));
+
+    res.json({ ticked, candidates });
+  } catch (error) {
+    console.error('Get job contacts error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/pipeline/:jobId/contacts
+// Idempotent replace. Body: { person_ids: string[], primary_person_id: string | null }
+// At most one primary (enforced by partial unique index; passing a primary
+// not in person_ids is a 400). Empty person_ids clears all contacts on the job.
+const putJobContactsSchema = z.object({
+  person_ids: z.array(z.string().uuid()),
+  primary_person_id: z.string().uuid().nullable().optional(),
+});
+
+router.put('/:jobId/contacts', validate(putJobContactsSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const { person_ids, primary_person_id } = req.body as z.infer<typeof putJobContactsSchema>;
+
+    if (primary_person_id && !person_ids.includes(primary_person_id)) {
+      res.status(400).json({ error: 'primary_person_id must be one of person_ids' });
+      return;
+    }
+
+    // Verify job exists
+    const jobCheck = await query('SELECT id FROM jobs WHERE id = $1 AND is_deleted = false', [jobId]);
+    if (jobCheck.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    // Transactional replace: delete all existing, insert the new set.
+    // Simpler than a diff for a small list and keeps the audit clean.
+    await query('BEGIN');
+    try {
+      await query('DELETE FROM job_contacts WHERE job_id = $1', [jobId]);
+      for (const personId of person_ids) {
+        const isPrimary = personId === primary_person_id;
+        await query(
+          `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
+           VALUES ($1, $2, $3, $4)`,
+          [jobId, personId, isPrimary, req.user!.id]
+        );
+      }
+      await query('COMMIT');
+    } catch (txErr) {
+      await query('ROLLBACK');
+      throw txErr;
+    }
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', {}, {
+      job_contacts_updated: true,
+      contact_count: person_ids.length,
+      primary_person_id: primary_person_id || null,
+    });
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('Update job contacts error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/pipeline/:jobId/contacts/add-person
+// One-shot helper: link an existing person to the client org (if not already)
+// AND tick them on the job. Used by the Add-contact UI on Job Detail and by
+// the picker promote checkbox. Optionally creates a new person inline.
+// Body: { person_id?, first_name?, last_name?, email?, phone?, role?,
+//         set_as_primary?: boolean }
+// Exactly one of person_id or (first_name + last_name) must be supplied.
+const addContactSchema = z.object({
+  person_id: z.string().uuid().optional(),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+  email: z.string().email().optional().or(z.literal('')),
+  phone: z.string().optional(),
+  role: z.string().optional(),
+  set_as_primary: z.boolean().optional(),
+});
+
+router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const { person_id, first_name, last_name, email, phone, role, set_as_primary } =
+      req.body as z.infer<typeof addContactSchema>;
+
+    if (!person_id && !(first_name && last_name)) {
+      res.status(400).json({ error: 'Provide either person_id or first_name+last_name' });
+      return;
+    }
+
+    const jobResult = await query(
+      'SELECT id, client_id FROM jobs WHERE id = $1 AND is_deleted = false',
+      [jobId]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const clientId = jobResult.rows[0].client_id;
+
+    await query('BEGIN');
+    try {
+      let resolvedPersonId = person_id;
+
+      // Create person if needed
+      if (!resolvedPersonId) {
+        const createResult = await query(
+          `INSERT INTO people (first_name, last_name, email, phone, created_by)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id`,
+          [first_name, last_name, email || null, phone || null, req.user!.id]
+        );
+        resolvedPersonId = createResult.rows[0].id;
+      }
+
+      // Link to client org via person_organisation_roles if a client org
+      // exists and the link doesn't already (active row).
+      if (clientId) {
+        const existingLink = await query(
+          `SELECT id FROM person_organisation_roles
+           WHERE person_id = $1 AND organisation_id = $2 AND status = 'active'
+           LIMIT 1`,
+          [resolvedPersonId, clientId]
+        );
+        if (existingLink.rows.length === 0) {
+          await query(
+            `INSERT INTO person_organisation_roles
+             (person_id, organisation_id, role, status, created_by)
+             VALUES ($1, $2, $3, 'active', $4)`,
+            [resolvedPersonId, clientId, role || 'General Contact', req.user!.id]
+          );
+        }
+      }
+
+      // If set_as_primary, clear any current primary on the job first
+      // (the partial unique index would otherwise reject the insert).
+      if (set_as_primary) {
+        await query(
+          `UPDATE job_contacts SET is_primary = false
+           WHERE job_id = $1 AND is_primary = true`,
+          [jobId]
+        );
+      }
+
+      // Tick on the job
+      await query(
+        `INSERT INTO job_contacts (job_id, person_id, is_primary, created_by)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (job_id, person_id) DO UPDATE
+           SET is_primary = EXCLUDED.is_primary OR job_contacts.is_primary`,
+        [jobId, resolvedPersonId, !!set_as_primary, req.user!.id]
+      );
+
+      await query('COMMIT');
+      res.status(201).json({ person_id: resolvedPersonId });
+    } catch (txErr) {
+      await query('ROLLBACK');
+      throw txErr;
+    }
+  } catch (error) {
+    console.error('Add job contact error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================================================
 // JOB FIELD EDITING — Inline edit of key job fields from Job Detail page
 // ============================================================================
 
