@@ -503,6 +503,10 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     let totalExcessDeposits = 0;
     // Track deposit money applied to invoices via kind=3 (for invoice reconciliation)
     let hireDepositAppliedToInvoices = 0;
+    // Track credit notes — these reduce HH invoice owing without being real cash,
+    // so they must be subtracted from the reconciliation gap to avoid being
+    // counted as "direct invoice payments". See job 15627 incident (May 2026).
+    let totalCreditNotesApplied = 0;
     // Collect approved invoices for reconciliation (detect direct invoice payments)
     const approvedInvoices: Array<{ amount: number; owing: number }> = [];
     // HireHop dual-publishes a single payment-application as TWO kind=3 rows:
@@ -661,14 +665,26 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
             }
           }
         } else if (kind === 2) {
-          // Credit note — negative debit, classified same as deposits
-          const creditAmount = -(parseFloat(row.debit || data.debit || '0'));
+          // Credit note. HireHop publishes the value in `row.credit` (positive),
+          // not as a negative `row.debit`. HH already nets credit notes off the
+          // invoice's `owing` field, so adding them to totalHireDeposits would
+          // double-count (the hire-value side already reflects the credit, and
+          // PASS 3 reconciliation would also count them as direct invoice
+          // payments). Instead track separately and subtract from the
+          // reconciliation gap below. Verified against job 15627 (May 2026).
+          const creditAmount = parseFloat(
+            row.credit || data.credit || (-(parseFloat(row.debit || data.debit || '0'))).toString()
+          );
           const description = String(data.DESCRIPTION || row.desc || '');
           const isExcess = isExcessPayment(description);
 
-          if (Math.abs(creditAmount) > 0) {
-            if (isExcess) { totalExcessDeposits += creditAmount; }
-            else { totalHireDeposits += creditAmount; }
+          if (creditAmount > 0 && !isExcess) {
+            totalCreditNotesApplied += creditAmount;
+          }
+          // Excess credit notes are rare in practice; preserve original behaviour
+          // (treat as deposit) for now until we see one in the wild.
+          else if (creditAmount > 0 && isExcess) {
+            totalExcessDeposits += creditAmount;
           }
         }
       }
@@ -687,7 +703,15 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         totalPaidOnApprovedInvoices += paidOnInvoice;
       }
     }
-    const directInvoicePayments = Math.max(totalPaidOnApprovedInvoices - hireDepositAppliedToInvoices, 0);
+    // Credit notes reduce an invoice's `owing` without being real cash, so we
+    // subtract them from the gap to avoid mistaking the credit-note offset
+    // for a direct payment. Verified against job 15627 (May 2026): £24 credit
+    // note was inflating totalHireDeposits by £24, producing a phantom £2.40
+    // overpayment.
+    const directInvoicePayments = Math.max(
+      totalPaidOnApprovedInvoices - hireDepositAppliedToInvoices - totalCreditNotesApplied,
+      0
+    );
     if (directInvoicePayments > 0.01) {
       totalHireDeposits += directInvoicePayments;
     }
