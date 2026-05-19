@@ -2,9 +2,7 @@ import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
-import DatePicker from '../components/DatePicker';
-import { TimeInput } from '../components/TimeInput';
-import { VenuePicker } from '../components/VenuePicker';
+import QuoteEditModal from '../components/QuoteEditModal';
 import CompleteQuoteOverrideModal from '../components/CompleteQuoteOverrideModal';
 import { MobileListCard } from '../components/mobile/MobileListCard';
 import { MobileFilterSheet } from '../components/mobile/MobileFilterSheet';
@@ -695,16 +693,6 @@ export default function TransportOpsPage() {
       setQuotes(mapEffectiveOpsStatus(res.data));
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update combined fee');
-    }
-  }
-
-  async function saveQuoteEdit(quoteId: string, fields: Record<string, unknown>) {
-    try {
-      await api.put(`/quotes/${quoteId}`, fields);
-      await loadOps();
-      setEditingQuote(null);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save');
     }
   }
 
@@ -1510,12 +1498,12 @@ export default function TransportOpsPage() {
         </div>
       )}
 
-      {/* Edit Quote Modal */}
+      {/* Edit Quote Modal — shared component */}
       {editingQuote && (
-        <EditQuoteModal
+        <QuoteEditModal
           quote={editingQuote}
-          onSave={saveQuoteEdit}
           onClose={() => setEditingQuote(null)}
+          onSaved={loadOps}
         />
       )}
 
@@ -1797,7 +1785,7 @@ function QuoteRow({
         <div className="w-32 flex-shrink-0">
           <div className="text-sm font-medium text-gray-900">{dateBlock}</div>
           <div className="text-xs text-gray-500 flex items-center gap-1.5">
-            {q.arrival_time && <span>{q.arrival_time}</span>}
+            {q.arrival_time ? <span>{q.arrival_time}</span> : <span className="text-gray-400 italic">🕐 Time TBC</span>}
             {q.is_multi_day && q.num_days && q.num_days > 1 && (
               <span className="text-purple-600 font-medium">{q.num_days}d</span>
             )}
@@ -1999,7 +1987,7 @@ function QuoteRow({
           meta={
             <>
               <span className="text-gray-700 font-medium">{dateBlock}</span>
-              {q.arrival_time && <span>· {q.arrival_time}</span>}
+              {q.arrival_time ? <span>· {q.arrival_time}</span> : <span className="text-gray-400 italic">· 🕐 Time TBC</span>}
               {q.is_multi_day && q.num_days && q.num_days > 1 && (
                 <span className="text-purple-600 font-medium">· {q.num_days}d</span>
               )}
@@ -2935,306 +2923,6 @@ function ClickableStatusPill({
   );
 }
 
-// ── Edit Quote Modal ────────────────────────────────────────────────
-
-function EditQuoteModal({
-  quote,
-  onSave,
-  onClose,
-}: {
-  quote: OpsQuote;
-  onSave: (id: string, fields: Record<string, unknown>) => Promise<void>;
-  onClose: () => void;
-}) {
-  const isLocal = quote.is_local || quote.calculation_mode === 'fixed';
-  const parseDateField = (d: string | Date | null) => {
-    if (!d) return '';
-    if (d instanceof Date) return d.toISOString().split('T')[0];
-    return String(d).includes('T') ? String(d).split('T')[0] : String(d);
-  };
-  const [form, setForm] = useState({
-    job_type: quote.job_type,
-    venue_name: quote.linked_venue_name || quote.venue_name || '',
-    job_date: parseDateField(quote.job_date),
-    job_finish_date: parseDateField(quote.job_finish_date),
-    is_multi_day: quote.is_multi_day || false,
-    num_days: quote.num_days || 1,
-    arrival_time: quote.arrival_time || '',
-    what_is_it: quote.what_is_it || '',
-    work_type: quote.work_type || '',
-    work_description: quote.work_description || '',
-    crew_count: quote.crew_count || 1,
-    internal_notes: quote.internal_notes || '',
-    freelancer_notes: quote.freelancer_notes || '',
-    client_charge_rounded: quote.client_charge_rounded || 0,
-    freelancer_fee_rounded: quote.freelancer_fee_rounded || 0,
-  });
-  const [saving, setSaving] = useState(false);
-  const [selectedVenueId, setSelectedVenueId] = useState<string | null>(quote.venue_id || null);
-
-  async function handleSave() {
-    setSaving(true);
-    try {
-      await onSave(quote.id, {
-        job_type: form.job_type,
-        venue_name: form.venue_name,
-        venue_id: selectedVenueId,
-        job_date: form.job_date || null,
-        job_finish_date: form.job_finish_date || null,
-        is_multi_day: form.is_multi_day,
-        num_days: form.num_days,
-        arrival_time: form.arrival_time || null,
-        what_is_it: form.what_is_it || null,
-        work_type: form.work_type || null,
-        work_description: form.work_description || null,
-        crew_count: form.crew_count > 1 ? form.crew_count : 1,
-        internal_notes: form.internal_notes || null,
-        freelancer_notes: form.freelancer_notes || null,
-        client_charge_rounded: form.client_charge_rounded,
-        freelancer_fee_rounded: form.freelancer_fee_rounded,
-      });
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  useEffect(() => {
-    function handleEsc(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
-    }
-    document.addEventListener('keydown', handleEsc);
-    return () => document.removeEventListener('keydown', handleEsc);
-  }, [onClose]);
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
-      <div className="relative bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6 max-h-[90vh] overflow-y-auto">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">
-          Edit {isLocal ? 'Local ' : ''}{form.job_type === 'delivery' ? 'Delivery' : form.job_type === 'collection' ? 'Collection' : 'Crewed Job'}
-        </h3>
-
-        <div className="space-y-4">
-          {/* Type */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
-            <select
-              value={form.job_type}
-              onChange={(e) => setForm((p) => ({ ...p, job_type: e.target.value as OpsQuote['job_type'] }))}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-            >
-              <option value="delivery">Delivery</option>
-              <option value="collection">Collection</option>
-              <option value="crewed">Crewed</option>
-            </select>
-          </div>
-
-          {/* Venue */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Venue</label>
-            <VenuePicker
-              value={{ venueId: selectedVenueId, venueName: form.venue_name }}
-              onChange={({ venueId, venueName }) => {
-                setSelectedVenueId(venueId);
-                setForm((p) => ({ ...p, venue_name: venueName }));
-              }}
-            />
-          </div>
-
-          {/* Date & Time row */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">{form.is_multi_day ? 'Start Date' : 'Date'}</label>
-              <DatePicker
-                value={form.job_date}
-                onChange={(val) => setForm((p) => ({ ...p, job_date: val }))}
-                className={quote.out_date && form.job_date && form.job_date !== parseDateField(quote.out_date) ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
-              />
-              {quote.out_date && form.job_date && form.job_date !== parseDateField(quote.out_date) && (
-                <p className="text-xs text-amber-600 mt-1">
-                  HH start: {parseDateField(quote.out_date)}
-                </p>
-              )}
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Arrival Time</label>
-              <TimeInput
-                value={form.arrival_time}
-                onChange={(v) => setForm((p) => ({ ...p, arrival_time: v }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-              />
-            </div>
-          </div>
-
-          {/* Multi-day toggle + finish date */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <label className="flex items-center gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={form.is_multi_day}
-                onChange={(e) => setForm((p) => ({ ...p, is_multi_day: e.target.checked, num_days: e.target.checked ? Math.max(p.num_days, 2) : 1 }))}
-                className="w-4 h-4 text-ooosh-600 rounded"
-              />
-              Multi-day
-            </label>
-            {form.is_multi_day && (
-              <>
-                <div>
-                  <DatePicker
-                    value={form.job_finish_date}
-                    onChange={(val) => {
-                      const days = form.job_date && val
-                        ? Math.max(1, Math.ceil((new Date(val + 'T00:00:00').getTime() - new Date(form.job_date + 'T00:00:00').getTime()) / 86400000) + 1)
-                        : form.num_days;
-                      setForm((p) => ({ ...p, job_finish_date: val, num_days: days }));
-                    }}
-                    min={form.job_date || undefined}
-                    className={quote.return_date && form.job_finish_date && form.job_finish_date !== parseDateField(quote.return_date) ? '[&>button]:border-amber-400 [&>button]:bg-amber-50' : ''}
-                  />
-                </div>
-                <span className="text-xs text-purple-600 font-medium">{form.num_days} days</span>
-              </>
-            )}
-          </div>
-          {form.is_multi_day && quote.return_date && form.job_finish_date && form.job_finish_date !== parseDateField(quote.return_date) && (
-            <p className="text-xs text-amber-600 -mt-2">
-              HH return: {parseDateField(quote.return_date)}
-            </p>
-          )}
-
-          {/* Crewed-specific fields */}
-          {form.job_type === 'crewed' && (
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Work Type</label>
-                <select
-                  value={form.work_type}
-                  onChange={(e) => setForm((p) => ({ ...p, work_type: e.target.value }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                >
-                  <option value="">—</option>
-                  <option value="backline_tech">Backline Tech</option>
-                  <option value="general_assist">General Assist</option>
-                  <option value="engineer_foh">Engineer - FOH</option>
-                  <option value="engineer_mons">Engineer - mons</option>
-                  <option value="driving_only">Driving Only</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Crew Needed</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={form.crew_count}
-                  onChange={(e) => setForm((p) => ({ ...p, crew_count: Math.max(1, parseInt(e.target.value) || 1) }))}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-              {form.work_type && (
-                <div className="col-span-2">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Work Description</label>
-                  <textarea
-                    value={form.work_description}
-                    onChange={(e) => setForm((p) => ({ ...p, work_description: e.target.value }))}
-                    rows={2}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  />
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* What is it (D&C only) */}
-          {form.job_type !== 'crewed' && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">What is it</label>
-              <select
-                value={form.what_is_it}
-                onChange={(e) => setForm((p) => ({ ...p, what_is_it: e.target.value }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-              >
-                <option value="">—</option>
-                <option value="vehicle">Vehicle</option>
-                <option value="equipment">Equipment</option>
-                <option value="people">People</option>
-              </select>
-            </div>
-          )}
-
-          {/* Fees — editable for all quotes (override calculator values or set local fees) */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Client Charge</label>
-              <input
-                type="number"
-                min={0}
-                step={5}
-                value={form.client_charge_rounded}
-                onChange={(e) => setForm((p) => ({ ...p, client_charge_rounded: parseFloat(e.target.value) || 0 }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Fee</label>
-              <input
-                type="number"
-                min={0}
-                step={5}
-                value={form.freelancer_fee_rounded}
-                onChange={(e) => setForm((p) => ({ ...p, freelancer_fee_rounded: parseFloat(e.target.value) || 0 }))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-              />
-            </div>
-          </div>
-
-          {/* Notes */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Internal Notes</label>
-            <textarea
-              value={form.internal_notes}
-              onChange={(e) => setForm((p) => ({ ...p, internal_notes: e.target.value }))}
-              rows={2}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Freelancer Notes</label>
-            <textarea
-              value={form.freelancer_notes}
-              onChange={(e) => setForm((p) => ({ ...p, freelancer_notes: e.target.value }))}
-              rows={2}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-            />
-          </div>
-
-          {!isLocal && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
-              Fee overrides will replace the calculator values. To fully recalculate, use the transport calculator from the Job Detail page.
-            </div>
-          )}
-        </div>
-
-        <div className="mt-6 flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200 font-medium"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="px-4 py-2 bg-ooosh-600 text-white rounded-lg text-sm hover:bg-ooosh-700 font-medium disabled:opacity-50"
-          >
-            {saving ? 'Saving...' : 'Save Changes'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 
 // ── Calendar View ────────────────────────────────────────────────────
@@ -3343,7 +3031,9 @@ function CalendarView({
               </span>
               <span className="font-semibold text-gray-900">{q.linked_venue_name || q.venue_name || 'TBC'}</span>
               {q.job_date && <span className="text-sm text-gray-500">{formatDate(q.job_date)}</span>}
-              {q.arrival_time && <span className="text-sm text-gray-500">{q.arrival_time}</span>}
+              {q.arrival_time
+                ? <span className="text-sm text-gray-500">{q.arrival_time}</span>
+                : <span className="text-sm text-gray-400 italic">🕐 Time TBC</span>}
             </div>
             <div className="flex items-center gap-2">
               <div className="w-28">
@@ -3383,9 +3073,11 @@ function CalendarView({
         className={`text-[10px] leading-tight px-1 py-0.5 rounded truncate cursor-pointer hover:opacity-80 transition-opacity ${
           JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-100 text-gray-700'
         }`}
-        title={`${JOB_TYPE_LABELS[q.job_type]} ${q.linked_venue_name || q.venue_name || ''} ${q.arrival_time || ''}`}
+        title={`${JOB_TYPE_LABELS[q.job_type]} ${q.linked_venue_name || q.venue_name || ''} ${q.arrival_time || 'Time TBC'}`}
       >
-        {q.arrival_time && <span className="font-semibold">{q.arrival_time} </span>}
+        {q.arrival_time
+          ? <span className="font-semibold">{q.arrival_time} </span>
+          : <span className="italic opacity-70">TBC </span>}
         {JOB_TYPE_LABELS[q.job_type]} {q.linked_venue_name || q.venue_name || '?'}
       </div>
     );
@@ -3493,7 +3185,7 @@ function CalendarView({
                         onClick={() => setSelectedQuote(q)}
                         className={`p-1.5 rounded border cursor-pointer hover:shadow-sm transition-shadow ${JOB_TYPE_COLOURS[q.job_type] || 'bg-gray-50 border-gray-200'}`}
                       >
-                        <div className="text-[10px] font-semibold">{q.arrival_time || '—'}</div>
+                        <div className={`text-[10px] font-semibold ${q.arrival_time ? '' : 'italic opacity-70'}`}>{q.arrival_time || 'Time TBC'}</div>
                         <div className="text-[10px] leading-tight truncate">{q.linked_venue_name || q.venue_name || 'TBC'}</div>
                         <div className="flex items-center gap-1 mt-0.5">
                           <span className={`text-[9px] rounded px-1 py-0.5 ${sc.bgColour} ${sc.colour}`}>{sc.label}</span>
@@ -3533,7 +3225,9 @@ function CalendarView({
                       className="flex items-start gap-4 p-3 rounded-lg border border-gray-200 hover:bg-gray-50 cursor-pointer transition-colors"
                     >
                       <div className="w-16 text-right">
-                        <div className="text-sm font-semibold text-gray-900">{q.arrival_time || '—'}</div>
+                        {q.arrival_time
+                          ? <div className="text-sm font-semibold text-gray-900">{q.arrival_time}</div>
+                          : <div className="text-xs text-gray-400 italic">🕐 TBC</div>}
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">

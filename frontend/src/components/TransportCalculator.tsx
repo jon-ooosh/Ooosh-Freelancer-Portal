@@ -910,7 +910,7 @@ export default function TransportCalculator({
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-2">
-                          {formData.jobType === 'collection' ? 'Collection Date' : isCrewedJob && formData.isMultiDay ? 'Start Date' : 'Job Date'}
+                          {formData.isMultiDay ? 'Start Date' : (formData.jobType === 'collection' ? 'Collection Date' : 'Job Date')}
                         </label>
                         <input type="date" value={formData.jobDate} onChange={(e) => updateField('jobDate', e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
                         {(() => {
@@ -927,12 +927,13 @@ export default function TransportCalculator({
                         <label className="block text-sm font-medium text-gray-700 mb-2">Arrive by (optional)</label>
                         <TimeInput value={formData.arrivalTime} onChange={(v) => updateField('arrivalTime', v)} />
                       </div>
-                      {isCrewedJob && (
+                      {(isCrewedJob || isDC) && (
                         <>
                           <div className="md:col-span-2">
                             <label className="flex items-center space-x-2">
                               <input type="checkbox" checked={formData.isMultiDay} onChange={(e) => { updateField('isMultiDay', e.target.checked); if (e.target.checked) updateField('calculationMode', 'dayrate'); }} className="w-4 h-4 text-ooosh-600 rounded" />
                               <span className="text-sm font-medium text-gray-700">Multi-day job</span>
+                              {isDC && <span className="text-xs text-gray-500 ml-2">(switches pricing to day rate)</span>}
                             </label>
                           </div>
                           {formData.isMultiDay && (
@@ -1090,6 +1091,53 @@ export default function TransportCalculator({
                           </>
                         )}
                       </div>
+                    </div>
+                  )}
+
+                  {/* Pricing — D&C only. Crewed has its own block on Step 3. */}
+                  {isDC && (
+                    <div className="border-t pt-6">
+                      <h4 className="font-medium text-gray-900 mb-1">💷 Pricing</h4>
+                      <p className="text-xs text-gray-500 mb-4">Hourly works the time math from drive + handover + unload. Day rate is a flat fee per day — useful for long-haul or multi-day trips where the freelancer commits a whole day.</p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-2">Mode</label>
+                          <select value={formData.calculationMode} onChange={(e) => updateField('calculationMode', e.target.value as QuoteCalcMode)} className="w-full px-4 py-2 border border-gray-300 rounded-lg">
+                            <option value="hourly">Hourly rate</option>
+                            <option value="dayrate">Day rate</option>
+                          </select>
+                        </div>
+                        {formData.calculationMode === 'dayrate' && (
+                          <>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-2">Days</label>
+                              <input type="number" value={formData.numberOfDays || ''} onChange={(e) => updateField('numberOfDays', parseInt(e.target.value) || 1)} min={1} disabled={formData.isMultiDay} className="w-full px-4 py-2 border border-gray-300 rounded-lg disabled:bg-gray-50 disabled:text-gray-500" />
+                              {formData.isMultiDay && <p className="text-xs text-gray-500 mt-1">Auto from finish date</p>}
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-2">Freelancer Day Rate (&pound;)</label>
+                              <input type="number" value={formData.dayRateOverride ?? settings?.driver_day_rate ?? ''} onChange={(e) => updateField('dayRateOverride', e.target.value ? parseFloat(e.target.value) : null)} className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-2">Client Day Rate (&pound;) <span className="text-gray-400 font-normal">optional</span></label>
+                              <input type="number" value={formData.clientDayRateOverride ?? ''} onChange={(e) => updateField('clientDayRateOverride', e.target.value ? parseFloat(e.target.value) : null)} placeholder="Auto" className="w-full px-4 py-2 border border-gray-300 rounded-lg" />
+                            </div>
+                          </>
+                        )}
+                      </div>
+                      {formData.calculationMode === 'hourly' && (
+                        <div className="mt-4">
+                          <label className="flex items-center space-x-2">
+                            <input type="checkbox" checked={formData.applyMinHours} onChange={(e) => updateField('applyMinHours', e.target.checked)} className="w-4 h-4 text-ooosh-600 rounded" />
+                            <span className="text-sm font-medium text-gray-700">Apply min hours ({settings?.min_hours_threshold || 5}hr)</span>
+                          </label>
+                        </div>
+                      )}
+                      {formData.calculationMode === 'dayrate' && formData.addCollection && (
+                        <div className="mt-4 px-3 py-2 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-xs">
+                          ⚠️ "Add collection from same location" pairs two quotes. In day-rate mode both quotes use the same Days value — usually you want separate single-day quotes for delivery and collection. Consider creating them as two separate quotes instead.
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1306,7 +1354,7 @@ export default function TransportCalculator({
                       {formData.addCollection && formData.collectionDate && (
                         <div><span className="text-gray-500">Collection:</span> <span className="ml-1 font-medium">{formatDateUK(formData.collectionDate)}{formData.collectionArrivalTime && ` @ ${formatTime12h(formData.collectionArrivalTime)}`}</span></div>
                       )}
-                      {isCrewedJob && formData.isMultiDay && formData.jobFinishDate && (
+                      {formData.isMultiDay && formData.jobFinishDate && (
                         <div><span className="text-gray-500">Finish:</span> <span className="ml-1">{formatDateUK(formData.jobFinishDate)} ({formData.numberOfDays} days)</span></div>
                       )}
                       {formData.includesSetupWork && formData.setupWorkDescription && (
