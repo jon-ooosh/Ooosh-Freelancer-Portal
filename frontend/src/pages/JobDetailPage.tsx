@@ -11,6 +11,7 @@ import ExcessGateBanner from '../components/ExcessGateBanner';
 import ExcessPaymentModal from '../components/ExcessPaymentModal';
 import OohReturnModal from '../components/OohReturnModal';
 import AddToHireModal, { type AddToHireCandidate } from '../components/AddToHireModal';
+import JobContactsCard from '../components/JobContactsCard';
 import type { JobExcess } from '../../../shared/types';
 import CancellationModal from '../components/CancellationModal';
 import CancelOpenRequirementsSection from '../components/CancelOpenRequirementsSection';
@@ -3505,6 +3506,10 @@ export default function JobDetailPage() {
             </div>
           )}
         </div>
+
+        {/* Per-job contacts (migration 086) — tick who's on this hire and
+            mark a primary. Drives where client-facing emails route. */}
+        {id && <JobContactsCard jobId={id} onChanged={loadJob} />}
 
         {/* Collapsible Details & Notes */}
         <div ref={detailsNotesRef} className="mt-3 pt-3 border-t border-gray-100">

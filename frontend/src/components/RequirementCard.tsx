@@ -81,6 +81,9 @@ interface EmailContact {
   email: string;
   name: string;
   source: string;
+  /** Optional person UUID when the contact came from a known person row.
+   *  Used by the picker's "save as job contacts" promote checkbox. */
+  person_id?: string;
 }
 
 interface HireFormDriver {
@@ -196,6 +199,11 @@ export default function RequirementCard({
   const [customEmail, setCustomEmail] = useState('');
   const [customName, setCustomName] = useState('');
   const [customError, setCustomError] = useState('');
+  // Round 6: opt-in promote-to-job-contacts on send. Default OFF — we want
+  // staff to consciously promote, not silently mutate. Only renders when at
+  // least one selected contact has a person_id AND isn't already in
+  // job_contacts (i.e. source isn't job_contact / job_contact_primary).
+  const [promoteToJobContacts, setPromoteToJobContacts] = useState(false);
 
   // Deletion confirmation state
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -236,6 +244,7 @@ export default function RequirementCard({
     setCustomEmail('');
     setCustomName('');
     setCustomError('');
+    setPromoteToJobContacts(false);
     try {
       const data = await api.get<{ contacts: EmailContact[] }>(`/hire-forms/email-contacts/${jobId}`);
       setEmailContacts(data.contacts);
@@ -245,6 +254,24 @@ export default function RequirementCard({
     } finally {
       setLoadingContacts(false);
     }
+  }
+
+  /** Promote any selected contacts that have a known person_id and aren't
+   *  already in job_contacts. Fire-and-forget — failures don't block the send. */
+  async function promoteSelectedToJobContacts() {
+    const toPromote = emailContacts.filter(c =>
+      selectedEmails.has(c.email) &&
+      c.person_id &&
+      c.source !== 'job_contact' &&
+      c.source !== 'job_contact_primary'
+    );
+    if (toPromote.length === 0) return;
+    await Promise.all(
+      toPromote.map(c =>
+        api.post(`/pipeline/${jobId}/contacts/add-person`, { person_id: c.person_id })
+          .catch(err => console.warn(`Failed to promote ${c.email}:`, err))
+      )
+    );
   }
 
   function addCustomEmail() {
@@ -282,6 +309,11 @@ export default function RequirementCard({
       const recipients = emailContacts
         .filter(c => selectedEmails.has(c.email))
         .map(c => ({ email: c.email, name: c.name }));
+      // Promote first so future auto-emails route to job_contacts directly.
+      // Best-effort: don't block the send on promote failure.
+      if (promoteToJobContacts) {
+        await promoteSelectedToJobContacts();
+      }
       const data = await api.post<{ sent: number; failed: number }>('/hire-forms/send-email', {
         jobId,
         recipients,
@@ -954,6 +986,31 @@ export default function RequirementCard({
                   <div className="text-[11px] text-red-500 mt-1">{customError}</div>
                 )}
               </div>
+
+              {/* Round 6 — promote-on-send. Only render when ≥1 selected
+                  recipient has a person_id AND isn't already in job_contacts. */}
+              {(() => {
+                const promotable = emailContacts.filter(c =>
+                  selectedEmails.has(c.email) &&
+                  c.person_id &&
+                  c.source !== 'job_contact' &&
+                  c.source !== 'job_contact_primary'
+                );
+                if (promotable.length === 0) return null;
+                return (
+                  <label className="flex items-start gap-2 mt-3 px-2 py-1.5 rounded bg-blue-50 border border-blue-100 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={promoteToJobContacts}
+                      onChange={e => setPromoteToJobContacts(e.target.checked)}
+                      className="mt-0.5 rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+                    />
+                    <span className="text-[11px] text-blue-900 leading-snug">
+                      Also save {promotable.length === 1 ? 'this contact' : `these ${promotable.length} contacts`} to the job, so future emails route here automatically.
+                    </span>
+                  </label>
+                );
+              })()}
 
               <div className="flex items-center gap-2 mt-3">
                 <button

@@ -36,6 +36,11 @@ export interface ResolvedContact {
   email: string;
   name: string;
   source: string;
+  /** Optional underlying person UUID — present when this contact came from a
+   *  known person row (job_contacts, client_person, linked-org-person,
+   *  client_name_match). Absent for org-level emails or manual entries.
+   *  Used by the picker promote flow to tick contacts into job_contacts. */
+  person_id?: string;
 }
 
 /**
@@ -60,7 +65,7 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
   // 0. Per-job contacts (migration 086) — staff-ticked on the New Enquiry
   // form. Primary lands first so the auto-emailer picks it as `to`.
   const jobContactsResult = await query(
-    `SELECT p.email, p.first_name, p.last_name, jc.is_primary
+    `SELECT p.id AS person_id, p.email, p.first_name, p.last_name, jc.is_primary
      FROM job_contacts jc
      JOIN people p ON p.id = jc.person_id
      WHERE jc.job_id = $1
@@ -74,6 +79,7 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
       email: p.email,
       name: `${p.first_name} ${p.last_name}`.trim(),
       source: p.is_primary ? 'job_contact_primary' : 'job_contact',
+      person_id: p.person_id,
     });
   }
 
@@ -89,7 +95,7 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
   // 2. People at the client org
   if (job.client_id) {
     const peopleResult = await query(
-      `SELECT p.email, p.first_name, p.last_name
+      `SELECT p.id AS person_id, p.email, p.first_name, p.last_name
        FROM person_organisation_roles por
        JOIN people p ON p.id = por.person_id
        WHERE por.organisation_id = $1
@@ -104,6 +110,7 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
           email: p.email,
           name: `${p.first_name} ${p.last_name}`.trim(),
           source: 'client_person',
+          person_id: p.person_id,
         });
       }
     }
@@ -111,7 +118,8 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
 
   // 3. People at any org linked via job_organisations (band, promoter, mgmt)
   const joPeopleResult = await query(
-    `SELECT DISTINCT p.email, p.first_name, p.last_name, jo.role AS org_role, o.name AS org_name
+    `SELECT DISTINCT p.id AS person_id, p.email, p.first_name, p.last_name,
+            jo.role AS org_role, o.name AS org_name
      FROM job_organisations jo
      JOIN organisations o ON o.id = jo.organisation_id
      JOIN person_organisation_roles por ON por.organisation_id = jo.organisation_id
@@ -131,6 +139,7 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
         email: p.email,
         name: `${p.first_name} ${p.last_name}`.trim(),
         source,
+        person_id: p.person_id,
       });
     }
   }
@@ -158,7 +167,7 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
   // linked person)
   if (job.client_name) {
     const contactResult = await query(
-      `SELECT p.email, p.first_name, p.last_name
+      `SELECT p.id AS person_id, p.email, p.first_name, p.last_name
        FROM people p
        WHERE p.email IS NOT NULL AND p.email != ''
          AND p.is_deleted = false
@@ -172,6 +181,7 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
           email: p.email,
           name: `${p.first_name} ${p.last_name}`.trim(),
           source: 'client_name_match',
+          person_id: p.person_id,
         });
       }
     }
