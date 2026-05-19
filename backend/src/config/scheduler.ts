@@ -1,6 +1,7 @@
 import cron from 'node-cron';
-import { isR2Configured } from './r2';
+import { isR2Configured, listR2Objects } from './r2';
 import { runBackup } from '../scripts/backup';
+import { runRetentionSweep } from '../scripts/backup-retention';
 import { isHireHopConfigured } from './hirehop';
 import { syncJobsFromHireHop } from '../services/hirehop-job-sync';
 import { runComplianceCheck } from '../services/compliance-checker';
@@ -18,8 +19,27 @@ export function startScheduler() {
   if (!isR2Configured()) {
     console.log('Scheduler: R2 not configured — automated backups disabled');
   } else {
-    // Daily at 2:00 AM
+    // Daily at 2:00 AM. Guarded against duplicate fires: if the service
+    // restarts within the 02:00 window (deploy, reboot, etc.) node-cron
+    // re-arms and fires again. Before running, check R2 for a backup
+    // taken within the last hour and skip if found.
     cron.schedule('0 2 * * *', async () => {
+      try {
+        const recent = await listR2Objects('backups/');
+        const oneHourAgo = Date.now() - 60 * 60 * 1000;
+        const hasRecent = recent.some(
+          (o) => o.Key?.endsWith('.sql.gz') && o.LastModified && o.LastModified.getTime() > oneHourAgo,
+        );
+        if (hasRecent) {
+          console.log('Scheduler: Daily backup skipped — a backup was taken within the last hour');
+          return;
+        }
+      } catch (err) {
+        // If the dedup check fails, fall through and take the backup anyway —
+        // duplicates are cheaper than a missed backup.
+        console.warn('Scheduler: Backup dedup check failed, proceeding:', err);
+      }
+
       console.log('Scheduler: Starting daily backup...');
       try {
         const result = await runBackup();
@@ -28,7 +48,27 @@ export function startScheduler() {
         console.error('Scheduler: Backup failed:', err);
       }
     });
-    console.log('Scheduler: Daily backup scheduled at 02:00');
+    console.log('Scheduler: Daily backup scheduled at 02:00 (deduped against last-hour runs)');
+
+    // Daily at 02:30 — retention sweep. Keeps every backup from the last
+    // 30 days plus the oldest backup of each calendar month forever.
+    cron.schedule('30 2 * * *', async () => {
+      console.log('Scheduler: Running backup retention sweep...');
+      try {
+        const result = await runRetentionSweep(true);
+        if (result.deleted > 0 || result.errors.length > 0) {
+          console.log(
+            `Scheduler: Retention sweep — scanned ${result.scanned}, kept ${result.kept}, deleted ${result.deleted}, errors ${result.errors.length}`,
+          );
+          if (result.errors.length > 0) {
+            result.errors.forEach((e) => console.error(`  Retention error ${e.key}: ${e.error}`));
+          }
+        }
+      } catch (err) {
+        console.error('Scheduler: Retention sweep failed:', err);
+      }
+    });
+    console.log('Scheduler: Backup retention sweep scheduled daily at 02:30');
   }
 
   // ── HireHop Job Sync ──────────────────────────────────────────────────
