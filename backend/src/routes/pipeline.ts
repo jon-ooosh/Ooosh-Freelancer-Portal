@@ -1812,11 +1812,42 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Primary per-job contact (job_contacts, migration 086). When set, this
+    // person becomes the HH contact NAME/EMAIL/TELEPHONE; the org name stays
+    // as COMPANY. Falls through to org name in both NAME and COMPANY (today's
+    // behaviour) when no primary is ticked.
+    let primaryContact: { name: string; email: string | null; phone: string | null } | null = null;
+    {
+      const pcResult = await query(
+        `SELECT p.first_name, p.last_name, p.email, p.phone
+         FROM job_contacts jc
+         JOIN people p ON p.id = jc.person_id
+         WHERE jc.job_id = $1
+           AND jc.is_primary = true
+           AND p.is_deleted = false
+         LIMIT 1`,
+        [jobId]
+      );
+      if (pcResult.rows.length > 0) {
+        const r = pcResult.rows[0];
+        const fullName = `${r.first_name || ''} ${r.last_name || ''}`.trim();
+        if (fullName) {
+          primaryContact = {
+            name: fullName,
+            email: r.email || null,
+            phone: r.phone || null,
+          };
+        }
+      }
+    }
+
     // Build HireHop job payload
     // HH API: `name` is required for new jobs, `job_name` is the job title
     const hhBody: Record<string, unknown> = {
       job: 0, // 0 = create new
-      name: job.client_name || job.job_name || 'New Job', // required for new
+      // Prefer per-job primary contact's name, then job's client_name (free text),
+      // then job_name as last resort.
+      name: primaryContact?.name || job.client_name || job.job_name || 'New Job',
       job_name: job.job_name || '',
       no_webhook: 1,
     };
@@ -1829,8 +1860,11 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
     if (venueName) hhBody.venue = venueName;
 
     // Include contact fields in job creation — save_job.php may populate the auto-created contact
-    if (orgDetails?.email) hhBody.email = orgDetails.email;
-    if (orgDetails?.phone) hhBody.telephone = orgDetails.phone;
+    // Primary per-job contact's email/phone wins over the org's when set.
+    const initialEmail = primaryContact?.email || orgDetails?.email;
+    const initialPhone = primaryContact?.phone || orgDetails?.phone;
+    if (initialEmail) hhBody.email = initialEmail;
+    if (initialPhone) hhBody.telephone = initialPhone;
 
     const { out, start, end, to, duration } = buildHHJobDateTimes(job);
 
@@ -1924,14 +1958,22 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
           }
         }
 
-        const contactName = orgDetails.name || job.client_name || job.company_name || '';
+        // When a primary per-job contact (job_contacts, migration 086) is set,
+        // NAME is the person, COMPANY is the org. Otherwise both fall back to
+        // the org name (today's behaviour — no regression).
+        const orgName = orgDetails.name || job.client_name || job.company_name || '';
+        const nameForHh = primaryContact?.name || orgName;
+        const companyForHh = orgName || primaryContact?.name || '';
         const contactPayload: Record<string, unknown> = {
           JOB_ID: hhJobNumber,
-          NAME: contactName,
-          COMPANY: contactName,
+          NAME: nameForHh,
+          COMPANY: companyForHh,
           CLIENT: 1,
           no_webhook: 1,
         };
+        if (primaryContact) {
+          syncedFields.push('primary contact');
+        }
 
         // CLIENT_ID is critical — without it, HH creates a new unlinked contact instead of updating
         if (hhClientId) {
@@ -1946,12 +1988,15 @@ router.post('/:id/push-hirehop', async (req: AuthRequest, res: Response) => {
           contactPayload.ADDRESS = addressParts.join(', ');
           syncedFields.push('address');
         }
-        if (orgDetails.email) {
-          contactPayload.EMAIL = orgDetails.email;
+        // Primary contact's email/phone takes precedence over the org's when set.
+        const emailForHh = primaryContact?.email || orgDetails.email;
+        const phoneForHh = primaryContact?.phone || orgDetails.phone;
+        if (emailForHh) {
+          contactPayload.EMAIL = emailForHh;
           syncedFields.push('email');
         }
-        if (orgDetails.phone) {
-          contactPayload.TELEPHONE = orgDetails.phone;
+        if (phoneForHh) {
+          contactPayload.TELEPHONE = phoneForHh;
           syncedFields.push('phone');
         }
 
@@ -2081,14 +2126,43 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
       }
     }
 
+    // Primary per-job contact (job_contacts, migration 086). When set, NAME +
+    // EMAIL + TELEPHONE come from the person; COMPANY stays as the org name.
+    let primaryContact: { name: string; email: string | null; phone: string | null } | null = null;
+    {
+      const pcResult = await query(
+        `SELECT p.first_name, p.last_name, p.email, p.phone
+         FROM job_contacts jc
+         JOIN people p ON p.id = jc.person_id
+         WHERE jc.job_id = $1
+           AND jc.is_primary = true
+           AND p.is_deleted = false
+         LIMIT 1`,
+        [jobId]
+      );
+      if (pcResult.rows.length > 0) {
+        const r = pcResult.rows[0];
+        const fullName = `${r.first_name || ''} ${r.last_name || ''}`.trim();
+        if (fullName) {
+          primaryContact = {
+            name: fullName,
+            email: r.email || null,
+            phone: r.phone || null,
+          };
+        }
+      }
+    }
+
     const { hhBroker } = await import('../services/hirehop-broker');
 
     // Step 1: Create/update contact in HireHop address book via job_save_contact.php
-    const contactName = orgDetails?.name || job.client_name || job.company_name || '';
+    const orgName = orgDetails?.name || job.client_name || job.company_name || '';
+    const nameForHh = primaryContact?.name || orgName;
+    const companyForHh = orgName || primaryContact?.name || '';
     const contactPayload: Record<string, unknown> = {
       JOB_ID: job.hh_job_number,
-      NAME: contactName,
-      COMPANY: contactName,
+      NAME: nameForHh,
+      COMPANY: companyForHh,
       CLIENT: 1,
       no_webhook: 1,
     };
@@ -2098,19 +2172,21 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
       contactPayload.CLIENT_ID = hhClientId;
     }
 
-    // Add address, email, phone from org details if available
+    // Add address, email, phone — primary contact's email/phone wins when set.
     if (orgDetails) {
       // Build full address from address + location fields
       const addressParts = [orgDetails.address, orgDetails.location].filter(Boolean);
       if (addressParts.length > 0) {
         contactPayload.ADDRESS = addressParts.join(', ');
       }
-      if (orgDetails.email) {
-        contactPayload.EMAIL = orgDetails.email;
-      }
-      if (orgDetails.phone) {
-        contactPayload.TELEPHONE = orgDetails.phone;
-      }
+    }
+    const emailForHh = primaryContact?.email || orgDetails?.email;
+    const phoneForHh = primaryContact?.phone || orgDetails?.phone;
+    if (emailForHh) {
+      contactPayload.EMAIL = emailForHh;
+    }
+    if (phoneForHh) {
+      contactPayload.TELEPHONE = phoneForHh;
     }
 
     const contactResponse = await hhBroker.post(
@@ -2162,18 +2238,19 @@ router.post('/:id/sync-client-to-hh', async (req: AuthRequest, res: Response) =>
 
     // Build a summary of what was synced
     const syncedFields: string[] = ['name'];
-    if (orgDetails?.email) syncedFields.push('email');
-    if (orgDetails?.phone) syncedFields.push('phone');
+    if (primaryContact) syncedFields.push('primary contact');
+    if (emailForHh) syncedFields.push('email');
+    if (phoneForHh) syncedFields.push('phone');
     if (orgDetails?.address || orgDetails?.location) syncedFields.push('address');
 
-    console.log('[Pipeline] Client synced to HireHop job #' + job.hh_job_number + ':', contactName, '(fields:', syncedFields.join(', ') + ')');
+    console.log('[Pipeline] Client synced to HireHop job #' + job.hh_job_number + ':', nameForHh, '(fields:', syncedFields.join(', ') + ')');
 
     // Log as interaction on the job
     await query(
       `INSERT INTO interactions (type, content, job_id, created_by, pipeline_status_at_creation)
        VALUES ('note', $1, $2, $3, $4)`,
       [
-        `Synced client "${contactName}" to HireHop job #${job.hh_job_number} (contact details: ${syncedFields.join(', ')})`,
+        `Synced client "${nameForHh}" to HireHop job #${job.hh_job_number} (contact details: ${syncedFields.join(', ')})`,
         jobId,
         req.user!.id,
         job.pipeline_status,

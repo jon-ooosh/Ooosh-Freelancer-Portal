@@ -295,7 +295,8 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
 
     // Compute has_client_email: true if we can reach the client via OP's address book.
     // Mirrors getJobEmailRecipients so the Job Detail banner matches send behaviour.
-    // Four levels: (1) people linked via roles to client or any linked org,
+    // Five levels: (0) per-job contacts (job_contacts — migration 086),
+    // (1) people linked via roles to client or any linked org,
     // (2) client org's own email, (3) any org linked via job_organisations
     // with an email (client, band, promoter, etc. — any role counts),
     // (4) jobs.client_name string matching a Person's first+last name.
@@ -305,6 +306,13 @@ router.get('/jobs/:id', async (req: AuthRequest, res: Response) => {
        WHERE j.id = $1
          AND (
            EXISTS (
+             SELECT 1 FROM job_contacts jc
+             JOIN people p ON p.id = jc.person_id
+             WHERE jc.job_id = j.id
+               AND p.is_deleted = false
+               AND p.email IS NOT NULL AND p.email <> ''
+           )
+           OR EXISTS (
              SELECT 1 FROM people p
              JOIN person_organisation_roles por ON por.person_id = p.id AND por.status = 'active'
              WHERE p.email IS NOT NULL AND p.email <> ''

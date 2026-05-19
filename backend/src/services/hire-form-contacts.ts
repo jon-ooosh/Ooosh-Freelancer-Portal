@@ -13,12 +13,19 @@
  * the email forever (the daily cron only fires on the exact 10-day mark, so
  * a 0-contact day wasn't retried).
  *
- * This resolver covers all five sources the picker uses:
+ * This resolver covers six sources, in priority order:
+ *   0. Per-job contacts (job_contacts — migration 086, staff-ticked on enquiry)
  *   1. Client org's own email column
  *   2. People linked to client org via person_organisation_roles
  *   3. People linked to ANY org on job_organisations (band, promoter, mgmt)
  *   4. Org-level emails on job_organisations entries
  *   5. People whose name matches `jobs.client_name` (HH contact-name fallback)
+ *
+ * Source 0 is preferred when present — it's the explicit per-job answer to
+ * "who's on this hire" rather than the org-wide "who's at this org". Sources
+ * 1-5 still fire even if 0 returned rows (the picker is additive — staff may
+ * want to see other reachable contacts as candidates), but the primary
+ * (`is_primary=true`) job_contact lands first in the list.
  *
  * Returns deduplicated contacts, source-tagged so callers can log/audit which
  * path resolved them.
@@ -49,6 +56,26 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
   );
   if (jobResult.rows.length === 0) return contacts;
   const job = jobResult.rows[0];
+
+  // 0. Per-job contacts (migration 086) — staff-ticked on the New Enquiry
+  // form. Primary lands first so the auto-emailer picks it as `to`.
+  const jobContactsResult = await query(
+    `SELECT p.email, p.first_name, p.last_name, jc.is_primary
+     FROM job_contacts jc
+     JOIN people p ON p.id = jc.person_id
+     WHERE jc.job_id = $1
+       AND p.email IS NOT NULL AND p.email <> ''
+       AND p.is_deleted = false
+     ORDER BY jc.is_primary DESC, p.first_name ASC`,
+    [jobId]
+  );
+  for (const p of jobContactsResult.rows) {
+    contacts.push({
+      email: p.email,
+      name: `${p.first_name} ${p.last_name}`.trim(),
+      source: p.is_primary ? 'job_contact_primary' : 'job_contact',
+    });
+  }
 
   // 1. Client org email
   if (job.org_email) {
@@ -144,7 +171,7 @@ export async function resolveHireFormContacts(jobId: string): Promise<ResolvedCo
         contacts.push({
           email: p.email,
           name: `${p.first_name} ${p.last_name}`.trim(),
-          source: 'job_contact',
+          source: 'client_name_match',
         });
       }
     }
