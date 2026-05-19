@@ -1703,6 +1703,13 @@ The cleanup strategy is: OP becomes master for relationship data, HH gets what i
   - [x] Band trading history on New Enquiry form sidebar (shows band's job history alongside client history)
   - [x] Band trading history on Job Detail sidebar (when band linked via job_organisations)
   - [x] Separate stacked sections: client history above, band history below, each with 4-square stats grid
+- [x] **Per-job Contact Linkage** (May 2026, rounds 1-6) — full spec under "Per-job contacts (`job_contacts`)" in Shared Utilities. Six PRs (#547, #549, #550, #551, #554, #559, #561) split into a data layer + routing graduation + management UI:
+  - [x] Round 1 (#547): picklist tidy + cascade contact picker on New Enquiry form
+  - [x] Round 2 (#549): tickable contacts + search-first add + `job_contacts` table (migration 086)
+  - [x] Round 3 (#550): +1 button on Returning, auto-tick of default contact on cascade load
+  - [x] Round 4 (#551, #554): dangling-form auto-save on submit failure + loud failure alerts, validation-error clear-on-recover
+  - [x] Round 5 (#559): sender helpers (money-emails, hire-form-contacts, has_client_email banner) read `job_contacts` first; HH push enrichment uses primary contact's name as `NAME` + email/phone, org as `COMPANY`
+  - [x] Round 6 (#561): `JobContactsCard` on Job Detail header — tickable chips with primary star, debounced autosave, "+ Add" with search-first / create-new fallback; opt-in promote-to-job-contacts checkbox on the hire-form picker; three new endpoints under `/api/pipeline/:jobId/contacts` (GET / PUT / POST add-person)
 - [x] **Mobile Responsiveness & UX** (15 Apr 2026)
   - [x] Job Detail header: responsive job name (text-lg/text-2xl), stacked action buttons on mobile, flex-wrap badges
   - [x] Details & Notes collapsed into header card with truncated snippets, click-outside-to-close
@@ -2152,7 +2159,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 
   **Plus structural fix for the duplicate-org pattern:** HH job sync (`hirehop-job-sync.ts`) now name-matches new shell client orgs against active People and auto-links unambiguous matches via `person_organisation_roles` (role='Main Contact'). Multi-candidate matches go to `sync_review_queue` with `review_type='person_link_ambiguous'`. Same logic applied in reverse on contact sync (`hirehop-sync.ts`) — `name_conflict` now auto-links shell orgs instead of just flagging. Backfill script `backend/src/scripts/backfill-shell-org-person-links.ts` covers historical data (dry-run by default, `--commit` to apply).
 
-- **Job-level people + role junction (`job_person_roles`) for role-based email routing — per SPEC.md §2.3 and §3.4** (flagged 22 Apr 2026). The safety net above is a stepping stone — it keeps comms working while the real role-based model is built. Current model is org-centric: `jobs.client_id → organisations`, with people reached only via `person_organisation_roles`. The spec mandates per-job roles (Enquirer, Authoriser, Payer, Site Contact, Driver, Booker) and routes automated emails to the right role (`payment_received → Payer`, `delivery_confirmed → Site Contact`, etc.). Proper build needs: migration for `job_person_roles` (`job_id, person_id, role, is_primary, notes, start_date, end_date`), population path from HH sync (default `CLIENT` contact → Enquirer/Main Contact role) + New Enquiry form + hire form submission, role-keyed recipient helpers per template (replace `getJobEmailRecipients` with `getRoleRecipient(jobId, 'payer')` + fallback chain), and Job Detail UI to add/edit roles per job. Issue logged in platform tracker: search "job-level people" in /operations/issues.
+- **Job-level people + role junction (`job_person_roles`) for role-based email routing — per SPEC.md §2.3 and §3.4** (flagged 22 Apr 2026, partially addressed May 2026). The safety net + the May 2026 `job_contacts` model (rounds 1-6, see "Per-job contacts" under Shared Utilities) are stepping stones — they keep comms working and let staff manage per-hire contacts, but it's a SINGLE-LIST model with one primary. The real SPEC vision is role-keyed: per-job roles (Enquirer, Authoriser, Payer, Site Contact, Driver, Booker) routing automated emails to the right role (`payment_received → Payer`, `delivery_confirmed → Site Contact`, etc.). Current state (post-round-6): every job CAN have its contact list managed, and primary lands as `to` for all client emails — but it's one bucket for everyone. Proper build needs: either (a) extend `job_contacts` with a per-row `role` enum, or (b) build a separate `job_person_roles` table (`job_id, person_id, role, is_primary, notes, start_date, end_date`); population path from HH sync (default `CLIENT` contact → Enquirer/Main Contact role) + New Enquiry form + hire form submission; role-keyed recipient helpers per template (replace `getJobEmailRecipients` with `getRoleRecipient(jobId, 'payer')` + fallback chain); Job Detail UI to add/edit roles per job. Open design question: extend `job_contacts` (smaller migration, reuses existing UI + endpoints) vs. fresh table (cleaner if roles need start/end dates per booking phase). Issue logged in platform tracker: search "job-level people" in /operations/issues.
 - ~~**Vehicle condition report PDF failure (C3, 22 Apr 2026)**~~ — **RESOLVED 22 Apr 2026** (initially with a pdf-lib Roboto port, then **superseded 23 Apr 2026** by restoring the original jsPDF template). Root cause of the crash was `drawText` drawing `✓` (U+2713) with `StandardFonts.Helvetica` (WinAnsi), which throws `WinAnsi cannot encode "✓" (0x2713)`. The first fix ported the logic to pdf-lib with Roboto via fontkit and looked functional but plain, losing the navy-branded header + clickable photo links from the original standalone Vehicle Module template. Second fix ported the original `netlify/functions/generate-pdf.mts` from the pre-integration VM codebase verbatim into `buildConditionReportPdf` — it uses **jsPDF** (not pdf-lib) because jsPDF provides `textWithLink()` for hyperlink annotations and renders bullets as filled rounded rectangles instead of Unicode ticks, sidestepping the WinAnsi issue entirely. Logo loads from the existing R2 asset via `fetchLogo()` converted to a data URI at runtime (cached in-module), so no hardcoded `LOGO_BASE64` string. StandardFonts fallback removed from `hire-form-pdf.ts` as well — missing Roboto now throws instead of silently degrading. Also added `POST /api/vehicles/events/:eventId/regenerate-pdf` for mis-fire backfills + damage-dispute re-sends, surfaced in the Event History section of VehicleDetailPage. `save-event` persists signature base64 as a separate R2 png (`vehicle-events/{REG}/{id}_signature.png`) and `briefingItems` on the event JSON so regenerations have full fidelity.
 - ~~**Photo clickability — photos in private bucket (23 Apr 2026)**~~ — **RESOLVED 23 Apr 2026.** `backend/src/config/r2.ts` now exports `uploadToPublicR2` / `getFromPublicR2` / `listPublicR2Objects` targeting `R2_PUBLIC_BUCKET_NAME` (`ooosh-vehicle-photos`). In `vehicles.ts`: `/upload-photo` branches on the `events/` prefix and writes condition photos to the public bucket (everything else stays private); `/list-photos`, `/photo/*`, and `/events/:id/regenerate-pdf` all read from the public bucket for `events/` keys. Signatures + event JSON stay in the private bucket (embedded in the PDF, not linked from it). Env vars required: backend needs `R2_PUBLIC_URL=https://pub-<hash>.r2.dev` + `R2_PUBLIC_BUCKET_NAME=ooosh-vehicle-photos`; frontend needs `VITE_R2_PUBLIC_URL=https://pub-<hash>.r2.dev` (live book-outs pre-build the `r2Url` client-side, so Vite needs the value baked in at `npm run build`). Historical book-outs before this fix have photos stranded in `ooosh-operations` — accept as lost (one-off, only Desmond's RX24SZC 22 Apr hire was affected). **Future hardening** (non-urgent): the `pub-<hash>.r2.dev` dev URL is rate-limited and bypasses Cloudflare caching. At Ooosh's current volume (handful of PDFs/week × handful of clicks each) this doesn't matter. If traffic ever grows, connect a custom domain (e.g. `photos.oooshtours.co.uk`) to the bucket via Cloudflare dashboard and swap the env var values — no code change required.
 - ~~**Allocations booked-out UX (22 Apr 2026)**~~ — **PARTIALLY RESOLVED 24 Apr 2026.** AllocationsPage now hides "Book Out" on `booked_out`/`active` cards and shows a "Booked Out" / "On Hire" pill in its place (`AllocationsPage.tsx:721-733`). Still missing: an explicit "Mark as Returned" action directly on booked-out cards (currently staff action check-in from the CheckInPage). Tracked alongside the van-centric rebuild — worth bundling into that pass.
@@ -2581,6 +2588,74 @@ This was a real bug: `hire-forms.ts` PDF generation at lines 1173 + 1424 was usi
 4. Vehicle event history — full audit trail
 
 Book-out is the canonical moment dates get LOCKED on the assignment. Before book-out, `hire_start/hire_end` are tentative (mirror job dates if not set). At book-out, staff can adjust them on the BookOutPage form. Mid-tour drivers added after book-out get THEIR own `hire_start = NOW()`.
+
+### Per-job contacts (`job_contacts`)
+
+**The convention:** each hire has its own contact list — who's actually involved in THIS booking — distinct from the org-wide "who works at this company" model in `person_organisation_roles`. Rounds 1-6 (May 2026) built this end-to-end: the storage layer, the routing graduation, the management UI, and the HH push enrichment. **All new client-facing email senders, and any new HH push surface, MUST follow this convention.**
+
+**Storage** (migration 086):
+
+`job_contacts (job_id, person_id, is_primary, role_override, notes, created_by, created_at, updated_at)`
+- `UNIQUE (job_id, person_id)` — one row per person per job
+- Partial unique index `WHERE is_primary = true` — at most one primary per job (enforced; passing two would 23505)
+- `role_override` reserved for the edge case where a person's per-job role differs from their org-level role; NULL = inherit. Most rows leave it NULL.
+
+**Why a new table rather than `person_organisation_roles.is_primary`:** `is_primary` is org-wide. "Sarah is primary at ATC Live" means she's primary on every job for ATC Live. We need per-job selection where some hires have Sarah as lead, others Tom, some both ticked with Sarah as lead. `job_contacts` lets that vary independently per job without polluting the org-level "who's the main rep here" signal.
+
+**The routing rule (single source of truth):**
+
+Every client-facing email sender resolves recipients in this exact order:
+
+```
+1. job_contacts            ← primary = `to`, rest = CC (REPLACES org-level when non-empty)
+2. person_organisation_roles  via client_id OR any job_organisations link
+3. organisations.email     (client org's own column, then any linked org)
+4. people name-match       (jobs.client_name → people.first_name + last_name)
+5. info@oooshtours.co.uk   (safety net, banner injected)
+```
+
+When `job_contacts` has rows for a job, they ARE the recipient list. The org-level lookup is NOT merged — that's the point of per-job selection ("Sarah's at this org but THIS hire is Tom"). Steps 2-5 only run when the job has zero `job_contacts` rows.
+
+**Implementations:**
+- `getJobEmailRecipients` (`services/money-emails.ts`) — used by `resolveClientEmailTarget`, drives payment/excess/cancellation/portal/vehicle/hire-form-auto emails
+- `resolveHireFormContacts` (`services/hire-form-contacts.ts`) — used by the manual hire-form picker. **Differs from above:** stays additive (shows all reachable contacts as candidates) but lands `job_contacts` rows at the top tagged `job_contact_primary` / `job_contact`. Surfaces `person_id` on every source backed by a known person row.
+- `has_client_email` banner check (`routes/hirehop.ts`) — mirrors the same priority order so the Job Detail amber warning matches send behaviour. Must stay in sync with `getJobEmailRecipients`.
+
+**Don't write a parallel path.** Any new client-facing sender must route through one of the helpers above, or follow the same five-level fallback. The May 2026 round-3 RX22SWU sole-trader incident is the cautionary tale — multiple senders had drifted from `getJobEmailRecipients` and were silently failing on edge-case data shapes.
+
+**Write paths (where `job_contacts` rows come from):**
+1. **New Enquiry form** (`POST /api/pipeline/enquiry`) — `contact_person_ids[]` + `primary_contact_person_id` from the cascade picker
+2. **Job Detail `<JobContactsCard>`** (round 6) — three endpoints under `/api/pipeline/:jobId/contacts`:
+   - `GET` → `{ ticked, candidates }` (candidates = people from `client_id` + any `job_organisations` linked org, deduped by `person_id`, client wins tie)
+   - `PUT` → idempotent replace `{ person_ids, primary_person_id }`. Transactional delete-all-insert-new.
+   - `POST /add-person` → one-shot: link existing person OR create-and-link to client org + tick on job. Honours `set_as_primary` by clearing any current primary first (partial unique index would 23505 otherwise).
+3. **Hire-form picker promote checkbox** (round 6) — when staff sends a hire-form email via `<RequirementCard>`, an opt-in checkbox "Also save these N contacts to the job" POSTs each promotable selected contact (one with a `person_id` not already in `job_contacts`) to `/add-person`. Fire-and-forget; doesn't block the send.
+
+**HireHop push enrichment** (round 5):
+
+`POST /:id/push-hirehop` + `POST /:id/sync-client-to-hh` (both in `routes/pipeline.ts`) look up the primary `job_contacts` row and use it for the HH `job_save_contact.php` payload:
+
+| HH field | Value |
+|---|---|
+| `NAME` | Primary contact's full name (fallback: org name) |
+| `COMPANY` | Org name (fallback: primary contact's name) |
+| `EMAIL` | Primary contact's email if set, else org email |
+| `TELEPHONE` | Primary contact's phone if set, else org phone |
+| `CLIENT_ID` | `external_id_map` lookup — UPDATE in place, not duplicate |
+
+Because we pass `CLIENT_ID`, HH updates the existing contact record in place — including its `NAME` field. That's the intended cleanup direction (evolves "ATC Live" → "Sarah Smith / ATC Live") and matches the SPEC's Stream C cleanup notes. New jobs for the same client will show the most recent push's NAME until their own push overwrites it.
+
+**`person_id` on `resolveHireFormContacts` results:**
+- Present for: `job_contact`, `job_contact_primary`, `client_person`, role-derived linked-org sources, `client_name_match`
+- Absent for: `client_org`, `linked_org`-style org-level rows, `manual_entry`
+
+The picker promote checkbox keys off this — it only renders for selected contacts where `person_id` is set AND `source !== 'job_contact*'`.
+
+**Watch list:**
+- Staff report "I picked Tom but the email still went to Sarah" → check `job_contacts.is_primary` for the job. The partial unique index means only one row should have `is_primary=true`; if zero rows have it, routing falls through to step 2+. The amber "No primary contact picked" hint on `<JobContactsCard>` is the heads-up.
+- Staff add a contact via the Job Detail UI but the banner doesn't clear → make sure the parent component is wired to refresh on the `onChanged` callback (re-runs `loadJob()` which re-fetches `has_client_email`).
+- New email sender added but recipients are wrong → confirm it routes via `resolveClientEmailTarget` / `getJobEmailRecipients`. Don't write a fresh `SELECT email FROM organisations WHERE id = $client_id` — that bypasses the rule.
+- Future `job_person_roles` work (SPEC §2.3 — Enquirer / Authoriser / Payer / Site Contact / Driver / Booker per-job roles) will extend or replace this. `job_contacts` was the round-1-to-6 stepping stone; the role-keyed routing model is captured in "Future Enhancements".
 
 ## Security
 
