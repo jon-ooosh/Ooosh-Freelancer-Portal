@@ -64,7 +64,24 @@ export default function DataCleanupPage() {
   const api = useApi();
 
   // Tabs
-  const [tab, setTab] = useState<'reviews' | 'types' | 'convert'>('reviews');
+  const [tab, setTab] = useState<'reviews' | 'types' | 'convert' | 'import-hh'>('reviews');
+
+  // Import HH job state
+  const [importInput, setImportInput] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{
+    jobNumber: number;
+    jobId: string;
+    created: boolean;
+    clientLinked: boolean;
+    clientCreated: boolean;
+    venueLinked: boolean;
+    personLinked: boolean;
+    personFlagged: boolean;
+    lineItemsFetched: number;
+    derivationRan: boolean;
+  } | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
   // Review queue state
   const [reviews, setReviews] = useState<ReviewItem[]>([]);
@@ -193,6 +210,40 @@ export default function DataCleanupPage() {
     }
   }
 
+  // Import HH job: accepts a bare number or a pasted HH URL
+  // (e.g. https://myhirehop.com/job.php?id=15159) — extract the number.
+  function parseHHJobInput(raw: string): number | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const urlMatch = trimmed.match(/[?&]id=(\d+)/);
+    if (urlMatch) return Number(urlMatch[1]);
+    const numMatch = trimmed.match(/^\d+$/);
+    if (numMatch) return Number(trimmed);
+    return null;
+  }
+
+  async function importHHJob() {
+    const jobNumber = parseHHJobInput(importInput);
+    if (!jobNumber) {
+      setImportError('Enter a HireHop job number (e.g. 15159) or paste a HH job URL.');
+      return;
+    }
+    setImporting(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const result = await api('/data-cleanup/import-hh-job', {
+        method: 'POST',
+        body: JSON.stringify({ hh_job_number: jobNumber }),
+      });
+      setImportResult(result.data);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Import failed');
+    } finally {
+      setImporting(false);
+    }
+  }
+
   const tabClass = (t: string) =>
     `px-4 py-2 text-sm font-medium rounded-t-lg ${tab === t ? 'bg-white text-ooosh-700 border-b-2 border-ooosh-600' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'}`;
 
@@ -211,6 +262,7 @@ export default function DataCleanupPage() {
         </button>
         <button onClick={() => setTab('types')} className={tabClass('types')}>Organisation Types</button>
         <button onClick={() => setTab('convert')} className={tabClass('convert')}>Convert Person to Org</button>
+        <button onClick={() => setTab('import-hh')} className={tabClass('import-hh')}>Import HH Job</button>
       </div>
 
       {/* ═══════ REVIEW QUEUE TAB ═══════ */}
@@ -459,6 +511,73 @@ export default function DataCleanupPage() {
                     </button>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ═══════ IMPORT HH JOB TAB ═══════ */}
+      {tab === 'import-hh' && (
+        <div className="max-w-xl">
+          <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 mb-6 text-sm text-blue-700">
+            <p className="font-medium mb-1">Pull a HireHop job into OP on demand.</p>
+            <p>
+              Use this for historical / completed jobs that pre-date OP, or any job that didn't come
+              in via the 30-min sync (which only picks up active statuses 0–8). Re-running on a job
+              already in OP just re-syncs it from HireHop. Common case: backfilling a rolled-over
+              excess from a pre-OP hire so it can be applied to the new booking.
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">HireHop job number or URL</label>
+              <input
+                type="text"
+                value={importInput}
+                onChange={e => { setImportInput(e.target.value); setImportError(null); }}
+                onKeyDown={e => { if (e.key === 'Enter' && !importing) importHHJob(); }}
+                placeholder="e.g. 15159 or https://myhirehop.com/job.php?id=15159"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                disabled={importing}
+              />
+            </div>
+
+            <button
+              onClick={importHHJob}
+              disabled={importing || !importInput.trim()}
+              className="px-4 py-2 bg-ooosh-600 text-white rounded-lg text-sm font-medium hover:bg-ooosh-700 disabled:opacity-50"
+            >
+              {importing ? 'Importing…' : 'Import job from HireHop'}
+            </button>
+
+            {importError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-700">
+                {importError}
+              </div>
+            )}
+
+            {importResult && (
+              <div className="bg-green-50 border border-green-200 rounded-lg px-4 py-3 text-sm text-green-800">
+                <p className="font-medium mb-2">
+                  {importResult.created ? 'Job imported' : 'Job re-synced'} — HH #{importResult.jobNumber}
+                </p>
+                <ul className="text-xs space-y-0.5 text-green-700">
+                  {importResult.clientCreated && <li>• Created new client organisation (shell)</li>}
+                  {importResult.clientLinked && <li>• Linked to existing client</li>}
+                  {importResult.personLinked && <li>• Auto-linked matching person as Main Contact</li>}
+                  {importResult.personFlagged && <li>• Ambiguous person match flagged in review queue</li>}
+                  {importResult.venueLinked && <li>• Linked to existing venue</li>}
+                  <li>• {importResult.lineItemsFetched} line item{importResult.lineItemsFetched === 1 ? '' : 's'} fetched</li>
+                  {importResult.derivationRan && <li>• Requirement derivation ran</li>}
+                </ul>
+                <button
+                  onClick={() => navigate(`/jobs/${importResult.jobId}`)}
+                  className="mt-3 text-xs px-3 py-1.5 bg-ooosh-600 text-white rounded hover:bg-ooosh-700 font-medium"
+                >
+                  Open Job Detail →
+                </button>
               </div>
             )}
           </div>

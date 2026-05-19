@@ -664,6 +664,281 @@ export async function fetchLineItemsOnDemand(jobNumber: number): Promise<HHLineI
     });
 }
 
+// ── Single-job on-demand import ──────────────────────────────────────────
+
+export interface SingleJobSyncResult {
+  jobNumber: number;
+  jobId: string;
+  created: boolean;        // true if newly inserted, false if updated existing
+  clientLinked: boolean;
+  clientCreated: boolean;
+  venueLinked: boolean;
+  personLinked: boolean;
+  personFlagged: boolean;
+  lineItemsFetched: number;
+  derivationRan: boolean;
+}
+
+/**
+ * Sync a single HireHop job by its job number, bypassing the active-status
+ * filter used by the bulk sync. Used by the Data Cleanup "Import HH Job"
+ * action to pull historical / completed / cancelled jobs into OP on demand.
+ *
+ * Idempotent: existing jobs get the same field updates the bulk sync would
+ * apply. Newly imported jobs also have line items fetched and requirement
+ * derivation run.
+ *
+ * Throws on:
+ * - HH returning an error / empty response for the job number
+ * - DB transaction failures
+ */
+export async function syncSingleHireHopJob(
+  jobNumber: number,
+  userId: string,
+): Promise<SingleJobSyncResult> {
+  const detail = await hhBroker.get<Record<string, unknown>>(
+    '/api/job_data.php',
+    { job: jobNumber },
+    { priority: 'high', cacheTTL: 0, skipCache: true },
+  );
+
+  if (!detail.success || !detail.data) {
+    throw new Error(`HireHop job_data.php failed: ${detail.error || 'no data'}`);
+  }
+  const raw = detail.data as Record<string, unknown>;
+  if (raw.error) {
+    throw new Error(`HireHop returned error for job ${jobNumber}: ${String(raw.error)}`);
+  }
+  // job_data.php returns the requested job's fields directly. Empty object
+  // (no JOB_NAME and no STATUS) usually means "not found".
+  if (raw.JOB_NAME === undefined && raw.STATUS === undefined && raw.NAME === undefined) {
+    throw new Error(`HireHop returned no job for number ${jobNumber}`);
+  }
+
+  // job_data.php naming differs slightly from search_list.php — normalise.
+  const job = {
+    NUMBER: Number(raw.NUMBER ?? raw.ID ?? jobNumber),
+    STATUS: Number(raw.STATUS ?? 0),
+    JOB_NAME: String(raw.JOB_NAME ?? raw.NAME ?? ''),
+    JOB_TYPE: (raw.JOB_TYPE as string) || null,
+    COLOUR: (raw.COLOUR as string) || null,
+    CLIENT: (raw.CLIENT as string) || null,
+    COMPANY: (raw.COMPANY as string) || null,
+    CLIENT_REF: (raw.CLIENT_REF as string) || null,
+    VENUE: (raw.VENUE as string) || null,
+    OUT_DATE: (raw.OUT_DATE as string) || null,
+    JOB_DATE: (raw.JOB_DATE as string) || null,
+    JOB_END: (raw.JOB_END as string) || null,
+    RETURN_DATE: (raw.RETURN_DATE as string) || null,
+    CREATE_DATE: (raw.CREATE_DATE as string) || null,
+    MANAGER: (raw.MANAGER as string) || null,
+    MANAGER2: (raw.MANAGER2 as string) || null,
+    CUSTOM_INDEX: (raw.CUSTOM_INDEX as string) || null,
+    MONEY: raw.MONEY != null ? Number(raw.MONEY) : null,
+  };
+
+  const result: SingleJobSyncResult = {
+    jobNumber: job.NUMBER,
+    jobId: '',
+    created: false,
+    clientLinked: false,
+    clientCreated: false,
+    venueLinked: false,
+    personLinked: false,
+    personFlagged: false,
+    lineItemsFetched: 0,
+    derivationRan: false,
+  };
+
+  const client = await getClient();
+  try {
+    await client.query('BEGIN');
+
+    const statusCode = Math.floor(job.STATUS);
+    const statusName = HH_JOB_STATUS_MAP[statusCode] || `Unknown (${statusCode})`;
+
+    // Link / create client organisation (mirrors bulk sync)
+    let clientOrgId: string | null = null;
+    if (job.COMPANY && job.COMPANY.trim()) {
+      const companyName = job.COMPANY.trim();
+      const orgMatch = await client.query(
+        `SELECT id FROM organisations
+         WHERE lower(name) = lower($1) AND is_deleted = false
+         LIMIT 1`,
+        [companyName],
+      );
+      if (orgMatch.rows.length > 0) {
+        clientOrgId = orgMatch.rows[0].id;
+        result.clientLinked = true;
+      } else {
+        const newOrg = await client.query(
+          `INSERT INTO organisations (name, type, created_by)
+           VALUES ($1, 'client', $2)
+           RETURNING id`,
+          [companyName, 'hirehop_sync'],
+        );
+        clientOrgId = newOrg.rows[0].id;
+        result.clientCreated = true;
+
+        const linkResult = await linkMatchingPersonToShellOrg(
+          client,
+          clientOrgId!,
+          companyName,
+          String(job.NUMBER),
+        );
+        if (linkResult.linked) result.personLinked = true;
+        if (linkResult.flagged) result.personFlagged = true;
+      }
+    }
+
+    // Try to link venue
+    let venueId: string | null = null;
+    if (job.VENUE) {
+      const venueMatch = await client.query(
+        `SELECT id FROM venues
+         WHERE lower(name) = lower($1) AND is_deleted = false
+         LIMIT 1`,
+        [job.VENUE.trim()],
+      );
+      if (venueMatch.rows.length > 0) {
+        venueId = venueMatch.rows[0].id;
+        result.venueLinked = true;
+      }
+    }
+
+    const existing = await client.query(
+      `SELECT id FROM jobs WHERE hh_job_number = $1`,
+      [job.NUMBER],
+    );
+
+    if (existing.rows.length > 0) {
+      await client.query(
+        `UPDATE jobs SET
+           job_name = $1, job_type = $2, status = $3, status_name = $4,
+           colour = $5, client_id = COALESCE($6, client_id),
+           client_name = $7, company_name = $8, client_ref = $9,
+           venue_id = COALESCE($10, venue_id), venue_name = $11,
+           out_date = $12, job_date = $13, job_end = $14, return_date = $15,
+           created_date = $16, manager1_name = $17, manager2_name = $18,
+           custom_index = $19, job_value = $20, hh_status = $3,
+           updated_at = NOW()
+         WHERE hh_job_number = $21`,
+        [
+          stripProjectPrefix(job.JOB_NAME),
+          job.JOB_TYPE,
+          statusCode,
+          statusName,
+          job.COLOUR,
+          clientOrgId,
+          job.CLIENT,
+          job.COMPANY,
+          job.CLIENT_REF,
+          venueId,
+          job.VENUE,
+          job.OUT_DATE,
+          job.JOB_DATE,
+          job.JOB_END,
+          job.RETURN_DATE,
+          job.CREATE_DATE,
+          job.MANAGER,
+          job.MANAGER2,
+          job.CUSTOM_INDEX,
+          job.MONEY,
+          job.NUMBER,
+        ],
+      );
+      result.jobId = existing.rows[0].id;
+      result.created = false;
+    } else {
+      // Match bulk sync's mapping for consistency (statusCode 11 → 'confirmed').
+      // Staff can manually adjust after import if a more granular status is wanted.
+      const initialPipelineStatus =
+        statusCode === 0 ? 'new_enquiry' :
+        statusCode === 1 ? 'provisional' :
+        statusCode >= 2 && statusCode <= 8 ? 'confirmed' :
+        statusCode === 9 ? 'cancelled' :
+        statusCode === 10 ? 'lost' :
+        statusCode === 11 ? 'confirmed' : 'new_enquiry';
+
+      const insertRes = await client.query(
+        `INSERT INTO jobs (
+           hh_job_number, job_name, job_type, status, status_name,
+           colour, client_id, client_name, company_name, client_ref,
+           venue_id, venue_name, out_date, job_date, job_end, return_date,
+           created_date, manager1_name, manager2_name, custom_index, created_by,
+           job_value, hh_status, pipeline_status, pipeline_status_changed_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+           $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+           $22, $4, $23, NOW()
+         ) RETURNING id`,
+        [
+          job.NUMBER,
+          stripProjectPrefix(job.JOB_NAME),
+          job.JOB_TYPE,
+          statusCode,
+          statusName,
+          job.COLOUR,
+          clientOrgId,
+          job.CLIENT,
+          job.COMPANY,
+          job.CLIENT_REF,
+          venueId,
+          job.VENUE,
+          job.OUT_DATE,
+          job.JOB_DATE,
+          job.JOB_END,
+          job.RETURN_DATE,
+          job.CREATE_DATE,
+          job.MANAGER,
+          job.MANAGER2,
+          job.CUSTOM_INDEX,
+          userId,
+          job.MONEY,
+          initialPipelineStatus,
+        ],
+      );
+      result.jobId = insertRes.rows[0].id;
+      result.created = true;
+
+      await client.query(
+        `INSERT INTO external_id_map (entity_type, entity_id, external_system, external_id)
+         VALUES ('jobs', $1, 'hirehop', $2)
+         ON CONFLICT (entity_type, entity_id, external_system) DO UPDATE SET
+           external_id = $2, synced_at = NOW()`,
+        [result.jobId, String(job.NUMBER)],
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // Fetch line items + run derivation (outside the upsert transaction so a
+  // derivation error doesn't roll back the job import).
+  try {
+    const items = await fetchLineItemsOnDemand(job.NUMBER);
+    await query(
+      `UPDATE jobs SET line_items = $1, line_items_synced_at = NOW(), updated_at = NOW()
+       WHERE id = $2`,
+      [JSON.stringify(items), result.jobId],
+    );
+    result.lineItemsFetched = items.length;
+
+    const { deriveRequirementsForJob } = await import('./hh-requirement-derivation');
+    await deriveRequirementsForJob(result.jobId);
+    result.derivationRan = true;
+  } catch (err) {
+    console.warn(`[HH Single-Job Sync] Line items / derivation failed for job ${job.NUMBER}:`, err);
+  }
+
+  return result;
+}
+
 /**
  * Preview what jobs would be synced (dry run)
  */

@@ -237,6 +237,42 @@ router.get('/org-type-stats', authorize('admin', 'manager'), async (_req: AuthRe
   }
 });
 
+// ── Import HH Job ─────────────────────────────────────────────────────────
+
+// POST /api/data-cleanup/import-hh-job — pull a single HireHop job into OP
+// by job number, bypassing the active-status filter the 30-min sync uses.
+// Idempotent: existing jobs get re-synced. Used for historical / completed
+// jobs that pre-date OP (e.g. backfilling a rolled-over excess source).
+router.post('/import-hh-job',
+  authorize('admin', 'manager'),
+  validate(z.object({
+    hh_job_number: z.number().int().positive(),
+  })),
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { hh_job_number } = req.body as { hh_job_number: number };
+      const { syncSingleHireHopJob } = await import('../services/hirehop-job-sync');
+      const result = await syncSingleHireHopJob(hh_job_number, req.user!.id);
+
+      await logAudit(
+        req.user!.id,
+        'jobs',
+        result.jobId,
+        result.created ? 'create' : 'update',
+        null,
+        { hh_job_number, imported_via: 'data-cleanup' },
+      );
+
+      res.json({ data: result });
+    } catch (error) {
+      console.error('Import HH job error:', error);
+      const message = error instanceof Error ? error.message : 'Internal server error';
+      res.status(500).json({ error: message });
+    }
+  }
+);
+
+
 // GET /api/data-cleanup/orgs-by-type/:type — list orgs of a specific type
 router.get('/orgs-by-type/:type', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
   try {
