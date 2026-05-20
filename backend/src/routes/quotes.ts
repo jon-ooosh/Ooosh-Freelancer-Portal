@@ -1863,9 +1863,6 @@ function buildItemNote(date?: string | Date | null, endDate?: string | Date | nu
 const HEADER_KEYWORDS = ['crew', 'transport', 'delivery', 'collection'];
 
 async function findOrCreateHeader(hhJobId: string): Promise<string> {
-  const domain = process.env.HIREHOP_DOMAIN || 'myhirehop.com';
-  const token = process.env.HIREHOP_API_TOKEN!;
-
   // Fetch existing items to find a header — skip cache to avoid stale data causing duplicate headers
   const itemsRes = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: -1 }) as any;
   if (!itemsRes?.success) {
@@ -1891,18 +1888,17 @@ async function findOrCreateHeader(hhJobId: string): Promise<string> {
     }
   }
 
-  // Create header
-  const params = new URLSearchParams({
-    job: hhJobId, kind: '0', id: '0', name: 'Crew & transport', qty: '0', parent: '0', token,
-  });
-  const res = await fetch(`https://${domain}/php_functions/items_save.php`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString(),
-  });
-  const result = await res.json() as any;
-  if (result.items?.[0]?.ID) return result.items[0].ID;
-  console.error(`[HH findOrCreateHeader] Job ${hhJobId}: header create returned unexpected shape (HTTP ${res.status}):`, JSON.stringify(result));
+  // Create header — via broker so we get rate limiting + 327 retry
+  const createRes = await hhBroker.post('/php_functions/items_save.php', {
+    job: hhJobId, kind: 0, id: 0, name: 'Crew & transport', qty: 0, parent: 0,
+  }, { priority: 'high' }) as any;
+  if (!createRes?.success) {
+    console.error(`[HH findOrCreateHeader] Job ${hhJobId}: header create broker call failed:`, createRes?.error);
+    throw new Error(`Failed to create header in HireHop: ${createRes?.error || 'unknown error'}`);
+  }
+  const result = createRes.data;
+  if (result?.items?.[0]?.ID) return result.items[0].ID;
+  console.error(`[HH findOrCreateHeader] Job ${hhJobId}: header create returned unexpected shape:`, JSON.stringify(result));
   throw new Error('Failed to create header in HireHop');
 }
 
@@ -1914,9 +1910,6 @@ async function addItemToHireHop(
   note: string,
   headerId: string,
 ): Promise<{ success: boolean; error?: string }> {
-  const domain = process.env.HIREHOP_DOMAIN || 'myhirehop.com';
-  const token = process.env.HIREHOP_API_TOKEN!;
-
   try {
     // Step 1: Get items before
     const itemsBefore = await hhBroker.get('/frames/items_to_supply_list.php', { job: hhJobId }, { priority: 'high', cacheTTL: -1 }) as any;
@@ -1945,31 +1938,25 @@ async function addItemToHireHop(
       return { success: false, error: 'Item added but could not find its ID' };
     }
 
-    // Step 4: Edit item to set price, note, parent
+    // Step 4: Edit item to set price, note, parent — via broker for rate limiting + 327 retry
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    const editParams = new URLSearchParams({
-      job: hhJobId, kind: '4', id: newItem.ID, list_id: String(listId),
-      qty: String(qty), unit_price: String(price), price: String(price * qty),
-      price_type: '0', add: note, cust_add: '', memo: '', name: '',
-      parent: headerId, acc_nominal: '29', acc_nominal_po: '30',
-      vat_rate: '0', value: '0', cost_price: '0', weight: '0',
-      start: '', end: '', duration: '0', country_origin: '', hs_code: '',
-      flag: '0', priority_confirm: '0', no_shortfall: '1', no_availability: '0',
-      ignore: '0', local: now, token,
-    });
+    const editRes = await hhBroker.post('/php_functions/items_save.php', {
+      job: hhJobId, kind: 4, id: newItem.ID, list_id: listId,
+      qty, unit_price: price, price: price * qty,
+      price_type: 0, add: note, cust_add: '', memo: '', name: '',
+      parent: headerId, acc_nominal: 29, acc_nominal_po: 30,
+      vat_rate: 0, value: 0, cost_price: 0, weight: 0,
+      start: '', end: '', duration: 0, country_origin: '', hs_code: '',
+      flag: 0, priority_confirm: 0, no_shortfall: 1, no_availability: 0,
+      ignore: 0, local: now,
+    }, { priority: 'high' }) as any;
 
-    const editRes = await fetch(`https://${domain}/php_functions/items_save.php`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: editParams.toString(),
-    });
-
-    if (!editRes.ok) {
-      return { success: false, error: `Edit step failed: HTTP ${editRes.status}` };
+    if (!editRes?.success) {
+      return { success: false, error: `Edit step failed: ${editRes?.error || 'unknown error'}` };
     }
 
-    const editResult = await editRes.json() as any;
-    if (editResult.error) {
+    const editResult = editRes.data;
+    if (editResult?.error) {
       return { success: false, error: `Edit error: ${editResult.error}` };
     }
 
