@@ -1902,6 +1902,7 @@ async function findOrCreateHeader(hhJobId: string): Promise<string> {
   });
   const result = await res.json() as any;
   if (result.items?.[0]?.ID) return result.items[0].ID;
+  console.error(`[HH findOrCreateHeader] Job ${hhJobId}: header create returned unexpected shape (HTTP ${res.status}):`, JSON.stringify(result));
   throw new Error('Failed to create header in HireHop');
 }
 
