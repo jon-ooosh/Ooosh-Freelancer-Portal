@@ -486,7 +486,7 @@ export default function TransportCalculator({
       expenses: createInitialExpenses(),
       jobDate: parsedDate,
       jobFinishDate: parsedEndDate,
-      isMultiDay: !!(parsedDate && parsedEndDate && parsedDate !== parsedEndDate),
+      isMultiDay: false,
       collectionDate: parsedEndDate || parsedDate, // Pre-fill collection date from HireHop end date (or start)
     });
     setVenueSearch(venueName || '');
@@ -670,7 +670,7 @@ export default function TransportCalculator({
         whatIsIt: formData.whatIsIt || null,
         addCollection: formData.addCollection,
         collectionDate: formData.collectionDate || null,
-        collectionTime: formData.collectionArrivalTime || null,
+        collectionTime: formData.collectionArrivalTime || arrivalTime,
         clientName: clientName || null,
         includesSetup: formData.includesSetupWork,
         setupDescription: formData.setupWorkDescription || null,
