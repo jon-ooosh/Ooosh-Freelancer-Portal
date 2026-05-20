@@ -15,6 +15,7 @@ import {
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
 import { alertReturnedWithStillBookedOutVans } from '../services/vehicle-emails';
+import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 
 const router = Router();
 router.use(authenticate);
@@ -726,6 +727,25 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       `UPDATE jobs SET ${updates.join(', ')} WHERE id = $${pIdx} RETURNING *`,
       updateParams
     );
+
+    // Resurrection: reverse the Lost / Cancelled requirement sweep when moving
+    // OUT of lost/cancelled. Marker-gated so staff-cancelled rows stay cancelled.
+    // See CLAUDE.md → "Lost / Cancelled cleanup pattern".
+    if (
+      (fromStatus === 'lost' && pipeline_status !== 'lost') ||
+      (fromStatus === 'cancelled' && pipeline_status !== 'cancelled')
+    ) {
+      try {
+        const reactivated = await reactivateAutoCancelledRequirements(jobId);
+        if (reactivated.reactivatedCount > 0) {
+          console.log(
+            `[Pipeline] Reactivated ${reactivated.reactivatedCount} auto-cancelled requirement(s) on resurrection (${fromStatus} → ${pipeline_status}) for job ${jobId}`
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Pipeline] Failed to reactivate auto-cancelled requirements:', reactivateErr);
+      }
+    }
 
     // Log the transition as an interaction
     const fromLabel = PIPELINE_LABELS[fromStatus] || fromStatus;

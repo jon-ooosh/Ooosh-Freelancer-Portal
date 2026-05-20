@@ -18,6 +18,7 @@ import {
   hireFormResultIsAnomaly,
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
+import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 
 const router = Router();
 
@@ -221,6 +222,25 @@ async function handleJobStatusChange(
        WHERE id = $2`,
       [newPipelineStatus, job.id],
     );
+
+    // Resurrection: reverse the Lost / Cancelled requirement sweep when HH
+    // moves the job back out of lost/cancelled. Marker-gated so staff-cancelled
+    // rows stay cancelled. See CLAUDE.md → "Lost / Cancelled cleanup pattern".
+    if (
+      (job.pipeline_status === 'lost' && newPipelineStatus !== 'lost') ||
+      (job.pipeline_status === 'cancelled' && newPipelineStatus !== 'cancelled')
+    ) {
+      try {
+        const reactivated = await reactivateAutoCancelledRequirements(job.id);
+        if (reactivated.reactivatedCount > 0) {
+          console.log(
+            `[Webhook] Reactivated ${reactivated.reactivatedCount} auto-cancelled requirement(s) on resurrection (${job.pipeline_status} → ${newPipelineStatus}) for job ${job.id}`,
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Webhook] Failed to reactivate auto-cancelled requirements:', reactivateErr);
+      }
+    }
 
     // Log as interaction (status transition)
     await query(
@@ -480,6 +500,25 @@ router.post('/external/status-transition', async (req: Request, res: Response) =
        WHERE id = $4`,
       [newPipelineStatus, new_status, getHHStatusName(new_status), job.id],
     );
+
+    // Resurrection: reverse the Lost / Cancelled requirement sweep when an
+    // external caller moves the job back out of lost/cancelled. Marker-gated
+    // so staff-cancelled rows stay cancelled.
+    if (
+      (job.pipeline_status === 'lost' && newPipelineStatus !== 'lost') ||
+      (job.pipeline_status === 'cancelled' && newPipelineStatus !== 'cancelled')
+    ) {
+      try {
+        const reactivated = await reactivateAutoCancelledRequirements(job.id);
+        if (reactivated.reactivatedCount > 0) {
+          console.log(
+            `[Webhook/external] Reactivated ${reactivated.reactivatedCount} auto-cancelled requirement(s) on resurrection (${job.pipeline_status} → ${newPipelineStatus}) for job ${job.id}`,
+          );
+        }
+      } catch (reactivateErr) {
+        console.warn('[Webhook/external] Failed to reactivate auto-cancelled requirements:', reactivateErr);
+      }
+    }
 
     // Log transition
     const fromLabel = PIPELINE_LABELS[job.pipeline_status] || job.pipeline_status;
