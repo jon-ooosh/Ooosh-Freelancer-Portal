@@ -86,6 +86,9 @@ async function main() {
     console.log(`        ${target.job_date?.toISOString?.()?.slice(0,10)} → ${target.job_end?.toISOString?.()?.slice(0,10)}\n`);
 
     // ── Find assignment rows to move ─────────────────────────────────────
+    // drivers table only stores full_name (no split first/last), so match
+    // each target last name with ILIKE '%<name>%' against full_name.
+    const nameClauses = DRIVER_LAST_NAMES.map((_, i) => `d.full_name ILIKE $${i + 2}`).join(' OR ');
     const assignments = await client.query(
       `SELECT vha.id           AS assignment_id,
               vha.status,
@@ -93,15 +96,13 @@ async function main() {
               vha.hire_end,
               vha.vehicle_id,
               vha.driver_id,
-              d.first_name,
-              d.last_name,
               d.full_name
          FROM vehicle_hire_assignments vha
          JOIN drivers d ON d.id = vha.driver_id
         WHERE vha.hirehop_job_id = $1
-          AND lower(d.last_name) = ANY($2::text[])
-        ORDER BY d.last_name`,
-      [SOURCE_HH, DRIVER_LAST_NAMES.map((n) => n.toLowerCase())]
+          AND (${nameClauses})
+        ORDER BY d.full_name`,
+      [SOURCE_HH, ...DRIVER_LAST_NAMES.map((n) => `%${n}%`)]
     );
 
     console.log(`── Assignments to move (${assignments.rows.length}) ──`);
