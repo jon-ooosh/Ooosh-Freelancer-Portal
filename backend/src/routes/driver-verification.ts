@@ -815,7 +815,15 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
 
   // Licence: 90 days from iDenfy check, capped at actual licence expiry
   // Falls back to licence_next_check_due if idenfy_check_date is not set
-  if (driver.idenfy_check_date) {
+  //
+  // Integrity guard: licence_issued_by must be populated for the licence
+  // record to be trusted. A partial webhook write (date fields set but
+  // identity blank) would otherwise let a stale date count as proof of
+  // validity, and the non-UK branch would route the driver to passport
+  // upload instead of re-running licence verification.
+  const licenceIssuedBy =
+    typeof driver.licence_issued_by === 'string' ? driver.licence_issued_by.trim() : '';
+  if (licenceIssuedBy && driver.idenfy_check_date) {
     const windowEnd = addDays(driver.idenfy_check_date as string, 90);
     // Cap at actual licence expiry if that's sooner
     let effectiveEnd = windowEnd;
@@ -825,7 +833,7 @@ function analyzeDocuments(driver: Record<string, unknown> | null): DocumentAnaly
     }
     analysis.licence.valid = effectiveEnd > today;
     analysis.licence.expiryDate = effectiveEnd.toISOString().split('T')[0];
-  } else if (driver.licence_next_check_due) {
+  } else if (licenceIssuedBy && driver.licence_next_check_due) {
     // licence_next_check_due stores the actual expiry date (already check date + 90 days)
     // If value looks like a past date relative to driver creation, it's the raw check date — add 90 days
     const storedDate = new Date(driver.licence_next_check_due as string);
