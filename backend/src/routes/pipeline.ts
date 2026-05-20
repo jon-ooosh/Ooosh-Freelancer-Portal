@@ -1585,9 +1585,9 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
         if (existingLink.rows.length === 0) {
           await query(
             `INSERT INTO person_organisation_roles
-             (person_id, organisation_id, role, status, created_by)
-             VALUES ($1, $2, $3, 'active', $4)`,
-            [resolvedPersonId, clientId, role || 'General Contact', req.user!.id]
+             (person_id, organisation_id, role, status)
+             VALUES ($1, $2, $3, 'active')`,
+            [resolvedPersonId, clientId, role || 'General Contact']
           );
         }
       }
