@@ -121,6 +121,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '084_fleet_turnaround_settings.sql',
         '085_person_org_role_picklist.sql',
         '086_job_contacts.sql',
+        '087_preauth_lifecycle.sql',
       ];
 
       for (const migration of migrations) {

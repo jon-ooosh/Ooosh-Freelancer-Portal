@@ -17,6 +17,7 @@ import { validate } from '../middleware/validate';
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { pushDepositToHH } from '../services/hh-deposit';
+import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 
 const router = Router();
 router.use(authenticate);
@@ -27,7 +28,7 @@ const updateExcessSchema = z.object({
   excess_amount_required: z.number().min(0).nullable().optional(),
   excess_amount_taken: z.number().min(0).optional(),
   excess_calculation_basis: z.string().nullable().optional(),
-  excess_status: z.enum(['not_required', 'needed', 'taken', 'partially_paid', 'pre_auth', 'waived', 'fully_claimed', 'partially_reimbursed', 'reimbursed', 'rolled_over']).optional(),
+  excess_status: z.enum(['not_required', 'needed', 'taken', 'partially_paid', 'pre_auth', 'released', 'waived', 'fully_claimed', 'partially_reimbursed', 'reimbursed', 'rolled_over']).optional(),
   payment_method: z.string().max(30).nullable().optional(),
   payment_reference: z.string().max(200).nullable().optional(),
   xero_contact_id: z.string().max(100).nullable().optional(),
@@ -60,6 +61,36 @@ const claimSchema = z.object({
   amount: z.number().positive(),
   invoice_id: z.number().int().positive().nullable().optional(), // HH invoice ID (required for HH-linked records)
   notes: z.string().nullable().optional(),
+});
+
+// Capture-a-pre-auth schema (migration 087). Converts held money → taken money.
+//
+// Stripe-channel: triggers an API capture on the stored stripe_payment_intent_id.
+// Card-machine channels (worldpay/amex/till_cash): passive record — staff captured
+// on the terminal, OP just persists what happened and creates the HH deposit so
+// Xero sees the money. For card machines, receipt_url should be populated with
+// the R2 key of the receipt scan (mandatory in UI, soft-warned at backend level).
+//
+// Optional invoice_id makes this an atomic "capture & apply" — captured deposit
+// gets immediately applied to a specific HH invoice (same mechanism as /claim).
+// Reason: most captures correspond to a known charge (damage, underfuelling),
+// so doing it one step avoids a "captured but not claimed" intermediate state.
+const captureSchema = z.object({
+  amount: z.number().positive(),
+  method: z.enum(['stripe_gbp', 'worldpay', 'amex', 'till_cash']).default('stripe_gbp'),
+  invoice_id: z.number().int().positive().nullable().optional(),
+  receipt_url: z.string().max(500).nullable().optional(),
+  reason: z.string().max(200).nullable().optional(),
+  notes: z.string().max(1000).nullable().optional(),
+});
+
+// Release-a-pre-auth schema (migration 087). Voids a held pre-auth without
+// capturing any of it. For Stripe-channel: calls stripe.paymentIntents.cancel
+// (best-effort — may already be auto-voided). For card-machine: passive record;
+// the acquirer's hold expires on its own clock.
+const releaseSchema = z.object({
+  reason: z.string().max(200).nullable().optional(),
+  notes: z.string().max(1000).nullable().optional(),
 });
 
 const reimburseSchema = z.object({
@@ -643,6 +674,7 @@ function deriveExcessStatus(currentStatus: string, required: number, taken: numb
     'fully_claimed',
     'partially_reimbursed',
     'pre_auth',
+    'released', // Migration 087: pre-auth voided without capture — terminal, don't demote
   ]);
   if (PROTECTED.has(currentStatus)) return currentStatus;
 
@@ -1036,6 +1068,443 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
   } catch (error) {
     console.error('[excess] Payment error:', error);
     res.status(500).json({ error: 'Failed to record payment' });
+  }
+});
+
+// ── POST /api/excess/:id/capture — Capture a held pre-auth ──
+//
+// Converts "held" money into "taken" money. Three-step chain:
+//   1. Stripe capture (if method=stripe_gbp) OR passive record (card-machine)
+//   2. HH deposit creation (records the money in HireHop + Xero)
+//   3. Optional: apply deposit to a HH invoice (atomic capture-and-claim)
+//
+// Stripe capture is ONE-SHOT — Stripe doesn't support multiple partial captures
+// per PaymentIntent. So a £200 capture of a £1200 hold means:
+//   - £200 lands in our Stripe GBP account (excess_amount_taken)
+//   - £1000 auto-released by Stripe (amount_released)
+//   - The hold is gone (amount_held → 0)
+// Card-machine pre-auths have the same one-shot constraint.
+//
+// Loud-fail policy with compensation:
+//   - Record not in 'pre_auth' state → 400
+//   - amount > amount_held → 400
+//   - method=stripe_gbp without stripe_payment_intent_id → 422 (linkage missing)
+//   - Stripe capture fails → 502, no state change
+//   - HH deposit fails AFTER Stripe capture succeeded → refund the Stripe capture
+//     (compensation), then 502 with detail. OP record left unchanged.
+//   - HH apply-to-invoice fails AFTER deposit created → leave deposit standing,
+//     update OP record with the deposit + warn staff "captured but not applied"
+//     (least bad — money is correctly tracked, just not earmarked to invoice).
+//
+// Receipt scan: required at UI level for card-machine methods (PR 2). Backend
+// accepts the receipt_url and stores it on the file system — see receipt_required
+// column behaviour. PR 1 does not yet surface receipt-missing as a hard block.
+
+router.post('/:id/capture', authorize('admin', 'manager'), validate(captureSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { amount, method, invoice_id, receipt_url, reason, notes } = req.body;
+
+    const currentResult = await query(
+      `SELECT je.*, j.hh_job_number, j.client_name AS job_client_name
+       FROM job_excess je
+       LEFT JOIN jobs j ON j.id = je.job_id
+       WHERE je.id = $1`,
+      [id]
+    );
+    if (currentResult.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const current = currentResult.rows[0];
+
+    // ── Validation ───────────────────────────────────────────────────────────
+    if (current.excess_status !== 'pre_auth') {
+      res.status(400).json({
+        error: 'Excess is not in pre-auth state',
+        detail: `Current status: ${current.excess_status}. Capture only applies to pre-auth holds.`,
+      });
+      return;
+    }
+    const amountHeld = parseFloat(current.amount_held || '0');
+    if (amountHeld <= 0) {
+      res.status(400).json({
+        error: 'No money held on this record',
+        detail: 'amount_held is zero. The hold may have already been captured or released.',
+      });
+      return;
+    }
+    if (amount > amountHeld + 0.005) {
+      res.status(400).json({
+        error: 'Capture amount exceeds held amount',
+        detail: `Held: £${amountHeld.toFixed(2)}, requested: £${amount.toFixed(2)}`,
+      });
+      return;
+    }
+
+    const amountReleased = Math.max(0, amountHeld - amount);
+
+    // ── Step 1: Stripe capture (or passive record for card-machine) ─────────
+    let stripeChargeId: string | null = null;
+    let stripeWarning: string | null = null;
+
+    if (method === 'stripe_gbp') {
+      if (!isStripeConfigured()) {
+        res.status(503).json({
+          error: 'Stripe not configured',
+          detail: 'STRIPE_SECRET_KEY not set on server. Cannot capture Stripe pre-auths until configured.',
+        });
+        return;
+      }
+      if (!current.stripe_payment_intent_id) {
+        res.status(422).json({
+          error: 'Stripe PaymentIntent ID missing',
+          detail: 'This record has no stripe_payment_intent_id, so we cannot address the hold via the Stripe API. Verify the hold was actually taken via Stripe (Payment Portal), or use the passive-record path with method=worldpay/amex if the hold was on the card machine.',
+        });
+        return;
+      }
+
+      try {
+        const stripe = getStripeClient();
+        const captured = await stripe.paymentIntents.capture(
+          current.stripe_payment_intent_id,
+          {
+            amount_to_capture: Math.round(amount * 100), // pence
+            metadata: {
+              excess_id: String(id),
+              op_job_id: current.job_id || '',
+              hh_job_number: String(current.hirehop_job_id || ''),
+              capture_reason: reason || '',
+              captured_by_op: 'true',
+            },
+          }
+        );
+        // The PaymentIntent now has a latest_charge — that's the charge to refund
+        // if HH fails later. Capture the charge ID for compensation.
+        stripeChargeId = typeof captured.latest_charge === 'string'
+          ? captured.latest_charge
+          : (captured.latest_charge?.id || null);
+        console.log(`[excess] Stripe capture OK: PI ${current.stripe_payment_intent_id} → £${amount} captured, charge ${stripeChargeId}, £${amountReleased.toFixed(2)} auto-released`);
+      } catch (err) {
+        const errMsg = isStripeError(err)
+          ? `${err.type}: ${err.message}`
+          : (err instanceof Error ? err.message : String(err));
+        console.error('[excess] Stripe capture failed:', errMsg, err);
+        res.status(502).json({
+          error: 'Stripe capture failed',
+          detail: errMsg,
+        });
+        return;
+      }
+    } else {
+      // Card-machine capture is passive — staff captured on the terminal, OP
+      // just records what happened. Receipt scan strongly recommended for audit;
+      // surfaced as amber "outstanding" if missing (UI lives in PR 2).
+      console.log(`[excess] Passive capture recorded: method=${method}, £${amount} captured (£${amountReleased.toFixed(2)} released on acquirer clock)`);
+      if (!receipt_url) {
+        stripeWarning = 'Card-machine capture recorded without a receipt scan. Upload one when convenient — it surfaces as an outstanding to-do until added.';
+      }
+    }
+
+    // ── Step 2: Push HH deposit ──────────────────────────────────────────────
+    let hhDepositId: number | null = null;
+    let hhPushError: string | null = null;
+    let hhPaymentAppId: number | null = null;
+
+    if (current.hirehop_job_id) {
+      const depositDesc = invoice_id
+        ? `Excess captured & applied (job ${current.hirehop_job_id})`
+        : `Excess captured (job ${current.hirehop_job_id}${reason ? ` — ${reason}` : ''})`;
+
+      const pushResult = await pushDepositToHH({
+        hhJobNumber: current.hirehop_job_id,
+        amount,
+        paymentMethod: method,
+        paymentReference: stripeChargeId || current.stripe_payment_intent_id || null,
+        paymentType: 'excess',
+        notes: notes || `Captured from pre-auth (£${amountReleased.toFixed(2)} released)`,
+      });
+
+      hhDepositId = pushResult.hhDepositId;
+      hhPushError = pushResult.error;
+
+      if (hhPushError && stripeChargeId) {
+        // Compensation: HH failed after we captured real money in Stripe.
+        // Refund the capture to leave the world consistent. We've now lost the
+        // hold + the £1000 that auto-released (can't get those back), but at
+        // least we don't have orphaned money in Stripe that HH/Xero doesn't
+        // know about.
+        try {
+          const stripe = getStripeClient();
+          await stripe.refunds.create({
+            charge: stripeChargeId,
+            reason: 'requested_by_customer',
+            metadata: {
+              op_compensation: 'true',
+              excess_id: String(id),
+              reason: 'HH deposit creation failed after Stripe capture',
+            },
+          });
+          console.log(`[excess] Compensation refund issued for charge ${stripeChargeId} after HH deposit failure`);
+        } catch (refundErr) {
+          const msg = refundErr instanceof Error ? refundErr.message : String(refundErr);
+          console.error(`[excess] CRITICAL: HH push failed AND compensation refund failed. Manual intervention needed for charge ${stripeChargeId}. Refund error: ${msg}`);
+        }
+
+        res.status(502).json({
+          error: 'HireHop deposit failed; Stripe capture has been refunded',
+          detail: hhPushError,
+        });
+        return;
+      } else if (hhPushError) {
+        // No Stripe capture to unwind (card-machine path). Surface and bail.
+        res.status(502).json({
+          error: 'HireHop deposit failed',
+          detail: hhPushError,
+        });
+        return;
+      }
+
+      // ── Step 3: Optional apply-to-invoice (atomic capture-and-claim) ──────
+      if (invoice_id && hhDepositId) {
+        try {
+          const currentDate = new Date().toISOString().split('T')[0];
+          const applyDesc = `${current.hirehop_job_id} - Excess applied to invoice`;
+          const applyMemo = reason
+            ? `Captured & applied — ${reason} (via Ooosh OP)`
+            : `Captured & applied to invoice (via Ooosh OP)`;
+
+          const applyResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
+            id: 0,
+            date: currentDate,
+            desc: applyDesc,
+            paid: amount,
+            memo: applyMemo,
+            bank: 169,
+            OWNER: invoice_id,
+            deposit: hhDepositId,
+            correction: 0,
+            no_webhook: 1,
+          }, { priority: 'high' });
+
+          if (applyResult.success && applyResult.data) {
+            hhPaymentAppId = (applyResult.data as Record<string, unknown>).hh_id as number
+              || (applyResult.data as Record<string, unknown>).id as number
+              || null;
+            // Trigger Xero sync for the application
+            if (hhPaymentAppId) {
+              try {
+                await hhBroker.post('/php_functions/accounting/tasks.php', {
+                  hh_package_type: 1,
+                  hh_acc_package_id: 3,
+                  hh_task: 'post_payment',
+                  hh_id: hhPaymentAppId,
+                  hh_acc_id: '',
+                }, { priority: 'high' });
+              } catch (e) {
+                console.error('[excess] Xero sync for capture-apply failed (non-fatal):', e);
+              }
+            }
+          } else {
+            // Deposit succeeded, apply-to-invoice failed. Don't unwind the
+            // deposit — money is correctly recorded in HH/Xero, just not
+            // earmarked to the invoice yet. Surface as warning.
+            stripeWarning = `Captured & deposited £${amount.toFixed(2)}, but applying to invoice ${invoice_id} failed: ${applyResult.error || 'unknown'}. Apply manually in HireHop or via the Claim action.`;
+            console.warn('[excess] Capture apply-to-invoice failed:', applyResult.error);
+          }
+        } catch (e) {
+          stripeWarning = `Captured & deposited £${amount.toFixed(2)}, but applying to invoice ${invoice_id} threw: ${e instanceof Error ? e.message : String(e)}`;
+          console.error('[excess] Capture apply-to-invoice threw:', e);
+        }
+      }
+    }
+
+    // ── Step 4: Update OP record ─────────────────────────────────────────────
+    // The hold has concluded. Status becomes:
+    //   - 'fully_claimed' if invoice_id was provided AND apply succeeded
+    //   - 'taken' otherwise (money is in our account, no invoice link yet)
+    const claimApplied = Boolean(invoice_id && hhPaymentAppId);
+    const newStatus = claimApplied ? 'fully_claimed' : 'taken';
+    const newClaimAmount = claimApplied ? amount : (parseFloat(current.claim_amount || '0'));
+
+    const dateStr = new Date().toISOString().split('T')[0];
+    const captureNote = `[${dateStr}] Captured £${amount.toFixed(2)} from £${amountHeld.toFixed(2)} hold (£${amountReleased.toFixed(2)} released)${reason ? ` — ${reason}` : ''}${notes ? `. ${notes}` : ''}`;
+    const newNotes = current.notes
+      ? `${current.notes}\n${captureNote}`
+      : captureNote;
+    const newClaimNotes = claimApplied
+      ? (current.claim_notes
+          ? `${current.claim_notes}\n[${dateStr}] £${amount.toFixed(2)}: applied at capture${notes ? ` — ${notes}` : ''}`
+          : `[${dateStr}] £${amount.toFixed(2)}: applied at capture${notes ? ` — ${notes}` : ''}`)
+      : current.claim_notes;
+
+    // receipt_required: TRUE for card-machine methods if no receipt_url given.
+    // Stripe captures don't need a receipt (electronic trail).
+    const needsReceipt = method !== 'stripe_gbp' && !receipt_url;
+
+    const result = await query(
+      `UPDATE job_excess SET
+        amount_held              = 0,
+        amount_released          = COALESCE(amount_released, 0) + $1,
+        excess_amount_taken      = COALESCE(excess_amount_taken, 0) + $2,
+        excess_status            = $3,
+        payment_method           = $4,
+        payment_reference        = COALESCE($5, payment_reference),
+        payment_date             = NOW(),
+        released_at              = CASE WHEN $1 > 0 THEN NOW() ELSE released_at END,
+        hh_deposit_id            = COALESCE($6, hh_deposit_id),
+        hh_reconciled_at         = COALESCE(hh_reconciled_at, NOW()),
+        hh_reconcile_source      = COALESCE(hh_reconcile_source, 'op_push'),
+        claim_amount             = $7,
+        claim_date               = CASE WHEN $8 THEN NOW() ELSE claim_date END,
+        claim_notes              = $9,
+        notes                    = $10,
+        receipt_required         = $11,
+        updated_at               = NOW()
+      WHERE id = $12
+      RETURNING *`,
+      [
+        amountReleased,                    // $1
+        amount,                             // $2
+        newStatus,                          // $3
+        method,                             // $4
+        stripeChargeId,                     // $5
+        hhDepositId,                        // $6
+        newClaimAmount,                     // $7
+        claimApplied,                       // $8
+        newClaimNotes,                      // $9
+        newNotes,                           // $10
+        needsReceipt,                       // $11
+        id,                                 // $12
+      ]
+    );
+
+    // Sync requirement status (coverage may now be met)
+    if (current.job_id) {
+      syncExcessRequirementStatus(current.job_id).catch(e =>
+        console.error('[excess] syncExcessRequirementStatus failed (capture):', e)
+      );
+    }
+
+    res.json({
+      data: result.rows[0],
+      stripe_charge_id: stripeChargeId,
+      hh_deposit_id: hhDepositId,
+      hh_payment_application_id: hhPaymentAppId,
+      amount_captured: amount,
+      amount_released: amountReleased,
+      ...(stripeWarning ? { warning: stripeWarning } : {}),
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Capture error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to capture pre-auth', detail: errMsg });
+  }
+});
+
+// ── POST /api/excess/:id/release — Release a held pre-auth without capture ──
+//
+// Voids the hold. For Stripe-channel: calls stripe.paymentIntents.cancel on
+// the stored PaymentIntent — money never moves, hold is gone. For card-machine:
+// passive record — the acquirer's hold expires on its own timer (typically
+// 5-30 days depending on card), OP just records that we don't intend to claim.
+//
+// Idempotent on the Stripe side — if the PI is already canceled (e.g. expired
+// past Stripe's 7-day window before we got here), the cancel call succeeds
+// quietly and we proceed.
+//
+// Status transitions: pre_auth → released (terminal).
+
+router.post('/:id/release', authorize('admin', 'manager'), validate(releaseSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { reason, notes } = req.body;
+
+    const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
+    if (currentResult.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const current = currentResult.rows[0];
+
+    if (current.excess_status !== 'pre_auth') {
+      res.status(400).json({
+        error: 'Excess is not in pre-auth state',
+        detail: `Current status: ${current.excess_status}. Release only applies to pre-auth holds.`,
+      });
+      return;
+    }
+    const amountHeld = parseFloat(current.amount_held || '0');
+
+    // ── Stripe cancel (best-effort) ──
+    let stripeOutcome: string | null = null;
+    if (current.payment_method === 'stripe_gbp' && current.stripe_payment_intent_id && isStripeConfigured()) {
+      try {
+        const stripe = getStripeClient();
+        const cancelled = await stripe.paymentIntents.cancel(
+          current.stripe_payment_intent_id,
+          { cancellation_reason: 'abandoned' }
+        );
+        stripeOutcome = `cancelled (status: ${cancelled.status})`;
+        console.log(`[excess] Stripe PI ${current.stripe_payment_intent_id} cancelled, status: ${cancelled.status}`);
+      } catch (err) {
+        // Common case: PI is already canceled (expired) — Stripe returns an
+        // invalid_request_error. Treat as success (the hold is gone either way).
+        if (isStripeError(err) && err.type === 'StripeInvalidRequestError') {
+          stripeOutcome = `already cancelled (Stripe: ${err.message})`;
+          console.log(`[excess] Stripe PI already cancelled: ${err.message}`);
+        } else {
+          // Other Stripe errors — log but don't block the release. The OP-side
+          // truth is that we're choosing not to claim this hold, and Stripe
+          // will auto-void on its own clock if our explicit cancel failed.
+          const errMsg = err instanceof Error ? err.message : String(err);
+          stripeOutcome = `cancel call failed (will auto-void): ${errMsg}`;
+          console.warn('[excess] Stripe cancel failed (non-fatal, will auto-void):', errMsg);
+        }
+      }
+    } else if (current.payment_method === 'stripe_gbp' && !current.stripe_payment_intent_id) {
+      stripeOutcome = 'stripe_gbp method but no PI on record — Stripe will auto-void; nothing to call';
+    } else {
+      stripeOutcome = `passive release (${current.payment_method}) — acquirer auto-voids on its own clock`;
+    }
+
+    // ── Update OP record ──
+    const dateStr = new Date().toISOString().split('T')[0];
+    const releaseNote = `[${dateStr}] Released £${amountHeld.toFixed(2)} hold${reason ? ` — ${reason}` : ''}${notes ? `. ${notes}` : ''}. ${stripeOutcome}`;
+    const newNotes = current.notes
+      ? `${current.notes}\n${releaseNote}`
+      : releaseNote;
+
+    const result = await query(
+      `UPDATE job_excess SET
+        amount_released = COALESCE(amount_released, 0) + amount_held,
+        amount_held     = 0,
+        excess_status   = 'released',
+        released_at     = NOW(),
+        notes           = $1,
+        updated_at      = NOW()
+      WHERE id = $2
+      RETURNING *`,
+      [newNotes, id]
+    );
+
+    // Sync requirement status — released means we have no money for this
+    // requirement, may need to flip back to outstanding.
+    if (current.job_id) {
+      syncExcessRequirementStatus(current.job_id).catch(e =>
+        console.error('[excess] syncExcessRequirementStatus failed (release):', e)
+      );
+    }
+
+    res.json({
+      data: result.rows[0],
+      amount_released: amountHeld,
+      stripe_outcome: stripeOutcome,
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Release error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to release pre-auth', detail: errMsg });
   }
 });
 
