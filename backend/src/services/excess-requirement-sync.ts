@@ -2,7 +2,13 @@ import { query } from '../config/database';
 
 /**
  * Promote the pre-hire excess requirement to 'done' when the job_excess
- * record is covered. Coverage = terminal state, or amount_taken >= required.
+ * record is covered. Coverage = terminal state, OR (amount_taken + amount_held)
+ * meets the required amount.
+ *
+ * Migration 087: a pre-auth hold counts as coverage for the requirement (we have
+ * collateral against damage, even if no money has moved). 'released' explicitly
+ * does NOT count — the hold ended without capture, nothing kept.
+ *
  * Forward-only: does not un-do a 'done' status if coverage is later lost
  * (handled via manual status change).
  *
@@ -26,10 +32,11 @@ export async function syncExcessRequirementStatus(
        AND EXISTS (
          SELECT 1 FROM job_excess je
          WHERE je.job_id = $1
+           AND je.excess_status <> 'released'
            AND (
              je.excess_status IN ('waived','rolled_over','not_required','reimbursed','fully_claimed','partially_reimbursed')
              OR (COALESCE(je.excess_amount_required, 0) > 0
-                 AND COALESCE(je.excess_amount_taken, 0) >= je.excess_amount_required)
+                 AND COALESCE(je.excess_amount_taken, 0) + COALESCE(je.amount_held, 0) >= je.excess_amount_required)
            )
        )`,
     [jobId],

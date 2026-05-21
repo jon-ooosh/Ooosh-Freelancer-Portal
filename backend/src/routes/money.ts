@@ -247,8 +247,11 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     // needed for this hire."
     const excessResult = await query(
       `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_amount_taken,
+              je.amount_held, je.amount_released,
+              je.held_at, je.held_expires_at, je.released_at,
               je.excess_status, je.excess_calculation_basis, je.payment_method,
               je.payment_reference, je.payment_date, je.hh_deposit_id,
+              je.stripe_payment_intent_id,
               je.suggested_collection_method, je.client_name,
               d.id AS driver_id, d.full_name AS driver_name,
               d.licence_points, d.requires_referral,
@@ -292,6 +295,12 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     const drivers = excessResult.rows.map((r: any) => {
       const required = parseFloat(r.excess_amount_required || 0);
       const taken = parseFloat(r.excess_amount_taken || 0);
+      const held = parseFloat(r.amount_held || 0);
+      const released = parseFloat(r.amount_released || 0);
+      // Coverage = money in our account OR on hold. A pre-auth at full required
+      // amount covers the requirement for dispatch purposes (we have collateral
+      // even though no money has moved). excess_outstanding nets both off.
+      const coverage = taken + held;
       return {
         // Canonical OP fields
         excess_id: r.excess_id,
@@ -305,7 +314,15 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
         excess_amount: required, // alias for Payment Portal compat
         excess: required, // alias — Payment Portal sorts on `.excess`
         excess_amount_taken: taken,
-        excess_outstanding: Math.max(0, required - taken),
+        // Pre-auth lifecycle (migration 087) — held = on hold (not yet captured);
+        // released = was held, then voided without capture (terminal info).
+        amount_held: held,
+        amount_released: released,
+        held_at: r.held_at,
+        held_expires_at: r.held_expires_at,
+        released_at: r.released_at,
+        stripe_payment_intent_id: r.stripe_payment_intent_id,
+        excess_outstanding: Math.max(0, required - coverage),
         excess_status: r.excess_status,
         status: r.excess_status, // alias — Payment Portal checks `.status`
         excess_calculation_basis: r.excess_calculation_basis,
@@ -326,20 +343,24 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       };
     });
 
-    // Totals
+    // Totals — collected = money in account + money on hold (migration 087).
+    // Held money counts as collected for portal display purposes (client sees
+    // their excess is covered, whether by pre-auth or captured payment).
     const totalRequired = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_required, 0);
-    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken, 0);
+    const totalCollected = drivers.reduce((sum: number, d: any) => sum + d.excess_amount_taken + d.amount_held, 0);
     const totalOutstanding = Math.max(0, totalRequired - totalCollected);
 
     // A record is "covered" if it's in a terminal state (waived/reimbursed/claimed/rolled_over/not_required),
     // OR enough money has been taken/held to meet the required amount. This catches the edge case of a
     // pre-auth or 'taken' record that's underfunded (e.g. £600 pre-auth against £1,200 required).
+    // Note: 'released' is not covered — the hold ended without capture, no money was kept.
     const terminalStatuses = ['waived', 'rolled_over', 'not_required', 'reimbursed', 'fully_claimed', 'partially_reimbursed'];
     const isCovered = (d: any) => {
       if (terminalStatuses.includes(d.excess_status)) return true;
+      if (d.excess_status === 'released') return false; // hold ended, nothing kept
       const required = d.excess_amount_required || 0;
-      const taken = d.excess_amount_taken || 0;
-      return required > 0 && taken >= required;
+      const coverage = (d.excess_amount_taken || 0) + (d.amount_held || 0);
+      return required > 0 && coverage >= required;
     };
     const driversCleared = drivers.filter(isCovered).length;
     const driversPending = drivers.length - driversCleared;
@@ -1368,18 +1389,28 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
 
       // Now update the excess record
       if (isPreAuth) {
+        // Pre-auth lifecycle (migration 087): money is HELD, not TAKEN. Populate
+        // amount_held, held_at, held_expires_at (5-day standard window across
+        // Stripe + card-machine), and stripe_payment_intent_id (used by the
+        // capture/release endpoints to address the hold via Stripe API).
+        // excess_amount_taken stays at 0 — that column means money in our
+        // account, which a pre-auth is not.
         await query(
           `UPDATE job_excess SET
-            excess_amount_taken = $1,
+            amount_held = $1,
+            excess_amount_taken = 0,
             excess_status = 'pre_auth',
+            held_at = NOW(),
+            held_expires_at = NOW() + INTERVAL '5 days',
+            stripe_payment_intent_id = COALESCE($5, stripe_payment_intent_id),
             payment_method = $2,
             payment_reference = $3,
             payment_date = NOW(),
             updated_at = NOW()
           WHERE id = $4`,
-          [amount, effectiveMethod, payment_reference || null, resolvedExcessId]
+          [amount, effectiveMethod, payment_reference || null, resolvedExcessId, stripe_payment_intent || null]
         );
-        console.log(`[money] Excess ${resolvedExcessId} set to pre_auth (£${amount})`);
+        console.log(`[money] Excess ${resolvedExcessId} set to pre_auth (£${amount} held, expires in 5 days)`);
       } else {
         await query(
           `UPDATE job_excess SET

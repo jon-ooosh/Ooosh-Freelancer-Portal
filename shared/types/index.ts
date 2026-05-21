@@ -787,7 +787,10 @@ export interface VehicleHireAssignment {
 // Excess status. Note: 'partial' and 'claimed' were renamed to 'partially_paid'
 // and 'fully_claimed' respectively in migration 038 — the DB no longer contains
 // the old values, so they're omitted from the type.
-export type ExcessStatus = 'not_required' | 'needed' | 'pending' | 'taken' | 'partially_paid' | 'pre_auth' | 'waived' | 'fully_claimed' | 'partially_reimbursed' | 'reimbursed' | 'rolled_over';
+// 'released' added in migration 087 — pre-auth voided without capture (terminal).
+// 'pending' is legacy (renamed to 'needed' in 038, backfilled in 087); kept in
+// the type for backward compatibility with any stale code paths.
+export type ExcessStatus = 'not_required' | 'needed' | 'pending' | 'taken' | 'partially_paid' | 'pre_auth' | 'released' | 'waived' | 'fully_claimed' | 'partially_reimbursed' | 'reimbursed' | 'rolled_over';
 
 export interface JobExcess {
   id: string;
@@ -821,6 +824,16 @@ export interface JobExcess {
   hh_deposit_id: number | null;
   hh_reconciled_at: string | null;
   hh_reconcile_source: 'op_push' | 'auto_match' | 'manual_link' | null;
+  // Pre-auth lifecycle (migration 087) — separates "held" (promised, on hold) from
+  // "taken" (real money in account). See migration file header for full design.
+  amount_held: number;
+  amount_released: number;
+  held_at: string | null;
+  held_expires_at: string | null;
+  released_at: string | null;
+  stripe_payment_intent_id: string | null;
+  receipt_required: boolean;
+  receipt_uploaded_at: string | null;
   created_at: string;
   updated_at: string;
   created_by: string | null;
