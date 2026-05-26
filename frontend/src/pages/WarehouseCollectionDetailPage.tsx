@@ -17,16 +17,29 @@ interface EquipmentItem {
   quantity: number;
 }
 
+interface CollectionContact {
+  personId: string;
+  name: string;
+  email: string;
+  phone: string | null;
+  role: string | null;
+  isPrimary: boolean;
+}
+
 interface JobDetails {
   id: string;
   hhRef: string;
   jobName: string;
   clientName: string;
   clientEmail: string;
+  contacts: CollectionContact[];
   hireStartDate: string;
   pipelineStatus: string;
   items: EquipmentItem[];
 }
+
+// Sentinel for the "Someone else" picker option
+const MANUAL_CONTACT = 'manual';
 
 export default function WarehouseCollectionDetailPage() {
   const navigate = useNavigate();
@@ -39,6 +52,7 @@ export default function WarehouseCollectionDetailPage() {
   const [collectedBy, setCollectedBy] = useState('');
   const [emails, setEmails] = useState<string[]>(['']);
   const [sendEmail, setSendEmail] = useState(true);
+  const [selectedContactId, setSelectedContactId] = useState<string>(MANUAL_CONTACT);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
@@ -63,9 +77,21 @@ export default function WarehouseCollectionDetailPage() {
         return;
       }
       const data = await response.json();
-      setJob(data.job);
-      setCollectedBy(data.job.clientName || '');
-      if (data.job.clientEmail) setEmails([data.job.clientEmail]);
+      const j: JobDetails = data.job;
+      setJob(j);
+      // Default to the lead contact (job_contacts primary first, then org
+      // graph). Falls back to free-text prefilled with client name + the
+      // helper-resolved email when the job has no associated people.
+      const lead = j.contacts && j.contacts.length > 0 ? j.contacts[0] : null;
+      if (lead) {
+        setSelectedContactId(lead.personId);
+        setCollectedBy(lead.name || j.clientName || '');
+        setEmails(lead.email ? [lead.email] : j.clientEmail ? [j.clientEmail] : ['']);
+      } else {
+        setSelectedContactId(MANUAL_CONTACT);
+        setCollectedBy(j.clientName || '');
+        setEmails(j.clientEmail ? [j.clientEmail] : ['']);
+      }
     } catch (err) {
       if (err && typeof err === 'object' && 'unauthorized' in err) {
         navigate('/warehouse', { replace: true });
@@ -151,6 +177,19 @@ export default function WarehouseCollectionDetailPage() {
     const canvas = canvasRef.current;
     if (!canvas || !hasSignature) return null;
     return canvas.toDataURL('image/png');
+  }
+
+  function selectContact(c: CollectionContact) {
+    setSelectedContactId(c.personId);
+    setCollectedBy(c.name);
+    setEmails(c.email ? [c.email] : ['']);
+    setSendEmail(true);
+  }
+
+  function selectManual() {
+    setSelectedContactId(MANUAL_CONTACT);
+    setCollectedBy('');
+    setEmails(['']);
   }
 
   function addEmail() { if (emails.length < 3) setEmails([...emails, '']); }
@@ -307,6 +346,53 @@ export default function WarehouseCollectionDetailPage() {
           </div>
         </div>
 
+        {job.contacts.length > 0 && (
+          <div className="bg-white rounded-xl p-4 shadow-sm">
+            <label className="block text-sm font-medium text-gray-700 mb-3">👤 Who's collecting?</label>
+            <div className="space-y-2">
+              {job.contacts.map((c) => {
+                const selected = selectedContactId === c.personId;
+                return (
+                  <button
+                    key={c.personId}
+                    type="button"
+                    onClick={() => selectContact(c)}
+                    className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
+                      selected
+                        ? 'border-purple-500 bg-purple-50 ring-2 ring-purple-200'
+                        : 'border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="font-medium text-gray-800 truncate">
+                          {c.isPrimary && <span className="text-amber-500 mr-1" title="Lead contact">★</span>}
+                          {c.name}
+                          {c.role && <span className="text-gray-400 font-normal"> · {c.role}</span>}
+                        </p>
+                        {c.email && <p className="text-sm text-gray-500 truncate">{c.email}</p>}
+                      </div>
+                      {selected && <span className="text-purple-600 text-lg">✓</span>}
+                    </div>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={selectManual}
+                className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
+                  selectedContactId === MANUAL_CONTACT
+                    ? 'border-purple-500 bg-purple-50 ring-2 ring-purple-200'
+                    : 'border-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                <p className="font-medium text-gray-800">✏️ Someone else</p>
+                <p className="text-sm text-gray-500">Type the collector's name and email below</p>
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="bg-white rounded-xl p-4 shadow-sm">
           <label className="block text-sm font-medium text-gray-700 mb-2">👤 Collected by</label>
           <input
@@ -317,7 +403,9 @@ export default function WarehouseCollectionDetailPage() {
             className="w-full px-4 py-3 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
           />
           <p className="mt-1 text-xs text-gray-400">
-            Edit if someone other than {job.clientName || 'the contact'} is collecting
+            {job.contacts.length > 0
+              ? 'Auto-filled from the contact above — overtype if needed'
+              : `Edit if someone other than ${job.clientName || 'the contact'} is collecting`}
           </p>
         </div>
 
