@@ -98,6 +98,11 @@ export interface ComplianceSettings {
   insurance_urgent_days: number
   tfl_warning_days: number
   tfl_urgent_days: number
+  // Service alerts (migration 088)
+  service_mileage_warning_miles: number
+  rossetts_first_service_years: number
+  rossetts_interval_months: number
+  rossetts_warning_days: number
 }
 
 export const DEFAULT_COMPLIANCE: ComplianceSettings = {
@@ -109,6 +114,10 @@ export const DEFAULT_COMPLIANCE: ComplianceSettings = {
   insurance_urgent_days: 7,
   tfl_warning_days: 30,
   tfl_urgent_days: 7,
+  service_mileage_warning_miles: 2000,
+  rossetts_first_service_years: 3,
+  rossetts_interval_months: 12,
+  rossetts_warning_days: 30,
 }
 
 export async function fetchComplianceSettings(): Promise<ComplianceSettings> {

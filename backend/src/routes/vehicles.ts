@@ -631,6 +631,8 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
       last_rossetts_service_date: 'last_rossetts_service_date', lastRossettsServiceDate: 'last_rossetts_service_date',
       last_rossetts_service_notes: 'last_rossetts_service_notes', lastRossettsServiceNotes: 'last_rossetts_service_notes',
       service_plan_status: 'service_plan_status', servicePlanStatus: 'service_plan_status',
+      // Rossetts annual warranty applicability (migration 088)
+      rossetts_applicable: 'rossetts_applicable', rossettsApplicable: 'rossetts_applicable',
       // Seat layout (migration 041)
       seat_layout: 'seat_layout', seatLayout: 'seat_layout',
     };
@@ -4920,6 +4922,7 @@ function mapDbRowToVehicle(row: Record<string, unknown>) {
     lastRossettsServiceDate: formatDate(row.last_rossetts_service_date),
     lastRossettsServiceNotes: row.last_rossetts_service_notes as string | null,
     servicePlanStatus: row.service_plan_status as string | null,
+    rossettsApplicable: row.rossetts_applicable === true,
     seatLayout: row.seat_layout as string | null,
     files: row.files || [],
   };

@@ -66,6 +66,7 @@ export interface Vehicle {
   lastRossettsServiceDate: string | null
   lastRossettsServiceNotes: string | null
   servicePlanStatus: string | null // '0 Remaining'..'6 Remaining', 'WORKINGONIT', 'NO PLAN'
+  rossettsApplicable: boolean       // on the Rossetts (Mercedes) annual warranty plan — drives Rossetts service alerts
   seatLayout: 'round_table' | 'forward_facing' | null  // Premium vans only — current seat config
   files: VehicleFile[]
   // Fleet group classification

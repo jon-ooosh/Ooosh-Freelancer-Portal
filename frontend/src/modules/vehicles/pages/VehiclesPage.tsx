@@ -1,13 +1,16 @@
 import { Link, useSearchParams } from 'react-router-dom'
 import { useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useFilteredVehicles } from '../hooks/useVehicles'
 import { useAllocations } from '../hooks/useAllocations'
 import { getGearbox } from '../lib/van-matching'
 import { getDateUrgency } from '../types/vehicle'
 import { vmPath } from '../config/route-paths'
-import { createVehicle } from '../lib/fleet-api'
+import { createVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
+import { getServiceMileageStatus, getRossettsStatus, URGENCY_TEXT } from '../lib/service-status'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import type { Vehicle } from '../types/vehicle'
+import type { ComplianceSettings } from '../lib/fleet-api'
 
 /** Colour classes for simple vehicle types */
 const typeColours: Record<string, string> = {
@@ -107,17 +110,13 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
         </div>
       </Link>
 
-      {/* Quick-action buttons */}
+      {/* Quick-action buttons.
+          Book-out is intentionally NOT offered here — it needs job context and
+          belongs on Job Detail / Allocations (where ?vehicle=&job= is set).
+          Check-in stays: returning a van is van-centric, staff grab it from
+          the fleet view. */}
       {!vehicle.isOldSold && (
         <div className="flex border-t border-gray-100">
-          {vehicle.hireStatus !== 'On Hire' && (
-            <Link
-              to={vmPath(`/book-out?vehicle=${encodeURIComponent(vehicle.reg)}`)}
-              className="flex-1 py-2 text-center text-xs font-medium text-gray-500 hover:bg-gray-50 hover:text-ooosh-navy active:bg-gray-100 border-r border-gray-100"
-            >
-              Book Out
-            </Link>
-          )}
           {vehicle.hireStatus === 'On Hire' && (
             <Link
               to={vmPath(`/check-in?vehicle=${encodeURIComponent(vehicle.reg)}`)}
@@ -146,6 +145,123 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
   )
 }
 
+/** Compact date for the dense table — "26 May 26". */
+function compactDate(dateStr: string | null): string {
+  if (!dateStr) return '—'
+  try {
+    return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB', {
+      day: '2-digit', month: 'short', year: '2-digit',
+    })
+  } catch {
+    return dateStr
+  }
+}
+
+/** A single colour-coded date cell for the fleet table. */
+function DateCell({ date, warningDays }: { date: string | null; warningDays: number }) {
+  const urgency = getDateUrgency(date, warningDays)
+  return (
+    <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[urgency]}`}>
+      {compactDate(date)}
+      {urgency === 'overdue' && date && ' ⚠️'}
+    </td>
+  )
+}
+
+const STATUS_PILL: Record<string, string> = {
+  'On Hire': 'bg-blue-100 text-blue-700',
+  'Available': 'bg-green-100 text-green-700',
+  'Prep Needed': 'bg-amber-100 text-amber-700',
+  'Not Ready': 'bg-red-100 text-red-700',
+}
+
+function statusLabel(vehicle: Vehicle, isAllocated: boolean): { label: string; cls: string } {
+  if (vehicle.isOldSold) return { label: 'Old & Sold', cls: 'bg-orange-100 text-orange-700' }
+  if (vehicle.hireStatus === 'Available' && isAllocated) return { label: 'Allocated', cls: 'bg-purple-100 text-purple-700' }
+  const label = vehicle.hireStatus === 'Available' ? 'Ready' : (vehicle.hireStatus || '—')
+  return { label, cls: STATUS_PILL[vehicle.hireStatus] || 'bg-gray-100 text-gray-600' }
+}
+
+/**
+ * Dense, glanceable fleet table. One row per van with colour-coded service +
+ * compliance columns so the whole fleet's health reads at a glance — the
+ * "Monday colour coding" the vehicle manager asked for.
+ */
+function FleetTable({
+  vehicles,
+  allocatedVehicleIds,
+  settings,
+}: {
+  vehicles: Vehicle[]
+  allocatedVehicleIds: Set<string>
+  settings: ComplianceSettings
+}) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+      <table className="min-w-full text-left">
+        <thead>
+          <tr className="border-b border-gray-200 bg-gray-50 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+            <th className="px-3 py-2">Reg</th>
+            <th className="px-2 py-2">Type</th>
+            <th className="px-2 py-2">Status</th>
+            <th className="px-2 py-2 text-right">Mileage</th>
+            <th className="px-2 py-2">Service</th>
+            <th className="px-2 py-2">MOT</th>
+            <th className="px-2 py-2">Tax</th>
+            <th className="px-2 py-2">Insurance</th>
+            <th className="px-2 py-2">TFL</th>
+            <th className="px-2 py-2">Rossetts</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {vehicles.map(vehicle => {
+            const svc = getServiceMileageStatus(vehicle, settings.service_mileage_warning_miles)
+            const ross = getRossettsStatus(vehicle, settings)
+            const status = statusLabel(vehicle, allocatedVehicleIds.has(vehicle.id))
+            const gearbox = getGearbox(vehicle.vehicleType)
+            const gearboxLabel = gearbox === 'auto' ? 'A' : gearbox === 'manual' ? 'M' : null
+            return (
+              <tr key={vehicle.id} className="hover:bg-gray-50">
+                <td className="whitespace-nowrap px-3 py-2">
+                  <Link to={vmPath(`/vehicles/${vehicle.id}`)} className="text-sm font-bold text-ooosh-navy hover:underline">
+                    {vehicle.reg}
+                  </Link>
+                </td>
+                <td className="whitespace-nowrap px-2 py-2 text-xs text-gray-600">
+                  {vehicle.simpleType || '—'}{gearboxLabel ? ` · ${gearboxLabel}` : ''}
+                </td>
+                <td className="whitespace-nowrap px-2 py-2">
+                  <span className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${status.cls}`}>
+                    {status.label}
+                  </span>
+                </td>
+                <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-gray-600">
+                  {vehicle.currentMileage != null ? vehicle.currentMileage.toLocaleString() : '—'}
+                </td>
+                <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[svc.urgency]}`}>
+                  {svc.milesRemaining == null
+                    ? '—'
+                    : svc.milesRemaining <= 0
+                      ? `${Math.abs(svc.milesRemaining).toLocaleString()} over ⚠️`
+                      : `${svc.milesRemaining.toLocaleString()} mi`}
+                </td>
+                <DateCell date={vehicle.motDue} warningDays={settings.mot_warning_days} />
+                <DateCell date={vehicle.taxDue} warningDays={settings.tax_warning_days} />
+                <DateCell date={vehicle.insuranceDue} warningDays={settings.insurance_warning_days} />
+                <DateCell date={vehicle.tflDue} warningDays={settings.tfl_warning_days} />
+                <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[ross.urgency]}`}>
+                  {ross.dueDate ? compactDate(ross.dueDate) : '—'}
+                  {ross.urgency === 'overdue' && ross.dueDate && ' ⚠️'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 /** Simple type filter pills */
 const VEHICLE_TYPES = ['Premium', 'Basic', 'Panel', 'Vito']
 
@@ -161,6 +277,23 @@ export function VehiclesPage() {
   const [showAddForm, setShowAddForm] = useState(false)
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+
+  // View mode — dense table (default, glanceable at a desk) vs cards (mobile-
+  // friendly). Persisted so each user keeps their preference.
+  const [viewMode, setViewMode] = useState<'table' | 'cards'>(
+    () => (localStorage.getItem('fleet-view-mode') === 'cards' ? 'cards' : 'table'),
+  )
+  const setView = (mode: 'table' | 'cards') => {
+    setViewMode(mode)
+    localStorage.setItem('fleet-view-mode', mode)
+  }
+
+  const { data: complianceSettings } = useQuery({
+    queryKey: ['compliance-settings'],
+    queryFn: fetchComplianceSettings,
+    staleTime: 5 * 60 * 1000,
+  })
+  const settings = complianceSettings || DEFAULT_COMPLIANCE
 
   // Auto-apply hireStatus filter from URL param (e.g. ?status=on-hire from dashboard links)
   useEffect(() => {
@@ -190,6 +323,23 @@ export function VehiclesPage() {
           )}
         </h2>
         <div className="flex gap-2">
+          {/* View toggle: table (glanceable) vs cards (mobile) */}
+          <div className="flex overflow-hidden rounded-lg border border-gray-200">
+            <button
+              onClick={() => setView('table')}
+              className={`px-3 py-1.5 text-sm font-medium ${viewMode === 'table' ? 'bg-ooosh-navy text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}
+              title="Table view"
+            >
+              Table
+            </button>
+            <button
+              onClick={() => setView('cards')}
+              className={`px-3 py-1.5 text-sm font-medium ${viewMode === 'cards' ? 'bg-ooosh-navy text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}
+              title="Card view"
+            >
+              Cards
+            </button>
+          </div>
           {isAdmin && (
             <button
               onClick={() => setShowAddForm(true)}
@@ -356,21 +506,27 @@ export function VehiclesPage() {
         </div>
       )}
 
-      {/* Vehicle cards */}
+      {/* Vehicle list — table (glanceable) or cards (mobile) */}
       {!isLoading && !isError && (
-        <div className="space-y-3">
-          {sortedVehicles.length === 0 ? (
-            <div className="rounded-lg border border-gray-200 bg-white p-6 text-center text-sm text-gray-400">
-              {filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold
-                ? 'No vehicles match your filters'
-                : 'No vehicles found'}
-            </div>
-          ) : (
-            sortedVehicles.map(vehicle => (
+        sortedVehicles.length === 0 ? (
+          <div className="rounded-lg border border-gray-200 bg-white p-6 text-center text-sm text-gray-400">
+            {filters.search || filters.simpleType || filters.hireStatus || filters.showOldSold
+              ? 'No vehicles match your filters'
+              : 'No vehicles found'}
+          </div>
+        ) : viewMode === 'table' ? (
+          <FleetTable
+            vehicles={sortedVehicles}
+            allocatedVehicleIds={allocatedVehicleIds}
+            settings={settings}
+          />
+        ) : (
+          <div className="space-y-3">
+            {sortedVehicles.map(vehicle => (
               <VehicleCard key={vehicle.id} vehicle={vehicle} isAllocated={allocatedVehicleIds.has(vehicle.id)} />
-            ))
-          )}
-        </div>
+            ))}
+          </div>
+        )
       )}
     </div>
   )
