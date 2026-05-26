@@ -142,6 +142,54 @@ function ComplianceThresholdRow({
   )
 }
 
+/** Single-value fleet-wide setting row (e.g. "Service alert: 2000 miles"). */
+function ComplianceValueRow({
+  label,
+  settingsKey,
+  suffix,
+  settings,
+  onSave,
+}: {
+  label: string
+  settingsKey: keyof ComplianceSettings
+  suffix: string
+  settings: ComplianceSettings
+  onSave: (key: keyof ComplianceSettings, val: number) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [editVal, setEditVal] = useState('')
+
+  const save = () => {
+    setEditing(false)
+    const num = parseInt(editVal, 10)
+    if (!isNaN(num) && num >= 0) onSave(settingsKey, num)
+  }
+
+  return (
+    <div className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
+      <span className="text-sm text-gray-600">{label}</span>
+      {editing ? (
+        <input
+          type="number" min="0" value={editVal}
+          onChange={e => setEditVal(e.target.value)}
+          onBlur={save}
+          onKeyDown={e => e.key === 'Enter' && save()}
+          autoFocus
+          className="w-24 rounded border border-gray-200 px-1.5 py-0.5 text-xs text-right focus:border-blue-300 focus:outline-none"
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => { setEditVal(String(settings[settingsKey])); setEditing(true) }}
+          className="text-xs font-medium text-gray-700 hover:text-blue-600"
+        >
+          {settings[settingsKey]}{suffix}
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function VehicleSettingsPage() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -238,6 +286,18 @@ export function VehicleSettingsPage() {
         <EditableField label="Next service due (miles)" value={vehicle.nextServiceDue} type="number" placeholder="e.g. 120000" onSave={v => saveField('next_service_due', v)} />
         <EditableField label="Last service mileage" value={vehicle.lastServiceMileage} type="number" onSave={v => saveField('last_service_mileage', v)} />
         <EditableField label="Last service date" value={vehicle.lastServiceDate} type="date" onSave={v => saveField('last_service_date', v)} />
+        {/* Rossetts annual warranty service (Mercedes / on-plan vans) */}
+        <div className="flex items-center justify-between py-2.5 border-b border-gray-100 last:border-0">
+          <span className="text-sm text-gray-600">On Rossetts plan</span>
+          <button
+            type="button"
+            onClick={() => saveField('rossetts_applicable', !vehicle.rossettsApplicable)}
+            className={`rounded-full px-3 py-1 text-xs font-medium ${vehicle.rossettsApplicable ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}
+          >
+            {vehicle.rossettsApplicable ? 'Yes' : 'No'}
+          </button>
+        </div>
+        <EditableField label="Last Rossetts service date" value={vehicle.lastRossettsServiceDate} type="date" onSave={v => saveField('last_rossetts_service_date', v)} />
       </div>
 
       {/* Insurance */}
@@ -276,6 +336,18 @@ export function VehicleSettingsPage() {
         <ComplianceThresholdRow label="Tax" warningKey="tax_warning_days" urgentKey="tax_urgent_days" settings={compliance} onSave={saveThreshold} />
         <ComplianceThresholdRow label="Insurance" warningKey="insurance_warning_days" urgentKey="insurance_urgent_days" settings={compliance} onSave={saveThreshold} />
         <ComplianceThresholdRow label="TFL" warningKey="tfl_warning_days" urgentKey="tfl_urgent_days" settings={compliance} onSave={saveThreshold} />
+      </div>
+
+      {/* Service Alerts (fleet-wide) */}
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <h3 className="mb-1 text-sm font-semibold uppercase tracking-wide text-gray-500">Service Alerts</h3>
+        <p className="mb-3 text-xs text-gray-400">
+          Fleet-wide. Daily 08:00 scan emails the vehicle manager when a van approaches a service. Click to edit.
+        </p>
+        <ComplianceValueRow label="General service — alert this far ahead" settingsKey="service_mileage_warning_miles" suffix=" mi" settings={compliance} onSave={saveThreshold} />
+        <ComplianceValueRow label="Rossetts — first service after first registration" settingsKey="rossetts_first_service_years" suffix=" yr" settings={compliance} onSave={saveThreshold} />
+        <ComplianceValueRow label="Rossetts — interval between services" settingsKey="rossetts_interval_months" suffix=" mo" settings={compliance} onSave={saveThreshold} />
+        <ComplianceValueRow label="Rossetts — alert this far ahead" settingsKey="rossetts_warning_days" suffix="d" settings={compliance} onSave={saveThreshold} />
       </div>
 
       {/* Danger zone */}

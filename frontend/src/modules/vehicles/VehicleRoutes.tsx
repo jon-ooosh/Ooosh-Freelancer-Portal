@@ -15,6 +15,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { HomePage } from './pages/HomePage'
 import { VehiclesPage } from './pages/VehiclesPage'
 import { VehicleDetailPage } from './pages/VehicleDetailPage'
+import { HireRecordPage } from './pages/HireRecordPage'
 import { BookOutPage } from './pages/BookOutPage'
 import { CheckInPage } from './pages/CheckInPage'
 import { CollectionPage } from './pages/CollectionPage'
@@ -63,6 +64,7 @@ export function VehicleRoutes() {
         <Route path="fleet" element={<VehiclesPage />} />
         <Route path="fleet/:id" element={<VehicleDetailPage />} />
         <Route path="fleet/:id/settings" element={<VehicleSettingsPage />} />
+        <Route path="fleet/:id/hire/:hhJob" element={<HireRecordPage />} />
         <Route path="book-out" element={<BookOutPage />} />
         <Route path="check-in" element={<CheckInPage />} />
         <Route path="collection" element={<CollectionPage />} />

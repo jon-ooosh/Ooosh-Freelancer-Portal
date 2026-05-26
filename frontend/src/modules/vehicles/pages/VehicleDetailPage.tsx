@@ -8,9 +8,10 @@ import { useVehicleTracker, useUpdateTrackerAssignment } from '../hooks/useTrack
 import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
-import FuelHistoryTab from '../components/fuel/FuelHistoryTab'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
 import { updateVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile } from '../lib/fleet-api'
+import { getRossettsStatus, URGENCY_DOT, URGENCY_TEXT } from '../lib/service-status'
+import type { ComplianceSettings } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import { getAuthHeaders } from '../config/api-config'
 import { getDateUrgency } from '../types/vehicle'
@@ -133,7 +134,7 @@ export function VehicleDetailPage() {
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [searchParams] = useSearchParams()
-  const validTabs = ['details', 'service', 'fuel', 'location', 'preps'] as const
+  const validTabs = ['details', 'service', 'issues', 'location', 'preps'] as const
   type TabName = typeof validTabs[number]
   const initialTab = validTabs.includes(searchParams.get('tab') as TabName) ? (searchParams.get('tab') as TabName) : 'details'
   const [activeTab, setActiveTab] = useState<TabName>(initialTab)
@@ -298,7 +299,7 @@ export function VehicleDetailPage() {
 
       {/* Tab bar */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
-        {(['details', 'service', 'fuel', 'preps', 'location'] as const).map(tab => (
+        {(['details', 'service', 'issues', 'preps', 'location'] as const).map(tab => (
           <button
             key={tab}
             type="button"
@@ -309,7 +310,7 @@ export function VehicleDetailPage() {
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'fuel' ? 'Fuel' : tab === 'preps' ? 'Prep History' : 'Location'}
+            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'issues' ? 'Issues' : tab === 'preps' ? 'Prep History' : 'Location'}
           </button>
         ))}
       </div>
@@ -324,9 +325,9 @@ export function VehicleDetailPage() {
         <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} />
       )}
 
-      {/* Fuel tab */}
-      {activeTab === 'fuel' && (
-        <FuelHistoryTab vehicleId={vehicle.id} currentMileage={vehicle.currentMileage} />
+      {/* Issues tab — OP job_issues backed, open issues surfaced by default */}
+      {activeTab === 'issues' && (
+        <VehicleIssuesSectionOp vehicleId={vehicle.id} />
       )}
 
       {/* Prep History tab */}
@@ -383,6 +384,7 @@ export function VehicleDetailPage() {
           onSaveDate={v => saveField('last_service_date', v)}
           onSaveBooked={v => saveField('service_booked_in_date', v)}
         />
+        <RossettsDueRow vehicle={vehicle} settings={cs} />
         <EditableRow label="Warranty Expires" value={vehicle.warrantyExpires} type="date" onSave={v => saveField('warranty_expires', v)} />
         <EditableRow label="Finance Ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
       </div>
@@ -541,18 +543,39 @@ export function VehicleDetailPage() {
       {/* Vehicle Files */}
       <VehicleFilesSection vehicleId={vehicle.id} files={vehicle.files || []} />
 
-      {/* Event History — lists book-outs, check-ins, preps etc. with
-          inline "Regenerate PDF" action on condition-report events. */}
-      <VehicleEventsHistory vehicleReg={vehicle.reg} />
-
-      {/* Issues — OP job_issues backed (Stage 3, May 2026).
-          Replaces the legacy R2-blob VehicleIssuesSection; same place
-          on the page, same compact-list layout, but new dedup model
-          means recurring problems append events instead of breeding
-          duplicate rows. */}
-      <VehicleIssuesSectionOp vehicleId={vehicle.id} />
+      {/* Event History — lists book-outs, check-ins, preps etc. Book-out and
+          check-in are paired into a hire so staff can open the full "life of
+          a hire" comparison (out vs back-in). */}
+      <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
 
       </>}
+    </div>
+  )
+}
+
+/** Computed Rossetts annual-warranty service due row (read-only).
+ *  Only shown for vans on the Rossetts plan. Due date is derived from the last
+ *  Rossetts service (+ interval) or first registration (+ warranty years), so
+ *  it updates automatically when those underlying dates change. */
+function RossettsDueRow({
+  vehicle,
+  settings,
+}: {
+  vehicle: { rossettsApplicable: boolean; lastRossettsServiceDate: string | null; dateFirstReg: string | null }
+  settings: ComplianceSettings
+}) {
+  if (!vehicle.rossettsApplicable) return null
+  const ross = getRossettsStatus(vehicle, settings)
+  return (
+    <div className="flex items-center gap-2 rounded border-b border-gray-100 px-1 py-2 last:border-0">
+      <span className={`h-2 w-2 shrink-0 rounded-full ${URGENCY_DOT[ross.urgency]}`} />
+      <span className="min-w-0 flex-1 text-sm text-gray-500">
+        Rossetts Service Due
+        <span className="ml-1 text-[10px] text-gray-300">{ross.isFirstService ? '(first / warranty)' : '(annual)'}</span>
+      </span>
+      <span className={`text-sm font-medium ${ross.dueDate ? URGENCY_TEXT[ross.urgency] : 'text-gray-400'}`}>
+        {ross.dueDate ? formatDate(ross.dueDate) : 'set last service or first-reg date'}
+      </span>
     </div>
   )
 }

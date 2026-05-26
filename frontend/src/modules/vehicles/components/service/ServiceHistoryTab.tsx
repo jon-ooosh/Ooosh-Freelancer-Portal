@@ -294,21 +294,29 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
             {/* Expanded details */}
             {isExpanded && (
               <div className="border-t border-gray-100 px-4 py-3 space-y-2">
-                {record.mileage != null && (
-                  <DetailRow label="Mileage" value={record.mileage.toLocaleString()} />
-                )}
-                {record.status && (
-                  <DetailRow label="Status" value={record.status} />
-                )}
-                {record.hirehopJob && (
-                  <DetailRow label="HireHop Job" value={`#${record.hirehopJob}`} />
-                )}
-                {record.nextDueDate && (
-                  <DetailRow label="Next Due" value={formatDisplayDate(record.nextDueDate)} />
-                )}
-                {record.nextDueMileage != null && (
-                  <DetailRow label="Next Due Mileage" value={record.nextDueMileage.toLocaleString()} />
-                )}
+                {/* Data rows grouped into compact label:value pairs so the
+                    figures sit next to their labels (not flung to opposite
+                    edges of the card). */}
+                <div className="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+                  {record.serviceDate && (
+                    <DetailRow label="Date" value={formatDisplayDate(record.serviceDate)} />
+                  )}
+                  {record.mileage != null && (
+                    <DetailRow label="Mileage" value={record.mileage.toLocaleString()} />
+                  )}
+                  {record.status && (
+                    <DetailRow label="Status" value={record.status} />
+                  )}
+                  {record.hirehopJob && (
+                    <DetailRow label="HireHop Job" value={`#${record.hirehopJob}`} />
+                  )}
+                  {record.nextDueDate && (
+                    <DetailRow label="Next Due" value={formatDisplayDate(record.nextDueDate)} />
+                  )}
+                  {record.nextDueMileage != null && (
+                    <DetailRow label="Next Due Mileage" value={record.nextDueMileage.toLocaleString()} />
+                  )}
+                </div>
                 {record.notes && (
                   <div>
                     <span className="text-xs font-medium text-gray-400">Notes</span>
@@ -507,9 +515,9 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
 
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-center justify-between">
-      <span className="text-xs font-medium text-gray-400">{label}</span>
-      <span className="text-sm text-gray-700">{value}</span>
+    <div className="flex items-baseline gap-2">
+      <span className="shrink-0 text-xs font-medium text-gray-400">{label}:</span>
+      <span className="text-sm text-gray-700 tabular-nums">{value}</span>
     </div>
   )
 }
@@ -517,7 +525,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 function formatShortDate(dateStr: string): string {
   try {
     const d = new Date(dateStr + 'T00:00:00')
-    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' })
   } catch {
     return dateStr
   }

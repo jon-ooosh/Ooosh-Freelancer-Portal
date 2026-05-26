@@ -6,12 +6,17 @@
  */
 
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { fetchVehicleEvents, type EventIndexEntry } from '../../lib/events-query'
 import { regenerateEventPdf } from '../../lib/events-api'
+import { vmPath } from '../../config/route-paths'
 
 interface Props {
   vehicleReg: string
+  /** Vehicle UUID — used to deep-link a book-out/check-in into its full
+   *  "life of a hire" comparison page (/vehicles/fleet/:id/hire/:hhJob). */
+  vehicleId?: string
 }
 
 const EVENT_TYPE_BADGE: Record<string, string> = {
@@ -34,7 +39,7 @@ function formatEventDate(iso: string): string {
   }
 }
 
-export function VehicleEventsHistory({ vehicleReg }: Props) {
+export function VehicleEventsHistory({ vehicleReg, vehicleId }: Props) {
   const { data, isLoading, error } = useQuery<EventIndexEntry[]>({
     queryKey: ['vehicle-events', vehicleReg],
     queryFn: () => fetchVehicleEvents(vehicleReg),
@@ -66,7 +71,7 @@ export function VehicleEventsHistory({ vehicleReg }: Props) {
       {events.length > 0 && (
         <ul className="divide-y divide-gray-100">
           {events.map(ev => (
-            <EventRow key={ev.id} event={ev} vehicleReg={vehicleReg} />
+            <EventRow key={ev.id} event={ev} vehicleReg={vehicleReg} vehicleId={vehicleId} />
           ))}
         </ul>
       )}
@@ -74,10 +79,13 @@ export function VehicleEventsHistory({ vehicleReg }: Props) {
   )
 }
 
-function EventRow({ event, vehicleReg }: { event: EventIndexEntry; vehicleReg: string }) {
+function EventRow({ event, vehicleReg, vehicleId }: { event: EventIndexEntry; vehicleReg: string; vehicleId?: string }) {
   const [regenOpen, setRegenOpen] = useState(false)
   const badgeClass = EVENT_TYPE_BADGE[event.eventType] || 'bg-gray-100 text-gray-700'
-  const canRegen = event.eventType === 'Book Out' || event.eventType === 'Check In'
+  const isHireEvent = event.eventType === 'Book Out' || event.eventType === 'Check In'
+  const canRegen = isHireEvent
+  // Entry point to the full "life of a hire" comparison page (out vs back-in).
+  const canViewHire = isHireEvent && !!vehicleId && !!event.hireHopJob
 
   return (
     <li className="py-3">
@@ -119,15 +127,25 @@ function EventRow({ event, vehicleReg }: { event: EventIndexEntry; vehicleReg: s
           </div>
         </div>
 
-        {canRegen && (
-          <button
-            type="button"
-            onClick={() => setRegenOpen(true)}
-            className="shrink-0 rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
-          >
-            Regenerate PDF
-          </button>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          {canViewHire && (
+            <Link
+              to={vmPath(`/vehicles/${vehicleId}/hire/${event.hireHopJob}`)}
+              className="rounded border border-ooosh-navy bg-white px-3 py-1 text-xs font-medium text-ooosh-navy hover:bg-ooosh-navy/5"
+            >
+              View hire →
+            </Link>
+          )}
+          {canRegen && (
+            <button
+              type="button"
+              onClick={() => setRegenOpen(true)}
+              className="rounded border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Regenerate PDF
+            </button>
+          )}
+        </div>
       </div>
 
       {regenOpen && (
