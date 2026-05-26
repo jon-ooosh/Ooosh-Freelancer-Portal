@@ -39,7 +39,7 @@ This spec covers both, plus the soft-check-in primitive that's also needed for t
 | `booked_out`, `active` | **Visible** — primary swap case |
 | `returned`, `cancelled`, `swapped` | Hidden — terminal |
 
-Admin/manager only. (Other staff should call a manager to action breakdowns — there's reimbursement, insurance, contractor coordination implications.)
+**RBAC: `admin`, `manager`, AND `weekend_manager`.** Breakdowns happen at weekends — `weekend_manager` MUST be able to action a swap. Do NOT use a bare `authorize('admin', 'manager')` (it silently locks out `weekend_manager`, the exact bug class flagged in CLAUDE.md for `/pipeline` + `/requirements`). Use `authorize('admin', 'manager', 'weekend_manager')` explicitly — this is narrower than `STAFF_ROLES` (which also includes `staff` + `general_assistant`), so don't reach for the spread constant here. No override flow for other roles — trust that 90% of swaps are pre-planned enough to wait for a manager call; the rare genuinely-stuck case escalates by phone.
 
 ### Modal contents
 
@@ -54,7 +54,7 @@ Single modal, three sections:
 - Vehicle search picker (same component as Allocations)
 - Filter to vans of the same `simple_type` by default, toggleable to "any vehicle"
 - Live availability check on selection — surfaces 409 inline with proposed alternatives rather than waiting until submit
-- Read-only sibling-driver awareness: if multiple drivers share this van slot on the hire, show "This swap will affect N drivers" with a list. Decided up-front, can't accidentally swap only some
+- Read-only sibling-driver awareness: if multiple drivers share this van slot on the hire, show "This swap will affect N drivers" with a list. **All siblings auto-cascade — a physical van change moves every driver on it.** No per-driver confirmation; single submit swaps all N assignments from van A to van B. Each driver's hire agreement PDF re-stamps with the new reg at the replacement van's book-out (per-driver PDFs, same van reg on each — see CLAUDE.md "Scope rules" table)
 
 **Section C — Soft check-in of the van being swapped out**
 See §2 for the primitive. In the modal, this section captures:
@@ -292,6 +292,8 @@ Re-running is safe — the cancellation criteria specifically targets `status IN
 
 Recommended PR shape: §2 + §4 + §5 in one PR (foundation + cleanup), §1 + §3 in a second PR (the user-facing swap).
 
+**Immediate follow-on (next work after this spec lands):** Freelancer-led interim check-in UI. The soft check-in primitive (§2) is the bulk of the work — the freelancer case just needs a different entry point (not the swap modal): a freelancer-facing surface where someone collecting a van from a customer on Ooosh's behalf records its state. Reuses the soft check-in event type, the interim PDF, the `Not Ready` fleet transition, and (optionally) a Job Issue if there's damage. Slots onto the existing freelancer-bookout JWT flow (CLAUDE.md "Freelancer book-out Round 5+"). Capturing it here so it doesn't fall off the radar — jon's steer (May 2026): tackle straight after the swap work, since we're laying 90% of it now.
+
 ## 7. Schema changes
 
 Minimal — most fields already exist.
@@ -327,12 +329,14 @@ Before merging:
 - [ ] Driver Detail Hire History shows both rows with swap relationship
 - [ ] Eventual full check-in of the swapped-out van (later, when garage returns it) works without re-flipping the assignment status (it's already `swapped`, full check-in just generates the report)
 
-## 9. Open questions
+## 9. Resolved decisions (jon, May 2026)
 
-- **Who owns the swap?** Admin/manager only feels right for the breakdown/accident case. But weekend incidents could leave staff stuck without a manager. Override flow? Or trust that 90% of swaps are pre-planned enough to wait for a manager call?
-- **Multi-driver swap UI** — when the original assignment has sibling drivers on the same van slot, the modal needs to surface "this swap affects N drivers" prominently. Do the sibling assignments auto-swap (likely yes — same physical van change) or each get individual confirmation? Initial design: auto-cascade with read-only display of all affected drivers. Single submit handles all.
-- **Soft check-in via freelancer-led handover** — this spec covers the swap case. The freelancer-handover case needs a different entry point (not the swap modal). Initial release: soft check-in primitive is built, but the freelancer-handover UI isn't — flagged as a follow-up bullet under CLAUDE.md "Freelancer book-out Round 5+".
-- **HH job memo note on swap** — should we push a `job_note` to HireHop noting "Mid-hire swap on DD/MM: RX73TBZ → RO23HLU"? Useful for HH-only staff (operational visibility) but isn't strictly necessary. Default: yes, post the note. Cheap, reversible.
+All four open questions resolved — locked in:
+
+- **Who owns the swap?** `admin`, `manager`, AND `weekend_manager`. No override flow for other roles — genuinely-stuck weekend cases escalate by phone. (See §1 RBAC note — must explicitly include `weekend_manager`, don't use bare `authorize('admin', 'manager')`.)
+- **Multi-driver swap** — auto-cascade. If 4 drivers share van A, all 4 move to van B on a single submit. Read-only display of affected drivers in the modal, no per-driver confirmation. (See §1 Section B.)
+- **Soft check-in via freelancer-led handover** — soft check-in primitive (§2) is built here; the freelancer-handover entry point is **the very next piece of work after this lands** (see §6 — we're laying ~90% of it). Not deferred indefinitely.
+- **HH job memo note on swap** — YES. Push a `job_note` to HireHop on swap: "Mid-hire swap on DD/MM/YYYY: RX73TBZ → RO23HLU". Best-effort (logged warning if it fails, doesn't block the swap), gives HH-only staff operational visibility.
 
 ## 10. Cross-references
 
