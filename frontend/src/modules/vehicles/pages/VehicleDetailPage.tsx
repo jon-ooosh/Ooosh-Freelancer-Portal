@@ -134,7 +134,7 @@ export function VehicleDetailPage() {
   })
   const cs = complianceSettings || DEFAULT_COMPLIANCE
   const [searchParams] = useSearchParams()
-  const validTabs = ['details', 'service', 'issues', 'location', 'preps'] as const
+  const validTabs = ['details', 'service', 'issues', 'history', 'location', 'preps'] as const
   type TabName = typeof validTabs[number]
   const initialTab = validTabs.includes(searchParams.get('tab') as TabName) ? (searchParams.get('tab') as TabName) : 'details'
   const [activeTab, setActiveTab] = useState<TabName>(initialTab)
@@ -299,18 +299,18 @@ export function VehicleDetailPage() {
 
       {/* Tab bar */}
       <div className="flex gap-1 rounded-lg bg-gray-100 p-1">
-        {(['details', 'service', 'issues', 'preps', 'location'] as const).map(tab => (
+        {(['details', 'service', 'issues', 'history', 'preps', 'location'] as const).map(tab => (
           <button
             key={tab}
             type="button"
             onClick={() => setActiveTab(tab)}
-            className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+            className={`flex-1 rounded-md px-2 py-2 text-sm font-medium transition-colors ${
               activeTab === tab
                 ? 'bg-white text-ooosh-navy shadow-sm'
                 : 'text-gray-500 hover:text-gray-700'
             }`}
           >
-            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'issues' ? 'Issues' : tab === 'preps' ? 'Prep History' : 'Location'}
+            {tab === 'details' ? 'Details' : tab === 'service' ? 'Service' : tab === 'issues' ? 'Issues' : tab === 'history' ? 'Events' : tab === 'preps' ? 'Preps' : 'Location'}
           </button>
         ))}
       </div>
@@ -328,6 +328,12 @@ export function VehicleDetailPage() {
       {/* Issues tab — OP job_issues backed, open issues surfaced by default */}
       {activeTab === 'issues' && (
         <VehicleIssuesSectionOp vehicleId={vehicle.id} />
+      )}
+
+      {/* Events tab — book-outs, check-ins, preps. Book-out/check-in rows
+          link through to the full "life of a hire" comparison page. */}
+      {activeTab === 'history' && (
+        <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
       )}
 
       {/* Prep History tab */}
@@ -542,11 +548,6 @@ export function VehicleDetailPage() {
 
       {/* Vehicle Files */}
       <VehicleFilesSection vehicleId={vehicle.id} files={vehicle.files || []} />
-
-      {/* Event History — lists book-outs, check-ins, preps etc. Book-out and
-          check-in are paired into a hire so staff can open the full "life of
-          a hire" comparison (out vs back-in). */}
-      <VehicleEventsHistory vehicleReg={vehicle.reg} vehicleId={vehicle.id} />
 
       </>}
     </div>
