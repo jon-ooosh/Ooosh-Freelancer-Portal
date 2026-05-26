@@ -33,11 +33,46 @@ interface EventDetail {
   photoMeta?: Array<{ angle: string; label: string }> | null
 }
 
+interface Pic {
+  /** Public image URL for <img> display (unauthenticated R2). */
+  display: string
+  /** R2 key — used to download the original via the authenticated proxy. */
+  key: string
+}
+
 interface EventPhotos {
-  /** Walkaround photos by angle slug → public image URL. */
-  byAngle: Map<string, string>
-  /** Damage detail photos (public URLs), flat list. */
-  damage: string[]
+  /** Walkaround photos by angle slug. */
+  byAngle: Map<string, Pic>
+  /** Damage detail photos, flat list. */
+  damage: Pic[]
+}
+
+interface LightboxState {
+  display: string
+  key: string
+  filename: string
+}
+
+/**
+ * Download a photo at full resolution. Fetches via the authenticated
+ * same-origin proxy (so it works regardless of the public bucket's CORS
+ * policy) and saves with a meaningful filename. Falls back to opening the
+ * public URL in a new tab if the proxy fetch fails.
+ */
+async function downloadPhoto(key: string, display: string, filename: string) {
+  try {
+    const res = await apiFetch(`/photo/${encodeURIComponent(key)}`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch {
+    window.open(display, '_blank')
+  }
 }
 
 function safeRegOf(reg: string): string {
@@ -66,21 +101,22 @@ async function fetchEventDetail(vehicleReg: string, eventId: string): Promise<Ev
 
 async function fetchEventPhotos(vehicleReg: string, eventId: string): Promise<EventPhotos> {
   const prefix = `events/${eventId}/${safeRegOf(vehicleReg)}/`
-  const byAngle = new Map<string, string>()
-  const damage: string[] = []
+  const byAngle = new Map<string, Pic>()
+  const damage: Pic[] = []
   try {
     const res = await apiFetch(`/list-photos?prefix=${encodeURIComponent(prefix)}`)
     if (!res.ok) return { byAngle, damage }
     const data = await res.json() as { photos: Array<{ angle: string; key: string }> }
     for (const p of data.photos || []) {
       if (!p.key) continue
-      const publicUrl = R2_PUBLIC_URL ? `${R2_PUBLIC_URL}/${p.key}` : `/api/vehicles/photo/${encodeURIComponent(p.key)}`
+      const display = R2_PUBLIC_URL ? `${R2_PUBLIC_URL}/${p.key}` : `/api/vehicles/photo/${encodeURIComponent(p.key)}`
+      const pic: Pic = { display, key: p.key }
       // Damage photos live under .../damage/{id}/{i}.jpg — keep them separate
       // from the walkaround angle set.
       if (p.key.includes('/damage/')) {
-        damage.push(publicUrl)
+        damage.push(pic)
       } else if (p.angle) {
-        byAngle.set(p.angle, publicUrl)
+        byAngle.set(p.angle, pic)
       }
     }
   } catch {
@@ -93,7 +129,8 @@ export function HireRecordPage() {
   const { id, hhJob } = useParams<{ id: string; hhJob: string }>()
   const { data: vehicle, isLoading: vehicleLoading } = useVehicle(id)
   const reg = vehicle?.reg || ''
-  const [lightbox, setLightbox] = useState<string | null>(null)
+  const safeReg = (reg || 'van').replace(/\s+/g, '-')
+  const [lightbox, setLightbox] = useState<LightboxState | null>(null)
 
   // All events for this van, narrowed to the requested hire (HH job).
   const { data: events, isLoading: eventsLoading } = useQuery<EventIndexEntry[]>({
@@ -254,10 +291,11 @@ export function HireRecordPage() {
             <div className="rounded-lg border border-red-200 bg-white p-4">
               <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-red-600">Damage Photos (Check-In)</h3>
               <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6">
-                {checkInPhotos!.damage.map((url, i) => (
-                  <button key={i} type="button" onClick={() => setLightbox(url)}
+                {checkInPhotos!.damage.map((pic, i) => (
+                  <button key={i} type="button"
+                          onClick={() => setLightbox({ display: pic.display, key: pic.key, filename: `${safeReg}_hire${hhJob}_damage${i + 1}.jpg` })}
                           className="aspect-square overflow-hidden rounded border border-gray-200">
-                    <img src={url} alt={`Damage ${i + 1}`} className="h-full w-full object-cover" loading="lazy" />
+                    <img src={pic.display} alt={`Damage ${i + 1}`} className="h-full w-full object-cover" loading="lazy" />
                   </button>
                 ))}
               </div>
@@ -277,8 +315,8 @@ export function HireRecordPage() {
                   <div key={angle} className="rounded-lg border border-gray-100 p-2">
                     <p className="mb-1.5 text-xs font-medium text-gray-500">{angleLabels.get(angle) || prettifyAngle(angle)}</p>
                     <div className="grid grid-cols-2 gap-2">
-                      <ComparePhoto label="Out" url={bookOutPhotos?.byAngle.get(angle)} onOpen={setLightbox} />
-                      <ComparePhoto label="Back" url={checkInPhotos?.byAngle.get(angle)} onOpen={setLightbox} />
+                      <ComparePhoto label="Out" pic={bookOutPhotos?.byAngle.get(angle)} filename={`${safeReg}_hire${hhJob}_out_${angle}.jpg`} onOpen={setLightbox} />
+                      <ComparePhoto label="Back" pic={checkInPhotos?.byAngle.get(angle)} filename={`${safeReg}_hire${hhJob}_back_${angle}.jpg`} onOpen={setLightbox} />
                     </div>
                   </div>
                 ))}
@@ -291,11 +329,20 @@ export function HireRecordPage() {
       {/* Lightbox */}
       {lightbox && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setLightbox(null)}>
-          <img src={lightbox} alt="Full size" className="max-h-full max-w-full rounded" onClick={e => e.stopPropagation()} />
-          <button type="button" onClick={() => setLightbox(null)}
-                  className="absolute right-4 top-4 rounded-full bg-white/90 px-3 py-1 text-sm font-medium text-gray-800">
-            Close
-          </button>
+          <img src={lightbox.display} alt="Full size" className="max-h-full max-w-full rounded" onClick={e => e.stopPropagation()} />
+          <div className="absolute right-4 top-4 flex gap-2" onClick={e => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => downloadPhoto(lightbox.key, lightbox.display, lightbox.filename)}
+              className="rounded-full bg-white/90 px-3 py-1 text-sm font-medium text-ooosh-navy hover:bg-white"
+            >
+              Download
+            </button>
+            <button type="button" onClick={() => setLightbox(null)}
+                    className="rounded-full bg-white/90 px-3 py-1 text-sm font-medium text-gray-800 hover:bg-white">
+              Close
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -339,13 +386,13 @@ function StateCard({
   )
 }
 
-function ComparePhoto({ label, url, onOpen }: { label: string; url?: string; onOpen: (url: string) => void }) {
+function ComparePhoto({ label, pic, filename, onOpen }: { label: string; pic?: Pic; filename: string; onOpen: (lb: LightboxState) => void }) {
   return (
     <div>
       <p className="mb-0.5 text-[10px] font-medium uppercase text-gray-400">{label}</p>
-      {url ? (
-        <button type="button" onClick={() => onOpen(url)} className="block aspect-[4/3] w-full overflow-hidden rounded border border-gray-200">
-          <img src={url} alt={label} className="h-full w-full object-cover" loading="lazy" />
+      {pic ? (
+        <button type="button" onClick={() => onOpen({ display: pic.display, key: pic.key, filename })} className="block aspect-[4/3] w-full overflow-hidden rounded border border-gray-200">
+          <img src={pic.display} alt={label} className="h-full w-full object-cover" loading="lazy" />
         </button>
       ) : (
         <div className="flex aspect-[4/3] w-full items-center justify-center rounded border border-dashed border-gray-200 text-[11px] text-gray-300">
