@@ -2303,6 +2303,27 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
       }
     }
 
+    // Soft check-in side effects: an INTERIM assessment of a van being taken
+    // out of service mid-hire (vehicle swap) or handed over by a freelancer,
+    // WITHOUT closing the hire. Unlike a full check-in this does NOT flip any
+    // assignment status — the caller (the swap endpoint) owns the assignment
+    // lifecycle. It only forces fleet hire_status to 'Not Ready' (a sticky
+    // value), which the final reconcile below then preserves rather than
+    // recomputing to 'On Hire' / 'Prep Needed'. No HH writeback, no close-out
+    // requirements — the hire continues (on a replacement van for the swap
+    // case). Mileage is logged generically above (the reading is real).
+    if (normalisedEventType === 'soft-check-in') {
+      try {
+        await query(
+          `UPDATE fleet_vehicles SET hire_status = 'Not Ready', updated_at = NOW() WHERE reg = $1`,
+          [reg]
+        );
+        console.log(`[vehicles/events] soft check-in: ${reg} → Not Ready (interim — hire continues elsewhere, no assignment flip)`);
+      } catch (err) {
+        console.warn('[vehicles/events] soft check-in side-effect failed:', err);
+      }
+    }
+
     // Final reconcile — recompute fleet hire_status from current assignment
     // state. Runs AFTER the assignment status flips above, so the helper
     // observes the post-flip state. The earlier `event.hireStatus` direct
@@ -2681,9 +2702,17 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     }
   }
 
+  // Interim assessment = soft check-in (mid-hire swap / freelancer handover).
+  // Takes precedence over isCheckIn for titling — it's neither a clean
+  // book-out nor a final return.
+  const isInterim = data.isInterim === true;
   const isCheckIn = data.isCheckIn === true;
-  const reportTitle = isCheckIn ? 'VEHICLE CHECK-IN REPORT' : 'VEHICLE CONDITION REPORT';
-  const reportSubtitle = isCheckIn ? 'Return Record' : 'Book-Out Record';
+  const reportTitle = isInterim
+    ? 'INTERIM VEHICLE ASSESSMENT'
+    : isCheckIn ? 'VEHICLE CHECK-IN REPORT' : 'VEHICLE CONDITION REPORT';
+  const reportSubtitle = isInterim
+    ? 'Mid-Hire Assessment Record'
+    : isCheckIn ? 'Return Record' : 'Book-Out Record';
 
   addText(reportTitle, 0, 15, { size: 18, bold: true, color: [255, 255, 255], align: 'center' });
   addText(reportSubtitle, 0, 23, { size: 11, color: [180, 190, 210], align: 'center' });
@@ -2692,6 +2721,21 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   addText(timestamp, 0, 31, { size: 8, color: [140, 150, 170], align: 'center' });
 
   y = 48;
+
+  // Interim context banner — explains why there's no signature and that the
+  // hire is still live.
+  if (isInterim) {
+    pdf.setFillColor(255, 251, 235);
+    pdf.setDrawColor(253, 230, 138);
+    pdf.roundedRect(margin, y, contentWidth, 18, 2, 2, 'FD');
+    addText('Interim assessment captured during a mid-hire vehicle change.', margin + 4, y + 6.5, {
+      size: 9, bold: true, color: [146, 64, 14],
+    });
+    addText('The hire is continuing on a replacement vehicle. A full check-in will follow when this vehicle returns to base.', margin + 4, y + 12, {
+      size: 7.5, color: [146, 64, 14],
+    });
+    y += 24;
+  }
 
   // -- Vehicle Details --
   addText('VEHICLE DETAILS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
@@ -3025,7 +3069,18 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   addText('SIGNATURE', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
   y += 3; addLine(y); y += 6;
 
-  if (isCheckIn && data.driverPresent === false) {
+  if (isInterim) {
+    pdf.setFillColor(248, 250, 252);
+    pdf.setDrawColor(203, 213, 225);
+    pdf.roundedRect(margin, y, contentWidth, 18, 2, 2, 'FD');
+    addText('No signature — interim assessment', margin + 4, y + 6.5, {
+      size: 9, bold: true, color: [71, 85, 105],
+    });
+    addText('Captured during a mid-hire vehicle change; the driver/customer is not necessarily present.', margin + 4, y + 12, {
+      size: 7.5, color: [71, 85, 105],
+    });
+    y += 22;
+  } else if (isCheckIn && data.driverPresent === false) {
     pdf.setFillColor(255, 251, 235);
     pdf.setDrawColor(253, 230, 138);
     pdf.roundedRect(margin, y, contentWidth, 14, 2, 2, 'FD');
@@ -3086,7 +3141,9 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     pdf.setFontSize(7);
     pdf.setTextColor(160, 160, 160);
     const generated = new Date().toISOString().split('T')[0];
-    const footerLabel = isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Condition Report';
+    const footerLabel = isInterim
+      ? 'Interim Vehicle Assessment'
+      : isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Condition Report';
     pdf.text(
       'Ooosh Tours Ltd - ' + footerLabel + ' - Generated ' + generated,
       pageWidth / 2, 292, { align: 'center' },
@@ -3105,7 +3162,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     : eventDateStr;
   const safeReg = String(data.vehicleReg || 'unknown').replace(/\s+/g, '-');
   const jobPart = data.hireHopJob ? '-Job' + data.hireHopJob : '';
-  const docType = isCheckIn ? 'check-in' : 'book-out';
+  const docType = isInterim ? 'interim' : isCheckIn ? 'check-in' : 'book-out';
   const filename = `${safeReg}-${ddmmyy}${jobPart}-${docType}.pdf`;
 
   return { pdfBytes, filename };

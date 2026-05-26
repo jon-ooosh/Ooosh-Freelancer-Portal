@@ -702,19 +702,30 @@ Joined-up referral management: flag → email → review → resolve → date ex
 - [ ] `post-signature-notifications.js` repointing: currently reads from Monday.com to check referral — needs OP backend repoint (reads from driver-verification status endpoint instead)
 - [ ] Excess module integration: adjusted excess from referral resolution flows into excess tracking/payment portal
 
-**Phase D3 — Vehicle Swap (Breakdown / Reallocation)**
-When a vehicle breaks down mid-hire and needs swapping to a replacement:
+**Phase D3 — Vehicle Swap (Breakdown / Reallocation)** ← IN PROGRESS (May 2026)
+When a vehicle breaks down mid-hire and needs swapping to a replacement.
 
-- [ ] "Swap Vehicle" button on Job Detail > Drivers & Vehicles tab (per-assignment)
-- [ ] Swap flow: select replacement vehicle → original assignment gets `status = 'swapped'` with `swap_reason`, `swapped_at`, `swapped_to_assignment_id`
-- [ ] New assignment auto-created for same driver + replacement vehicle, inheriting job/dates
-- [ ] Both assignments visible in driver Hire History (audit trail: "was in GX17DHN → swapped to RX22SWN on 25 Mar")
-- [ ] Original vehicle's book-out event gets "swapped" note; new vehicle gets fresh book-out
-- [ ] New hire form PDF can be generated for replacement vehicle
-- [ ] VE103B regenerated for new vehicle (VE103B generation built — just needs triggering from swap flow)
-- [ ] Migration: add `swap_reason`, `swapped_at`, `swapped_to_assignment_id` to `vehicle_hire_assignments`
-- [ ] Future: tie into vehicle Issues module (breakdown creates issue) + job activity timeline notes
+**Full spec:** `docs/VAN-SWAP-AND-SOFT-CHECKIN-SPEC.md` — covers the swap UI, the soft check-in primitive (also used by the future freelancer-led handover), Job Issues integration, the orphan dedup root-cause fix, and the sweeper script. Read it before touching swap code.
+
+**Motivation incident (15 May 2026, HH 15378):** staff tried to swap a brake-faulty van for RO23HLU; the swap was blocked because an orphaned `confirmed` `vehicle_hire_assignments` row from a previous hire (15613) still "occupied" HLU in the overlap check, even though the real hire had been checked in hours earlier. Root cause = dual-row pattern (staff-allocation row + hire-form row) not deduplicated at staff book-out time.
+
+*PR 1 — Foundation + cleanup (shipped May 2026):*
+- [x] **Orphan dedup at book-out** — `services/vha-dedup.ts` `cancelOrphanSiblingAllocations()`, called from `PATCH /api/hire-forms/:id` book-out completion AND `POST /api/assignments/:id/book-out`. Cancels sibling staff-allocation rows (driver_id NULL, never booked out, soft/confirmed) for the same (vehicle, job) once a hire-form row owns the van. Multi-driver-safe (driver_id IS NULL guard preserves real second drivers).
+- [x] **Soft check-in primitive** — `save-event` handles `eventType='soft-check-in'`: sets `fleet_vehicles.hire_status='Not Ready'` (sticky, preserved by the final `syncFleetHireStatusByReg` reconcile), does NOT flip assignment status (caller owns that), no HH writeback, no close-out requirements. Mileage logged generically. `buildConditionReportPdf` gains an `isInterim` flag → "INTERIM VEHICLE ASSESSMENT" title, context banner, no signature block, `-interim.pdf` filename.
+- [x] **Sweeper script** — `scripts/cleanup-orphan-vha-rows.ts` (dry-run default, `--commit`, `--vehicle=REG`, `--job=HHNUM`). Cleans historical orphans the live dedup pre-dates. Soft-cancel + fleet status re-sync. Idempotent.
+
+*PR 2 — Swap UI (NOT YET BUILT — next session can pick up from the spec):*
+- [ ] "Swap Vehicle" button on Job Detail > Drivers & Vehicles tab (per-assignment, `admin`/`manager`/`weekend_manager` only — see spec §1 RBAC note)
+- [ ] Swap modal: reason picklist + details, replacement van picker (live availability check), soft check-in fields for the swapped-out van, Job Issue link-or-create section
+- [ ] Multi-driver auto-cascade (all siblings on the van slot move together, single submit)
+- [ ] Extend `POST /api/assignments/:id/swap-vehicle` to accept `soft_checkin` + `issue_link` payloads, fire soft check-in event, link/create `job_issues`, post HH job memo note
+- [ ] Frontend post-submit redirect → BookOutPage for the replacement van (fresh walkaround + hire agreement PDF email)
+- [ ] VE103B regen for replacement if original had `ve103b_ref` (international)
+- [ ] Both assignments visible in driver Hire History (audit: "was in GX17DHN → swapped to RX22SWN on 25 Mar")
+- [ ] Migration columns `swap_reason`, `swapped_at`, `swapped_to_assignment_id` already exist — no migration needed
 - [ ] Future: client notification of vehicle change
+
+*Immediate follow-on after PR 2:* freelancer-led interim check-in UI (reuses the soft check-in primitive shipped in PR 1 — see spec §6 + §9).
 
 #### Step 3: Money System (Unified Financial View) ← IN PROGRESS
 The OP becomes the staff's financial view of every job, reading from HireHop for accounting data and adding intelligence on top. HireHop stays the accounting engine; the OP is the operational dashboard.
@@ -1477,7 +1488,7 @@ Global operational view for what's currently happening / about to happen with tr
   - **Frontend re-enables hire forms in freelancer mode.** `BookOutPage`'s `useDriverHireForms({ enabled: !isFreelancer })` guard is gone — freelancers now load the customer's hire form, see the customer's name + email pre-filled on the Driver & Hire step, and the writeback loop fires for every customer hire form on the job (multi-driver-on-one-van case). A new `canAdvance` branch blocks the Driver & Hire step in freelancer mode unless at least one customer hire form exists, with copy "Customer hire form not received yet — please contact the Ooosh office before continuing." Cross-job driver fallback is hidden in freelancer mode (irrelevant + their session is scoped). The post-book-out hire-agreement PDF chain happens server-side via the existing `setImmediate` in the PATCH handler — no frontend change needed.
   - **Email fallback wired into 2 endpoints.** `POST /api/vehicles/send-email` (condition report) and `POST /api/hire-forms/:id/generate-pdf?send_email=true` (hire agreement PDF) now route through `resolveClientEmailTarget` when no driver/customer email is on file. Recipient chain: hire-form driver email → job-level client contacts → `info@oooshtours.co.uk` with amber "no client email on file" banner + `email`-type interaction logged on the job timeline. Frontend (`sendConditionReportEmail`) now passes `to` as nullable + always includes `hireHopJob` so the backend has the lookup key for the fallback. Stops condition reports being silently dropped on HH-synced sole-trader jobs (e.g. RX22SWU class incidents) and aligns the freelancer flow with the existing `money-emails.ts` safety net.
   - **Tidy.** `GET /get-checklist-settings` and `GET /get-events` added to `FREELANCER_BOOKOUT_ALLOW`. `/get-events` gains a scope check that clamps the query to the session's allocated reg (no fleet-wide enumeration). Kills the 403 console noise the freelancer was hitting on every walkaround load.
-  - **Still TODO (Round 5+):** Vehicle swap mid-hire (Phase D3 — `swap_reason` migration + UI). Multi-van D&C (drivers × vans expansion of the resolve merge). Soft check-in.
+  - **Still TODO (Round 5+):** Vehicle swap mid-hire (Phase D3 — UI; soft check-in primitive shipped May 2026, see `docs/VAN-SWAP-AND-SOFT-CHECKIN-SPEC.md`). Multi-van D&C (drivers × vans expansion of the resolve merge). Freelancer-led interim check-in (reuses the soft check-in primitive).
 
 ##### Carnets (inline on Prep Checklist, with global overview)
 - [ ] Carnet fields on `job_requirements` with step tracking: applied → received → items listed → stamped out → returned → closed
@@ -2135,7 +2146,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 - **Non-SDH book-out — D&C / delivery / collection mode (Phase 1B).** V&D shipped May 2026 (see entry above); the same pattern can extend to delivery / collection / D&C book-outs (freelancer collects van from base → delivers to customer site, or the reverse on collection). The schema already supports `assignment_type` values of `delivery` and `collection`, and the BookOutPage mode switch is positioned to add these — the picker would still pull from the job's crew assignments, the PDF + email flow stays the same, and the only new wiring is the assignment_type promotion at submit time. Trigger from Crew & Transport ops cards / Allocations page when slot is non-self-drive non-V&D. Defer until V&D is proven in live use across more hires.
 
-- **Mid-hire breakdown swap UI (27 Apr 2026)** — `POST /api/assignments/:id/swap-vehicle` endpoint already exists (creates a new assignment for the replacement van, marks the original as `swapped`, copies excess across). What's missing is the UI: a "Mid-hire swap" button on Job Detail > Drivers & Vehicles that opens a modal to (a) pick replacement vehicle, (b) record swap reason, (c) trigger fresh hire agreement PDF email to the driver, (d) regenerate VE103B for the replacement if international. The `match-job-dates` and book-out in-flight swap shipped 27 Apr handle the simpler cases (date drift, last-minute van issue before book-out). Mid-hire breakdown is the rarer, higher-stakes case — needs its own scoped UI pass.
+- **Mid-hire breakdown swap UI (27 Apr 2026, now spec'd May 2026)** — `POST /api/assignments/:id/swap-vehicle` endpoint already exists (creates a new assignment for the replacement van, marks the original as `swapped`, copies excess across). The UI + supporting flow is now fully spec'd in `docs/VAN-SWAP-AND-SOFT-CHECKIN-SPEC.md`. PR 1 (soft check-in primitive, orphan dedup at book-out, sweeper script) shipped May 2026; PR 2 (the swap modal + Job Issues link + redirect to BookOutPage + VE103B regen) is the next build. See Step 2 Phase D3 above for the current checklist. The `match-job-dates` and book-out in-flight swap shipped 27 Apr handle the simpler cases (date drift, last-minute van issue before book-out).
 
 - **Driver document validity expansion (27 Apr 2026)** — the assign-driver picker on Job Detail computes a green/amber/red traffic light from `licence_valid_to`, `dvla_valid_until`, `poa1_valid_until`, `poa2_valid_until`, plus `requires_referral`/`referral_status`. Backend gate at `POST /api/hire-forms/quick-assign` mirrors the same rules. Future additions: passport expiry for international hires (driver flag), insurance company carve-outs (some clients have alternate excess rules that survive longer than DVLA cycles). Currently passport / international flag isn't part of the gate.
 
