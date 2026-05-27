@@ -250,7 +250,22 @@ Logged via `console.log` with the count of cancelled siblings for observability.
 
 The dual-row pattern only affects self-drive hires with hire forms. V&D and D&C don't have hire-form rows — the staff allocation IS the canonical record. No dedup needed there.
 
-The book-out trigger lives in `PATCH /api/hire-forms/:id`, but the staff-side book-out via `POST /api/assignments/:id/book-out` could also be a write path for self-drive. Currently it's the freelancer endpoint that gets used; if/when the staff endpoint handles self-drive book-out, the same dedup must be applied. Add the dedup helper to a shared service file (e.g. `backend/src/services/vha-dedup.ts`) and call from both write paths.
+The book-out trigger lives in `PATCH /api/hire-forms/:id`, but the staff-side book-out via `POST /api/assignments/:id/book-out` could also be a write path for self-drive. The dedup helper lives in `backend/src/services/vha-dedup.ts` and is called from both.
+
+### The book-out dedup isn't enough — check-in cleanup is the real prevention (found May 2026)
+
+When we ran the sweeper against live data after PR 1's first cut, it found **0** orphans — but the actual blocking row from the 15613/HLU incident had a **`driver_id` set**, not NULL. The book-out dedup (`cancelOrphanSiblingAllocations`) deliberately guards on `driver_id IS NULL` so it can never cancel a legitimate second driver pending their own book-out. That guard means it would have **missed the very orphan that caused the incident.**
+
+The robust prevention is at **check-in**, not book-out. `cancelStaleVanAllocationsOnReturn` (in `vha-dedup.ts`) fires from both check-in paths (`save-event` check-in side-effect + `POST /api/assignments/:id/check-in`) and cancels **any** soft/confirmed row on the same (vehicle, job) with `booked_out_at IS NULL` — driver-agnostic. The reasoning: once a van is physically checked in, the hire on that (vehicle, job) is over, so nothing un-booked-out on it is going anywhere. There's no multi-driver ambiguity at check-in like there is at book-out. Had this existed on 15 May, the HLU orphan would have been cancelled when its sibling checked in at 10:59, and the 5pm swap would have succeeded.
+
+**Two-layer model, by intent:**
+
+| Helper | Fires at | Guard | Why |
+|---|---|---|---|
+| `cancelOrphanSiblingAllocations` | book-out (hire-form PATCH + assignments book-out) | `driver_id IS NULL` | Mid-hire we can't safely cancel a driver-bearing sibling — it might be a real second driver pending book-out |
+| `cancelStaleVanAllocationsOnReturn` | check-in (save-event + assignments check-in) | driver-agnostic | Hire's over — anything un-booked-out is definitively stale |
+
+The sweeper catches both classes historically: pure staff-allocation orphans (`driver_id IS NULL`, any progressed sibling) AND driver-bearing orphans whose sibling has `returned`.
 
 ## 5. Sweeper Script
 

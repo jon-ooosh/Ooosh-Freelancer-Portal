@@ -19,7 +19,7 @@ import {
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { syncVehicleRequirementStatus } from '../services/vehicle-requirement-sync';
-import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
+import { cancelOrphanSiblingAllocations, cancelStaleVanAllocationsOnReturn } from '../services/vha-dedup';
 
 const router = Router();
 router.use(authenticate);
@@ -627,6 +627,26 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
          WHERE id = $2`,
         [mileage_in, assignment.vehicle_id]
       );
+    }
+
+    // The van's back — cancel any stale van allocations on this (vehicle,
+    // job) that never booked out. Driver-agnostic: once the hire's returned,
+    // nothing un-booked-out on it is going anywhere. Prevents the dual-row
+    // block-the-swap class (15 May 2026 HLU/15613, where the orphan carried
+    // a driver_id and slipped past the book-out dedup).
+    if (assignment.vehicle_id) {
+      try {
+        const cancelled = await cancelStaleVanAllocationsOnReturn({
+          vehicleId: assignment.vehicle_id,
+          jobId: assignment.job_id ?? null,
+          hhJobNumber: assignment.hirehop_job_id ?? null,
+        });
+        if (cancelled > 0) {
+          console.log(`[assignments] check-in: cancelled ${cancelled} stale van allocation(s) for assignment ${id}`);
+        }
+      } catch (err) {
+        console.warn(`[assignments] check-in stale-allocation cleanup failed for ${id}:`, err);
+      }
     }
 
     // Recompute fleet hire_status — helper sees no active assignment and
