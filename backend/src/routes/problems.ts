@@ -28,7 +28,11 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { uploadToR2, deleteFromR2, isR2Configured } from '../config/r2';
-import { getSystemSetting } from './system-settings';
+import {
+  logIssueEvent as logEvent,
+  getDefaultVehicleIssueWatchers,
+  notifyIssueRecipients,
+} from '../services/job-issues';
 
 const router = Router();
 router.use(authenticate);
@@ -127,17 +131,6 @@ function isResolvedStatus(s: string): boolean {
   return s === 'resolved' || s === 'written_off' || s === 'cancelled';
 }
 
-async function logEvent(
-  issueId: string, userId: string, eventType: string,
-  body: string | null, metadata: Record<string, unknown> | null = null,
-) {
-  await query(
-    `INSERT INTO job_issue_events (issue_id, event_type, body, metadata, created_by)
-     VALUES ($1, $2, $3, $4::jsonb, $5)`,
-    [issueId, eventType, body, metadata ? JSON.stringify(metadata) : null, userId]
-  );
-}
-
 /**
  * Attach already-uploaded R2 photos to an issue. Skips keys that are
  * already linked to the issue so a reflag carrying the same photo set
@@ -178,106 +171,9 @@ async function attachExternalIssuePhotos(
   return added;
 }
 
-// Read fleet-wide default watchers from system_settings (migration 082).
-// Returns the parsed UUID array, or [] on missing / invalid JSON. Used at
-// two points:
-//   1. INSERT path on POST /api/problems + /auto-create — seeds the
-//      watchers column on new issues so any subsequent event hits the
-//      default set even if the actor doesn't explicitly add watchers.
-//   2. notifyIssueRecipients — merges the defaults into the recipient
-//      set as a safety net so the FIRST event (creation) fires bells
-//      even on issues that were already in the table before this
-//      setting landed (i.e. pre-migration-082 historical rows).
-async function getDefaultVehicleIssueWatchers(): Promise<string[]> {
-  const raw = await getSystemSetting('vehicle_issue_default_watchers');
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((v): v is string => typeof v === 'string');
-  } catch {
-    console.warn('vehicle_issue_default_watchers: invalid JSON, ignoring');
-    return [];
-  }
-}
-
-// Severity → notification priority (CLAUDE.md Stage 3 Phase F spec):
-//   urgent → 'urgent' (immediate email regardless of working hours)
-//   normal → 'normal' (4h escalation in working hours)
-//   low    → 'low'    (bell only, no email escalation)
-function severityToPriority(severity: string | null | undefined): 'urgent' | 'normal' | 'low' {
-  if (severity === 'urgent') return 'urgent';
-  if (severity === 'low') return 'low';
-  return 'normal';
-}
-
-/**
- * Fire inbox notifications for an issue event.
- *
- * Recipients: watchers + assignee (deduped), excluding the actor.
- * `includeReporter` adds the reporter to the set — used for reflag and
- * status-change events where the reporter cares about updates. NOT
- * used on initial creation (the reporter IS the actor).
- *
- * Best-effort: failures are logged but don't roll back the issue
- * operation. Notifications are derived signal.
- */
-async function notifyIssueRecipients(
-  issueId: string,
-  actorUserId: string,
-  severity: string | null | undefined,
-  title: string,
-  content: string,
-  opts: { includeReporter?: boolean } = {}
-): Promise<void> {
-  try {
-    const issueRow = await query(
-      `SELECT ji.watchers, ji.assigned_to, ji.reported_by, ji.summary,
-              j.hh_job_number
-       FROM job_issues ji
-       LEFT JOIN jobs j ON j.id = ji.job_id
-       WHERE ji.id = $1`,
-      [issueId]
-    );
-    if (issueRow.rowCount === 0) return;
-
-    const row = issueRow.rows[0];
-    const recipients: Set<string> = new Set();
-    for (const w of (row.watchers as string[] | null) || []) recipients.add(w);
-    if (row.assigned_to) recipients.add(row.assigned_to);
-    if (opts.includeReporter && row.reported_by) recipients.add(row.reported_by);
-
-    // Belt-and-braces: pull in the fleet-wide default watchers too.
-    // Most new issues already carry these in the watchers column (the
-    // INSERT path seeds them), so this branch usually just re-adds
-    // already-included IDs. Matters for historical rows pre-migration
-    // 082, manual issues created with explicit watchers=[], or rows
-    // where the actor cleared the array.
-    for (const w of await getDefaultVehicleIssueWatchers()) recipients.add(w);
-
-    recipients.delete(actorUserId);
-
-    if (recipients.size === 0) return;
-
-    const priority = severityToPriority(severity);
-    const actionUrl = `/operations/problems/${issueId}`;
-
-    for (const userId of recipients) {
-      // The 15-min escalation scheduler picks these up based on
-      // priority — 'urgent' fires email immediately regardless of
-      // working hours, 'normal' after 4h within working hours, 'low'
-      // never fires email (bell only).
-      await query(
-        `INSERT INTO notifications
-           (user_id, type, title, content, entity_type, entity_id, action_url, priority, source_user_id)
-         VALUES ($1, 'system', $2, $3, 'job_issues', $4, $5, $6, $7)`,
-        [userId, title, content, issueId, actionUrl, priority, actorUserId]
-      );
-    }
-  } catch (err) {
-    console.error('Issue notification fire failed (non-fatal):', err);
-  }
-}
+// Issue event logging, watcher seeding, severity→priority mapping, and
+// notification firing all live in services/job-issues.ts (imported above)
+// so the vehicle-swap flow shares one source of truth with this route.
 
 const ISSUE_SELECT = `
   ji.id, ji.job_id, ji.vehicle_id, ji.driver_id, ji.person_id,

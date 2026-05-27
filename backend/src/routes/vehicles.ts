@@ -3549,6 +3549,8 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     // Operator name — for regenerated PDFs we want the ORIGINAL operator,
     // not the staff member clicking the regenerate button. Read from the
     // assignment's booked_out_by / checked_in_by user reference.
+    const normalisedRegenType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
+    const isInterimRegen = normalisedRegenType === 'soft-check-in';
     const isCheckInRegen = event.eventType === 'Check In' || event.eventType === 'check-in';
     const performedByName = await resolveOperatorNameForEvent(
       reg,
@@ -3576,8 +3578,9 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       briefingItems: Array.isArray(event.briefingItems) ? event.briefingItems : [],
       bookOutNotes: notes,
       signatureBase64,
-      signatureMissing: !signatureBase64,
+      signatureMissing: !isInterimRegen && !signatureBase64,
       isCheckIn: isCheckInRegen,
+      isInterim: isInterimRegen,
     });
 
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
