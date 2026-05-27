@@ -34,6 +34,7 @@ import {
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { autoDispatchJob } from '../services/auto-dispatch';
 import { runHookWithRecovery } from '../services/post-hook-recovery';
+import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
 
 /** Format a date string/Date to "18 Mar 2026" */
 function fmtDate(d?: string | Date | null): string {
@@ -1508,6 +1509,29 @@ router.patch('/:id', authenticateVehicleFlexible, validate(patchSchema), async (
       );
     }
     if (nowBookedOut && updated.vehicle_id) {
+      // Orphan dedup: now this hire-form row owns the van, cancel any
+      // sibling staff-allocation row (driver_id NULL, never booked out) for
+      // the same (vehicle, job). Without this, the stale 'confirmed' sibling
+      // keeps "occupying" the van in overlap checks and blocks future
+      // allocations + swaps (the 15 May 2026 HLU/15613 incident). Awaited so
+      // the data is consistent before the response + the fleet status sync
+      // inside firePostBookOutHooks observes the cleaned-up state.
+      try {
+        const cancelled = await cancelOrphanSiblingAllocations({
+          keepAssignmentId: id,
+          vehicleId: updated.vehicle_id,
+          jobId: updated.job_id ?? null,
+          hhJobNumber: updated.hirehop_job_id ?? null,
+        });
+        if (cancelled > 0) {
+          console.log(
+            `[hire-forms] PATCH book-out: cancelled ${cancelled} orphan staff-allocation sibling(s) for assignment ${id}`,
+          );
+        }
+      } catch (err) {
+        console.warn(`[hire-forms] orphan dedup failed for assignment ${id}:`, err);
+      }
+
       const isFreelancer = isFreelancerBookout(req);
       firePostBookOutHooks({
         assignmentId: id,

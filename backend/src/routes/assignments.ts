@@ -19,6 +19,7 @@ import {
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { syncVehicleRequirementStatus } from '../services/vehicle-requirement-sync';
+import { cancelOrphanSiblingAllocations } from '../services/vha-dedup';
 
 const router = Router();
 router.use(authenticate);
@@ -539,6 +540,25 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
          WHERE id = $2`,
         [mileage_out, assignment.vehicle_id]
       );
+    }
+
+    // Orphan dedup: cancel any sibling staff-allocation row (driver_id NULL,
+    // never booked out) for the same (vehicle, job) now this row owns the van.
+    // Prevents the dual-row block-the-swap bug (15 May 2026 HLU/15613).
+    if (assignment.vehicle_id) {
+      try {
+        const cancelled = await cancelOrphanSiblingAllocations({
+          keepAssignmentId: String(id),
+          vehicleId: assignment.vehicle_id,
+          jobId: assignment.job_id ?? null,
+          hhJobNumber: assignment.hirehop_job_id ?? null,
+        });
+        if (cancelled > 0) {
+          console.log(`[assignments] book-out: cancelled ${cancelled} orphan staff-allocation sibling(s) for assignment ${id}`);
+        }
+      } catch (err) {
+        console.warn(`[assignments] orphan dedup failed for assignment ${id}:`, err);
+      }
     }
 
     // Recompute fleet hire_status from current assignment state so the Fleet
