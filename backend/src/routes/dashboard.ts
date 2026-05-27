@@ -606,6 +606,31 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         GROUP BY deprep_date
         ORDER BY deprep_date ASC
       `),
+
+      // 25. Pre-auth holds expiring soon (migration 087). Stripe / card-machine
+      // holds auto-void at the 5-day mark — staff need to capture or release
+      // before then or the collateral evaporates. Surface holds expiring within
+      // 2 days (and any already-past-expiry that are still pre_auth, i.e. not
+      // yet actioned). Soonest-expiring first.
+      query(`
+        SELECT je.id AS excess_id,
+               COALESCE(je.amount_held, 0) AS amount_held,
+               je.held_expires_at,
+               (je.held_expires_at::date - CURRENT_DATE) AS days_until_expiry,
+               COALESCE(d.full_name, je.client_name) AS driver_name,
+               fv.reg AS vehicle_reg,
+               j.id AS job_uuid, j.hh_job_number, j.job_name
+        FROM job_excess je
+        LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+        LEFT JOIN drivers d ON d.id = vha.driver_id
+        LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+        LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
+        WHERE je.excess_status = 'pre_auth'
+          AND je.held_expires_at IS NOT NULL
+          AND je.held_expires_at::date <= CURRENT_DATE + INTERVAL '2 days'
+        ORDER BY je.held_expires_at ASC
+        LIMIT 10
+      `),
     ]);
 
     const [
@@ -622,6 +647,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       teamActivityResult, recentActivityResult,
       pendingReferralsResult, pendingExcessResult,
       prepTimeResult, onHireSparkResult, deprepTimeResult,
+      expiringHoldsResult,
     ] = results;
 
     // Build the 14-day on-hire series — oldest day first, today last.
@@ -737,6 +763,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         excess_count: parseInt(excessCountResult.rows[0].count as string),
         excess_total: parseFloat(excessCountResult.rows[0].total_amount as string),
         excess_items: pendingExcessResult.rows,
+        // ── Pre-auth holds expiring soon (migration 087) ──
+        // Holds within 2 days of auto-voiding — capture or release before the
+        // collateral evaporates.
+        expiring_holds_count: expiringHoldsResult.rows.length,
+        expiring_holds: expiringHoldsResult.rows,
       },
       transport_ops: {
         summary: transportOpsSummary,

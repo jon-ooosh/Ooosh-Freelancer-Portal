@@ -5,6 +5,7 @@
  * Admin/manager only.
  */
 import { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import ExcessPaymentModal, { statusLabel, statusColor } from '../components/ExcessPaymentModal';
 import { MobileListCard } from '../components/mobile/MobileListCard';
@@ -13,11 +14,15 @@ import type { ClientExcessLedgerEntry, JobExcess } from '../../../shared/types';
 type ViewMode = 'ledger' | 'all' | 'client-detail';
 
 export default function ExcessLedgerPage() {
-  const [viewMode, setViewMode] = useState<ViewMode>('ledger');
+  const [searchParams] = useSearchParams();
+  // Deep-link support: /money/excess?status=pre_auth lands on the All Records
+  // view pre-filtered (used by the dashboard "Pre-auth Holds Expiring" bucket).
+  const initialStatus = searchParams.get('status') || '';
+  const [viewMode, setViewMode] = useState<ViewMode>(initialStatus ? 'all' : 'ledger');
   const [ledger, setLedger] = useState<ClientExcessLedgerEntry[]>([]);
   const [allRecords, setAllRecords] = useState<JobExcess[]>([]);
   const [loading, setLoading] = useState(true);
-  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [statusFilter, setStatusFilter] = useState<string>(initialStatus);
   const [sortBy, setSortBy] = useState<string>('newest');
   const [methodFilter, setMethodFilter] = useState<string>('');
   const [searchText, setSearchText] = useState<string>('');
@@ -242,7 +247,8 @@ export default function ExcessLedgerPage() {
                 <option value="needed">Needed</option>
                 <option value="taken">Taken</option>
                 <option value="partially_paid">Partially Paid</option>
-                <option value="pre_auth">Pre-auth Taken</option>
+                <option value="pre_auth">Pre-auth Held</option>
+                <option value="released">Released</option>
                 <option value="fully_claimed">Fully Claimed</option>
                 <option value="partially_reimbursed">Partially Reimbursed</option>
                 <option value="reimbursed">Reimbursed</option>
@@ -526,7 +532,13 @@ function RecordsTable({
                 {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
               </td>
               <td className="px-3 py-3 text-right text-sm font-medium text-gray-900">
-                £{Number(record.excess_amount_taken || 0).toFixed(2)}
+                {Number(record.amount_held || 0) > 0 ? (
+                  <span className="text-sky-700" title="On pre-auth hold (not yet captured)">
+                    £{Number(record.amount_held).toFixed(2)} held
+                  </span>
+                ) : (
+                  <>£{Number(record.excess_amount_taken || 0).toFixed(2)}</>
+                )}
               </td>
               <td className="px-3 py-3 text-center">
                 <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${statusColor(record.excess_status)}`}>
