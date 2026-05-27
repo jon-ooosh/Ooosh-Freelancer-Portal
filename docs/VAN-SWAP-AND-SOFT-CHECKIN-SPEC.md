@@ -369,3 +369,36 @@ All four open questions resolved — locked in:
 - CLAUDE.md "Smart resolve" (in freelancer-bookout flow) — pattern being ported to staff book-out as the orphan dedup
 - `docs/VE103B-SPEC.md` — VE103B regen on swap
 - `docs/HIRE-FORM-REPOINTING-SPEC.md` — hire form PDF generation triggers
+
+## 11. NEXT — Freelancer-led interim check-in (handoff, May 2026)
+
+**Status going into the next session:** PR 1 (soft check-in primitive + dedup + sweeper), PR 2 (swap UI), and the excess move-not-copy double-count fix are all SHIPPED + merged to main. The next piece is the freelancer-led interim check-in — and ~90% of the machinery already exists, so this should be a focused build.
+
+### The use case
+
+A freelancer is out with a van on Ooosh's behalf (D&C / Van & Driver) and needs to record the van's state mid-job WITHOUT closing the hire — e.g. they hand the van to a customer, take it back from a customer, or note its condition partway through. It's the same primitive the swap uses for the swapped-out van: an **interim** assessment that sets the van's operational state + produces a condition record, but doesn't flip the assignment to `returned` or fire close-out.
+
+### What ALREADY exists (reuse, don't rebuild)
+
+1. **Soft check-in primitive** (PR 1) — `POST /api/vehicles/save-event` with `eventType='soft-check-in'`: sets `fleet_vehicles.hire_status='Not Ready'` (sticky), no assignment status flip, no HH writeback, no close-out requirements, logs mileage. `backend/src/routes/vehicles.ts` (search `normalisedEventType === 'soft-check-in'`).
+2. **Interim PDF variant** (PR 1) — `buildConditionReportPdf({ isInterim: true })` → "INTERIM VEHICLE ASSESSMENT" title, context banner, no signature block, `-interim.pdf` filename. `regenerate-pdf` recognises `soft-check-in` events too.
+3. **Freelancer-bookout JWT flow** — `middleware/freelancer-bookout-auth.ts` (`authenticateFreelancerBookout`, `getBookoutScope`, `isFreelancerBookout`), the `POST /api/vehicles/freelancer-bookout/resolve` token→session exchange, and the portal-side token mint. This is how a freelancer gets a scoped session today for book-out. (CLAUDE.md "Freelancer book-out Round 4".)
+4. **BookOutPage / CheckInPage** vehicle-module components — the walkaround / photo / mileage / fuel UI to model the interim form on.
+
+### What needs BUILDING
+
+1. **Widen the freelancer save-event guard.** `backend/src/routes/vehicles.ts` ~line 2016 currently rejects any non-book-out event for a freelancer session (`'Only book-out events allowed for freelancer session'`). Add `'soft-check-in'` to the allowed set so a freelancer's scoped session can fire an interim assessment for THEIR allocated van. Keep the reg/job scope checks that already gate freelancer events (they sit just above, ~lines 2003-2011).
+2. **Freelancer-facing interim check-in entry point.** Decide the trigger — most likely a new portal action ("Record vehicle condition" / "Interim check-in") that mints a freelancer-bookout-style scoped session (reuse the resolve flow, or a sibling token type) and deep-links to a new interim-check-in page in the vehicles module. This is the main net-new UI. Model it on CheckInPage but: no "compare to book-out / close the hire" framing, fewer required fields (mileage/fuel/condition/photos), fires `save-event` with `eventType='soft-check-in'` + `isInterim` PDF generation.
+3. **Interim PDF generation + recipient.** After the freelancer submits, generate the interim PDF (via `generate-pdf` with `isInterim:true`, same pattern BookOutPage uses) and decide who it goes to — likely `info@oooshtours.co.uk` + optionally the client, routed through `resolveClientEmailTarget` (CLAUDE.md "Client email safety net"). Store under R2 `vehicle-events/{REG}/{id}_interim.pdf`.
+4. **(Optional) tie to a Job Issue** if the interim check-in surfaces damage — reuse `services/job-issues.ts` `createJobIssue` (extracted in PR 2), same as the swap flow does.
+
+### Open questions for the next session to settle with jon
+
+- **Entry point:** brand-new portal page/action, or extend the existing freelancer book-out flow with an "interim check-in" mode? (The book-out resolve flow already scopes a session to one assignment — an interim variant could reuse it almost wholesale.)
+- **Does the interim check-in flip any operational state the freelancer can see**, or is it purely a record + `Not Ready` flag for the office?
+- **Photos:** does the freelancer capture photos (R2 upload, like book-out) or is it a lighter mileage/fuel/notes capture? Photos make the interim PDF far more useful for damage disputes but add upload-reliability concerns on poor signal (see CLAUDE.md "Book-out photo upload reliability").
+
+### Don't forget
+
+- The swap flow's deferred items (§ PR 2 "Deferred") — the auto interim PDF for the swapped-out van — could be knocked out in the same pass, since this work builds exactly that PDF-firing wiring.
+- Keep the soft check-in DRIVER-AGNOSTIC and NON-destructive: it never flips assignment status, never writes back to HH, never closes the hire. The eventual full check-in (when the van returns to base) is what closes it.
