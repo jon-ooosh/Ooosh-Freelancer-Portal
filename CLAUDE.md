@@ -808,18 +808,21 @@ The hire form process calculates excess. The principle: charge the excess of the
 - [x] HH ↔ OP excess reconciliation (migration 039): `hh_deposit_id` on `job_excess`, passive reconciliation on Money tab load, manual link/unlink, create-from-HH endpoint
 - [x] Excess ledger filtering: search, status, payment method, sort (date, amount, client), date columns
 
-**Excess status values (migration 038, 1 Apr 2026):**
+**Excess status values (migration 038, 1 Apr 2026; `released` added migration 087, May 2026):**
 | Status | Label | When set |
 |---|---|---|
 | `needed` | Needed | Auto on excess record creation |
 | `partially_paid` | Partially Paid | Payment < required amount |
-| `taken` | Taken | Payment >= required amount |
-| `pre_auth` | Pre-auth Taken | Card hold without charge |
+| `taken` | Taken | Payment >= required amount (real money in account) |
+| `pre_auth` | Pre-auth Held | Card hold — money on hold, NOT yet captured (see Pre-Auth Lifecycle below) |
+| `released` | Released | Pre-auth voided without capture — terminal (migration 087) |
 | `waived` | Waived | Admin decision to skip |
 | `fully_claimed` | Fully Claimed | Damage — keeping full amount |
 | `partially_reimbursed` | Partially Reimbursed | Returning some, claiming rest |
 | `reimbursed` | Reimbursed | Full excess returned |
 | `rolled_over` | Rolled Over | Held on account for next hire |
+
+**⚠️ `pre_auth` semantics changed (migration 087, May 2026):** A `pre_auth` record now stores the hold value in `amount_held`, NOT `excess_amount_taken` (which is 0 until capture). See "Excess Pre-Auth Lifecycle" section below — this is the held-vs-taken separation. Pre-087 code that summed `excess_amount_taken` to mean "money we have including holds" is wrong post-087; coverage = `excess_amount_taken + amount_held`.
 
 **HH reimbursement write-back (1 Apr 2026):** Uses `billing_payments_save.php` (payment application against specific deposit), NOT negative deposits. Finds original HH deposit ID from `job_payments` table or by searching HH billing for excess-classified deposits. Xero sync via `hh_task: 'post_payment'`.
 
@@ -953,8 +956,8 @@ The Payment Portal (ooosh-tours-payment-page.netlify.app) currently reads from M
 *Known gaps / follow-ups (non-blocking, captured 17 Apr 2026):*
 - [x] **API key auth vuln — FIXED May 2026:** `authenticateFlexible` in `money.ts` and the inline check in `webhooks.ts` `/external/status-transition` now route through the shared `middleware/api-key.ts` `verifyApiKey()` helper, which pulls all rows with the matching `key_prefix` and `bcrypt.compare`s the full key against each `key_hash`. Previous behaviour matched only the 8-char prefix and accepted any string starting with `ppk_live`. Pre-deploy audit script: `backend/src/scripts/audit-api-key-hashes.ts` (checks every row's hash is bcrypt-shaped — non-bcrypt rows would stop authenticating after the fix, so they need re-issuing first).
 - [ ] **Refund path doesn't unwind excess record:** `payment-event` with `payment_type: 'refund'` or `'excess_refund'` records the payment in `job_payments` but doesn't flip `excess_status` back from `pre_auth`/`taken`. Staff must manually mark reimbursed on Money tab.
-- [ ] **Pre-auth capture vs release:** portal's `admin-claim-preauth.js` fires `payment_type: 'excess'` to capture a hold as a real charge. Works in common case but on pre_auth records `amount_taken` is REPLACED (not added), so split-capture scenarios could produce odd aggregates.
-- [ ] **Stripe pre-auth expiry scheduler — FAIRLY HIGH PRIORITY (21 Apr 2026):** OP currently trusts a stored `excess_status = 'pre_auth'` indefinitely, but Stripe auto-voids holds after ~7 days and Ooosh policy is to re-take inside 4 days. Need a daily scheduler task that scans `job_excess` records with `status = 'pre_auth'` and a `payment_date` (or `updated_at`) older than 4 days, flips them to a new `expired` (or `pre_auth_expired`) status, and fires a bell notification + email to staff prompting re-take. Touches `backend/src/config/scheduler.ts`, `backend/src/routes/excess.ts`, probably a new excess status value in migration. See handoff 21 Apr 2026 open item #3.
+- [x] **Pre-auth capture vs release — SUPERSEDED by migration 087 (May 2026):** the held/taken split + `POST /api/excess/:id/capture` (Stripe one-shot partial capture, rest auto-releases) + `POST /api/excess/:id/release` now handle this properly OP-side. The portal's `admin-claim-preauth.js` REPLACE-not-add concern is moot — OP owns capture now. See "Excess Pre-Auth Lifecycle" section above.
+- [ ] **Stripe pre-auth expiry scheduler — NOW PR 4 (see Pre-Auth Lifecycle section above):** the held/taken model + `released` status + dashboard "Pre-auth Holds Expiring" bucket (shipped PR 2) are in place. PR 4 adds the proactive daily scheduler: scan `excess_status='pre_auth'` past `held_expires_at` (5-day window now, not the old 4-day note), reconcile Stripe PI status live (auto-mark `released` when voided), fire bell + email 24-48h before expiry. Touches `config/scheduler.ts`. The `released` status the old note wanted now exists.
 - [ ] **Rolled-over balance linking:** recording a payment with method `rolled_over` updates the current job's excess to `taken` but doesn't mark the *previous* job's excess as `rolled_over` — two-step manual process. Could be automated when client ledger integration lands.
 - [x] **Rolled-over email template (24 Apr 2026):** recording a payment with method `rolled_over` previously fired the standard `excess_payment_confirmed` email, confusing clients with "we've received your insurance excess payment of £X" when really we'd just moved money across from their last hire. `excess.ts` `/:id/payment` handler now branches on `method === 'rolled_over'`, looks up the previous rolled-over job's HH number for the same `jobs.client_id`, and sends the new `excess_rolled_over_applied` template instead: "We've applied £X from your previous hire #12345 to your upcoming hire #54321. No further action needed." `sendExcessEmail` accepts an optional `previousJobNumber` opt, and the template renders `{{previousJobRef}}` as ` #12345` or empty string when the previous hire can't be determined. Still doesn't auto-mark the previous job's excess as `rolled_over` — that's the open item above.
 - [x] **HH job number in client money emails (24 Apr 2026):** `booking_confirmed_deposit` + `payment_received` + `hire_form_request` + `hire_form_chase` previously referenced only `{{jobName}}` in body ("Thank you for your payment for Katatonia - Van & backline hire"). Now include the HH job number ("...for Katatonia - Van & backline hire (job #15607)"). Subject lines for booking/payment also updated to include `(#{{jobNumber}})`. All excess templates already carried `{{jobNumber}}`. `sendPaymentEmail` now passes `jobNumber: String(job?.hh_job_number || '')`; hire form senders already passed it.
@@ -1020,6 +1023,52 @@ The legacy "Record Payment → Rolled Over from Previous Hire" dropdown option i
 - Splitting one claim across multiple invoices in a single click (one-claim-per-invoice in the picker is fine until usage proves otherwise).
 - Moving deposits between HH jobs (HH doesn't support this; OP linkage handles the conceptual move).
 - `/money/excess` summary cards now reflect current filter on the All Records tab — captured separately, also shipped this round.
+
+##### Excess Pre-Auth Lifecycle — held vs taken (migration 087, May 2026) ✅ PR 1 + PR 2 SHIPPED
+
+**The core idea:** a pre-authorisation is a *promise of money on hold*, NOT money in our account. Before migration 087, OP modelled a pre-auth as a `taken` record with a `pre_auth` status label, conflating the two — which meant (a) reporting overstated collected excess by the value of every live hold, (b) the claim/reimburse flow refused to operate on pre-auths because no real HireHop deposit existed, and (c) "capture £200, release the rest" had no representation. The 087 model separates the two.
+
+**Data model (`job_excess` columns added in 087):**
+| Column | Meaning |
+|---|---|
+| `amount_held` | Money on a pre-auth hold (Stripe / card-machine), not captured |
+| `excess_amount_taken` | Real money in our account (claimable, reimbursable) — **0 for an un-captured pre_auth** |
+| `amount_released` | Money that was held then auto-released without capture |
+| `held_at` / `held_expires_at` / `released_at` | Hold lifecycle timestamps |
+| `stripe_payment_intent_id` | Direct reference for Stripe capture/cancel API calls (no memo-mining) |
+| `receipt_required` / `receipt_uploaded_at` | Card-machine receipt-scan tracking (UI is PR 3) |
+
+**5-day standard hold window.** Stripe and card-machine holds all expire 5 days (120h) after creation in our model (`held_expires_at = held_at + 5 days`), regardless of the card provider's actual window. Deliberately conservative — gives time to check the van in, claim, and still have buffer. Release is automatic unless captured.
+
+**Three lifecycle outcomes for a pre-auth:**
+1. **Capture full** → `taken`, `amount_held=0`, `excess_amount_taken=full`
+2. **Capture partial** → `taken` (or `fully_claimed` if applied to invoice), `amount_held=0`, `excess_amount_taken=captured`, `amount_released=residual`. Capture is ONE-SHOT (Stripe + card machines both only allow one capture per auth; the rest auto-releases).
+3. **Void / expire** → `released`, `amount_held=0`, `amount_released=full`, `excess_amount_taken=0`
+
+**Endpoints (`routes/excess.ts`):**
+- `POST /api/excess/:id/capture` — `{ amount, method, invoice_id?, reason?, notes? }`. Stripe channel → `paymentIntents.capture`; card-machine → passive record. Pushes HH deposit via `pushDepositToHH`. Optional `invoice_id` = atomic capture-and-apply (same `billing_payments_save.php` mechanism as `/claim`). **Compensation:** if HH deposit fails after a Stripe capture succeeded, the capture is refunded and the call 502s (OP untouched). If apply-to-invoice fails after the deposit is created, the deposit stands and a `warning` is returned (money tracked, just not earmarked — least-bad).
+- `POST /api/excess/:id/release` — `{ reason?, notes? }`. Stripe channel → `paymentIntents.cancel` (idempotent against already-expired holds); card-machine → passive. Flips to `released`.
+
+**Coverage rule (updated 087):** a held pre-auth counts as covered for dispatch / requirement-done purposes — we have collateral against damage even though no money has moved. `coverage = excess_amount_taken + amount_held`. `released` does NOT count (hold ended, nothing kept). Applied in `services/excess-requirement-sync.ts`, `routes/money.ts` `/excess-info` + `/summary`, and the `assignments.ts` dispatch select. The `deriveExcessStatus` PROTECTED set includes `released`.
+
+**Stripe integration (`config/stripe.ts`):** singleton client behind `getStripeClient()` + `isStripeConfigured()` guard (routes 503 cleanly if `STRIPE_SECRET_KEY` missing rather than throwing). `isStripeError()` type guard. SDK uses bundled `LatestApiVersion`. OP is now the staff-facing control surface for capture/refund/void; the Payment Portal stays the client-facing collection surface. Env: `STRIPE_SECRET_KEY` (restricted key — PaymentIntents R/W, Refunds R/W, Charges R, Disputes R), `STRIPE_WEBHOOK_SECRET` (for PR 4).
+
+**UI (PR 2, `ExcessPaymentModal` + `MoneyTab` + `ExcessLedgerPage` + dashboard):** Manage modal shows Capture/Release for held records (replaces Claim/Reimburse, which apply to taken money). Money tab + ledger show Held vs Collected vs Released distinctly with an expiry countdown. Dashboard NeedsAttention "Pre-auth Holds Expiring" bucket (red, holds within 2 days of auto-void) — backend `needs_attention.expiring_holds` / `expiring_holds_count`.
+
+**Migration 087 backfill:** the 10 then-live `pre_auth` records (all >5d old, Stripe had voided them) moved to `released`; 21 legacy `pending` → `needed`; `stripe_payment_intent_id` lifted from `payment_reference` where `pi_%`; `receipt_required` flagged on existing card-machine records.
+
+**Still TODO — PR 3 + PR 4 (the next Claude picks up here):**
+
+*PR 3 — Bank details + encryption + receipt scans* (security-sensitive, isolate for review):
+- **Encryption layer** — build `services/encryption.ts` (AES-256-GCM, Node built-in `crypto`, keyed off `ENCRYPTION_KEY` env var = 64 hex chars via `openssl rand -hex 32`). `encrypt()`/`decrypt()` + `encryptJson()`/`decryptJson()`. Store as `iv:authTag:ciphertext`. Decrypt ONLY in the API response layer, admin/manager only. **The key must NEVER change once data is encrypted with it** (data becomes unrecoverable) — jon has generated the key and has it in a safe place; it needs adding to `/var/www/ooosh-portal/backend/.env` as `ENCRYPTION_KEY=...` when PR 3 deploys. Add a **"PII Encryption" section to this CLAUDE.md** documenting the helper + a retrofit checklist of what should eventually move to encrypted storage: driver hire-form data (POA docs, licence, passport, DVLA), card-receipt scans, freelancer PII. Build once, apply to bank details first, retrofit the rest on jon's timeline.
+- **Client bank details for reimbursement** — needed whenever reimbursement method is a bank transfer (any hire length). Store encrypted, **scoped to the `job_excess` record** (not permanent on person/org) with a **"reuse from previous hire" lookup** (same pattern as rollover linkage — find the client's most recent record with bank details, offer to copy) and a **"last used DD/MM/YYYY" heads-up** so staff sanity-check stale details (they reconfirm with the client as standard). Fields: UK = account holder name + sort code + account number; **International = IBAN + SWIFT/BIC + bank country** (jon confirmed international reimbursements happen). Stamp `last_used_at` when a reimbursement is recorded against the details. These structured fields become the direct input to a future Wise recipient (see below). UI: capture/reuse lives in the reimburse form inside `ExcessPaymentModal`, shown when reimbursement method is a bank transfer.
+- **Receipt scans** (deferred from PR 2 to here — same "attach sensitive scan to excess" infra): required at UI level for card-machine excess (worldpay/amex/cash), surfaced as an amber "outstanding to-do" banner (NOT a hard block — like the client-intro banner pattern). Columns `receipt_required`/`receipt_uploaded_at` already exist (087). Also add a "Receipts outstanding" NeedsAttention bucket. Each claim/reimburse event on physical-card-machine excess should also carry its own receipt (the refund/capture receipt), so scans aren't one-time.
+
+*PR 4 — Stripe webhooks + expiry scheduler:*
+- **Webhook receiver** — `POST /api/webhooks/stripe` (currently 404ing — jon has ALREADY configured the webhook in Stripe pointing here, with `STRIPE_WEBHOOK_SECRET` in `.env`). Verify signature, idempotency via a `stripe_events` log table. Subscribed events: `payment_intent.amount_capturable_updated`, `payment_intent.canceled`, `payment_intent.succeeded`, `charge.refunded`, `charge.dispute.created/updated/closed`. The big new capability is **disputes/chargebacks** (arrive out-of-band, only via webhook) + catching out-of-band refunds/voids done in the Stripe dashboard.
+- **Expiry scheduler** — daily task: scan `job_excess` where `excess_status='pre_auth'` and `held_expires_at` near/past. For Stripe records, reconcile live via Stripe API (PI status → auto-mark `released` when voided). Fire bell + email 24-48h before expiry prompting capture-or-release. This supersedes the older "Stripe pre-auth expiry scheduler" TODO in Phase E (which predates the held/taken model — the `released` status it wanted now exists). Touches `config/scheduler.ts`. The dashboard "Pre-auth Holds Expiring" bucket (shipped PR 2) is the surface; the scheduler is the proactive nudge.
+
+**Branch for this work:** `claude/process-reimbursement-claims-sf8yz` (PR 1 = #573 merged, PR 2 = #582). Continue on the same branch or a fresh one — PR 1 + 2 are both on main once #582 merges.
 
 ##### Phase F — Staff Card Payments (future)
 Allow staff to take card payments directly from the Money tab, rather than walking to the card terminal.
@@ -2094,7 +2143,7 @@ These are existing standalone tools that currently push to Monday.com. They need
 
 - **HH ↔ OP excess refund-leg passive reconciliation (5 May 2026)** — Migration 039 added passive matching of HH excess deposits → OP `job_excess.hh_deposit_id` so taken-side records auto-link without staff action. The **refund leg is not passively reconciled the same way**: if someone refunds an excess directly in HireHop (rather than via OP's "Reimburse" flow), HH knows it's gone but OP still shows the record as `taken`, and any subsequent OP-side reimburse push will fail with HH error 370 (because the deposit is already fully refunded in HH). Surfaced 5 May 2026 by Pom Poko (HH job 12803, refunded 31/03/2025 in HH, still showing as Taken in OP). Workaround: staff click "Unlink HireHop deposit" on the excess record, then run OP-only Reimburse (no HH push). Proper fix: add a passive reconciliation pass that scans HH billing for refund payments matching linked deposits and flips OP records to `reimbursed` automatically. Affects a small number of historical records — not urgent.
 
-- **Pre-auth expiry NeedsAttention bucket (5 May 2026)** — The Step 3 Phase E "Stripe pre-auth expiry scheduler" TODO will fire notifications when a `job_excess` record sits in `pre_auth` past Ooosh's 4-day re-take policy. When that scheduler ships, it should ALSO populate a new bucket on the dashboard's NeedsAttention secondary row (purple accent suggested). Registry + bucket pattern is ready: extend `/api/dashboard/operations` `needs_attention` with `pre_auth_expiring` count + items, add a `NABucket` definition in `NeedsAttention.tsx`, no other plumbing needed.
+- **Pre-auth expiry NeedsAttention bucket — SHIPPED PR 2 (May 2026)** — done as `expiring_holds` / `expiring_holds_count` on `/api/dashboard/operations` `needs_attention` + the "Pre-auth Holds Expiring" `NABucket` (red accent, leads secondary row) in `NeedsAttention.tsx`. Holds within 2 days of `held_expires_at` auto-void. The remaining piece is the proactive scheduler (PR 4) that actively nudges staff via bell/email rather than just surfacing on the dashboard.
 
 - **Post-hire pill rethink + central "Problems" register (5 May 2026)** — the Today block's per-job progress strip currently shows the same pill set across both phases (Backline · Hire Form · Excess · Vehicle pre-hire; De-prep · Client · Excess · Freelancer · Invoicing · Payment · Vehicle post-hire). The post-hire pills are of limited operational value: as soon as staff starts checking the hire in, the job drops off the "Returning Today" pile, so most of those pills never have time to shift to a useful state. More useful would be an at-a-glance summary of any **on-the-road problems** aggregated across the vehicle / backline / transport modules — but there's no central "problems" register today. Each module has its own ad-hoc problem-tracking (vehicle has_damage flag, backline has manual notes, transport has internal_notes / freelancer_notes etc.) but nothing unified. New module-shaped piece: needs a design pass for what "problem" means cross-module, where it gets logged from, and how it surfaces (Today block, Job Detail header alert, dashboard widget, notifications). Until that lands, the post-hire pill strip stays as-is.
 
@@ -2427,6 +2476,21 @@ Centralised two-step HireHop deposit push (`billing_deposit_save.php` + Xero syn
 **Top-ups against records that already have `hh_deposit_id`:** the helper deliberately skips the HH push and returns `hh_push_error` set to a descriptive message. Reason: the existing HH deposit row would need a separate top-up entry, not an additive update. Staff create the top-up deposit manually in HH and use Manage > Link to HH (or a future change splits the OP record).
 
 **Don't bypass:** route handlers should NOT call `billing_deposit_save.php` directly from inline code — that bypasses the failure-surfacing contract. The previous direct call in `money.ts` was the source of the silent-failure problem.
+
+### Stripe Client ✅ COMPLETE (May 2026)
+
+**File:** `backend/src/config/stripe.ts`
+
+Singleton Stripe SDK client for OP's direct Stripe operations (pre-auth capture, refund, void). OP is now the staff-facing control surface for everything post-collection; the Payment Portal stays the client-facing collection surface (initial pre-auth + checkout).
+
+**Exports:**
+- `getStripeClient()` — returns the singleton. Throws if `STRIPE_SECRET_KEY` unset.
+- `isStripeConfigured()` — guard before calling, so routes can 503 cleanly on a server missing the key rather than throwing (the app boots fine without it; only capture/release/refund need it).
+- `isStripeError(err)` — type guard for Stripe-thrown errors (matches `.type` starting with `Stripe`).
+
+**Env vars:** `STRIPE_SECRET_KEY` (restricted key — scopes: PaymentIntents R/W, Refunds R/W, Charges R, Disputes R). `STRIPE_WEBHOOK_SECRET` for the PR 4 webhook receiver. Both already set on the production server (May 2026). SDK pins to its bundled `LatestApiVersion`.
+
+**Used by:** `routes/excess.ts` capture/release endpoints. PR 4 will add `routes/webhooks.ts` `/stripe` receiver. **Don't instantiate `new Stripe()` elsewhere** — go through `getStripeClient()` so key handling lives in one place.
 
 ### API Key Verification ✅ COMPLETE
 
