@@ -308,40 +308,126 @@ interface DispatchCheckResult {
   }>;
 }
 
-// ── Swap Vehicle Button ─────────────────────────────────────────────────────
-function SwapVehicleButton({ assignmentId, currentVehicleReg, onSwapped }: {
+// ── Swap Vehicle Button + Modal ─────────────────────────────────────────────
+// Mid-hire vehicle swap (breakdown / accident / reallocation). admin/manager/
+// weekend_manager only. Cascades across all drivers sharing the van slot,
+// soft-checks-in the swapped-out van, links/creates a Problems issue, then
+// redirects to BookOut for the replacement van.
+const SWAP_REASONS = [
+  { code: 'breakdown', label: 'Breakdown' },
+  { code: 'accident', label: 'Accident damage' },
+  { code: 'mechanical_failure', label: 'Mechanical failure' },
+  { code: 'client_request', label: 'Client request' },
+  { code: 'other', label: 'Other' },
+];
+
+interface OpenIssueLite { id: string; summary: string; category: string; severity: string; status: string }
+
+function SwapVehicleButton({ assignmentId, vehicleId, currentVehicleReg, onSwapped }: {
   assignmentId: string;
+  vehicleId: string | null;
   currentVehicleReg: string;
   onSwapped: () => void;
 }) {
+  const navigate = useNavigate();
   const [showForm, setShowForm] = useState(false);
   const [vehicles, setVehicles] = useState<{ id: string; reg: string; simpleType: string }[]>([]);
   const [selectedVehicle, setSelectedVehicle] = useState('');
-  const [reason, setReason] = useState('');
+  const [reasonCode, setReasonCode] = useState('breakdown');
+  const [reasonDetails, setReasonDetails] = useState('');
+  // Soft check-in of the van being swapped out
+  const [mileage, setMileage] = useState('');
+  const [fuelLevel, setFuelLevel] = useState('');
+  const [location, setLocation] = useState('');
+  const [checkinNotes, setCheckinNotes] = useState('');
+  // Issue link/create
+  const [openIssues, setOpenIssues] = useState<OpenIssueLite[]>([]);
+  const [issueChoice, setIssueChoice] = useState<string>('new'); // existing issue id | 'new' | 'none'
+  const [newIssueSummary, setNewIssueSummary] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (showForm && vehicles.length === 0) {
+    if (!showForm) return;
+    if (vehicles.length === 0) {
       api.get<{ data: { id: string; reg: string; simple_type: string }[] }>('/vehicles/fleet')
         .then(r => setVehicles((r.data || []).map(v => ({ id: v.id, reg: v.reg, simpleType: v.simple_type }))))
         .catch(() => {});
     }
+    if (vehicleId) {
+      api.get<{ data: OpenIssueLite[] }>(`/problems/by-vehicle/${vehicleId}`)
+        .then(r => {
+          const open = (r.data || []).filter(i => !['resolved', 'written_off', 'cancelled'].includes(i.status));
+          setOpenIssues(open);
+          // Default: link to the first open issue if any (likely the call we
+          // already logged today), else create a new breakdown issue.
+          setIssueChoice(open.length > 0 ? open[0].id : 'new');
+        })
+        .catch(() => {});
+    }
+    // Pre-fill the new-issue summary from the reason
+    setNewIssueSummary(`${currentVehicleReg}: ${SWAP_REASONS.find(r => r.code === reasonCode)?.label || 'swap'}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showForm]);
 
   const handleSwap = async () => {
-    if (!selectedVehicle || !reason.trim()) return;
+    if (!selectedVehicle || !reasonDetails.trim()) return;
+    if (issueChoice === 'new' && !newIssueSummary.trim()) {
+      setError('Give the new issue a short summary, or link an existing one.');
+      return;
+    }
     setSubmitting(true);
     setError('');
     try {
-      await api.post(`/assignments/${assignmentId}/swap-vehicle`, {
+      const reasonLabel = SWAP_REASONS.find(r => r.code === reasonCode)?.label || reasonCode;
+      const payload: any = {
         new_vehicle_id: selectedVehicle,
-        swap_reason: reason,
-      });
+        swap_reason: `${reasonLabel}: ${reasonDetails.trim()}`,
+      };
+      const softCheckin: any = {};
+      if (mileage.trim()) softCheckin.mileage = parseInt(mileage, 10);
+      if (fuelLevel.trim()) softCheckin.fuel_level = fuelLevel.trim();
+      if (location.trim()) softCheckin.location = location.trim();
+      if (checkinNotes.trim()) softCheckin.notes = checkinNotes.trim();
+      if (Object.keys(softCheckin).length > 0) payload.soft_checkin = softCheckin;
+
+      if (issueChoice === 'new') {
+        payload.issue_link = {
+          new_issue: {
+            category: reasonCode === 'accident' ? 'damaged' : reasonCode === 'client_request' ? 'other' : 'breakdown',
+            severity: 'urgent',
+            summary: newIssueSummary.trim(),
+            description: reasonDetails.trim() || null,
+          },
+        };
+      } else if (issueChoice !== 'none') {
+        payload.issue_link = { existing_issue_id: issueChoice };
+      }
+
+      const resp = await api.post<{ data: { redirect_to?: string; ve103b_regen_needed?: boolean; ve103b_reg?: string | null; swapped_count?: number } }>(
+        `/assignments/${assignmentId}/swap-vehicle`, payload,
+      );
+      const data = resp.data;
+
+      if (data?.ve103b_regen_needed) {
+        alert(
+          `Vehicle swapped. NOTE: the original had a VE103B certificate — ` +
+          `generate a new VE103B for ${data.ve103b_reg || 'the replacement'} from the VE103B page ` +
+          `(a new certificate number is required, so this can't be done automatically).`
+        );
+      }
+
       setShowForm(false);
       onSwapped();
+
+      // Redirect to BookOut for the replacement van — fresh walkaround +
+      // hire agreement PDF email for the new reg.
+      if (data?.redirect_to) {
+        navigate(data.redirect_to);
+      }
     } catch (err: any) {
-      setError(err.message || 'Swap failed');
+      // Surface the live-availability conflict cleanly.
+      setError(err?.body?.error || err.message || 'Swap failed');
     } finally {
       setSubmitting(false);
     }
@@ -353,43 +439,101 @@ function SwapVehicleButton({ assignmentId, currentVehicleReg, onSwapped }: {
         onClick={() => setShowForm(true)}
         className="text-xs text-orange-600 hover:text-orange-800 font-medium"
       >
-        Swap Vehicle
+        🔄 Swap Vehicle
       </button>
     );
   }
 
   return (
-    <div className="mt-2 border border-orange-200 rounded-lg p-3 bg-orange-50 space-y-2">
+    <div className="mt-2 border border-orange-200 rounded-lg p-3 bg-orange-50 space-y-3 w-full max-w-md">
       <p className="text-xs font-medium text-orange-800">
-        Swap <strong>{currentVehicleReg}</strong> to:
+        Swap <strong>{currentVehicleReg}</strong> — moves every driver on this van to the replacement.
       </p>
-      <select
-        value={selectedVehicle}
-        onChange={e => setSelectedVehicle(e.target.value)}
-        className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
-      >
-        <option value="">Select replacement vehicle...</option>
-        {vehicles
-          .filter(v => v.reg !== currentVehicleReg)
-          .map(v => (
-            <option key={v.id} value={v.id}>{v.reg} ({v.simpleType})</option>
+
+      {/* Reason */}
+      <div className="space-y-1">
+        <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Reason</label>
+        <select
+          value={reasonCode}
+          onChange={e => { setReasonCode(e.target.value); setNewIssueSummary(`${currentVehicleReg}: ${SWAP_REASONS.find(r => r.code === e.target.value)?.label || 'swap'}`); }}
+          className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+        >
+          {SWAP_REASONS.map(r => <option key={r.code} value={r.code}>{r.label}</option>)}
+        </select>
+        <input
+          type="text"
+          value={reasonDetails}
+          onChange={e => setReasonDetails(e.target.value)}
+          placeholder="Details (e.g. brake pad failure on the M6)"
+          className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+        />
+      </div>
+
+      {/* Replacement van */}
+      <div className="space-y-1">
+        <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Replacement van</label>
+        <select
+          value={selectedVehicle}
+          onChange={e => setSelectedVehicle(e.target.value)}
+          className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+        >
+          <option value="">Select replacement vehicle...</option>
+          {vehicles
+            .filter(v => v.reg !== currentVehicleReg)
+            .map(v => (
+              <option key={v.id} value={v.id}>{v.reg} ({v.simpleType})</option>
+            ))}
+        </select>
+        <p className="text-[11px] text-gray-500">Availability is checked on submit — a clash blocks the swap.</p>
+      </div>
+
+      {/* Soft check-in of the swapped-out van */}
+      <div className="space-y-1">
+        <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">
+          State of {currentVehicleReg} now <span className="font-normal normal-case text-gray-400">(all optional)</span>
+        </label>
+        <div className="flex gap-2">
+          <input type="number" value={mileage} onChange={e => setMileage(e.target.value)} placeholder="Mileage" className="w-1/2 text-sm border border-gray-300 rounded px-2 py-1.5" />
+          <input type="text" value={fuelLevel} onChange={e => setFuelLevel(e.target.value)} placeholder="Fuel" className="w-1/2 text-sm border border-gray-300 rounded px-2 py-1.5" />
+        </div>
+        <input type="text" value={location} onChange={e => setLocation(e.target.value)} placeholder="Where is it? (garage / tow truck / venue)" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
+        <input type="text" value={checkinNotes} onChange={e => setCheckinNotes(e.target.value)} placeholder="Condition notes" className="w-full text-sm border border-gray-300 rounded px-2 py-1.5" />
+        <p className="text-[11px] text-gray-500">{currentVehicleReg} will be marked <strong>Not Ready</strong> — full check-in when it's back at base.</p>
+      </div>
+
+      {/* Issue link/create */}
+      <div className="space-y-1">
+        <label className="block text-[11px] font-semibold text-gray-600 uppercase tracking-wide">Problem record</label>
+        <select
+          value={issueChoice}
+          onChange={e => setIssueChoice(e.target.value)}
+          className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+        >
+          {openIssues.map(i => (
+            <option key={i.id} value={i.id}>Link to: {i.summary.slice(0, 50)} ({i.category})</option>
           ))}
-      </select>
-      <input
-        type="text"
-        value={reason}
-        onChange={e => setReason(e.target.value)}
-        placeholder="Reason for swap (e.g. breakdown)"
-        className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
-      />
+          <option value="new">Create a new issue</option>
+          <option value="none">Don't link to an issue</option>
+        </select>
+        {issueChoice === 'new' && (
+          <input
+            type="text"
+            value={newIssueSummary}
+            onChange={e => setNewIssueSummary(e.target.value)}
+            placeholder="New issue summary"
+            className="w-full text-sm border border-gray-300 rounded px-2 py-1.5"
+          />
+        )}
+      </div>
+
       {error && <p className="text-xs text-red-600">{error}</p>}
-      <div className="flex gap-2">
+      <div className="flex gap-2 pt-1">
         <button
           onClick={handleSwap}
-          disabled={!selectedVehicle || !reason.trim() || submitting}
+          disabled={!selectedVehicle || !reasonDetails.trim() || submitting}
           className="bg-orange-600 text-white px-3 py-1.5 rounded text-xs font-medium hover:bg-orange-700 disabled:opacity-50"
         >
-          {submitting ? 'Swapping...' : 'Confirm Swap'}
+          {submitting ? 'Swapping...' : 'Swap & Book Out Replacement'}
         </button>
         <button
           onClick={() => { setShowForm(false); setError(''); }}
@@ -4103,17 +4247,18 @@ export default function JobDetailPage() {
                         <HireFormActions assignmentId={a.id} pdfKey={a.hire_form_pdf_key} pdfGeneratedAt={a.hire_form_generated_at} vehicleId={a.vehicle_id} />
                       )}
 
-                      {/* Swap Vehicle button — only for active/confirmed assignments */}
-                      {!['cancelled', 'swapped'].includes(a.status) && (
+                      {/* Swap Vehicle — only once a van is physically out
+                          (booked_out / active) and only for managers. Breakdown
+                          swaps carry insurance/reimbursement implications, so
+                          they're gated to admin / manager / weekend_manager. */}
+                      {(a.status === 'booked_out' || a.status === 'active') &&
+                       (a.effective_vehicle_id || a.vehicle_id) &&
+                       ['admin', 'manager', 'weekend_manager'].includes(user?.role || '') && (
                         <SwapVehicleButton
                           assignmentId={a.id}
+                          vehicleId={a.effective_vehicle_id || a.vehicle_id}
                           currentVehicleReg={a.vehicle_reg}
-                          onSwapped={() => {
-                            // Refresh assignments
-                            api.get<{ data: VehicleAssignment[] }>(`/assignments?job_id=${job.id}`)
-                              .then(r => setVehicleAssignments(r.data || []))
-                              .catch(() => {});
-                          }}
+                          onSwapped={loadVehicleAssignments}
                         />
                       )}
                     </div>

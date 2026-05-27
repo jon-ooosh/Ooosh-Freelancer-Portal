@@ -716,16 +716,20 @@ When a vehicle breaks down mid-hire and needs swapping to a replacement.
 - [x] **Soft check-in primitive** — `save-event` handles `eventType='soft-check-in'`: sets `fleet_vehicles.hire_status='Not Ready'` (sticky, preserved by the final `syncFleetHireStatusByReg` reconcile), does NOT flip assignment status (caller owns that), no HH writeback, no close-out requirements. Mileage logged generically. `buildConditionReportPdf` gains an `isInterim` flag → "INTERIM VEHICLE ASSESSMENT" title, context banner, no signature block, `-interim.pdf` filename.
 - [x] **Sweeper script** — `scripts/cleanup-orphan-vha-rows.ts` (dry-run default, `--commit`, `--vehicle=REG`, `--job=HHNUM`). Cleans historical orphans the live dedup pre-dates — both pure staff-allocation rows (`driver_id IS NULL`) and driver-bearing rows whose sibling has `returned`. Soft-cancel + fleet status re-sync. Idempotent.
 
-*PR 2 — Swap UI (NOT YET BUILT — next session can pick up from the spec):*
-- [ ] "Swap Vehicle" button on Job Detail > Drivers & Vehicles tab (per-assignment, `admin`/`manager`/`weekend_manager` only — see spec §1 RBAC note)
-- [ ] Swap modal: reason picklist + details, replacement van picker (live availability check), soft check-in fields for the swapped-out van, Job Issue link-or-create section
-- [ ] Multi-driver auto-cascade (all siblings on the van slot move together, single submit)
-- [ ] Extend `POST /api/assignments/:id/swap-vehicle` to accept `soft_checkin` + `issue_link` payloads, fire soft check-in event, link/create `job_issues`, post HH job memo note
-- [ ] Frontend post-submit redirect → BookOutPage for the replacement van (fresh walkaround + hire agreement PDF email)
-- [ ] VE103B regen for replacement if original had `ve103b_ref` (international)
-- [ ] Both assignments visible in driver Hire History (audit: "was in GX17DHN → swapped to RX22SWN on 25 Mar")
-- [ ] Migration columns `swap_reason`, `swapped_at`, `swapped_to_assignment_id` already exist — no migration needed
-- [ ] Future: client notification of vehicle change
+*PR 2 — Swap UI (shipped May 2026):*
+- [x] "Swap Vehicle" button on Job Detail > Drivers & Vehicles tab — only on `booked_out`/`active` cards with a van linked, gated to `admin`/`manager`/`weekend_manager` (frontend role check + backend `authorize('admin','manager','weekend_manager')` on the route)
+- [x] Swap modal: reason picklist + details, replacement van picker, soft check-in fields (mileage/fuel/location/notes, all optional), Job Issue link-or-create section (defaults to first open issue on the van, else create-new)
+- [x] Multi-driver auto-cascade — backend swaps EVERY occupying assignment sharing the old van on the job (target row + siblings) to the new van in one call; excess copied per row
+- [x] `POST /api/assignments/:id/swap-vehicle` extended: `soft_checkin` + `issue_link` payloads, sets old van `fleet_vehicles.hire_status='Not Ready'`, logs soft-checkin mileage, links/creates `job_issues` (via shared `services/job-issues.ts`) with a `swap_logged` event, posts HH job memo note, logs a `🔄 Vehicle swapped` job-timeline interaction. Returns `redirect_to` (BookOut for the replacement), `issue_id`, `ve103b_regen_needed`.
+- [x] Frontend post-submit redirect → BookOutPage for the replacement van (`redirect_to` from the response)
+- [x] VE103B: detects `ve103b_ref` on any swapped row → returns `ve103b_regen_needed` + flags the user to generate a new cert manually (can't auto-regen — a new pre-printed cert number is required). NOT auto-generated.
+- [x] Both assignments visible in driver Hire History (original → `swapped`, replacement created)
+- [x] Migration columns `swap_reason`, `swapped_at`, `swapped_to_assignment_id` already existed — no migration needed
+- [x] Shared `services/job-issues.ts` extracted (logIssueEvent / notifyIssueRecipients / getDefaultVehicleIssueWatchers / createJobIssue); `routes/problems.ts` refactored to import them — one source of truth for issue create + event + notify
+
+*Deferred from PR 2 (deliberate, noted in spec §2):*
+- [ ] **Auto-generated Interim Assessment PDF + vehicle Event-History entry for the swapped-out van.** The soft check-in's durable effects (Not Ready, mileage log, soft-checkin data on the Job Issue + job timeline) all happen, and the `isInterim` PDF variant + `save-event` soft-check-in branch exist (PR 1). The swap endpoint just doesn't fire them — the breakdown's system of record is the Job Issue. Wiring the interim PDF into the swap flow (or surfacing a "Generate interim PDF" button on the issue) is a small follow-up.
+- [ ] Client notification of vehicle change
 
 *Immediate follow-on after PR 2:* freelancer-led interim check-in UI (reuses the soft check-in primitive shipped in PR 1 — see spec §6 + §9).
 
