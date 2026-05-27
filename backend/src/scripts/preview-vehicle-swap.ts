@@ -91,7 +91,7 @@ async function main() {
            FROM job_excess WHERE assignment_id = ANY($1::uuid[])`,
         [ids]
       );
-      console.log(`\n── Excess: ${exRes.rows.length} record(s) would copy to the replacement ──`);
+      console.log(`\n── Excess: ${exRes.rows.length} record(s) would MOVE to the replacement (re-pointed, not duplicated) ──`);
       for (const e of exRes.rows) {
         console.log(`  assignment ${e.assignment_id}: £${e.excess_amount_required} (${e.excess_status})`);
       }
