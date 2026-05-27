@@ -14,14 +14,23 @@
  * "occupying" their van in overlap checks, blocking future allocations +
  * swaps (the 15 May 2026 HLU/15613 incident).
  *
- * Detection: a row is an orphan when
+ * Detection: a row is an orphan when it never physically went out
  *   - status IN ('soft', 'confirmed')
- *   - booked_out_at IS NULL          (never physically went out)
- *   - driver_id IS NULL              (PURE allocation — protects multi-driver
- *                                     hires where a 2nd DRIVER shares the van)
+ *   - booked_out_at IS NULL
  *   - vehicle_id + hirehop_job_id both set
  *   - AND a sibling row exists on the same (vehicle, job) with
- *     booked_out_at NOT NULL        (the row that actually progressed)
+ *     booked_out_at NOT NULL (the row that actually progressed)
+ *   - AND one of:
+ *       (a) driver_id IS NULL  — a PURE staff-allocation row. Safe to cancel
+ *           anytime once a real hire owns the van, even mid-hire.
+ *       (b) the booked-out sibling is `returned` — the hire is definitively
+ *           over, so ANY un-booked-out row (even one carrying a driver_id) is
+ *           stale. This is the class that bit us on 15 May 2026: the blocking
+ *           HLU/15613 orphan had a driver_id, so a driver_id-NULL-only rule
+ *           would have missed it.
+ *
+ * The driver_id-bearing live prevention is `cancelStaleVanAllocationsOnReturn`
+ * (fired at check-in); this sweeper mops up historical rows that pre-date it.
  *
  * Soft-cancel only (status='cancelled' + audit note) — never a physical
  * DELETE (CLAUDE.md "vehicle_hire_assignments is soft-cancel only").
@@ -60,16 +69,17 @@ async function main() {
     console.log('');
 
     const orphans = await client.query(
-      `SELECT orphan.id,
+      `SELECT DISTINCT ON (orphan.id)
+              orphan.id,
               orphan.status,
+              orphan.driver_id,
               orphan.vehicle_id,
               orphan.hirehop_job_id,
               orphan.job_id,
               orphan.created_at,
               fv.reg,
               sibling.id           AS sibling_id,
-              sibling.status       AS sibling_status,
-              sibling.booked_out_at AS sibling_booked_out_at
+              sibling.status       AS sibling_status
          FROM vehicle_hire_assignments orphan
          JOIN vehicle_hire_assignments sibling
            ON sibling.vehicle_id = orphan.vehicle_id
@@ -79,20 +89,21 @@ async function main() {
          LEFT JOIN fleet_vehicles fv ON fv.id = orphan.vehicle_id
         WHERE orphan.status IN ('soft', 'confirmed')
           AND orphan.booked_out_at IS NULL
-          AND orphan.driver_id IS NULL
           AND orphan.vehicle_id IS NOT NULL
           AND orphan.hirehop_job_id IS NOT NULL
+          AND (orphan.driver_id IS NULL OR sibling.status = 'returned')
           AND ($1::text IS NULL OR fv.reg = $1::text)
           AND ($2::integer IS NULL OR orphan.hirehop_job_id = $2::integer)
-        ORDER BY orphan.hirehop_job_id, orphan.created_at`,
+        ORDER BY orphan.id, sibling.status = 'returned' DESC`,
       [vehicleArg || null, jobArg ? parseInt(jobArg, 10) : null]
     );
 
     console.log(`Found ${orphans.rows.length} orphan row(s):\n`);
     for (const r of orphans.rows) {
+      const cls = r.driver_id ? 'returned-sibling' : 'staff-alloc';
       console.log(
         `  ${r.id}  status=${String(r.status).padEnd(10)} van=${(r.reg || '(none)').padEnd(10)} ` +
-        `job=#${r.hirehop_job_id}  → superseded by ${r.sibling_id} (${r.sibling_status})`
+        `job=#${r.hirehop_job_id}  [${cls}]  → superseded by ${r.sibling_id} (${r.sibling_status})`
       );
     }
 

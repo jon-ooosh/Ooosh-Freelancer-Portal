@@ -2297,6 +2297,28 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           } else {
             console.log(`[vehicles/events] check-in: no matching booked_out assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
           }
+
+          // The van is back — cancel any stale van allocations on this
+          // (vehicle, job) that never booked out. Driver-agnostic: once the
+          // hire's returned, nothing un-booked-out on it is going anywhere.
+          // This is the prevention for the 15 May 2026 HLU/15613 incident,
+          // where the blocking orphan carried a driver_id and so slipped
+          // past the book-out dedup's `driver_id IS NULL` guard.
+          try {
+            const vidRow = await query(`SELECT id FROM fleet_vehicles WHERE reg = $1`, [reg]);
+            if (vidRow.rows.length > 0) {
+              const { cancelStaleVanAllocationsOnReturn } = await import('../services/vha-dedup');
+              const cancelled = await cancelStaleVanAllocationsOnReturn({
+                vehicleId: vidRow.rows[0].id,
+                hhJobNumber: hhJob,
+              });
+              if (cancelled > 0) {
+                console.log(`[vehicles/events] check-in: cancelled ${cancelled} stale van allocation(s) for ${reg} / HH#${hhJob}`);
+              }
+            }
+          } catch (err) {
+            console.warn('[vehicles/events] check-in stale-allocation cleanup failed:', err);
+          }
         }
       } catch (err) {
         console.warn('[vehicles/events] check-in side-effect failed:', err);
