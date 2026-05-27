@@ -139,6 +139,19 @@ export interface PendingExcess {
   days_since_finish?: number | null;
 }
 
+/** Pre-auth holds expiring soon (migration 087) — capture or release before auto-void. */
+export interface ExpiringHold {
+  excess_id: string;
+  amount_held: number;
+  held_expires_at: string;
+  days_until_expiry: number;
+  driver_name: string | null;
+  vehicle_reg: string | null;
+  job_uuid: string | null;
+  hh_job_number: number | null;
+  job_name: string | null;
+}
+
 export interface PipelineStat {
   pipeline_status: string;
   count: string;
@@ -267,6 +280,9 @@ export interface OperationsData {
     excess_count: number;
     excess_total: number;
     excess_items: PendingExcess[];
+    /** Pre-auth holds expiring within 2 days (migration 087). */
+    expiring_holds_count?: number;
+    expiring_holds?: ExpiringHold[];
   };
   transport_ops: {
     summary: Record<string, number>;

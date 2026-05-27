@@ -8,6 +8,7 @@ import { uploadAllPhotos } from '../lib/photo-upload'
 import { updateFleetHireStatus } from '../lib/fleet-status'
 import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { withRetry } from '../lib/retry'
+import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoCapture } from '../components/book-out/PhotoCapture'
 import { TimeInput } from '../../../components/TimeInput'
@@ -2525,6 +2526,10 @@ function StepVehicleState({
 }) {
   const enteredMileage = form.mileage ? parseInt(form.mileage, 10) : null
   const isBelowLast = lastKnownMileage != null && enteredMileage != null && !isNaN(enteredMileage) && enteredMileage < lastKnownMileage
+  // Non-blocking high-jump warning (typo guard). The low side is already hard-blocked above.
+  const highJump = !isBelowLast
+    ? checkMileagePlausibility({ newReading: enteredMileage, lastReading: lastKnownMileage })
+    : { level: 'ok' as const, message: null }
 
   return (
     <div className="space-y-5">
@@ -2554,6 +2559,9 @@ function StepVehicleState({
           <p className="mt-1 text-xs font-medium text-red-600">
             Mileage cannot be lower than the last recorded reading ({lastKnownMileage!.toLocaleString()} mi)
           </p>
+        )}
+        {highJump.level === 'high' && (
+          <p className="mt-1 text-xs font-medium text-amber-600">{highJump.message}</p>
         )}
         {!lastKnownMileage && (
           <p className="mt-1 text-xs text-gray-400">Read from the dashboard display</p>

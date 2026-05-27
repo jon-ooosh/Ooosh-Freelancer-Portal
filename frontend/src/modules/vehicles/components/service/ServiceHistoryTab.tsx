@@ -53,9 +53,10 @@ const SORT_OPTIONS: { value: SortField; label: string }[] = [
 interface Props {
   vehicleId: string
   currentMileage?: number | null
+  lastMileageUpdate?: string | null
 }
 
-export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) {
+export default function ServiceHistoryTab({ vehicleId, currentMileage, lastMileageUpdate }: Props) {
   const queryClient = useQueryClient()
   const [filter, setFilter] = useState<ServiceType | 'all'>('all')
   const [sortBy, setSortBy] = useState<SortField>('date_desc')
@@ -504,6 +505,7 @@ export default function ServiceHistoryTab({ vehicleId, currentMileage }: Props) 
         <ServiceRecordForm
           vehicleId={vehicleId}
           currentMileage={currentMileage}
+          lastMileageUpdate={lastMileageUpdate}
           editing={editing}
           onSave={handleSave}
           onClose={() => { setShowForm(false); setEditing(null) }}

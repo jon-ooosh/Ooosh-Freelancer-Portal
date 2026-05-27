@@ -72,6 +72,25 @@ export async function updateVehicle(id: string, fields: Record<string, unknown>)
 }
 
 /**
+ * Correct a vehicle's current mileage (managers+). This is the only path that
+ * can LOWER the figure — all other writes ratchet upward. Audited server-side.
+ */
+export async function correctCurrentMileage(id: string, mileage: number, reason?: string): Promise<Vehicle> {
+  const response = await apiFetch(`/fleet/${encodeURIComponent(id)}/current-mileage`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mileage, reason }),
+  })
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(err.error || `Failed to correct mileage: ${response.status}`)
+  }
+
+  return response.json() as Promise<Vehicle>
+}
+
+/**
  * Create a new vehicle. Returns the created vehicle.
  */
 export async function createVehicle(fields: Record<string, unknown>): Promise<Vehicle> {

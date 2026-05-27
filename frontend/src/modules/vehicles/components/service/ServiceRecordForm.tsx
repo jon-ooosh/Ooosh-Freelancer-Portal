@@ -8,6 +8,7 @@
 
 import { useState, useRef } from 'react'
 import type { ServiceType, CreateServiceLogParams, ServiceLogRecord } from '../../lib/service-log-api'
+import { checkMileagePlausibility } from '../../lib/mileage-sanity'
 
 const SERVICE_TYPES: { value: ServiceType; label: string }[] = [
   { value: 'service', label: 'Service' },
@@ -29,12 +30,13 @@ export interface StagedFile {
 interface Props {
   vehicleId: string
   currentMileage?: number | null
+  lastMileageUpdate?: string | null
   editing?: ServiceLogRecord | null
   onSave: (params: CreateServiceLogParams, stagedFiles?: StagedFile[]) => Promise<void>
   onClose: () => void
 }
 
-export default function ServiceRecordForm({ currentMileage, editing, onSave, onClose }: Props) {
+export default function ServiceRecordForm({ currentMileage, lastMileageUpdate, editing, onSave, onClose }: Props) {
   const [serviceType, setServiceType] = useState<ServiceType>(editing?.serviceType as ServiceType || 'service')
   const [name, setName] = useState(editing?.name || '')
   const [serviceDate, setServiceDate] = useState(editing?.serviceDate || new Date().toISOString().split('T')[0]!)
@@ -51,11 +53,16 @@ export default function ServiceRecordForm({ currentMileage, editing, onSave, onC
   const [error, setError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Mileage sanity check — warn if lower than current (for service records, don't block)
+  // Mileage sanity check — non-blocking amber warning for an implausibly high
+  // jump (likely a typo, e.g. the RX73TBZ 132,782 incident) or a lower-than-
+  // current reading (a backdate). Never blocks the save.
   const mileageNum = mileage ? parseInt(mileage, 10) : null
-  const mileageWarning = mileageNum && currentMileage && mileageNum < currentMileage
-    ? `Current mileage is ${currentMileage.toLocaleString()}. This entry is ${(currentMileage - mileageNum).toLocaleString()} miles lower — is this a backdated record?`
-    : null
+  const mileageWarning = checkMileagePlausibility({
+    newReading: mileageNum,
+    lastReading: currentMileage,
+    lastReadingDate: lastMileageUpdate,
+    newReadingDate: serviceDate,
+  }).message
 
   function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files

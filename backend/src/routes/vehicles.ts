@@ -614,8 +614,9 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
       service_booked_in_date: 'service_booked_in_date', serviceBookedInDate: 'service_booked_in_date',
       insurance_booked_in_date: 'insurance_booked_in_date', insuranceBookedInDate: 'insurance_booked_in_date',
       tax_booked_in_date: 'tax_booked_in_date', taxBookedInDate: 'tax_booked_in_date',
-      // Mileage
-      current_mileage: 'current_mileage', currentMileage: 'current_mileage',
+      // NOTE: current_mileage is deliberately NOT settable here — it is a
+      // ratcheted/derived field and corrections must go through the audited
+      // PATCH /fleet/:id/current-mileage endpoint (managers+ only).
       // V5 fields
       vin: 'vin',
       date_first_reg: 'date_first_reg', dateFirstReg: 'date_first_reg',
@@ -668,6 +669,72 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[vehicles/fleet] Update error:', error);
     res.status(500).json({ error: 'Failed to update vehicle' });
+  }
+});
+
+/**
+ * PATCH /api/vehicles/fleet/:id/current-mileage
+ * Audited correction of current_mileage. This is the ONLY path that can LOWER
+ * the figure — every other write path ratchets upward (GREATEST guard), so a
+ * fat-fingered high reading is otherwise stuck. Managers+ only.
+ * Writes the figure directly, logs a 'correction' reading for the history
+ * list, and records an audit_log entry.
+ */
+router.patch('/fleet/:id/current-mileage', async (req: FlexibleVehicleRequest, res: Response) => {
+  try {
+    const role = req.user?.role;
+    if (!role || !['admin', 'manager', 'weekend_manager'].includes(role)) {
+      res.status(403).json({ error: 'Manager access required to correct mileage' });
+      return;
+    }
+
+    const { id } = req.params;
+    const { mileage, reason } = req.body;
+    const userId = req.user?.id || null;
+    const mileageVal = Number(mileage);
+
+    if (!Number.isFinite(mileageVal) || mileageVal <= 0) {
+      res.status(400).json({ error: 'A valid mileage is required' });
+      return;
+    }
+
+    const existing = await query('SELECT id, current_mileage FROM fleet_vehicles WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    const previousMileage = existing.rows[0].current_mileage as number | null;
+
+    // Direct set — deliberately bypasses the upward-only ratchet so a bad high
+    // value can be corrected down.
+    const result = await query(
+      `UPDATE fleet_vehicles SET current_mileage = $1, last_mileage_update = NOW()
+       WHERE id = $2 RETURNING *`,
+      [mileageVal, id]
+    );
+
+    // Audit trail in the mileage history list (source='correction').
+    await query(
+      `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
+       VALUES ($1, $2, 'correction', $3, $4)`,
+      [id, mileageVal, reason ? String(reason).slice(0, 200) : null, userId]
+    ).catch(err => console.warn('[vehicles/current-mileage] log insert failed:', err));
+
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+       VALUES ($1, 'fleet_vehicle', $2, 'correct_mileage', $3, $4)`,
+      [
+        userId,
+        id,
+        JSON.stringify({ current_mileage: previousMileage }),
+        JSON.stringify({ current_mileage: mileageVal, reason: reason || null }),
+      ]
+    ).catch(err => console.warn('[vehicles/current-mileage] audit insert failed:', err));
+
+    res.json(mapDbRowToVehicle(result.rows[0]));
+  } catch (error) {
+    console.error('[vehicles/current-mileage] Correction error:', error);
+    res.status(500).json({ error: 'Failed to correct mileage' });
   }
 });
 
@@ -4021,6 +4088,13 @@ router.get('/fleet/:vehicleId/mileage', async (req: AuthRequest, res: Response) 
     );
     const stats = statsResult.rows[0] || {};
 
+    // Canonical "current mileage" is fleet_vehicles.current_mileage — NOT
+    // MAX(log). A stuck-high bad reading in the log must never drive the
+    // headline figure (see RX73TBZ, May 2026). One edit on the vehicle then
+    // updates the headline everywhere it's shown.
+    const fleetRow = await query('SELECT current_mileage FROM fleet_vehicles WHERE id = $1', [vehicleId]);
+    const canonicalMileage = fleetRow.rows[0]?.current_mileage ?? null;
+
     // Average daily mileage (from first to last reading)
     let avgDailyMileage: number | null = null;
     if (stats.first_reading && stats.last_reading && stats.min_mileage != null && stats.max_mileage != null) {
@@ -4043,7 +4117,7 @@ router.get('/fleet/:vehicleId/mileage', async (req: AuthRequest, res: Response) 
       })),
       total: Number(countResult.rows[0]?.count || 0),
       stats: {
-        currentMileage: stats.max_mileage ? Number(stats.max_mileage) : null,
+        currentMileage: canonicalMileage != null ? Number(canonicalMileage) : null,
         totalReadings: Number(stats.total_readings || 0),
         avgDailyMileage,
       },
