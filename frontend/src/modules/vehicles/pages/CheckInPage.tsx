@@ -14,6 +14,7 @@ import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { getCollection } from '../lib/collection-api'
 import type { CollectionData } from '../types/vehicle-event'
 import { findDeviceByReg, getPositions } from '../lib/traccar-api'
+import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { knotsToMph } from '../types/traccar'
 import type { IssueLocation } from '../types/issue'
 import { withRetry } from '../lib/retry'
@@ -1499,6 +1500,10 @@ function StepCurrentState({
   const mileageDiff = form.bookOutMileage && !isNaN(currentMileage)
     ? currentMileage - form.bookOutMileage
     : null
+  // Non-blocking high-jump warning (typo guard). The low side is hard-blocked below.
+  const highJump = mileageDiff != null && mileageDiff >= 0
+    ? checkMileagePlausibility({ newReading: currentMileage, lastReading: form.bookOutMileage })
+    : { level: 'ok' as const, message: null }
 
   return (
     <div className="space-y-5">
@@ -1528,6 +1533,9 @@ function StepCurrentState({
                 </span>
               )}
             </div>
+            {highJump.level === 'high' && (
+              <p className="text-xs font-medium text-amber-600">{highJump.message}</p>
+            )}
             {mileageDiff != null && mileageDiff < 0 && (
               <div className="rounded-lg border border-red-200 bg-red-50 p-2">
                 <p className="text-xs font-medium text-red-700">

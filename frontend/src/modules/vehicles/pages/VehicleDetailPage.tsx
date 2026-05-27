@@ -9,7 +9,8 @@ import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
-import { updateVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile } from '../lib/fleet-api'
+import { updateVehicle, correctCurrentMileage, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile } from '../lib/fleet-api'
+import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { getRossettsStatus, URGENCY_DOT, URGENCY_TEXT } from '../lib/service-status'
 import type { ComplianceSettings } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
@@ -122,6 +123,106 @@ function EditableRow({
   )
 }
 
+/**
+ * Current Mileage — read-only for everyone, with an inline correction affordance
+ * for managers+. This is the only UI path that can LOWER the figure (the backend
+ * correction endpoint bypasses the upward-only ratchet). Runs the shared sanity
+ * check and asks for a confirm on an implausible jump or a downward correction.
+ */
+function CurrentMileageRow({
+  vehicleId,
+  currentMileage,
+  lastMileageUpdate,
+  canEdit,
+  onSaved,
+}: {
+  vehicleId: string
+  currentMileage: number | null
+  lastMileageUpdate: string | null
+  canEdit: boolean
+  onSaved: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const entered = value ? parseInt(value.replace(/[^0-9]/g, ''), 10) : null
+  const check = checkMileagePlausibility({
+    newReading: entered,
+    lastReading: currentMileage,
+    lastReadingDate: lastMileageUpdate,
+  })
+
+  const startEdit = () => {
+    setValue(currentMileage != null ? String(currentMileage) : '')
+    setEditing(true)
+  }
+
+  const save = async () => {
+    if (entered == null || !Number.isFinite(entered) || entered <= 0) {
+      setEditing(false)
+      return
+    }
+    if (entered === currentMileage) {
+      setEditing(false)
+      return
+    }
+    if (check.message && !window.confirm(`${check.message}\n\nSave ${entered.toLocaleString()} mi anyway?`)) {
+      return
+    }
+    setSaving(true)
+    try {
+      await correctCurrentMileage(vehicleId, entered)
+      setEditing(false)
+      onSaved()
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to correct mileage')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="py-2 border-b border-gray-100">
+      <div className="flex items-center justify-between">
+        <span className="text-sm text-gray-500">Current Mileage</span>
+        {editing ? (
+          <div className="flex items-center gap-1">
+            <input
+              type="number"
+              inputMode="numeric"
+              value={value}
+              onChange={e => setValue(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false) }}
+              autoFocus
+              className="w-32 rounded border border-gray-200 px-2 py-1 text-sm text-right focus:border-blue-300 focus:outline-none"
+            />
+            <button type="button" disabled={saving} onClick={save}
+              className="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+              {saving ? '…' : 'Save'}
+            </button>
+            <button type="button" onClick={() => setEditing(false)}
+              className="rounded px-2 py-1 text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold text-gray-900">
+              {currentMileage != null ? `${currentMileage.toLocaleString()} mi` : '—'}
+            </span>
+            {canEdit && (
+              <button type="button" onClick={startEdit}
+                className="text-[10px] text-gray-300 hover:text-blue-400">Edit</button>
+            )}
+          </div>
+        )}
+      </div>
+      {editing && check.message && (
+        <p className="mt-1 text-xs text-amber-600">{check.message}</p>
+      )}
+    </div>
+  )
+}
+
 export function VehicleDetailPage() {
   const { id } = useParams()
   const { data: vehicle, isLoading, isError } = useVehicle(id)
@@ -152,6 +253,7 @@ export function VehicleDetailPage() {
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  const canEditMileage = isAdmin || opAuth?.userRole === 'weekend_manager'
 
   const saveField = async (field: string, value: string | number | boolean | null) => {
     if (!vehicle) return
@@ -322,7 +424,7 @@ export function VehicleDetailPage() {
 
       {/* Service History tab */}
       {activeTab === 'service' && (
-        <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} />
+        <ServiceHistoryTab vehicleId={vehicle.id} currentMileage={(vehicle as unknown as { currentMileage?: number | null }).currentMileage ?? null} lastMileageUpdate={vehicle.lastMileageUpdate ?? null} />
       )}
 
       {/* Issues tab — OP job_issues backed, open issues surfaced by default */}
@@ -409,12 +511,13 @@ export function VehicleDetailPage() {
       {/* Mileage & Service */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Mileage & Service</h3>
-        {vehicle.currentMileage != null && (
-          <div className="flex items-center justify-between py-2 border-b border-gray-100">
-            <span className="text-sm text-gray-500">Current Mileage</span>
-            <span className="text-sm font-bold text-gray-900">{vehicle.currentMileage.toLocaleString()} mi</span>
-          </div>
-        )}
+        <CurrentMileageRow
+          vehicleId={vehicle.id}
+          currentMileage={vehicle.currentMileage ?? null}
+          lastMileageUpdate={vehicle.lastMileageUpdate ?? null}
+          canEdit={canEditMileage}
+          onSaved={() => queryClient.invalidateQueries({ queryKey: ['vehicles'] })}
+        />
         {vehicle.currentMileage != null && vehicle.lastMileageUpdate && (
           <div className="flex items-center justify-between py-1 border-b border-gray-100">
             <span className="text-[11px] text-gray-400">Last updated</span>
