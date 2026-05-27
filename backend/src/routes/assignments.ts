@@ -976,7 +976,7 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.job_id = $1
         AND vha.assignment_type = 'self_drive'
-        AND vha.status != 'cancelled'`,
+        AND vha.status NOT IN ('cancelled', 'swapped')`,
       [jobId]
     );
 
@@ -1514,12 +1514,15 @@ router.post(
         [swap_reason, newId, row.id]
       );
 
-      // Copy any excess record across to the new assignment.
+      // Move any excess record to the new assignment — re-point, don't COPY.
+      // The £X held is the SAME money following the hire to the new van, not
+      // a new charge. Copying would double-count: the swapped row keeps its
+      // job_excess record AND the new row gets one, so the Money tab (which
+      // sums taken across all rows on the job) and the client ledger would
+      // both read 2× the real held amount. Re-pointing keeps exactly one row.
       await query(
-        `INSERT INTO job_excess (assignment_id, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, created_by)
-         SELECT $1, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, $2
-         FROM job_excess WHERE assignment_id = $3 LIMIT 1`,
-        [newId, req.user!.id, row.id]
+        `UPDATE job_excess SET assignment_id = $1 WHERE assignment_id = $2`,
+        [newId, row.id]
       );
 
       swapped.push({

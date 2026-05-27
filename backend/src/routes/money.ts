@@ -280,13 +280,17 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
       [job.id]
     );
 
-    // Count self-drive vehicles (van count)
+    // Count self-drive vehicles (van count). Exclude 'swapped' as well as
+    // 'cancelled' — a swapped-out van's assignment lingers with the old
+    // vehicle_id, and counting it as a distinct van would inflate the
+    // required excess (it's the same hire on a replacement van, not a
+    // second van).
     const vanCountResult = await query(
       `SELECT COUNT(DISTINCT vehicle_id) AS van_count
        FROM vehicle_hire_assignments
        WHERE job_id = $1
          AND assignment_type = 'self_drive'
-         AND status != 'cancelled'`,
+         AND status NOT IN ('cancelled', 'swapped')`,
       [job.id]
     );
     const vanCount = parseInt(vanCountResult.rows[0]?.van_count || '0');

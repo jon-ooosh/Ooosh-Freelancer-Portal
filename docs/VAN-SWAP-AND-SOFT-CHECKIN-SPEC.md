@@ -80,7 +80,9 @@ Extend `POST /api/assignments/:id/swap-vehicle`:
 **Existing behaviour (unchanged):**
 - Overlap check on replacement van (uses target hire window — see CLAUDE.md "Hire Date Resolution" — `vha.hire_start/hire_end` → fallback `jobs.job_date/job_end`, NOT `return_date`)
 - Mark original assignment `status='swapped'`, populate `swap_reason`, `swapped_at`, `swapped_to_assignment_id`
-- Create new assignment for replacement van, copy excess
+- Create new assignment for replacement van, **move** the excess record to it (re-point `assignment_id`, do NOT copy — see note below)
+
+> **Excess MUST be moved, not copied.** The held £X is the same money following the hire to the replacement van, not a new charge. Copying leaves a `job_excess` row on the `swapped` assignment AND creates one on the new assignment; the Money tab (`money.ts` sums `excess_amount_taken` across all rows on the job, no assignment-status filter) and the client ledger would then read 2× the real held amount. Re-pointing keeps exactly one row. Companion fix: the self-drive **van count** in `money.ts` and the **dispatch-check** in `assignments.ts` must exclude `status = 'swapped'` (a swapped-out van's row lingers with the old `vehicle_id`; counting it inflates the required excess / shows it as a false dispatch blocker). Both fixed May 2026 when the multi-driver-with-money preview surfaced the double-count.
 
 **New behaviour:**
 - Accept `soft_checkin` payload — see §2
