@@ -546,8 +546,9 @@ const FLEET_FIELD_MAP: Record<string, string> = {
   service_booked_in_date: 'service_booked_in_date', serviceBookedInDate: 'service_booked_in_date',
   insurance_booked_in_date: 'insurance_booked_in_date', insuranceBookedInDate: 'insurance_booked_in_date',
   tax_booked_in_date: 'tax_booked_in_date', taxBookedInDate: 'tax_booked_in_date',
-  // Mileage
-  current_mileage: 'current_mileage', currentMileage: 'current_mileage',
+  // NOTE: current_mileage is deliberately NOT settable here — it is a
+  // ratcheted/derived field and corrections must go through the audited
+  // current-mileage correction endpoint (managers+ only).
   // V5 fields
   vin: 'vin',
   date_first_reg: 'date_first_reg', dateFirstReg: 'date_first_reg',
@@ -663,6 +664,72 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
   } catch (error) {
     console.error('[vehicles/fleet] Update error:', error);
     res.status(500).json({ error: 'Failed to update vehicle' });
+  }
+});
+
+/**
+ * PATCH /api/vehicles/fleet/:id/current-mileage
+ * Audited correction of current_mileage. This is the ONLY path that can LOWER
+ * the figure — every other write path ratchets upward (GREATEST guard), so a
+ * fat-fingered high reading is otherwise stuck. Managers+ only.
+ * Writes the figure directly, logs a 'correction' reading for the history
+ * list, and records an audit_log entry.
+ */
+router.patch('/fleet/:id/current-mileage', async (req: FlexibleVehicleRequest, res: Response) => {
+  try {
+    const role = req.user?.role;
+    if (!role || !['admin', 'manager', 'weekend_manager'].includes(role)) {
+      res.status(403).json({ error: 'Manager access required to correct mileage' });
+      return;
+    }
+
+    const { id } = req.params;
+    const { mileage, reason } = req.body;
+    const userId = req.user?.id || null;
+    const mileageVal = Number(mileage);
+
+    if (!Number.isFinite(mileageVal) || mileageVal <= 0) {
+      res.status(400).json({ error: 'A valid mileage is required' });
+      return;
+    }
+
+    const existing = await query('SELECT id, current_mileage FROM fleet_vehicles WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    const previousMileage = existing.rows[0].current_mileage as number | null;
+
+    // Direct set — deliberately bypasses the upward-only ratchet so a bad high
+    // value can be corrected down.
+    const result = await query(
+      `UPDATE fleet_vehicles SET current_mileage = $1, last_mileage_update = NOW()
+       WHERE id = $2 RETURNING *`,
+      [mileageVal, id]
+    );
+
+    // Audit trail in the mileage history list (source='correction').
+    await query(
+      `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
+       VALUES ($1, $2, 'correction', $3, $4)`,
+      [id, mileageVal, reason ? String(reason).slice(0, 200) : null, userId]
+    ).catch(err => console.warn('[vehicles/current-mileage] log insert failed:', err));
+
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+       VALUES ($1, 'fleet_vehicle', $2, 'correct_mileage', $3, $4)`,
+      [
+        userId,
+        id,
+        JSON.stringify({ current_mileage: previousMileage }),
+        JSON.stringify({ current_mileage: mileageVal, reason: reason || null }),
+      ]
+    ).catch(err => console.warn('[vehicles/current-mileage] audit insert failed:', err));
+
+    res.json(mapDbRowToVehicle(result.rows[0]));
+  } catch (error) {
+    console.error('[vehicles/current-mileage] Correction error:', error);
+    res.status(500).json({ error: 'Failed to correct mileage' });
   }
 });
 
@@ -2306,9 +2373,52 @@ router.post('/save-event', async (req: FlexibleVehicleRequest, res: Response) =>
           } else {
             console.log(`[vehicles/events] check-in: no matching booked_out assignment for ${reg} / HH#${hhJob} — no assignment state flip`);
           }
+
+          // The van is back — cancel any stale van allocations on this
+          // (vehicle, job) that never booked out. Driver-agnostic: once the
+          // hire's returned, nothing un-booked-out on it is going anywhere.
+          // This is the prevention for the 15 May 2026 HLU/15613 incident,
+          // where the blocking orphan carried a driver_id and so slipped
+          // past the book-out dedup's `driver_id IS NULL` guard.
+          try {
+            const vidRow = await query(`SELECT id FROM fleet_vehicles WHERE reg = $1`, [reg]);
+            if (vidRow.rows.length > 0) {
+              const { cancelStaleVanAllocationsOnReturn } = await import('../services/vha-dedup');
+              const cancelled = await cancelStaleVanAllocationsOnReturn({
+                vehicleId: vidRow.rows[0].id,
+                hhJobNumber: hhJob,
+              });
+              if (cancelled > 0) {
+                console.log(`[vehicles/events] check-in: cancelled ${cancelled} stale van allocation(s) for ${reg} / HH#${hhJob}`);
+              }
+            }
+          } catch (err) {
+            console.warn('[vehicles/events] check-in stale-allocation cleanup failed:', err);
+          }
         }
       } catch (err) {
         console.warn('[vehicles/events] check-in side-effect failed:', err);
+      }
+    }
+
+    // Soft check-in side effects: an INTERIM assessment of a van being taken
+    // out of service mid-hire (vehicle swap) or handed over by a freelancer,
+    // WITHOUT closing the hire. Unlike a full check-in this does NOT flip any
+    // assignment status — the caller (the swap endpoint) owns the assignment
+    // lifecycle. It only forces fleet hire_status to 'Not Ready' (a sticky
+    // value), which the final reconcile below then preserves rather than
+    // recomputing to 'On Hire' / 'Prep Needed'. No HH writeback, no close-out
+    // requirements — the hire continues (on a replacement van for the swap
+    // case). Mileage is logged generically above (the reading is real).
+    if (normalisedEventType === 'soft-check-in') {
+      try {
+        await query(
+          `UPDATE fleet_vehicles SET hire_status = 'Not Ready', updated_at = NOW() WHERE reg = $1`,
+          [reg]
+        );
+        console.log(`[vehicles/events] soft check-in: ${reg} → Not Ready (interim — hire continues elsewhere, no assignment flip)`);
+      } catch (err) {
+        console.warn('[vehicles/events] soft check-in side-effect failed:', err);
       }
     }
 
@@ -2690,9 +2800,17 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     }
   }
 
+  // Interim assessment = soft check-in (mid-hire swap / freelancer handover).
+  // Takes precedence over isCheckIn for titling — it's neither a clean
+  // book-out nor a final return.
+  const isInterim = data.isInterim === true;
   const isCheckIn = data.isCheckIn === true;
-  const reportTitle = isCheckIn ? 'VEHICLE CHECK-IN REPORT' : 'VEHICLE CONDITION REPORT';
-  const reportSubtitle = isCheckIn ? 'Return Record' : 'Book-Out Record';
+  const reportTitle = isInterim
+    ? 'INTERIM VEHICLE ASSESSMENT'
+    : isCheckIn ? 'VEHICLE CHECK-IN REPORT' : 'VEHICLE CONDITION REPORT';
+  const reportSubtitle = isInterim
+    ? 'Mid-Hire Assessment Record'
+    : isCheckIn ? 'Return Record' : 'Book-Out Record';
 
   addText(reportTitle, 0, 15, { size: 18, bold: true, color: [255, 255, 255], align: 'center' });
   addText(reportSubtitle, 0, 23, { size: 11, color: [180, 190, 210], align: 'center' });
@@ -2701,6 +2819,21 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   addText(timestamp, 0, 31, { size: 8, color: [140, 150, 170], align: 'center' });
 
   y = 48;
+
+  // Interim context banner — explains why there's no signature and that the
+  // hire is still live.
+  if (isInterim) {
+    pdf.setFillColor(255, 251, 235);
+    pdf.setDrawColor(253, 230, 138);
+    pdf.roundedRect(margin, y, contentWidth, 18, 2, 2, 'FD');
+    addText('Interim assessment captured during a mid-hire vehicle change.', margin + 4, y + 6.5, {
+      size: 9, bold: true, color: [146, 64, 14],
+    });
+    addText('The hire is continuing on a replacement vehicle. A full check-in will follow when this vehicle returns to base.', margin + 4, y + 12, {
+      size: 7.5, color: [146, 64, 14],
+    });
+    y += 24;
+  }
 
   // -- Vehicle Details --
   addText('VEHICLE DETAILS', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
@@ -3034,7 +3167,18 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
   addText('SIGNATURE', margin, y, { size: 11, bold: true, color: [27, 42, 78] });
   y += 3; addLine(y); y += 6;
 
-  if (isCheckIn && data.driverPresent === false) {
+  if (isInterim) {
+    pdf.setFillColor(248, 250, 252);
+    pdf.setDrawColor(203, 213, 225);
+    pdf.roundedRect(margin, y, contentWidth, 18, 2, 2, 'FD');
+    addText('No signature — interim assessment', margin + 4, y + 6.5, {
+      size: 9, bold: true, color: [71, 85, 105],
+    });
+    addText('Captured during a mid-hire vehicle change; the driver/customer is not necessarily present.', margin + 4, y + 12, {
+      size: 7.5, color: [71, 85, 105],
+    });
+    y += 22;
+  } else if (isCheckIn && data.driverPresent === false) {
     pdf.setFillColor(255, 251, 235);
     pdf.setDrawColor(253, 230, 138);
     pdf.roundedRect(margin, y, contentWidth, 14, 2, 2, 'FD');
@@ -3095,7 +3239,9 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     pdf.setFontSize(7);
     pdf.setTextColor(160, 160, 160);
     const generated = new Date().toISOString().split('T')[0];
-    const footerLabel = isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Condition Report';
+    const footerLabel = isInterim
+      ? 'Interim Vehicle Assessment'
+      : isCheckIn ? 'Vehicle Check-In Report' : 'Vehicle Condition Report';
     pdf.text(
       'Ooosh Tours Ltd - ' + footerLabel + ' - Generated ' + generated,
       pageWidth / 2, 292, { align: 'center' },
@@ -3114,7 +3260,7 @@ async function buildConditionReportPdf(data: any): Promise<{ pdfBytes: Uint8Arra
     : eventDateStr;
   const safeReg = String(data.vehicleReg || 'unknown').replace(/\s+/g, '-');
   const jobPart = data.hireHopJob ? '-Job' + data.hireHopJob : '';
-  const docType = isCheckIn ? 'check-in' : 'book-out';
+  const docType = isInterim ? 'interim' : isCheckIn ? 'check-in' : 'book-out';
   const filename = `${safeReg}-${ddmmyy}${jobPart}-${docType}.pdf`;
 
   return { pdfBytes, filename };
@@ -3479,6 +3625,8 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
     // Operator name — for regenerated PDFs we want the ORIGINAL operator,
     // not the staff member clicking the regenerate button. Read from the
     // assignment's booked_out_by / checked_in_by user reference.
+    const normalisedRegenType = String(event.eventType || '').toLowerCase().replace(/[\s_]+/g, '-');
+    const isInterimRegen = normalisedRegenType === 'soft-check-in';
     const isCheckInRegen = event.eventType === 'Check In' || event.eventType === 'check-in';
     const performedByName = await resolveOperatorNameForEvent(
       reg,
@@ -3506,8 +3654,9 @@ router.post('/events/:eventId/regenerate-pdf', async (req: AuthRequest, res: Res
       briefingItems: Array.isArray(event.briefingItems) ? event.briefingItems : [],
       bookOutNotes: notes,
       signatureBase64,
-      signatureMissing: !signatureBase64,
+      signatureMissing: !isInterimRegen && !signatureBase64,
       isCheckIn: isCheckInRegen,
+      isInterim: isInterimRegen,
     });
 
     const base64Pdf = Buffer.from(pdfBytes).toString('base64');
@@ -3946,6 +4095,13 @@ router.get('/fleet/:vehicleId/mileage', async (req: AuthRequest, res: Response) 
     );
     const stats = statsResult.rows[0] || {};
 
+    // Canonical "current mileage" is fleet_vehicles.current_mileage — NOT
+    // MAX(log). A stuck-high bad reading in the log must never drive the
+    // headline figure (see RX73TBZ, May 2026). One edit on the vehicle then
+    // updates the headline everywhere it's shown.
+    const fleetRow = await query('SELECT current_mileage FROM fleet_vehicles WHERE id = $1', [vehicleId]);
+    const canonicalMileage = fleetRow.rows[0]?.current_mileage ?? null;
+
     // Average daily mileage (from first to last reading)
     let avgDailyMileage: number | null = null;
     if (stats.first_reading && stats.last_reading && stats.min_mileage != null && stats.max_mileage != null) {
@@ -3968,7 +4124,7 @@ router.get('/fleet/:vehicleId/mileage', async (req: AuthRequest, res: Response) 
       })),
       total: Number(countResult.rows[0]?.count || 0),
       stats: {
-        currentMileage: stats.max_mileage ? Number(stats.max_mileage) : null,
+        currentMileage: canonicalMileage != null ? Number(canonicalMileage) : null,
         totalReadings: Number(stats.total_readings || 0),
         avgDailyMileage,
       },

@@ -19,6 +19,9 @@ import {
 } from '../services/assignment-overlap';
 import { syncFleetHireStatus } from '../services/fleet-hire-status-sync';
 import { syncVehicleRequirementStatus } from '../services/vehicle-requirement-sync';
+import { cancelOrphanSiblingAllocations, cancelStaleVanAllocationsOnReturn } from '../services/vha-dedup';
+import { createJobIssue, logIssueEvent } from '../services/job-issues';
+import { hhBroker } from '../services/hirehop-broker';
 
 const router = Router();
 router.use(authenticate);
@@ -541,6 +544,25 @@ router.post('/:id/book-out', validate(bookOutSchema), async (req: AuthRequest, r
       );
     }
 
+    // Orphan dedup: cancel any sibling staff-allocation row (driver_id NULL,
+    // never booked out) for the same (vehicle, job) now this row owns the van.
+    // Prevents the dual-row block-the-swap bug (15 May 2026 HLU/15613).
+    if (assignment.vehicle_id) {
+      try {
+        const cancelled = await cancelOrphanSiblingAllocations({
+          keepAssignmentId: String(id),
+          vehicleId: assignment.vehicle_id,
+          jobId: assignment.job_id ?? null,
+          hhJobNumber: assignment.hirehop_job_id ?? null,
+        });
+        if (cancelled > 0) {
+          console.log(`[assignments] book-out: cancelled ${cancelled} orphan staff-allocation sibling(s) for assignment ${id}`);
+        }
+      } catch (err) {
+        console.warn(`[assignments] orphan dedup failed for assignment ${id}:`, err);
+      }
+    }
+
     // Recompute fleet hire_status from current assignment state so the Fleet
     // page reflects reality. The helper is the single source of truth — it
     // sees the just-flipped 'booked_out' assignment and writes 'On Hire'.
@@ -607,6 +629,26 @@ router.post('/:id/check-in', validate(checkInSchema), async (req: AuthRequest, r
          WHERE id = $2`,
         [mileage_in, assignment.vehicle_id]
       );
+    }
+
+    // The van's back — cancel any stale van allocations on this (vehicle,
+    // job) that never booked out. Driver-agnostic: once the hire's returned,
+    // nothing un-booked-out on it is going anywhere. Prevents the dual-row
+    // block-the-swap class (15 May 2026 HLU/15613, where the orphan carried
+    // a driver_id and slipped past the book-out dedup).
+    if (assignment.vehicle_id) {
+      try {
+        const cancelled = await cancelStaleVanAllocationsOnReturn({
+          vehicleId: assignment.vehicle_id,
+          jobId: assignment.job_id ?? null,
+          hhJobNumber: assignment.hirehop_job_id ?? null,
+        });
+        if (cancelled > 0) {
+          console.log(`[assignments] check-in: cancelled ${cancelled} stale van allocation(s) for assignment ${id}`);
+        }
+      } catch (err) {
+        console.warn(`[assignments] check-in stale-allocation cleanup failed for ${id}:`, err);
+      }
     }
 
     // Recompute fleet hire_status — helper sees no active assignment and
@@ -934,7 +976,7 @@ router.get('/dispatch-check/:jobId', async (req: AuthRequest, res: Response) => 
       LEFT JOIN job_excess je ON je.assignment_id = vha.id
       WHERE vha.job_id = $1
         AND vha.assignment_type = 'self_drive'
-        AND vha.status != 'cancelled'`,
+        AND vha.status NOT IN ('cancelled', 'swapped')`,
       [jobId]
     );
 
@@ -1341,12 +1383,40 @@ router.post('/compat/allocations', async (req: AuthRequest, res: Response) => {
 // Original assignment gets status 'swapped'; new assignment is created for the replacement vehicle.
 const swapSchema = z.object({
   new_vehicle_id: z.string().uuid(),
+  // swap_reason carries the picklist code + free-text details combined by
+  // the frontend (e.g. "breakdown: brake pad failure on the M6").
   swap_reason: z.string().min(1).max(500),
+  // Soft check-in of the van being swapped OUT. All optional — staff often
+  // don't know mileage when a van's broken down 200 miles away.
+  soft_checkin: z.object({
+    mileage: z.number().int().nonnegative().optional().nullable(),
+    fuel_level: z.string().max(20).optional().nullable(),
+    location: z.string().max(500).optional().nullable(),
+    notes: z.string().max(2000).optional().nullable(),
+  }).optional(),
+  // Link this swap to a Problems-register issue, or create a new one.
+  issue_link: z.union([
+    z.object({ existing_issue_id: z.string().uuid() }),
+    z.object({
+      new_issue: z.object({
+        category: z.enum(['damaged', 'missing', 'broken', 'dispute', 'breakdown', 'other']).default('breakdown'),
+        severity: z.enum(['low', 'normal', 'urgent']).default('urgent'),
+        summary: z.string().trim().min(2).max(255),
+        description: z.string().trim().max(10000).optional().nullable(),
+      }),
+    }),
+  ]).optional().nullable(),
 });
 
-router.post('/:id/swap-vehicle', validate(swapSchema), async (req: AuthRequest, res: Response) => {
-  const { id } = req.params;
-  const { new_vehicle_id, swap_reason } = req.body;
+router.post(
+  '/:id/swap-vehicle',
+  // Breakdown/accident swaps carry reimbursement + insurance implications —
+  // gate to the managers. weekend_manager MUST be included (weekend incidents).
+  authorize('admin', 'manager', 'weekend_manager'),
+  validate(swapSchema),
+  async (req: AuthRequest, res: Response) => {
+  const id = String(req.params.id);
+  const { new_vehicle_id, swap_reason, soft_checkin, issue_link } = req.body as z.infer<typeof swapSchema>;
 
   try {
     // 1. Load original assignment
@@ -1384,84 +1454,228 @@ router.post('/:id/swap-vehicle', validate(swapSchema), async (req: AuthRequest, 
       return res.status(409).json(buildConflictPayload(swapConflicts, newVehicle.reg));
     }
 
-    // 3. Create new assignment for replacement vehicle (same driver, job, dates)
-    const newResult = await query(
-      `INSERT INTO vehicle_hire_assignments (
-        vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
-        driver_id, assignment_type,
-        van_requirement_index, required_type, required_gearbox,
-        status, status_changed_at,
-        hire_start, hire_end, start_time, end_time, return_overnight,
-        client_email, notes, created_by
-      ) VALUES (
-        $1, $2, $3, $4,
-        $5, $6,
-        $7, $8, $9,
-        'confirmed', NOW(),
-        NOW(), $10, $11, $12, $13,
-        $14, $15, $16
-      ) RETURNING *`,
-      [
-        new_vehicle_id, orig.job_id, orig.hirehop_job_id, orig.hirehop_job_name,
-        orig.driver_id, orig.assignment_type,
-        orig.van_requirement_index, orig.required_type, orig.required_gearbox,
-        orig.hire_end, orig.start_time, orig.end_time, orig.return_overnight,
-        orig.client_email,
-        `Swapped from ${orig.vehicle_reg || 'unknown'}: ${swap_reason}`,
-        req.user!.id,
-      ]
+    // 3. Multi-driver cascade — a physical van change moves EVERY driver on
+    // that van slot. Find all occupying assignments sharing the old van on
+    // the same job (the target row + any siblings) and swap them as a unit.
+    const slotResult = await query(
+      `SELECT a.*, d.full_name AS driver_name
+         FROM vehicle_hire_assignments a
+         LEFT JOIN drivers d ON d.id = a.driver_id
+        WHERE a.vehicle_id = $1
+          AND a.status IN ('soft', 'confirmed', 'booked_out', 'active')
+          AND (
+            ($2::uuid IS NOT NULL AND a.job_id = $2::uuid)
+            OR ($3::integer IS NOT NULL AND a.hirehop_job_id = $3::integer)
+          )
+        ORDER BY a.created_at`,
+      [orig.vehicle_id, orig.job_id ?? null, orig.hirehop_job_id ?? null]
     );
-    const newAssignment = newResult.rows[0];
+    // Always include the explicitly-targeted row even if the slot query
+    // somehow misses it (e.g. unusual status).
+    const slotRows = slotResult.rows.some((r: any) => r.id === id)
+      ? slotResult.rows
+      : [orig, ...slotResult.rows];
 
-    // 4. Mark original as swapped
-    await query(
-      `UPDATE vehicle_hire_assignments
-       SET status = 'swapped', swap_reason = $1, swapped_at = NOW(), swapped_to_assignment_id = $2, status_changed_at = NOW()
-       WHERE id = $3`,
-      [swap_reason, newAssignment.id, id]
-    );
+    const swapped: Array<{ oldId: string; newId: string; driverName: string | null; hadVe103b: boolean }> = [];
+    for (const row of slotRows) {
+      const newRow = await query(
+        `INSERT INTO vehicle_hire_assignments (
+          vehicle_id, job_id, hirehop_job_id, hirehop_job_name,
+          driver_id, assignment_type, freelancer_person_id,
+          van_requirement_index, required_type, required_gearbox,
+          status, status_changed_at,
+          hire_start, hire_end, start_time, end_time, return_overnight,
+          client_email, notes, created_by
+        ) VALUES (
+          $1, $2, $3, $4,
+          $5, $6, $7,
+          $8, $9, $10,
+          'confirmed', NOW(),
+          NOW(), $11, $12, $13, $14,
+          $15, $16, $17
+        ) RETURNING id`,
+        [
+          new_vehicle_id, row.job_id, row.hirehop_job_id, row.hirehop_job_name,
+          row.driver_id, row.assignment_type, row.freelancer_person_id ?? null,
+          row.van_requirement_index, row.required_type, row.required_gearbox,
+          row.hire_end, row.start_time, row.end_time, row.return_overnight,
+          row.client_email,
+          `Swapped from ${orig.vehicle_reg || 'unknown'}: ${swap_reason}`,
+          req.user!.id,
+        ]
+      );
+      const newId = newRow.rows[0].id as string;
 
-    // 5. Copy excess record to new assignment
-    await query(
-      `INSERT INTO job_excess (assignment_id, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, created_by)
-       SELECT $1, job_id, hirehop_job_id, excess_amount_required, excess_calculation_basis, excess_status, $2
-       FROM job_excess WHERE assignment_id = $3 LIMIT 1`,
-      [newAssignment.id, req.user!.id, id]
-    );
+      await query(
+        `UPDATE vehicle_hire_assignments
+         SET status = 'swapped', swap_reason = $1, swapped_at = NOW(),
+             swapped_to_assignment_id = $2, status_changed_at = NOW(), updated_at = NOW()
+         WHERE id = $3`,
+        [swap_reason, newId, row.id]
+      );
 
-    // 6. Recompute hire_status on both vehicles. Old van: assignment is now
-    // 'swapped' (not occupying), helper transitions 'On Hire' → 'Prep Needed'
-    // if the original was already booked out, otherwise preserves. New van:
-    // assignment is 'confirmed', no flip until book-out completes — helper
-    // preserves whatever value it had ('Available' usually).
+      // Move any excess record to the new assignment — re-point, don't COPY.
+      // The £X held is the SAME money following the hire to the new van, not
+      // a new charge. Copying would double-count: the swapped row keeps its
+      // job_excess record AND the new row gets one, so the Money tab (which
+      // sums taken across all rows on the job) and the client ledger would
+      // both read 2× the real held amount. Re-pointing keeps exactly one row.
+      await query(
+        `UPDATE job_excess SET assignment_id = $1 WHERE assignment_id = $2`,
+        [newId, row.id]
+      );
+
+      swapped.push({
+        oldId: row.id,
+        newId,
+        driverName: row.driver_name ?? null,
+        hadVe103b: Boolean(row.ve103b_ref),
+      });
+    }
+
+    // The assignment row the staff member clicked "Swap" on — its replacement
+    // is the one we redirect to BookOutPage for (the lead row).
+    const leadSwap = swapped.find(s => s.oldId === id) || swapped[0];
+
+    // 4. Soft check-in of the van being swapped OUT — set fleet status to
+    // 'Not Ready' (sticky). The van's off to a garage / tow truck; it's not
+    // available until repaired + re-prepped. syncFleetHireStatus below
+    // preserves 'Not Ready'. We also record the soft-checkin mileage if given.
+    if (orig.vehicle_id) {
+      await query(
+        `UPDATE fleet_vehicles SET hire_status = 'Not Ready', updated_at = NOW() WHERE id = $1`,
+        [orig.vehicle_id]
+      );
+      if (soft_checkin?.mileage && soft_checkin.mileage > 0) {
+        await query(
+          `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
+           VALUES ($1, $2, 'soft_check_in', $3, $4)`,
+          [orig.vehicle_id, soft_checkin.mileage, id, req.user!.id]
+        ).catch(err => console.warn('[assignments] swap soft-checkin mileage log failed:', err));
+        await query(
+          `UPDATE fleet_vehicles
+             SET current_mileage = GREATEST(COALESCE(current_mileage, 0), $1), last_mileage_update = NOW()
+           WHERE id = $2`,
+          [soft_checkin.mileage, orig.vehicle_id]
+        ).catch(() => {});
+      }
+    }
+
+    // 5. Link or create a Problems-register issue for this swap.
+    let issueId: string | null = null;
+    try {
+      const softLine = soft_checkin
+        ? [
+            soft_checkin.location ? `Location: ${soft_checkin.location}` : null,
+            soft_checkin.mileage != null ? `Mileage: ${soft_checkin.mileage}` : null,
+            soft_checkin.fuel_level ? `Fuel: ${soft_checkin.fuel_level}` : null,
+            soft_checkin.notes ? `Notes: ${soft_checkin.notes}` : null,
+          ].filter(Boolean).join(' · ')
+        : '';
+      const swapBody =
+        `Swapped ${orig.vehicle_reg || 'vehicle'} → ${newVehicle.reg} (${swapped.length} driver(s)). ` +
+        `Reason: ${swap_reason}.${softLine ? ' ' + softLine : ''}`;
+
+      if (issue_link && 'existing_issue_id' in issue_link) {
+        const existing = await query(
+          `SELECT id, severity FROM job_issues WHERE id = $1 AND status NOT IN ('resolved', 'written_off', 'cancelled')`,
+          [issue_link.existing_issue_id]
+        );
+        if (existing.rows.length > 0) {
+          issueId = existing.rows[0].id;
+          await logIssueEvent(issueId!, req.user!.id, 'swap_logged', swapBody, {
+            old_vehicle: orig.vehicle_reg, new_vehicle: newVehicle.reg,
+            reason: swap_reason, soft_checkin: soft_checkin ?? null,
+            old_assignment_id: id, new_assignment_id: leadSwap?.newId ?? null,
+          });
+          // Breakdown/accident makes a low-severity issue acute — bump it.
+          if (existing.rows[0].severity === 'low') {
+            await query(`UPDATE job_issues SET severity = 'urgent', updated_at = NOW() WHERE id = $1`, [issueId]);
+          }
+        }
+      } else if (issue_link && 'new_issue' in issue_link) {
+        issueId = await createJobIssue({
+          reportedByUserId: req.user!.id,
+          category: issue_link.new_issue.category,
+          severity: issue_link.new_issue.severity,
+          summary: issue_link.new_issue.summary,
+          description: issue_link.new_issue.description ?? null,
+          sourceModule: 'vehicle',
+          jobId: orig.job_id ?? null,
+          vehicleId: orig.vehicle_id,
+          driverId: orig.driver_id ?? null,
+          echoToJobTimeline: false, // the swap interaction below covers the timeline
+        });
+        await logIssueEvent(issueId, req.user!.id, 'swap_logged', swapBody, {
+          old_vehicle: orig.vehicle_reg, new_vehicle: newVehicle.reg,
+          reason: swap_reason, soft_checkin: soft_checkin ?? null,
+          old_assignment_id: id, new_assignment_id: leadSwap?.newId ?? null,
+        });
+      }
+    } catch (err) {
+      console.warn('[assignments] swap issue link/create failed (non-fatal):', err);
+    }
+
+    // 6. Recompute hire_status on both vehicles + the vehicle requirement.
     if (orig.vehicle_id) await syncFleetHireStatus(orig.vehicle_id);
     await syncFleetHireStatus(new_vehicle_id);
-
-    // Vehicle requirement: count is unchanged (1 swapped out, 1 swapped in)
-    // but recompute anyway for safety — handles edge cases like swapping
-    // when the new assignment can't be created for some reason.
     if (orig.job_id) {
       syncVehicleRequirementStatus(orig.job_id).catch(err => {
         console.warn(`[assignments] swap-vehicle requirement sync failed:`, err);
       });
     }
 
-    console.log(`[assignments] Vehicle swapped: ${orig.vehicle_reg} → ${newVehicle.reg} (assignment ${id} → ${newAssignment.id})`);
+    // 7. Job timeline interaction — the swap story on the Activity Timeline.
+    if (orig.job_id) {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by)
+         VALUES ('note', $1, $2, $3)`,
+        [
+          `🔄 Vehicle swapped: ${orig.vehicle_reg || 'unknown'} → ${newVehicle.reg} ` +
+          `(${swapped.length} driver(s)). Reason: ${swap_reason}.` +
+          (issueId ? ` Issue logged.` : ''),
+          orig.job_id, req.user!.id,
+        ]
+      ).catch(err => console.warn('[assignments] swap timeline interaction failed:', err));
+    }
 
-    // Return both assignments
+    // 8. HireHop job memo note — operational visibility for HH-only staff.
+    const hhJobForNote = orig.hirehop_job_id;
+    if (hhJobForNote) {
+      hhBroker.get('/api/job_note.php', {
+        job: hhJobForNote,
+        note: `Mid-hire vehicle swap on ${new Date().toLocaleDateString('en-GB')}: ` +
+              `${orig.vehicle_reg || 'unknown'} → ${newVehicle.reg}. Reason: ${swap_reason}.`,
+      }, { priority: 'low' }).catch(err => console.warn('[assignments] swap HH note failed:', err));
+    }
+
+    // VE103B: scoped to the lead driver's cert. We can't auto-regenerate (a
+    // new pre-printed cert number is required), so flag it for the staff to
+    // generate manually from the VE103B page for the replacement van.
+    const ve103bRegenNeeded = swapped.some(s => s.hadVe103b);
+
+    console.log(`[assignments] Vehicle swapped: ${orig.vehicle_reg} → ${newVehicle.reg} (${swapped.length} driver(s), lead ${id} → ${leadSwap?.newId})`);
+
     const fullNew = await query(
       `SELECT a.*, fv.reg AS vehicle_reg, d.full_name AS driver_name
        FROM vehicle_hire_assignments a
        LEFT JOIN fleet_vehicles fv ON fv.id = a.vehicle_id
        LEFT JOIN drivers d ON d.id = a.driver_id
        WHERE a.id = $1`,
-      [newAssignment.id]
+      [leadSwap?.newId]
     );
 
     res.status(201).json({
       data: {
         original: { id, status: 'swapped', swap_reason, vehicle_reg: orig.vehicle_reg },
         replacement: fullNew.rows[0],
+        swapped_count: swapped.length,
+        issue_id: issueId,
+        ve103b_regen_needed: ve103bRegenNeeded,
+        ve103b_reg: ve103bRegenNeeded ? newVehicle.reg : null,
+        // Frontend redirects here for the replacement van's fresh book-out
+        // (walkaround + hire agreement PDF email).
+        redirect_to: `/vehicles/book-out?vehicle=${new_vehicle_id}${orig.hirehop_job_id ? `&job=${orig.hirehop_job_id}` : ''}&assignment=${leadSwap?.newId}`,
       },
     });
   } catch (error) {

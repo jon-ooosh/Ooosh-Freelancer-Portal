@@ -16,7 +16,14 @@ interface OutstandingInvoice {
   date: string | null;
 }
 
-type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit';
+type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release';
+
+const CAPTURE_METHODS = [
+  { value: 'stripe_gbp', label: 'Stripe (online card pre-auth)' },
+  { value: 'worldpay', label: 'Worldpay (card machine pre-auth)' },
+  { value: 'amex', label: 'Amex (card machine pre-auth)' },
+  { value: 'till_cash', label: 'Cash held' },
+];
 
 interface ExcessPaymentModalProps {
   excess: JobExcess;
@@ -54,7 +61,8 @@ function statusLabel(status: ExcessStatus): string {
     taken: 'Taken',
     partially_paid: 'Partially Paid',
     partial: 'Partially Paid', // legacy compat
-    pre_auth: 'Pre-auth Taken',
+    pre_auth: 'Pre-auth Held',
+    released: 'Released',
     waived: 'Waived',
     fully_claimed: 'Fully Claimed',
     claimed: 'Fully Claimed', // legacy compat
@@ -74,6 +82,7 @@ function statusColor(status: ExcessStatus): string {
     partially_paid: 'bg-yellow-100 text-yellow-800',
     partial: 'bg-yellow-100 text-yellow-800',
     pre_auth: 'bg-sky-100 text-sky-800',
+    released: 'bg-gray-100 text-gray-600',
     waived: 'bg-blue-100 text-blue-800',
     fully_claimed: 'bg-red-100 text-red-800',
     claimed: 'bg-red-100 text-red-800',
@@ -119,7 +128,9 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   // clear error if the claim is missing the invoice picker selection.
   const isHhLinked = Boolean(excess.hirehop_job_id);
   useEffect(() => {
-    if (action !== 'claim' || !isHhLinked) return;
+    // Both claim and capture offer an invoice picker (capture's is optional —
+    // atomic capture-and-apply). Fetch outstanding invoices for either.
+    if ((action !== 'claim' && action !== 'capture') || !isHhLinked) return;
     let cancelled = false;
     setLoadingInvoices(true);
     setInvoicesError('');
@@ -127,8 +138,9 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
       .then((r) => {
         if (cancelled) return;
         setOutstandingInvoices(r.data);
-        // Auto-select if exactly one invoice — common case.
-        if (r.data.length === 1) setClaimInvoiceId(r.data[0]!.id);
+        // Auto-select if exactly one invoice — common case (claim only; capture
+        // leaves it unselected since applying-to-invoice is opt-in there).
+        if (r.data.length === 1 && action === 'claim') setClaimInvoiceId(r.data[0]!.id);
       })
       .catch((err: any) => {
         if (cancelled) return;
@@ -144,6 +156,30 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const claimAvailable = Number(excess.excess_amount_taken || 0)
     - Number(excess.claim_amount || 0)
     - Number(excess.reimbursement_amount || 0);
+
+  // Pre-auth hold amount (migration 087). DISTINCT from `amountHeld` below, which
+  // is the remaining balance of TAKEN money. `preAuthHeld` is money on a Stripe /
+  // card-machine hold that hasn't been captured yet.
+  const preAuthHeld = Number(excess.amount_held || 0);
+
+  // Capture form — converts a held pre-auth into taken money. Default amount is
+  // the full hold (most common: capture exactly what's needed for a known
+  // charge). Method defaults to the record's payment_method (the channel the
+  // hold was taken on) so Stripe holds capture via Stripe, card-machine holds
+  // record passively.
+  const [captureAmount, setCaptureAmount] = useState(preAuthHeld > 0 ? preAuthHeld.toFixed(2) : '');
+  const captureDefaultMethod = excess.payment_method && CAPTURE_METHODS.some((m) => m.value === excess.payment_method)
+    ? excess.payment_method
+    : 'stripe_gbp';
+  const [captureMethod, setCaptureMethod] = useState(captureDefaultMethod);
+  const [captureInvoiceId, setCaptureInvoiceId] = useState<number | null>(null);
+  const [captureReason, setCaptureReason] = useState('');
+  const [captureNotes, setCaptureNotes] = useState('');
+  const [captureWarning, setCaptureWarning] = useState<string | null>(null);
+
+  // Release form
+  const [releaseReason, setReleaseReason] = useState('');
+  const [releaseNotes, setReleaseNotes] = useState('');
 
   // Reimburse form
   // Default to the original payment method IF it's a real bank method we can refund
@@ -325,6 +361,41 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
         case 'unlink_deposit':
           await api.post(`/excess/${excess.id}/unlink-deposit`, {});
           break;
+        case 'capture': {
+          const captureAmountNum = parseFloat(captureAmount);
+          if (isNaN(captureAmountNum) || captureAmountNum <= 0) {
+            throw new Error('Enter a valid capture amount');
+          }
+          if (captureAmountNum > preAuthHeld + 0.005) {
+            throw new Error(`Capture amount exceeds held amount (£${preAuthHeld.toFixed(2)})`);
+          }
+          const resp = await api.post<{ data: any; warning?: string }>(
+            `/excess/${excess.id}/capture`,
+            {
+              amount: captureAmountNum,
+              method: captureMethod,
+              invoice_id: captureInvoiceId,
+              reason: captureReason || null,
+              notes: captureNotes || null,
+            }
+          );
+          if (resp.warning) {
+            // Capture + deposit succeeded but apply-to-invoice failed (or a
+            // card-machine receipt is outstanding). Surface and keep the modal
+            // open — the money is correctly tracked, just needs a follow-up.
+            setCaptureWarning(resp.warning);
+            onUpdated();
+            setLoading(false);
+            return;
+          }
+          break;
+        }
+        case 'release':
+          await api.post(`/excess/${excess.id}/release`, {
+            reason: releaseReason || null,
+            notes: releaseNotes || null,
+          });
+          break;
       }
       onUpdated();
       onClose();
@@ -348,7 +419,15 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
     availableActions.push({ action: 'payment', label: 'Record Payment', icon: '£' });
   }
-  if ((s === 'taken' || s === 'partially_paid' || s === 'pre_auth') && amountHeld > 0) {
+  // Pre-auth holds: capture (→ taken) or release (→ released). These REPLACE
+  // claim/reimburse for held money — you can't claim or reimburse a hold, you
+  // capture or release it first (migration 087). Capture supports atomic
+  // capture-and-apply-to-invoice for the common "capture exactly the damage" case.
+  if (s === 'pre_auth' && preAuthHeld > 0) {
+    availableActions.push({ action: 'capture', label: 'Capture (claim from hold)', icon: '£' });
+    availableActions.push({ action: 'release', label: 'Release Hold', icon: '○' });
+  }
+  if ((s === 'taken' || s === 'partially_paid') && amountHeld > 0) {
     availableActions.push({ action: 'claim', label: 'Apply to Invoice (claim)', icon: '!' });
     availableActions.push({ action: 'reimburse', label: 'Reimburse', icon: '<' });
     availableActions.push({ action: 'rollover', label: 'Roll Over to Next Hire', icon: '>' });
@@ -363,7 +442,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   // Amend the required excess figure — available whenever the record isn't in a
   // terminal state. Primary case: insurance referral comes back with a revised
   // excess after the hire form has already been submitted.
-  if (s !== 'waived' && s !== 'reimbursed' && s !== 'rolled_over' && s !== 'not_required') {
+  if (s !== 'waived' && s !== 'reimbursed' && s !== 'rolled_over' && s !== 'not_required' && s !== 'released') {
     availableActions.push({ action: 'edit_required', label: 'Edit Required Amount', icon: '✎' });
   }
   if (s === 'needed' || s === 'pending') {
@@ -414,9 +493,11 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               </p>
             </div>
             <div>
-              <p className="text-xs text-gray-500">Collected</p>
-              <p className="text-lg font-semibold text-green-700">
-                £{Number(excess.excess_amount_taken || 0).toFixed(2)}
+              <p className="text-xs text-gray-500">{preAuthHeld > 0 ? 'Held' : 'Collected'}</p>
+              <p className={`text-lg font-semibold ${preAuthHeld > 0 ? 'text-sky-700' : 'text-green-700'}`}>
+                {preAuthHeld > 0
+                  ? `£${preAuthHeld.toFixed(2)}`
+                  : `£${Number(excess.excess_amount_taken || 0).toFixed(2)}`}
               </p>
             </div>
             <div>
@@ -426,6 +507,30 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               </span>
             </div>
           </div>
+          {/* Pre-auth hold: show expiry countdown so staff capture or release before
+              Stripe / the acquirer auto-voids at the 5-day mark. */}
+          {excess.excess_status === 'pre_auth' && excess.held_expires_at && (
+            <div className="mt-3 px-3 py-2 bg-sky-50 border border-sky-200 rounded-md">
+              <p className="text-xs text-sky-800">
+                {(() => {
+                  const expires = new Date(excess.held_expires_at);
+                  const daysLeft = Math.ceil((expires.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+                  const dateStr = expires.toLocaleDateString('en-GB');
+                  if (daysLeft <= 0) return `Hold expired ${dateStr} — likely already auto-released by Stripe. Verify before capturing.`;
+                  if (daysLeft === 1) return `Hold expires tomorrow (${dateStr}) — capture or release today.`;
+                  return `Hold expires in ${daysLeft} days (${dateStr}). Capture what you need or release the rest before it auto-voids.`;
+                })()}
+              </p>
+            </div>
+          )}
+          {excess.excess_status === 'released' && (Number(excess.amount_released || 0) > 0) && (
+            <div className="mt-3 px-3 py-2 bg-gray-50 border border-gray-200 rounded-md">
+              <p className="text-xs text-gray-600">
+                £{Number(excess.amount_released).toFixed(2)} released without capture
+                {excess.released_at && ` on ${new Date(excess.released_at).toLocaleDateString('en-GB')}`}.
+              </p>
+            </div>
+          )}
           {excess.dispatch_override && (
             <div className="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md">
               <p className="text-xs text-amber-700">
@@ -836,6 +941,143 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     value={moveReason}
                     onChange={(e) => setMoveReason(e.target.value)}
                     placeholder="Why is this being moved?"
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  />
+                </div>
+              </div>
+            )}
+
+            {action === 'capture' && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900">Capture Pre-Auth</h3>
+                {captureWarning && (
+                  <div className="px-3 py-2 text-xs bg-amber-50 border border-amber-200 rounded-md text-amber-800">
+                    <div className="font-semibold mb-1">Captured — follow-up needed</div>
+                    <div>{captureWarning}</div>
+                  </div>
+                )}
+                <div className="px-3 py-2 bg-sky-50 border border-sky-200 rounded-md text-xs text-sky-800">
+                  £{preAuthHeld.toFixed(2)} is on hold. Capturing is <strong>one-shot</strong> — whatever you
+                  don't capture is released automatically (Stripe / the card machine voids the rest).
+                  You can't capture again from this hold afterwards.
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Amount to capture</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={captureAmount}
+                      onChange={(e) => setCaptureAmount(e.target.value)}
+                      className="w-full text-sm border border-gray-300 rounded-md pl-7 pr-3 py-2"
+                    />
+                  </div>
+                  {parseFloat(captureAmount) > 0 && parseFloat(captureAmount) < preAuthHeld && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      £{(preAuthHeld - parseFloat(captureAmount)).toFixed(2)} will be released.
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Hold channel</label>
+                  <select
+                    value={captureMethod}
+                    onChange={(e) => setCaptureMethod(e.target.value)}
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  >
+                    {CAPTURE_METHODS.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {captureMethod === 'stripe_gbp'
+                      ? 'OP captures via the Stripe API automatically.'
+                      : 'Capture the amount on the card machine, then record it here. The rest releases on the acquirer\'s clock.'}
+                  </p>
+                </div>
+                {isHhLinked && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Apply to invoice (optional)
+                    </label>
+                    {loadingInvoices ? (
+                      <p className="text-xs text-gray-500">Loading invoices…</p>
+                    ) : invoicesError ? (
+                      <p className="text-xs text-red-600">{invoicesError}</p>
+                    ) : outstandingInvoices.length === 0 ? (
+                      <p className="text-xs text-gray-500">
+                        No outstanding invoices. Capture now and apply later via Claim, or create the
+                        invoice in HireHop first.
+                      </p>
+                    ) : (
+                      <select
+                        value={captureInvoiceId ?? ''}
+                        onChange={(e) => setCaptureInvoiceId(e.target.value ? Number(e.target.value) : null)}
+                        className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                      >
+                        <option value="">Don't apply yet — just capture</option>
+                        {outstandingInvoices.map((inv) => (
+                          <option key={inv.id} value={inv.id}>
+                            {inv.number} · £{inv.owing.toFixed(2)} owing
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <p className="mt-1 text-xs text-gray-500">
+                      Applying earmarks the captured money against a HireHop invoice in one step. Leave
+                      unset to capture into the account and decide later.
+                    </p>
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Reason</label>
+                  <input
+                    type="text"
+                    value={captureReason}
+                    onChange={(e) => setCaptureReason(e.target.value)}
+                    placeholder="e.g. Underfuelling, damage to nearside panel"
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+                  <textarea
+                    value={captureNotes}
+                    onChange={(e) => setCaptureNotes(e.target.value)}
+                    rows={2}
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  />
+                </div>
+              </div>
+            )}
+
+            {action === 'release' && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900">Release Hold</h3>
+                <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded-md text-xs text-gray-700">
+                  Releases the full £{preAuthHeld.toFixed(2)} hold without capturing any of it. No money
+                  moves.
+                  {excess.payment_method === 'stripe_gbp'
+                    ? ' OP voids the Stripe hold immediately.'
+                    : ' The card machine hold expires on the acquirer\'s clock — this just records that we\'re not claiming it.'}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Reason (optional)</label>
+                  <input
+                    type="text"
+                    value={releaseReason}
+                    onChange={(e) => setReleaseReason(e.target.value)}
+                    placeholder="e.g. Van returned clean, no charges"
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+                  <textarea
+                    value={releaseNotes}
+                    onChange={(e) => setReleaseNotes(e.target.value)}
+                    rows={2}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
                   />
                 </div>

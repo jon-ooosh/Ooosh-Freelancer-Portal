@@ -484,9 +484,37 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                   </p>
                   <p className="text-xs text-gray-500">
                     Required: {record.excess_amount_required != null ? `£${Number(record.excess_amount_required).toFixed(2)}` : '—'}
-                    {' · '}
-                    Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
+                    {Number(record.amount_held || 0) > 0 ? (
+                      <>
+                        {' · '}
+                        <span className="text-sky-700">Held: £{Number(record.amount_held).toFixed(2)}</span>
+                      </>
+                    ) : (
+                      <>
+                        {' · '}
+                        Collected: £{Number(record.excess_amount_taken || 0).toFixed(2)}
+                      </>
+                    )}
+                    {Number(record.amount_released || 0) > 0 && (
+                      <>
+                        {' · '}
+                        <span className="text-gray-400">Released: £{Number(record.amount_released).toFixed(2)}</span>
+                      </>
+                    )}
                   </p>
+                  {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
+                    const daysLeft = Math.ceil((new Date(record.held_expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+                    const cls = daysLeft <= 1 ? 'text-red-600' : daysLeft <= 2 ? 'text-amber-600' : 'text-sky-600';
+                    return (
+                      <p className={`text-[11px] mt-0.5 font-medium ${cls}`}>
+                        {daysLeft <= 0
+                          ? 'Hold expired — capture or release'
+                          : daysLeft === 1
+                            ? 'Hold expires tomorrow'
+                            : `Hold expires in ${daysLeft} days`}
+                      </p>
+                    );
+                  })()}
                 </div>
                 <button
                   onClick={() => setActionExcess(record)}

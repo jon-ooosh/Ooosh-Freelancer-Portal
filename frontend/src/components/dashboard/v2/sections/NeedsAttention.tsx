@@ -237,6 +237,28 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     })),
     viewAllHref: '/money/excess',
   };
+  // Pre-auth holds expiring soon (migration 087). Red accent — time-critical:
+  // the hold auto-voids at the 5-day mark, so staff must capture or release
+  // before the collateral evaporates. Click → Job Detail Money tab to action.
+  const expiringHolds: NABucket = {
+    key: 'expiring_holds',
+    title: 'Pre-auth Holds Expiring',
+    accent: 'red',
+    count: na.expiring_holds_count || 0,
+    items: (na.expiring_holds || []).map((h) => ({
+      id: h.excess_id,
+      label: h.driver_name || h.job_name || `Job #${h.hh_job_number ?? '—'}`,
+      age: `£${Math.round(h.amount_held ?? 0)}`,
+      sub: h.days_until_expiry <= 0
+        ? 'expired — verify'
+        : h.days_until_expiry === 1
+          ? 'expires tomorrow'
+          : `expires in ${h.days_until_expiry}d`,
+      tag: h.vehicle_reg ?? undefined,
+      href: h.job_uuid ? `/jobs/${h.job_uuid}` : '/money/excess',
+    })),
+    viewAllHref: '/money/excess?status=pre_auth',
+  };
   // Transport arrangements to action — quotes in next 7 days on a
   // confirmed/pre-dispatch job where any arranging pill (client intro /
   // tolls / accommodation / flights) is still outstanding. Replaces the
@@ -321,7 +343,10 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
 
   const allClear = overdueTotal === 0;
   const overdueBuckets = [departures, completions, backline, transport];
-  const secondaryBuckets = [referrals, excess, transportArrangements, fleetBucket, problemsBucket];
+  // expiringHolds leads the secondary row — red accent, time-critical (hold
+  // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
+  // catches the eye when present.
+  const secondaryBuckets = [expiringHolds, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (
