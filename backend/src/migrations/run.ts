@@ -124,6 +124,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '087_preauth_lifecycle.sql',
         '088_fleet_service_alerts.sql',
         '089_fix_excess_requirement_coverage.sql',
+        '090_fix_excess_resolve_coverage.sql',
       ];
 
       for (const migration of migrations) {
