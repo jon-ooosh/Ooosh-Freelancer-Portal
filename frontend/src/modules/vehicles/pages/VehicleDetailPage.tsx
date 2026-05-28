@@ -15,7 +15,8 @@ import type { ComplianceSettings } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import { getAuthHeaders } from '../config/api-config'
 import { getDateUrgency } from '../types/vehicle'
-import type { DateUrgency, DateUrgencyMode, VehicleFile } from '../types/vehicle'
+import type { DateUrgency, DateUrgencyMode, VehicleFile, SetupChecklistItem } from '../types/vehicle'
+import { mergeChecklist, buildDefaultChecklist, checklistProgress } from '../lib/setup-checklist'
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return '—'
@@ -344,6 +345,9 @@ export function VehicleDetailPage() {
       {/* Details tab */}
       {activeTab === 'details' && <>
 
+      {/* Setup checklist — onboarding tasks for a newly added vehicle */}
+      <SetupChecklistCard vehicleId={vehicle.id} checklist={vehicle.setupChecklist} canEdit={isAdmin} />
+
       {/* Status */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Status</h3>
@@ -546,10 +550,149 @@ export function VehicleDetailPage() {
         <EditableRow label="Spare Key" value={vehicle.spareKey} type="toggle" onSave={v => saveField('spare_key', v)} />
       </div>
 
+      {/* Notes */}
+      <NotesCard vehicleId={vehicle.id} notes={vehicle.notes} />
+
       {/* Vehicle Files */}
       <VehicleFilesSection vehicleId={vehicle.id} files={vehicle.files || []} />
 
       </>}
+    </div>
+  )
+}
+
+/** Free-text per-vehicle notes — inline editable. */
+function NotesCard({ vehicleId, notes }: { vehicleId: string; notes: string | null }) {
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(notes || '')
+  const [saving, setSaving] = useState(false)
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      await updateVehicle(vehicleId, { notes: value.trim() || null })
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+      setEditing(false)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save notes')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Notes</h3>
+        {!editing && (
+          <button
+            type="button"
+            onClick={() => { setValue(notes || ''); setEditing(true) }}
+            className="text-[10px] text-gray-400 hover:text-blue-600"
+          >
+            Edit
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <div className="space-y-2">
+          <textarea
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            rows={4}
+            placeholder="Anything worth knowing about this vehicle…"
+            className="w-full resize-y rounded border border-gray-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
+            autoFocus
+          />
+          <div className="flex gap-2">
+            <button type="button" onClick={save} disabled={saving}
+              className="rounded bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-ooosh-navy/90 disabled:opacity-50">
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button type="button" onClick={() => setEditing(false)}
+              className="rounded border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className={`whitespace-pre-wrap text-sm ${notes ? 'text-gray-700' : 'text-gray-400'}`}>
+          {notes || 'No notes yet.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** New-vehicle setup checklist — tickable onboarding tasks. */
+function SetupChecklistCard({ vehicleId, checklist, canEdit }: { vehicleId: string; checklist: SetupChecklistItem[]; canEdit: boolean }) {
+  const queryClient = useQueryClient()
+  const [saving, setSaving] = useState(false)
+  const merged = mergeChecklist(checklist)
+  const started = merged.length > 0
+  const { done, total } = checklistProgress(checklist)
+  const complete = started && done === total
+
+  const persist = async (items: SetupChecklistItem[]) => {
+    setSaving(true)
+    try {
+      await updateVehicle(vehicleId, { setup_checklist: items })
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save checklist')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const toggle = (key: string) => {
+    if (!canEdit) return
+    persist(merged.map(i => i.key === key
+      ? { ...i, done: !i.done, doneAt: !i.done ? new Date().toISOString() : null }
+      : i))
+  }
+
+  // Legacy vehicle with no checklist — offer to start one (admin only).
+  if (!started) {
+    if (!canEdit) return null
+    return (
+      <div className="rounded-lg border border-gray-200 bg-white p-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Setup Checklist</h3>
+          <button
+            type="button"
+            onClick={() => persist(buildDefaultChecklist())}
+            disabled={saving}
+            className="rounded border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+          >
+            Start setup checklist
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className={`rounded-lg border p-4 ${complete ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'}`}>
+      <h3 className={`mb-2 text-sm font-semibold uppercase tracking-wide ${complete ? 'text-green-700' : 'text-amber-700'}`}>
+        Setup Checklist
+        <span className="ml-1.5 font-normal">{complete ? '✓ Complete' : `${done}/${total}`}</span>
+      </h3>
+      <div className="space-y-1">
+        {merged.map(item => (
+          <label key={item.key} className={`flex items-center gap-2 text-sm ${canEdit ? 'cursor-pointer' : ''} ${item.done ? 'text-gray-400 line-through' : 'text-gray-700'}`}>
+            <input
+              type="checkbox"
+              checked={item.done}
+              disabled={!canEdit || saving}
+              onChange={() => toggle(item.key)}
+              className="h-4 w-4 rounded border-gray-300 text-ooosh-navy focus:ring-ooosh-blue"
+            />
+            {item.label}
+          </label>
+        ))}
+      </div>
     </div>
   )
 }

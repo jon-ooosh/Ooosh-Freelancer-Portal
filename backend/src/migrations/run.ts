@@ -123,6 +123,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '086_job_contacts.sql',
         '087_preauth_lifecycle.sql',
         '088_fleet_service_alerts.sql',
+        '089_fleet_setup_checklist.sql',
       ];
 
       for (const migration of migrations) {

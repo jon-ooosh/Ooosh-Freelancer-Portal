@@ -55,6 +55,8 @@ export interface CreateServiceLogParams {
   next_due_mileage?: number | null
   ai_summary?: string | null
   ai_extracted?: boolean
+  /** When false, log the record but don't touch the vehicle's live figures (backfill). Defaults to true. */
+  apply_to_vehicle?: boolean
   files?: Array<{ name: string; url: string; type: string; size?: number }>
 }
 

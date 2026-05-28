@@ -1,9 +1,11 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { vmPath } from '../config/route-paths'
 import { getDateUrgency } from '../types/vehicle'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../config/api-config'
+import { updateVehicle } from '../lib/fleet-api'
+import type { EnrichedVehicle } from '../hooks/useFleetWithHireStatus'
 import { useRecentEvents } from '../hooks/useRecentEvents'
 import { useGoingOutJobs, useDueBackJobs } from '../hooks/useHireHopJobs'
 import { useAllocations } from '../hooks/useAllocations'
@@ -153,17 +155,9 @@ export function HomePage() {
         </div>
       )}
 
-      {/* Status mismatch warning */}
+      {/* Status mismatch warning — expandable + resolve in place */}
       {stats.mismatches > 0 && (
-        <div className="rounded-lg border border-orange-200 bg-orange-50 p-3">
-          <p className="text-xs font-medium text-orange-700">
-            {stats.mismatches} vehicle{stats.mismatches > 1 ? 's have' : ' has'} a status
-            mismatch between Fleet Master and HireHop.
-          </p>
-          <Link to={vmPath('/vehicles')} className="mt-1 text-xs font-medium text-orange-600 underline">
-            View fleet →
-          </Link>
-        </div>
+        <MismatchPanel vehicles={enrichedVehicles.filter(v => v.statusMismatch)} />
       )}
 
       {/* Low stock warning */}
@@ -534,6 +528,89 @@ export function HomePage() {
           </div>
         )}
       </section>
+    </div>
+  )
+}
+
+/** What the fleet status should become to resolve a given mismatch. */
+function resolveSuggestion(v: EnrichedVehicle): { status: string; label: string } {
+  // Fleet says Available but there's a confirmed allocation → it's out.
+  if (v.hireStatus === 'Available' && v.confirmedAllocation) {
+    return { status: 'On Hire', label: 'Mark On Hire' }
+  }
+  // Fleet says On Hire but the HireHop job has returned/finished → it's back.
+  return { status: 'Prep Needed', label: 'Mark Prep Needed' }
+}
+
+/**
+ * Actionable status-mismatch panel. The fleet hire_status and HireHop disagree;
+ * staff can see each van's two states side by side and resolve in place rather
+ * than hunting through the fleet list.
+ */
+function MismatchPanel({ vehicles }: { vehicles: EnrichedVehicle[] }) {
+  const queryClient = useQueryClient()
+  const [expanded, setExpanded] = useState(false)
+  const [savingId, setSavingId] = useState<string | null>(null)
+
+  const resolve = async (v: EnrichedVehicle, status: string) => {
+    setSavingId(v.id)
+    try {
+      await updateVehicle(v.id, { hire_status: status })
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+      queryClient.invalidateQueries({ queryKey: ['allocations'] })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update status')
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-orange-200 bg-orange-50">
+      <button
+        type="button"
+        onClick={() => setExpanded(e => !e)}
+        className="flex w-full items-center justify-between p-3 text-left"
+      >
+        <span className="text-xs font-medium text-orange-700">
+          {vehicles.length} vehicle{vehicles.length > 1 ? 's have' : ' has'} a status mismatch between Fleet Master and HireHop.
+        </span>
+        <span className="text-xs font-medium text-orange-600">{expanded ? 'Hide' : 'Review'} →</span>
+      </button>
+
+      {expanded && (
+        <div className="divide-y divide-orange-100 border-t border-orange-100">
+          {vehicles.map(v => {
+            const sugg = resolveSuggestion(v)
+            const hhState = v.activeJob
+              ? `${v.activeJob.status}${v.activeJob.jobId ? ` (Job #${v.activeJob.jobId})` : ''}`
+              : v.confirmedAllocation ? 'Allocated to a job' : 'No active job'
+            return (
+              <div key={v.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5">
+                <Link to={vmPath(`/vehicles/${v.id}`)} className="font-mono text-sm font-bold text-ooosh-navy hover:underline">
+                  {v.reg}
+                </Link>
+                <span className="text-xs text-gray-600">
+                  Fleet: <span className="font-medium">{v.hireStatus || '—'}</span>
+                  <span className="mx-1 text-gray-300">·</span>
+                  HireHop: <span className="font-medium">{hhState}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => resolve(v, sugg.status)}
+                  disabled={savingId === v.id}
+                  className="ml-auto rounded-md bg-orange-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-orange-700 disabled:opacity-50"
+                >
+                  {savingId === v.id ? 'Saving…' : sugg.label}
+                </button>
+              </div>
+            )
+          })}
+          <p className="px-3 py-2 text-[11px] text-orange-500">
+            Resolving sets the fleet status to match HireHop. If a van keeps re-flagging, check its allocation on the vehicle page.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
