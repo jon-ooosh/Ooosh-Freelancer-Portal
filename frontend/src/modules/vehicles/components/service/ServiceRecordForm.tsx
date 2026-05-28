@@ -48,6 +48,9 @@ export default function ServiceRecordForm({ currentMileage, lastMileageUpdate, e
   const [notes, setNotes] = useState(editing?.notes || '')
   const [nextDueDate, setNextDueDate] = useState(editing?.nextDueDate || '')
   const [nextDueMileage, setNextDueMileage] = useState(editing?.nextDueMileage?.toString() || '')
+  // Apply to the vehicle's live figures (mileage / last+next service / due dates).
+  // Default on; staff untick when backfilling a historical record.
+  const [applyToVehicle, setApplyToVehicle] = useState(true)
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -103,6 +106,7 @@ export default function ServiceRecordForm({ currentMileage, lastMileageUpdate, e
         notes: notes.trim() || null,
         next_due_date: nextDueDate || null,
         next_due_mileage: nextDueMileage ? parseInt(nextDueMileage, 10) : null,
+        apply_to_vehicle: applyToVehicle,
         files: editing?.files || [],
       }, stagedFiles.length > 0 ? stagedFiles : undefined)
       onClose()
@@ -256,6 +260,47 @@ export default function ServiceRecordForm({ currentMileage, lastMileageUpdate, e
                     className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none"
                   />
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* Apply to vehicle's live figures — untick for backfilled records.
+              Only relevant when creating (edits don't re-propagate). */}
+          {!editing && (
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={applyToVehicle}
+                  onChange={e => setApplyToVehicle(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-ooosh-navy focus:ring-ooosh-blue"
+                />
+                <span className="text-xs text-gray-700">
+                  <span className="font-medium">Update the vehicle's live figures from this record</span>
+                  <span className="mt-0.5 block text-gray-500">
+                    Current mileage, last/next service and due dates. Untick when adding a backdated / historical record.
+                  </span>
+                </span>
+              </label>
+              {applyToVehicle ? (
+                ((mileageNum && (!currentMileage || mileageNum > currentMileage)) || (nextDueMileage && serviceType === 'service')) ? (
+                  <p className="mt-2 text-xs text-amber-600">
+                    Will update
+                    {mileageNum && (!currentMileage || mileageNum > currentMileage)
+                      ? ` current mileage to ${mileageNum.toLocaleString()}`
+                      : ''}
+                    {mileageNum && (!currentMileage || mileageNum > currentMileage) && nextDueMileage && serviceType === 'service' ? ' and' : ''}
+                    {nextDueMileage && serviceType === 'service'
+                      ? ` next service due to ${parseInt(nextDueMileage, 10).toLocaleString()} mi`
+                      : ''}
+                    .
+                  </p>
+                ) : null
+              ) : (
+                <p className="mt-2 text-xs text-gray-500">
+                  Recorded for history only — the vehicle stays at its current reading
+                  {currentMileage ? ` of ${currentMileage.toLocaleString()}` : ''}.
+                </p>
               )}
             </div>
           )}

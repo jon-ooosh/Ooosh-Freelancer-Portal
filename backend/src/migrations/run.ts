@@ -125,6 +125,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '088_fleet_service_alerts.sql',
         '089_fix_excess_requirement_coverage.sql',
         '090_fix_excess_resolve_coverage.sql',
+        '091_fleet_setup_checklist.sql',
       ];
 
       for (const migration of migrations) {

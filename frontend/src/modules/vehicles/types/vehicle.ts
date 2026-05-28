@@ -68,11 +68,21 @@ export interface Vehicle {
   servicePlanStatus: string | null // '0 Remaining'..'6 Remaining', 'WORKINGONIT', 'NO PLAN'
   rossettsApplicable: boolean       // on the Rossetts (Mercedes) annual warranty plan — drives Rossetts service alerts
   seatLayout: 'round_table' | 'forward_facing' | null  // Premium vans only — current seat config
+  notes: string | null             // Free-text per-vehicle notes
+  setupChecklist: SetupChecklistItem[]  // New-vehicle onboarding tasks (migration 089)
   files: VehicleFile[]
   // Fleet group classification
   isOldSold: boolean              // true = from Monday "Old and sold" group
   // Raw data for anything we haven't mapped yet
   _raw?: Record<string, unknown>
+}
+
+export interface SetupChecklistItem {
+  key: string
+  label: string
+  done: boolean
+  doneAt?: string | null
+  doneBy?: string | null
 }
 
 export interface VehicleFile {

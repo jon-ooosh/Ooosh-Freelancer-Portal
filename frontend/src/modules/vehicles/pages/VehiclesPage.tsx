@@ -6,8 +6,11 @@ import { useAllocations } from '../hooks/useAllocations'
 import { getGearbox } from '../lib/van-matching'
 import { getDateUrgency } from '../types/vehicle'
 import { vmPath } from '../config/route-paths'
-import { createVehicle, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
+import { createVehicle, uploadVehicleFile, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
+import { buildDefaultChecklist } from '../lib/setup-checklist'
+import type { SetupChecklistItem } from '../types/vehicle'
 import { getServiceMileageStatus, getRossettsStatus, URGENCY_TEXT } from '../lib/service-status'
+import { isSetupPending, checklistProgress } from '../lib/setup-checklist'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import type { Vehicle } from '../types/vehicle'
 import type { ComplianceSettings } from '../lib/fleet-api'
@@ -98,6 +101,11 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
           {vehicle.isOldSold && (
             <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-orange-100 text-orange-700">
               Old &amp; Sold
+            </span>
+          )}
+          {isSetupPending(vehicle.setupChecklist) && (
+            <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-700">
+              ⚙ Setup {checklistProgress(vehicle.setupChecklist).done}/{checklistProgress(vehicle.setupChecklist).total}
             </span>
           )}
         </div>
@@ -208,9 +216,9 @@ function FleetTable({
             <th className="px-2 py-2">Service</th>
             <th className="px-2 py-2">MOT</th>
             <th className="px-2 py-2">Tax</th>
-            <th className="px-2 py-2">Insurance</th>
             <th className="px-2 py-2">TFL</th>
             <th className="px-2 py-2">Rossetts</th>
+            <th className="px-2 py-2">Warranty</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
@@ -226,6 +234,14 @@ function FleetTable({
                   <Link to={vmPath(`/vehicles/${vehicle.id}`)} className="text-sm font-bold text-ooosh-navy hover:underline">
                     {vehicle.reg}
                   </Link>
+                  {isSetupPending(vehicle.setupChecklist) && (
+                    <span
+                      className="ml-1.5 inline-block rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 align-middle"
+                      title={`Setup incomplete (${checklistProgress(vehicle.setupChecklist).done}/${checklistProgress(vehicle.setupChecklist).total})`}
+                    >
+                      ⚙ setup
+                    </span>
+                  )}
                 </td>
                 <td className="whitespace-nowrap px-2 py-2 text-xs text-gray-600">
                   {vehicle.simpleType || '—'}{gearboxLabel ? ` · ${gearboxLabel}` : ''}
@@ -247,12 +263,12 @@ function FleetTable({
                 </td>
                 <DateCell date={vehicle.motDue} warningDays={settings.mot_warning_days} />
                 <DateCell date={vehicle.taxDue} warningDays={settings.tax_warning_days} />
-                <DateCell date={vehicle.insuranceDue} warningDays={settings.insurance_warning_days} />
                 <DateCell date={vehicle.tflDue} warningDays={settings.tfl_warning_days} />
                 <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${URGENCY_TEXT[ross.urgency]}`}>
                   {ross.dueDate ? compactDate(ross.dueDate) : '—'}
                   {ross.urgency === 'overdue' && ross.dueDate && ' ⚠️'}
                 </td>
+                <DateCell date={vehicle.warrantyExpires} warningDays={30} />
               </tr>
             )
           })}
@@ -532,43 +548,103 @@ export function VehiclesPage() {
   )
 }
 
-/** Inline form for adding a new vehicle */
+const NUMERIC_FIELDS = new Set([
+  'seats', 'last_service_mileage', 'next_service_due', 'max_mass_kg',
+  'cylinder_capacity_cc', 'mpg', 'co2_per_km',
+  'recommended_tyre_psi_front', 'recommended_tyre_psi_rear',
+])
+
+/** Collapsible section wrapper for the add-vehicle form. */
+function FormSection({ title, defaultOpen = false, children }: { title: string; defaultOpen?: boolean; children: React.ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-500 hover:bg-gray-50"
+      >
+        {title}
+        <span className="text-gray-400">{open ? '−' : '+'}</span>
+      </button>
+      {open && <div className="border-t border-gray-100 p-3">{children}</div>}
+    </div>
+  )
+}
+
+/** Inline form for adding a new vehicle — full onboarding capture + setup checklist. */
 function AddVehicleForm({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [reg, setReg] = useState('')
-  const [make, setMake] = useState('')
-  const [model, setModel] = useState('')
-  const [simpleType, setSimpleType] = useState('Premium')
-  const [colour, setColour] = useState('')
-  const [seats, setSeats] = useState('')
-  const [fuelType, setFuelType] = useState('diesel')
+  const [form, setForm] = useState<Record<string, string>>({ simple_type: 'Premium', fuel_type: 'diesel' })
+  const [rossettsApplicable, setRossettsApplicable] = useState(false)
+  const [checklist, setChecklist] = useState<SetupChecklistItem[]>(() => buildDefaultChecklist())
+  const [v5File, setV5File] = useState<File | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [warning, setWarning] = useState<string | null>(null)
+
+  const set = (key: string, value: string) => setForm(f => ({ ...f, [key]: value }))
+
+  const toggleItem = (key: string) =>
+    setChecklist(list => list.map(i => i.key === key
+      ? { ...i, done: !i.done, doneAt: !i.done ? new Date().toISOString() : null }
+      : i))
+
+  const inputCls = 'w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none'
+
+  /** Render a labelled text/number/date input bound to `form[key]`. */
+  const field = (key: string, label: string, type: 'text' | 'number' | 'date' = 'text', placeholder?: string) => (
+    <div>
+      <label className="mb-1 block text-xs font-medium text-gray-600">{label}</label>
+      <input
+        type={type}
+        value={form[key] || ''}
+        onChange={e => set(key, e.target.value)}
+        placeholder={placeholder}
+        className={inputCls}
+      />
+    </div>
+  )
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!reg.trim()) { setError('Registration is required'); return }
+    if (!(form.reg || '').trim()) { setError('Registration is required'); return }
 
     setIsSaving(true)
     setError(null)
+    setWarning(null)
+
+    // Build payload — omit empty strings, coerce numeric fields.
+    const payload: Record<string, unknown> = { fleet_group: 'active', is_active: true }
+    for (const [key, raw] of Object.entries(form)) {
+      const val = (raw ?? '').trim()
+      if (!val) continue
+      payload[key] = NUMERIC_FIELDS.has(key) ? Number(val) : val
+    }
+    payload.reg = String(form.reg).trim().toUpperCase()
+    payload.rossetts_applicable = rossettsApplicable
+    payload.setup_checklist = checklist
+
     try {
-      await createVehicle({
-        reg: reg.trim().toUpperCase(),
-        make: make.trim(),
-        model: model.trim(),
-        simple_type: simpleType,
-        colour: colour.trim(),
-        seats: seats ? parseInt(seats) : null,
-        fuel_type: fuelType,
-        fleet_group: 'active',
-        is_active: true,
-      })
+      const created = await createVehicle(payload)
+      // Upload the V5 scan (if provided) after the vehicle exists. A failed
+      // upload shouldn't lose the created vehicle — surface a warning instead.
+      if (v5File) {
+        try {
+          await uploadVehicleFile(created.id, v5File, 'V5 Document', 'Uploaded at vehicle setup')
+        } catch {
+          setWarning(`${created.reg} was created, but the V5 upload failed. You can add it from the vehicle's Files section.`)
+          setIsSaving(false)
+          return
+        }
+      }
       onCreated()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create vehicle')
-    } finally {
       setIsSaving(false)
     }
   }
+
+  const doneCount = checklist.filter(i => i.done).length
 
   return (
     <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
@@ -577,51 +653,126 @@ function AddVehicleForm({ onClose, onCreated }: { onClose: () => void; onCreated
         <button type="button" onClick={onClose} className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
       </div>
       <form onSubmit={handleSubmit} className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Registration *</label>
-            <input type="text" value={reg} onChange={e => setReg(e.target.value)} placeholder="e.g. AB12 CDE"
-              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Type</label>
-            <select value={simpleType} onChange={e => setSimpleType(e.target.value)}
-              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none">
-              {VEHICLE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Make</label>
-            <input type="text" value={make} onChange={e => setMake(e.target.value)} placeholder="e.g. Mercedes"
-              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Model</label>
-            <input type="text" value={model} onChange={e => setModel(e.target.value)} placeholder="e.g. Sprinter"
-              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Colour</label>
-            <input type="text" value={colour} onChange={e => setColour(e.target.value)} placeholder="e.g. White"
-              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Seats</label>
-            <input type="number" value={seats} onChange={e => setSeats(e.target.value)} placeholder="e.g. 16"
-              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none" />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Fuel Type</label>
-            <select value={fuelType} onChange={e => setFuelType(e.target.value)}
-              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none">
-              <option value="diesel">Diesel</option>
-              <option value="petrol">Petrol</option>
-              <option value="electric">Electric</option>
-              <option value="hybrid">Hybrid</option>
-            </select>
+        {/* Basics — always open */}
+        <div className="rounded-lg border border-gray-200 bg-white p-3">
+          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Basics</h4>
+          <div className="grid grid-cols-2 gap-3">
+            {field('reg', 'Registration *', 'text', 'e.g. AB12 CDE')}
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">Type</label>
+              <select value={form.simple_type} onChange={e => set('simple_type', e.target.value)} className={inputCls}>
+                {VEHICLE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            {field('make', 'Make', 'text', 'e.g. Mercedes')}
+            {field('model', 'Model', 'text', 'e.g. Sprinter')}
+            {field('colour', 'Colour', 'text', 'e.g. White')}
+            {field('seats', 'Seats', 'number', 'e.g. 16')}
+            <div>
+              <label className="mb-1 block text-xs font-medium text-gray-600">Fuel Type</label>
+              <select value={form.fuel_type} onChange={e => set('fuel_type', e.target.value)} className={inputCls}>
+                <option value="diesel">Diesel</option>
+                <option value="petrol">Petrol</option>
+                <option value="electric">Electric</option>
+                <option value="hybrid">Hybrid</option>
+              </select>
+            </div>
           </div>
         </div>
+
+        <FormSection title="Compliance & Key Dates">
+          <div className="grid grid-cols-2 gap-3">
+            {field('mot_due', 'MOT due', 'date')}
+            {field('tax_due', 'Tax due', 'date')}
+            {field('tfl_due', 'TFL due', 'date')}
+            {field('warranty_expires', 'Warranty expires', 'date')}
+            {field('insurance_due', 'Insurance due', 'date')}
+            {field('insurance_provider', 'Insurance provider', 'text', 'e.g. Adrian Flux')}
+            {field('insurance_policy_number', 'Policy number', 'text')}
+          </div>
+        </FormSection>
+
+        <FormSection title="Service">
+          <div className="grid grid-cols-2 gap-3">
+            {field('next_service_due', 'Next service due (miles)', 'number', 'e.g. 120000')}
+            {field('last_service_date', 'Last service date', 'date')}
+            {field('last_service_mileage', 'Last service mileage', 'number')}
+            {field('last_rossetts_service_date', 'Last Rossetts service', 'date')}
+          </div>
+          <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-gray-700">
+            <input
+              type="checkbox"
+              checked={rossettsApplicable}
+              onChange={e => setRossettsApplicable(e.target.checked)}
+              className="h-4 w-4 rounded border-gray-300 text-ooosh-navy focus:ring-ooosh-blue"
+            />
+            On Rossetts (Mercedes) annual warranty plan
+          </label>
+        </FormSection>
+
+        <FormSection title="V5 / Registration">
+          <div className="grid grid-cols-2 gap-3">
+            {field('vin', 'VIN / Chassis #', 'text')}
+            {field('date_first_reg', 'Date of first reg', 'date')}
+            {field('v5_type', 'D.2: Type', 'text')}
+            {field('body_type', 'D.5: Body type', 'text', 'e.g. Panel Van')}
+            {field('max_mass_kg', 'F.1: Max mass (kg)', 'number')}
+            {field('vehicle_category', 'J: Vehicle category', 'text', 'e.g. N1')}
+            {field('cylinder_capacity_cc', 'P.1: Cylinder capacity (cc)', 'number')}
+          </div>
+        </FormSection>
+
+        <FormSection title="Specs & Finance">
+          <div className="grid grid-cols-2 gap-3">
+            {field('oil_type', 'Oil type', 'text', 'e.g. 5W-30')}
+            {field('coolant_type', 'Coolant type', 'text')}
+            {field('tyre_size', 'Tyre size', 'text', 'e.g. 235/65/R16')}
+            {field('mpg', 'MPG', 'number')}
+            {field('co2_per_km', 'CO2 (g/km)', 'number')}
+            {field('recommended_tyre_psi_front', 'Tyre PSI (front)', 'number')}
+            {field('recommended_tyre_psi_rear', 'Tyre PSI (rear)', 'number')}
+            {field('finance_with', 'Finance with', 'text')}
+            {field('finance_ends', 'Finance ends', 'date')}
+          </div>
+        </FormSection>
+
+        {/* Setup checklist — always open, the safety net */}
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+          <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-amber-700">
+            Setup Checklist <span className="font-normal text-amber-600">({doneCount}/{checklist.length})</span>
+          </h4>
+          <p className="mb-2 text-[11px] text-amber-600">
+            Tick what's done. Unticked items stay on the vehicle so nothing's forgotten.
+          </p>
+          <div className="space-y-1">
+            {checklist.map(item => (
+              <label key={item.key} className="flex cursor-pointer items-center gap-2 text-xs text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={item.done}
+                  onChange={() => toggleItem(item.key)}
+                  className="h-4 w-4 rounded border-gray-300 text-ooosh-navy focus:ring-ooosh-blue"
+                />
+                {item.label}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {/* V5 upload */}
+        <div className="rounded-lg border border-gray-200 bg-white p-3">
+          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-gray-500">Upload V5 scan</label>
+          <input
+            type="file"
+            accept=".pdf,.jpg,.jpeg,.png,.webp"
+            onChange={e => setV5File(e.target.files?.[0] || null)}
+            className="block w-full text-xs text-gray-600 file:mr-2 file:rounded file:border-0 file:bg-ooosh-navy file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-ooosh-navy/90"
+          />
+          {v5File && <p className="mt-1 text-[11px] text-gray-500">{v5File.name}</p>}
+        </div>
+
         {error && <p className="text-xs text-red-600">{error}</p>}
+        {warning && <p className="text-xs text-amber-700">{warning}</p>}
         <button type="submit" disabled={isSaving}
           className="rounded-lg bg-ooosh-navy px-4 py-2 text-sm font-medium text-white hover:bg-ooosh-navy/90 disabled:opacity-50">
           {isSaving ? 'Creating...' : 'Create Vehicle'}

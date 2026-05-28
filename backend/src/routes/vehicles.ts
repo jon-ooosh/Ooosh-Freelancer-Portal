@@ -503,55 +503,109 @@ router.get('/fleet/:idOrReg', async (req: FlexibleVehicleRequest, res: Response)
  * POST /api/vehicles/fleet
  * Create a new vehicle.
  */
+/**
+ * Whitelist of accepted vehicle fields (request key → DB column). Shared by the
+ * fleet create + update handlers so a field added once is editable AND settable
+ * at creation. Accepts both snake_case and camelCase request keys.
+ */
+const FLEET_FIELD_MAP: Record<string, string> = {
+  reg: 'reg', vehicle_type: 'vehicle_type', vehicleType: 'vehicle_type',
+  simple_type: 'simple_type', simpleType: 'simple_type',
+  make: 'make', model: 'model', colour: 'colour', seats: 'seats',
+  damage_status: 'damage_status', damageStatus: 'damage_status',
+  service_status: 'service_status', serviceStatus: 'service_status',
+  hire_status: 'hire_status', hireStatus: 'hire_status',
+  mot_due: 'mot_due', motDue: 'mot_due',
+  tax_due: 'tax_due', taxDue: 'tax_due',
+  tfl_due: 'tfl_due', tflDue: 'tfl_due',
+  last_service_date: 'last_service_date', lastServiceDate: 'last_service_date',
+  warranty_expires: 'warranty_expires', warrantyExpires: 'warranty_expires',
+  last_service_mileage: 'last_service_mileage', lastServiceMileage: 'last_service_mileage',
+  next_service_due: 'next_service_due', nextServiceDue: 'next_service_due',
+  ulez_compliant: 'ulez_compliant', ulezCompliant: 'ulez_compliant',
+  spare_key: 'spare_key', spareKey: 'spare_key',
+  wifi_network: 'wifi_network', wifiNetwork: 'wifi_network',
+  finance_with: 'finance_with', financeWith: 'finance_with',
+  finance_ends: 'finance_ends', financeEnds: 'finance_ends',
+  co2_per_km: 'co2_per_km', co2PerKm: 'co2_per_km',
+  recommended_tyre_psi_front: 'recommended_tyre_psi_front', recommendedTyrePsiFront: 'recommended_tyre_psi_front',
+  recommended_tyre_psi_rear: 'recommended_tyre_psi_rear', recommendedTyrePsiRear: 'recommended_tyre_psi_rear',
+  fuel_type: 'fuel_type', fuelType: 'fuel_type',
+  mpg: 'mpg', fleet_group: 'fleet_group', fleetGroup: 'fleet_group',
+  is_active: 'is_active', isActive: 'is_active',
+  monday_item_id: 'monday_item_id', mondayItemId: 'monday_item_id',
+  notes: 'notes',
+  // Setup checklist (migration 089)
+  setup_checklist: 'setup_checklist', setupChecklist: 'setup_checklist',
+  // Insurance
+  insurance_due: 'insurance_due', insuranceDue: 'insurance_due',
+  insurance_provider: 'insurance_provider', insuranceProvider: 'insurance_provider',
+  insurance_policy_number: 'insurance_policy_number', insurancePolicyNumber: 'insurance_policy_number',
+  // Booked-in dates
+  mot_booked_in_date: 'mot_booked_in_date', motBookedInDate: 'mot_booked_in_date',
+  service_booked_in_date: 'service_booked_in_date', serviceBookedInDate: 'service_booked_in_date',
+  insurance_booked_in_date: 'insurance_booked_in_date', insuranceBookedInDate: 'insurance_booked_in_date',
+  tax_booked_in_date: 'tax_booked_in_date', taxBookedInDate: 'tax_booked_in_date',
+  // NOTE: current_mileage is deliberately NOT settable here — it is a
+  // ratcheted/derived field and corrections must go through the audited
+  // current-mileage correction endpoint (managers+ only).
+  // V5 fields
+  vin: 'vin',
+  date_first_reg: 'date_first_reg', dateFirstReg: 'date_first_reg',
+  v5_type: 'v5_type', v5Type: 'v5_type',
+  body_type: 'body_type', bodyType: 'body_type',
+  max_mass_kg: 'max_mass_kg', maxMassKg: 'max_mass_kg',
+  vehicle_category: 'vehicle_category', vehicleCategory: 'vehicle_category',
+  cylinder_capacity_cc: 'cylinder_capacity_cc', cylinderCapacityCc: 'cylinder_capacity_cc',
+  // Extended details (migration 015)
+  oil_type: 'oil_type', oilType: 'oil_type',
+  coolant_type: 'coolant_type', coolantType: 'coolant_type',
+  tyre_size: 'tyre_size', tyreSize: 'tyre_size',
+  last_rossetts_service_date: 'last_rossetts_service_date', lastRossettsServiceDate: 'last_rossetts_service_date',
+  last_rossetts_service_notes: 'last_rossetts_service_notes', lastRossettsServiceNotes: 'last_rossetts_service_notes',
+  service_plan_status: 'service_plan_status', servicePlanStatus: 'service_plan_status',
+  // Rossetts annual warranty applicability (migration 088)
+  rossetts_applicable: 'rossetts_applicable', rossettsApplicable: 'rossetts_applicable',
+  // Seat layout (migration 041)
+  seat_layout: 'seat_layout', seatLayout: 'seat_layout',
+};
+
+/** Coerce a request value for its target DB column (uppercase reg, stringify jsonb). */
+function coerceFleetValue(key: string, dbCol: string, value: unknown): unknown {
+  if (key === 'reg') return String(value).toUpperCase();
+  if (dbCol === 'setup_checklist' && typeof value !== 'string') {
+    return JSON.stringify(value ?? []);
+  }
+  return value;
+}
+
 router.post('/fleet', async (req: AuthRequest, res: Response) => {
   try {
     const v = req.body;
+    if (!v.reg || !String(v.reg).trim()) {
+      res.status(400).json({ error: 'Registration is required' });
+      return;
+    }
+
+    // Build a dynamic INSERT from whitelisted fields. Columns not provided fall
+    // back to their DB defaults (hire_status, fuel_type, fleet_group, etc.).
+    const columns: string[] = [];
+    const placeholders: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+    for (const [key, dbCol] of Object.entries(FLEET_FIELD_MAP)) {
+      if (v[key] !== undefined && !columns.includes(dbCol)) {
+        columns.push(dbCol);
+        placeholders.push(`$${idx}`);
+        values.push(coerceFleetValue(key, dbCol, v[key]));
+        idx++;
+      }
+    }
+
     const result = await query(
-      `INSERT INTO fleet_vehicles (
-        reg, vehicle_type, simple_type, make, model, colour, seats,
-        damage_status, service_status, hire_status,
-        mot_due, tax_due, tfl_due, last_service_date, warranty_expires,
-        last_service_mileage, next_service_due,
-        ulez_compliant, spare_key, wifi_network,
-        finance_with, finance_ends,
-        co2_per_km, recommended_tyre_psi_front, recommended_tyre_psi_rear,
-        fuel_type, mpg, fleet_group, is_active, monday_item_id, notes
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7,
-        $8, $9, $10,
-        $11, $12, $13, $14, $15,
-        $16, $17,
-        $18, $19, $20,
-        $21, $22,
-        $23, $24, $25,
-        $26, $27, $28, $29, $30, $31
-      ) RETURNING *`,
-      [
-        (v.reg || '').toUpperCase(), v.vehicle_type || v.vehicleType, v.simple_type || v.simpleType,
-        v.make, v.model, v.colour, v.seats || null,
-        v.damage_status || v.damageStatus || 'ALL GOOD',
-        v.service_status || v.serviceStatus || 'OK',
-        v.hire_status || v.hireStatus || 'Available',
-        v.mot_due || v.motDue || null, v.tax_due || v.taxDue || null,
-        v.tfl_due || v.tflDue || null, v.last_service_date || v.lastServiceDate || null,
-        v.warranty_expires || v.warrantyExpires || null,
-        v.last_service_mileage || v.lastServiceMileage || null,
-        v.next_service_due || v.nextServiceDue || null,
-        v.ulez_compliant ?? v.ulezCompliant ?? true,
-        v.spare_key ?? v.spareKey ?? false,
-        v.wifi_network || v.wifiNetwork || null,
-        v.finance_with || v.financeWith || null,
-        v.finance_ends || v.financeEnds || null,
-        v.co2_per_km || v.co2PerKm || null,
-        v.recommended_tyre_psi_front || v.recommendedTyrePsiFront || null,
-        v.recommended_tyre_psi_rear || v.recommendedTyrePsiRear || null,
-        v.fuel_type || v.fuelType || 'diesel',
-        v.mpg || null,
-        v.fleet_group || v.fleetGroup || 'active',
-        v.is_active ?? v.isActive ?? true,
-        v.monday_item_id || v.mondayItemId || null,
-        v.notes || null,
-      ]
+      `INSERT INTO fleet_vehicles (${columns.join(', ')})
+       VALUES (${placeholders.join(', ')}) RETURNING *`,
+      values
     );
 
     res.status(201).json(mapDbRowToVehicle(result.rows[0]));
@@ -579,71 +633,12 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
     const values: unknown[] = [];
     let idx = 1;
 
-    const fieldMap: Record<string, string> = {
-      reg: 'reg', vehicle_type: 'vehicle_type', vehicleType: 'vehicle_type',
-      simple_type: 'simple_type', simpleType: 'simple_type',
-      make: 'make', model: 'model', colour: 'colour', seats: 'seats',
-      damage_status: 'damage_status', damageStatus: 'damage_status',
-      service_status: 'service_status', serviceStatus: 'service_status',
-      hire_status: 'hire_status', hireStatus: 'hire_status',
-      mot_due: 'mot_due', motDue: 'mot_due',
-      tax_due: 'tax_due', taxDue: 'tax_due',
-      tfl_due: 'tfl_due', tflDue: 'tfl_due',
-      last_service_date: 'last_service_date', lastServiceDate: 'last_service_date',
-      warranty_expires: 'warranty_expires', warrantyExpires: 'warranty_expires',
-      last_service_mileage: 'last_service_mileage', lastServiceMileage: 'last_service_mileage',
-      next_service_due: 'next_service_due', nextServiceDue: 'next_service_due',
-      ulez_compliant: 'ulez_compliant', ulezCompliant: 'ulez_compliant',
-      spare_key: 'spare_key', spareKey: 'spare_key',
-      wifi_network: 'wifi_network', wifiNetwork: 'wifi_network',
-      finance_with: 'finance_with', financeWith: 'finance_with',
-      finance_ends: 'finance_ends', financeEnds: 'finance_ends',
-      co2_per_km: 'co2_per_km', co2PerKm: 'co2_per_km',
-      recommended_tyre_psi_front: 'recommended_tyre_psi_front', recommendedTyrePsiFront: 'recommended_tyre_psi_front',
-      recommended_tyre_psi_rear: 'recommended_tyre_psi_rear', recommendedTyrePsiRear: 'recommended_tyre_psi_rear',
-      fuel_type: 'fuel_type', fuelType: 'fuel_type',
-      mpg: 'mpg', fleet_group: 'fleet_group', fleetGroup: 'fleet_group',
-      is_active: 'is_active', isActive: 'is_active',
-      notes: 'notes',
-      // Insurance
-      insurance_due: 'insurance_due', insuranceDue: 'insurance_due',
-      insurance_provider: 'insurance_provider', insuranceProvider: 'insurance_provider',
-      insurance_policy_number: 'insurance_policy_number', insurancePolicyNumber: 'insurance_policy_number',
-      // Booked-in dates
-      mot_booked_in_date: 'mot_booked_in_date', motBookedInDate: 'mot_booked_in_date',
-      service_booked_in_date: 'service_booked_in_date', serviceBookedInDate: 'service_booked_in_date',
-      insurance_booked_in_date: 'insurance_booked_in_date', insuranceBookedInDate: 'insurance_booked_in_date',
-      tax_booked_in_date: 'tax_booked_in_date', taxBookedInDate: 'tax_booked_in_date',
-      // NOTE: current_mileage is deliberately NOT settable here — it is a
-      // ratcheted/derived field and corrections must go through the audited
-      // PATCH /fleet/:id/current-mileage endpoint (managers+ only).
-      // V5 fields
-      vin: 'vin',
-      date_first_reg: 'date_first_reg', dateFirstReg: 'date_first_reg',
-      v5_type: 'v5_type', v5Type: 'v5_type',
-      body_type: 'body_type', bodyType: 'body_type',
-      max_mass_kg: 'max_mass_kg', maxMassKg: 'max_mass_kg',
-      vehicle_category: 'vehicle_category', vehicleCategory: 'vehicle_category',
-      cylinder_capacity_cc: 'cylinder_capacity_cc', cylinderCapacityCc: 'cylinder_capacity_cc',
-      // Extended details (migration 015)
-      oil_type: 'oil_type', oilType: 'oil_type',
-      coolant_type: 'coolant_type', coolantType: 'coolant_type',
-      tyre_size: 'tyre_size', tyreSize: 'tyre_size',
-      last_rossetts_service_date: 'last_rossetts_service_date', lastRossettsServiceDate: 'last_rossetts_service_date',
-      last_rossetts_service_notes: 'last_rossetts_service_notes', lastRossettsServiceNotes: 'last_rossetts_service_notes',
-      service_plan_status: 'service_plan_status', servicePlanStatus: 'service_plan_status',
-      // Rossetts annual warranty applicability (migration 088)
-      rossetts_applicable: 'rossetts_applicable', rossettsApplicable: 'rossetts_applicable',
-      // Seat layout (migration 041)
-      seat_layout: 'seat_layout', seatLayout: 'seat_layout',
-    };
-
-    for (const [key, dbCol] of Object.entries(fieldMap)) {
+    for (const [key, dbCol] of Object.entries(FLEET_FIELD_MAP)) {
       if (v[key] !== undefined) {
         // Avoid duplicate columns
         if (!fields.some(f => f.startsWith(`${dbCol} =`))) {
           fields.push(`${dbCol} = $${idx}`);
-          values.push(key === 'reg' ? String(v[key]).toUpperCase() : v[key]);
+          values.push(coerceFleetValue(key, dbCol, v[key]));
           idx++;
         }
       }
@@ -1026,6 +1021,11 @@ router.post('/fleet/:vehicleId/service-log', async (req: AuthRequest, res: Respo
       ai_summary, ai_extracted = false, files = [],
     } = req.body;
 
+    // When false (e.g. backfilling a historical record), the record is logged
+    // but the vehicle's live figures (current mileage, last/next service, due
+    // dates) are NOT touched. Defaults to true.
+    const applyToVehicle = req.body.apply_to_vehicle !== false;
+
     if (!name) {
       res.status(400).json({ error: 'name is required' });
       return;
@@ -1049,45 +1049,52 @@ router.post('/fleet/:vehicleId/service-log', async (req: AuthRequest, res: Respo
 
     const record = result.rows[0];
 
-    // If mileage provided, record it in mileage log and update vehicle
+    // If mileage provided, always log it to the historical mileage log. The
+    // live current_mileage only moves when applying to the vehicle (and never
+    // downward — the < $1 guard keeps the highest reading).
     if (mileage) {
       await query(
         `INSERT INTO vehicle_mileage_log (vehicle_id, mileage, source, source_ref, recorded_by)
          VALUES ($1, $2, 'service', $3, $4)`,
         [vehicleId, mileage, record.id, userId]
       );
-      await query(
-        `UPDATE fleet_vehicles SET current_mileage = $1, last_mileage_update = NOW()
-         WHERE id = $2 AND (current_mileage IS NULL OR current_mileage < $1)`,
-        [mileage, vehicleId]
-      );
-    }
-
-    // If next_due_date, update relevant date on fleet_vehicles
-    if (next_due_date) {
-      const dateFieldMap: Record<string, string> = {
-        mot: 'mot_due',
-        service: 'next_service_due', // For service, we use last_service_date + next_due_date
-        insurance: 'insurance_due',
-        tax: 'tax_due',
-      };
-      // For MOT/insurance/tax, update the due date directly
-      if (service_type === 'mot') {
-        await query('UPDATE fleet_vehicles SET mot_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
-      } else if (service_type === 'insurance') {
-        await query('UPDATE fleet_vehicles SET insurance_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
-      } else if (service_type === 'tax') {
-        await query('UPDATE fleet_vehicles SET tax_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
+      if (applyToVehicle) {
+        await query(
+          `UPDATE fleet_vehicles SET current_mileage = $1, last_mileage_update = NOW()
+           WHERE id = $2 AND (current_mileage IS NULL OR current_mileage < $1)`,
+          [mileage, vehicleId]
+        );
       }
     }
 
-    // Update last_service_date if this is a service record
-    if ((service_type === 'service' || service_type === 'repair') && service_date) {
-      await query(
-        `UPDATE fleet_vehicles SET last_service_date = $1, last_service_mileage = COALESCE($2, last_service_mileage)
-         WHERE id = $3`,
-        [service_date, mileage, vehicleId]
-      );
+    // The remaining writes mutate the vehicle's live figures — skip entirely
+    // for backfilled / historical records.
+    if (applyToVehicle) {
+      // If next_due_date, update the relevant due date on fleet_vehicles
+      if (next_due_date) {
+        if (service_type === 'mot') {
+          await query('UPDATE fleet_vehicles SET mot_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
+        } else if (service_type === 'insurance') {
+          await query('UPDATE fleet_vehicles SET insurance_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
+        } else if (service_type === 'tax') {
+          await query('UPDATE fleet_vehicles SET tax_due = $1 WHERE id = $2', [next_due_date, vehicleId]);
+        }
+      }
+
+      // Propagate the next service mileage threshold to the vehicle so the
+      // "miles until service" indicator + alerts pick it up automatically.
+      if ((service_type === 'service' || service_type === 'repair') && next_due_mileage) {
+        await query('UPDATE fleet_vehicles SET next_service_due = $1 WHERE id = $2', [next_due_mileage, vehicleId]);
+      }
+
+      // Update last_service_date if this is a service record
+      if ((service_type === 'service' || service_type === 'repair') && service_date) {
+        await query(
+          `UPDATE fleet_vehicles SET last_service_date = $1, last_service_mileage = COALESCE($2, last_service_mileage)
+           WHERE id = $3`,
+          [service_date, mileage, vehicleId]
+        );
+      }
     }
 
     res.status(201).json(mapServiceLogRow(record));
@@ -5080,6 +5087,8 @@ function mapDbRowToVehicle(row: Record<string, unknown>) {
     servicePlanStatus: row.service_plan_status as string | null,
     rossettsApplicable: row.rossetts_applicable === true,
     seatLayout: row.seat_layout as string | null,
+    notes: (row.notes as string | null) ?? null,
+    setupChecklist: Array.isArray(row.setup_checklist) ? row.setup_checklist : [],
     files: row.files || [],
   };
 }
