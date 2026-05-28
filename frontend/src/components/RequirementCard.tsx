@@ -108,6 +108,8 @@ interface ExcessInfo {
     driver_name: string;
     excess_amount_required: number;
     excess_amount_taken: number;
+    amount_held?: number;
+    held_expires_at?: string | null;
     excess_status: string;
     requires_referral: boolean;
   }>;
@@ -226,7 +228,7 @@ export default function RequirementCard({
         .then(d => setHireFormDrivers(Array.isArray(d?.data) ? d.data : []))
         .catch(() => {});
     }
-    if (req.requirement_type === 'excess' && jobId) {
+    if ((req.requirement_type === 'excess' || req.requirement_type === 'excess_resolve') && jobId) {
       // Try the excess-info endpoint — gracefully handle if it doesn't exist or returns unexpected shape
       api.get<{ data?: ExcessInfo }>(`/money/${jobId}/excess-info`)
         .then(d => {
@@ -693,8 +695,53 @@ export default function RequirementCard({
               </div>
             )}
 
+            {/* Excess resolution — explain the amber/blue light against live excess */}
+            {req.requirement_type === 'excess_resolve' && excessInfo?.drivers && (() => {
+              const NEEDS_ACTION = ['needed', 'pending', 'taken', 'partially_paid', 'partially_reimbursed'];
+              const unresolved = excessInfo.drivers.filter(d => NEEDS_ACTION.includes(d.excess_status));
+              const heldAmount = unresolved.reduce(
+                (sum, d) => sum + Math.max(0, (d.excess_amount_taken || 0) + (d.amount_held || 0)), 0);
+              const preAuths = excessInfo.drivers.filter(d => d.excess_status === 'pre_auth');
+              const preAuthTotal = preAuths.reduce((sum, d) => sum + (d.amount_held || 0), 0);
+              const earliestExpiry = preAuths
+                .map(d => d.held_expires_at)
+                .filter((x): x is string => !!x)
+                .sort()[0];
+              const daysToExpiry = earliestExpiry
+                ? Math.ceil((new Date(earliestExpiry).getTime() - Date.now()) / 86400000)
+                : null;
+              if (unresolved.length === 0 && preAuths.length === 0) return null;
+              return (
+                <div className="mt-1 space-y-1">
+                  {/* Amber contradiction — marked Resolved but money still in limbo */}
+                  {req.status === 'done' && unresolved.length > 0 && (
+                    <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                      ⚠ Marked resolved, but £{heldAmount.toLocaleString('en-GB', { minimumFractionDigits: 2 })} excess is still in limbo
+                      ({unresolved.map(d => `${d.driver_name || 'Driver'}: ${d.excess_status.replace(/_/g, ' ')}`).join(', ')}).
+                      Reimburse, claim, roll over or waive.
+                    </div>
+                  )}
+                  {/* Amber to-do when not yet resolved (and not just a pre-auth pending) */}
+                  {req.status !== 'done' && unresolved.length > 0 && (
+                    <div className="text-xs text-amber-600">
+                      £{heldAmount.toLocaleString('en-GB', { minimumFractionDigits: 2 })} excess still to resolve — reimburse, claim, roll over or waive.
+                    </div>
+                  )}
+                  {/* Blue info — live pre-auth, decision pending */}
+                  {preAuths.length > 0 && (
+                    <div className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded px-2 py-1">
+                      Pre-auth £{preAuthTotal.toLocaleString('en-GB', { minimumFractionDigits: 2 })} held
+                      {daysToExpiry !== null && (daysToExpiry > 0
+                        ? ` — auto-releases in ${daysToExpiry} day${daysToExpiry === 1 ? '' : 's'}`
+                        : ' — releasing imminently')}. Capture now if claiming for damage, otherwise no action needed.
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Notes (for types without specific rendering) */}
-            {!['vehicle', 'hire_forms', 'backline', 'excess', 'invoice', 'damage_review', 'reminder'].includes(req.requirement_type) && req.notes && (
+            {!['vehicle', 'hire_forms', 'backline', 'excess', 'excess_resolve', 'invoice', 'damage_review', 'reminder'].includes(req.requirement_type) && req.notes && (
               <div className="mt-1 text-xs text-gray-400 truncate max-w-md">{req.notes.split('\n').filter(Boolean).pop()}</div>
             )}
 

@@ -56,4 +56,42 @@ export async function syncExcessRequirementStatus(
        AND jr.status <> (CASE WHEN cov.covered THEN 'done' ELSE 'in_progress' END)`,
     [jobId],
   );
+
+  // Post-hire close-out: the 'excess_resolve' card is RESOLUTION-authoritative
+  // (changed May 2026). 'done' only when every record is in a terminal,
+  // nothing-left-to-do state; otherwise 'in_progress' (amber). This is a
+  // stronger bar than coverage above — a `taken` record is COVERED (collateral
+  // held) but NOT RESOLVED (the money still has to be reimbursed or claimed now
+  // the hire is over). Auto-advances when reimbursed / claimed / waived /
+  // rolled_over, and amber-flags a card staff marked Resolved while money is
+  // still in limbo. Returns-page progress bar (counts status='done') reflects
+  // this for free.
+  //
+  // Resolved set: reimbursed / fully_claimed / waived / rolled_over /
+  // not_required / released. A live `pre_auth` is deliberately NOT resolved
+  // (a capture-or-release decision is still pending) — the card surfaces a blue
+  // expiry countdown for that case rather than treating it as done.
+  // 'blocked' (Dispute) and 'cancelled' are left untouched.
+  await run(
+    `UPDATE job_requirements jr
+     SET status = CASE WHEN rs.resolved THEN 'done' ELSE 'in_progress' END,
+         updated_at = NOW()
+     FROM (
+       SELECT
+         NOT EXISTS (
+           SELECT 1 FROM job_excess je
+           WHERE je.job_id = $1
+             AND je.excess_status NOT IN
+               ('reimbursed','fully_claimed','waived','rolled_over','not_required','released')
+         ) AS resolved,
+         EXISTS (SELECT 1 FROM job_excess je2 WHERE je2.job_id = $1) AS has_records
+     ) rs
+     WHERE jr.job_id = $1
+       AND jr.requirement_type = 'excess_resolve'
+       AND jr.phase = 'post_hire'
+       AND jr.status IN ('not_started', 'in_progress', 'done')
+       AND rs.has_records
+       AND jr.status <> (CASE WHEN rs.resolved THEN 'done' ELSE 'in_progress' END)`,
+    [jobId],
+  );
 }

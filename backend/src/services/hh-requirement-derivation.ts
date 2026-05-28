@@ -653,17 +653,12 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         await autoResolve('backline', 'done');
       }
 
-      // Excess resolution: check if ALL excess records are in a terminal state
-      const unresolvedExcess = await client.query(
-        `SELECT COUNT(*) AS cnt FROM job_excess
-         WHERE job_id = $1
-           AND excess_status NOT IN ('reimbursed', 'fully_claimed', 'waived', 'rolled_over')`,
-        [jobId]
-      );
-      if (parseInt(excessCount.rows[0]?.cnt || '0') > 0 &&
-          parseInt(unresolvedExcess.rows[0]?.cnt || '0') === 0) {
-        await autoResolve('excess_resolve', 'done');
-      }
+      // Excess resolution: resolution-authoritative via the shared helper
+      // (now that the post_hire excess_resolve card is created above). Sets
+      // 'done' when every excess record is terminal-resolved, else amber
+      // 'in_progress' — including demoting a card staff marked Resolved while
+      // money's still in limbo. Replaces the old forward-only autoResolve.
+      await syncExcessRequirementStatus(jobId, client);
 
       // Client follow-up: check if any interaction exists after return_date
       const postReturnInteraction = await client.query(
