@@ -18,6 +18,7 @@ import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
 import { pushDepositToHH } from '../services/hh-deposit';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
+import { encryptJson, tryDecryptJson, isEncryptionConfigured } from '../services/encryption';
 
 const router = Router();
 router.use(authenticate);
@@ -93,9 +94,48 @@ const releaseSchema = z.object({
   notes: z.string().max(1000).nullable().optional(),
 });
 
+// Record-a-pre-auth schema (PR 3). Staff-facing manual entry of a pre-auth hold
+// taken on the Worldpay/Amex card machine (or cash held, or a manual Stripe
+// hold). Distinct from the portal's payment-event path (which creates Stripe
+// holds online). This is "I just held £1,200 on the terminal, log it as held".
+//   - No money moves to our account → no HH deposit pushed here. The HH deposit
+//     is created later at capture time (when the hold becomes real money).
+//   - receipt_required is set TRUE for card-machine methods until a scan is added.
+//   - Flows straight into the existing capture/release lifecycle.
+const recordPreauthSchema = z.object({
+  amount: z.number().positive(),
+  method: z.enum(['worldpay', 'amex', 'till_cash', 'stripe_gbp']).default('worldpay'),
+  reference: z.string().max(200).nullable().optional(), // terminal auth code, etc.
+  stripe_payment_intent_id: z.string().max(200).nullable().optional(), // only if a manual Stripe hold
+  expires_in_days: z.number().int().min(1).max(30).optional(), // default 5
+  notes: z.string().max(1000).nullable().optional(),
+});
+
+// Receipt-scan upload schema (PR 3). receipt_url is the R2 key of an uploaded
+// scan (uploaded via /api/files/upload first). Clears the receipt_required flag.
+const receiptSchema = z.object({
+  receipt_url: z.string().min(1).max(500),
+});
+
+// Client bank details for reimbursement (PR 3). Stored ENCRYPTED, scoped to the
+// job_excess record. UK = holder + sort code + account number; international =
+// holder + IBAN + SWIFT/BIC + bank country. Structured for a future Wise recipient.
+const bankDetailsSchema = z.object({
+  type: z.enum(['uk', 'international']),
+  accountHolder: z.string().min(1).max(200),
+  sortCode: z.string().max(20).optional(),
+  accountNumber: z.string().max(40).optional(),
+  iban: z.string().max(50).optional(),
+  swiftBic: z.string().max(20).optional(),
+  bankCountry: z.string().max(100).optional(),
+});
+
 const reimburseSchema = z.object({
   amount: z.number().min(0),
   method: z.enum(['stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank']),
+  // Captured at reimburse time when the method is a bank transfer. Stored
+  // encrypted on this record + stamps bank_details_last_used_at.
+  bank_details: bankDetailsSchema.nullable().optional(),
 });
 
 const waiveSchema = z.object({
@@ -1100,6 +1140,273 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
 // accepts the receipt_url and stores it on the file system — see receipt_required
 // column behaviour. PR 1 does not yet surface receipt-missing as a hard block.
 
+// ── POST /api/excess/:id/record-preauth — Record a manual pre-auth hold ──
+//
+// Staff-facing entry for a pre-auth taken on the card machine (Worldpay/Amex),
+// cash held, or a manual Stripe hold. Sets the record to 'pre_auth' with the
+// hold in amount_held (NOT excess_amount_taken — no money is in our account
+// yet). No HireHop deposit is pushed — that happens at capture time. The record
+// then flows into the existing Capture / Release lifecycle.
+//
+// Only valid from a "no money yet" state (needed / pending). A record already
+// holding or carrying money is rejected — you don't stack a hold on top.
+
+router.post('/:id/record-preauth', authorize('admin', 'manager'), validate(recordPreauthSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { amount, method, reference, stripe_payment_intent_id, expires_in_days, notes } = req.body;
+
+    const currentResult = await query(
+      `SELECT je.*, j.hh_job_number FROM job_excess je
+       LEFT JOIN jobs j ON j.id = je.job_id
+       WHERE je.id = $1`,
+      [id]
+    );
+    if (currentResult.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const current = currentResult.rows[0];
+
+    // Guard: only record a hold when there's no money/hold already on the record.
+    // 'needed'/'pending' are the collectable pre-money states. Anything else
+    // (taken, pre_auth, fully_claimed, etc.) means money or a hold is already
+    // attached and a fresh hold would be ambiguous.
+    const alreadyHeld = parseFloat(current.amount_held || '0');
+    const alreadyTaken = parseFloat(current.excess_amount_taken || '0');
+    if (!['needed', 'pending'].includes(current.excess_status) || alreadyHeld > 0 || alreadyTaken > 0) {
+      res.status(400).json({
+        error: 'Cannot record a pre-auth on this record',
+        detail: `Status is "${current.excess_status}" with £${alreadyTaken.toFixed(2)} taken and £${alreadyHeld.toFixed(2)} held. Pre-auth holds can only be recorded on a record that is still Needed with nothing collected. If a hold already exists, capture or release it first.`,
+      });
+      return;
+    }
+
+    const holdDays = expires_in_days || 5;
+    // Card-machine methods need a paper receipt scan; Stripe holds have an
+    // electronic trail so don't.
+    const needsReceipt = method !== 'stripe_gbp';
+
+    const dateStr = new Date().toISOString().split('T')[0];
+    const preauthNote = `[${dateStr}] Pre-auth hold of £${amount.toFixed(2)} recorded via ${method.replace(/_/g, ' ')}${reference ? ` (ref ${reference})` : ''}${notes ? `. ${notes}` : ''}. Expires in ${holdDays} days.`;
+    const newNotes = current.notes ? `${current.notes}\n${preauthNote}` : preauthNote;
+
+    const result = await query(
+      `UPDATE job_excess SET
+        amount_held              = $1,
+        excess_amount_taken      = 0,
+        excess_status            = 'pre_auth',
+        held_at                  = NOW(),
+        held_expires_at          = NOW() + ($2 || ' days')::interval,
+        payment_method           = $3,
+        payment_reference        = $4,
+        stripe_payment_intent_id = COALESCE($5, stripe_payment_intent_id),
+        receipt_required         = $6,
+        notes                    = $7,
+        updated_at               = NOW()
+      WHERE id = $8
+      RETURNING *`,
+      [
+        amount,                       // $1
+        String(holdDays),             // $2
+        method,                       // $3
+        reference || null,            // $4
+        stripe_payment_intent_id || null, // $5
+        needsReceipt,                 // $6
+        newNotes,                     // $7
+        id,                           // $8
+      ]
+    );
+
+    // Audit row in job_payments (payment_status='pre_auth' — not completed). Keeps
+    // the hold visible in payment history, consistent with the portal path in money.ts.
+    try {
+      await query(
+        `INSERT INTO job_payments
+          (job_id, hirehop_job_id, payment_type, amount, payment_method,
+           payment_reference, payment_status, source, excess_id,
+           client_name, recorded_by, notes, payment_date)
+         VALUES ($1, $2, 'excess', $3, $4, $5, 'pre_auth', 'op_excess_modal', $6, $7, $8, $9, NOW())`,
+        [
+          current.job_id,
+          current.hh_job_number || null,
+          amount,
+          method,
+          reference || null,
+          id,
+          current.client_name || null,
+          req.user?.id || null,
+          notes || `Pre-auth hold recorded (expires ${holdDays}d)`,
+        ]
+      );
+    } catch (err) {
+      console.error('[excess] Failed to insert job_payments row for pre-auth (non-fatal):', err);
+    }
+
+    // Held money counts as coverage — sync requirement status.
+    if (current.job_id) {
+      syncExcessRequirementStatus(current.job_id).catch(e =>
+        console.error('[excess] syncExcessRequirementStatus failed (record-preauth):', e)
+      );
+    }
+
+    console.log(`[excess] Pre-auth recorded: ${id}, £${amount} held via ${method}, expires ${holdDays}d`);
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Record-preauth error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to record pre-auth hold', detail: errMsg });
+  }
+});
+
+// ── POST /api/excess/:id/receipt — Attach a card-machine receipt scan ──
+//
+// receipt_url is the R2 key of a scan uploaded via /api/files/upload. Clears the
+// receipt_required to-do flag. Card-machine excess (worldpay/amex/cash) needs a
+// receipt for audit — surfaced as an amber to-do (NeedsAttention bucket) until set.
+
+router.post('/:id/receipt', authorize('admin', 'manager'), validate(receiptSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { receipt_url } = req.body;
+
+    const current = await query(`SELECT id, notes FROM job_excess WHERE id = $1`, [id]);
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+
+    const dateStr = new Date().toISOString().split('T')[0];
+    const note = `[${dateStr}] Receipt scan attached.`;
+    const newNotes = current.rows[0].notes ? `${current.rows[0].notes}\n${note}` : note;
+
+    const result = await query(
+      `UPDATE job_excess SET
+        receipt_url         = $1,
+        receipt_uploaded_at = NOW(),
+        receipt_required    = FALSE,
+        notes               = $2,
+        updated_at          = NOW()
+      WHERE id = $3
+      RETURNING *`,
+      [receipt_url, newNotes, id]
+    );
+
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Receipt-attach error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to attach receipt', detail: errMsg });
+  }
+});
+
+// ── GET /api/excess/:id/bank-details — Decrypt stored bank details ──
+//
+// Returns the decrypted bank details for THIS record. Admin/manager only — this
+// is PII. Decryption happens here (response layer), never in SQL or logs.
+
+router.get('/:id/bank-details', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const result = await query(
+      `SELECT bank_details_encrypted, bank_details_last_used_at, bank_details_updated_at
+       FROM job_excess WHERE id = $1`,
+      [id]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const row = result.rows[0];
+    if (!row.bank_details_encrypted) {
+      res.json({ data: null });
+      return;
+    }
+    if (!isEncryptionConfigured()) {
+      res.status(503).json({ error: 'Encryption not configured — cannot decrypt bank details (ENCRYPTION_KEY missing).' });
+      return;
+    }
+    const details = tryDecryptJson(row.bank_details_encrypted);
+    res.json({
+      data: details,
+      last_used_at: row.bank_details_last_used_at,
+      updated_at: row.bank_details_updated_at,
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Bank-details fetch error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to fetch bank details', detail: errMsg });
+  }
+});
+
+// ── GET /api/excess/:id/previous-bank-details — Reuse-from-previous lookup ──
+//
+// Finds the same client's most recent OTHER excess record carrying bank details,
+// so staff can copy them across rather than re-typing. Returns the decrypted
+// details + when they were last used (staleness heads-up — staff reconfirm with
+// the client as standard). Admin/manager only.
+
+router.get('/:id/previous-bank-details', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (!isEncryptionConfigured()) {
+      res.json({ data: null, available: false });
+      return;
+    }
+
+    // Resolve this record's client so we only offer the same client's details.
+    const self = await query(
+      `SELECT je.id, j.client_id
+       FROM job_excess je LEFT JOIN jobs j ON j.id = je.job_id
+       WHERE je.id = $1`,
+      [id]
+    );
+    if (self.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const clientId = self.rows[0].client_id;
+    if (!clientId) {
+      res.json({ data: null, available: false });
+      return;
+    }
+
+    const prev = await query(
+      `SELECT je.bank_details_encrypted, je.bank_details_last_used_at,
+              je.bank_details_updated_at, j.hh_job_number
+       FROM job_excess je
+       JOIN jobs j ON j.id = je.job_id
+       WHERE je.id <> $1
+         AND j.client_id = $2
+         AND je.bank_details_encrypted IS NOT NULL
+       ORDER BY je.bank_details_updated_at DESC NULLS LAST
+       LIMIT 1`,
+      [id, clientId]
+    );
+    if (prev.rows.length === 0) {
+      res.json({ data: null, available: false });
+      return;
+    }
+    const row = prev.rows[0];
+    const details = tryDecryptJson(row.bank_details_encrypted);
+    if (!details) {
+      res.json({ data: null, available: false });
+      return;
+    }
+    res.json({
+      data: details,
+      available: true,
+      last_used_at: row.bank_details_last_used_at,
+      updated_at: row.bank_details_updated_at,
+      source_hh_job: row.hh_job_number || null,
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Previous-bank-details lookup error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to look up previous bank details', detail: errMsg });
+  }
+});
+
 router.post('/:id/capture', authorize('admin', 'manager'), validate(captureSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
@@ -1360,6 +1667,8 @@ router.post('/:id/capture', authorize('admin', 'manager'), validate(captureSchem
         claim_notes              = $9,
         notes                    = $10,
         receipt_required         = $11,
+        receipt_url              = COALESCE($13, receipt_url),
+        receipt_uploaded_at      = CASE WHEN $13 IS NOT NULL THEN NOW() ELSE receipt_uploaded_at END,
         updated_at               = NOW()
       WHERE id = $12
       RETURNING *`,
@@ -1376,6 +1685,7 @@ router.post('/:id/capture', authorize('admin', 'manager'), validate(captureSchem
         newNotes,                           // $10
         needsReceipt,                       // $11
         id,                                 // $12
+        receipt_url || null,                // $13
       ]
     );
 
@@ -1704,7 +2014,7 @@ router.post('/:id/claim', authorize('admin', 'manager'), validate(claimSchema), 
 router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { amount, method } = req.body;
+    const { amount, method, bank_details } = req.body;
 
     // Get the current excess record to determine partial vs full
     const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
@@ -1842,6 +2152,42 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
 
     const excess = result.rows[0];
 
+    // ── Persist client bank details (encrypted) when supplied ──────────────
+    // Captured at reimburse time for bank-transfer methods. Scoped to this
+    // record; stamps last_used_at so a future reuse-lookup can flag staleness.
+    let bankDetailsWarning: string | null = null;
+    if (bank_details) {
+      if (!isEncryptionConfigured()) {
+        // Don't store PII in plaintext if the key is missing. The reimbursement
+        // itself already succeeded — surface a warning rather than failing.
+        bankDetailsWarning = 'Reimbursement recorded, but bank details were NOT saved: encryption key not configured on the server (ENCRYPTION_KEY). Details were not stored in plaintext.';
+        console.warn('[excess] Bank details provided but ENCRYPTION_KEY not set — not storing.');
+      } else {
+        try {
+          const encrypted = encryptJson(bank_details);
+          await query(
+            `UPDATE job_excess SET
+              bank_details_encrypted    = $1,
+              bank_details_last_used_at = NOW(),
+              bank_details_updated_at   = NOW(),
+              updated_at                = NOW()
+            WHERE id = $2`,
+            [encrypted, id]
+          );
+        } catch (e) {
+          bankDetailsWarning = 'Reimbursement recorded, but saving bank details failed. Re-enter on the record if you need them stored.';
+          console.error('[excess] Bank details encryption/store failed (non-fatal):', e);
+        }
+      }
+    } else if (excess.bank_details_encrypted) {
+      // Reimbursing against already-stored details — stamp last_used_at so the
+      // staleness heads-up stays accurate on future hires.
+      await query(
+        `UPDATE job_excess SET bank_details_last_used_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [id]
+      ).catch(e => console.error('[excess] bank_details_last_used_at stamp failed (non-fatal):', e));
+    }
+
     // ── Step 4: Trigger Xero sync (best-effort — HH push already succeeded,
     // so OP and HH are in sync. If Xero sync fails the next sync will pick it
     // up). Logged so engineering can investigate. ──────────────────────────
@@ -1881,6 +2227,7 @@ router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseS
     res.json({
       data: { ...excess, hh_payment_application_id: hhPaymentAppId },
       ...(isHhLinked ? {} : { op_only: true }),
+      ...(bankDetailsWarning ? { warning: bankDetailsWarning } : {}),
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);

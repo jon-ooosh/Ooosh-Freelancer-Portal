@@ -1059,18 +1059,22 @@ The legacy "Record Payment → Rolled Over from Previous Hire" dropdown option i
 
 **Migration 087 backfill:** the 10 then-live `pre_auth` records (all >5d old, Stripe had voided them) moved to `released`; 21 legacy `pending` → `needed`; `stripe_payment_intent_id` lifted from `payment_reference` where `pi_%`; `receipt_required` flagged on existing card-machine records.
 
-**Still TODO — PR 3 + PR 4 (the next Claude picks up here):**
+**PR 3 — Manual pre-auth entry + bank details + encryption + receipt scans ✅ SHIPPED (May 2026):**
 
-*PR 3 — Bank details + encryption + receipt scans* (security-sensitive, isolate for review):
-- **Encryption layer** — build `services/encryption.ts` (AES-256-GCM, Node built-in `crypto`, keyed off `ENCRYPTION_KEY` env var = 64 hex chars via `openssl rand -hex 32`). `encrypt()`/`decrypt()` + `encryptJson()`/`decryptJson()`. Store as `iv:authTag:ciphertext`. Decrypt ONLY in the API response layer, admin/manager only. **The key must NEVER change once data is encrypted with it** (data becomes unrecoverable) — jon has generated the key and has it in a safe place; it needs adding to `/var/www/ooosh-portal/backend/.env` as `ENCRYPTION_KEY=...` when PR 3 deploys. Add a **"PII Encryption" section to this CLAUDE.md** documenting the helper + a retrofit checklist of what should eventually move to encrypted storage: driver hire-form data (POA docs, licence, passport, DVLA), card-receipt scans, freelancer PII. Build once, apply to bank details first, retrofit the rest on jon's timeline.
-- **Client bank details for reimbursement** — needed whenever reimbursement method is a bank transfer (any hire length). Store encrypted, **scoped to the `job_excess` record** (not permanent on person/org) with a **"reuse from previous hire" lookup** (same pattern as rollover linkage — find the client's most recent record with bank details, offer to copy) and a **"last used DD/MM/YYYY" heads-up** so staff sanity-check stale details (they reconfirm with the client as standard). Fields: UK = account holder name + sort code + account number; **International = IBAN + SWIFT/BIC + bank country** (jon confirmed international reimbursements happen). Stamp `last_used_at` when a reimbursement is recorded against the details. These structured fields become the direct input to a future Wise recipient (see below). UI: capture/reuse lives in the reimburse form inside `ExcessPaymentModal`, shown when reimbursement method is a bank transfer.
-- **Receipt scans** (deferred from PR 2 to here — same "attach sensitive scan to excess" infra): required at UI level for card-machine excess (worldpay/amex/cash), surfaced as an amber "outstanding to-do" banner (NOT a hard block — like the client-intro banner pattern). Columns `receipt_required`/`receipt_uploaded_at` already exist (087). Also add a "Receipts outstanding" NeedsAttention bucket. Each claim/reimburse event on physical-card-machine excess should also carry its own receipt (the refund/capture receipt), so scans aren't one-time.
+Built on branch `claude/excess-preauth-lifecycle-ZvUQA` as one PR (jon's call). Migration 091.
 
-*PR 4 — Stripe webhooks + expiry scheduler:*
+- [x] **Manual pre-auth entry** (jon's actual need — recording a hold taken on the Worldpay machine). `POST /api/excess/:id/record-preauth` + "Record Pre-Auth Hold" action in `ExcessPaymentModal`. Sets `amount_held` (NOT `excess_amount_taken` — no money in account yet), `held_at`, `held_expires_at = NOW() + N days` (default 5), `excess_status='pre_auth'`, flags `receipt_required` for card-machine methods. **No HireHop deposit pushed** — that happens at capture time. Guarded to `needed`/`pending` records with nothing collected/held (can't stack a hold on existing money). Inserts a `job_payments` audit row (`payment_status='pre_auth'`). Flows straight into the existing Capture/Release lifecycle. Method options: worldpay / amex / cash / manual-stripe. The action only renders on a clean `needed`/`pending` record (frontend + backend both enforce).
+- [x] **Encryption layer** — `services/encryption.ts` (AES-256-GCM, `ENCRYPTION_KEY` env, `iv:authTag:ciphertext`, `encrypt`/`decrypt`/`encryptJson`/`decryptJson`/`tryDecrypt*`/`isEncryptionConfigured`). See "PII Encryption" under Shared Utilities for full docs + the retrofit checklist. **`ENCRYPTION_KEY` still needs adding to the server `.env`** when this deploys (jon holds the key) — until then bank-detail storage refuses cleanly (no plaintext fallback) and the decrypt endpoints 503; everything else works.
+- [x] **Client bank details for reimbursement** — encrypted on `job_excess.bank_details_encrypted` (migration 094), scoped to the record. Captured in the reimburse form when method is a bank transfer (`wise_bacs`/`lloyds_bank`). UK = holder + sort code + account number; international = holder + IBAN + SWIFT/BIC + bank country. `GET /api/excess/:id/previous-bank-details` powers the "reuse from previous hire" offer with a `bank_details_last_used_at` staleness heads-up; `GET /api/excess/:id/bank-details` decrypts for display (admin/manager). `bank_details_last_used_at` stamped on every reimbursement against the details.
+- [x] **Receipt scans** — `receipt_url` column added (094; 087 only had the flag + timestamp). `POST /api/excess/:id/receipt` attaches a scan (uploaded via `/api/files/upload?attachment_only=true`), clears `receipt_required`. "Upload Receipt Scan" modal action + amber "receipt outstanding" banner in the modal summary (non-blocking). Capture endpoint now stores `receipt_url` too (was accepting it in the body but discarding it). "Receipts Outstanding" NeedsAttention dashboard bucket (amber) added.
+
+*Still open under the receipt work (deferred):* each claim/reimburse event on physical-card-machine excess carrying its OWN receipt (refund/capture receipt) — currently one receipt per record, not per event.
+
+*PR 4 — Stripe webhooks + expiry scheduler (NOT yet built):*
 - **Webhook receiver** — `POST /api/webhooks/stripe` (currently 404ing — jon has ALREADY configured the webhook in Stripe pointing here, with `STRIPE_WEBHOOK_SECRET` in `.env`). Verify signature, idempotency via a `stripe_events` log table. Subscribed events: `payment_intent.amount_capturable_updated`, `payment_intent.canceled`, `payment_intent.succeeded`, `charge.refunded`, `charge.dispute.created/updated/closed`. The big new capability is **disputes/chargebacks** (arrive out-of-band, only via webhook) + catching out-of-band refunds/voids done in the Stripe dashboard.
 - **Expiry scheduler** — daily task: scan `job_excess` where `excess_status='pre_auth'` and `held_expires_at` near/past. For Stripe records, reconcile live via Stripe API (PI status → auto-mark `released` when voided). Fire bell + email 24-48h before expiry prompting capture-or-release. This supersedes the older "Stripe pre-auth expiry scheduler" TODO in Phase E (which predates the held/taken model — the `released` status it wanted now exists). Touches `config/scheduler.ts`. The dashboard "Pre-auth Holds Expiring" bucket (shipped PR 2) is the surface; the scheduler is the proactive nudge.
 
-**Branch for this work:** `claude/process-reimbursement-claims-sf8yz` (PR 1 = #573 merged, PR 2 = #582). Continue on the same branch or a fresh one — PR 1 + 2 are both on main once #582 merges.
+**Branch for this work:** PR 1 = #573, PR 2 = #582 (both merged to main). PR 3 = branch `claude/excess-preauth-lifecycle-ZvUQA` (manual pre-auth entry + bank details + encryption + receipts). PR 4 (webhooks + expiry scheduler) is the next pick-up.
 
 ##### Phase F — Staff Card Payments (future)
 Allow staff to take card payments directly from the Money tab, rather than walking to the card terminal.
@@ -2519,6 +2523,35 @@ Singleton Stripe SDK client for OP's direct Stripe operations (pre-auth capture,
 **Env vars:** `STRIPE_SECRET_KEY` (restricted key — scopes: PaymentIntents R/W, Refunds R/W, Charges R, Disputes R). `STRIPE_WEBHOOK_SECRET` for the PR 4 webhook receiver. Both already set on the production server (May 2026). SDK pins to its bundled `LatestApiVersion`.
 
 **Used by:** `routes/excess.ts` capture/release endpoints. PR 4 will add `routes/webhooks.ts` `/stripe` receiver. **Don't instantiate `new Stripe()` elsewhere** — go through `getStripeClient()` so key handling lives in one place.
+
+### PII Encryption ✅ COMPLETE (PR 3, May 2026)
+
+**File:** `backend/src/services/encryption.ts`
+
+Application-level AES-256-GCM encryption for fields that must never sit in the database as plaintext. First consumer is **client bank details for excess reimbursement** (migration 094); the rest of the PII surface gets retrofitted on jon's timeline (checklist below).
+
+**Exports:**
+- `encrypt(plaintext) → "iv:authTag:ciphertext"` (hex) / `decrypt(stored) → plaintext`
+- `encryptJson(obj)` / `decryptJson<T>(stored)` — for structured records (bank details)
+- `tryDecrypt` / `tryDecryptJson` — best-effort variants returning `null` instead of throwing (use in list-mapping loops so one bad row doesn't 500 the response)
+- `isEncryptionConfigured()` — guard before calling. Routes 503 / refuse-and-warn cleanly on a server without the key, rather than throwing a 500. **Never fall back to storing plaintext** when the key is missing — refuse the write and surface a warning (the reimburse flow does this).
+
+**Format:** `iv:authTag:ciphertext`, all hex. IV is random per call (12 bytes, GCM), so the same plaintext encrypts to different ciphertext each time — expected. Decrypt ONLY in the API response layer, admin/manager only. Never decrypt inside SQL or log decrypted values.
+
+**Key management — CRITICAL:**
+- `ENCRYPTION_KEY` env var = 64 hex chars (32 bytes), `openssl rand -hex 32`.
+- **The key must NEVER change once data is encrypted with it** — rotating or losing it makes every encrypted field permanently unrecoverable. There is no recovery path.
+- jon generated the key and holds it safely. It goes into `/var/www/ooosh-portal/backend/.env` as `ENCRYPTION_KEY=...` when PR 3 deploys. Until it's set, bank-detail storage is refused (no plaintext fallback) and decrypt endpoints 503 — everything else works.
+
+**Bank details (the first consumer):** Stored encrypted on `job_excess.bank_details_encrypted` (migration 094), SCOPED TO THE RECORD (not permanently on person/org). Captured in the reimburse form when the method is a bank transfer (`wise_bacs` / `lloyds_bank`). UK = holder + sort code + account number; international = holder + IBAN + SWIFT/BIC + bank country (structured for a future Wise recipient). `GET /api/excess/:id/previous-bank-details` finds the client's most recent record with details for a "reuse from previous hire" offer, with a `bank_details_last_used_at` staleness heads-up so staff reconfirm before relying on them. `bank_details_last_used_at` is stamped every time a reimbursement is recorded against the details.
+
+**Retrofit checklist (apply on jon's timeline — build once, encrypt incrementally):**
+- [x] Client bank details (reimbursement) — done in PR 3
+- [ ] Driver hire-form PII: POA documents, licence, passport, DVLA record data
+- [ ] Card-machine receipt scan storage (the scan files themselves; metadata flag already on `job_excess`)
+- [ ] Freelancer PII (held in `people` / `drivers`)
+
+When retrofitting a field: add an `*_encrypted TEXT` column, write via `encrypt`/`encryptJson` (guarded by `isEncryptionConfigured()`), decrypt only in the admin/manager response layer via `tryDecrypt`/`tryDecryptJson`, and never log or SQL-query the decrypted value.
 
 ### API Key Verification ✅ COMPLETE
 
