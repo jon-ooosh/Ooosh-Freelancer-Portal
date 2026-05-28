@@ -38,6 +38,7 @@ import oohReturnRouter from './ooh-return';
 import preHireBriefingRouter from './pre-hire-briefing';
 import fillGapRouter from './fill-gap';
 import costsRouter from './costs';
+import storageRouter from './storage';
 
 const router = Router();
 
@@ -70,6 +71,7 @@ router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled
 router.use('/issues', issuesRouter);
 router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute) — distinct from /issues platform tracker
 router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing receipt/cost workflow
+router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
