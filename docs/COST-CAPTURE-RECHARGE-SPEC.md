@@ -214,9 +214,9 @@ Attacks the "can I confidently close this hire?" pain.
 
 ---
 
-## Component 9: Database — Migration 066
+## Component 9: Database — Migration 070
 
-> Verify the next free migration number before building, and **add the filename to the hardcoded array in `backend/src/migrations/run.ts`**.
+> Migrations already run to 069, so this is **070** (`070_cost_capture.sql`), added to the hardcoded array in `backend/src/migrations/run.ts`. **Built in the foundation PR.**
 
 ```sql
 CREATE TABLE IF NOT EXISTS costs (

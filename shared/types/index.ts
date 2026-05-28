@@ -885,6 +885,76 @@ export interface HireHopDeposit {
 
 export type PaymentTerms = 'standard' | 'credit_7' | 'credit_14' | 'credit_30' | 'credit_60' | 'no_deposit' | 'custom';
 
+// ── Cost Capture & Recharge ──────────────────────────────────────────────────
+export type CostType = 'overhead' | 'job' | 'vehicle' | 'stock' | 'parts' | 'freelancer_invoice';
+export type CostPaymentMethod = 'cot_card' | 'petty_cash' | 'paypal' | 'reimburse_me' | 'not_yet_paid' | 'other';
+export type CostPaymentStatus = 'paid' | 'awaiting_payment' | 'awaiting_invoice';
+export type CostRechargeMode = 'none' | 'full' | 'partial';
+export type CostApprovalState = 'submitted' | 'verified' | 'approved' | 'paid';
+export type CostXeroSyncState = 'pending' | 'bill_created' | 'attached' | 'reconciled' | 'error';
+export type CostStatus = 'draft' | 'confirmed' | 'resolved';
+
+export interface Cost {
+  id: string;
+  uploaded_by: string | null;
+  uploaded_by_name?: string | null;
+  uploaded_at: string;
+  supplier_name: string | null;
+  cost_date: string | null;
+  amount_gross: number | null;
+  amount_vat: number | null;
+  amount_net: number | null;
+  currency: string;
+  description: string | null;
+  category: string | null;
+  xero_account_code: string | null;
+  cost_type: CostType;
+  payment_method: CostPaymentMethod | null;
+  cot_card_holder: string | null;
+  cot_card_last4: string | null;
+  payment_status: CostPaymentStatus;
+  job_id: string | null;
+  vehicle_id: string | null;
+  quote_assignment_id: string | null;
+  platform_issue_id: string | null;
+  vehicle_service_log_id: string | null;
+  vehicle_fuel_log_id: string | null;
+  recharge_mode: CostRechargeMode;
+  recharge_amount: number | null;
+  recharged_to_hh_at: string | null;
+  recharge_hh_item_id: string | null;
+  approval_state: CostApprovalState | null;
+  verified_by: string | null;
+  verified_at: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  paid_by: string | null;
+  paid_at: string | null;
+  paid_method: string | null;
+  receipt_r2_key: string | null;
+  receipt_filename: string | null;
+  xero_sync_state: CostXeroSyncState;
+  xero_object_id: string | null;
+  xero_synced_at: string | null;
+  xero_error: string | null;
+  status: CostStatus;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  allocations?: CostAllocation[];
+}
+
+export interface CostAllocation {
+  id: string;
+  cost_id: string;
+  job_id: string | null;
+  quote_assignment_id: string | null;
+  amount: number;
+  recharge: boolean;
+  notes: string | null;
+  created_at: string;
+}
+
 // API response wrappers
 export interface PaginatedResponse<T> {
   data: T[];
