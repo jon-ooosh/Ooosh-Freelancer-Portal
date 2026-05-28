@@ -52,7 +52,8 @@ A single `costs` entity with optional **facets** (job, vehicle, freelancer), rat
 
 ### Why one model
 
-- **Vehicle costs** write through to the existing fuel/service log (which already carries `cost` + `receiptFile`) rather than duplicating — the vehicle facet *is* the same record, surfaced on the vehicle page.
+- **Vehicle costs** link 1:1 to the existing fuel/service log (which already carries `cost` + `receiptFile`) rather than duplicating — see §7a. The vehicle log stays the maintenance home; `costs` is the financial spine underneath it.
+- **Repair/damage costs** link to the existing `platform_issues` record (the Problems module) — see §7b.
 - **Recharge** and **payable** are just states/flags on the cost, so a single list view can answer "what do we owe?" and "what can we bill back?" without joins across silos.
 
 ---
@@ -134,7 +135,7 @@ The bookkeeper-pain killer. Reads COT card transactions **from Xero** and matche
 
 - Freelancer invoice links to one or more `quote_assignments` — we hold the **agreed rate** there.
 - Card shows *expected* (agreed fee + any pre-agreed expenses) vs *invoiced*, with variance flagged.
-- **Bundled invoice** (5 jobs on one): allow one cost record to allocate across multiple jobs/assignments, each slice checked against its expected rate.
+- **Bundled invoice** (5 jobs on one): an **allocation modal** splits one cost across jobs — "£80 → job 12345, £22 → job 23456" — writing a `cost_allocations` row per line. Each line shows that job's expected rate inline so the split is checked as it's entered. Allocated total must reconcile to the invoice gross.
 - **Freelancer-incurred client costs** (their train fare we recharge on): tag that line `recharge` → it flows into the job's recharge bucket (4a) so it's billed back.
 
 ---
@@ -159,15 +160,17 @@ submitted → verified (booker) → approved (admin) → paid (admin)
 
 No Xero integration exists today (everything reaches Xero *through* HireHop). This builds a **direct** connection — baked in from Phase 1 since it shapes the data model.
 
-### App type — decision
+### App type — DECIDED: Custom Connection
 
-OP connects to exactly **one** Xero org (Ooosh's own), server-side, no end-user in the auth loop.
+OP connects to exactly **one** Xero org (Ooosh's own), server-side, no end-user in the auth loop — the textbook case for a **Custom Connection** (`client_credentials` grant). Confirmed facts (Xero developer docs, May 2026):
 
-- **Recommended: Custom connection** (client-credentials / M2M grant). Purpose-built for "my own back-office app ↔ my own Xero". No interactive consent, no refresh-token juggling. Premium (small monthly fee per connection), UK-available.
-- **Fallback: Web app** (authorization-code grant). Free for one org. Requires a one-time OAuth consent, then OP stores + refreshes tokens server-side (30-min access tokens, 60-day rotating refresh tokens).
-- ✗ Mobile/desktop (PKCE) — not us.
+- **No refresh tokens.** The `client_credentials` grant has none. The server mints a fresh 30-min access token on demand with `client_id` + `client_secret` — **fully programmatic, indefinitely. No manual 60-day reauthorisation** (that headache is exclusive to the Web app authorization-code flow).
+- **Free** under the Starter tier (5 connections, 1,000 API calls/day/org). No separate per-connection fee.
+- **One organisation per connection** — exactly our case.
+- **Egress is a non-issue:** reading COT transactions for reconciliation is a few dozen rows/month (KB, not GB). The 1,000 calls/day Starter rate limit is the only ceiling and is far above our need.
 
-> **Prerequisite:** Jon to create the Xero developer app and confirm which type. Spec assumes Custom connection; if Web app, add a `xero_tokens` table + refresh scheduler.
+> No `xero_tokens` table or refresh scheduler needed. The broker just caches the current access token and re-mints on 401/expiry.
+> **Prerequisite:** Jon creates the Xero developer app as a *Custom Connection* and supplies `client_id` + `client_secret` (server env vars).
 
 ### What we use
 
@@ -185,6 +188,22 @@ OP connects to exactly **one** Xero org (Ooosh's own), server-side, no end-user 
 - `xero_sync_state` on each cost tracks where it is; failures are non-fatal and surfaced for retry.
 
 ---
+
+## Component 7a: Vehicle service/fuel log — adjunct, not replacement
+
+The existing `vehicle_service_log` / `vehicle_fuel_log` are **not replaced**. They hold vehicle-domain fields (mileage, next-due date/mileage, garage, service type) that don't belong on a generic cost. Instead:
+
+- A service/fuel record with a cost links **1:1** to a `costs` row (`costs.vehicle_service_log_id` / `costs.vehicle_fuel_log_id`).
+- **Enter from either side, no double-entry:** saving the existing Add Service/Fuel modal with a cost can create the linked `costs` row; capturing a `cost_type = vehicle` cost can write through to the service/fuel log.
+- This ensures vehicle spend flows into Xero coding + reconciliation (Component 4c) — otherwise reconciliation would have a vehicle-shaped hole.
+
+## Component 7b: Problems module — repair cost wire-up
+
+The `platform_issues` Problems module already anticipates this: its resolution panel shows Estimated/Actual cost with the note *"Cost is informational only — future wire-up to HireHop / Xero pending. Don't double-enter into the Money tab."* **This system is that wire-up.**
+
+- A repair invoice (TTS360, garage, parts) logged against a problem links via `costs.platform_issue_id`.
+- The cost flows to Xero, and if the damage is **client-caused**, into the recharge bucket (4a) → billed back via HireHop.
+- The problem's **"Actual" cost reads from the linked `costs` row** instead of being a dead informational field — removing the "don't double-enter" caveat. Estimated stays a manual field on the issue (it's a pre-cost guess).
 
 ## Component 8: Job close-out integration
 
@@ -227,6 +246,9 @@ CREATE TABLE IF NOT EXISTS costs (
   job_id              UUID REFERENCES jobs(id),
   vehicle_id          UUID REFERENCES fleet_vehicles(id),
   quote_assignment_id UUID REFERENCES quote_assignments(id),
+  platform_issue_id   UUID REFERENCES platform_issues(id),       -- repair/damage costs (§7b)
+  vehicle_service_log_id UUID REFERENCES vehicle_service_log(id), -- 1:1 maintenance link (§7a)
+  vehicle_fuel_log_id    UUID REFERENCES vehicle_fuel_log(id),    -- 1:1 fuel link (§7a)
 
   -- Recharge
   recharge_mode       VARCHAR(10) NOT NULL DEFAULT 'none',  -- none|full|partial
@@ -312,6 +334,20 @@ RBAC: capture/list = staff+; verify = manager+; approve/pay = admin.
 
 ---
 
+## Component 11a: Reporting & queryability
+
+Because every cost is **structured data** (not a photo emailed into Xero), the dataset is fully analysable — a deliberate win over the Jotform black hole. The schema captures the dimensions that make the useful slices cheap:
+
+| Question | Query shape |
+|---|---|
+| Fuel recharged to clients vs absorbed by us | `costs WHERE category='fuel' GROUP BY recharge_mode` (× vehicle / period) |
+| Total spend per vehicle | `costs WHERE vehicle_id=? GROUP BY category` (joins service/fuel log) |
+| Outstanding payables (incl. by freelancer) | `costs WHERE payment_status!='paid'` |
+| Recharges billed vs pending per job | `costs WHERE job_id=? AND recharge_mode!='none'` |
+| Spend by Xero account code / period | `costs GROUP BY xero_account_code, date_trunc('month', cost_date)` |
+
+Phase 1 ships these as filters/exports on the hub; a dedicated **`/money/costs/reports`** dashboard (charts) is Phase 3. The point is the *data shape* is right from day one, so reports are additive, never a schema migration.
+
 ## Component 12: Phasing
 
 **Phase 1 — Capture + tracking + recharge + Xero (core)**
@@ -321,8 +357,10 @@ RBAC: capture/list = staff+; verify = manager+; approve/pay = admin.
 - [ ] Branching capture form; entry points (hub, Job View, mobile, vehicle write-through)
 - [ ] Recharges Pending view + flag-and-confirm HH push (+ generic recharge stock items)
 - [ ] Bills to Pay view + approval workflow (with uploader-is-booker shortcut)
-- [ ] Xero broker + app connection (Custom connection)
+- [ ] Xero broker + Custom Connection (client_credentials, no token table)
 - [ ] Create bills (ACCPAY) + attach receipts + chart-of-accounts picker
+- [ ] Vehicle service/fuel log ↔ `costs` 1:1 link (§7a)
+- [ ] Problems module repair-cost link (§7b) — Actual cost reads from linked `costs`
 - [ ] Job close-out outstanding-costs flag
 
 **Phase 2 — Reconciliation + polish**
@@ -341,7 +379,13 @@ RBAC: capture/list = staff+; verify = manager+; approve/pay = admin.
 
 ## Open verification items (before/at build)
 
-1. **Codat→Xero shape** — bank-feed statement lines vs spend-money transactions (decides attach vs create — Component 3).
-2. **Xero app type** — Custom connection (recommended) vs Web app — Jon to set up the developer app.
-3. **Generic HH recharge stock items** — create the small set in HireHop, capture their stock IDs.
-4. **Reimbursement payouts** — how staff reimbursements are actually paid (payroll? bank transfer?) so the `paid` step records correctly.
+1. **Codat→Xero shape** — bank-feed statement lines vs spend-money transactions (decides attach vs create — Component 3). *The one remaining external unknown.*
+2. **Generic HH recharge stock items** — create the small set in HireHop, capture their stock IDs.
+3. **Reimbursement payouts** — how staff reimbursements are actually paid (payroll? bank transfer?) so the `paid` step records correctly.
+4. **Company stock / capex vs overhead** — confirm whether company-stock/capex costs need different Xero account coding from general overhead (likely yes — capex to an asset/stock account). Affects category mapping defaults only.
+
+### Decided
+- **Xero app type:** Custom Connection — `client_credentials`, free (Starter tier), single-org, no refresh tokens. ✓
+- **Recharge to HH:** flag-and-confirm, never auto-push. ✓
+- **Approval:** uploader-is-booker satisfies verify inline → admin approves + pays. ✓
+- **Service log & Problems module:** adjunct with 1:1 `costs` links, not replaced. ✓
