@@ -462,17 +462,26 @@ export function BookOutPage() {
     // Dedupe by angle — required angles are fixed strings, extras now use
     // a unique `extra_<timestamp>` angle so retake-of-extra also lands on
     // the same key. Result: either pattern just replaces in place.
-    setForm(f => ({
-      ...f,
-      photos: [...f.photos.filter(p => p.angle !== photo.angle), photo],
-    }))
+    setForm(f => {
+      // Revoke the displaced photo's preview URL so retakes don't leak.
+      const displaced = f.photos.find(p => p.angle === photo.angle)
+      if (displaced?.blobUrl) URL.revokeObjectURL(displaced.blobUrl)
+      return {
+        ...f,
+        photos: [...f.photos.filter(p => p.angle !== photo.angle), photo],
+      }
+    })
   }, [])
 
   const handlePhotoRemove = useCallback((angle: string) => {
-    setForm(f => ({
-      ...f,
-      photos: f.photos.filter(p => p.angle !== angle),
-    }))
+    setForm(f => {
+      const removed = f.photos.find(p => p.angle === angle)
+      if (removed?.blobUrl) URL.revokeObjectURL(removed.blobUrl)
+      return {
+        ...f,
+        photos: f.photos.filter(p => p.angle !== angle),
+      }
+    })
   }, [])
 
   const handlePhotoUpdate = useCallback(
@@ -683,21 +692,20 @@ export function BookOutPage() {
     setUploadProgress('Preparing photos for PDF...')
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = []
     let photoConvertFails = 0
-    const photoResizePromises = form.photos.map(async (p) => {
+    // Resize one photo at a time. createImageBitmap + OffscreenCanvas each
+    // allocate a full decoded bitmap; doing them all in parallel (Promise.all)
+    // spiked memory and could OOM the browser tab on phones with lots of
+    // high-res photos. Sequential keeps only one decode alive at a time.
+    for (const p of form.photos) {
       try {
         const base64 = await resizeImageForPdf(p.blob)
         const photoKey = `events/${eventId}/${safeReg}/${p.angle}.jpg`
         const r2Url = r2PublicBase ? `${r2PublicBase}/${photoKey}` : undefined
-        return { angle: p.angle, label: p.label, base64, r2Url }
+        photoBase64s.push({ angle: p.angle, label: p.label, base64, r2Url })
       } catch {
         photoConvertFails++
         console.warn('Failed to resize photo for PDF:', p.angle)
-        return null
       }
-    })
-    const resizedPhotos = await Promise.all(photoResizePromises)
-    for (const p of resizedPhotos) {
-      if (p) photoBase64s.push(p)
     }
     if (photoConvertFails > 0) {
       results.push({
