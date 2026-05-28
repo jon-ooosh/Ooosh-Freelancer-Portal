@@ -1,5 +1,5 @@
 -- ============================================================================
--- 070: Cost Capture & Recharge — foundation
+-- 092: Cost Capture & Recharge — foundation
 --
 -- Staff-facing cost/receipt capture replacing the Jotform process. A single
 -- `costs` entity with optional facets (job, vehicle, freelancer assignment,
