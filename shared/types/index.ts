@@ -834,6 +834,11 @@ export interface JobExcess {
   stripe_payment_intent_id: string | null;
   receipt_required: boolean;
   receipt_uploaded_at: string | null;
+  receipt_url: string | null;
+  // Encrypted client bank details for reimbursement (migration 094). Never sent
+  // to the client decrypted — fetched separately via /excess/:id/bank-details.
+  bank_details_last_used_at: string | null;
+  bank_details_updated_at: string | null;
   created_at: string;
   updated_at: string;
   created_by: string | null;

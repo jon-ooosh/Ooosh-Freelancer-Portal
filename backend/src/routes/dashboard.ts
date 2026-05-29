@@ -631,6 +631,28 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         ORDER BY je.held_expires_at ASC
         LIMIT 10
       `),
+
+      // 26. Card-machine receipt scans outstanding (migration 087). Excess
+      // collected/held on a physical terminal (Worldpay/Amex/cash) needs a
+      // receipt scan attached for audit. Non-blocking — surfaced as an amber
+      // to-do until the scan lands. Newest first.
+      query(`
+        SELECT je.id AS excess_id,
+               COALESCE(je.amount_held, je.excess_amount_taken, 0) AS amount,
+               je.payment_method, je.excess_status,
+               COALESCE(d.full_name, je.client_name) AS driver_name,
+               fv.reg AS vehicle_reg,
+               j.id AS job_uuid, j.hh_job_number, j.job_name
+        FROM job_excess je
+        LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
+        LEFT JOIN drivers d ON d.id = vha.driver_id
+        LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
+        LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
+        WHERE je.receipt_required = TRUE
+          AND je.receipt_uploaded_at IS NULL
+        ORDER BY je.updated_at DESC
+        LIMIT 10
+      `),
     ]);
 
     const [
@@ -647,7 +669,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       teamActivityResult, recentActivityResult,
       pendingReferralsResult, pendingExcessResult,
       prepTimeResult, onHireSparkResult, deprepTimeResult,
-      expiringHoldsResult,
+      expiringHoldsResult, receiptsOutstandingResult,
     ] = results;
 
     // Build the 14-day on-hire series — oldest day first, today last.
@@ -768,6 +790,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         // collateral evaporates.
         expiring_holds_count: expiringHoldsResult.rows.length,
         expiring_holds: expiringHoldsResult.rows,
+        // ── Card-machine receipt scans outstanding (migration 087) ──
+        // Excess collected/held on a physical terminal needs a receipt scan
+        // attached. Amber to-do, non-blocking.
+        receipts_outstanding_count: receiptsOutstandingResult.rows.length,
+        receipts_outstanding: receiptsOutstandingResult.rows,
       },
       transport_ops: {
         summary: transportOpsSummary,

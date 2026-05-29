@@ -259,6 +259,25 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
     })),
     viewAllHref: '/money/excess?status=pre_auth',
   };
+  // Card-machine receipt scans outstanding (migration 087 / PR 3). Amber —
+  // action-needed but not time-critical. Excess taken/held on a physical
+  // terminal needs a receipt scan attached for audit. Click → Money tab.
+  const receiptsOutstanding: NABucket = {
+    key: 'receipts_outstanding',
+    title: 'Receipts Outstanding',
+    accent: 'amber',
+    count: na.receipts_outstanding_count || 0,
+    items: (na.receipts_outstanding || []).map((r) => ({
+      id: r.excess_id,
+      label: r.driver_name || r.job_name || `Job #${r.hh_job_number ?? '—'}`,
+      age: `£${Math.round(r.amount ?? 0)}`,
+      sub: r.payment_method ? r.payment_method.replace(/_/g, ' ') : undefined,
+      tag: r.vehicle_reg ?? undefined,
+      href: r.job_uuid ? `/jobs/${r.job_uuid}` : '/money/excess',
+    })),
+    viewAllHref: '/money/excess',
+  };
+
   // Transport arrangements to action — quotes in next 7 days on a
   // confirmed/pre-dispatch job where any arranging pill (client intro /
   // tolls / accommodation / flights) is still outstanding. Replaces the
@@ -346,7 +365,7 @@ export default function NeedsAttention({ data }: DashboardSectionProps) {
   // expiringHolds leads the secondary row — red accent, time-critical (hold
   // auto-voids at day 5). Sits ahead of the amber/blue/purple buckets so it
   // catches the eye when present.
-  const secondaryBuckets = [expiringHolds, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
+  const secondaryBuckets = [expiringHolds, receiptsOutstanding, referrals, excess, transportArrangements, fleetBucket, problemsBucket];
   const secondaryAny = secondaryBuckets.some(b => b.count > 0);
 
   return (
