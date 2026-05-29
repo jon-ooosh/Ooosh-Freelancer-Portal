@@ -268,6 +268,7 @@ interface VehicleAssignment {
     excess_status: string;
     excess_amount_required: number | null;
     excess_amount_taken: number | null;
+    dispute_status?: 'open' | 'won' | 'lost' | null;
   } | null;
   /**
    * Driver's personal insurance liability — source of truth for "what is
@@ -2294,6 +2295,7 @@ export default function JobDetailPage() {
             excess_status: r.excess_status,
             excess_amount_required: r.excess_amount_required,
             excess_amount_taken: r.excess_amount_taken,
+            dispute_status: r.dispute_status ?? null,
           } : null,
           effective_vehicle_id: r.vehicle_id || inferred,
         };
@@ -4042,6 +4044,11 @@ export default function JobDetailPage() {
                                    a.excess.excess_status === 'not_required' ? 'Covered' :
                                    a.excess.excess_status}
                                 </span>
+                                {a.excess.dispute_status && (
+                                  <span className={`px-2 py-0.5 rounded-full font-semibold ${a.excess.dispute_status === 'won' ? 'bg-gray-100 text-gray-600' : 'bg-red-100 text-red-700'}`}>
+                                    {a.excess.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${a.excess.dispute_status}`}
+                                  </span>
+                                )}
                                 {/* "Covered" (not_required) rows are the top-N
                                     losers — £0 sibling of another driver's excess
                                     on the same hire. Nothing actionable, so no

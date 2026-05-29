@@ -835,6 +835,10 @@ export interface JobExcess {
   receipt_required: boolean;
   receipt_uploaded_at: string | null;
   receipt_url: string | null;
+  // Stripe chargeback/dispute tracking (migration 098). NULL = no dispute;
+  // 'open' while live; 'won'/'lost' once closed. Flagged via the Stripe webhook.
+  dispute_status: 'open' | 'won' | 'lost' | null;
+  disputed_at: string | null;
   // Encrypted client bank details for reimbursement (migration 094). Never sent
   // to the client decrypted — fetched separately via /excess/:id/bank-details.
   bank_details_last_used_at: string | null;

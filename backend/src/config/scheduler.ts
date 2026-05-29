@@ -722,4 +722,53 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Client Storage reminders scheduled daily at 09:20 Europe/London');
+
+  // ── Pre-auth expiry reconciliation (silent housekeeping) ─────────────────
+  // Daily at 09:40 Europe/London. Closes out held pre-auths past their window.
+  // NO emails / bell nudges — the dashboard "Pre-auth Holds Expiring" bucket is
+  // the surface. This is what lets the bucket self-clear and makes the absence
+  // of a manual "release" action on card-machine holds safe.
+  //   - Stripe holds: retrieve the PaymentIntent; release in OP only if Stripe
+  //     reports it canceled (backstop for a missed payment_intent.canceled webhook).
+  //   - Card-machine holds: release once 5 days have passed — the acquirer has
+  //     auto-voided it and it can no longer be captured.
+  cron.schedule('40 9 * * *', async () => {
+    try {
+      const { markExcessReleased } = await import('../services/excess-preauth');
+      const { getStripeClient, isStripeConfigured } = await import('./stripe');
+
+      const rows = await query(
+        `SELECT id, payment_method, stripe_payment_intent_id
+         FROM job_excess
+         WHERE excess_status = 'pre_auth'
+           AND held_expires_at IS NOT NULL
+           AND held_expires_at < NOW()`
+      );
+
+      let released = 0;
+      for (const r of rows.rows as Array<{ id: string; payment_method: string | null; stripe_payment_intent_id: string | null }>) {
+        if (r.payment_method === 'stripe_gbp' && r.stripe_payment_intent_id) {
+          // Only release if Stripe confirms it's gone — never pre-empt a hold
+          // Stripe still considers live (their auth window can run to ~7 days).
+          if (!isStripeConfigured()) continue;
+          try {
+            const pi = await getStripeClient().paymentIntents.retrieve(r.stripe_payment_intent_id);
+            if (pi.status === 'canceled') {
+              if (await markExcessReleased(r.id, 'Stripe hold expired/canceled (reconciled)')) released++;
+            }
+          } catch (e) {
+            console.error(`Scheduler: Stripe PI retrieve failed for excess ${r.id}:`, e);
+          }
+        } else {
+          // Card-machine / cash: past the 5-day window → auto-void on the
+          // acquirer's clock, can't be captured. Release in OP.
+          if (await markExcessReleased(r.id, 'Card-machine hold expired (5-day window elapsed)')) released++;
+        }
+      }
+      if (released > 0) console.log(`Scheduler: Pre-auth reconciliation released ${released} expired hold(s)`);
+    } catch (err) {
+      console.error('Scheduler: Pre-auth reconciliation failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Pre-auth expiry reconciliation scheduled daily at 09:40 Europe/London');
 }

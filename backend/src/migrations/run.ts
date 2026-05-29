@@ -132,6 +132,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '095_mobile_upload_tokens.sql',
         '096_fleet_gearbox.sql',
         '097_storage_round2.sql',
+        '098_stripe_webhooks.sql',
       ];
 
       for (const migration of migrations) {

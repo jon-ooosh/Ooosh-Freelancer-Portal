@@ -98,7 +98,8 @@ const BASE_SELECT = `
     je.excess_amount_required,
     je.excess_amount_taken,
     je.amount_held,
-    je.amount_released
+    je.amount_released,
+    je.dispute_status
   FROM vehicle_hire_assignments vha
   LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
   LEFT JOIN drivers d ON d.id = vha.driver_id
