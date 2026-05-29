@@ -511,6 +511,7 @@ router.get('/fleet/:idOrReg', async (req: FlexibleVehicleRequest, res: Response)
 const FLEET_FIELD_MAP: Record<string, string> = {
   reg: 'reg', vehicle_type: 'vehicle_type', vehicleType: 'vehicle_type',
   simple_type: 'simple_type', simpleType: 'simple_type',
+  gearbox: 'gearbox',
   make: 'make', model: 'model', colour: 'colour', seats: 'seats',
   damage_status: 'damage_status', damageStatus: 'damage_status',
   service_status: 'service_status', serviceStatus: 'service_status',
@@ -5029,6 +5030,7 @@ function mapDbRowToVehicle(row: Record<string, unknown>) {
     reg: row.reg as string,
     vehicleType: (row.vehicle_type as string) || '',
     simpleType: (row.simple_type as string) || '',
+    gearbox: (row.gearbox as string | null) || null,
     make: (row.make as string) || '',
     model: (row.model as string) || '',
     colour: (row.colour as string) || '',

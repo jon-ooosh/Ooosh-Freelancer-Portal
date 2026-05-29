@@ -33,7 +33,7 @@ import { fetchLastEventForVehicle } from '../lib/events-query'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { useFormAutosave } from '../hooks/useFormAutosave'
 import { clearFreelancerSession } from '../adapters/freelancer-session'
-import { vehicleMatchesRequirement, getGearbox } from '../lib/van-matching'
+import { vehicleMatchesRequirement, getGearbox, vehicleGearbox } from '../lib/van-matching'
 import { getChecklistItems } from '../lib/settings-api'
 import { queueSubmission } from '../lib/offline-queue'
 import { DraftResumePrompt } from '../components/shared/DraftResumePrompt'
@@ -1610,7 +1610,7 @@ function StepSelectVehicle({
       <div className="space-y-2">
         {filtered.map(v => {
           const matched = isTypeMatch(v)
-          const gearbox = getGearbox(v.vehicleType)
+          const gearbox = vehicleGearbox(v)
 
           return (
             <button
