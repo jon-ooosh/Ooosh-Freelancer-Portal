@@ -410,3 +410,13 @@ Frontend hub + manual capture shipped (PR #592) and tested live. Decisions + fol
 **"Nothing pushed to Xero yet" is expected.** Capture stores the cost + receipt in OP/R2 only. Pushing to Xero (creating a bill / attaching the receipt / reconciling a COT-card line) is the not-yet-wired fast-follow. A COT-card purchase (e.g. the D'Addario strings on Chris's card) reconciles against the COT bank feed — it's not an ACCPAY bill.
 
 **AI auto-fill (fast-follow).** Receipt-at-top is laid out for it. `POST /api/costs/extract` (Claude vision) → returns supplier/date/amounts/suggested account → pre-fills the modal for staff to confirm. Needs `ANTHROPIC_API_KEY`.
+
+## Build notes — testing round 2 (29 May 2026)
+
+**Single "What's this cost for?" picker.** The separate Cost Type + Xero account dropdowns were merged into one plain-English picker (no codes, no Xero/accountant terminology). The `COST_CATEGORIES` map in `CostCaptureModal.tsx` is the single source of truth — each label carries a hidden Xero account code + a derived `cost_type` (which is only a filter/display field, nothing load-bearing). The hub "Type" column now shows the friendly `category` label. The backend curated `/xero/accounts` endpoint stays as a Xero diagnostic; the picker no longer depends on a live Xero fetch (works even if Xero is down). Keep `COST_CATEGORIES` (frontend) and `STAFF_COST_ACCOUNT_CODES` (backend) in step.
+
+**Edit / Delete.** Surfaced the existing `PATCH` / `DELETE` endpoints as row actions on the hub (Delete = admin/manager). The capture modal doubles as the edit modal (`existing` prop → PATCH). Receipt can be replaced; the saved receipt is viewable inline.
+
+**Xero-lock semantics (forward-design for when the push lands).** Edit/Delete are OP-only today (nothing is pushed yet). Once the push is wired: while a record is still draft/unreconciled in Xero, edits propagate (update bill) and delete voids it; once it's authorised/reconciled in Xero it's locked — the UI blocks edit/delete and offers void-and-recreate. The hub already guards `xero_sync_state === 'reconciled'` on delete as the seed of this.
+
+**Bigger receipt preview.** Image receipts render full-width (max 256px tall, click to open full size); PDFs render an inline `<embed>` preview.
