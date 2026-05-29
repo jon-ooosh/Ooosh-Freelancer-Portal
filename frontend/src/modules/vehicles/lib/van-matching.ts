@@ -11,6 +11,14 @@ import type { Vehicle } from '../types/vehicle'
 import type { VanRequirement, VanAllocation } from '../types/hirehop'
 
 /**
+ * Canonical van types. A vehicle's `simple_type` must be exactly one of these
+ * for it to match a HireHop-derived job requirement (the requirement infers
+ * the same strings). A blank `simple_type` matches nothing — which is why the
+ * fleet UI must always offer a way to set it.
+ */
+export const VAN_TYPES = ['Premium', 'Basic', 'Vito', 'Panel'] as const
+
+/**
  * Derive gearbox type from vehicleType string.
  * Fleet Master board uses (A) for auto, (M) for manual.
  * Examples: "PREMIUM LWB (A)", "BASIC MWB (M)", "PANEL VAN"
@@ -19,6 +27,17 @@ export function getGearbox(vehicleType: string): 'auto' | 'manual' | 'unknown' {
   if (vehicleType.includes('(A)')) return 'auto'
   if (vehicleType.includes('(M)')) return 'manual'
   return 'unknown'
+}
+
+/**
+ * Effective gearbox for a vehicle: the explicit `gearbox` column (migration
+ * 095) wins; otherwise fall back to parsing the free-text `vehicleType` label.
+ * Use this anywhere you have a full Vehicle — it's the source of truth the
+ * matcher relies on.
+ */
+export function vehicleGearbox(vehicle: Vehicle): 'auto' | 'manual' | 'unknown' {
+  if (vehicle.gearbox === 'auto' || vehicle.gearbox === 'manual') return vehicle.gearbox
+  return getGearbox(vehicle.vehicleType)
 }
 
 /**
@@ -44,8 +63,8 @@ export function vehicleMatchesRequirement(
   // Panel vans don't distinguish gearbox — always match
   if (requirement.simpleType === 'Panel') return true
 
-  // Other types: check gearbox
-  const gearbox = getGearbox(vehicle.vehicleType)
+  // Other types: check gearbox (explicit column wins, label parse falls back)
+  const gearbox = vehicleGearbox(vehicle)
   if (gearbox !== 'unknown' && gearbox !== requirement.gearbox) return false
 
   return true
@@ -136,7 +155,7 @@ export function findMatchingVehiclesLegacy(
  * Get the gearbox label for a vehicle, for display purposes.
  */
 export function getVehicleGearboxLabel(vehicle: Vehicle): string {
-  const gearbox = getGearbox(vehicle.vehicleType)
+  const gearbox = vehicleGearbox(vehicle)
   if (gearbox === 'auto') return 'Auto'
   if (gearbox === 'manual') return 'Manual'
   return ''

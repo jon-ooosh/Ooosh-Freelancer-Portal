@@ -702,4 +702,24 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Pre-hire review scheduled daily at 09:55 Europe/London');
+
+  // ── Client Storage reminders ─────────────────────────────────────────────
+  // Daily at 09:20 Europe/London — billing-due / billing-overdue / rate-review
+  // nudges for active storage tenancies. Per-cycle dedup lives on the tenancy
+  // (stamps reset when the relevant date rolls forward). See
+  // services/storage-reminders.ts + docs/STORAGE-CLIENTS-SPEC.md.
+  cron.schedule('20 9 * * *', async () => {
+    try {
+      const { runStorageReminders } = await import('../services/storage-reminders');
+      const r = await runStorageReminders();
+      if (r.billingDue || r.billingOverdue || r.reviews || r.accessEvents) {
+        console.log(
+          `Scheduler: Storage reminders — ${r.billingDue} billing due, ${r.billingOverdue} overdue, ${r.reviews} rate reviews, ${r.accessEvents} access requests`
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Storage reminders failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Client Storage reminders scheduled daily at 09:20 Europe/London');
 }

@@ -35,9 +35,11 @@ import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
 import systemSettingsRouter from './system-settings';
 import oohReturnRouter from './ooh-return';
+import mobileUploadRouter from './mobile-upload';
 import preHireBriefingRouter from './pre-hire-briefing';
 import fillGapRouter from './fill-gap';
 import costsRouter from './costs';
+import storageRouter from './storage';
 
 const router = Router();
 
@@ -70,12 +72,14 @@ router.use('/fill-gap', fillGapRouter);  // Replacement candidates for cancelled
 router.use('/issues', issuesRouter);
 router.use('/problems', problemsRouter);  // Job-level problems register (damaged/missing/broken/dispute) — distinct from /issues platform tracker
 router.use('/costs', costsRouter);  // Cost Capture & Recharge — staff-facing receipt/cost workflow
+router.use('/storage', storageRouter);  // Client Storage — rooms/tenancies/access/waiting list (+ public T&Cs accept by token)
 router.use('/hire-forms', hireFormsRouter);
 router.use('/requirements', requirementsRouter);
 router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not OP staff JWT)
 router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
 router.use('/system-settings', systemSettingsRouter);
 router.use('/ooh-return', oohReturnRouter);  // Public parking-form (token auth) + staff endpoints
+router.use('/mobile-upload', mobileUploadRouter);  // Public token-auth file capture (phone QR handoff)
 router.use('/data-cleanup', dataCleanupRouter);
 router.use('/pre-hire-briefing', preHireBriefingRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key

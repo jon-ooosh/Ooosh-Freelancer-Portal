@@ -152,6 +152,18 @@ export interface ExpiringHold {
   job_name: string | null;
 }
 
+export interface ReceiptOutstanding {
+  excess_id: string;
+  amount: number;
+  payment_method: string | null;
+  excess_status: string;
+  driver_name: string | null;
+  vehicle_reg: string | null;
+  job_uuid: string | null;
+  hh_job_number: number | null;
+  job_name: string | null;
+}
+
 export interface PipelineStat {
   pipeline_status: string;
   count: string;
@@ -241,7 +253,19 @@ export interface ReturnsOverview {
   };
 }
 
+/** Ad-hoc "do this today/tomorrow" item — currently storage access requests,
+ *  built to absorb future ad-hoc sources (see OnToday dashboard section). */
+export interface OnTodayItem {
+  source: string;
+  id: string;
+  title: string;
+  detail: string;
+  due: string | null;
+  href: string;
+}
+
 export interface OperationsData {
+  on_today?: OnTodayItem[];
   stat_cards: {
     on_hire_count: string;
     going_out_count: string;
@@ -283,6 +307,9 @@ export interface OperationsData {
     /** Pre-auth holds expiring within 2 days (migration 087). */
     expiring_holds_count?: number;
     expiring_holds?: ExpiringHold[];
+    /** Card-machine receipt scans outstanding (migration 087 / PR 3). */
+    receipts_outstanding_count?: number;
+    receipts_outstanding?: ReceiptOutstanding[];
   };
   transport_ops: {
     summary: Record<string, number>;

@@ -4,6 +4,7 @@
  * Supports: Record Payment, Record Claim, Reimburse, Waive, Roll Over, Move to different entity.
  */
 import { useState, useRef, useEffect } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import { api } from '../services/api';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
@@ -16,7 +17,7 @@ interface OutstandingInvoice {
   date: string | null;
 }
 
-type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release';
+type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release' | 'record_preauth' | 'upload_receipt';
 
 const CAPTURE_METHODS = [
   { value: 'stripe_gbp', label: 'Stripe (online card pre-auth)' },
@@ -24,6 +25,26 @@ const CAPTURE_METHODS = [
   { value: 'amex', label: 'Amex (card machine pre-auth)' },
   { value: 'till_cash', label: 'Cash held' },
 ];
+
+// Methods staff can record a manual pre-auth hold against. Card-machine methods
+// (worldpay/amex/cash) are the common case; Stripe is offered for the rare manual
+// online hold (capture then needs the PI — see record-preauth endpoint notes).
+const PREAUTH_METHODS = [
+  { value: 'worldpay', label: 'Worldpay (card machine pre-auth)' },
+  { value: 'amex', label: 'Amex (card machine pre-auth)' },
+  { value: 'till_cash', label: 'Cash held' },
+  { value: 'stripe_gbp', label: 'Stripe (manual online hold)' },
+];
+
+interface BankDetails {
+  type: 'uk' | 'international';
+  accountHolder: string;
+  sortCode?: string;
+  accountNumber?: string;
+  iban?: string;
+  swiftBic?: string;
+  bankCountry?: string;
+}
 
 interface ExcessPaymentModalProps {
   excess: JobExcess;
@@ -99,6 +120,17 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [action, setAction] = useState<ModalAction | null>(initialAction || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Tracks whether we've made a change the parent needs to see. Lets us DEFER
+  // the parent refresh (onUpdated) to close-time instead of calling it mid-flow
+  // — calling onUpdated() while the modal is open reloads the parent's data and
+  // tears the modal down (that's what made the joined-up receipt step "flash and
+  // disappear"). Close affordances run handleClose, which fires onUpdated once.
+  const [madeChange, setMadeChange] = useState(false);
+
+  function handleClose() {
+    if (madeChange) onUpdated();
+    onClose();
+  }
 
   // Payment form — uses absolute "total collected" semantics (not delta-add).
   // Default: full required amount (the most common case is "fully collected
@@ -181,6 +213,37 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [releaseReason, setReleaseReason] = useState('');
   const [releaseNotes, setReleaseNotes] = useState('');
 
+  // Record-pre-auth form (manual hold entry — e.g. Worldpay card machine)
+  const [preauthAmount, setPreauthAmount] = useState(requiredAmount > 0 ? requiredAmount.toFixed(2) : '');
+  const [preauthMethod, setPreauthMethod] = useState('worldpay');
+  const [preauthReference, setPreauthReference] = useState('');
+  const [preauthExpiryDays, setPreauthExpiryDays] = useState('5');
+  const [preauthNotes, setPreauthNotes] = useState('');
+
+  // Receipt upload (card-machine receipt scan) — two paths: this device, or
+  // "scan with phone" QR handoff (laptop shows QR, phone uploads, laptop polls).
+  const [receiptFile, setReceiptFile] = useState<File | null>(null);
+  const [receiptUploading, setReceiptUploading] = useState(false);
+  const [receiptMode, setReceiptMode] = useState<'choose' | 'device' | 'qr'>('choose');
+  const [qrUrl, setQrUrl] = useState<string | null>(null);
+  const [qrToken, setQrToken] = useState<string | null>(null);
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrError, setQrError] = useState('');
+
+  // Bank details (captured during reimburse when method is a bank transfer)
+  const [bankCapture, setBankCapture] = useState(false); // user has opted to enter/edit details
+  const [bankType, setBankType] = useState<'uk' | 'international'>('uk');
+  const [bankHolder, setBankHolder] = useState('');
+  const [bankSortCode, setBankSortCode] = useState('');
+  const [bankAccountNumber, setBankAccountNumber] = useState('');
+  const [bankIban, setBankIban] = useState('');
+  const [bankSwift, setBankSwift] = useState('');
+  const [bankCountry, setBankCountry] = useState('');
+  const [previousBank, setPreviousBank] = useState<{ data: BankDetails; last_used_at: string | null; source_hh_job: number | null } | null>(null);
+
+  // Reimburse methods that are bank transfers → trigger the bank-details capture UI.
+  const BANK_TRANSFER_METHODS = ['wise_bacs', 'lloyds_bank'];
+
   // Reimburse form
   // Default to the original payment method IF it's a real bank method we can refund
   // through. The original payment_method may be 'rolled_over' (carried forward from a
@@ -243,6 +306,62 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needsCollection, excess.id]);
 
+  // When reimbursing via a bank transfer, look up the client's previously-saved
+  // bank details so staff can reuse them (with a "last used" staleness heads-up)
+  // instead of re-typing. Admin/manager only on the backend; non-fatal if it 403s.
+  useEffect(() => {
+    if (action !== 'reimburse' || !BANK_TRANSFER_METHODS.includes(reimburseMethod)) return;
+    let cancelled = false;
+    api.get<{ data: BankDetails | null; available?: boolean; last_used_at: string | null; source_hh_job: number | null }>(
+      `/excess/${excess.id}/previous-bank-details`
+    )
+      .then((r) => {
+        if (cancelled || !r.data) return;
+        setPreviousBank({ data: r.data, last_used_at: r.last_used_at, source_hh_job: r.source_hh_job });
+      })
+      .catch(() => { /* non-fatal */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action, reimburseMethod, excess.id]);
+
+  // Poll the QR upload token — when the phone completes the upload, the token
+  // flips to consumed; close the modal and refresh so the parent re-fetches the
+  // now-attached receipt.
+  useEffect(() => {
+    if (!qrToken) return;
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const r = await api.get<{ data: { consumed: boolean } }>(`/mobile-upload/${qrToken}`);
+        if (cancelled) return;
+        if (r.data.consumed) {
+          clearInterval(interval);
+          onUpdated();
+          onClose();
+        }
+      } catch { /* transient — keep polling */ }
+    }, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qrToken]);
+
+  async function startQr() {
+    setQrLoading(true);
+    setQrError('');
+    try {
+      const r = await api.post<{ data: { token: string; url: string } }>(
+        `/excess/${excess.id}/receipt-upload-token`, {}
+      );
+      setQrToken(r.data.token);
+      setQrUrl(r.data.url);
+      setReceiptMode('qr');
+    } catch (err: any) {
+      setQrError(err.message || 'Failed to generate QR code');
+    } finally {
+      setQrLoading(false);
+    }
+  }
+
   // Move form
   const [moveXeroId, setMoveXeroId] = useState('');
   const [moveXeroName, setMoveXeroName] = useState('');
@@ -276,7 +395,10 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             // keep the modal open so staff can decide what to do (manual link,
             // retry by re-submitting, etc.). The OP record is already correct.
             setPayHHPushError(resp.hh_push_error);
-            onUpdated();
+            // Defer the parent refresh to close (madeChange) — calling onUpdated()
+            // here unmounts the modal on the Money tab (loadData → loading spinner)
+            // before staff can read this banner.
+            setMadeChange(true);
             setLoading(false);
             return;
           }
@@ -300,12 +422,44 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           });
           break;
         }
-        case 'reimburse':
-          await api.post(`/excess/${excess.id}/reimburse`, {
-            amount: parseFloat(reimburseAmount),
-            method: reimburseMethod,
-          });
+        case 'reimburse': {
+          // Assemble bank details only when the method is a bank transfer AND the
+          // staff member has entered/confirmed them. Otherwise send null so the
+          // backend leaves any stored details untouched (just stamps last_used).
+          let bankDetails: BankDetails | null = null;
+          if (BANK_TRANSFER_METHODS.includes(reimburseMethod) && bankCapture) {
+            if (!bankHolder.trim()) throw new Error('Enter the account holder name');
+            if (bankType === 'uk') {
+              if (!bankSortCode.trim() || !bankAccountNumber.trim()) {
+                throw new Error('Enter the sort code and account number');
+              }
+            } else {
+              if (!bankIban.trim()) throw new Error('Enter the IBAN');
+            }
+            bankDetails = {
+              type: bankType,
+              accountHolder: bankHolder.trim(),
+              ...(bankType === 'uk'
+                ? { sortCode: bankSortCode.trim(), accountNumber: bankAccountNumber.trim() }
+                : { iban: bankIban.trim(), swiftBic: bankSwift.trim() || undefined, bankCountry: bankCountry.trim() || undefined }),
+            };
+          }
+          const resp = await api.post<{ data: any; warning?: string }>(
+            `/excess/${excess.id}/reimburse`,
+            {
+              amount: parseFloat(reimburseAmount),
+              method: reimburseMethod,
+              bank_details: bankDetails,
+            }
+          );
+          if (resp.warning) {
+            setError(resp.warning);
+            setMadeChange(true); // refresh on close, not mid-flow (see handleClose)
+            setLoading(false);
+            return;
+          }
           break;
+        }
         case 'waive':
           await api.post(`/excess/${excess.id}/waive`, {
             reason: waiveReason,
@@ -384,7 +538,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             // card-machine receipt is outstanding). Surface and keep the modal
             // open — the money is correctly tracked, just needs a follow-up.
             setCaptureWarning(resp.warning);
-            onUpdated();
+            setMadeChange(true); // refresh on close, not mid-flow (see handleClose)
             setLoading(false);
             return;
           }
@@ -396,6 +550,43 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             notes: releaseNotes || null,
           });
           break;
+        case 'record_preauth': {
+          const amt = parseFloat(preauthAmount);
+          if (isNaN(amt) || amt <= 0) throw new Error('Enter a valid hold amount');
+          const days = parseInt(preauthExpiryDays, 10);
+          await api.post(`/excess/${excess.id}/record-preauth`, {
+            amount: amt,
+            method: preauthMethod,
+            reference: preauthReference || null,
+            expires_in_days: isNaN(days) ? 5 : days,
+            notes: preauthNotes || null,
+          });
+          // Joined-up flow: card-machine holds need a receipt. Advance straight
+          // to the receipt step instead of closing, so staff aren't sent back
+          // into Manage to find it. DON'T call onUpdated() here — that reloads
+          // the parent and tears the modal down (the "flash and disappear" bug).
+          // madeChange ensures the parent refreshes when the modal finally closes.
+          if (preauthMethod !== 'stripe_gbp') {
+            setMadeChange(true);
+            setAction('upload_receipt');
+            setReceiptMode('choose');
+            setError('');
+            setLoading(false);
+            return;
+          }
+          break;
+        }
+        case 'upload_receipt': {
+          if (!receiptFile) throw new Error('Choose a receipt scan to upload');
+          setReceiptUploading(true);
+          const fd = new FormData();
+          fd.append('file', receiptFile);
+          fd.append('attachment_only', 'true');
+          const up = await api.upload<{ r2_key: string }>('/files/upload', fd);
+          await api.post(`/excess/${excess.id}/receipt`, { receipt_url: up.r2_key });
+          setReceiptUploading(false);
+          break;
+        }
       }
       onUpdated();
       onClose();
@@ -403,6 +594,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
       setError(err.message || 'Action failed');
     } finally {
       setLoading(false);
+      setReceiptUploading(false);
     }
   }
 
@@ -419,13 +611,25 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   if (s === 'needed' || s === 'pending' || s === 'partially_paid') {
     availableActions.push({ action: 'payment', label: 'Record Payment', icon: '£' });
   }
-  // Pre-auth holds: capture (→ taken) or release (→ released). These REPLACE
-  // claim/reimburse for held money — you can't claim or reimburse a hold, you
-  // capture or release it first (migration 087). Capture supports atomic
+  // Record a manual pre-auth hold (e.g. taken on the Worldpay machine). Only
+  // from a clean "needed" state with no money/hold yet — stacking a hold on top
+  // of existing money would be ambiguous (backend enforces the same guard).
+  if ((s === 'needed' || s === 'pending') && preAuthHeld === 0 && Number(excess.excess_amount_taken || 0) === 0) {
+    availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth Hold', icon: '◫' });
+  }
+  // Pre-auth holds: capture (→ taken). For held money you can't claim/reimburse,
+  // you capture it first (migration 087). Capture supports atomic
   // capture-and-apply-to-invoice for the common "capture exactly the damage" case.
   if (s === 'pre_auth' && preAuthHeld > 0) {
     availableActions.push({ action: 'capture', label: 'Capture (claim from hold)', icon: '£' });
-    availableActions.push({ action: 'release', label: 'Release Hold', icon: '○' });
+    // "Release" only makes sense for Stripe holds, where cancelling the
+    // PaymentIntent genuinely voids the hold via the API. Card-machine
+    // (Worldpay/Amex/cash) holds are controlled by the acquirer — we CAN'T
+    // release them, they auto-void on the card company's clock. Showing a
+    // "Release" button there is misleading, so hide it for those.
+    if (excess.payment_method === 'stripe_gbp') {
+      availableActions.push({ action: 'release', label: 'Release Hold (Stripe)', icon: '○' });
+    }
   }
   if ((s === 'taken' || s === 'partially_paid') && amountHeld > 0) {
     availableActions.push({ action: 'claim', label: 'Apply to Invoice (claim)', icon: '!' });
@@ -448,6 +652,10 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   if (s === 'needed' || s === 'pending') {
     availableActions.push({ action: 'waive', label: 'Waive Excess', icon: '~' });
   }
+  // Card-machine receipt scan outstanding → offer upload (non-blocking to-do).
+  if (excess.receipt_required && !excess.receipt_uploaded_at) {
+    availableActions.push({ action: 'upload_receipt', label: 'Upload Receipt Scan', icon: '⎙' });
+  }
   availableActions.push({ action: 'move', label: 'Move to Different Entity', icon: '>' });
 
   // Unlink HH deposit — only when a record is linked. Covers the case where
@@ -459,7 +667,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={handleClose}>
       <div
         className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
@@ -475,7 +683,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                 {excess.hirehop_job_name && ` — ${excess.hirehop_job_name}`}
               </p>
             </div>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <button onClick={handleClose} className="text-gray-400 hover:text-gray-600">
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
@@ -531,6 +739,14 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               </p>
             </div>
           )}
+          {excess.receipt_required && !excess.receipt_uploaded_at && (
+            <div className="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md">
+              <p className="text-xs text-amber-800">
+                <span className="font-medium">Receipt scan outstanding</span> — this excess was taken/held on a
+                card machine. Upload the receipt scan for audit (not blocking). Use the “Upload Receipt Scan” action.
+              </p>
+            </div>
+          )}
           {excess.dispatch_override && (
             <div className="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md">
               <p className="text-xs text-amber-700">
@@ -571,7 +787,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
         {action && (
           <div className="px-6 py-4">
             <button
-              onClick={() => { setAction(null); setError(''); }}
+              onClick={() => { setAction(null); setError(''); setReceiptMode('choose'); setQrToken(null); setQrUrl(null); }}
               className="text-xs text-gray-500 hover:text-gray-700 mb-3 flex items-center gap-1"
             >
               <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
@@ -755,6 +971,129 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     ))}
                   </select>
                 </div>
+
+                {/* Bank details — only for bank-transfer methods. Stored encrypted,
+                    scoped to this record. Reuse-from-previous offered when the
+                    client has details on a prior hire (with staleness heads-up). */}
+                {BANK_TRANSFER_METHODS.includes(reimburseMethod) && (
+                  <div className="border border-gray-200 rounded-md p-3 space-y-3 bg-gray-50">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-gray-700">Client bank details</span>
+                      <span className="text-[10px] text-gray-400">encrypted at rest</span>
+                    </div>
+
+                    {/* Reuse-from-previous offer */}
+                    {previousBank && !bankCapture && (
+                      <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded-md text-xs text-blue-800 space-y-1">
+                        <div>
+                          Saved details on file for this client
+                          {previousBank.source_hh_job ? <> (from hire #{previousBank.source_hh_job})</> : null}.
+                        </div>
+                        {previousBank.last_used_at && (
+                          <div className="text-blue-600">
+                            Last used {new Date(previousBank.last_used_at).toLocaleDateString('en-GB')} — confirm they're still current with the client.
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const d = previousBank.data;
+                            setBankType(d.type);
+                            setBankHolder(d.accountHolder || '');
+                            setBankSortCode(d.sortCode || '');
+                            setBankAccountNumber(d.accountNumber || '');
+                            setBankIban(d.iban || '');
+                            setBankSwift(d.swiftBic || '');
+                            setBankCountry(d.bankCountry || '');
+                            setBankCapture(true);
+                          }}
+                          className="mt-1 px-2 py-1 text-xs font-medium text-blue-700 bg-white border border-blue-300 rounded hover:bg-blue-100"
+                        >
+                          Reuse these details
+                        </button>
+                      </div>
+                    )}
+
+                    {!bankCapture ? (
+                      <button
+                        type="button"
+                        onClick={() => setBankCapture(true)}
+                        className="text-xs font-medium text-ooosh-600 hover:text-ooosh-700"
+                      >
+                        + Enter bank details
+                      </button>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setBankType('uk')}
+                            className={`flex-1 px-2 py-1 text-xs rounded border ${bankType === 'uk' ? 'bg-ooosh-50 border-ooosh-300 text-ooosh-700 font-medium' : 'border-gray-300 text-gray-600'}`}
+                          >UK</button>
+                          <button
+                            type="button"
+                            onClick={() => setBankType('international')}
+                            className={`flex-1 px-2 py-1 text-xs rounded border ${bankType === 'international' ? 'bg-ooosh-50 border-ooosh-300 text-ooosh-700 font-medium' : 'border-gray-300 text-gray-600'}`}
+                          >International</button>
+                        </div>
+                        <input
+                          type="text"
+                          value={bankHolder}
+                          onChange={(e) => setBankHolder(e.target.value)}
+                          placeholder="Account holder name"
+                          className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                        />
+                        {bankType === 'uk' ? (
+                          <div className="grid grid-cols-2 gap-2">
+                            <input
+                              type="text"
+                              value={bankSortCode}
+                              onChange={(e) => setBankSortCode(e.target.value)}
+                              placeholder="Sort code"
+                              className="text-sm border border-gray-300 rounded-md px-3 py-2"
+                            />
+                            <input
+                              type="text"
+                              value={bankAccountNumber}
+                              onChange={(e) => setBankAccountNumber(e.target.value)}
+                              placeholder="Account number"
+                              className="text-sm border border-gray-300 rounded-md px-3 py-2"
+                            />
+                          </div>
+                        ) : (
+                          <>
+                            <input
+                              type="text"
+                              value={bankIban}
+                              onChange={(e) => setBankIban(e.target.value)}
+                              placeholder="IBAN"
+                              className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                            />
+                            <div className="grid grid-cols-2 gap-2">
+                              <input
+                                type="text"
+                                value={bankSwift}
+                                onChange={(e) => setBankSwift(e.target.value)}
+                                placeholder="SWIFT / BIC"
+                                className="text-sm border border-gray-300 rounded-md px-3 py-2"
+                              />
+                              <input
+                                type="text"
+                                value={bankCountry}
+                                onChange={(e) => setBankCountry(e.target.value)}
+                                placeholder="Bank country"
+                                className="text-sm border border-gray-300 rounded-md px-3 py-2"
+                              />
+                            </div>
+                          </>
+                        )}
+                        <p className="text-[10px] text-gray-400">
+                          Stored encrypted against this hire. Leave the "Enter bank details" step skipped to reimburse without recording them.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1084,6 +1423,148 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               </div>
             )}
 
+            {action === 'record_preauth' && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900">Record Pre-Auth Hold</h3>
+                <div className="px-3 py-2 bg-sky-50 border border-sky-200 rounded-md text-xs text-sky-800">
+                  Logs a pre-authorisation <strong>hold</strong> — money on hold, not in our account.
+                  No HireHop deposit is created now; that happens when you capture the hold.
+                  The record moves to <strong>Pre-auth Held</strong> and you can capture or release it later.
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Hold amount</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">£</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={preauthAmount}
+                      onChange={(e) => setPreauthAmount(e.target.value)}
+                      className="w-full pl-7 pr-3 py-2 text-sm border border-gray-300 rounded-md"
+                    />
+                  </div>
+                  {requiredAmount > 0 && (
+                    <p className="mt-1 text-xs text-gray-500">Required: £{requiredAmount.toFixed(2)}.</p>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Method</label>
+                  <select
+                    value={preauthMethod}
+                    onChange={(e) => setPreauthMethod(e.target.value)}
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  >
+                    {PREAUTH_METHODS.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                  {preauthMethod !== 'stripe_gbp' && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      Card-machine hold — you'll be asked for a receipt scan (audit to-do, not blocking).
+                    </p>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Auth ref (optional)</label>
+                    <input
+                      type="text"
+                      value={preauthReference}
+                      onChange={(e) => setPreauthReference(e.target.value)}
+                      placeholder="Terminal auth code"
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Expires (days)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="30"
+                      value={preauthExpiryDays}
+                      onChange={(e) => setPreauthExpiryDays(e.target.value)}
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+                  <textarea
+                    value={preauthNotes}
+                    onChange={(e) => setPreauthNotes(e.target.value)}
+                    rows={2}
+                    className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  />
+                </div>
+              </div>
+            )}
+
+            {action === 'upload_receipt' && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900">Upload Receipt Scan</h3>
+                <p className="text-xs text-gray-500">
+                  Attach the card-machine receipt for this excess (audit record). Clears the outstanding to-do.
+                </p>
+
+                {receiptMode === 'choose' && (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={startQr}
+                      disabled={qrLoading}
+                      className="w-full text-left px-4 py-3 rounded-lg border border-gray-200 hover:border-ooosh-300 hover:bg-ooosh-50 disabled:opacity-50"
+                    >
+                      <span className="text-sm font-medium text-gray-900">📱 Scan with phone</span>
+                      <span className="block text-xs text-gray-500 mt-0.5">
+                        {qrLoading ? 'Generating QR…' : 'Show a QR code, photograph the receipt on your phone'}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReceiptMode('device')}
+                      className="w-full text-left px-4 py-3 rounded-lg border border-gray-200 hover:border-ooosh-300 hover:bg-ooosh-50"
+                    >
+                      <span className="text-sm font-medium text-gray-900">💻 Upload from this device</span>
+                      <span className="block text-xs text-gray-500 mt-0.5">Choose a file already saved here</span>
+                    </button>
+                    {qrError && <p className="text-xs text-red-600">{qrError}</p>}
+                  </div>
+                )}
+
+                {receiptMode === 'device' && (
+                  <div className="space-y-2">
+                    <input
+                      type="file"
+                      accept="image/*,application/pdf"
+                      capture="environment"
+                      onChange={(e) => setReceiptFile(e.target.files?.[0] || null)}
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 file:mr-3 file:px-3 file:py-1 file:rounded file:border-0 file:bg-ooosh-50 file:text-ooosh-700"
+                    />
+                    {receiptUploading && <p className="text-xs text-gray-500">Uploading…</p>}
+                    <button type="button" onClick={() => { setReceiptMode('choose'); setReceiptFile(null); }} className="text-xs text-gray-500 hover:text-gray-700">
+                      ← Back
+                    </button>
+                  </div>
+                )}
+
+                {receiptMode === 'qr' && qrUrl && (
+                  <div className="flex flex-col items-center text-center space-y-3 py-2">
+                    <div className="bg-white p-3 rounded-lg border border-gray-200">
+                      <QRCodeSVG value={qrUrl} size={180} />
+                    </div>
+                    <p className="text-sm text-gray-700">Scan with your phone camera, then photograph the receipt.</p>
+                    <p className="text-xs text-gray-400 flex items-center gap-1.5">
+                      <span className="inline-block h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
+                      Waiting for the upload from your phone…
+                    </p>
+                    <button type="button" onClick={() => { setReceiptMode('choose'); setQrToken(null); setQrUrl(null); }} className="text-xs text-gray-500 hover:text-gray-700">
+                      ← Back
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {action === 'unlink_deposit' && (
               <div className="space-y-3">
                 <h3 className="text-sm font-semibold text-gray-900">Unlink HireHop Deposit</h3>
@@ -1112,18 +1593,23 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             )}
 
             <div className="mt-4 flex gap-2">
+              {/* Confirm is hidden on the receipt step unless a file is staged on
+                  this device — the QR path completes via the phone + poll, and the
+                  choose screen has nothing to confirm yet. */}
+              {!(action === 'upload_receipt' && receiptMode !== 'device') && (
+                <button
+                  onClick={handleSubmit}
+                  disabled={loading}
+                  className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50"
+                >
+                  {loading ? 'Processing...' : 'Confirm'}
+                </button>
+              )}
               <button
-                onClick={handleSubmit}
-                disabled={loading}
-                className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50"
+                onClick={handleClose}
+                className={`px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md ${action === 'upload_receipt' && receiptMode !== 'device' ? 'flex-1' : ''}`}
               >
-                {loading ? 'Processing...' : 'Confirm'}
-              </button>
-              <button
-                onClick={onClose}
-                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
-              >
-                Cancel
+                {action === 'upload_receipt' && receiptMode !== 'device' ? 'Close' : 'Cancel'}
               </button>
             </div>
           </div>

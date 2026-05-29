@@ -199,8 +199,12 @@ cd /var/www/ooosh-portal
 # `git reset --hard origin/<current-branch>` and re-run the pull.
 git status
 git pull origin <current-branch>
-cd backend && npm run build
-cd ../frontend && npm run build
+# IMPORTANT: install deps before building. `npm install` is fast/no-op when
+# nothing changed, but a PR that added a dependency (e.g. qrcode.react in the
+# pre-auth PR 3, May 2026) will fail the build with "Cannot find module ..."
+# if you skip this. The full deploy.sh always installs; this manual path must too.
+cd backend && npm install && npm run build
+cd ../frontend && npm install && npm run build
 sudo systemctl restart ooosh-portal
 sudo systemctl status ooosh-portal
 ```
@@ -1059,18 +1063,31 @@ The legacy "Record Payment → Rolled Over from Previous Hire" dropdown option i
 
 **Migration 087 backfill:** the 10 then-live `pre_auth` records (all >5d old, Stripe had voided them) moved to `released`; 21 legacy `pending` → `needed`; `stripe_payment_intent_id` lifted from `payment_reference` where `pi_%`; `receipt_required` flagged on existing card-machine records.
 
-**Still TODO — PR 3 + PR 4 (the next Claude picks up here):**
+**PR 3 — Manual pre-auth entry + bank details + encryption + receipt scans ✅ SHIPPED (May 2026):**
 
-*PR 3 — Bank details + encryption + receipt scans* (security-sensitive, isolate for review):
-- **Encryption layer** — build `services/encryption.ts` (AES-256-GCM, Node built-in `crypto`, keyed off `ENCRYPTION_KEY` env var = 64 hex chars via `openssl rand -hex 32`). `encrypt()`/`decrypt()` + `encryptJson()`/`decryptJson()`. Store as `iv:authTag:ciphertext`. Decrypt ONLY in the API response layer, admin/manager only. **The key must NEVER change once data is encrypted with it** (data becomes unrecoverable) — jon has generated the key and has it in a safe place; it needs adding to `/var/www/ooosh-portal/backend/.env` as `ENCRYPTION_KEY=...` when PR 3 deploys. Add a **"PII Encryption" section to this CLAUDE.md** documenting the helper + a retrofit checklist of what should eventually move to encrypted storage: driver hire-form data (POA docs, licence, passport, DVLA), card-receipt scans, freelancer PII. Build once, apply to bank details first, retrofit the rest on jon's timeline.
-- **Client bank details for reimbursement** — needed whenever reimbursement method is a bank transfer (any hire length). Store encrypted, **scoped to the `job_excess` record** (not permanent on person/org) with a **"reuse from previous hire" lookup** (same pattern as rollover linkage — find the client's most recent record with bank details, offer to copy) and a **"last used DD/MM/YYYY" heads-up** so staff sanity-check stale details (they reconfirm with the client as standard). Fields: UK = account holder name + sort code + account number; **International = IBAN + SWIFT/BIC + bank country** (jon confirmed international reimbursements happen). Stamp `last_used_at` when a reimbursement is recorded against the details. These structured fields become the direct input to a future Wise recipient (see below). UI: capture/reuse lives in the reimburse form inside `ExcessPaymentModal`, shown when reimbursement method is a bank transfer.
-- **Receipt scans** (deferred from PR 2 to here — same "attach sensitive scan to excess" infra): required at UI level for card-machine excess (worldpay/amex/cash), surfaced as an amber "outstanding to-do" banner (NOT a hard block — like the client-intro banner pattern). Columns `receipt_required`/`receipt_uploaded_at` already exist (087). Also add a "Receipts outstanding" NeedsAttention bucket. Each claim/reimburse event on physical-card-machine excess should also carry its own receipt (the refund/capture receipt), so scans aren't one-time.
+Built on branch `claude/excess-preauth-lifecycle-ZvUQA` as one PR (jon's call). Migrations 094 (bank details + `receipt_url`) and 095 (mobile upload tokens). Note: rebased onto main, so the bank-details migration is **094** not 091 (091–093 were taken by other work that landed first).
 
-*PR 4 — Stripe webhooks + expiry scheduler:*
+- [x] **Manual pre-auth entry** (jon's actual need — recording a hold taken on the Worldpay machine). `POST /api/excess/:id/record-preauth` + "Record Pre-Auth Hold" action in `ExcessPaymentModal`. Sets `amount_held` (NOT `excess_amount_taken` — no money in account yet), `held_at`, `held_expires_at = NOW() + N days` (default 5), `excess_status='pre_auth'`, flags `receipt_required` for card-machine methods. **No HireHop deposit pushed** — that happens at capture time. Guarded to `needed`/`pending` records with nothing collected/held (can't stack a hold on existing money). Inserts a `job_payments` audit row (`payment_status='pre_auth'`). Flows straight into the existing Capture/Release lifecycle. Method options: worldpay / amex / cash / manual-stripe. The action only renders on a clean `needed`/`pending` record (frontend + backend both enforce).
+- [x] **Encryption layer** — `services/encryption.ts` (AES-256-GCM, `ENCRYPTION_KEY` env, `iv:authTag:ciphertext`, `encrypt`/`decrypt`/`encryptJson`/`decryptJson`/`tryDecrypt*`/`isEncryptionConfigured`). See "PII Encryption" under Shared Utilities for full docs + the retrofit checklist. **`ENCRYPTION_KEY` still needs adding to the server `.env`** when this deploys (jon holds the key) — until then bank-detail storage refuses cleanly (no plaintext fallback) and the decrypt endpoints 503; everything else works.
+- [x] **Client bank details for reimbursement** — encrypted on `job_excess.bank_details_encrypted` (migration 094), scoped to the record. Captured in the reimburse form when method is a bank transfer (`wise_bacs`/`lloyds_bank`). UK = holder + sort code + account number; international = holder + IBAN + SWIFT/BIC + bank country. `GET /api/excess/:id/previous-bank-details` powers the "reuse from previous hire" offer with a `bank_details_last_used_at` staleness heads-up; `GET /api/excess/:id/bank-details` decrypts for display (admin/manager). `bank_details_last_used_at` stamped on every reimbursement against the details.
+- [x] **Receipt scans** — `receipt_url` column added (094; 087 only had the flag + timestamp). `POST /api/excess/:id/receipt` attaches a scan (uploaded via `/api/files/upload?attachment_only=true`), clears `receipt_required`. "Upload Receipt Scan" modal action + amber "receipt outstanding" banner in the modal summary (non-blocking). Capture endpoint now stores `receipt_url` too (was accepting it in the body but discarding it). "Receipts Outstanding" NeedsAttention dashboard bucket (amber) added. The receipt also appears on the job's **Files tab** — `services/excess-receipt.ts` `attachExcessReceipt()` is the single source of truth: it sets `receipt_url` on the excess AND appends a `FileAttachment` (label "Excess receipt") to `jobs.files`. Both the direct endpoint and the phone-upload side-effect call it.
+
+**Release Hold is Stripe-only (May 2026):** a pre-auth on a card machine (Worldpay/Amex/cash) is controlled by the acquirer — we CAN'T release it, it auto-voids on the card company's clock. The "Release Hold" action only renders when `excess.payment_method === 'stripe_gbp'` (where cancelling the PaymentIntent genuinely voids the hold via the API). For card-machine holds, capture is the only action; un-captured holds just expire (PR 4's scheduler will reconcile them to `released`).
+
+**Modal refresh gotcha (May 2026) — DON'T call `onUpdated()` mid-flow:** `ExcessPaymentModal`'s `onUpdated` is `loadData`/`loadVehicleAssignments` on the parent. On the Money tab, `loadData` sets `loading=true` and MoneyTab early-returns a spinner — so calling `onUpdated()` while the modal is open **unmounts the modal**. This caused the joined-up receipt step to "flash and disappear". Fix: the modal tracks a `madeChange` flag and defers the parent refresh to close-time via `handleClose()` (wired to the backdrop, X, and footer button). Any action that wants to keep the modal open after a change (capture/payment/reimburse warning banners, the pre-auth→receipt advance) sets `madeChange=true` instead of calling `onUpdated()` directly. Only call `onUpdated()` immediately before `onClose()` (close-time), never to keep the modal open.
+
+**Post-deploy polish (May 2026, jon feedback round):**
+- [x] **Hide Edit/Manage on "Covered" (`not_required`) excess rows** — these are the top-N losers (£0 sibling of another driver's excess on the same hire), nothing actionable. The Manage modal only offered "Move to Different Entity" which is meaningless on a £0 record. Hidden on both the Job Detail Drivers & Vehicles card (`JobDetailPage.tsx`) and the Money tab / `/money/excess` list (`MoneyTab.tsx`). Note: there's deliberately NO UI to reassign *which* driver bears the excess — it's the same £1,200 for the job whichever row it's attached to, so it doesn't matter operationally. Build a "swap who's charged" control only if a real case ever demands it.
+- [x] **Joined-up receipt step** — recording a card-machine pre-auth now advances the modal straight to the receipt-upload step (instead of closing and making staff re-enter Manage). Stripe holds skip it (electronic trail). Still non-blocking — skipping leaves the amber to-do + dashboard bucket.
+- [x] **"Scan with phone" QR handoff** — reusable mobile-upload primitive. `mobile_upload_tokens` table (migration 095), `services/mobile-upload-token.ts` (create/resolve/consume, purpose-scoped), public `routes/mobile-upload.ts` (`GET /:token` context+validity, `POST /:token` multipart upload + purpose side-effect). `POST /api/excess/:id/receipt-upload-token` (staff) mints a `purpose='excess_receipt'` token → laptop renders QR (`qrcode.react`) → phone opens `/m/receipt/:token` (public `MobileReceiptUploadPage`, no Layout, `capture="environment"`) → uploads → backend attaches to the excess + marks token consumed → laptop polls `GET /api/mobile-upload/:token` for `consumed` and closes. Tokens are single-use, 15-min TTL. **This is the primitive the long-deferred book-out/check-in walkaround handoff should adopt** (see "Mobile book-out handoff (QR code)" in Future Enhancements — `mobile_upload_tokens` generalises beyond receipts; add new `purpose` values + side-effects in `mobile-upload.ts`).
+
+*Still open under the receipt work (deferred):* each claim/reimburse event on physical-card-machine excess carrying its OWN receipt (refund/capture receipt) — currently one receipt per record, not per event.
+
+*PR 4 — Stripe webhooks + expiry scheduler (NOT yet built):*
 - **Webhook receiver** — `POST /api/webhooks/stripe` (currently 404ing — jon has ALREADY configured the webhook in Stripe pointing here, with `STRIPE_WEBHOOK_SECRET` in `.env`). Verify signature, idempotency via a `stripe_events` log table. Subscribed events: `payment_intent.amount_capturable_updated`, `payment_intent.canceled`, `payment_intent.succeeded`, `charge.refunded`, `charge.dispute.created/updated/closed`. The big new capability is **disputes/chargebacks** (arrive out-of-band, only via webhook) + catching out-of-band refunds/voids done in the Stripe dashboard.
 - **Expiry scheduler** — daily task: scan `job_excess` where `excess_status='pre_auth'` and `held_expires_at` near/past. For Stripe records, reconcile live via Stripe API (PI status → auto-mark `released` when voided). Fire bell + email 24-48h before expiry prompting capture-or-release. This supersedes the older "Stripe pre-auth expiry scheduler" TODO in Phase E (which predates the held/taken model — the `released` status it wanted now exists). Touches `config/scheduler.ts`. The dashboard "Pre-auth Holds Expiring" bucket (shipped PR 2) is the surface; the scheduler is the proactive nudge.
 
-**Branch for this work:** `claude/process-reimbursement-claims-sf8yz` (PR 1 = #573 merged, PR 2 = #582). Continue on the same branch or a fresh one — PR 1 + 2 are both on main once #582 merges.
+**Branch for this work:** PR 1 = #573, PR 2 = #582 (both merged to main). PR 3 = branch `claude/excess-preauth-lifecycle-ZvUQA` (manual pre-auth entry + bank details + encryption + receipts). PR 4 (webhooks + expiry scheduler) is the next pick-up.
 
 ##### Phase F — Staff Card Payments (future)
 Allow staff to take card payments directly from the Money tab, rather than walking to the card terminal.
@@ -2106,6 +2123,37 @@ The `prepping` (HH 4 / Part Dispatched) inclusion handles the edge case of a job
 **Future enhancements (deferred):**
 - "Recent collections" / "Customer-collected" filter on Jobs + Returns pages — would surface a `collect_method` column on `jobs` (HH `COLLECT` field synced down: 0=customer, 1=we deliver, 2=courier, 3=other) and add a filter pill + Job Detail header pip. Discussed May 2026, parked in favour of higher-value work.
 
+#### Step 9: Client Storage Module ← PHASE 1 BUILT (May 2026)
+
+Standalone OP-native module replacing the Monday.com "Storage Clients" board. Ooosh rents ~20 storage rooms to clients long-term — deliberately NOT tracked in HireHop (no per-month book-in/out). **Full spec:** `docs/STORAGE-CLIENTS-SPEC.md`.
+
+**Where:** `/storage` (Operations submenu → "Storage"), tabbed page: Rooms / Tenancies / Waiting List / Access Requests / T&Cs. Public T&Cs accept page at `/storage-tcs/:token` (token auth, no Layout wrapper, mirrors the OOH parking page).
+
+**Backend:** migration 093 (`storage_rooms`, `storage_tenancies`, `storage_rate_history`, `storage_invoice_log`, `storage_access_list`, `storage_access_events`, `storage_waiting_list`, `storage_tcs_versions`, `storage_tcs_agreements`) + migration 094 (round-2 refinements, below). `routes/storage.ts` mounted at `/api/storage` — public T&Cs token endpoints defined BEFORE the `STAFF_ROLES` auth gate; rooms/T&Cs-version writes gated to admin/manager. `services/storage-reminders.ts` wired into the scheduler (daily 09:20 Europe/London). `storage_tcs_request` email template added.
+
+**Round 2 (migration 094, May 2026 — first-live feedback):**
+- **Access mechanism moved room → tenancy.** Door code / we-hold-key / client-key-or-padlock changes per client, so `access_type` / `access_code` / `key_location` live on `storage_tenancies` now (set at move-in, editable). Rooms keep physical attributes only.
+- **Rooms gained `location_type` (internal/external) + `default_weekly_rate`** — move-in prefills the rate from the room default. **Photo upload** wired (room form → `POST /api/files/upload?attachment_only=true` → `files/attachments/<uid>/…`, appended to `storage_rooms.photos` JSONB; display via authenticated `/api/files/download`).
+- **Access requests are reminder-style.** `storage_access_events` gained `notify_user_ids UUID[]` + `delivery_method` (notification/email/both). The logger is pre-ticked as a recipient. Fires **immediately if undated or due today**, otherwise on the **morning of** `requested_date` via the daily scanner (`notifyAccessEvent()` + the round-4 pass in `runStorageReminders`). `notified_at` is the per-event dedup stamp. Honours delivery_method like the close-out chase scanner (notification→low priority, email→sent immediately, both→normal/escalated).
+- **Dashboard "On Today" section** (`frontend/src/components/dashboard/v2/sections/OnToday.tsx`, registry id `ontoday`, slotted right after `needs`). The general home for ad-hoc to-dos that fall through the cracks — seeded from storage access requests due today/tomorrow via `on_today` on `GET /api/dashboard/operations` (defensively wrapped so a pre-migration env can't 500 the dashboard). Hidden when empty. **To add another ad-hoc source, union it into the `on_today` payload** — the item shape (`source/id/title/detail/due/href`) is generic on purpose.
+- **UI:** Tenancies is now the default tab (it's the "who's where" view staff live in); Move-In button moved to the bottom of the list; tab-bar `overflow-y` quirk fixed (`overflow-y-hidden scrollbar-hide`).
+
+**Key design points:**
+- **One live tenancy per room** enforced by a partial unique index (`status IN ('active','notice','reserved')`); the create handler catches `23505` → 409. Move-out soft-ends the tenancy (row preserved as ex-client history) and frees the room.
+- **Invoice "tickbox" = forward-moving date.** Manual-billing tenancies carry `next_bill_date`. "Mark invoice sent" logs a `storage_invoice_log` row and advances `next_bill_date` by cadence (clearing the per-cycle reminder dedup stamps). Recurring-mode (Xero) tenancies are tracked but not nudged. Mirrors the chase-date convention.
+- **Reminders** (per-cycle dedup via `billing_reminder_sent_for` / `billing_overdue_sent_for` / `rate_review_sent_for`): billing due-soon (lead days before), billing overdue (grace days after, unticked → high priority), rate review due. Notify `bill_reminder_person_id` (fallback admins/managers) as `follow_up` bell notifications (escalation handles email per prefs).
+- **Access requests** (`storage_access_events`): "collect X / courier Y" pinch point — log → notify admins/managers → mark done. Non-blocking access-list check warns if the attendee isn't on the unit's allowed list.
+- **T&Cs:** versioned (`storage_tcs_versions`, one current), public accept-link + e-signature → `storage_tcs_agreements` (signature PNG to R2).
+
+**Deferred (noted, not built):**
+- **Door-code encryption** — `storage_rooms.access_code` is plaintext for now (STAFF_ROLES-gated + audited). Moves to the planned `services/encryption.ts` PII layer once it lands (jon: ~within a week of this build). See spec §9.
+- **Xero recurring-invoice tracking** — follow-on from the broader Xero integration work. The manual `invoice sent` log + reminders are the interim value.
+- ~~**Dashboard surface**~~ — done in round 2 as the general "On Today" section (not a NeedsAttention bucket). `/api/storage/overview` still returns counts if a header widget is ever wanted.
+- **Address-book "Storage" tab** on Org/Person detail (mirrors Hire History / Excess History pattern).
+- **Waiting-list → vacancy matching** suggestions on move-out.
+- **Signed T&Cs snapshot PDF** (acceptance + signature image recorded; PDF generation not yet wired).
+- Temp storage / incoming deliveries — deliberately NOT here; belongs with the future Incoming Deliveries module (spec §10).
+
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
 These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready (Step 5 above):
@@ -2495,6 +2543,35 @@ Singleton Stripe SDK client for OP's direct Stripe operations (pre-auth capture,
 **Env vars:** `STRIPE_SECRET_KEY` (restricted key — scopes: PaymentIntents R/W, Refunds R/W, Charges R, Disputes R). `STRIPE_WEBHOOK_SECRET` for the PR 4 webhook receiver. Both already set on the production server (May 2026). SDK pins to its bundled `LatestApiVersion`.
 
 **Used by:** `routes/excess.ts` capture/release endpoints. PR 4 will add `routes/webhooks.ts` `/stripe` receiver. **Don't instantiate `new Stripe()` elsewhere** — go through `getStripeClient()` so key handling lives in one place.
+
+### PII Encryption ✅ COMPLETE (PR 3, May 2026)
+
+**File:** `backend/src/services/encryption.ts`
+
+Application-level AES-256-GCM encryption for fields that must never sit in the database as plaintext. First consumer is **client bank details for excess reimbursement** (migration 094); the rest of the PII surface gets retrofitted on jon's timeline (checklist below).
+
+**Exports:**
+- `encrypt(plaintext) → "iv:authTag:ciphertext"` (hex) / `decrypt(stored) → plaintext`
+- `encryptJson(obj)` / `decryptJson<T>(stored)` — for structured records (bank details)
+- `tryDecrypt` / `tryDecryptJson` — best-effort variants returning `null` instead of throwing (use in list-mapping loops so one bad row doesn't 500 the response)
+- `isEncryptionConfigured()` — guard before calling. Routes 503 / refuse-and-warn cleanly on a server without the key, rather than throwing a 500. **Never fall back to storing plaintext** when the key is missing — refuse the write and surface a warning (the reimburse flow does this).
+
+**Format:** `iv:authTag:ciphertext`, all hex. IV is random per call (12 bytes, GCM), so the same plaintext encrypts to different ciphertext each time — expected. Decrypt ONLY in the API response layer, admin/manager only. Never decrypt inside SQL or log decrypted values.
+
+**Key management — CRITICAL:**
+- `ENCRYPTION_KEY` env var = 64 hex chars (32 bytes), `openssl rand -hex 32`.
+- **The key must NEVER change once data is encrypted with it** — rotating or losing it makes every encrypted field permanently unrecoverable. There is no recovery path.
+- jon generated the key and holds it safely. It goes into `/var/www/ooosh-portal/backend/.env` as `ENCRYPTION_KEY=...` when PR 3 deploys. Until it's set, bank-detail storage is refused (no plaintext fallback) and decrypt endpoints 503 — everything else works.
+
+**Bank details (the first consumer):** Stored encrypted on `job_excess.bank_details_encrypted` (migration 094), SCOPED TO THE RECORD (not permanently on person/org). Captured in the reimburse form when the method is a bank transfer (`wise_bacs` / `lloyds_bank`). UK = holder + sort code + account number; international = holder + IBAN + SWIFT/BIC + bank country (structured for a future Wise recipient). `GET /api/excess/:id/previous-bank-details` finds the client's most recent record with details for a "reuse from previous hire" offer, with a `bank_details_last_used_at` staleness heads-up so staff reconfirm before relying on them. `bank_details_last_used_at` is stamped every time a reimbursement is recorded against the details.
+
+**Retrofit checklist (apply on jon's timeline — build once, encrypt incrementally):**
+- [x] Client bank details (reimbursement) — done in PR 3
+- [ ] Driver hire-form PII: POA documents, licence, passport, DVLA record data
+- [ ] Card-machine receipt scan storage (the scan files themselves; metadata flag already on `job_excess`)
+- [ ] Freelancer PII (held in `people` / `drivers`)
+
+When retrofitting a field: add an `*_encrypted TEXT` column, write via `encrypt`/`encryptJson` (guarded by `isEncryptionConfigured()`), decrypt only in the admin/manager response layer via `tryDecrypt`/`tryDecryptJson`, and never log or SQL-query the decrypted value.
 
 ### API Key Verification ✅ COMPLETE
 

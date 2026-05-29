@@ -8,6 +8,7 @@ export interface Vehicle {
   reg: string             // Registration plate, e.g. "RO71JYA"
   vehicleType: string     // Full type: "PREMIUM LWB (A)", "BASIC MWB (M)", etc.
   simpleType: VehicleSimpleType
+  gearbox: 'auto' | 'manual' | null  // Explicit gearbox (migration 095); falls back to parsing vehicleType when null
   make: string            // MERCEDES-BENZ, VOLKSWAGEN, FORD
   model: string           // SPRINTER 317 PREMIUM CDI, etc.
   colour: string          // BLUE, SILVER, WHITE, GREY

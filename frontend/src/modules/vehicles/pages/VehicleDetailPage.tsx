@@ -18,6 +18,7 @@ import { getAuthHeaders } from '../config/api-config'
 import { getDateUrgency } from '../types/vehicle'
 import type { DateUrgency, DateUrgencyMode, VehicleFile, SetupChecklistItem } from '../types/vehicle'
 import { mergeChecklist, buildDefaultChecklist, checklistProgress } from '../lib/setup-checklist'
+import { VAN_TYPES } from '../lib/van-matching'
 
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return '—'
@@ -381,6 +382,32 @@ export function VehicleDetailPage() {
         )}
       </div>
 
+      {/* Van type missing — this van won't match any job's vehicle requirement
+          until set. Surfaced for everyone (the header badge falls back to the
+          free-text vehicleType label, which hides the problem). */}
+      {!vehicle.isOldSold && !vehicle.simpleType && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <span className="font-semibold">⚠ Van type not set.</span>{' '}
+          This van won't appear when allocating vehicles to a job until its type is set.
+          {isAdmin
+            ? <> Set it in <Link to={vmPath(`/vehicles/${vehicle.id}/settings`)} className="font-medium underline">Vehicle Settings</Link> or the setup checklist below.</>
+            : <> Ask an admin to set the van type in Vehicle Settings.</>}
+        </div>
+      )}
+
+      {/* Gearbox missing on a non-Panel van — it'll match BOTH auto and manual
+          requirements, so could be offered for the wrong job. (Panel vans don't
+          distinguish gearbox, so no warning for them.) */}
+      {!vehicle.isOldSold && vehicle.simpleType && vehicle.simpleType !== 'Panel' && !vehicle.gearbox && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <span className="font-semibold">⚠ Gearbox not set.</span>{' '}
+          This van will match both automatic and manual job requirements until its gearbox is set.
+          {isAdmin
+            ? <> Set it in <Link to={vmPath(`/vehicles/${vehicle.id}/settings`)} className="font-medium underline">Vehicle Settings</Link> or the setup checklist below.</>
+            : <> Ask an admin to set the gearbox in Vehicle Settings.</>}
+        </div>
+      )}
+
       {/* Quick actions — hidden for old/sold vehicles */}
       {!vehicle.isOldSold && (
         <div className="grid grid-cols-3 gap-2">
@@ -448,7 +475,7 @@ export function VehicleDetailPage() {
       {activeTab === 'details' && <>
 
       {/* Setup checklist — onboarding tasks for a newly added vehicle */}
-      <SetupChecklistCard vehicleId={vehicle.id} checklist={vehicle.setupChecklist} canEdit={isAdmin} />
+      <SetupChecklistCard vehicleId={vehicle.id} checklist={vehicle.setupChecklist} simpleType={vehicle.simpleType} gearbox={vehicle.gearbox} canEdit={isAdmin} />
 
       {/* Status */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -729,13 +756,24 @@ function NotesCard({ vehicleId, notes }: { vehicleId: string; notes: string | nu
 }
 
 /** New-vehicle setup checklist — tickable onboarding tasks. */
-function SetupChecklistCard({ vehicleId, checklist, canEdit }: { vehicleId: string; checklist: SetupChecklistItem[]; canEdit: boolean }) {
+function SetupChecklistCard({ vehicleId, checklist, simpleType, gearbox, canEdit }: { vehicleId: string; checklist: SetupChecklistItem[]; simpleType: string | null | undefined; gearbox: 'auto' | 'manual' | null | undefined; canEdit: boolean }) {
   const queryClient = useQueryClient()
   const [saving, setSaving] = useState(false)
   const merged = mergeChecklist(checklist)
   const started = merged.length > 0
   const { done, total } = checklistProgress(checklist)
-  const complete = started && done === total
+  // Van type + gearbox are real onboarding tasks too: a van with no type
+  // silently fails to match any job requirement, and a non-Panel van with no
+  // gearbox can match the wrong (auto vs manual) requirement. The checklist is
+  // only "complete" once the tick-boxes are done AND both are set. Panel vans
+  // don't distinguish gearbox, so it isn't required for them.
+  const vanTypeSet = !!simpleType
+  const needsGearbox = vanTypeSet && simpleType !== 'Panel'
+  const gearboxSet = !needsGearbox || gearbox === 'auto' || gearbox === 'manual'
+  const complete = started && done === total && vanTypeSet && gearboxSet
+  // Once complete, collapse to a single line by default so the card stops
+  // taking up space on every visit. Expandable for review.
+  const [expanded, setExpanded] = useState(false)
 
   const persist = async (items: SetupChecklistItem[]) => {
     setSaving(true)
@@ -744,6 +782,32 @@ function SetupChecklistCard({ vehicleId, checklist, canEdit }: { vehicleId: stri
       queryClient.invalidateQueries({ queryKey: ['vehicles'] })
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to save checklist')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveVanType = async (val: string) => {
+    if (!canEdit) return
+    setSaving(true)
+    try {
+      await updateVehicle(vehicleId, { simple_type: val || null })
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save van type')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveGearbox = async (val: string) => {
+    if (!canEdit) return
+    setSaving(true)
+    try {
+      await updateVehicle(vehicleId, { gearbox: val || null })
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to save gearbox')
     } finally {
       setSaving(false)
     }
@@ -776,12 +840,72 @@ function SetupChecklistCard({ vehicleId, checklist, canEdit }: { vehicleId: stri
     )
   }
 
+  // Collapsed summary once everything's done — a single green line, clickable
+  // to re-expand. Stops the completed checklist sitting open forever.
+  if (complete && !expanded) {
+    return (
+      <button
+        type="button"
+        onClick={() => setExpanded(true)}
+        className="flex w-full items-center justify-between rounded-lg border border-green-200 bg-green-50 px-4 py-2.5 text-left hover:bg-green-100/60"
+      >
+        <span className="text-sm font-semibold uppercase tracking-wide text-green-700">
+          Setup Checklist <span className="font-normal">✓ Complete</span>
+        </span>
+        <span className="text-xs text-green-600">Show ▾</span>
+      </button>
+    )
+  }
+
   return (
     <div className={`rounded-lg border p-4 ${complete ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'}`}>
-      <h3 className={`mb-2 text-sm font-semibold uppercase tracking-wide ${complete ? 'text-green-700' : 'text-amber-700'}`}>
-        Setup Checklist
-        <span className="ml-1.5 font-normal">{complete ? '✓ Complete' : `${done}/${total}`}</span>
-      </h3>
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className={`text-sm font-semibold uppercase tracking-wide ${complete ? 'text-green-700' : 'text-amber-700'}`}>
+          Setup Checklist
+          <span className="ml-1.5 font-normal">{complete ? '✓ Complete' : `${done}/${total}`}</span>
+        </h3>
+        {complete && (
+          <button type="button" onClick={() => setExpanded(false)} className="text-xs text-green-600 hover:underline">
+            Hide ▴
+          </button>
+        )}
+      </div>
+
+      {/* Van type — gates "complete" and feeds requirement matching. */}
+      <div className={`mb-2 flex items-center justify-between gap-2 rounded border px-2 py-2 ${vanTypeSet ? 'border-transparent' : 'border-amber-300 bg-amber-100/50'}`}>
+        <span className={`text-sm ${vanTypeSet ? 'text-gray-400 line-through' : 'font-medium text-amber-800'}`}>
+          Van type set{!vanTypeSet && ' — required to match jobs'}
+        </span>
+        <select
+          value={simpleType || ''}
+          disabled={!canEdit || saving}
+          onChange={e => saveVanType(e.target.value)}
+          className="rounded border border-gray-200 px-2 py-1 text-sm focus:border-blue-300 focus:outline-none disabled:opacity-60"
+        >
+          <option value="">Not set</option>
+          {VAN_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </div>
+
+      {/* Gearbox — only relevant for non-Panel vans (Panel ignores gearbox). */}
+      {needsGearbox && (
+        <div className={`mb-2 flex items-center justify-between gap-2 rounded border px-2 py-2 ${gearboxSet ? 'border-transparent' : 'border-amber-300 bg-amber-100/50'}`}>
+          <span className={`text-sm ${gearboxSet ? 'text-gray-400 line-through' : 'font-medium text-amber-800'}`}>
+            Gearbox set{!gearboxSet && ' — required to match auto/manual'}
+          </span>
+          <select
+            value={gearbox || ''}
+            disabled={!canEdit || saving}
+            onChange={e => saveGearbox(e.target.value)}
+            className="rounded border border-gray-200 px-2 py-1 text-sm focus:border-blue-300 focus:outline-none disabled:opacity-60"
+          >
+            <option value="">Not set</option>
+            <option value="auto">Auto</option>
+            <option value="manual">Manual</option>
+          </select>
+        </div>
+      )}
+
       <div className="space-y-1">
         {merged.map(item => (
           <label key={item.key} className={`flex items-center gap-2 text-sm ${canEdit ? 'cursor-pointer' : ''} ${item.done ? 'text-gray-400 line-through' : 'text-gray-700'}`}>
