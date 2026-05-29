@@ -437,6 +437,11 @@ async function compressImage(
 ): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const img = new Image()
+    // Hold the object URL so we can revoke it the moment decoding is done.
+    // Without this, the full-resolution original stays pinned in memory for
+    // the whole walkaround (one per photo) — a real OOM risk on phones with
+    // high-megapixel cameras.
+    const objectUrl = URL.createObjectURL(file)
     img.onload = () => {
       let { width, height } = img
 
@@ -456,11 +461,14 @@ async function compressImage(
 
       const ctx = canvas.getContext('2d')
       if (!ctx) {
+        URL.revokeObjectURL(objectUrl)
         reject(new Error('Could not get canvas context'))
         return
       }
 
       ctx.drawImage(img, 0, 0, width, height)
+      // Original is now drawn into the canvas — release the source bytes.
+      URL.revokeObjectURL(objectUrl)
 
       canvas.toBlob(
         blob => {
@@ -472,7 +480,10 @@ async function compressImage(
       )
     }
 
-    img.onerror = () => reject(new Error('Failed to load image'))
-    img.src = URL.createObjectURL(file)
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      reject(new Error('Failed to load image'))
+    }
+    img.src = objectUrl
   })
 }

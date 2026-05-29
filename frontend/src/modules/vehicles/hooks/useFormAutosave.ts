@@ -31,6 +31,10 @@ interface DraftData {
 
 export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Content signature of the last draft we actually wrote — lets us skip
+  // redundant IndexedDB writes (which re-serialise every photo blob) when a
+  // re-render produces an identical draft (e.g. unrelated state churn).
+  const lastSigRef = useRef<string | null>(null)
   const [draftLoaded, setDraftLoaded] = useState<DraftData | null>(null)
   const [draftChecked, setDraftChecked] = useState(false)
   // When true, all saves are permanently suppressed (draft was dismissed)
@@ -88,6 +92,20 @@ export function useFormAutosave({ flowType, disabled }: AutosaveOptions) {
       timerRef.current = setTimeout(() => {
         // Double-check suppression inside the debounced callback (captures ref, not stale state)
         if (suppressedRef.current) return
+
+        // Skip the write if nothing material changed since the last save.
+        // Photos are identified by angle + timestamp + byte size (cheap, no
+        // blob read); this avoids needlessly re-cloning all photo blobs to IDB.
+        const sig = JSON.stringify({
+          step: data.step,
+          formData: data.formData,
+          photos: data.photos.map(p => `${p.angle}:${p.timestamp}:${p.blob.size}`),
+          signature: data.signatureBlob ? data.signatureBlob.size : 0,
+          vehicleReg: data.vehicleReg,
+        })
+        if (sig === lastSigRef.current) return
+        lastSigRef.current = sig
+
         const draft: FormDraft = {
           id: flowType,
           flowType,
