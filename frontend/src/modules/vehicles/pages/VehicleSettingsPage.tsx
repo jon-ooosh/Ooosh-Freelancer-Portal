@@ -12,18 +12,23 @@ import { useVehicle } from '../hooks/useVehicles'
 import { updateVehicle, fetchComplianceSettings, updateComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
 import type { ComplianceSettings } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
+import { VAN_TYPES } from '../lib/van-matching'
 
 function EditableField({
   label,
   value,
   type = 'text',
   placeholder,
+  options,
+  hint,
   onSave,
 }: {
   label: string
   value: string | number | null
-  type?: 'text' | 'number' | 'date'
+  type?: 'text' | 'number' | 'date' | 'select'
   placeholder?: string
+  options?: string[]
+  hint?: string
   onSave: (val: string | number | null) => void
 }) {
   const [editing, setEditing] = useState(false)
@@ -37,6 +42,27 @@ function EditableField({
     setEditing(false)
     if (type === 'number') onSave(editValue ? Number(editValue) : null)
     else onSave(editValue || null)
+  }
+
+  // Select renders an always-visible dropdown that saves on change — no
+  // click-to-edit step, since a dropdown is already self-explanatory.
+  if (type === 'select' && options) {
+    return (
+      <div className="flex items-center justify-between py-2.5 border-b border-gray-100 last:border-0">
+        <span className="text-sm text-gray-600">
+          {label}
+          {hint && <span className="ml-1 block text-[10px] text-gray-400">{hint}</span>}
+        </span>
+        <select
+          value={value != null ? String(value) : ''}
+          onChange={e => onSave(e.target.value || null)}
+          className="w-40 rounded border border-gray-200 px-2 py-1 text-sm focus:border-blue-300 focus:outline-none"
+        >
+          <option value="">Not set</option>
+          {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+        </select>
+      </div>
+    )
   }
 
   return (
@@ -311,6 +337,14 @@ export function VehicleSettingsPage() {
       {/* Vehicle Details */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Vehicle Details</h3>
+        <EditableField
+          label="Van type"
+          value={vehicle.simpleType || null}
+          type="select"
+          options={[...VAN_TYPES]}
+          hint="Used to match this van to job requirements"
+          onSave={v => saveField('simple_type', v)}
+        />
         <EditableField label="Fuel type" value={vehicle.fuelType} type="text" placeholder="Diesel, Petrol, Electric" onSave={v => saveField('fuel_type', v)} />
         <EditableField label="MPG" value={vehicle.mpg} type="number" placeholder="e.g. 35" onSave={v => saveField('mpg', v)} />
         <EditableField label="CO2 (g/km)" value={vehicle.co2PerKm} type="number" onSave={v => saveField('co2_per_km', v)} />
