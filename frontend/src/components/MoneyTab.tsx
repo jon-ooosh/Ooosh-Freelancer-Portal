@@ -477,6 +477,11 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     {record.suggested_collection_method === 'pre_auth' && (record.excess_status === 'needed' || record.excess_status === 'pending') && (
                       <span className="text-[10px] text-blue-600 font-medium">pre-auth suggested</span>
                     )}
+                    {record.dispute_status && (
+                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${record.dispute_status === 'open' ? 'bg-red-100 text-red-700' : record.dispute_status === 'lost' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+                        {record.dispute_status === 'open' ? '⚠ Chargeback' : `Chargeback ${record.dispute_status}`}
+                      </span>
+                    )}
                   </div>
                   <p className="text-sm text-gray-900 mt-1">
                     {record.driver_name || record.client_name || 'Job-level excess'}

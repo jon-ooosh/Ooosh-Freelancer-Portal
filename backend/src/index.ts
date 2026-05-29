@@ -10,6 +10,7 @@ import dotenv from 'dotenv';
 import routes from './routes';
 import { connectRedis } from './config/redis';
 import { startScheduler } from './config/scheduler';
+import { handleStripeWebhook } from './services/stripe-webhook';
 
 dotenv.config();
 
@@ -53,6 +54,10 @@ app.use(cors({
 }));
 app.use(cookieParser());
 app.use(morgan('short'));
+// Stripe webhook MUST receive the raw body for signature verification, so mount
+// it BEFORE express.json() (which would consume + reparse the body). Scoped to
+// the one path — everything else still gets JSON parsing below.
+app.post('/api/webhooks/stripe', express.raw({ type: '*/*' }), handleStripeWebhook);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 

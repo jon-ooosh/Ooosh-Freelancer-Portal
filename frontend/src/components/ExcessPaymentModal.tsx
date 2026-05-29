@@ -747,6 +747,18 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               </p>
             </div>
           )}
+          {excess.dispute_status && (
+            <div className={`mt-3 px-3 py-2 rounded-md border ${excess.dispute_status === 'open' || excess.dispute_status === 'lost' ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-200'}`}>
+              <p className={`text-xs ${excess.dispute_status === 'open' || excess.dispute_status === 'lost' ? 'text-red-800' : 'text-gray-600'}`}>
+                <span className="font-medium">
+                  {excess.dispute_status === 'open' ? '⚠ Chargeback open' : `Chargeback ${excess.dispute_status}`}
+                </span>
+                {excess.dispute_status === 'open'
+                  ? ' — a Stripe dispute is live on this excess. Respond in the Stripe dashboard before the evidence deadline.'
+                  : excess.disputed_at ? ` — recorded ${new Date(excess.disputed_at).toLocaleDateString('en-GB')}.` : '.'}
+              </p>
+            </div>
+          )}
           {excess.dispatch_override && (
             <div className="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md">
               <p className="text-xs text-amber-700">
