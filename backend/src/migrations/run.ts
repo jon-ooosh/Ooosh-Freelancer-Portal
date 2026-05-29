@@ -131,6 +131,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '094_excess_bank_details.sql',
         '095_mobile_upload_tokens.sql',
         '096_fleet_gearbox.sql',
+        '097_storage_round2.sql',
       ];
 
       for (const migration of migrations) {

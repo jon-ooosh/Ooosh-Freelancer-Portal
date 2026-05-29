@@ -2129,7 +2129,14 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 
 **Where:** `/storage` (Operations submenu → "Storage"), tabbed page: Rooms / Tenancies / Waiting List / Access Requests / T&Cs. Public T&Cs accept page at `/storage-tcs/:token` (token auth, no Layout wrapper, mirrors the OOH parking page).
 
-**Backend:** migration 093 (`storage_rooms`, `storage_tenancies`, `storage_rate_history`, `storage_invoice_log`, `storage_access_list`, `storage_access_events`, `storage_waiting_list`, `storage_tcs_versions`, `storage_tcs_agreements`). `routes/storage.ts` mounted at `/api/storage` — public T&Cs token endpoints defined BEFORE the `STAFF_ROLES` auth gate; rooms/T&Cs-version writes gated to admin/manager. `services/storage-reminders.ts` wired into the scheduler (daily 09:20 Europe/London). `storage_tcs_request` email template added.
+**Backend:** migration 093 (`storage_rooms`, `storage_tenancies`, `storage_rate_history`, `storage_invoice_log`, `storage_access_list`, `storage_access_events`, `storage_waiting_list`, `storage_tcs_versions`, `storage_tcs_agreements`) + migration 094 (round-2 refinements, below). `routes/storage.ts` mounted at `/api/storage` — public T&Cs token endpoints defined BEFORE the `STAFF_ROLES` auth gate; rooms/T&Cs-version writes gated to admin/manager. `services/storage-reminders.ts` wired into the scheduler (daily 09:20 Europe/London). `storage_tcs_request` email template added.
+
+**Round 2 (migration 094, May 2026 — first-live feedback):**
+- **Access mechanism moved room → tenancy.** Door code / we-hold-key / client-key-or-padlock changes per client, so `access_type` / `access_code` / `key_location` live on `storage_tenancies` now (set at move-in, editable). Rooms keep physical attributes only.
+- **Rooms gained `location_type` (internal/external) + `default_weekly_rate`** — move-in prefills the rate from the room default. **Photo upload** wired (room form → `POST /api/files/upload?attachment_only=true` → `files/attachments/<uid>/…`, appended to `storage_rooms.photos` JSONB; display via authenticated `/api/files/download`).
+- **Access requests are reminder-style.** `storage_access_events` gained `notify_user_ids UUID[]` + `delivery_method` (notification/email/both). The logger is pre-ticked as a recipient. Fires **immediately if undated or due today**, otherwise on the **morning of** `requested_date` via the daily scanner (`notifyAccessEvent()` + the round-4 pass in `runStorageReminders`). `notified_at` is the per-event dedup stamp. Honours delivery_method like the close-out chase scanner (notification→low priority, email→sent immediately, both→normal/escalated).
+- **Dashboard "On Today" section** (`frontend/src/components/dashboard/v2/sections/OnToday.tsx`, registry id `ontoday`, slotted right after `needs`). The general home for ad-hoc to-dos that fall through the cracks — seeded from storage access requests due today/tomorrow via `on_today` on `GET /api/dashboard/operations` (defensively wrapped so a pre-migration env can't 500 the dashboard). Hidden when empty. **To add another ad-hoc source, union it into the `on_today` payload** — the item shape (`source/id/title/detail/due/href`) is generic on purpose.
+- **UI:** Tenancies is now the default tab (it's the "who's where" view staff live in); Move-In button moved to the bottom of the list; tab-bar `overflow-y` quirk fixed (`overflow-y-hidden scrollbar-hide`).
 
 **Key design points:**
 - **One live tenancy per room** enforced by a partial unique index (`status IN ('active','notice','reserved')`); the create handler catches `23505` → 409. Move-out soft-ends the tenancy (row preserved as ex-client history) and frees the room.
@@ -2141,7 +2148,7 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 **Deferred (noted, not built):**
 - **Door-code encryption** — `storage_rooms.access_code` is plaintext for now (STAFF_ROLES-gated + audited). Moves to the planned `services/encryption.ts` PII layer once it lands (jon: ~within a week of this build). See spec §9.
 - **Xero recurring-invoice tracking** — follow-on from the broader Xero integration work. The manual `invoice sent` log + reminders are the interim value.
-- **Dashboard NeedsAttention bucket** (`/api/storage/overview` already returns the counts — just needs a `NABucket` + deep-link wired in).
+- ~~**Dashboard surface**~~ — done in round 2 as the general "On Today" section (not a NeedsAttention bucket). `/api/storage/overview` still returns counts if a header widget is ever wanted.
 - **Address-book "Storage" tab** on Org/Person detail (mirrors Hire History / Excess History pattern).
 - **Waiting-list → vacancy matching** suggestions on move-out.
 - **Signed T&Cs snapshot PDF** (acceptance + signature image recorded; PDF generation not yet wired).

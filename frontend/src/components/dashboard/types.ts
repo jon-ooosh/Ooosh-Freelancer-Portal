@@ -253,7 +253,19 @@ export interface ReturnsOverview {
   };
 }
 
+/** Ad-hoc "do this today/tomorrow" item — currently storage access requests,
+ *  built to absorb future ad-hoc sources (see OnToday dashboard section). */
+export interface OnTodayItem {
+  source: string;
+  id: string;
+  title: string;
+  detail: string;
+  due: string | null;
+  href: string;
+}
+
 export interface OperationsData {
+  on_today?: OnTodayItem[];
   stat_cards: {
     on_hire_count: string;
     going_out_count: string;
