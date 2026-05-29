@@ -17,17 +17,19 @@ interface Overview {
   waiting: number;
 }
 interface Room {
-  id: string; name: string; size_category: SizeCat; dimensions: string | null; area_sqft: number | null;
-  access_type: string; access_code: string | null; key_location: string | null; description: string | null;
+  id: string; name: string; size_category: SizeCat; location_type: string | null; default_weekly_rate: number | null;
+  dimensions: string | null; area_sqft: number | null; description: string | null;
+  photos?: { name: string; url: string; type?: string }[];
   status: string; notes: string | null; occupant_name?: string | null; tenancy_id?: string | null;
 }
 interface Tenancy {
-  id: string; room_id: string; room_name: string; size_category: SizeCat; organisation_id: string | null;
+  id: string; room_id: string; room_name: string; size_category: SizeCat; location_type?: string | null;
+  organisation_id: string | null;
   organisation_name: string | null; lead_contact_name: string | null; status: string;
   move_in_date: string | null; move_out_date: string | null; weekly_rate: number; billing_mode: string;
   billing_cadence: string; next_bill_date: string | null; next_rate_review_date: string | null;
   last_rate_change_date: string | null; previous_weekly_rate: number | null; tcs_accepted_at: string | null;
-  notes: string | null; access_code?: string | null; key_location?: string | null;
+  notes: string | null; access_type?: string | null; access_code?: string | null; key_location?: string | null;
   rate_history?: { id: string; effective_date: string; old_rate: number | null; new_rate: number; notes: string | null }[];
   access_list?: { id: string; person_name: string | null; name: string | null; phone: string | null; relationship: string | null }[];
   invoices?: { id: string; due_date: string; amount: number | null; sent_at: string }[];
@@ -44,7 +46,7 @@ interface Waiting {
 }
 interface TcsVersion { id: string; version: string; is_current: boolean; effective_date: string; body: string; }
 
-const TABS = ['rooms', 'tenancies', 'waiting', 'access', 'tcs'] as const;
+const TABS = ['tenancies', 'rooms', 'waiting', 'access', 'tcs'] as const;
 type Tab = typeof TABS[number];
 const TAB_LABELS: Record<Tab, string> = { rooms: 'Rooms', tenancies: 'Tenancies', waiting: 'Waiting List', access: 'Access Requests', tcs: 'T&Cs' };
 
@@ -126,7 +128,7 @@ export default function StoragePage() {
   const role = useAuthStore((s) => s.user?.role) || '';
   const isAdminManager = role === 'admin' || role === 'manager';
   const [params, setParams] = useSearchParams();
-  const tab = (TABS.includes(params.get('tab') as Tab) ? params.get('tab') : 'rooms') as Tab;
+  const tab = (TABS.includes(params.get('tab') as Tab) ? params.get('tab') : 'tenancies') as Tab;
   const setTab = (t: Tab) => setParams({ tab: t });
 
   const [overview, setOverview] = useState<Overview | null>(null);
@@ -152,7 +154,7 @@ export default function StoragePage() {
         )}
       </div>
 
-      <div className="flex gap-1 border-b mb-5 overflow-x-auto">
+      <div className="flex gap-1 border-b mb-5 overflow-x-auto overflow-y-hidden scrollbar-hide">
         {TABS.map((t) => (
           <button key={t} onClick={() => setTab(t)}
             className={`px-4 py-2 text-sm font-medium whitespace-nowrap border-b-2 -mb-px ${tab === t ? 'border-[#7B5EA7] text-[#7B5EA7]' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
@@ -195,10 +197,12 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
               <h3 className="font-semibold text-slate-800">{r.name}</h3>
               <span className={`px-2 py-0.5 rounded text-xs font-medium ${ROOM_STATUS_COLOUR[r.status] || 'bg-slate-100'}`}>{r.status.replace('_', ' ')}</span>
             </div>
-            <p className="text-xs text-slate-500 mb-2 capitalize">{r.size_category}{r.dimensions ? ` · ${r.dimensions}` : ''}</p>
+            <p className="text-xs text-slate-500 mb-2 capitalize">
+              {r.size_category}{r.location_type ? ` · ${r.location_type}` : ''}{r.dimensions ? ` · ${r.dimensions}` : ''}
+            </p>
             {r.occupant_name && <p className="text-sm text-slate-700 mb-1">📦 {r.occupant_name}</p>}
-            {r.access_type === 'door_code' && r.access_code && <p className="text-xs text-slate-500">Code: {r.access_code}</p>}
-            {r.access_type === 'we_hold_key' && <p className="text-xs text-slate-500">🔑 Key held{r.key_location ? ` · ${r.key_location}` : ''}</p>}
+            {r.default_weekly_rate != null && <p className="text-xs text-slate-500">Default {money(r.default_weekly_rate)}/wk</p>}
+            {(r.photos?.length ?? 0) > 0 && <p className="text-xs text-slate-400">📷 {r.photos!.length} photo{r.photos!.length !== 1 ? 's' : ''}</p>}
             {isAdminManager && <button onClick={() => setEditing(r)} className="text-xs text-[#7B5EA7] mt-2">Edit</button>}
           </div>
         ))}
@@ -214,17 +218,42 @@ function RoomsTab({ isAdminManager, onChange }: { isAdminManager: boolean; onCha
 
 function RoomModal({ room, onClose, onSaved }: { room: Room | null; onClose: () => void; onSaved: () => void }) {
   const [f, setF] = useState({
-    name: room?.name || '', size_category: room?.size_category || 'medium', dimensions: room?.dimensions || '',
-    access_type: room?.access_type || 'door_code', access_code: room?.access_code || '', key_location: room?.key_location || '',
-    description: room?.description || '', status: room?.status || 'available', notes: room?.notes || '',
+    name: room?.name || '', size_category: room?.size_category || 'medium',
+    location_type: room?.location_type || '', default_weekly_rate: room?.default_weekly_rate != null ? String(room.default_weekly_rate) : '',
+    dimensions: room?.dimensions || '', description: room?.description || '', status: room?.status || 'available', notes: room?.notes || '',
   });
+  const [photos, setPhotos] = useState<{ name: string; url: string; type?: string }[]>(room?.photos || []);
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState('');
+
+  async function handleUpload(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploading(true); setErr('');
+    try {
+      for (const file of Array.from(files)) {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('attachment_only', 'true');
+        const token = useAuthStore.getState().accessToken;
+        const res = await fetch('/api/files/upload', { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {}, body: fd });
+        if (!res.ok) throw new Error('Upload failed');
+        const j = await res.json();
+        setPhotos((p) => [...p, { name: j.filename || file.name, url: j.r2_key, type: 'image' }]);
+      }
+    } catch (e) { setErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setUploading(false); }
+  }
+
   async function save() {
     if (!f.name.trim()) { setErr('Name is required'); return; }
     setSaving(true); setErr('');
     try {
-      const body = { ...f, dimensions: f.dimensions || null, access_code: f.access_code || null, key_location: f.key_location || null, description: f.description || null, notes: f.notes || null };
+      const body = {
+        name: f.name, size_category: f.size_category, status: f.status,
+        location_type: f.location_type || null,
+        default_weekly_rate: f.default_weekly_rate ? Number(f.default_weekly_rate) : null,
+        dimensions: f.dimensions || null, description: f.description || null, notes: f.notes || null, photos,
+      };
       if (room) await api.put(`/storage/rooms/${room.id}`, body);
       else await api.post('/storage/rooms', body);
       onSaved();
@@ -239,21 +268,33 @@ function RoomModal({ room, onClose, onSaved }: { room: Room | null; onClose: () 
             <select className={inputCls} value={f.size_category} onChange={(e) => setF({ ...f, size_category: e.target.value as SizeCat })}>
               <option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option><option value="xl">XL</option>
             </select></div>
-        </div>
-        <div><label className="block text-xs text-slate-500 mb-1">Dimensions / area</label><input className={inputCls} value={f.dimensions} onChange={(e) => setF({ ...f, dimensions: e.target.value })} placeholder="e.g. 3m × 4m" /></div>
-        <div className="grid grid-cols-2 gap-3">
-          <div><label className="block text-xs text-slate-500 mb-1">Access</label>
-            <select className={inputCls} value={f.access_type} onChange={(e) => setF({ ...f, access_type: e.target.value })}>
-              <option value="door_code">Door code</option><option value="we_hold_key">We hold a key</option><option value="client_key">Client key</option>
+          <div><label className="block text-xs text-slate-500 mb-1">Location</label>
+            <select className={inputCls} value={f.location_type} onChange={(e) => setF({ ...f, location_type: e.target.value })}>
+              <option value="">—</option><option value="internal">Internal</option><option value="external">External</option>
             </select></div>
+          <div><label className="block text-xs text-slate-500 mb-1">Default rate £/wk</label><input className={inputCls} type="number" value={f.default_weekly_rate} onChange={(e) => setF({ ...f, default_weekly_rate: e.target.value })} placeholder="e.g. 25" /></div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-xs text-slate-500 mb-1">Dimensions / area</label><input className={inputCls} value={f.dimensions} onChange={(e) => setF({ ...f, dimensions: e.target.value })} placeholder="e.g. 3m × 4m" /></div>
           <div><label className="block text-xs text-slate-500 mb-1">Status</label>
             <select className={inputCls} value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>
               <option value="available">Available</option><option value="occupied">Occupied</option><option value="reserved">Reserved</option><option value="out_of_use">Out of use</option>
             </select></div>
         </div>
-        {f.access_type === 'door_code' && <div><label className="block text-xs text-slate-500 mb-1">Door code</label><input className={inputCls} value={f.access_code} onChange={(e) => setF({ ...f, access_code: e.target.value })} /></div>}
-        {f.access_type === 'we_hold_key' && <div><label className="block text-xs text-slate-500 mb-1">Key location</label><input className={inputCls} value={f.key_location} onChange={(e) => setF({ ...f, key_location: e.target.value })} /></div>}
-        <div><label className="block text-xs text-slate-500 mb-1">Description</label><textarea className={inputCls} rows={2} value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></div>
+        <div><label className="block text-xs text-slate-500 mb-1">Description</label><textarea className={inputCls} rows={2} value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} placeholder="Reference detail for enquiries" /></div>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Photos</label>
+          <div className="flex flex-wrap gap-2 mb-2">
+            {photos.map((p, idx) => (
+              <span key={idx} className="inline-flex items-center gap-1 text-xs bg-slate-100 rounded px-2 py-1">
+                📷 {p.name}
+                <button type="button" onClick={() => setPhotos((cur) => cur.filter((_, j) => j !== idx))} className="text-red-500">×</button>
+              </span>
+            ))}
+          </div>
+          <input type="file" accept="image/*" multiple onChange={(e) => handleUpload(e.target.files)} className="text-xs" />
+          {uploading && <span className="text-xs text-slate-400 ml-2">Uploading…</span>}
+        </div>
         {err && <p className="text-red-600 text-sm">{err}</p>}
         <div className="flex justify-end gap-2"><button onClick={onClose} className="px-4 py-2 text-sm text-slate-600">Cancel</button><button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-[#7B5EA7] text-white rounded-lg disabled:opacity-50">{saving ? 'Saving…' : 'Save'}</button></div>
       </div>
@@ -274,8 +315,7 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
-        <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
+      <div className="flex items-center justify-end mb-3">
         <label className="text-sm text-slate-600 flex items-center gap-2"><input type="checkbox" checked={showEnded} onChange={(e) => setShowEnded(e.target.checked)} /> Show ended</label>
       </div>
       <div className="overflow-x-auto border border-slate-200 rounded-xl bg-white">
@@ -303,6 +343,9 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
           </tbody>
         </table>
       </div>
+      <div className="mt-4">
+        <button onClick={() => setCreating(true)} className="bg-[#7B5EA7] text-white px-4 py-2 rounded-lg text-sm font-medium">+ Move In Client</button>
+      </div>
       {creating && <MoveInModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); onChange(); }} />}
       {detailId && <TenancyDetailModal id={detailId} isAdminManager={isAdminManager} onClose={() => setDetailId(null)} onChange={() => { load(); onChange(); }} />}
     </div>
@@ -311,17 +354,23 @@ function TenanciesTab({ isAdminManager, onChange }: { isAdminManager: boolean; o
 
 function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [rooms, setRooms] = useState<Room[]>([]);
-  const [f, setF] = useState({ room_id: '', organisation_id: null as string | null, org_name: '', lead_contact_person_id: null as string | null, contact_name: '', weekly_rate: '', billing_mode: 'manual', billing_cadence: 'monthly', next_bill_date: '', next_rate_review_date: '', move_in_date: new Date().toISOString().slice(0, 10), notes: '' });
+  const [f, setF] = useState({ room_id: '', organisation_id: null as string | null, org_name: '', lead_contact_person_id: null as string | null, contact_name: '', weekly_rate: '', access_type: 'door_code', access_code: '', key_location: '', billing_mode: 'manual', billing_cadence: 'monthly', next_bill_date: '', next_rate_review_date: '', move_in_date: new Date().toISOString().slice(0, 10), notes: '' });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
   useEffect(() => { api.get<{ data: Room[] }>('/storage/rooms?status=available').then((r) => setRooms(r.data)); }, []);
+  function pickRoom(roomId: string) {
+    const room = rooms.find((r) => r.id === roomId);
+    // Prefill the rate from the room's default if the user hasn't typed one yet
+    setF((cur) => ({ ...cur, room_id: roomId, weekly_rate: cur.weekly_rate || (room?.default_weekly_rate != null ? String(room.default_weekly_rate) : '') }));
+  }
   async function save() {
     if (!f.room_id) { setErr('Pick a room'); return; }
     setSaving(true); setErr('');
     try {
       await api.post('/storage/tenancies', {
         room_id: f.room_id, organisation_id: f.organisation_id, lead_contact_person_id: f.lead_contact_person_id,
-        weekly_rate: Number(f.weekly_rate) || 0, billing_mode: f.billing_mode, billing_cadence: f.billing_cadence,
+        weekly_rate: Number(f.weekly_rate) || 0, access_type: f.access_type, access_code: f.access_code || null, key_location: f.key_location || null,
+        billing_mode: f.billing_mode, billing_cadence: f.billing_cadence,
         next_bill_date: f.next_bill_date || null, next_rate_review_date: f.next_rate_review_date || null,
         move_in_date: f.move_in_date || null, notes: f.notes || null,
       });
@@ -332,15 +381,23 @@ function MoveInModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
     <Modal title="Move In Client" onClose={onClose}>
       <div className="space-y-3">
         <div><label className="block text-xs text-slate-500 mb-1">Room (available)</label>
-          <select className={inputCls} value={f.room_id} onChange={(e) => setF({ ...f, room_id: e.target.value })}>
+          <select className={inputCls} value={f.room_id} onChange={(e) => pickRoom(e.target.value)}>
             <option value="">Select a room…</option>
-            {rooms.map((r) => <option key={r.id} value={r.id}>{r.name} ({r.size_category})</option>)}
+            {rooms.map((r) => <option key={r.id} value={r.id}>{r.name} ({r.size_category}){r.default_weekly_rate != null ? ` · ${money(r.default_weekly_rate)}/wk` : ''}</option>)}
           </select></div>
         <EntitySearch kind="organisations" label="Client organisation" value={f.org_name} onPick={(id, name) => setF({ ...f, organisation_id: id, org_name: name })} />
         <EntitySearch kind="people" label="Lead contact" value={f.contact_name} onPick={(id, name) => setF({ ...f, lead_contact_person_id: id, contact_name: name })} />
         <div className="grid grid-cols-2 gap-3">
           <div><label className="block text-xs text-slate-500 mb-1">Weekly rate £</label><input className={inputCls} type="number" value={f.weekly_rate} onChange={(e) => setF({ ...f, weekly_rate: e.target.value })} /></div>
           <div><label className="block text-xs text-slate-500 mb-1">Move-in date</label><input className={inputCls} type="date" value={f.move_in_date} onChange={(e) => setF({ ...f, move_in_date: e.target.value })} /></div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="block text-xs text-slate-500 mb-1">Access</label>
+            <select className={inputCls} value={f.access_type} onChange={(e) => setF({ ...f, access_type: e.target.value })}>
+              <option value="door_code">Door code</option><option value="we_hold_key">We hold a key</option><option value="client_key">Client key / padlock</option>
+            </select></div>
+          {f.access_type === 'door_code' && <div><label className="block text-xs text-slate-500 mb-1">Door code</label><input className={inputCls} value={f.access_code} onChange={(e) => setF({ ...f, access_code: e.target.value })} /></div>}
+          {f.access_type === 'we_hold_key' && <div><label className="block text-xs text-slate-500 mb-1">Key location</label><input className={inputCls} value={f.key_location} onChange={(e) => setF({ ...f, key_location: e.target.value })} /></div>}
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div><label className="block text-xs text-slate-500 mb-1">Billing</label>
@@ -384,7 +441,9 @@ function TenancyDetailModal({ id, isAdminManager, onClose, onChange }: { id: str
           {t.billing_mode === 'manual' && <Field label="Next invoice due" value={fmtDate(t.next_bill_date)} />}
           <Field label="Next rate review" value={fmtDate(t.next_rate_review_date)} />
           <Field label="T&Cs" value={t.tcs_accepted_at ? `Accepted ${fmtDate(t.tcs_accepted_at)}` : 'Not accepted'} />
-          {t.access_code && <Field label="Door code" value={t.access_code} />}
+          {t.access_type === 'door_code' && t.access_code && <Field label="Door code" value={t.access_code} />}
+          {t.access_type === 'we_hold_key' && <Field label="Access" value={`We hold a key${t.key_location ? ` · ${t.key_location}` : ''}`} />}
+          {t.access_type === 'client_key' && <Field label="Access" value="Client key / padlock" />}
         </div>
 
         {msg && <p className="text-red-600">{msg}</p>}
@@ -577,12 +636,20 @@ function AccessTab({ onChange }: { onChange: () => void }) {
   );
 }
 
+interface StaffUser { id: string; first_name: string | null; last_name: string | null; role: string; is_active: boolean; }
 function AccessModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const currentUserId = useAuthStore((s) => s.user?.id) || '';
   const [tenancies, setTenancies] = useState<Tenancy[]>([]);
-  const [f, setF] = useState({ tenancy_id: '', type: 'visit', description: '', attendee_name: '', method: 'in_person', requested_date: '', notes: '' });
+  const [users, setUsers] = useState<StaffUser[]>([]);
+  const [f, setF] = useState({ tenancy_id: '', type: 'visit', description: '', attendee_name: '', method: 'in_person', requested_date: '', delivery_method: 'both', notes: '' });
+  const [recipients, setRecipients] = useState<string[]>(currentUserId ? [currentUserId] : []);
   const [warn, setWarn] = useState('');
   const [saving, setSaving] = useState(false);
-  useEffect(() => { api.get<{ data: Tenancy[] }>('/storage/tenancies?status=live').then((r) => setTenancies(r.data)); }, []);
+  useEffect(() => {
+    api.get<{ data: Tenancy[] }>('/storage/tenancies?status=live').then((r) => setTenancies(r.data));
+    api.get<{ data: StaffUser[] }>('/users').then((r) => setUsers(r.data.filter((u) => u.is_active && u.role !== 'freelancer'))).catch(() => {});
+  }, []);
+  const toggleRecipient = (id: string) => setRecipients((cur) => cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]);
   return (
     <Modal title="Log Access Request" onClose={onClose}>
       <div className="space-y-3">
@@ -606,12 +673,34 @@ function AccessModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
           <div><label className="block text-xs text-slate-500 mb-1">Who's attending</label><input className={inputCls} value={f.attendee_name} onChange={(e) => setF({ ...f, attendee_name: e.target.value })} /></div>
           <div><label className="block text-xs text-slate-500 mb-1">When</label><input className={inputCls} type="date" value={f.requested_date} onChange={(e) => setF({ ...f, requested_date: e.target.value })} /></div>
         </div>
+        <div>
+          <label className="block text-xs text-slate-500 mb-1">Notify</label>
+          <div className="flex flex-wrap gap-1.5 mb-2 max-h-28 overflow-y-auto border border-slate-200 rounded-lg p-2">
+            {users.map((u) => {
+              const on = recipients.includes(u.id);
+              const name = `${u.first_name || ''} ${u.last_name || ''}`.trim() || 'User';
+              return (
+                <button type="button" key={u.id} onClick={() => toggleRecipient(u.id)}
+                  className={`text-xs px-2 py-1 rounded-full border ${on ? 'bg-[#7B5EA7] text-white border-[#7B5EA7]' : 'bg-white text-slate-600 border-slate-300'}`}>
+                  {name}{on ? ' ✓' : ''}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-slate-500">Send via</label>
+            <select className="border border-slate-300 rounded px-2 py-1 text-xs" value={f.delivery_method} onChange={(e) => setF({ ...f, delivery_method: e.target.value })}>
+              <option value="both">Bell + email</option><option value="notification">Bell only</option><option value="email">Email only</option>
+            </select>
+            <span className="text-xs text-slate-400">{f.requested_date ? 'fires on the day' : 'fires now'}</span>
+          </div>
+        </div>
         {warn && <p className="text-amber-600 text-sm">⚠️ {warn}</p>}
         <div className="flex justify-end gap-2"><button onClick={onClose} className="px-4 py-2 text-sm text-slate-600">Cancel</button>
           <button disabled={saving} onClick={async () => {
             setSaving(true); setWarn('');
             try {
-              const r = await api.post<{ not_on_access_list?: boolean }>('/storage/access-events', { tenancy_id: f.tenancy_id || null, type: f.type, description: f.description || null, attendee_name: f.attendee_name || null, method: f.method, requested_date: f.requested_date || null, notes: f.notes || null });
+              const r = await api.post<{ not_on_access_list?: boolean }>('/storage/access-events', { tenancy_id: f.tenancy_id || null, type: f.type, description: f.description || null, attendee_name: f.attendee_name || null, method: f.method, requested_date: f.requested_date || null, notify_user_ids: recipients, delivery_method: f.delivery_method, notes: f.notes || null });
               if (r.not_on_access_list && f.attendee_name) { setWarn(`${f.attendee_name} isn't on the access list for this unit. Logged anyway.`); setTimeout(onSaved, 1800); }
               else onSaved();
             } finally { setSaving(false); }

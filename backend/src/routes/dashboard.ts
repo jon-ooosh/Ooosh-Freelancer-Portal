@@ -734,8 +734,42 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       transportOpsSummary[row.ops_status as string] = parseInt(row.count as string);
     }
 
+    // ── On Today/Tomorrow — ad-hoc to-dos that fall through the cracks ──
+    // Currently seeded from storage access requests (open, due today/tomorrow
+    // or undated). Built as the general home for future ad-hoc items: union
+    // more sources into `onToday` as modules need a "do this soon" surface.
+    // Wrapped defensively so a missing storage table (pre-migration env) can't
+    // 500 the whole dashboard.
+    let onToday: Record<string, unknown>[] = [];
+    try {
+      const storageAccess = await query(`
+        SELECT e.id, e.type, e.description, e.method, e.requested_date, e.status,
+               r.name AS room_name,
+               COALESCE(e.attendee_name, p.first_name || ' ' || p.last_name) AS attendee
+        FROM storage_access_events e
+        LEFT JOIN storage_tenancies t ON t.id = e.tenancy_id
+        LEFT JOIN storage_rooms r ON r.id = COALESCE(e.room_id, t.room_id)
+        LEFT JOIN people p ON p.id = e.attendee_person_id
+        WHERE e.status IN ('requested','scheduled')
+          AND (e.requested_date IS NULL OR e.requested_date <= CURRENT_DATE + 1)
+        ORDER BY e.requested_date NULLS FIRST
+        LIMIT 25
+      `);
+      onToday = storageAccess.rows.map((e) => ({
+        source: 'storage_access',
+        id: e.id,
+        title: `${e.room_name || 'Storage'} — ${String(e.type).replace('_', ' ')}${e.method === 'courier' ? ' 🚚' : ''}`,
+        detail: [e.description, e.attendee].filter(Boolean).join(' · '),
+        due: e.requested_date,
+        href: '/storage?tab=access',
+      }));
+    } catch (err) {
+      console.warn('Dashboard on_today (storage) skipped:', (err as Error).message);
+    }
+
     res.json({
       stat_cards: { ...statCardsResult.rows[0], on_hire_spark: onHireSpark },
+      on_today: onToday,
       today: {
         going_out: goingOutResult.rows,
         returning: returningResult.rows,

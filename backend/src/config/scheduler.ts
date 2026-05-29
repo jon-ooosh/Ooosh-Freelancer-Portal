@@ -712,9 +712,9 @@ export function startScheduler() {
     try {
       const { runStorageReminders } = await import('../services/storage-reminders');
       const r = await runStorageReminders();
-      if (r.billingDue || r.billingOverdue || r.reviews) {
+      if (r.billingDue || r.billingOverdue || r.reviews || r.accessEvents) {
         console.log(
-          `Scheduler: Storage reminders — ${r.billingDue} billing due, ${r.billingOverdue} overdue, ${r.reviews} rate reviews`
+          `Scheduler: Storage reminders — ${r.billingDue} billing due, ${r.billingOverdue} overdue, ${r.reviews} rate reviews, ${r.accessEvents} access requests`
         );
       }
     } catch (err) {

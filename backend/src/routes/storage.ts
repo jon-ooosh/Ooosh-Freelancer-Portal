@@ -212,11 +212,10 @@ router.get('/rooms/:id', async (req: AuthRequest, res: Response) => {
 const roomSchema = z.object({
   name: z.string().min(1).max(120),
   size_category: z.enum(['small', 'medium', 'large', 'xl']).default('medium'),
+  location_type: z.enum(['internal', 'external']).optional().nullable(),
+  default_weekly_rate: z.number().nonnegative().optional().nullable(),
   dimensions: z.string().max(120).optional().nullable(),
   area_sqft: z.number().optional().nullable(),
-  access_type: z.enum(['door_code', 'we_hold_key', 'client_key']).default('door_code'),
-  access_code: z.string().optional().nullable(),
-  key_location: z.string().max(200).optional().nullable(),
   description: z.string().optional().nullable(),
   photos: z.array(z.object({ name: z.string(), url: z.string(), type: z.string().optional() })).optional().default([]),
   status: z.enum(['available', 'occupied', 'reserved', 'out_of_use']).optional(),
@@ -226,11 +225,11 @@ const roomSchema = z.object({
 router.post('/rooms', authorize(...ADMIN_MANAGER), validate(roomSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof roomSchema>;
   const result = await query(
-    `INSERT INTO storage_rooms (name, size_category, dimensions, area_sqft, access_type, access_code,
-        key_location, description, photos, status, notes, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-    [b.name, b.size_category, b.dimensions ?? null, b.area_sqft ?? null, b.access_type, b.access_code ?? null,
-     b.key_location ?? null, b.description ?? null, JSON.stringify(b.photos ?? []), b.status ?? 'available',
+    `INSERT INTO storage_rooms (name, size_category, location_type, default_weekly_rate, dimensions, area_sqft,
+        description, photos, status, notes, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+    [b.name, b.size_category, b.location_type ?? null, b.default_weekly_rate ?? null, b.dimensions ?? null,
+     b.area_sqft ?? null, b.description ?? null, JSON.stringify(b.photos ?? []), b.status ?? 'available',
      b.notes ?? null, req.user!.id]
   );
   await logAudit(req.user!.id, 'storage_rooms', result.rows[0].id, 'create', null, result.rows[0]);
@@ -284,7 +283,7 @@ router.get('/tenancies', async (req: AuthRequest, res: Response) => {
 
 router.get('/tenancies/:id', async (req: AuthRequest, res: Response) => {
   const t = await query(
-    `SELECT t.*, r.name AS room_name, r.size_category, r.access_type, r.access_code, r.key_location,
+    `SELECT t.*, r.name AS room_name, r.size_category, r.location_type,
             o.name AS organisation_name,
             p.first_name || ' ' || p.last_name AS lead_contact_name,
             a.accepted_at AS tcs_accepted_at, a.accepted_by_name AS tcs_accepted_by
@@ -314,6 +313,9 @@ const tenancySchema = z.object({
   status: z.enum(['reserved', 'active', 'notice', 'ended']).default('active'),
   move_in_date: z.string().optional().nullable(),
   weekly_rate: z.number().nonnegative().default(0),
+  access_type: z.enum(['door_code', 'we_hold_key', 'client_key']).default('door_code'),
+  access_code: z.string().optional().nullable(),
+  key_location: z.string().max(200).optional().nullable(),
   billing_mode: z.enum(['recurring', 'manual']).default('manual'),
   billing_cadence: z.enum(['monthly', 'quarterly', 'annual', 'custom']).default('monthly'),
   next_bill_date: z.string().optional().nullable(),
@@ -331,12 +333,14 @@ router.post('/tenancies', validate(tenancySchema), async (req: AuthRequest, res:
     const result = await query(
       `INSERT INTO storage_tenancies
         (room_id, organisation_id, lead_contact_person_id, status, move_in_date, weekly_rate,
+         access_type, access_code, key_location,
          billing_mode, billing_cadence, next_bill_date, bill_reminder_person_id,
          bill_reminder_lead_days, bill_overdue_grace_days, rate_review_cadence, next_rate_review_date,
          notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,COALESCE($11,7),COALESCE($12,5),$13,$14,$15,$16) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,COALESCE($14,7),COALESCE($15,5),$16,$17,$18,$19) RETURNING *`,
       [b.room_id, b.organisation_id ?? null, b.lead_contact_person_id ?? null, b.status, b.move_in_date ?? null,
-       b.weekly_rate, b.billing_mode, b.billing_cadence, b.next_bill_date ?? null, b.bill_reminder_person_id ?? null,
+       b.weekly_rate, b.access_type, b.access_code ?? null, b.key_location ?? null,
+       b.billing_mode, b.billing_cadence, b.next_bill_date ?? null, b.bill_reminder_person_id ?? null,
        b.bill_reminder_lead_days ?? null, b.bill_overdue_grace_days ?? null, b.rate_review_cadence,
        b.next_rate_review_date ?? null, b.notes ?? null, req.user!.id]
     );
@@ -356,7 +360,8 @@ router.post('/tenancies', validate(tenancySchema), async (req: AuthRequest, res:
 router.put('/tenancies/:id', validate(tenancySchema.partial()), async (req: AuthRequest, res: Response) => {
   const allowed = ['organisation_id', 'lead_contact_person_id', 'status', 'move_in_date', 'billing_mode',
     'billing_cadence', 'next_bill_date', 'bill_reminder_person_id', 'bill_reminder_lead_days',
-    'bill_overdue_grace_days', 'rate_review_cadence', 'next_rate_review_date', 'notes'];
+    'bill_overdue_grace_days', 'rate_review_cadence', 'next_rate_review_date', 'notes',
+    'access_type', 'access_code', 'key_location'];
   const fields: string[] = [];
   const params: unknown[] = [];
   let i = 1;
@@ -554,16 +559,20 @@ const accessEventSchema = z.object({
   attendee_name: z.string().max(200).optional().nullable(),
   method: z.enum(['in_person', 'courier']).default('in_person'),
   requested_date: z.string().optional().nullable(),
+  notify_user_ids: z.array(z.string().uuid()).optional().default([]),
+  delivery_method: z.enum(['notification', 'email', 'both']).default('both'),
   notes: z.string().optional().nullable(),
 });
 router.post('/access-events', validate(accessEventSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof accessEventSchema>;
   const result = await query(
     `INSERT INTO storage_access_events
-       (tenancy_id, room_id, type, description, requested_by, attendee_person_id, attendee_name, method, requested_date, notes)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+       (tenancy_id, room_id, type, description, requested_by, attendee_person_id, attendee_name, method,
+        requested_date, notify_user_ids, delivery_method, notes)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
     [b.tenancy_id ?? null, b.room_id ?? null, b.type, b.description ?? null, req.user!.id,
-     b.attendee_person_id ?? null, b.attendee_name ?? null, b.method, b.requested_date ?? null, b.notes ?? null]
+     b.attendee_person_id ?? null, b.attendee_name ?? null, b.method, b.requested_date ?? null,
+     b.notify_user_ids ?? [], b.delivery_method, b.notes ?? null]
   );
 
   // Access-list check (non-blocking warning)
@@ -579,27 +588,16 @@ router.post('/access-events', validate(accessEventSchema), async (req: AuthReque
     notOnAccessList = check.rows.length === 0;
   }
 
-  // Notify admins/managers
-  try {
-    const admins = await query(`SELECT id FROM users WHERE role IN ('admin','manager') AND is_active = true`);
-    const room = await query(
-      `SELECT r.name FROM storage_rooms r
-       LEFT JOIN storage_tenancies t ON t.id = $1
-       WHERE r.id = COALESCE($2, t.room_id)`,
-      [b.tenancy_id ?? null, b.room_id ?? null]
-    );
-    const roomName = room.rows[0]?.name || 'a storage unit';
-    const who = b.attendee_name || 'someone';
-    for (const a of admins.rows) {
-      await query(
-        `INSERT INTO notifications (user_id, type, title, content, entity_type, entity_id, action_url, priority)
-         VALUES ($1,'system',$2,$3,'storage_access_events',$4,'/storage?tab=access','normal')`,
-        [a.id, `Storage access: ${roomName}`,
-         `${who} — ${b.description || b.type}${notOnAccessList ? ' ⚠️ not on the access list' : ''}`,
-         result.rows[0].id]
-      );
-    }
-  } catch (err) { console.warn('[storage] access-event notify failed:', err); }
+  // Fire the notification NOW only if it's for today or has no date. Future-dated
+  // requests are picked up on the morning of by the daily scanner
+  // (services/storage-reminders.ts). notifyAccessEvent stamps notified_at.
+  const dueNow = !b.requested_date || new Date(b.requested_date) <= new Date(new Date().toISOString().slice(0, 10));
+  if (dueNow) {
+    try {
+      const { notifyAccessEvent } = await import('../services/storage-reminders');
+      await notifyAccessEvent(result.rows[0].id, notOnAccessList);
+    } catch (err) { console.warn('[storage] access-event notify failed:', err); }
+  }
 
   res.status(201).json({ data: result.rows[0], not_on_access_list: notOnAccessList });
 });
