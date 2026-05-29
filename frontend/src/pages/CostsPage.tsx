@@ -34,6 +34,14 @@ interface Stats {
 
 const gbp = (n: number | null | undefined) => `£${Number(n || 0).toFixed(2)}`;
 
+// cost_date is a DATE; pg/JSON returns it as an ISO timestamp. Take the date
+// part only (avoids timezone day-shift) and show UK format.
+const fmtDate = (s: string | null | undefined) => {
+  if (!s) return '—';
+  const [y, m, d] = s.slice(0, 10).split('-');
+  return y && m && d ? `${d}/${m}/${y}` : s;
+};
+
 const APPROVAL_COLOURS: Record<string, string> = {
   submitted: 'bg-gray-100 text-gray-700',
   verified: 'bg-blue-100 text-blue-700',
@@ -176,6 +184,7 @@ export default function CostsPage() {
                 <th className="px-3 py-2 text-right font-medium">Gross</th>
                 <th className="px-3 py-2 text-left font-medium">Type</th>
                 <th className="px-3 py-2 text-left font-medium">Linked</th>
+                <th className="px-3 py-2 text-left font-medium">Uploaded by</th>
                 <th className="px-3 py-2 text-left font-medium">Status</th>
                 <th className="px-3 py-2 text-right font-medium">Actions</th>
               </tr>
@@ -183,7 +192,7 @@ export default function CostsPage() {
             <tbody className="divide-y divide-gray-100">
               {rows.map((c) => (
                 <tr key={c.id} className="hover:bg-gray-50">
-                  <td className="px-3 py-2 whitespace-nowrap text-gray-700">{c.cost_date || '—'}</td>
+                  <td className="px-3 py-2 whitespace-nowrap text-gray-700">{fmtDate(c.cost_date)}</td>
                   <td className="px-3 py-2 text-gray-900">{c.supplier_name || '—'}</td>
                   <td className="px-3 py-2 text-gray-600 max-w-xs truncate">{c.description || '—'}</td>
                   <td className="px-3 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
@@ -192,6 +201,7 @@ export default function CostsPage() {
                     {c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
                       : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
                   </td>
+                  <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{c.uploaded_by_name || '—'}</td>
                   <td className="px-3 py-2">
                     {c.approval_state ? (
                       <span className={`px-2 py-0.5 text-xs rounded-full ${APPROVAL_COLOURS[c.approval_state] || 'bg-gray-100 text-gray-700'}`}>
