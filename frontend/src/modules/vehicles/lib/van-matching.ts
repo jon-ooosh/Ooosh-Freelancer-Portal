@@ -11,6 +11,14 @@ import type { Vehicle } from '../types/vehicle'
 import type { VanRequirement, VanAllocation } from '../types/hirehop'
 
 /**
+ * Canonical van types. A vehicle's `simple_type` must be exactly one of these
+ * for it to match a HireHop-derived job requirement (the requirement infers
+ * the same strings). A blank `simple_type` matches nothing — which is why the
+ * fleet UI must always offer a way to set it.
+ */
+export const VAN_TYPES = ['Premium', 'Basic', 'Vito', 'Panel'] as const
+
+/**
  * Derive gearbox type from vehicleType string.
  * Fleet Master board uses (A) for auto, (M) for manual.
  * Examples: "PREMIUM LWB (A)", "BASIC MWB (M)", "PANEL VAN"
