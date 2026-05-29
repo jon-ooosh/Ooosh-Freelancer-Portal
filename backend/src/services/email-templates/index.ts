@@ -1329,6 +1329,36 @@ const templates: Record<string, EmailTemplate> = {
       </p>
     `,
   },
+
+  storage_tcs_request: {
+    variant: 'client',
+    preheader: 'Please review and accept your storage terms',
+    subject: 'Your Ooosh storage terms — {{roomName}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Storage Terms &amp; Conditions</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">
+        Hi {{contactName}},
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Please take a moment to review and accept the terms &amp; conditions for your
+        storage with us{{orgSuffix}}.
+      </p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;">
+            <p style="margin:0 0 4px;font-size:13px;color:#64748b;">Storage unit</p>
+            <p style="margin:0;font-size:15px;color:#1e293b;font-weight:600;">{{roomName}}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 20px;">
+        <a href="{{link}}" style="display:inline-block;padding:12px 22px;background-color:#7B5EA7;color:#ffffff;text-decoration:none;border-radius:8px;font-size:15px;font-weight:600;">Review &amp; accept terms</a>
+      </p>
+      <p style="margin:0;font-size:14px;color:#334155;line-height:1.6;">
+        If you have any questions, just reply to this email or call us.
+      </p>
+    `,
+  },
 };
 
 export default templates;

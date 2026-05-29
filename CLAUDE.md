@@ -2106,6 +2106,30 @@ The `prepping` (HH 4 / Part Dispatched) inclusion handles the edge case of a job
 **Future enhancements (deferred):**
 - "Recent collections" / "Customer-collected" filter on Jobs + Returns pages — would surface a `collect_method` column on `jobs` (HH `COLLECT` field synced down: 0=customer, 1=we deliver, 2=courier, 3=other) and add a filter pill + Job Detail header pip. Discussed May 2026, parked in favour of higher-value work.
 
+#### Step 9: Client Storage Module ← PHASE 1 BUILT (May 2026)
+
+Standalone OP-native module replacing the Monday.com "Storage Clients" board. Ooosh rents ~20 storage rooms to clients long-term — deliberately NOT tracked in HireHop (no per-month book-in/out). **Full spec:** `docs/STORAGE-CLIENTS-SPEC.md`.
+
+**Where:** `/storage` (Operations submenu → "Storage"), tabbed page: Rooms / Tenancies / Waiting List / Access Requests / T&Cs. Public T&Cs accept page at `/storage-tcs/:token` (token auth, no Layout wrapper, mirrors the OOH parking page).
+
+**Backend:** migration 093 (`storage_rooms`, `storage_tenancies`, `storage_rate_history`, `storage_invoice_log`, `storage_access_list`, `storage_access_events`, `storage_waiting_list`, `storage_tcs_versions`, `storage_tcs_agreements`). `routes/storage.ts` mounted at `/api/storage` — public T&Cs token endpoints defined BEFORE the `STAFF_ROLES` auth gate; rooms/T&Cs-version writes gated to admin/manager. `services/storage-reminders.ts` wired into the scheduler (daily 09:20 Europe/London). `storage_tcs_request` email template added.
+
+**Key design points:**
+- **One live tenancy per room** enforced by a partial unique index (`status IN ('active','notice','reserved')`); the create handler catches `23505` → 409. Move-out soft-ends the tenancy (row preserved as ex-client history) and frees the room.
+- **Invoice "tickbox" = forward-moving date.** Manual-billing tenancies carry `next_bill_date`. "Mark invoice sent" logs a `storage_invoice_log` row and advances `next_bill_date` by cadence (clearing the per-cycle reminder dedup stamps). Recurring-mode (Xero) tenancies are tracked but not nudged. Mirrors the chase-date convention.
+- **Reminders** (per-cycle dedup via `billing_reminder_sent_for` / `billing_overdue_sent_for` / `rate_review_sent_for`): billing due-soon (lead days before), billing overdue (grace days after, unticked → high priority), rate review due. Notify `bill_reminder_person_id` (fallback admins/managers) as `follow_up` bell notifications (escalation handles email per prefs).
+- **Access requests** (`storage_access_events`): "collect X / courier Y" pinch point — log → notify admins/managers → mark done. Non-blocking access-list check warns if the attendee isn't on the unit's allowed list.
+- **T&Cs:** versioned (`storage_tcs_versions`, one current), public accept-link + e-signature → `storage_tcs_agreements` (signature PNG to R2).
+
+**Deferred (noted, not built):**
+- **Door-code encryption** — `storage_rooms.access_code` is plaintext for now (STAFF_ROLES-gated + audited). Moves to the planned `services/encryption.ts` PII layer once it lands (jon: ~within a week of this build). See spec §9.
+- **Xero recurring-invoice tracking** — follow-on from the broader Xero integration work. The manual `invoice sent` log + reminders are the interim value.
+- **Dashboard NeedsAttention bucket** (`/api/storage/overview` already returns the counts — just needs a `NABucket` + deep-link wired in).
+- **Address-book "Storage" tab** on Org/Person detail (mirrors Hire History / Excess History pattern).
+- **Waiting-list → vacancy matching** suggestions on move-out.
+- **Signed T&Cs snapshot PDF** (acceptance + signature image recorded; PDF generation not yet wired).
+- Temp storage / incoming deliveries — deliberately NOT here; belongs with the future Incoming Deliveries module (spec §10).
+
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 
 These are existing standalone tools that currently push to Monday.com. They need repointing to our status-transition API when ready (Step 5 above):

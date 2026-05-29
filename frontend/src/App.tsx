@@ -30,6 +30,8 @@ import InboxPage from './pages/InboxPage';
 import LostCancelledPage from './pages/LostCancelledPage';
 import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
+import StoragePage from './pages/StoragePage';
+import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
@@ -122,6 +124,8 @@ export default function App() {
       <Route path="/vehicles/book-out" element={<BookOutEntry />} />
       {/* Public OOH parking-confirmation form — token-authenticated, no Layout wrapper */}
       <Route path="/return-parking/:token" element={<OohReturnParkingPage />} />
+      {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
+      <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
       <Route path="/warehouse" element={<WarehousePinPage />} />
       <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />
@@ -150,6 +154,7 @@ export default function App() {
                 <Route path="/operations/issues" element={<IssuesPage />} />
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
+                <Route path="/storage" element={<StoragePage />} />
                 <Route path="/operations/problems/:id" element={<IssueDetailPage />} />
                 <Route path="/drivers" element={<DriversPage />} />
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />
