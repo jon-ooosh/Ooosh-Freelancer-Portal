@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useFilteredVehicles } from '../hooks/useVehicles'
 import { useAllocations } from '../hooks/useAllocations'
-import { getGearbox } from '../lib/van-matching'
+import { vehicleGearbox } from '../lib/van-matching'
 import { getDateUrgency } from '../types/vehicle'
 import { vmPath } from '../config/route-paths'
 import { createVehicle, uploadVehicleFile, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
@@ -47,7 +47,7 @@ function DateBadge({ label, date, warningDays = 30 }: { label: string; date: str
 }
 
 function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: boolean }) {
-  const gearbox = getGearbox(vehicle.vehicleType)
+  const gearbox = vehicleGearbox(vehicle)
   const gearboxLabel = gearbox === 'auto' ? 'Auto' : gearbox === 'manual' ? 'Manual' : null
 
   return (
@@ -226,7 +226,7 @@ function FleetTable({
             const svc = getServiceMileageStatus(vehicle, settings.service_mileage_warning_miles)
             const ross = getRossettsStatus(vehicle, settings)
             const status = statusLabel(vehicle, allocatedVehicleIds.has(vehicle.id))
-            const gearbox = getGearbox(vehicle.vehicleType)
+            const gearbox = vehicleGearbox(vehicle)
             const gearboxLabel = gearbox === 'auto' ? 'A' : gearbox === 'manual' ? 'M' : null
             return (
               <tr key={vehicle.id} className="hover:bg-gray-50">

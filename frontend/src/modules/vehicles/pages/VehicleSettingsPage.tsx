@@ -20,6 +20,7 @@ function EditableField({
   type = 'text',
   placeholder,
   options,
+  displayMap,
   hint,
   onSave,
 }: {
@@ -28,6 +29,7 @@ function EditableField({
   type?: 'text' | 'number' | 'date' | 'select'
   placeholder?: string
   options?: string[]
+  displayMap?: Record<string, string>
   hint?: string
   onSave: (val: string | number | null) => void
 }) {
@@ -59,7 +61,7 @@ function EditableField({
           className="w-40 rounded border border-gray-200 px-2 py-1 text-sm focus:border-blue-300 focus:outline-none"
         >
           <option value="">Not set</option>
-          {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+          {options.map(opt => <option key={opt} value={opt}>{displayMap?.[opt] || opt}</option>)}
         </select>
       </div>
     )
@@ -344,6 +346,15 @@ export function VehicleSettingsPage() {
           options={[...VAN_TYPES]}
           hint="Used to match this van to job requirements"
           onSave={v => saveField('simple_type', v)}
+        />
+        <EditableField
+          label="Gearbox"
+          value={vehicle.gearbox || null}
+          type="select"
+          options={['auto', 'manual']}
+          displayMap={{ auto: 'Auto', manual: 'Manual' }}
+          hint="Matches auto/manual job requirements (ignored for Panel vans)"
+          onSave={v => saveField('gearbox', v)}
         />
         <EditableField label="Fuel type" value={vehicle.fuelType} type="text" placeholder="Diesel, Petrol, Electric" onSave={v => saveField('fuel_type', v)} />
         <EditableField label="MPG" value={vehicle.mpg} type="number" placeholder="e.g. 35" onSave={v => saveField('mpg', v)} />
