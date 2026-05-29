@@ -19,6 +19,7 @@ import { hhBroker } from '../services/hirehop-broker';
 import { pushDepositToHH } from '../services/hh-deposit';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 import { encryptJson, tryDecryptJson, isEncryptionConfigured } from '../services/encryption';
+import { createMobileUploadToken } from '../services/mobile-upload-token';
 
 const router = Router();
 router.use(authenticate);
@@ -1297,6 +1298,40 @@ router.post('/:id/receipt', authorize('admin', 'manager'), validate(receiptSchem
     const errMsg = error instanceof Error ? error.message : String(error);
     console.error('[excess] Receipt-attach error:', errMsg, error);
     res.status(500).json({ error: 'Failed to attach receipt', detail: errMsg });
+  }
+});
+
+// ── POST /api/excess/:id/receipt-upload-token — Mint a phone-handoff token ──
+//
+// Used by the "Scan with phone" QR flow: returns a short-lived token + the URL
+// the phone should open. The phone uploads the receipt via the public
+// /api/mobile-upload/:token endpoint, which attaches it to this excess record.
+
+router.post('/:id/receipt-upload-token', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const exists = await query(`SELECT id FROM job_excess WHERE id = $1`, [id]);
+    if (exists.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const { token, expiresAt } = await createMobileUploadToken({
+      purpose: 'excess_receipt',
+      targetId: id as string,
+      createdBy: req.user?.id || null,
+    });
+    const base = process.env.FRONTEND_URL || '';
+    res.json({
+      data: {
+        token,
+        expires_at: expiresAt,
+        url: `${base}/m/receipt/${token}`,
+      },
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error('[excess] Receipt-upload-token error:', errMsg, error);
+    res.status(500).json({ error: 'Failed to create upload token', detail: errMsg });
   }
 });
 

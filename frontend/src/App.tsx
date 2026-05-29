@@ -35,6 +35,7 @@ import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
+import MobileReceiptUploadPage from './pages/MobileReceiptUploadPage';
 import WarehouseCollectionDetailPage from './pages/WarehouseCollectionDetailPage';
 import Layout from './components/Layout';
 import { VehicleRoutes, initVehicleModule } from './modules/vehicles';
@@ -124,6 +125,8 @@ export default function App() {
       <Route path="/vehicles/book-out" element={<BookOutEntry />} />
       {/* Public OOH parking-confirmation form — token-authenticated, no Layout wrapper */}
       <Route path="/return-parking/:token" element={<OohReturnParkingPage />} />
+      {/* Public mobile receipt capture (QR handoff) — token-authenticated, no Layout wrapper */}
+      <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}

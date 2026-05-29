@@ -516,12 +516,16 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                     );
                   })()}
                 </div>
-                <button
-                  onClick={() => setActionExcess(record)}
-                  className="px-3 py-1.5 text-xs font-medium text-ooosh-600 hover:text-ooosh-800 border border-ooosh-200 rounded-md hover:bg-ooosh-50"
-                >
-                  Manage
-                </button>
+                {/* "Covered" (not_required) records are £0 top-N siblings —
+                    nothing actionable, so no Manage button. */}
+                {record.excess_status !== 'not_required' && (
+                  <button
+                    onClick={() => setActionExcess(record)}
+                    className="px-3 py-1.5 text-xs font-medium text-ooosh-600 hover:text-ooosh-800 border border-ooosh-200 rounded-md hover:bg-ooosh-50"
+                  >
+                    Manage
+                  </button>
+                )}
               </div>
             ))}
           </div>

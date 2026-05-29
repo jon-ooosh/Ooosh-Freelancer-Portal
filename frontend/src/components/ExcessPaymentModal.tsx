@@ -4,6 +4,7 @@
  * Supports: Record Payment, Record Claim, Reimburse, Waive, Roll Over, Move to different entity.
  */
 import { useState, useRef, useEffect } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import { api } from '../services/api';
 import type { JobExcess, ExcessStatus } from '../../../shared/types';
 
@@ -208,9 +209,15 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [preauthExpiryDays, setPreauthExpiryDays] = useState('5');
   const [preauthNotes, setPreauthNotes] = useState('');
 
-  // Receipt upload (card-machine receipt scan)
+  // Receipt upload (card-machine receipt scan) — two paths: this device, or
+  // "scan with phone" QR handoff (laptop shows QR, phone uploads, laptop polls).
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptUploading, setReceiptUploading] = useState(false);
+  const [receiptMode, setReceiptMode] = useState<'choose' | 'device' | 'qr'>('choose');
+  const [qrUrl, setQrUrl] = useState<string | null>(null);
+  const [qrToken, setQrToken] = useState<string | null>(null);
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrError, setQrError] = useState('');
 
   // Bank details (captured during reimburse when method is a bank transfer)
   const [bankCapture, setBankCapture] = useState(false); // user has opted to enter/edit details
@@ -305,6 +312,44 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [action, reimburseMethod, excess.id]);
+
+  // Poll the QR upload token — when the phone completes the upload, the token
+  // flips to consumed; close the modal and refresh so the parent re-fetches the
+  // now-attached receipt.
+  useEffect(() => {
+    if (!qrToken) return;
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const r = await api.get<{ data: { consumed: boolean } }>(`/mobile-upload/${qrToken}`);
+        if (cancelled) return;
+        if (r.data.consumed) {
+          clearInterval(interval);
+          onUpdated();
+          onClose();
+        }
+      } catch { /* transient — keep polling */ }
+    }, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qrToken]);
+
+  async function startQr() {
+    setQrLoading(true);
+    setQrError('');
+    try {
+      const r = await api.post<{ data: { token: string; url: string } }>(
+        `/excess/${excess.id}/receipt-upload-token`, {}
+      );
+      setQrToken(r.data.token);
+      setQrUrl(r.data.url);
+      setReceiptMode('qr');
+    } catch (err: any) {
+      setQrError(err.message || 'Failed to generate QR code');
+    } finally {
+      setQrLoading(false);
+    }
+  }
 
   // Move form
   const [moveXeroId, setMoveXeroId] = useState('');
@@ -502,6 +547,18 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             expires_in_days: isNaN(days) ? 5 : days,
             notes: preauthNotes || null,
           });
+          // Joined-up flow: card-machine holds need a receipt. Refresh the parent
+          // and advance straight to the receipt step instead of closing, so staff
+          // aren't sent back into Manage to find it. Stripe holds have an
+          // electronic trail — just close.
+          if (preauthMethod !== 'stripe_gbp') {
+            onUpdated();
+            setAction('upload_receipt');
+            setReceiptMode('choose');
+            setError('');
+            setLoading(false);
+            return;
+          }
           break;
         }
         case 'upload_receipt': {
@@ -709,7 +766,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
         {action && (
           <div className="px-6 py-4">
             <button
-              onClick={() => { setAction(null); setError(''); }}
+              onClick={() => { setAction(null); setError(''); setReceiptMode('choose'); setQrToken(null); setQrUrl(null); }}
               className="text-xs text-gray-500 hover:text-gray-700 mb-3 flex items-center gap-1"
             >
               <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
@@ -1427,13 +1484,63 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                 <p className="text-xs text-gray-500">
                   Attach the card-machine receipt for this excess (audit record). Clears the outstanding to-do.
                 </p>
-                <input
-                  type="file"
-                  accept="image/*,application/pdf"
-                  onChange={(e) => setReceiptFile(e.target.files?.[0] || null)}
-                  className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 file:mr-3 file:px-3 file:py-1 file:rounded file:border-0 file:bg-ooosh-50 file:text-ooosh-700"
-                />
-                {receiptUploading && <p className="text-xs text-gray-500">Uploading…</p>}
+
+                {receiptMode === 'choose' && (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={startQr}
+                      disabled={qrLoading}
+                      className="w-full text-left px-4 py-3 rounded-lg border border-gray-200 hover:border-ooosh-300 hover:bg-ooosh-50 disabled:opacity-50"
+                    >
+                      <span className="text-sm font-medium text-gray-900">📱 Scan with phone</span>
+                      <span className="block text-xs text-gray-500 mt-0.5">
+                        {qrLoading ? 'Generating QR…' : 'Show a QR code, photograph the receipt on your phone'}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReceiptMode('device')}
+                      className="w-full text-left px-4 py-3 rounded-lg border border-gray-200 hover:border-ooosh-300 hover:bg-ooosh-50"
+                    >
+                      <span className="text-sm font-medium text-gray-900">💻 Upload from this device</span>
+                      <span className="block text-xs text-gray-500 mt-0.5">Choose a file already saved here</span>
+                    </button>
+                    {qrError && <p className="text-xs text-red-600">{qrError}</p>}
+                  </div>
+                )}
+
+                {receiptMode === 'device' && (
+                  <div className="space-y-2">
+                    <input
+                      type="file"
+                      accept="image/*,application/pdf"
+                      capture="environment"
+                      onChange={(e) => setReceiptFile(e.target.files?.[0] || null)}
+                      className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 file:mr-3 file:px-3 file:py-1 file:rounded file:border-0 file:bg-ooosh-50 file:text-ooosh-700"
+                    />
+                    {receiptUploading && <p className="text-xs text-gray-500">Uploading…</p>}
+                    <button type="button" onClick={() => { setReceiptMode('choose'); setReceiptFile(null); }} className="text-xs text-gray-500 hover:text-gray-700">
+                      ← Back
+                    </button>
+                  </div>
+                )}
+
+                {receiptMode === 'qr' && qrUrl && (
+                  <div className="flex flex-col items-center text-center space-y-3 py-2">
+                    <div className="bg-white p-3 rounded-lg border border-gray-200">
+                      <QRCodeSVG value={qrUrl} size={180} />
+                    </div>
+                    <p className="text-sm text-gray-700">Scan with your phone camera, then photograph the receipt.</p>
+                    <p className="text-xs text-gray-400 flex items-center gap-1.5">
+                      <span className="inline-block h-2 w-2 rounded-full bg-sky-400 animate-pulse" />
+                      Waiting for the upload from your phone…
+                    </p>
+                    <button type="button" onClick={() => { setReceiptMode('choose'); setQrToken(null); setQrUrl(null); }} className="text-xs text-gray-500 hover:text-gray-700">
+                      ← Back
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1465,18 +1572,23 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             )}
 
             <div className="mt-4 flex gap-2">
-              <button
-                onClick={handleSubmit}
-                disabled={loading}
-                className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50"
-              >
-                {loading ? 'Processing...' : 'Confirm'}
-              </button>
+              {/* Confirm is hidden on the receipt step unless a file is staged on
+                  this device — the QR path completes via the phone + poll, and the
+                  choose screen has nothing to confirm yet. */}
+              {!(action === 'upload_receipt' && receiptMode !== 'device') && (
+                <button
+                  onClick={handleSubmit}
+                  disabled={loading}
+                  className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50"
+                >
+                  {loading ? 'Processing...' : 'Confirm'}
+                </button>
+              )}
               <button
                 onClick={onClose}
-                className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
+                className={`px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md ${action === 'upload_receipt' && receiptMode !== 'device' ? 'flex-1' : ''}`}
               >
-                Cancel
+                {action === 'upload_receipt' && receiptMode !== 'device' ? 'Close' : 'Cancel'}
               </button>
             </div>
           </div>
