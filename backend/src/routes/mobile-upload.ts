@@ -14,12 +14,12 @@ import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
-import { query } from '../config/database';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import {
   resolveMobileUploadToken,
   consumeMobileUploadToken,
 } from '../services/mobile-upload-token';
+import { attachExcessReceipt } from '../services/excess-receipt';
 
 const router = Router();
 
@@ -92,24 +92,15 @@ router.post('/:token', publicLimiter, upload.single('file'), async (req: Request
 
     // Purpose-specific side-effect.
     if (ctx.purpose === 'excess_receipt') {
-      const dateStr = new Date().toISOString().split('T')[0];
-      const current = await query(`SELECT notes FROM job_excess WHERE id = $1`, [ctx.targetId]);
-      if (current.rows.length === 0) {
-        res.status(404).json({ error: 'Excess record no longer exists' });
-        return;
-      }
-      const note = `[${dateStr}] Receipt scan attached (via phone).`;
-      const newNotes = current.rows[0].notes ? `${current.rows[0].notes}\n${note}` : note;
-      await query(
-        `UPDATE job_excess SET
-          receipt_url         = $1,
-          receipt_uploaded_at = NOW(),
-          receipt_required    = FALSE,
-          notes               = $2,
-          updated_at          = NOW()
-        WHERE id = $3`,
-        [key, newNotes, ctx.targetId]
-      );
+      // Shared helper: sets receipt_url on the excess + appends to the job's
+      // Files tab. `via: 'phone'` annotates the audit note.
+      await attachExcessReceipt({
+        excessId: ctx.targetId,
+        key,
+        filename: req.file.originalname,
+        uploadedBy: null,
+        via: 'phone',
+      });
     }
 
     await consumeMobileUploadToken(token, key);
