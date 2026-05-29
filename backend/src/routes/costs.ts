@@ -212,6 +212,37 @@ router.get('/by-issue/:issueId', async (req: AuthRequest, res: Response) => {
   catch (err) { console.error('[costs] by-issue error:', err); res.status(500).json({ error: 'Internal server error' }); }
 });
 
+// ── Xero diagnostics (Custom Connection) ─────────────────────────────────────
+// Lets staff verify the Xero creds the moment they're set in .env, before any
+// of the sync/bill-create flows land. Multi-segment paths so they don't collide
+// with /:id below.
+
+router.get('/xero/health', authorize(...VERIFY_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { xeroBroker } = await import('../services/xero-broker');
+    const health = await xeroBroker.health();
+    res.json({ data: health });
+  } catch (err) {
+    console.error('[costs] xero health error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/xero/accounts', authorize(...VERIFY_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { isXeroConfigured } = await import('../config/xero');
+    if (!isXeroConfigured()) {
+      return res.status(503).json({ error: 'Xero not configured (XERO_CLIENT_ID / XERO_CLIENT_SECRET missing)' });
+    }
+    const { xeroBroker } = await import('../services/xero-broker');
+    const accounts = await xeroBroker.getAccounts();
+    res.json({ data: accounts });
+  } catch (err) {
+    console.error('[costs] xero accounts error:', err);
+    res.status(502).json({ error: 'Xero request failed', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // ── Get one (with allocations) ───────────────────────────────────────────────
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {

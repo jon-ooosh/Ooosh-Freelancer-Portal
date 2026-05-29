@@ -24,6 +24,7 @@ import IssuesPage from './pages/IssuesPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
+import CostsPage from './pages/CostsPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
 import LostCancelledPage from './pages/LostCancelledPage';
@@ -155,6 +156,7 @@ export default function App() {
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
                 <Route path="/data-cleanup" element={<DataCleanupPage />} />
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
+                <Route path="/money/costs" element={<CostsPage />} />
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
                 <Route path="/vehicles/*" element={<VehicleRoutes />} />
                 <Route path="/inbox" element={<InboxPage />} />
