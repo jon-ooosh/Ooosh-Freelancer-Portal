@@ -1185,9 +1185,10 @@ router.post('/:id/record-preauth', authorize('admin', 'manager'), validate(recor
     }
 
     const holdDays = expires_in_days || 5;
-    // Card-machine methods need a paper receipt scan; Stripe holds have an
-    // electronic trail so don't.
-    const needsReceipt = method !== 'stripe_gbp';
+    // Only card-machine CARD methods produce a paper receipt to scan
+    // (Worldpay/Amex). Stripe has an electronic trail; cash-held has no card
+    // receipt — so neither flags a receipt as required.
+    const needsReceipt = method === 'worldpay' || method === 'amex';
 
     const dateStr = new Date().toISOString().split('T')[0];
     const preauthNote = `[${dateStr}] Pre-auth hold of £${amount.toFixed(2)} recorded via ${method.replace(/_/g, ' ')}${reference ? ` (ref ${reference})` : ''}${notes ? `. ${notes}` : ''}. Expires in ${holdDays} days.`;
@@ -1669,9 +1670,10 @@ router.post('/:id/capture', authorize('admin', 'manager'), validate(captureSchem
           : `[${dateStr}] £${amount.toFixed(2)}: applied at capture${notes ? ` — ${notes}` : ''}`)
       : current.claim_notes;
 
-    // receipt_required: TRUE for card-machine methods if no receipt_url given.
-    // Stripe captures don't need a receipt (electronic trail).
-    const needsReceipt = method !== 'stripe_gbp' && !receipt_url;
+    // receipt_required: TRUE only for card-machine CARD methods (Worldpay/Amex)
+    // when no scan was supplied. Stripe (electronic trail) and cash-held (no card
+    // receipt) don't flag one.
+    const needsReceipt = (method === 'worldpay' || method === 'amex') && !receipt_url;
 
     const result = await query(
       `UPDATE job_excess SET
