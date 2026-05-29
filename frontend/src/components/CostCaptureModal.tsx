@@ -1,51 +1,47 @@
 /**
- * CostCaptureModal — manual cost/receipt capture for the Cost Capture & Recharge
- * module. Creates a `costs` row via POST /api/costs.
+ * CostCaptureModal — capture or edit a cost/receipt for the Cost Capture &
+ * Recharge module. Creates (POST) or updates (PATCH) a `costs` row.
  *
- * The Xero account picker reads a curated chart-of-accounts subset (GET
- * /api/costs/xero/accounts) when Xero is configured; otherwise it degrades to a
- * free-text category. Receipt upload uses the generic attachment_only upload
- * mode and stores the returned R2 key on the cost.
- *
- * Receipt is at the top because AI extraction (fast-follow) will populate the
- * rest of the form from it. Net/VAT/Gross auto-calculate at 20% (toggle off to
- * edit manually).
+ * One plain-English "What's this cost for?" picker drives both the Xero account
+ * code and the internal cost_type (staff never see codes or accountant terms).
+ * Receipt is at the top (AI extraction — fast-follow — will fill the rest from
+ * it). Net/VAT/Gross auto-calculate at 20% (toggle off to edit manually).
  */
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import type {
-  Cost,
-  CostType,
-  CostPaymentMethod,
-  CostPaymentStatus,
-  CostRechargeMode,
-} from '../../../shared/types';
-
-interface XeroAccount {
-  AccountID: string;
-  Code: string;
-  Name: string;
-  Type: string;
-  Class?: string;
-  Status?: string;
-}
+import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode } from '../../../shared/types';
 
 interface Props {
   onClose: () => void;
   onSaved: (cost: Cost) => void;
+  existing?: Cost | null;
   presetJobId?: string | null;
   presetVehicleId?: string | null;
   presetIssueId?: string | null;
 }
 
-const COST_TYPES: { value: CostType; label: string }[] = [
-  { value: 'overhead', label: 'Overhead' },
-  { value: 'job', label: 'Job cost' },
-  { value: 'vehicle', label: 'Vehicle' },
-  { value: 'stock', label: 'Stock' },
-  { value: 'parts', label: 'Parts' },
-  { value: 'freelancer_invoice', label: 'Freelancer invoice' },
+// Single source of truth for the staff-facing category picker. Each choice maps
+// to a Xero account code (for the eventual push) + an internal cost_type (for
+// filtering/reporting). Staff see only `label`. Keep in step with
+// STAFF_COST_ACCOUNT_CODES in backend routes/costs.ts.
+const COST_CATEGORIES: { label: string; xeroCode: string; costType: CostType }[] = [
+  { label: 'Freelance crew invoices', xeroCode: '320', costType: 'freelancer_invoice' },
+  { label: 'Crew travel (taxis, trains, etc.)', xeroCode: '325', costType: 'job' },
+  { label: 'Sub-hire of equipment', xeroCode: '326', costType: 'job' },
+  { label: 'Vehicle servicing & upkeep', xeroCode: '406', costType: 'vehicle' },
+  { label: 'Vehicle repairs (bodywork, glass)', xeroCode: '409', costType: 'vehicle' },
+  { label: 'Fuel', xeroCode: '410', costType: 'vehicle' },
+  { label: 'Parking', xeroCode: '411', costType: 'vehicle' },
+  { label: 'Parking fines / PCNs', xeroCode: '399', costType: 'vehicle' },
+  { label: 'Equipment repairs & spares', xeroCode: '473', costType: 'parts' },
+  { label: 'New equipment (backline, staging)', xeroCode: '764', costType: 'stock' },
+  { label: 'Shop stock', xeroCode: '310', costType: 'stock' },
+  { label: 'Postage / courier', xeroCode: '425', costType: 'overhead' },
+  { label: 'Office supplies (milk, cleaning)', xeroCode: '494', costType: 'overhead' },
+  { label: 'Office equipment', xeroCode: '710', costType: 'overhead' },
+  { label: 'Computer equipment', xeroCode: '720', costType: 'overhead' },
+  { label: 'Something else', xeroCode: '429', costType: 'overhead' },
 ];
 
 const PAYMENT_METHODS: { value: CostPaymentMethod; label: string }[] = [
@@ -66,40 +62,40 @@ const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
 const LAST4_KEY = 'ooosh_cot_last4';
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-export default function CostCaptureModal({ onClose, onSaved, presetJobId, presetVehicleId, presetIssueId }: Props) {
+export default function CostCaptureModal({ onClose, onSaved, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const { user } = useAuthStore();
   const fullName = user ? `${user.first_name} ${user.last_name}`.trim() : '';
+  const isEdit = Boolean(existing);
 
-  const [supplierName, setSupplierName] = useState('');
-  const [costDate, setCostDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [amountGross, setAmountGross] = useState('');
-  const [amountVat, setAmountVat] = useState('');
-  const [amountNet, setAmountNet] = useState('');
-  const [assumeVat20, setAssumeVat20] = useState(true);
-  const [description, setDescription] = useState('');
-  const [costType, setCostType] = useState<CostType>(presetVehicleId ? 'vehicle' : presetIssueId ? 'parts' : 'overhead');
-  const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>('cot_card');
-  const [cardHolder, setCardHolder] = useState(fullName);
-  const [cardLast4, setCardLast4] = useState(() => localStorage.getItem(LAST4_KEY) || '');
-  const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>('paid');
-  const [rechargeMode, setRechargeMode] = useState<CostRechargeMode>('none');
-  const [rechargeAmount, setRechargeAmount] = useState('');
-  const [xeroAccountCode, setXeroAccountCode] = useState('');
-  const [category, setCategory] = useState('');
-  const [notes, setNotes] = useState('');
+  const [supplierName, setSupplierName] = useState(existing?.supplier_name || '');
+  const [costDate, setCostDate] = useState(() => (existing?.cost_date ? existing.cost_date.slice(0, 10) : new Date().toISOString().slice(0, 10)));
+  const [amountGross, setAmountGross] = useState(existing?.amount_gross != null ? String(existing.amount_gross) : '');
+  const [amountVat, setAmountVat] = useState(existing?.amount_vat != null ? String(existing.amount_vat) : '');
+  const [amountNet, setAmountNet] = useState(existing?.amount_net != null ? String(existing.amount_net) : '');
+  const [assumeVat20, setAssumeVat20] = useState(!isEdit); // don't clobber existing amounts on edit
+  const [description, setDescription] = useState(existing?.description || '');
+  // Category selected by Xero code; derive label + cost_type from the map.
+  const [categoryCode, setCategoryCode] = useState(existing?.xero_account_code || (presetVehicleId ? '406' : presetIssueId ? '473' : ''));
+  const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>(existing?.payment_method || 'cot_card');
+  const [cardHolder, setCardHolder] = useState(existing?.cot_card_holder || fullName);
+  const [cardLast4, setCardLast4] = useState(existing?.cot_card_last4 || localStorage.getItem(LAST4_KEY) || '');
+  const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>(existing?.payment_status || 'paid');
+  const [rechargeMode, setRechargeMode] = useState<CostRechargeMode>(existing?.recharge_mode || 'none');
+  const [rechargeAmount, setRechargeAmount] = useState(existing?.recharge_amount != null ? String(existing.recharge_amount) : '');
+  const [notes, setNotes] = useState(existing?.notes || '');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
+  const [receiptIsPdf, setReceiptIsPdf] = useState(false);
 
-  const [accounts, setAccounts] = useState<XeroAccount[] | null>(null);
-  const [accountsError, setAccountsError] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  // Payment status follows method: 'not yet paid' → awaiting payment (a payable).
+  // 'not yet paid' is a payable. Only auto-drive status when not editing an
+  // existing record (so we don't stomp a manually-set status on edit).
   useEffect(() => {
-    if (paymentMethod === 'not_yet_paid') setPaymentStatus('awaiting_payment');
-    else setPaymentStatus('paid');
-  }, [paymentMethod]);
+    if (isEdit) return;
+    setPaymentStatus(paymentMethod === 'not_yet_paid' ? 'awaiting_payment' : 'paid');
+  }, [paymentMethod, isEdit]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -107,30 +103,15 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  // Load curated Xero accounts for the category picker (graceful fallback).
+  // Receipt preview for a newly-selected file (object URL, revoked on change).
   useEffect(() => {
-    api.get<{ data: XeroAccount[] }>('/costs/xero/accounts')
-      .then((r) => setAccounts((r.data || []).filter((a) => a.Status !== 'ARCHIVED')))
-      .catch(() => setAccountsError(true));
-  }, []);
-
-  // Image receipt preview (object URL, revoked on change/unmount).
-  useEffect(() => {
-    if (receiptFile && receiptFile.type.startsWith('image/')) {
-      const url = URL.createObjectURL(receiptFile);
-      setReceiptPreview(url);
-      return () => URL.revokeObjectURL(url);
-    }
-    setReceiptPreview(null);
+    if (!receiptFile) { setReceiptPreview(null); setReceiptIsPdf(false); return; }
+    const url = URL.createObjectURL(receiptFile);
+    setReceiptPreview(url);
+    setReceiptIsPdf(receiptFile.type === 'application/pdf');
+    return () => URL.revokeObjectURL(url);
   }, [receiptFile]);
 
-  const handleAccountPick = useCallback((code: string) => {
-    setXeroAccountCode(code);
-    const acct = accounts?.find((a) => a.Code === code);
-    if (acct) setCategory(acct.Name);
-  }, [accounts]);
-
-  // ── Net / VAT / Gross smart calc (20% assumed unless overridden) ──────────
   const onGrossChange = (v: string) => {
     setAmountGross(v);
     if (assumeVat20 && v !== '') {
@@ -154,15 +135,25 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
     }
   };
 
-  const canRecharge = Boolean(presetJobId);
+  const viewExistingReceipt = useCallback(async () => {
+    if (!existing?.receipt_r2_key) return;
+    try {
+      const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(existing.receipt_r2_key)}`);
+      window.open(URL.createObjectURL(blob), '_blank');
+    } catch {
+      setError('Could not open the saved receipt.');
+    }
+  }, [existing]);
+
+  const canRecharge = Boolean(presetJobId || existing?.job_id);
 
   async function handleSave() {
     setError('');
     if (!amountGross || Number(amountGross) <= 0) { setError('Gross amount is required.'); return; }
     setSaving(true);
     try {
-      let receiptKey: string | null = null;
-      let receiptName: string | null = null;
+      let receiptKey = existing?.receipt_r2_key ?? null;
+      let receiptName = existing?.receipt_filename ?? null;
       if (receiptFile) {
         const fd = new FormData();
         fd.append('file', receiptFile);
@@ -174,6 +165,7 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
 
       if (paymentMethod === 'cot_card' && cardLast4) localStorage.setItem(LAST4_KEY, cardLast4);
 
+      const cat = COST_CATEGORIES.find((c) => c.xeroCode === categoryCode);
       const payload: Record<string, unknown> = {
         supplier_name: supplierName || null,
         cost_date: costDate || null,
@@ -181,24 +173,29 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
         amount_vat: amountVat ? Number(amountVat) : null,
         amount_net: amountNet ? Number(amountNet) : null,
         description: description || null,
-        category: category || null,
-        xero_account_code: xeroAccountCode || null,
-        cost_type: costType,
+        category: cat?.label || null,
+        xero_account_code: cat?.xeroCode || null,
+        cost_type: cat?.costType || 'overhead',
         payment_method: paymentMethod,
         cot_card_holder: paymentMethod === 'cot_card' ? cardHolder || null : null,
         cot_card_last4: paymentMethod === 'cot_card' ? cardLast4 || null : null,
         payment_status: paymentStatus,
-        job_id: presetJobId || null,
-        vehicle_id: presetVehicleId || null,
-        platform_issue_id: presetIssueId || null,
         recharge_mode: canRecharge ? rechargeMode : 'none',
         recharge_amount: canRecharge && rechargeMode !== 'none' && rechargeAmount ? Number(rechargeAmount) : null,
         receipt_r2_key: receiptKey,
         receipt_filename: receiptName,
-        status: 'confirmed',
         notes: notes || null,
       };
-      const res = await api.post<{ data: Cost }>('/costs', payload);
+      if (!isEdit) {
+        payload.job_id = presetJobId || null;
+        payload.vehicle_id = presetVehicleId || null;
+        payload.platform_issue_id = presetIssueId || null;
+        payload.status = 'confirmed';
+      }
+
+      const res = isEdit
+        ? await api.patch<{ data: Cost }>(`/costs/${existing!.id}`, payload)
+        : await api.post<{ data: Cost }>('/costs', payload);
       onSaved(res.data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save cost');
@@ -213,7 +210,7 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
     <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 overflow-y-auto p-4">
       <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl my-8" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">Capture Cost</h2>
+          <h2 className="text-lg font-semibold text-gray-900">{isEdit ? 'Edit Cost' : 'Capture Cost'}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
 
@@ -222,17 +219,23 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
 
           {/* Receipt first — AI extraction (fast-follow) will fill the rest from it */}
           <div className="bg-gray-50 border border-dashed border-gray-300 rounded-md p-3">
-            <label className="block text-sm font-medium text-gray-700 mb-1">Receipt</label>
-            <div className="flex items-center gap-3">
-              <input type="file" accept="image/*,application/pdf" className="text-sm"
-                onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} />
-              {receiptPreview && (
-                <img src={receiptPreview} alt="Receipt preview" className="h-16 w-16 object-cover rounded border border-gray-200" />
-              )}
-              {receiptFile && !receiptPreview && (
-                <span className="text-xs text-gray-600">📄 {receiptFile.name}</span>
-              )}
-            </div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Receipt</label>
+            <input type="file" accept="image/*,application/pdf" className="text-sm mb-2"
+              onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} />
+            {receiptPreview && !receiptIsPdf && (
+              <img src={receiptPreview} alt="Receipt preview" onClick={() => window.open(receiptPreview, '_blank')}
+                className="w-full max-h-64 object-contain rounded border border-gray-200 cursor-zoom-in bg-white" />
+            )}
+            {receiptPreview && receiptIsPdf && (
+              <embed src={receiptPreview} type="application/pdf" className="w-full h-64 rounded border border-gray-200" />
+            )}
+            {!receiptFile && existing?.receipt_filename && (
+              <div className="text-sm text-gray-600 flex items-center gap-2">
+                <span>📄 {existing.receipt_filename}</span>
+                <button type="button" onClick={viewExistingReceipt} className="text-purple-700 hover:underline">View</button>
+                <span className="text-gray-400">· choose a file above to replace</span>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -277,25 +280,12 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
             <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What was this for?" />
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Cost type</label>
-              <select className={inputCls} value={costType} onChange={(e) => setCostType(e.target.value as CostType)}>
-                {COST_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Xero account</label>
-              {accounts && !accountsError ? (
-                <select className={inputCls} value={xeroAccountCode} onChange={(e) => handleAccountPick(e.target.value)}>
-                  <option value="">— select —</option>
-                  {accounts.map((a) => <option key={a.AccountID} value={a.Code}>{a.Code} · {a.Name}</option>)}
-                </select>
-              ) : (
-                <input className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}
-                  placeholder={accountsError ? 'Category (Xero unavailable)' : 'Category'} />
-              )}
-            </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">What's this cost for?</label>
+            <select className={inputCls} value={categoryCode} onChange={(e) => setCategoryCode(e.target.value)}>
+              <option value="">— select —</option>
+              {COST_CATEGORIES.map((c) => <option key={c.xeroCode} value={c.xeroCode}>{c.label}</option>)}
+            </select>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -356,7 +346,7 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
           <button onClick={handleSave} disabled={saving}
             className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-            {saving ? 'Saving…' : 'Save cost'}
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save cost'}
           </button>
         </div>
       </div>

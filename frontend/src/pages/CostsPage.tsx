@@ -64,6 +64,7 @@ export default function CostsPage() {
   const [searchDebounced, setSearchDebounced] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [showCapture, setShowCapture] = useState(false);
+  const [editing, setEditing] = useState<CostRow | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -97,6 +98,23 @@ export default function CostsPage() {
       await load();
     } catch (err) {
       alert(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function deleteCost(c: CostRow) {
+    if (c.xero_sync_state === 'reconciled') {
+      alert('This cost is reconciled in Xero and is locked — void it in Xero rather than deleting here.');
+      return;
+    }
+    if (!confirm(`Delete this cost${c.supplier_name ? ` from ${c.supplier_name}` : ''}? This cannot be undone.`)) return;
+    setActionBusy(c.id + 'delete');
+    try {
+      await api.delete(`/costs/${c.id}`);
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to delete');
     } finally {
       setActionBusy(null);
     }
@@ -196,7 +214,7 @@ export default function CostsPage() {
                   <td className="px-3 py-2 text-gray-900">{c.supplier_name || '—'}</td>
                   <td className="px-3 py-2 text-gray-600 max-w-xs truncate">{c.description || '—'}</td>
                   <td className="px-3 py-2 text-right font-medium text-gray-900">{gbp(c.amount_gross)}</td>
-                  <td className="px-3 py-2 text-gray-600">{c.cost_type.replace('_', ' ')}</td>
+                  <td className="px-3 py-2 text-gray-600">{c.category || c.cost_type.replace('_', ' ')}</td>
                   <td className="px-3 py-2 text-gray-600">
                     {c.hh_job_number ? <span className="text-purple-700">#{c.hh_job_number}</span>
                       : c.vehicle_reg ? <span className="text-purple-700">{c.vehicle_reg}</span> : '—'}
@@ -217,15 +235,26 @@ export default function CostsPage() {
                     )}
                   </td>
                   <td className="px-3 py-2 text-right whitespace-nowrap">
-                    {view === 'payable' && (
-                      <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} />
-                    )}
-                    {view === 'recharge' && !c.recharged_to_hh_at && (
-                      <button disabled={actionBusy === c.id + 'recharge'} onClick={() => confirmRecharge(c)}
-                        className="px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 rounded disabled:opacity-50">
-                        Confirm recharge
+                    <div className="flex items-center justify-end gap-2">
+                      {view === 'payable' && (
+                        <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} />
+                      )}
+                      {view === 'recharge' && !c.recharged_to_hh_at && (
+                        <button disabled={actionBusy === c.id + 'recharge'} onClick={() => confirmRecharge(c)}
+                          className="px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 rounded disabled:opacity-50">
+                          Confirm recharge
+                        </button>
+                      )}
+                      <button onClick={() => setEditing(c)} className="px-2 py-1 text-xs text-gray-600 hover:bg-gray-100 rounded">
+                        Edit
                       </button>
-                    )}
+                      {isManager && (
+                        <button disabled={actionBusy === c.id + 'delete'} onClick={() => deleteCost(c)}
+                          className="px-2 py-1 text-xs text-red-600 hover:bg-red-50 rounded disabled:opacity-50">
+                          Delete
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -238,6 +267,13 @@ export default function CostsPage() {
         <CostCaptureModal
           onClose={() => setShowCapture(false)}
           onSaved={() => { setShowCapture(false); load(); }}
+        />
+      )}
+      {editing && (
+        <CostCaptureModal
+          existing={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load(); }}
         />
       )}
     </div>
