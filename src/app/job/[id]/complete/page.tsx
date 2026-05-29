@@ -116,15 +116,22 @@ function isValidEmail(email: string): boolean {
 
 /**
  * Compress an image to target size
- * Resizes to max 1200px and converts to JPEG at 80% quality
+ * Resizes to max 1200px and converts to JPEG at 80% quality.
+ *
+ * Decodes from an object URL (revoked the moment the draw completes) rather
+ * than a base64 data URL. Reading the file to a data URL first builds a
+ * ~1.33x-size base64 copy of the full-resolution original in the JS heap and
+ * holds it through decode — a real OOM risk on phones with high-megapixel
+ * cameras. This keeps the source bytes referenced by the blob only.
  */
-async function compressImage(dataUrl: string): Promise<string> {
+async function compressImage(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const img = new Image()
+    const objectUrl = URL.createObjectURL(file)
     img.onload = () => {
       // Calculate new dimensions
       let { width, height } = img
-      
+
       if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
         if (width > height) {
           height = Math.round((height * MAX_IMAGE_DIMENSION) / width)
@@ -139,9 +146,10 @@ async function compressImage(dataUrl: string): Promise<string> {
       const canvas = document.createElement('canvas')
       canvas.width = width
       canvas.height = height
-      
+
       const ctx = canvas.getContext('2d')
       if (!ctx) {
+        URL.revokeObjectURL(objectUrl)
         reject(new Error('Could not get canvas context'))
         return
       }
@@ -150,20 +158,23 @@ async function compressImage(dataUrl: string): Promise<string> {
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'high'
       ctx.drawImage(img, 0, 0, width, height)
+      // Original is now drawn into the canvas — release the source bytes.
+      URL.revokeObjectURL(objectUrl)
 
       // Convert to JPEG
       const compressedDataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY)
-      
-      // Log compression results
-      const originalSize = Math.round(dataUrl.length * 0.75 / 1024) // Approximate KB
-      const compressedSize = Math.round(compressedDataUrl.length * 0.75 / 1024)
-      console.log(`Image compressed: ${originalSize}KB → ${compressedSize}KB (${width}x${height})`)
-      
+
+      const compressedSize = Math.round((compressedDataUrl.length * 0.75) / 1024) // Approximate KB
+      console.log(`Image compressed: ${width}x${height}, ~${compressedSize}KB`)
+
       resolve(compressedDataUrl)
     }
-    
-    img.onerror = () => reject(new Error('Failed to load image'))
-    img.src = dataUrl
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      reject(new Error('Failed to load image'))
+    }
+    img.src = objectUrl
   })
 }
 
@@ -353,16 +364,9 @@ function PhotoCapture({ photos, onPhotosChange, required }: PhotoCaptureProps) {
       const filesToProcess = Array.from(files).slice(0, remainingSlots)
 
       for (const file of filesToProcess) {
-        // Read file as data URL
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader()
-          reader.onload = () => resolve(reader.result as string)
-          reader.onerror = () => reject(new Error('Failed to read file'))
-          reader.readAsDataURL(file)
-        })
-
-        // Compress the image
-        const compressed = await compressImage(dataUrl)
+        // Compress directly from the File — compressImage decodes via an
+        // object URL, avoiding a full-resolution base64 copy in memory first.
+        const compressed = await compressImage(file)
         newPhotos.push(compressed)
       }
 
