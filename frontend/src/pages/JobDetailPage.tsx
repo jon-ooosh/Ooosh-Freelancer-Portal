@@ -4042,23 +4042,31 @@ export default function JobDetailPage() {
                                    a.excess.excess_status === 'not_required' ? 'Covered' :
                                    a.excess.excess_status}
                                 </span>
-                                <button
-                                  type="button"
-                                  onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
-                                  disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
-                                  title="Edit required excess amount"
-                                  className="text-xs font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
-                                >
-                                  {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => a.excess && openExcessModal(a.excess.id)}
-                                  disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
-                                  className="text-xs font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
-                                >
-                                  Manage
-                                </button>
+                                {/* "Covered" (not_required) rows are the top-N
+                                    losers — £0 sibling of another driver's excess
+                                    on the same hire. Nothing actionable, so no
+                                    Edit/Manage (only dead-end actions would show). */}
+                                {a.excess.excess_status !== 'not_required' && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => a.excess && openExcessModal(a.excess.id, 'edit_required')}
+                                      disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                      title="Edit required excess amount"
+                                      className="text-xs font-medium text-ooosh-700 hover:text-ooosh-900 hover:underline disabled:opacity-50"
+                                    >
+                                      {a.excess && excessModalLoadingId === a.excess.id ? '…' : 'Edit'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => a.excess && openExcessModal(a.excess.id)}
+                                      disabled={a.excess && excessModalLoadingId === a.excess.id ? true : false}
+                                      className="text-xs font-medium text-gray-600 hover:text-gray-900 hover:underline disabled:opacity-50"
+                                    >
+                                      Manage
+                                    </button>
+                                  </>
+                                )}
                               </div>
                             </div>
                           </div>

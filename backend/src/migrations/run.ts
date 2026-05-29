@@ -129,6 +129,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '092_cost_capture.sql',
         '093_storage_clients.sql',
         '094_excess_bank_details.sql',
+        '095_mobile_upload_tokens.sql',
       ];
 
       for (const migration of migrations) {

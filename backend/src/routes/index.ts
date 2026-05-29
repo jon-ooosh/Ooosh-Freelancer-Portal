@@ -35,6 +35,7 @@ import problemsRouter from './problems';
 import warehouseRouter from './warehouse';
 import systemSettingsRouter from './system-settings';
 import oohReturnRouter from './ooh-return';
+import mobileUploadRouter from './mobile-upload';
 import preHireBriefingRouter from './pre-hire-briefing';
 import fillGapRouter from './fill-gap';
 import costsRouter from './costs';
@@ -78,6 +79,7 @@ router.use('/portal', portalRouter);  // Freelancer portal — own JWT auth (not
 router.use('/warehouse', warehouseRouter);  // Warehouse kiosk — PIN-or-staff-JWT (in-person customer collections)
 router.use('/system-settings', systemSettingsRouter);
 router.use('/ooh-return', oohReturnRouter);  // Public parking-form (token auth) + staff endpoints
+router.use('/mobile-upload', mobileUploadRouter);  // Public token-auth file capture (phone QR handoff)
 router.use('/data-cleanup', dataCleanupRouter);
 router.use('/pre-hire-briefing', preHireBriefingRouter);
 router.use('/webhooks', webhooksRouter);  // No JWT auth — uses export_key / API key
