@@ -199,8 +199,12 @@ cd /var/www/ooosh-portal
 # `git reset --hard origin/<current-branch>` and re-run the pull.
 git status
 git pull origin <current-branch>
-cd backend && npm run build
-cd ../frontend && npm run build
+# IMPORTANT: install deps before building. `npm install` is fast/no-op when
+# nothing changed, but a PR that added a dependency (e.g. qrcode.react in the
+# pre-auth PR 3, May 2026) will fail the build with "Cannot find module ..."
+# if you skip this. The full deploy.sh always installs; this manual path must too.
+cd backend && npm install && npm run build
+cd ../frontend && npm install && npm run build
 sudo systemctl restart ooosh-portal
 sudo systemctl status ooosh-portal
 ```
