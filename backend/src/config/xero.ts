@@ -36,8 +36,19 @@ export const XERO_IDENTITY_URL = 'https://identity.xero.com/connect/token';
 export const XERO_CONNECTIONS_URL = 'https://api.xero.com/connections';
 export const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0';
 
+// The Ooosh Custom Connection (May 2026) was granted:
+//   accounting.banktransactions(.read), accounting.settings(.read),
+//   accounting.attachments(.read), accounting.contacts(.read)
+// We request the write-level scopes (which imply read). This covers chart of
+// accounts / tax rates / tracking categories (settings), reading COT bank
+// transactions + creating SPEND money (banktransactions), supplier linkage
+// (contacts) and receipt upload (attachments).
+//
+// NOT granted: `accounting.transactions` — the scope governing ACCPAY *Invoices*
+// (supplier bills). createBill() in the broker will 403 until that scope is added
+// to the connection and it's reconnected. Everything else works as-is.
 const DEFAULT_SCOPES = [
-  'accounting.transactions',
+  'accounting.banktransactions',
   'accounting.settings',
   'accounting.contacts',
   'accounting.attachments',
