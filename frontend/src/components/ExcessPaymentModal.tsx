@@ -120,6 +120,17 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [action, setAction] = useState<ModalAction | null>(initialAction || null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Tracks whether we've made a change the parent needs to see. Lets us DEFER
+  // the parent refresh (onUpdated) to close-time instead of calling it mid-flow
+  // — calling onUpdated() while the modal is open reloads the parent's data and
+  // tears the modal down (that's what made the joined-up receipt step "flash and
+  // disappear"). Close affordances run handleClose, which fires onUpdated once.
+  const [madeChange, setMadeChange] = useState(false);
+
+  function handleClose() {
+    if (madeChange) onUpdated();
+    onClose();
+  }
 
   // Payment form — uses absolute "total collected" semantics (not delta-add).
   // Default: full required amount (the most common case is "fully collected
@@ -384,7 +395,10 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             // keep the modal open so staff can decide what to do (manual link,
             // retry by re-submitting, etc.). The OP record is already correct.
             setPayHHPushError(resp.hh_push_error);
-            onUpdated();
+            // Defer the parent refresh to close (madeChange) — calling onUpdated()
+            // here unmounts the modal on the Money tab (loadData → loading spinner)
+            // before staff can read this banner.
+            setMadeChange(true);
             setLoading(false);
             return;
           }
@@ -440,7 +454,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           );
           if (resp.warning) {
             setError(resp.warning);
-            onUpdated();
+            setMadeChange(true); // refresh on close, not mid-flow (see handleClose)
             setLoading(false);
             return;
           }
@@ -524,7 +538,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             // card-machine receipt is outstanding). Surface and keep the modal
             // open — the money is correctly tracked, just needs a follow-up.
             setCaptureWarning(resp.warning);
-            onUpdated();
+            setMadeChange(true); // refresh on close, not mid-flow (see handleClose)
             setLoading(false);
             return;
           }
@@ -547,12 +561,13 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             expires_in_days: isNaN(days) ? 5 : days,
             notes: preauthNotes || null,
           });
-          // Joined-up flow: card-machine holds need a receipt. Refresh the parent
-          // and advance straight to the receipt step instead of closing, so staff
-          // aren't sent back into Manage to find it. Stripe holds have an
-          // electronic trail — just close.
+          // Joined-up flow: card-machine holds need a receipt. Advance straight
+          // to the receipt step instead of closing, so staff aren't sent back
+          // into Manage to find it. DON'T call onUpdated() here — that reloads
+          // the parent and tears the modal down (the "flash and disappear" bug).
+          // madeChange ensures the parent refreshes when the modal finally closes.
           if (preauthMethod !== 'stripe_gbp') {
-            onUpdated();
+            setMadeChange(true);
             setAction('upload_receipt');
             setReceiptMode('choose');
             setError('');
@@ -602,13 +617,19 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   if ((s === 'needed' || s === 'pending') && preAuthHeld === 0 && Number(excess.excess_amount_taken || 0) === 0) {
     availableActions.push({ action: 'record_preauth', label: 'Record Pre-Auth Hold', icon: '◫' });
   }
-  // Pre-auth holds: capture (→ taken) or release (→ released). These REPLACE
-  // claim/reimburse for held money — you can't claim or reimburse a hold, you
-  // capture or release it first (migration 087). Capture supports atomic
+  // Pre-auth holds: capture (→ taken). For held money you can't claim/reimburse,
+  // you capture it first (migration 087). Capture supports atomic
   // capture-and-apply-to-invoice for the common "capture exactly the damage" case.
   if (s === 'pre_auth' && preAuthHeld > 0) {
     availableActions.push({ action: 'capture', label: 'Capture (claim from hold)', icon: '£' });
-    availableActions.push({ action: 'release', label: 'Release Hold', icon: '○' });
+    // "Release" only makes sense for Stripe holds, where cancelling the
+    // PaymentIntent genuinely voids the hold via the API. Card-machine
+    // (Worldpay/Amex/cash) holds are controlled by the acquirer — we CAN'T
+    // release them, they auto-void on the card company's clock. Showing a
+    // "Release" button there is misleading, so hide it for those.
+    if (excess.payment_method === 'stripe_gbp') {
+      availableActions.push({ action: 'release', label: 'Release Hold (Stripe)', icon: '○' });
+    }
   }
   if ((s === 'taken' || s === 'partially_paid') && amountHeld > 0) {
     availableActions.push({ action: 'claim', label: 'Apply to Invoice (claim)', icon: '!' });
@@ -646,7 +667,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={handleClose}>
       <div
         className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
@@ -662,7 +683,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                 {excess.hirehop_job_name && ` — ${excess.hirehop_job_name}`}
               </p>
             </div>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <button onClick={handleClose} className="text-gray-400 hover:text-gray-600">
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
@@ -1585,7 +1606,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                 </button>
               )}
               <button
-                onClick={onClose}
+                onClick={handleClose}
                 className={`px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md ${action === 'upload_receipt' && receiptMode !== 'device' ? 'flex-1' : ''}`}
               >
                 {action === 'upload_receipt' && receiptMode !== 'device' ? 'Close' : 'Cancel'}

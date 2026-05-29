@@ -20,6 +20,7 @@ import { pushDepositToHH } from '../services/hh-deposit';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 import { encryptJson, tryDecryptJson, isEncryptionConfigured } from '../services/encryption';
 import { createMobileUploadToken } from '../services/mobile-upload-token';
+import { attachExcessReceipt } from '../services/excess-receipt';
 
 const router = Router();
 router.use(authenticate);
@@ -1271,28 +1272,16 @@ router.post('/:id/receipt', authorize('admin', 'manager'), validate(receiptSchem
     const { id } = req.params;
     const { receipt_url } = req.body;
 
-    const current = await query(`SELECT id, notes FROM job_excess WHERE id = $1`, [id]);
-    if (current.rows.length === 0) {
+    const exists = await query(`SELECT id FROM job_excess WHERE id = $1`, [id]);
+    if (exists.rows.length === 0) {
       res.status(404).json({ error: 'Excess record not found' });
       return;
     }
 
-    const dateStr = new Date().toISOString().split('T')[0];
-    const note = `[${dateStr}] Receipt scan attached.`;
-    const newNotes = current.rows[0].notes ? `${current.rows[0].notes}\n${note}` : note;
+    // Sets receipt_url + appends to the job's Files tab (shared with the phone path).
+    await attachExcessReceipt({ excessId: id as string, key: receipt_url, uploadedBy: req.user?.id || null });
 
-    const result = await query(
-      `UPDATE job_excess SET
-        receipt_url         = $1,
-        receipt_uploaded_at = NOW(),
-        receipt_required    = FALSE,
-        notes               = $2,
-        updated_at          = NOW()
-      WHERE id = $3
-      RETURNING *`,
-      [receipt_url, newNotes, id]
-    );
-
+    const result = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
     res.json({ data: result.rows[0] });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
