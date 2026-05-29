@@ -389,3 +389,24 @@ Phase 1 ships these as filters/exports on the hub; a dedicated **`/money/costs/r
 - **Recharge to HH:** flag-and-confirm, never auto-push. ✓
 - **Approval:** uploader-is-booker satisfies verify inline → admin approves + pays. ✓
 - **Service log & Problems module:** adjunct with 1:1 `costs` links, not replaced. ✓
+
+---
+
+## Build notes — testing round 1 (29 May 2026)
+
+Frontend hub + manual capture shipped (PR #592) and tested live. Decisions + follow-ups from that round:
+
+**Xero scopes — `accounting.transactions` is gone.** Xero split the old umbrella scope into granular ones. The Ooosh Custom Connection was granted `accounting.banktransactions` / `.settings` / `.contacts` / `.attachments` — which covers reads, spend-money, COT reconciliation, and receipt attachment. **ACCPAY supplier bills need `accounting.invoices`** (a bill is an Invoice of type ACCPAY). Action when bill-creation is wired:
+- [ ] Tick `accounting.invoices` (+ `.read`) on the Custom Connection and reconnect.
+- [ ] Add `accounting.invoices` to `DEFAULT_SCOPES` in `config/xero.ts` (only AFTER it's granted — requesting an ungranted scope fails the whole client_credentials token mint and breaks the working reads).
+
+**Curated account picker.** `GET /api/costs/xero/accounts` returns only a staff-facing subset (`STAFF_COST_ACCOUNT_CODES` in `routes/costs.ts`), ordered for the dropdown; `?all=true` returns the full chart. Current set: 320 crew, 325 crew costs, 326 sub-hire, 399 PCNs/fines, 406 vehicle upkeep, 409 vehicle repairs, 473 equipment upkeep, 310 shop stock, 410 fuel, 411 parking, 425 postage/courier, 429 other, 494 office expenses, 710 office equipment, 720 computer equipment, 764 new equipment. Move to `system_settings` if it ever needs editing without a deploy.
+
+**Capture modal UX (done this round):** receipt moved to top (AI extraction will fill the rest from it); image receipt preview; card holder defaults to logged-in user; net/VAT/gross auto-calc at 20% with a toggle to edit manually; uploaded-by column + tidy UK date on the hub.
+
+**Card last-4 — follow-up.** Currently remembered in `localStorage` so staff don't retype it. Proper fix: a per-staff COT card register (last4 + card label) on the user/person profile, auto-filled at capture. Different staff carry different COT cards, so a single global setting won't do.
+- [ ] Per-staff COT card field(s) on profile + auto-fill in capture modal.
+
+**"Nothing pushed to Xero yet" is expected.** Capture stores the cost + receipt in OP/R2 only. Pushing to Xero (creating a bill / attaching the receipt / reconciling a COT-card line) is the not-yet-wired fast-follow. A COT-card purchase (e.g. the D'Addario strings on Chris's card) reconciles against the COT bank feed — it's not an ACCPAY bill.
+
+**AI auto-fill (fast-follow).** Receipt-at-top is laid out for it. `POST /api/costs/extract` (Claude vision) → returns supplier/date/amounts/suggested account → pre-fills the modal for staff to confirm. Needs `ANTHROPIC_API_KEY`.

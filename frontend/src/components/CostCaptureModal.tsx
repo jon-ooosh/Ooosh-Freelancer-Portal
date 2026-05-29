@@ -2,15 +2,18 @@
  * CostCaptureModal — manual cost/receipt capture for the Cost Capture & Recharge
  * module. Creates a `costs` row via POST /api/costs.
  *
- * The Xero account picker reads the live chart of accounts (GET /api/costs/xero/
- * accounts) when Xero is configured; otherwise it degrades to a free-text
- * category. Receipt upload uses the generic attachment_only upload mode and
- * stores the returned R2 key on the cost.
+ * The Xero account picker reads a curated chart-of-accounts subset (GET
+ * /api/costs/xero/accounts) when Xero is configured; otherwise it degrades to a
+ * free-text category. Receipt upload uses the generic attachment_only upload
+ * mode and stores the returned R2 key on the cost.
  *
- * AI extraction (Claude vision) is a fast-follow — this is the manual path.
+ * Receipt is at the top because AI extraction (fast-follow) will populate the
+ * rest of the form from it. Net/VAT/Gross auto-calculate at 20% (toggle off to
+ * edit manually).
  */
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
+import { useAuthStore } from '../hooks/useAuthStore';
 import type {
   Cost,
   CostType,
@@ -60,17 +63,24 @@ const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
   { value: 'awaiting_invoice', label: 'Awaiting invoice' },
 ];
 
+const LAST4_KEY = 'ooosh_cot_last4';
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 export default function CostCaptureModal({ onClose, onSaved, presetJobId, presetVehicleId, presetIssueId }: Props) {
+  const { user } = useAuthStore();
+  const fullName = user ? `${user.first_name} ${user.last_name}`.trim() : '';
+
   const [supplierName, setSupplierName] = useState('');
   const [costDate, setCostDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [amountGross, setAmountGross] = useState('');
   const [amountVat, setAmountVat] = useState('');
   const [amountNet, setAmountNet] = useState('');
+  const [assumeVat20, setAssumeVat20] = useState(true);
   const [description, setDescription] = useState('');
   const [costType, setCostType] = useState<CostType>(presetVehicleId ? 'vehicle' : presetIssueId ? 'parts' : 'overhead');
   const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>('cot_card');
-  const [cardHolder, setCardHolder] = useState('');
-  const [cardLast4, setCardLast4] = useState('');
+  const [cardHolder, setCardHolder] = useState(fullName);
+  const [cardLast4, setCardLast4] = useState(() => localStorage.getItem(LAST4_KEY) || '');
   const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>('paid');
   const [rechargeMode, setRechargeMode] = useState<CostRechargeMode>('none');
   const [rechargeAmount, setRechargeAmount] = useState('');
@@ -78,6 +88,7 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
   const [category, setCategory] = useState('');
   const [notes, setNotes] = useState('');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
+  const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
 
   const [accounts, setAccounts] = useState<XeroAccount[] | null>(null);
   const [accountsError, setAccountsError] = useState(false);
@@ -96,18 +107,52 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  // Load Xero chart of accounts for the category picker (graceful fallback).
+  // Load curated Xero accounts for the category picker (graceful fallback).
   useEffect(() => {
     api.get<{ data: XeroAccount[] }>('/costs/xero/accounts')
       .then((r) => setAccounts((r.data || []).filter((a) => a.Status !== 'ARCHIVED')))
       .catch(() => setAccountsError(true));
   }, []);
 
+  // Image receipt preview (object URL, revoked on change/unmount).
+  useEffect(() => {
+    if (receiptFile && receiptFile.type.startsWith('image/')) {
+      const url = URL.createObjectURL(receiptFile);
+      setReceiptPreview(url);
+      return () => URL.revokeObjectURL(url);
+    }
+    setReceiptPreview(null);
+  }, [receiptFile]);
+
   const handleAccountPick = useCallback((code: string) => {
     setXeroAccountCode(code);
     const acct = accounts?.find((a) => a.Code === code);
     if (acct) setCategory(acct.Name);
   }, [accounts]);
+
+  // ── Net / VAT / Gross smart calc (20% assumed unless overridden) ──────────
+  const onGrossChange = (v: string) => {
+    setAmountGross(v);
+    if (assumeVat20 && v !== '') {
+      const gross = parseFloat(v);
+      if (!isNaN(gross)) {
+        const net = round2(gross / 1.2);
+        setAmountNet(net.toFixed(2));
+        setAmountVat(round2(gross - net).toFixed(2));
+      }
+    }
+  };
+  const onNetChange = (v: string) => {
+    setAmountNet(v);
+    if (assumeVat20 && v !== '') {
+      const net = parseFloat(v);
+      if (!isNaN(net)) {
+        const vat = round2(net * 0.2);
+        setAmountVat(vat.toFixed(2));
+        setAmountGross(round2(net + vat).toFixed(2));
+      }
+    }
+  };
 
   const canRecharge = Boolean(presetJobId);
 
@@ -116,7 +161,6 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
     if (!amountGross || Number(amountGross) <= 0) { setError('Gross amount is required.'); return; }
     setSaving(true);
     try {
-      // 1. Upload the receipt first (attachment_only mode → R2 key), if present.
       let receiptKey: string | null = null;
       let receiptName: string | null = null;
       if (receiptFile) {
@@ -128,7 +172,8 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
         receiptName = up.filename;
       }
 
-      // 2. Create the cost.
+      if (paymentMethod === 'cot_card' && cardLast4) localStorage.setItem(LAST4_KEY, cardLast4);
+
       const payload: Record<string, unknown> = {
         supplier_name: supplierName || null,
         cost_date: costDate || null,
@@ -175,6 +220,21 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
         <div className="px-6 py-4 space-y-4">
           {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
 
+          {/* Receipt first — AI extraction (fast-follow) will fill the rest from it */}
+          <div className="bg-gray-50 border border-dashed border-gray-300 rounded-md p-3">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Receipt</label>
+            <div className="flex items-center gap-3">
+              <input type="file" accept="image/*,application/pdf" className="text-sm"
+                onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} />
+              {receiptPreview && (
+                <img src={receiptPreview} alt="Receipt preview" className="h-16 w-16 object-cover rounded border border-gray-200" />
+              )}
+              {receiptFile && !receiptPreview && (
+                <span className="text-xs text-gray-600">📄 {receiptFile.name}</span>
+              )}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
@@ -186,19 +246,30 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Gross (£) *</label>
-              <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => setAmountGross(e.target.value)} />
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-sm font-medium text-gray-700">Amounts</span>
+              <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                <input type="checkbox" checked={assumeVat20} onChange={(e) => setAssumeVat20(e.target.checked)} />
+                Auto 20% VAT
+              </label>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">VAT (£)</label>
-              <input type="number" step="0.01" min="0" className={inputCls} value={amountVat} onChange={(e) => setAmountVat(e.target.value)} />
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Gross (£) *</label>
+                <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">VAT (£)</label>
+                <input type="number" step="0.01" min="0" className={`${inputCls} ${assumeVat20 ? 'bg-gray-100' : ''}`}
+                  value={amountVat} onChange={(e) => setAmountVat(e.target.value)} disabled={assumeVat20} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">Net (£)</label>
+                <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => onNetChange(e.target.value)} />
+              </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Net (£)</label>
-              <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => setAmountNet(e.target.value)} />
-            </div>
+            {assumeVat20 && <p className="text-xs text-gray-400 mt-1">Enter gross or net — the other two fill in. Untick to edit all three.</p>}
           </div>
 
           <div>
@@ -250,7 +321,8 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Card last 4</label>
-                <input maxLength={4} className={inputCls} value={cardLast4} onChange={(e) => setCardLast4(e.target.value.replace(/\D/g, ''))} />
+                <input maxLength={4} className={inputCls} value={cardLast4} onChange={(e) => setCardLast4(e.target.value.replace(/\D/g, ''))}
+                  placeholder="remembered for next time" />
               </div>
             </div>
           )}
@@ -273,12 +345,6 @@ export default function CostCaptureModal({ onClose, onSaved, presetJobId, preset
               )}
             </div>
           )}
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Receipt</label>
-            <input type="file" accept="image/*,application/pdf" className="text-sm"
-              onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} />
-          </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>

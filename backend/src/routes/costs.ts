@@ -21,6 +21,28 @@ router.use(authenticate);
 const VERIFY_ROLES = ['admin', 'manager'] as const;
 const ADMIN_ONLY = ['admin'] as const;
 
+// Curated staff-facing Xero account codes for the cost-capture category picker.
+// Ordered as they appear in the dropdown. Names are pulled live from Xero — this
+// is just the allowlist of which codes staff routinely code costs to.
+const STAFF_COST_ACCOUNT_CODES = [
+  '320', // Crew (freelance invoices)
+  '325', // Crew costs (bus / taxi)
+  '326', // Sub hire of equipment
+  '399', // PCNs / fines (usually recharged)
+  '406', // Vehicle upkeep (servicing, parts)
+  '409', // Vehicle repairs (bodywork, windscreens)
+  '473', // Equipment upkeep (amp repairs, spares)
+  '310', // Shop stock
+  '410', // Fuel
+  '411', // Parking
+  '425', // Postage / courier
+  '429', // Anything else not covered
+  '494', // General office expenses (milk, cleaning)
+  '710', // Office equipment
+  '720', // Computer equipment
+  '764', // New equipment (backline / staging)
+];
+
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
 const COST_TYPES = ['overhead', 'job', 'vehicle', 'stock', 'parts', 'freelancer_invoice'] as const;
@@ -228,7 +250,7 @@ router.get('/xero/health', authorize(...VERIFY_ROLES), async (_req: AuthRequest,
   }
 });
 
-router.get('/xero/accounts', authorize(...VERIFY_ROLES), async (_req: AuthRequest, res: Response) => {
+router.get('/xero/accounts', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const { isXeroConfigured } = await import('../config/xero');
     if (!isXeroConfigured()) {
@@ -236,7 +258,20 @@ router.get('/xero/accounts', authorize(...VERIFY_ROLES), async (_req: AuthReques
     }
     const { xeroBroker } = await import('../services/xero-broker');
     const accounts = await xeroBroker.getAccounts();
-    res.json({ data: accounts });
+
+    // Xero returns the whole chart of accounts (100+ rows). Staff only ever code
+    // a cost to a small operational subset, so we filter to a curated allowlist
+    // (ordered for the picker). ?all=true returns everything for admin/debug.
+    // TODO: move STAFF_COST_ACCOUNT_CODES to system_settings if it needs editing
+    // without a deploy — stable enough to hardcode for now.
+    if (req.query.all === 'true') {
+      return res.json({ data: accounts });
+    }
+    const order = new Map(STAFF_COST_ACCOUNT_CODES.map((c, i) => [c, i]));
+    const filtered = accounts
+      .filter((a) => order.has(a.Code))
+      .sort((a, b) => (order.get(a.Code)! - order.get(b.Code)!));
+    res.json({ data: filtered });
   } catch (err) {
     console.error('[costs] xero accounts error:', err);
     res.status(502).json({ error: 'Xero request failed', detail: err instanceof Error ? err.message : String(err) });
