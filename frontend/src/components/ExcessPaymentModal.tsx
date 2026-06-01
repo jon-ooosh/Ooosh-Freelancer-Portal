@@ -17,7 +17,7 @@ interface OutstandingInvoice {
   date: string | null;
 }
 
-type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release' | 'record_preauth' | 'upload_receipt';
+type ModalAction = 'payment' | 'claim' | 'reimburse' | 'waive' | 'rollover' | 'rollover_apply' | 'move' | 'edit_required' | 'unlink_deposit' | 'capture' | 'release' | 'record_preauth' | 'upload_receipt' | 'mark_externally_resolved';
 
 const CAPTURE_METHODS = [
   { value: 'stripe_gbp', label: 'Stripe (online card pre-auth)' },
@@ -273,6 +273,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   // Waive form
   const [waiveReason, setWaiveReason] = useState('');
 
+  // Mark Externally Resolved form (cleanup action — see backend route docstring)
+  const [extResolvedAmount, setExtResolvedAmount] = useState(() => String(excess.excess_amount_required || ''));
+  const [extResolvedMethod, setExtResolvedMethod] = useState<'stripe_gbp' | 'worldpay' | 'amex' | 'wise_bacs' | 'till_cash' | 'paypal' | 'lloyds_bank'>('stripe_gbp');
+  const [extResolvedReference, setExtResolvedReference] = useState('');
+  const [extResolvedReason, setExtResolvedReason] = useState('');
+
   // Edit required form
   const [editRequiredAmount, setEditRequiredAmount] = useState(
     excess.excess_amount_required != null ? Number(excess.excess_amount_required).toFixed(2) : ''
@@ -497,6 +503,22 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             reason: waiveReason,
           });
           break;
+        case 'mark_externally_resolved': {
+          const parsed = parseFloat(extResolvedAmount);
+          if (isNaN(parsed) || parsed < 0.01) {
+            throw new Error('Enter a valid amount (£0.01 or more)');
+          }
+          if (!extResolvedReason.trim()) {
+            throw new Error('Reason is required — please explain why this record is being marked externally resolved');
+          }
+          await api.post(`/excess/${excess.id}/mark-externally-resolved`, {
+            amount: parsed,
+            method: extResolvedMethod,
+            reference: extResolvedReference.trim() || null,
+            reason: extResolvedReason.trim(),
+          });
+          break;
+        }
         case 'rollover':
           await api.put(`/excess/${excess.id}`, {
             excess_status: 'rolled_over',
@@ -683,6 +705,20 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   }
   if (s === 'needed' || s === 'pending') {
     availableActions.push({ action: 'waive', label: 'Waive Excess', icon: '~' });
+    // Cleanup action: money flowed in and back out of OP's awareness (e.g.
+    // post-PR-630 cleanup of records where staff refunded in HH before the
+    // auto-reconciliation existed). Only offered when the record looks like
+    // "nothing happened" — backend gate also enforces this. Less prominent
+    // than the normal record-payment / reimburse flow on purpose.
+    const noActivity =
+      Number(excess.excess_amount_taken || 0) < 0.005 &&
+      Number(excess.amount_held || 0) < 0.005 &&
+      Number(excess.claim_amount || 0) < 0.005 &&
+      Number(excess.reimbursement_amount || 0) < 0.005 &&
+      !excess.hh_deposit_id;
+    if (noActivity) {
+      availableActions.push({ action: 'mark_externally_resolved', label: 'Mark as Externally Resolved (cleanup)', icon: '✓' });
+    }
   }
   // Card-machine receipt scan outstanding → offer upload (non-blocking to-do).
   if (excess.receipt_required && !excess.receipt_uploaded_at) {
@@ -1176,6 +1212,71 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     placeholder="Why is this excess being waived?"
                     rows={2}
                     className="w-full text-sm border border-gray-300 rounded-md px-3 py-2"
+                  />
+                </div>
+              </div>
+            )}
+
+            {action === 'mark_externally_resolved' && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-semibold text-gray-900">Mark as Externally Resolved</h3>
+                <div className="px-3 py-2 text-xs bg-amber-50 border border-amber-200 rounded-md text-amber-900">
+                  <p className="font-semibold mb-1">Cleanup action — not for normal flows.</p>
+                  <p>
+                    Use this when money has already flowed in <strong>and back out</strong> of OP's
+                    awareness (e.g. a hire that was collected and refunded directly in HireHop
+                    or Stripe before OP's auto-reconciliation existed). This single step records
+                    both the collection and the reimbursement in OP and flips the record to{' '}
+                    <strong>Reimbursed</strong>. Nothing is pushed to HireHop — the assumption is
+                    HireHop already reflects the truth.
+                  </p>
+                  <p className="mt-1">For normal collection use <em>Record Payment</em>; for normal reimbursement use <em>Reimburse</em>.</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Amount £</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={extResolvedAmount}
+                    onChange={(e) => setExtResolvedAmount(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                    placeholder="0.00"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Method</label>
+                  <select
+                    value={extResolvedMethod}
+                    onChange={(e) => setExtResolvedMethod(e.target.value as typeof extResolvedMethod)}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                  >
+                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="worldpay">Worldpay</option>
+                    <option value="amex">Amex</option>
+                    <option value="wise_bacs">Wise (BACS)</option>
+                    <option value="lloyds_bank">Lloyds Bank</option>
+                    <option value="till_cash">Cash</option>
+                    <option value="paypal">PayPal</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Reference (optional)</label>
+                  <input
+                    type="text"
+                    value={extResolvedReference}
+                    onChange={(e) => setExtResolvedReference(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                    placeholder="e.g. Stripe charge id, HH deposit #"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Reason <span className="text-red-600">*</span></label>
+                  <textarea
+                    value={extResolvedReason}
+                    onChange={(e) => setExtResolvedReason(e.target.value)}
+                    rows={2}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                    placeholder="Why is this being marked externally resolved? (e.g. 'HH-side refund pre-dating auto-reconciliation')"
                   />
                 </div>
               </div>
