@@ -2883,6 +2883,19 @@ ENCRYPTION_KEY=<64-char-hex-key>  # In .env, generated via: openssl rand -hex 32
 - Key stored only in `.env` on server (not in repo, not in R2)
 - Yes — we hold the key, so we can always read data back. If the key is lost, encrypted data is unrecoverable.
 
+### Dependency Security (npm audit / Dependabot)
+
+**Dependabot is live (June 2026).** Security updates are enabled in repo Settings (auto-PRs for new CVEs), and `.github/dependabot.yml` drives weekly grouped version-update PRs for `/`, `/backend`, `/frontend`, and the `github-actions` ecosystem. Routine minor/patch bumps arrive grouped per project; majors come as individual PRs. **Always let a Dependabot PR `npm install && npm run build` in the affected dir before merging** — a bump occasionally needs a code tweak.
+
+**Do NOT run `npm audit fix --force`.** The plain `npm audit fix` (semver-safe) is fine and already applied. `--force` pulls breaking majors that break the build. Two vulnerabilities are **deliberately left in `backend/` and must not be "fixed"**:
+
+| Package | Severity | Why left |
+|---|---|---|
+| `xlsx` (sheetjs) | high | No npm fix exists (SheetJS publish fixed builds via their own CDN, not npm). Only parses **trusted admin xlsx uploads** (Monday → Fleet Master import, a one-shot), never arbitrary user input. Migrating to the CDN build is a separate deliberate job, not an `audit fix`. |
+| `uuid` | moderate | Only fixable via `--force` → uuid@14, a breaking major. Not worth a breaking change for a buffer-bounds issue we don't hit. |
+
+**The "critical" npm sometimes reports is dev-only.** It's `handlebars`, pulled in transitively by `ts-jest` (a devDependency / test tooling) — **not shipped to production**, requires compiling attacker-controlled templates, zero runtime exposure. Don't panic over the severity label; npm doesn't know it's dev-only.
+
 ## Crew & Transport System
 
 This is the quoting/costing system for delivery, collection, and crewed jobs. It lives in the **"Crew & Transport" tab** on the Job Detail page.

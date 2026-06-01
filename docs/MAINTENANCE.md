@@ -2,7 +2,7 @@
 
 **Purpose:** A living document tracking everything that will need ongoing attention, scheduled maintenance, likely failure points, and upgrade paths. The goal is to predict and prevent problems rather than react to them.
 
-**Last reviewed:** March 2026
+**Last reviewed:** June 2026
 
 ---
 
@@ -52,9 +52,10 @@ These are things that **will** need doing on a known schedule. Non-negotiable.
 | **Frequency** | Monthly review. Security patches immediately. |
 | **Failure mode** | Vulnerabilities in outdated packages; breaking changes if left too long |
 | **Mitigation** | `npm audit` in CI pipeline. Dependabot or Renovate on GitHub for automated PRs. Monthly manual review. |
-| **Automated tooling** | GitHub Dependabot (enable on repo) — creates PRs for outdated/vulnerable dependencies |
-| **Action** | Review and merge Dependabot PRs monthly. Run test suite before merging. |
-| **Status** | [ ] Not yet configured |
+| **Automated tooling** | GitHub Dependabot — security updates enabled in repo Settings + `.github/dependabot.yml` for weekly grouped version-update PRs (`/`, `/backend`, `/frontend`, github-actions) |
+| **Action** | Review and merge Dependabot PRs. Always `npm install && npm run build` in the affected dir before merging — a bump occasionally needs a code tweak. Never `npm audit fix --force` (breaking majors). |
+| **Accepted leave-alones** | `backend/` `xlsx` (high, no npm fix, trusted-input only) and `uuid` (moderate, fix is breaking v14) are deliberately not patched. The "critical" npm reports is dev-only `handlebars` via `ts-jest` (not shipped). See CLAUDE.md → Security → Dependency Security. |
+| **Status** | [x] Configured June 2026 — Dependabot live (security updates + weekly grouped version PRs) |
 
 ### 1.5 PostgreSQL Version Updates
 
