@@ -220,6 +220,76 @@ router.post('/generate', async (req: AuthRequest, res) => {
   }
 });
 
+// ── GET /job/:hhJobId/status — VE103B coverage for a job ──────────────
+// "Done" only when certs issued >= vans going abroad (count vans first —
+// 2 vans to the EU need 2 certs, never "≥1 cert = sorted").
+router.get('/job/:hhJobId/status', async (req: AuthRequest, res) => {
+  try {
+    const hhJobId = parseInt(String(req.params.hhJobId), 10);
+    if (!Number.isFinite(hhJobId)) {
+      res.status(400).json({ error: 'Invalid job number' });
+      return;
+    }
+
+    const jobRes = await query(
+      `SELECT line_items FROM jobs WHERE hh_job_number = $1 AND is_deleted = false LIMIT 1`,
+      [hhJobId]
+    );
+    const lineItems: Array<Record<string, unknown>> = jobRes.rows[0]?.line_items || [];
+    let vansGoingAbroad = 0;
+    for (const item of lineItems) {
+      const listId = parseInt(String(item.LIST_ID || 0), 10);
+      const kind = Number(item.kind ?? 2);
+      if (listId === 1023 && kind !== 0) {
+        vansGoingAbroad += Math.max(1, Number(item.QUANTITY || 1));
+      }
+    }
+
+    const certRes = await query(
+      `SELECT COUNT(*)::int AS cnt FROM ve103b_certificates
+        WHERE hirehop_job_number = $1 AND status = 'issued'`,
+      [hhJobId]
+    );
+    const certsIssued = certRes.rows[0]?.cnt || 0;
+
+    res.json({
+      vans_going_abroad: vansGoingAbroad,
+      certs_issued: certsIssued,
+      ve103b_required: vansGoingAbroad > 0,
+      done: vansGoingAbroad > 0 && certsIssued >= vansGoingAbroad,
+    });
+  } catch (err) {
+    console.error('[VE103B] Job status error:', err);
+    res.status(500).json({ error: 'Failed to read VE103B status' });
+  }
+});
+
+// ── POST /job/:hhJobId/ensure-cert-item — add VE103B cert item to HH ──
+// Surprise-EU path: customer decides at the desk they're going abroad and the
+// cert item isn't on the HH job. Adds it (count-first, idempotent) so it's
+// charged + recorded; caller then generates the cert.
+const ensureItemSchema = z.object({ certs_needed: z.number().int().min(1).max(20) });
+router.post('/job/:hhJobId/ensure-cert-item', async (req: AuthRequest, res) => {
+  try {
+    const hhJobId = parseInt(String(req.params.hhJobId), 10);
+    if (!Number.isFinite(hhJobId)) {
+      res.status(400).json({ error: 'Invalid job number' });
+      return;
+    }
+    const { certs_needed } = ensureItemSchema.parse(req.body);
+    const { ensureVe103bCertItemOnJob } = await import('../services/ve103b-hh');
+    const result = await ensureVe103bCertItemOnJob(hhJobId, certs_needed);
+    res.json(result);
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      res.status(400).json({ error: 'Validation failed', details: err.errors });
+      return;
+    }
+    console.error('[VE103B] Ensure cert item error:', err);
+    res.status(500).json({ error: 'Failed to add VE103B cert item to HireHop' });
+  }
+});
+
 // ── POST /test-generate — Test generation from vehicle + manual driver info ──
 // Temporary endpoint for testing PDF output without needing a hire assignment.
 

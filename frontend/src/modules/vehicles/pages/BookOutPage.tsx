@@ -141,6 +141,7 @@ export function BookOutPage() {
         hireEndTime: form.hireEndTime,
         excess: form.excess,
         ve103b: form.ve103b,
+        ve103bGeneratedAtDesk: form.ve103bGeneratedAtDesk,
         returnOvernight: form.returnOvernight,
         allDrivers: form.allDrivers,
         hireFormEntries: form.hireFormEntries,
@@ -176,6 +177,7 @@ export function BookOutPage() {
       hireEndTime: (d.hireEndTime as string) || null,
       excess: (d.excess as string) || null,
       ve103b: (d.ve103b as string) || null,
+      ve103bGeneratedAtDesk: Boolean(d.ve103bGeneratedAtDesk),
       returnOvernight: (d.returnOvernight as string) || null,
       allDrivers: (d.allDrivers as string[]) || undefined,
       hireFormEntries: (d.hireFormEntries as BookOutFormState['hireFormEntries']) || undefined,
@@ -952,6 +954,11 @@ export function BookOutPage() {
     // V&D soft book-out: skipped — no VE103B for non-customer hires.
     const ve103bTrack = (async () => {
       if (isVanAndDriver) return []
+      // Already generated at the desk (Phase A) — don't re-generate (would 409
+      // on the unique cert number anyway). Report it as done for the summary.
+      if (form.ve103bGeneratedAtDesk) {
+        return [{ label: 'VE103B certificate', success: true, detail: 'Generated at the desk' }]
+      }
       if (!form.ve103b || !form.hireFormEntries || form.hireFormEntries.length === 0) return []
       // Find the lead driver's assignment ID
       const leadEntry = form.hireFormEntries.find(e => e.driverName === form.driverName)
@@ -1661,6 +1668,171 @@ function StepSelectVehicle({
 }
 
 /* ──────────────────────────────────────────────
+ * VE103B desk gate (Phase A): "Is this vehicle leaving the UK?"
+ * Generates the cert at the desk (by the printer) instead of at submit.
+ * Reads HH detection (item 1023) to pre-fill, counts vans for done-gating,
+ * and adds the cert item to HireHop for the surprise-EU case.
+ * ────────────────────────────────────────────── */
+
+interface Ve103bJobStatus {
+  vans_going_abroad: number
+  certs_issued: number
+  ve103b_required: boolean
+  done: boolean
+}
+
+function Ve103bDeskGate({
+  form,
+  onUpdate,
+}: {
+  form: BookOutFormState
+  onUpdate: <K extends keyof BookOutFormState>(key: K, value: BookOutFormState[K]) => void
+}) {
+  const [goingAbroad, setGoingAbroad] = useState<boolean | null>(null)
+  const [status, setStatus] = useState<Ve103bJobStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null)
+  const seededRef = useRef<string | null>(null)
+  const hhJob = form.hireHopJob
+
+  useEffect(() => {
+    if (!hhJob) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const resp = await apiFetch(`/api/ve103b/job/${encodeURIComponent(hhJob)}/status`)
+        if (!resp.ok || cancelled) return
+        const data = (await resp.json()) as Ve103bJobStatus
+        setStatus(data)
+        // Seed the toggle once per job: pre-select Yes if HH flags it, or if a
+        // cert ref / desk-generation is already on the form (resumed draft).
+        if (seededRef.current !== hhJob) {
+          seededRef.current = hhJob
+          if (data.ve103b_required || form.ve103b || form.ve103bGeneratedAtDesk) setGoingAbroad(true)
+        }
+      } catch { /* non-fatal — gate just starts unanswered */ }
+    })()
+    return () => { cancelled = true }
+  }, [hhJob, form.ve103b, form.ve103bGeneratedAtDesk])
+
+  const leadEntry = (form.hireFormEntries || []).find(e => e.driverName === form.driverName)
+    || (form.hireFormEntries || [])[0]
+
+  const handleGenerate = async () => {
+    if (!form.ve103b || !leadEntry || !hhJob) return
+    setBusy(true)
+    setResult(null)
+    try {
+      // 1. Link the van to the assignment so generate can read the vehicle.
+      //    vehicle_id only — no status change, so no book-out side-effects fire.
+      if (form.vehicleId) {
+        await apiFetch(`/api/hire-forms/${leadEntry.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vehicle_id: form.vehicleId }),
+        })
+      }
+      // 2. Surprise-EU: cert item not on the HH job — add it (charged + recorded).
+      if (status && !status.ve103b_required) {
+        await apiFetch(`/api/ve103b/job/${encodeURIComponent(hhJob)}/ensure-cert-item`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ certs_needed: Math.max(1, status.vans_going_abroad || 0) }),
+        })
+      }
+      // 3. Generate the certificate.
+      const resp = await apiFetch('/api/ve103b/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignment_id: leadEntry.id, certificate_number: form.ve103b }),
+      })
+      if (resp.ok) {
+        const data = await resp.json()
+        onUpdate('ve103bGeneratedAtDesk', true)
+        setResult({ ok: true, msg: `${data.pdf_filename || 'Certificate'} generated${data.emailed ? ' — emailed to office' : ''}. Print it now.` })
+        const s = await apiFetch(`/api/ve103b/job/${encodeURIComponent(hhJob)}/status`)
+        if (s.ok) setStatus((await s.json()) as Ve103bJobStatus)
+      } else {
+        const err = await resp.json().catch(() => ({}))
+        setResult({ ok: false, msg: err.message || err.error || `Failed (${resp.status})` })
+      }
+    } catch (e) {
+      setResult({ ok: false, msg: e instanceof Error ? e.message : 'Generation failed' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2">
+      <label className="block text-xs font-medium text-gray-600">
+        Is this vehicle leaving the UK on this hire?
+      </label>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => { setGoingAbroad(false); onUpdate('ve103b', null) }}
+          className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium ${goingAbroad === false ? 'border-green-500 bg-green-50 text-green-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+        >
+          No — UK only
+        </button>
+        <button
+          type="button"
+          onClick={() => setGoingAbroad(true)}
+          className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium ${goingAbroad === true ? 'border-ooosh-navy bg-blue-50 text-ooosh-navy' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+        >
+          Yes — VE103B
+        </button>
+      </div>
+
+      {goingAbroad === null && (
+        <p className="text-[11px] text-amber-600">Confirm with the customer before booking out.</p>
+      )}
+      {goingAbroad === false && (
+        <p className="text-[11px] text-gray-400">UK only — no VE103B required.</p>
+      )}
+
+      {goingAbroad === true && (
+        <div className="space-y-2 pt-1">
+          {status && status.vans_going_abroad > 1 && (
+            <p className="text-[11px] text-gray-500">
+              {status.certs_issued} of {status.vans_going_abroad} certs issued for this job
+              {status.done ? ' — all sorted' : ' — this van still needs one'}.
+            </p>
+          )}
+          {status && !status.ve103b_required && (
+            <p className="text-[11px] text-amber-600">
+              Not flagged on HireHop — generating will add the £25 VE103B item to the job.
+            </p>
+          )}
+          <input
+            type="text"
+            value={form.ve103b || ''}
+            onChange={e => onUpdate('ve103b', e.target.value || null)}
+            placeholder="Cert number (from the pre-printed form)"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
+          />
+          {!leadEntry && (
+            <p className="text-[11px] text-amber-600">Select a driver / hire form first to generate the certificate.</p>
+          )}
+          <button
+            type="button"
+            disabled={busy || !form.ve103b || !leadEntry || form.ve103bGeneratedAtDesk}
+            onClick={handleGenerate}
+            className="w-full rounded-lg bg-ooosh-navy px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {form.ve103bGeneratedAtDesk ? 'VE103B generated ✓' : busy ? 'Generating…' : 'Generate VE103B now'}
+          </button>
+          {result && (
+            <p className={`text-[11px] ${result.ok ? 'text-green-600' : 'text-red-600'}`}>{result.msg}</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ──────────────────────────────────────────────
  * Step 2: Driver & Hire details (enhanced with HireHop job picker)
  * ────────────────────────────────────────────── */
 
@@ -2052,16 +2224,7 @@ function StepDriverHire({
                 </div>
               </div>
 
-              <div>
-                <label className="mb-1 block text-xs font-medium text-gray-600">VE103b</label>
-                <input
-                  type="text"
-                  value={form.ve103b || ''}
-                  onChange={e => onUpdate('ve103b', e.target.value || null)}
-                  placeholder="VE103b reference"
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm placeholder:text-gray-400 focus:border-ooosh-navy focus:outline-none focus:ring-1 focus:ring-ooosh-navy"
-                />
-              </div>
+              <Ve103bDeskGate form={form} onUpdate={onUpdate} />
             </>
           )}
 

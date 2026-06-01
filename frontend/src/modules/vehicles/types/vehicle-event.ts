@@ -148,6 +148,7 @@ export interface BookOutFormState {
   hireEndTime?: string | null        // HH:mm
   excess?: string | null             // Excess amount (mirrored from linked board)
   ve103b?: string | null             // VE103b reference
+  ve103bGeneratedAtDesk?: boolean    // Cert generated at the desk (Phase A) — skip submit-time generation
   returnOvernight?: string | null    // "Yes" | "No" | "Don't know"
   allDrivers?: string[]              // All driver names on this job (for PDF display)
   hireFormEntries?: Array<{          // Full hire form data per driver (for write-back + multi-driver emails)
