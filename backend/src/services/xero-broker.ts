@@ -300,6 +300,24 @@ class XeroBroker {
     return created.Contacts[0];
   }
 
+  /**
+   * Fuzzy-search Xero contacts by name (uses Xero's `searchTerm` parameter).
+   * Powers the capture modal's supplier autocomplete — staff pick an existing
+   * supplier rather than retyping (avoids duplicate suppliers from typos).
+   * Returns up to `limit` ACTIVE contacts; if the search is empty, returns [].
+   */
+  async searchContacts(searchTerm: string, limit = 10): Promise<XeroContact[]> {
+    const trimmed = searchTerm.trim();
+    if (!trimmed) return [];
+    const r = await this.request<{ Contacts: (XeroContact & { ContactStatus?: string })[] }>(
+      'GET', '/Contacts', { query: { searchTerm: trimmed, page: '1' } }
+    );
+    return (r.Contacts || [])
+      .filter((c) => !c.ContactStatus || c.ContactStatus === 'ACTIVE')
+      .slice(0, limit)
+      .map((c) => ({ ContactID: c.ContactID, Name: c.Name }));
+  }
+
   /** Create an unpaid supplier bill (ACCPAY invoice). */
   async createBill(input: CreateBillInput): Promise<{ InvoiceID: string; InvoiceNumber?: string }> {
     const contact = await this.getOrCreateContact(input.contactName);
