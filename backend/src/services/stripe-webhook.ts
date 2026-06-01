@@ -34,10 +34,12 @@ type DisputeObj = {
   reason: string | null;
   status: string | null;
 };
+type RefundListItem = { id: string; amount: number; created: number };
 type ChargeObj = {
   id: string;
   payment_intent: string | { id: string } | null;
   amount_refunded: number;
+  refunds?: { data?: RefundListItem[] };
 };
 
 function piId(pi: string | { id: string } | null | undefined): string | null {
@@ -129,6 +131,18 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
       const ex = await findExcessByPaymentIntent(piRef);
       const refunded = (charge.amount_refunded / 100).toFixed(2);
 
+      // Use the latest refund's id for dedup — OP-initiated reimburse (Jun 2026)
+      // pre-records a refund_leg keyed `stripe_refund_<id>` so this webhook
+      // becomes a no-op for refunds OP itself triggered. Falls back to charge.id
+      // only if Stripe doesn't include the refunds list (shouldn't happen on
+      // charge.refunded but defensive).
+      const latestRefund = charge.refunds?.data
+        ?.slice()
+        .sort((a, b) => b.created - a.created)[0];
+      const sourceRefForDedup = latestRefund
+        ? `stripe_refund_${latestRefund.id}`
+        : `stripe_charge_${charge.id}`;
+
       // Auto-unwind the excess if a matching record exists. Idempotent — if
       // the portal's payment-event has already applied this refund leg, the
       // helper skips. The email to info@ still fires either way (visibility).
@@ -140,7 +154,7 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
             excessId: ex.id,
             amount: parseFloat(refunded),
             source: 'stripe_webhook',
-            sourceRef: charge.id,
+            sourceRef: sourceRefForDedup,
             method: 'stripe_gbp',
             notes: `Stripe charge ${charge.id}`,
           });

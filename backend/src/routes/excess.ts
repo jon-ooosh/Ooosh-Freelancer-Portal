@@ -2128,9 +2128,45 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     // £60 reimbursed flags as partial when it's actually fully resolved.
     const isPartial = (alreadyReimbursed + amount + claimed) < amountTaken - 0.005;
 
+    // ── Step 0: Stripe refund — when method=stripe_gbp + the record carries a
+    // PaymentIntent reference, OP originates the refund directly via the Stripe
+    // API. Closes the "OP first" loop so staff don't have to bounce out to the
+    // Stripe dashboard or the portal. For other methods (BACS, cash, etc.)
+    // skipped — the real-world money movement happens off-system. ─────────────
+    let stripeRefundId: string | null = null;
+    const stripeRefundPath = method === 'stripe_gbp' && current.stripe_payment_intent_id;
+
+    if (stripeRefundPath) {
+      if (!isStripeConfigured()) {
+        res.status(503).json({
+          error: 'Stripe not configured',
+          detail: 'Stripe API key is missing. Use a different reimburse method, or contact engineering.',
+        });
+        return;
+      }
+      try {
+        const stripe = getStripeClient();
+        const refund = await stripe.refunds.create({
+          payment_intent: current.stripe_payment_intent_id,
+          amount: Math.round(amount * 100),
+        });
+        stripeRefundId = refund.id;
+        console.log(`[excess] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${current.stripe_payment_intent_id})`);
+      } catch (err) {
+        const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
+        console.error('[excess] Stripe refund failed:', msg);
+        res.status(502).json({
+          error: 'Stripe refund failed',
+          detail: msg,
+        });
+        return;
+      }
+    }
+
     // ── Step 1: Find the original HH deposit ID (for HH-linked records) ─────
     let hhDepositId: number | null = null;
     let hhPaymentAppId: number | null = null;
+    let hhPushError: string | null = null;  // surfaced to staff when stripe path can't push HH paperwork
     const isHhLinked = Boolean(current.hirehop_job_id);
 
     if (isHhLinked) {
@@ -2183,46 +2219,66 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       }
 
       // No deposit found → loud fail. The cash chain is broken, refusing to drift.
+      // Exception: when Stripe has already moved the money (Step 0), HH paperwork
+      // is a record-keeping nice-to-have, not a money gate — capture the gap as
+      // hh_push_error and continue. The Stripe webhook will surface the refund
+      // to staff via info@ in parallel.
       if (!hhDepositId) {
-        res.status(422).json({
-          error: 'Cannot locate original HireHop deposit',
-          detail: current.payment_method === 'rolled_over'
-            ? 'This excess was rolled over from a previous hire and the chain back to the original HireHop deposit is broken. Use the "Link HH Deposit" action on the Money tab to attach this record to the correct HireHop deposit before reimbursing.'
-            : 'No excess deposit found on the linked HireHop job. Use the "Link HH Deposit" action on the Money tab to attach the correct HireHop deposit, or check that the original payment was recorded through OP.',
-        });
-        return;
+        if (stripeRefundPath) {
+          hhPushError = current.payment_method === 'rolled_over'
+            ? 'Stripe refund processed, but the HireHop deposit chain back to the original deposit is broken — OP record updated, but you may need to manually create the negative HH payment application to keep HH books matching.'
+            : 'Stripe refund processed, but no matching HireHop deposit was found for paperwork — OP record updated. Check the linked HH job and add a manual negative payment application if needed.';
+          console.warn(`[excess] Stripe refund succeeded but HH deposit lookup failed for excess ${id}`);
+        } else {
+          res.status(422).json({
+            error: 'Cannot locate original HireHop deposit',
+            detail: current.payment_method === 'rolled_over'
+              ? 'This excess was rolled over from a previous hire and the chain back to the original HireHop deposit is broken. Use the "Link HH Deposit" action on the Money tab to attach this record to the correct HireHop deposit before reimbursing.'
+              : 'No excess deposit found on the linked HireHop job. Use the "Link HH Deposit" action on the Money tab to attach the correct HireHop deposit, or check that the original payment was recorded through OP.',
+          });
+          return;
+        }
       }
+
+
 
       // ── Step 2: Push the refund payment application to HireHop ───────────
-      const currentDate = new Date().toISOString().split('T')[0];
-      const hhBankId = HH_BANK_IDS[method] || 265;
-      const description = `${current.hirehop_job_id} - Excess refund${isPartial ? ' (partial)' : ''}`;
-      const memo = `Insurance excess ${isPartial ? 'partial ' : ''}reimbursement — via ${method.replace(/_/g, ' ')} (recorded via Ooosh OP)`;
+      if (hhDepositId) {
+        const currentDate = new Date().toISOString().split('T')[0];
+        const hhBankId = HH_BANK_IDS[method] || 265;
+        const description = `${current.hirehop_job_id} - Excess refund${isPartial ? ' (partial)' : ''}`;
+        const memo = `Insurance excess ${isPartial ? 'partial ' : ''}reimbursement — via ${method.replace(/_/g, ' ')} (recorded via Ooosh OP)`;
 
-      console.log(`[excess] Creating HH payment application (refund) for job ${current.hirehop_job_id}, £${amount} against deposit ${hhDepositId}`);
-      const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
-        id: 0,
-        date: currentDate,
-        desc: description,
-        paid: amount,
-        memo: memo,
-        bank: hhBankId,
-        OWNER: 0,
-        deposit: hhDepositId,
-        no_webhook: 1,
-      }, { priority: 'high' });
+        console.log(`[excess] Creating HH payment application (refund) for job ${current.hirehop_job_id}, £${amount} against deposit ${hhDepositId}`);
+        const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
+          id: 0,
+          date: currentDate,
+          desc: description,
+          paid: amount,
+          memo: memo,
+          bank: hhBankId,
+          OWNER: 0,
+          deposit: hhDepositId,
+          no_webhook: 1,
+        }, { priority: 'high' });
 
-      if (!hhResult.success || !hhResult.data) {
-        console.error('[excess] HH payment application creation failed:', hhResult.error, hhResult.data);
-        res.status(502).json({
-          error: 'HireHop refund failed',
-          detail: hhResult.error || 'HireHop did not accept the payment application. OP record not updated. Please retry, or contact engineering if this persists.',
-        });
-        return;
+        if (!hhResult.success || !hhResult.data) {
+          console.error('[excess] HH payment application creation failed:', hhResult.error, hhResult.data);
+          if (stripeRefundPath) {
+            // Stripe already moved the money — record the gap rather than abort.
+            hhPushError = `Stripe refund processed, but HireHop paperwork push failed: ${hhResult.error || 'unknown error'}. OP record updated. Please retry the HH push manually or contact engineering.`;
+          } else {
+            res.status(502).json({
+              error: 'HireHop refund failed',
+              detail: hhResult.error || 'HireHop did not accept the payment application. OP record not updated. Please retry, or contact engineering if this persists.',
+            });
+            return;
+          }
+        } else {
+          hhPaymentAppId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
+          console.log(`[excess] HH payment application created: ${hhPaymentAppId}`);
+        }
       }
-
-      hhPaymentAppId = (hhResult.data as any).hh_id || (hhResult.data as any).id || (hhResult.data as any).ID || null;
-      console.log(`[excess] HH payment application created: ${hhPaymentAppId}`);
     }
 
     // ── Step 3: Update the OP record (only reached if HH push succeeded, or
@@ -2313,10 +2369,33 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       );
     }
 
+    // Refund-leg ledger: when OP initiated a Stripe refund, pre-record the
+    // dedup leg so the incoming `charge.refunded` webhook (which always fires
+    // for OP-initiated refunds too) sees an existing entry and no-ops. Source
+    // ref shape MUST match what `stripe-webhook.ts charge.refunded` produces.
+    if (stripeRefundId) {
+      await query(
+        `UPDATE job_excess
+         SET refund_legs = COALESCE(refund_legs, '[]'::jsonb) || $1::jsonb
+         WHERE id = $2`,
+        [
+          JSON.stringify([{
+            source: 'manual',
+            ref: `stripe_refund_${stripeRefundId}`,
+            amount,
+            at: new Date().toISOString(),
+          }]),
+          id,
+        ]
+      ).catch(e => console.error('[excess] Refund leg append failed (non-fatal):', e));
+    }
+
     res.json({
       data: { ...excess, hh_payment_application_id: hhPaymentAppId },
       ...(isHhLinked ? {} : { op_only: true }),
       ...(bankDetailsWarning ? { warning: bankDetailsWarning } : {}),
+      ...(stripeRefundId ? { stripe_refund_id: stripeRefundId } : {}),
+      ...(hhPushError ? { hh_push_error: hhPushError } : {}),
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
