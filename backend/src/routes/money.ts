@@ -524,6 +524,14 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       description: string | null; memo: string | null;
       bank_name: string | null;
     }> = [];
+    // Excess refunds processed directly in HireHop — drives passive unwind of
+    // the OP excess record so OP catches up to HH without staff intervention.
+    // Closes the Pom Poko / RX22SWN-shape gap where a colleague refunds in HH
+    // and then OP can't push (deposit already fully refunded → error 370).
+    const hhExcessRefunds: Array<{
+      hh_refund_row_id: number; amount: number; date: string;
+      description: string | null; memo: string | null;
+    }> = [];
     let totalHireDeposits = 0;
     let totalExcessDeposits = 0;
     // Track deposit money applied to invoices via kind=3 (for invoice reconciliation)
@@ -582,6 +590,16 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
                 is_refund: isRefund,
                 bank_name: getBankName(data.ACC_ACCOUNT_ID),
                 entered_by: data.CREATE_USER_NAME || null,
+              });
+            } else if (isExcess && isRefund) {
+              // HH-side excess refund — collect for passive unwind onto the
+              // matching OP record (catches refunds done directly in HH).
+              hhExcessRefunds.push({
+                hh_refund_row_id: depositId,
+                amount: absAmount,
+                date: data.DATE || row.date || '',
+                description: description || null,
+                memo: memo || null,
               });
             } else if (!isRefund) {
               // Excess deposit — collect for reconciliation (skip refunds, they're payment apps)
@@ -750,6 +768,50 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
         reconciliationResults = await reconcileExcessDeposits(job.id, hhExcessDeposits);
       } catch (reconcileErr) {
         console.error('[money] Reconciliation failed (non-fatal):', reconcileErr);
+      }
+    }
+
+    // Pass 2: HH-side excess refunds → passive unwind on the linked OP record.
+    // Catches the Pom Poko shape (staff issues refund in HH, OP never hears).
+    // Each refund is dedup'd via the excess.refund_legs JSONB on the helper
+    // side, so re-running the Money tab doesn't re-apply.
+    if (hhExcessRefunds.length > 0 && job.id) {
+      try {
+        const { unwindRefundOnExcess } = await import('../services/excess-refund');
+        // Pull the job's linked excess records (anything with hh_deposit_id set).
+        const linked = await query(
+          `SELECT id, hh_deposit_id, excess_status,
+                  excess_amount_taken, reimbursement_amount, claim_amount
+           FROM job_excess
+           WHERE job_id = $1 AND hh_deposit_id IS NOT NULL
+             AND excess_status NOT IN ('waived', 'rolled_over', 'released', 'reimbursed')`,
+          [job.id]
+        );
+        // For each HH refund row, pick the best-matching linked record by
+        // available cash; fall back to any linked record on the job. If
+        // multiple records exist and amounts don't disambiguate, the dedup
+        // key (`hh_refund_<rowId>`) still prevents double-apply.
+        for (const refund of hhExcessRefunds) {
+          if (linked.rows.length === 0) break;
+          const byAmount = linked.rows.findIndex((r: any) => {
+            const taken = parseFloat(r.excess_amount_taken || '0');
+            const reimbursed = parseFloat(r.reimbursement_amount || '0');
+            const claimed = parseFloat(r.claim_amount || '0');
+            const remaining = taken - reimbursed - claimed;
+            return Math.abs(remaining - refund.amount) < 0.01;
+          });
+          const target = byAmount !== -1 ? linked.rows[byAmount] : linked.rows[0];
+          await unwindRefundOnExcess({
+            excessId: target.id,
+            amount: refund.amount,
+            source: 'hh_reconcile',
+            sourceRef: `hh_refund_${refund.hh_refund_row_id}`,
+            method: null,
+            notes: `HH refund row #${refund.hh_refund_row_id}${refund.description ? ` — ${refund.description}` : ''}`,
+          }).catch((e) => console.error('[money] HH refund unwind failed (non-fatal):', e));
+        }
+      } catch (refundReconErr) {
+        console.error('[money] HH refund passive reconciliation failed (non-fatal):', refundReconErr);
       }
     }
 
@@ -1444,6 +1506,43 @@ router.post('/:jobId/payment-event', validate(paymentEventSchema), async (req: A
       syncExcessRequirementStatus(job.id).catch(e =>
         console.error('[money] syncExcessRequirementStatus failed (payment-event):', e)
       );
+    }
+
+    // ── Refund unwind: when the portal tells us about a refund, auto-flip
+    // the matching OP excess record to reimbursed/partially_reimbursed so
+    // staff don't have to repeat the action manually. Idempotent across
+    // sources (portal + Stripe webhook can both fire for one refund).
+    // Only acts when there's a clear excess linkage — generic hire-fee
+    // refunds (payment_type='refund' with no excess_id) fall through. ──
+    if ((effectivePaymentType === 'excess_refund' ||
+         (effectivePaymentType === 'refund' && (excess_id || stripe_payment_intent)))) {
+      try {
+        const { unwindRefundOnExcess, findExcessByStripePI } = await import('../services/excess-refund');
+        let targetExcessId = excess_id || null;
+        if (!targetExcessId && stripe_payment_intent) {
+          const ex = await findExcessByStripePI(stripe_payment_intent);
+          if (ex) targetExcessId = ex.id;
+        }
+        if (targetExcessId) {
+          const result = await unwindRefundOnExcess({
+            excessId: targetExcessId,
+            amount,
+            source: 'payment_event',
+            sourceRef: payment_reference || stripe_payment_intent || null,
+            method: effectiveMethod,
+            notes: `via payment-event from ${effectiveSource}`,
+          });
+          if (result.updated) {
+            console.log(`[money] Refund auto-unwound on excess ${targetExcessId} → ${result.newStatus}`);
+          } else {
+            console.log(`[money] Refund unwind skipped on excess ${targetExcessId}: ${result.reason}`);
+          }
+        } else {
+          console.log(`[money] Refund event on job ${job.id} — no matching excess record to unwind`);
+        }
+      } catch (err) {
+        console.error('[money] Refund unwind failed (non-fatal, payment-event):', err);
+      }
     }
 
     // ── Status transition: deposit/balance payment on pre-confirmed job → Confirmed ──

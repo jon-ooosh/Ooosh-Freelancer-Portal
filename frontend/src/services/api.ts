@@ -79,7 +79,14 @@ async function request<T>(
     // Include `detail` field when the backend provides extra context (e.g. excess
     // reimburse loud-fail messages). Without this, callers only see the headline.
     const fullMsg = error.detail ? `${baseMsg} — ${error.detail}` : baseMsg;
-    throw new Error(fullMsg);
+    // Attach status + raw details so callers that need them (e.g. the excess
+    // chain-break 409 warning flow) can branch without parsing the message.
+    const err = Object.assign(new Error(fullMsg), {
+      status: response.status,
+      code: error.error || null,
+      details: error.details || null,
+    });
+    throw err;
   }
 
   if (response.status === 204) return undefined as T;
