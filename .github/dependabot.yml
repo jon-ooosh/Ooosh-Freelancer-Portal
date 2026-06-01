@@ -1,0 +1,77 @@
+# Dependabot configuration
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# Security updates (auto-PRs for known vulnerabilities) are enabled separately
+# via repo Settings -> Advanced Security -> "Dependabot security updates" and
+# do NOT require this file. This file adds *scheduled* version updates so deps
+# don't quietly rot between security advisories.
+#
+# Low-noise design:
+#   - Weekly, Monday mornings (aligns with the server health-check email).
+#   - Routine minor/patch bumps are GROUPED into one PR per project.
+#   - Major (potentially breaking) bumps come as individual PRs to review.
+#   - Open-PR limits keep the queue small.
+version: 2
+updates:
+  # --- Next.js freelancer / payment portal (repo root) ---
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/London"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # --- OP backend (Express API) ---
+  - package-ecosystem: "npm"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/London"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # --- OP frontend (React + Vite SPA) ---
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/London"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # --- GitHub Actions used by workflows (e.g. deploy.yml) ---
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Europe/London"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(ci)"
