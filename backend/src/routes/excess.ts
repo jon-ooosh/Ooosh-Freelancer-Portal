@@ -67,6 +67,12 @@ const paymentSchema = z.object({
   reference: z.string().max(200).nullable().optional(),
   notes: z.string().max(1000).nullable().optional(),
   push_to_hirehop: z.boolean().default(true),
+  // Soft-enforce reimburse-after-nibble: when staff tries to top up an excess
+  // that already has a chain linkage (hh_deposit_id), the endpoint returns 409
+  // with a chain-break warning. Setting this to true acknowledges the warning
+  // and lets the call proceed (admin/manager override-style, no DB role check
+  // needed — the warning itself is the gate). See Jun 2026 build notes.
+  acknowledge_chain_break: z.boolean().optional(),
 }).refine(
   (val) => val.total_collected !== undefined || val.amount !== undefined,
   { message: 'Either total_collected or amount must be provided' }
@@ -819,7 +825,7 @@ router.put('/:id', validate(updateExcessSchema), async (req: AuthRequest, res: R
 router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { total_collected, amount: bodyAmount, method, reference, notes, push_to_hirehop } = req.body;
+    const { total_collected, amount: bodyAmount, method, reference, notes, push_to_hirehop, acknowledge_chain_break } = req.body;
 
     // Look up the existing record so we can compute the delta (new money) when
     // the caller passes total_collected (absolute set), and so we have
@@ -865,6 +871,38 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
         delta: 0,
         idempotent: true,
         hh_push_error: null,
+      });
+      return;
+    }
+
+    // Soft-enforce reimburse-after-nibble (Jun 2026): block top-ups against
+    // chain-linked records unless the caller explicitly acknowledges they're
+    // breaking the rollover chain. The 15047 scenario — staff rolls forward
+    // £1148, then tries to top up £52 — would push a second HH deposit that
+    // can't ride the chain forward to future hires. We force the operational
+    // decision: reimburse the residual and re-collect fresh OR proceed knowing
+    // the £52 won't follow the chain.
+    //
+    // Skipped for: rollover writes themselves (method='rolled_over' — that IS
+    // the chain extension), payments that reduce/match the existing total
+    // (delta <= 0 covered by no-op above), and explicit ack.
+    const isChainLinked = previous.hh_deposit_id != null;
+    const isTopUpAfterCollection = delta > 0.005
+      && !['needed', 'pending'].includes(previous.excess_status);
+    if (isChainLinked && isTopUpAfterCollection && method !== 'rolled_over' && !acknowledge_chain_break) {
+      const required = parseFloat(previous.excess_amount_required || '0');
+      const residual = Math.max(0, required - previousTaken);
+      res.status(409).json({
+        error: 'chain_break_warning',
+        message: 'This excess is linked to a HireHop deposit chain (rolled over from a previous hire). Adding more money here creates a second HH deposit that will NOT follow the chain forward to future rollovers.',
+        details: {
+          chain_break: true,
+          current_collected: previousTaken,
+          required,
+          residual,
+          suggested_action: 'reimburse_residual',
+          suggestion_reason: 'Reimburse the residual back to the client and collect a fresh full amount, OR re-submit with acknowledge_chain_break:true to proceed (the top-up will be tracked in OP but won\'t link to HireHop for future rollovers).',
+        },
       });
       return;
     }

@@ -145,6 +145,18 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
   const [payReference, setPayReference] = useState('');
   const [payPushToHH, setPayPushToHH] = useState(true);
   const [payHHPushError, setPayHHPushError] = useState<string | null>(null);
+  // Soft-enforce reimburse-after-nibble: when staff tries to top up a record
+  // already linked to a HireHop deposit chain (rolled forward from a previous
+  // hire), backend returns 409 with this payload. We surface the warning +
+  // require an explicit tick before re-submitting with the acknowledgement.
+  const [chainBreakWarning, setChainBreakWarning] = useState<{
+    message: string;
+    current_collected: number;
+    required: number;
+    residual: number;
+    suggestion_reason: string;
+  } | null>(null);
+  const [acknowledgeChainBreak, setAcknowledgeChainBreak] = useState(false);
 
   // Claim form
   const [claimAmount, setClaimAmount] = useState('');
@@ -381,15 +393,35 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           if (isNaN(totalCollected) || totalCollected < 0) {
             throw new Error('Enter a valid total collected amount');
           }
-          const resp = await api.post<{ data: any; hh_push_error?: string | null; idempotent?: boolean }>(
-            `/excess/${excess.id}/payment`,
-            {
-              total_collected: totalCollected,
-              method: payMethod,
-              reference: payReference || null,
-              push_to_hirehop: payPushToHH,
+          let resp: { data: any; hh_push_error?: string | null; idempotent?: boolean };
+          try {
+            resp = await api.post<{ data: any; hh_push_error?: string | null; idempotent?: boolean }>(
+              `/excess/${excess.id}/payment`,
+              {
+                total_collected: totalCollected,
+                method: payMethod,
+                reference: payReference || null,
+                push_to_hirehop: payPushToHH,
+                acknowledge_chain_break: acknowledgeChainBreak || undefined,
+              }
+            );
+          } catch (e) {
+            // Chain-break 409: surface the warning, force an explicit ack
+            // before re-submit. Don't blow the modal away.
+            const err = e as { status?: number; code?: string; details?: Record<string, unknown> };
+            if (err.status === 409 && err.code === 'chain_break_warning' && err.details) {
+              setChainBreakWarning({
+                message: (err as unknown as { message: string }).message || 'Chain-break warning',
+                current_collected: Number(err.details.current_collected || 0),
+                required: Number(err.details.required || 0),
+                residual: Number(err.details.residual || 0),
+                suggestion_reason: String(err.details.suggestion_reason || ''),
+              });
+              setLoading(false);
+              return;
             }
-          );
+            throw e;
+          }
           if (resp.hh_push_error) {
             // OP saved successfully but HH push failed. Surface the error and
             // keep the modal open so staff can decide what to do (manual link,
@@ -799,7 +831,7 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
         {action && (
           <div className="px-6 py-4">
             <button
-              onClick={() => { setAction(null); setError(''); setReceiptMode('choose'); setQrToken(null); setQrUrl(null); }}
+              onClick={() => { setAction(null); setError(''); setReceiptMode('choose'); setQrToken(null); setQrUrl(null); setChainBreakWarning(null); setAcknowledgeChainBreak(false); }}
               className="text-xs text-gray-500 hover:text-gray-700 mb-3 flex items-center gap-1"
             >
               <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
@@ -811,6 +843,29 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
             {action === 'payment' && (
               <div className="space-y-3">
                 <h3 className="text-sm font-semibold text-gray-900">Record Payment</h3>
+                {chainBreakWarning && (
+                  <div className="px-3 py-3 text-xs bg-amber-50 border border-amber-300 rounded-md text-amber-900 space-y-2">
+                    <div className="font-semibold">Chain-break warning — rolled-forward excess</div>
+                    <p>{chainBreakWarning.message}</p>
+                    <div className="grid grid-cols-3 gap-2 text-[11px] bg-white/60 rounded px-2 py-1.5">
+                      <div><span className="text-gray-600">Current</span><br/><strong>£{chainBreakWarning.current_collected.toFixed(2)}</strong></div>
+                      <div><span className="text-gray-600">Required</span><br/><strong>£{chainBreakWarning.required.toFixed(2)}</strong></div>
+                      <div><span className="text-gray-600">Residual</span><br/><strong>£{chainBreakWarning.residual.toFixed(2)}</strong></div>
+                    </div>
+                    <p className="italic">{chainBreakWarning.suggestion_reason}</p>
+                    <label className="flex items-start gap-2 cursor-pointer pt-1">
+                      <input
+                        type="checkbox"
+                        checked={acknowledgeChainBreak}
+                        onChange={(e) => setAcknowledgeChainBreak(e.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span className="text-amber-900">
+                        I understand — the top-up will be saved in OP but <strong>won't be tied to the HireHop chain</strong>. Future rollovers will only forward the original amount.
+                      </span>
+                    </label>
+                  </div>
+                )}
                 {payHHPushError && (
                   <div className="px-3 py-2 text-xs bg-amber-50 border border-amber-200 rounded-md text-amber-800">
                     <div className="font-semibold mb-1">Saved in OP — HireHop push failed</div>
@@ -1611,7 +1666,8 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               {!(action === 'upload_receipt' && receiptMode !== 'device') && (
                 <button
                   onClick={handleSubmit}
-                  disabled={loading}
+                  // Chain-break warning forces an explicit ack tick before Confirm fires.
+                  disabled={loading || (action === 'payment' && !!chainBreakWarning && !acknowledgeChainBreak)}
                   className="flex-1 px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50"
                 >
                   {loading ? 'Processing...' : 'Confirm'}

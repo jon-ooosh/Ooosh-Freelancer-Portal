@@ -125,16 +125,42 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
     }
     case 'charge.refunded': {
       const charge = event.data.object as ChargeObj;
-      const ex = await findExcessByPaymentIntent(piId(charge.payment_intent));
+      const piRef = piId(charge.payment_intent);
+      const ex = await findExcessByPaymentIntent(piRef);
       const refunded = (charge.amount_refunded / 100).toFixed(2);
-      // Notify only — do NOT auto-change the OP excess (jon's call). Staff
-      // reconcile via the Money tab.
+
+      // Auto-unwind the excess if a matching record exists. Idempotent — if
+      // the portal's payment-event has already applied this refund leg, the
+      // helper skips. The email to info@ still fires either way (visibility).
+      let unwindNote: string;
+      if (ex && piRef) {
+        try {
+          const { unwindRefundOnExcess } = await import('./excess-refund');
+          const result = await unwindRefundOnExcess({
+            excessId: ex.id,
+            amount: parseFloat(refunded),
+            source: 'stripe_webhook',
+            sourceRef: charge.id,
+            method: 'stripe_gbp',
+            notes: `Stripe charge ${charge.id}`,
+          });
+          unwindNote = result.updated
+            ? `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`
+            : `OP excess not changed: ${result.reason}. Reconcile manually if needed.`;
+        } catch (err) {
+          console.error('[stripe-webhook] charge.refunded unwind failed:', err);
+          unwindNote = `OP excess auto-unwind failed — please reconcile manually on the Money tab.`;
+        }
+      } else {
+        unwindNote = `No matching OP excess record found — reconcile manually if needed.`;
+      }
+
       await alertInfo(
         `Stripe refund recorded — £${refunded}`,
         [
           `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
           `OP excess: ${jobRef(ex)}.`,
-          `Action needed: if this relates to an insurance excess, mark it reimbursed on the Money tab so OP matches Stripe. OP has NOT changed the record automatically.`,
+          unwindNote,
         ]
       );
       break;
