@@ -162,6 +162,19 @@ const waiveSchema = z.object({
   reason: z.string().min(1),
 });
 
+// "Mark as Externally Resolved" — cleanup action for records where money has
+// already flowed in AND back out of OP's awareness (e.g. excess collected via
+// pre-PR-630 portal flow + refunded directly in HH or Stripe before PR 4
+// shipped). Sets both excess_amount_taken AND reimbursement_amount to `amount`
+// in one step, flips to `reimbursed`, no HH push. Requires a reason for audit.
+// See the May 2026 Jonathan Morley / RX22SWN incident for the canonical use case.
+const externallyResolvedSchema = z.object({
+  amount: z.number().min(0.01),
+  method: z.enum(['stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank']),
+  reference: z.string().max(200).nullable().optional(),
+  reason: z.string().min(1).max(500),
+});
+
 const overrideSchema = z.object({
   reason: z.enum([
     'client_on_credit',
@@ -2317,6 +2330,108 @@ const HH_BANK_IDS: Record<string, number> = {
   stripe_gbp: 267, worldpay: 169, amex: 165, wise_bacs: 265,
   till_cash: 168, paypal: 173, lloyds_bank: 170, rolled_over: 265,
 };
+
+// ── POST /api/excess/:id/mark-externally-resolved ──
+// Cleanup action: money flowed in and back out of OP's awareness (e.g. portal
+// charged + HH-side refund pre-dating the auto-reconciliation). Sets
+// excess_amount_taken AND reimbursement_amount to `amount` in one shot, flips
+// to `reimbursed`, does NOT push to HH (the HH side is already correct, that's
+// the whole point). Inherits the router-level STAFF_ROLES gate — same tier as
+// recording payments / reimbursing.
+//
+// Conservative guard: rejects records that have ANY existing payment activity
+// (amount_taken > 0, amount_held > 0, claim_amount > 0, reimbursement_amount > 0
+// or hh_deposit_id IS NOT NULL) — those should go through the normal payment /
+// reimburse paths, not this cleanup. The use case is records that look like
+// "nothing ever happened" but money has actually moved out-of-band.
+
+router.post('/:id/mark-externally-resolved', validate(externallyResolvedSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { amount, method, reference, reason } = req.body;
+
+    const cur = await query(
+      `SELECT excess_amount_taken, amount_held, claim_amount, reimbursement_amount,
+              hh_deposit_id, excess_status, notes, job_id
+       FROM job_excess WHERE id = $1`,
+      [id]
+    );
+    if (cur.rows.length === 0) {
+      res.status(404).json({ error: 'Excess record not found' });
+      return;
+    }
+    const row = cur.rows[0];
+
+    const hasActivity =
+      parseFloat(row.excess_amount_taken || '0') > 0.005 ||
+      parseFloat(row.amount_held || '0') > 0.005 ||
+      parseFloat(row.claim_amount || '0') > 0.005 ||
+      parseFloat(row.reimbursement_amount || '0') > 0.005 ||
+      row.hh_deposit_id != null;
+    if (hasActivity) {
+      res.status(409).json({
+        error: 'record_has_activity',
+        detail: 'This record already has payment / claim / reimburse activity or a HireHop deposit linkage. Use Record Payment / Reimburse / Unlink HireHop Deposit instead — Mark as Externally Resolved is only for records that look like nothing happened but money actually moved out-of-band.',
+      });
+      return;
+    }
+
+    const dateStr = new Date().toISOString().split('T')[0];
+    const noteLine = `[${dateStr} Externally Resolved] £${amount.toFixed(2)} via ${method}${reference ? ` (${reference})` : ''} — ${reason}. Record marked as collected-then-reimbursed to match external system; no HH push.`;
+    const newNotes = row.notes ? `${row.notes}\n${noteLine}` : noteLine;
+
+    const result = await query(
+      `UPDATE job_excess SET
+        excess_amount_taken = $1,
+        reimbursement_amount = $1,
+        excess_status = 'reimbursed',
+        payment_method = $2,
+        payment_reference = $3,
+        payment_date = COALESCE(payment_date, NOW()),
+        reimbursement_date = NOW(),
+        reimbursement_method = $2,
+        notes = $4,
+        updated_at = NOW()
+       WHERE id = $5
+       RETURNING *`,
+      [amount, method, reference || null, newNotes, id]
+    );
+
+    // Re-derive the close-out requirement state.
+    if (row.job_id) {
+      const { syncExcessRequirementStatus } = await import('../services/excess-requirement-sync');
+      syncExcessRequirementStatus(row.job_id).catch((e) =>
+        console.error('[excess] syncExcessRequirementStatus failed (externally-resolved):', e)
+      );
+    }
+
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, before_json, after_json)
+       VALUES ($1, 'job_excess', $2, 'mark_externally_resolved', $3::jsonb, $4::jsonb)`,
+      [
+        req.user!.id,
+        id,
+        JSON.stringify({
+          excess_status: row.excess_status,
+          excess_amount_taken: row.excess_amount_taken,
+          reimbursement_amount: row.reimbursement_amount,
+        }),
+        JSON.stringify({
+          excess_status: 'reimbursed',
+          excess_amount_taken: amount,
+          reimbursement_amount: amount,
+          reason,
+        }),
+      ]
+    ).catch((err) => console.error('[excess] audit_log insert failed (externally-resolved):', err));
+
+    console.log(`[excess] Externally resolved ${id} (by user ${req.user!.id}) — £${amount} via ${method}: ${reason}`);
+    res.json({ data: result.rows[0], message: 'Record marked as externally resolved' });
+  } catch (error) {
+    console.error('[excess] mark-externally-resolved error:', error);
+    res.status(500).json({ error: 'Failed to mark record as externally resolved' });
+  }
+});
 
 // ── POST /api/excess/:id/waive — Waive excess (admin only) ──
 

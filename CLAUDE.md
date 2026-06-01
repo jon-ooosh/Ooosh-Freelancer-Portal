@@ -1030,6 +1030,16 @@ The legacy "Record Payment → Rolled Over from Previous Hire" dropdown option i
 - Moving deposits between HH jobs (HH doesn't support this; OP linkage handles the conceptual move).
 - `/money/excess` summary cards now reflect current filter on the All Records tab — captured separately, also shipped this round.
 
+##### "Mark as Externally Resolved" cleanup action (Jun 2026)
+
+`POST /api/excess/:id/mark-externally-resolved` — the cleanup tool for records where money has flowed in **and** back out of OP's awareness in one stroke (e.g. an excess collected via the pre-PR-630 portal flow and refunded directly in HireHop / Stripe before the auto-reconciliation existed). Sets `excess_amount_taken` AND `reimbursement_amount` to `amount` and flips status to `reimbursed` in a single UPDATE. Does NOT push to HireHop — the assumption is HH already reflects reality. Requires a `reason` string for audit.
+
+**Conservative guard:** refuses any record with existing payment activity (`excess_amount_taken > 0`, `amount_held > 0`, `claim_amount > 0`, `reimbursement_amount > 0`, or `hh_deposit_id IS NOT NULL`) — those need to go through the normal `Record Payment` / `Reimburse` / `Unlink HireHop Deposit` paths. Use this **only** for records that look like nothing happened but money has actually moved out-of-band.
+
+UI: surfaces as **"Mark as Externally Resolved (cleanup)"** in the Manage modal, only when status is `needed`/`pending` AND no activity (mirrors the backend guard). Surfaced as a low-prominence action under the standard Record Payment / Pre-Auth / Waive — it's not for normal flows.
+
+Use case that drove the build: Jonathan Morley / RX22SWN (HH 15175, Jun 2026) — staff issued the Stripe refund manually before PR #630's auto-reconciliation existed. Standard `Unlink HireHop Deposit` reset the OP record's `amount_taken` to 0 → record looked like "Excess Not Collected" with the dispatch banner active, despite the hire being long over. This action fixes the cleanup in one click.
+
 ##### Excess RBAC matrix (May 2026)
 
 | Action | Tier | Rationale |
