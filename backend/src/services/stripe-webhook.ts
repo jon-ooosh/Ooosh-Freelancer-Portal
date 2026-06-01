@@ -128,7 +128,6 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
     case 'charge.refunded': {
       const charge = event.data.object as ChargeObj;
       const piRef = piId(charge.payment_intent);
-      const ex = await findExcessByPaymentIntent(piRef);
       const refunded = (charge.amount_refunded / 100).toFixed(2);
 
       // Use the latest refund's id for dedup — OP-initiated reimburse (Jun 2026)
@@ -142,12 +141,20 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
       const sourceRefForDedup = latestRefund
         ? `stripe_refund_${latestRefund.id}`
         : `stripe_charge_${charge.id}`;
+      const stripeRefundId = latestRefund?.id || null;
 
-      // Auto-unwind the excess if a matching record exists. Idempotent — if
-      // the portal's payment-event has already applied this refund leg, the
-      // helper skips. The email to info@ still fires either way (visibility).
-      let unwindNote: string;
+      // Two paths arrive here: refund of an EXCESS (stripe_payment_intent_id
+      // on job_excess matches) or refund of a HIRE PAYMENT (stripe_payment_intent
+      // on job_payments matches the original payment). Try excess first, then
+      // hire. Differentiate the email content so staff aren't told "no matching
+      // excess" when it was a hire payment refund the whole time.
+      const ex = await findExcessByPaymentIntent(piRef);
+      let subject: string;
+      let bodyLines: string[];
+
       if (ex && piRef) {
+        // ── Excess refund path ──
+        let unwindNote: string;
         try {
           const { unwindRefundOnExcess } = await import('./excess-refund');
           const result = await unwindRefundOnExcess({
@@ -162,21 +169,106 @@ async function processStripeEvent(event: StripeEventLike): Promise<void> {
             ? `OP excess auto-marked <strong>${result.newStatus}</strong> to match Stripe — no further action needed.`
             : `OP excess not changed: ${result.reason}. Reconcile manually if needed.`;
         } catch (err) {
-          console.error('[stripe-webhook] charge.refunded unwind failed:', err);
+          console.error('[stripe-webhook] charge.refunded excess unwind failed:', err);
           unwindNote = `OP excess auto-unwind failed — please reconcile manually on the Money tab.`;
         }
-      } else {
-        unwindNote = `No matching OP excess record found — reconcile manually if needed.`;
-      }
-
-      await alertInfo(
-        `Stripe refund recorded — £${refunded}`,
-        [
+        subject = `Stripe excess refund recorded — £${refunded}`;
+        bodyLines = [
           `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
           `OP excess: ${jobRef(ex)}.`,
           unwindNote,
-        ]
-      );
+        ];
+      } else if (piRef) {
+        // ── Hire payment refund path ──
+        // Find the original payment in job_payments. Then check whether a
+        // matching refund leg already exists in job_payments (OP-originated
+        // refunds insert one with payment_reference = the Stripe refund id).
+        const origPayment = await query(
+          `SELECT jp.id, jp.job_id, jp.hirehop_job_id, jp.hirehop_deposit_id, jp.amount,
+                  jp.client_name, j.job_name
+           FROM job_payments jp
+           LEFT JOIN jobs j ON j.id = jp.job_id
+           WHERE jp.stripe_payment_intent = $1
+             AND jp.payment_type IN ('deposit', 'balance', 'other')
+           ORDER BY jp.payment_date DESC LIMIT 1`,
+          [piRef]
+        );
+        const origRow = origPayment.rows[0] || null;
+
+        if (!origRow) {
+          subject = `Stripe refund recorded — £${refunded}`;
+          bodyLines = [
+            `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
+            `No matching OP record found (neither excess nor hire payment) — reconcile manually if needed.`,
+          ];
+        } else {
+          // Check for existing refund leg by Stripe refund id (OP-originated)
+          // OR by Stripe charge id (defensive). If found, dedup.
+          let alreadyRecorded = false;
+          if (stripeRefundId) {
+            const dedup = await query(
+              `SELECT id FROM job_payments
+               WHERE job_id = $1 AND payment_type = 'refund'
+                 AND (payment_reference = $2 OR payment_reference = $3)
+               LIMIT 1`,
+              [origRow.job_id, stripeRefundId, `stripe_refund_${stripeRefundId}`]
+            );
+            alreadyRecorded = dedup.rows.length > 0;
+          }
+
+          if (alreadyRecorded) {
+            subject = `Stripe refund recorded — £${refunded} (already on OP)`;
+            bodyLines = [
+              `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
+              `Hire payment on ${jobRef({ id: '', job_id: null, hirehop_job_id: origRow.hirehop_job_id, client_name: origRow.client_name, excess_status: '' })} — already recorded in OP. No action needed.`,
+            ];
+          } else {
+            // OP-originated path failed mid-flight OR this is a Stripe-dashboard
+            // refund — create the missing OP `job_payments` refund row so the
+            // Money tab balance / payment history stays accurate.
+            try {
+              await query(
+                `INSERT INTO job_payments
+                  (job_id, hirehop_job_id, payment_type, amount, payment_method,
+                   payment_reference, stripe_payment_intent, payment_status, source,
+                   hirehop_deposit_id, client_name, notes, payment_date)
+                 VALUES ($1, $2, 'refund', $3, 'stripe_gbp', $4, $5, 'completed', 'stripe_webhook', $6, $7, $8, NOW())`,
+                [
+                  origRow.job_id,
+                  origRow.hirehop_job_id,
+                  parseFloat(refunded),
+                  stripeRefundId || null,
+                  piRef,
+                  origRow.hirehop_deposit_id,
+                  origRow.client_name,
+                  `Auto-recorded from Stripe webhook (charge ${charge.id})`,
+                ]
+              );
+              subject = `Stripe hire payment refund recorded — £${refunded}`;
+              bodyLines = [
+                `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
+                `Hire payment on <strong>${origRow.client_name || '—'}</strong> · HH job #${origRow.hirehop_job_id || '—'}${origRow.job_name ? ` (${origRow.job_name})` : ''}.`,
+                `OP <strong>auto-recorded</strong> this refund in the payment history — no further action needed. Note: HireHop paperwork (negative payment-application) was NOT pushed by this webhook — verify it's there manually if needed.`,
+              ];
+            } catch (insertErr) {
+              console.error('[stripe-webhook] hire payment refund auto-record failed:', insertErr);
+              subject = `Stripe refund recorded — £${refunded}`;
+              bodyLines = [
+                `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
+                `Hire payment on ${origRow.client_name} · HH job #${origRow.hirehop_job_id}. OP failed to auto-record — please reconcile manually on the Money tab.`,
+              ];
+            }
+          }
+        }
+      } else {
+        subject = `Stripe refund recorded — £${refunded}`;
+        bodyLines = [
+          `A refund of £${refunded} was processed in Stripe for charge ${charge.id}.`,
+          `No PaymentIntent on the charge — couldn't look up the matching OP record. Reconcile manually if needed.`,
+        ];
+      }
+
+      await alertInfo(subject, bodyLines);
       break;
     }
     default:

@@ -1504,16 +1504,19 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       `INSERT INTO job_payments
         (job_id, hirehop_job_id, payment_type, amount, payment_method,
          payment_reference, stripe_payment_intent, payment_status, source,
-         hirehop_deposit_id, client_name, notes, payment_date, created_by)
-       VALUES ($1, $2, 'refund', $3, $4, $5, $6, 'completed', 'ooosh_op', $7, $8, $9, NOW(), $10)
+         hirehop_deposit_id, client_name, notes, payment_date, recorded_by)
+       VALUES ($1, $2, 'refund', $3, $4, $5, $6, 'completed', 'op', $7, $8, $9, NOW(), $10)
        RETURNING *`,
       [
         job.id,
         job.hh_job_number,
         amount,
         method,
-        reference || null,
-        stripeRefundId || stripePaymentIntent || null,
+        // For refund rows: payment_reference carries the Stripe refund id
+        // (when present) so the webhook can dedup against it. The original
+        // PI stays on stripe_payment_intent for cross-reference.
+        stripeRefundId || reference || null,
+        stripePaymentIntent || null,
         hh_deposit_id,
         job.client_name,
         auditNotes || null,
