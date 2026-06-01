@@ -844,6 +844,41 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
           )}
         </div>
 
+        {/* Nibble banner — appears when this excess has been partly claimed
+            but not fully resolved. Surfaces the operational decision rather
+            than letting staff drift into a chain-broken state at rollover. */}
+        {!action && (() => {
+          const claimed = Number(excess.claim_amount || 0);
+          const taken = Number(excess.excess_amount_taken || 0);
+          const reimbursed = Number(excess.reimbursement_amount || 0);
+          const residual = Math.max(0, taken - claimed - reimbursed);
+          const status = excess.excess_status;
+          const terminal = ['waived', 'reimbursed', 'rolled_over', 'released', 'fully_claimed', 'not_required'];
+          const isNibbled = claimed > 0.005 && !terminal.includes(status) && residual > 0.005;
+          if (!isNibbled) return null;
+          const required = Number(excess.excess_amount_required || 0);
+          return (
+            <div className="px-6 pt-4">
+              <div className="px-3 py-3 text-xs bg-amber-50 border border-amber-300 rounded-md text-amber-900 space-y-2">
+                <div className="font-semibold">Excess partly claimed — resolve before close-out</div>
+                <div className="grid grid-cols-3 gap-2 text-[11px] bg-white/60 rounded px-2 py-1.5">
+                  <div><span className="text-gray-600">Claimed</span><br/><strong>£{claimed.toFixed(2)}</strong></div>
+                  <div><span className="text-gray-600">Reimbursed</span><br/><strong>£{reimbursed.toFixed(2)}</strong></div>
+                  <div><span className="text-gray-600">Residual</span><br/><strong>£{residual.toFixed(2)}</strong></div>
+                </div>
+                <p>
+                  Pick one of: <em>Reimburse residual</em> to send the £{residual.toFixed(2)} back,
+                  {required > taken + 0.005 && <> <em>Top up to required</em> (collect the shortfall),</>}
+                  {' '}or <em>Roll forward</em> as-is (next hire sees £{residual.toFixed(2)} only).
+                </p>
+                <p className="italic text-amber-800">
+                  Leaving the record unresolved here means future rollovers only forward £{residual.toFixed(2)} — and any top-up after rollover breaks the HireHop chain.
+                </p>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Action selection */}
         {!action && (
           <div className="px-6 py-4">
@@ -1337,15 +1372,33 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               </div>
             )}
 
-            {action === 'rollover_apply' && rolloverInfo?.available && (
+            {action === 'rollover_apply' && rolloverInfo?.available && (() => {
+              const available = Number(rolloverInfo.amount_available || 0);
+              const required = Number(excess.excess_amount_required || 0);
+              // Source has been nibbled when the available rollover comes in
+              // under the new hire's required figure. Flag the shortfall so
+              // staff know what they're forwarding.
+              const shortfall = required > available + 0.005 ? required - available : 0;
+              return (
               <div className="space-y-3">
                 <h3 className="text-sm font-semibold text-gray-900">Apply Rolled Over Excess</h3>
                 <div className="text-xs bg-purple-50 border border-purple-200 rounded-md p-3 text-purple-900">
-                  <strong>£{Number(rolloverInfo.amount_available || 0).toFixed(2)}</strong> available
+                  <strong>£{available.toFixed(2)}</strong> available
                   {rolloverInfo.source_hh_job ? <> from previous hire <strong>#{rolloverInfo.source_hh_job}</strong></> : ' from a previous hire'}.
                   <br />
                   <span className="text-purple-700">No money moves — the existing deposit on the previous hire is being earmarked for this hire.</span>
                 </div>
+                {shortfall > 0 && (
+                  <div className="text-xs bg-amber-50 border border-amber-300 rounded-md p-3 text-amber-900">
+                    <strong>Heads up — source was partly claimed.</strong> The previous hire's excess
+                    has been nibbled (claim or partial reimbursement), so only{' '}
+                    <strong>£{available.toFixed(2)}</strong> rolls forward against the
+                    <strong> £{required.toFixed(2)}</strong> required here — a shortfall of{' '}
+                    <strong>£{shortfall.toFixed(2)}</strong>.
+                    Apply this amount AND top up the residual separately if you need full cover,
+                    OR proceed with the under-cover (insurance gap noted).
+                  </div>
+                )}
                 <div>
                   <label className="block text-xs font-medium text-gray-600 mb-1">Amount to apply</label>
                   <div className="relative">
@@ -1362,11 +1415,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     />
                   </div>
                   <p className="text-xs text-gray-500 mt-1">
-                    Pre-filled with the lesser of (required £{Number(excess.excess_amount_required || 0).toFixed(2)}) and (available £{Number(rolloverInfo.amount_available || 0).toFixed(2)}).
+                    Pre-filled with the lesser of (required £{required.toFixed(2)}) and (available £{available.toFixed(2)}).
                   </p>
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             {action === 'move' && (
               <div className="space-y-3">

@@ -2569,7 +2569,9 @@ Singleton Stripe SDK client for OP's direct Stripe operations (pre-auth capture,
 
 **Env vars:** `STRIPE_SECRET_KEY` (restricted key — scopes: PaymentIntents R/W, Refunds R/W, Charges R, Disputes R). `STRIPE_WEBHOOK_SECRET` for the PR 4 webhook receiver. Both already set on the production server (May 2026). SDK pins to its bundled `LatestApiVersion`.
 
-**Used by:** `routes/excess.ts` capture/release endpoints. PR 4 will add `routes/webhooks.ts` `/stripe` receiver. **Don't instantiate `new Stripe()` elsewhere** — go through `getStripeClient()` so key handling lives in one place.
+**Used by:** `routes/excess.ts` capture/release/**reimburse** endpoints (reimburse with `method='stripe_gbp'` AND `stripe_payment_intent_id` set originates the Stripe refund directly via `stripe.refunds.create()` — Jun 2026, closes the "OP first" loop so staff don't have to bounce out to the Stripe dashboard). PR 4 added the `routes/webhooks.ts` `/stripe` receiver for incoming events. **Don't instantiate `new Stripe()` elsewhere** — go through `getStripeClient()` so key handling lives in one place.
+
+**Refund dedup with the Stripe webhook (Jun 2026):** OP-initiated refunds and the corresponding `charge.refunded` webhook both fire for one logical refund event. The reimburse endpoint pre-records a `refund_legs` entry keyed `stripe_refund_<refund.id>` immediately after the Stripe API call succeeds; the webhook handler extracts the latest refund's id from `charge.refunds.data` (sorted by `created` desc) and constructs the same key. `unwindRefundOnExcess()` dedups on `(source, ref)` — whichever path arrives second is a no-op. Falls back to `stripe_charge_<id>` only when the webhook payload's refunds list is missing (defensive — Stripe always includes it on `charge.refunded`).
 
 ### PII Encryption ✅ COMPLETE (PR 3, May 2026)
 
