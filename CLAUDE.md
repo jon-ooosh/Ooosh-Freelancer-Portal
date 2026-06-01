@@ -780,7 +780,7 @@ Staff records manual payment (bank transfer, card in office, cash)
 - [x] Client balance check (`GET /api/excess/client-balance/:xeroContactId`) — for auto-suggest
 - [x] Migration 060: stop the `client_excess_ledger` view picking a misleading `MAX(client_name)` for the UNLINKED group — derivation-engine creates leave `xero_contact_id`/`client_name` NULL, all collapse into one bucket, and `MAX(client_name)` was alphabetically pinning a real client (e.g. "Zal Jones") on top of every other unlinked record on the summary table. The drill-in always showed correct per-job clients; only the summary label was wrong. Fix forces the UNLINKED group to display 'Unlinked Records'. Underlying data untouched, no Xero impact.
 - [x] **Migration 063: widen ledger grouping key to `client_name` when `xero_contact_id` is NULL** (24 Apr 2026). Partial companion to the 060 display fix. Previously every record without `xero_contact_id` collapsed into the single `'UNLINKED'` bucket, making portal-created excess records for unrelated clients look like they belonged to one shared "Unlinked Records" client on the `/money/excess` summary table. Fix: (a) `hh-requirement-derivation.ts` now populates `client_name` from `jobs.client_name` on auto-create (was inserting NULL); (b) one-shot backfill in migration 063 rescues existing derivation-created records by copying `client_name` across from their linked job; (c) ledger view grouping key is now `CASE WHEN xero_contact_id IS NOT NULL THEN xero_contact_id WHEN client_name IS NOT NULL THEN 'name:' || client_name ELSE 'UNLINKED' END`, so records for distinct clients bundle under their own name; (d) `GET /api/excess/ledger/:xeroContactId` understands all three key forms (real ID / `name:<...>` / `UNLINKED`) and queries `job_excess` accordingly; (e) `ExcessLedgerPage.tsx` URL-encodes the key so names with spaces/special chars round-trip safely. Only records with no `xero_contact_id` AND no `client_name` still fall into UNLINKED.
-- [ ] **Proper `xero_contact_id` column on `organisations`** — the remaining follow-up. Migration 063 closed the immediate "everyone is Unlinked" UX gap, but the real fix is: (a) add `xero_contact_id` column on `organisations`; (b) populate from HH contact sync (HH stores the Xero link via its accounting bridge); (c) read it into `job_excess` at creation time so records pair to real Xero contacts from the start; (d) one-shot backfill script for the existing records, reading the linked job's client organisation. Until done, the name-based bundling from 063 works but ties records to a mutable string rather than a stable Xero ID.
+- [x] **`xero_contact_id` column on `organisations` — SHIPPED Jun 2026** (migration 100). The structural fix behind migration 063's name-based bundling: (a) `organisations.xero_contact_id TEXT` column added with a partial index for lookups; (b) backfilled from `external_id_map` (HH contact sync already populated Xero ACC_IDs there since launch — most-recent-by-synced_at wins on duplicates); (c) `hirehop-sync.ts` §1c now writes BOTH `external_id_map` AND `organisations.xero_contact_id` (canonical = first non-empty ACC_ID); (d) `hh-requirement-derivation.ts` `INSERT INTO job_excess` reads `organisations.xero_contact_id` via the job's `client_id` and populates the new record at write time; (e) one-shot backfill in the migration updates existing `job_excess` rows where `xero_contact_id IS NULL` AND the linked client org has a Xero id. New records land in the correct ledger bucket from the start; existing records reading the ledger view automatically reclassify on the next page load.
 
 **Excess calculation — "Top N Drivers" algorithm:**
 The hire form process calculates excess. The principle: charge the excess of the highest-risk drivers, one per van. Sort all drivers by excess descending, take top N (N = van count), sum. If fewer drivers than vans, fill remaining slots with standard £1,200/van. The OP stores the calculated total via `job_excess.excess_amount_required`.
@@ -1114,12 +1114,18 @@ Built on branch `claude/excess-preauth-lifecycle-ZvUQA` as one PR (jon's call). 
 
 **Branch for this work:** PR 1 = #573, PR 2 = #582, PR 3 = #597 + #599, PR 3 polish = #603 (all merged to main). PR 4 = branch `claude/excess-preauth-lifecycle-ZvUQA`. The held/taken pre-auth lifecycle is now feature-complete.
 
-##### Phase F — Staff Card Payments (future)
-Allow staff to take card payments directly from the Money tab, rather than walking to the card terminal.
-- [ ] Stripe integration in OP (PaymentIntent creation from backend)
-- [ ] "Take Card Payment" button on Money tab → amount, generates Stripe payment link or embedded checkout
-- [ ] Webhook receiver for direct OP Stripe payments
-- [ ] Auto-record in HH as deposit + OP as job_payment
+##### Phase F — Staff Card Payments (OP-first money loop)
+
+OP is now the staff control surface for the FULL post-collection money loop. Initial collection (PaymentIntent creation, payment-link generation) is the remaining piece — staff still walks to the card terminal for that.
+
+**Shipped (Jun 2026):**
+- [x] **OP-initiated Stripe refunds — excess** (`/excess/:id/reimburse` with `method='stripe_gbp'` + `stripe_payment_intent_id` on the record). Calls `stripe.refunds.create()` directly; HH paperwork pushed best-effort once Stripe succeeds; `refund_legs` JSONB pre-records the leg so the incoming `charge.refunded` webhook is a no-op.
+- [x] **OP-initiated Stripe refunds — hire payments** (`POST /api/money/:jobId/refund-payment`). Money tab payment-history rows render a Refund button; Stripe-paid rows lock the method to `stripe_gbp` and refund via the API; other methods record-keep only (negative HH payment application + OP `job_payments` row). Same hh_push_error surfacing pattern as the excess flow. Multiple partial refunds against one deposit allowed (cumulative cap = original amount).
+- [x] **Stripe webhook reciprocity** — OP-initiated refunds and the corresponding `charge.refunded` webhook dedup on `stripe_refund_<id>` keys across both paths.
+
+**Still future:**
+- [ ] **Initial card collection from OP** (PaymentIntent create). "Take Card Payment" button on Money tab → amount → Stripe payment link or embedded checkout → portal-style flow without leaving OP.
+- [ ] Auto-record OP-collected payments in HH as deposit + OP as `job_payment`.
 
 ##### Global Money Views
 - [x] `/money/excess` — Insurance excess ledger (client balances, all records, drill-down)

@@ -16,6 +16,15 @@
 
 import { hhBroker } from './hirehop-broker';
 
+// HireHop bank account IDs — shared by money.ts (deposit pushes), excess.ts
+// (reimburse + refund payment applications), and any future hire-side refund
+// flow. Sourced from HH's Bank Accounts settings; see CLAUDE.md "HireHop bank
+// account IDs" table. Don't duplicate this mapping in callers.
+export const HH_BANK_IDS: Record<string, number> = {
+  stripe_gbp: 267, worldpay: 169, amex: 165, wise_bacs: 265,
+  till_cash: 168, paypal: 173, lloyds_bank: 170, rolled_over: 265,
+};
+
 // HireHop bank account labels (for emails / memos).
 export const PAYMENT_METHODS_LABELS: Record<string, string> = {
   stripe_gbp: 'Stripe GBP',
