@@ -1030,6 +1030,16 @@ The legacy "Record Payment → Rolled Over from Previous Hire" dropdown option i
 - Moving deposits between HH jobs (HH doesn't support this; OP linkage handles the conceptual move).
 - `/money/excess` summary cards now reflect current filter on the All Records tab — captured separately, also shipped this round.
 
+##### Excess RBAC matrix (May 2026)
+
+| Action | Tier | Rationale |
+|---|---|---|
+| Create / edit excess record; record payment (incl. **rollover**); record pre-auth hold; **capture / claim / partial claim**; release a Stripe hold; receipts (upload + QR token); link / unlink HH deposit | **STAFF_ROLES** | Day-to-day excess work — warehouse + general assistants + weekend manager all need this. Pre-May 2026 these were locked to admin/manager; jon's call (week of 1 Jun 2026) widened them so the whole team can take, top up, pre-auth, claim damage, and attach receipts without an admin bottleneck. |
+| Reimburse (money out); override the dispatch gate; move excess to a different entity; bank-details / previous-bank-details GETs; client ledger reads | **MANAGER_ROLES** (admin + manager + weekend_manager) | Money out the door + PII + overriding a hard gate. Weekend manager is in this tier so the weekend team isn't blocked when admin/manager are off. |
+| Waive an excess to £0 | **admin** only | Absolute / irreversible — kept narrow. |
+
+Gates live on `routes/excess.ts`: a router-level `authorize(...STAFF_ROLES)` closes the freelancer leak on `/create`/`/payment`/`PUT /:id`, then per-route `authorize(...MANAGER_ROLES)` / `authorize('admin')` tightens the manager-tier and admin-only actions. When adding a new excess endpoint, default to inheriting STAFF_ROLES; only add a tighter gate if the action moves real money, reveals PII, overrides a hard gate, or is irreversible.
+
 ##### Excess Pre-Auth Lifecycle — held vs taken (migration 087, May 2026) ✅ PR 1 + PR 2 SHIPPED
 
 **The core idea:** a pre-authorisation is a *promise of money on hold*, NOT money in our account. Before migration 087, OP modelled a pre-auth as a `taken` record with a `pre_auth` status label, conflating the two — which meant (a) reporting overstated collected excess by the value of every live hold, (b) the claim/reimburse flow refused to operate on pre-auths because no real HireHop deposit existed, and (c) "capture £200, release the rest" had no representation. The 087 model separates the two.
@@ -2831,7 +2841,7 @@ The picker promote checkbox keys off this — it only renders for selected conta
 **Authentication & Authorization:**
 - [x] JWT access tokens (15 min) + refresh tokens (7 days)
 - [x] Bcrypt password hashing (12 salt rounds)
-- [x] RBAC middleware (`authorize()`) on sensitive routes — 6 roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, `freelancer`. **For staff-wide gates** (anything the whole non-freelancer team needs), use the shared `STAFF_ROLES` constant from `middleware/auth.ts` and spread it: `router.use(authorize(...STAFF_ROLES))`. Do NOT hardcode `authorize('admin', 'manager', 'staff')` — it silently locks out `weekend_manager` and `general_assistant` (this caused a live bug on `/pipeline` + `/requirements` post-go-live, fixed 26 Apr 2026). For narrower gates (e.g. only admin/manager can waive excess), keep the explicit role list — `STAFF_ROLES` is only for "everyone except freelancer".
+- [x] RBAC middleware (`authorize()`) on sensitive routes — 6 roles: `admin`, `manager`, `staff`, `general_assistant`, `weekend_manager`, `freelancer`. **For staff-wide gates** (anything the whole non-freelancer team needs), use the shared `STAFF_ROLES` constant from `middleware/auth.ts` and spread it: `router.use(authorize(...STAFF_ROLES))`. Do NOT hardcode `authorize('admin', 'manager', 'staff')` — it silently locks out `weekend_manager` and `general_assistant` (this caused a live bug on `/pipeline` + `/requirements` post-go-live, fixed 26 Apr 2026). **For manager-tier gates** (money out the door, hard-gate overrides, PII reads), use the `MANAGER_ROLES` constant (admin + manager + weekend_manager) — don't hardcode `authorize('admin', 'manager')`, which silently locks out the weekend manager from actions they should be able to take when admin/manager are off. Use `authorize('admin')` alone only for absolute / irreversible decisions (e.g. waiving an excess to £0). For other narrower gates, keep the explicit role list.
 - [x] Account locking — `is_active = false` nulls refresh token via DB trigger, locks user out within 15 min (access token expiry)
 - [x] Optimistic locking — `version` column on people, organisations, venues, jobs tables. PUT requests can send `version` to detect concurrent edits (409 Conflict if stale). Backwards compatible — omitting `version` skips the check.
 - [x] JWT_SECRET required via env var (no default fallback) — app won't start without it

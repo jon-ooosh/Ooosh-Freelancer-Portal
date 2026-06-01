@@ -12,7 +12,7 @@ import { z } from 'zod';
 import { query } from '../config/database';
 import { sendExcessEmail } from '../services/money-emails';
 import { syncExcessRequirementStatus } from '../services/excess-requirement-sync';
-import { authenticate, authorize, AuthRequest } from '../middleware/auth';
+import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
@@ -24,6 +24,18 @@ import { attachExcessReceipt } from '../services/excess-receipt';
 
 const router = Router();
 router.use(authenticate);
+// Whole-team gate — every excess endpoint requires a staff JWT (no freelancers).
+// Per-route `authorize(...MANAGER_ROLES)` / `authorize('admin')` below tightens
+// further for manager-tier actions (reimburse, waive, override, move, bank
+// details). Everything else falls through to the staff baseline so the warehouse
+// / general assistants can take excess, top it up, pre-auth, capture/claim
+// damage, mark holds released, attach receipts, and link HH deposits — all
+// without an admin/manager bottleneck. The May 2026 RBAC widening: staff were
+// being blocked from `record-preauth` / `capture` / `claim` / `receipt` /
+// `link-deposit` / `unlink-deposit` because those carried inline admin/manager
+// gates. Removed. Reimburse / waive / override / move / bank-details reads
+// stay restricted (money out the door + PII).
+router.use(authorize(...STAFF_ROLES));
 
 // ── Schemas ──
 
@@ -580,7 +592,7 @@ router.get('/:id/available-rollover', async (req: AuthRequest, res: Response) =>
 
 // ── GET /api/excess/ledger — Client excess ledger ──
 
-router.get('/ledger', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
+router.get('/ledger', authorize(...MANAGER_ROLES), async (_req: AuthRequest, res: Response) => {
   try {
     const result = await query(
       `SELECT * FROM client_excess_ledger ORDER BY balance_held DESC`
@@ -594,7 +606,7 @@ router.get('/ledger', authorize('admin', 'manager'), async (_req: AuthRequest, r
 
 // ── GET /api/excess/ledger/:xeroContactId — Single client ledger ──
 
-router.get('/ledger/:xeroContactId', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+router.get('/ledger/:xeroContactId', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const xeroContactId = String(req.params.xeroContactId);
 
@@ -1153,7 +1165,7 @@ router.post('/:id/payment', validate(paymentSchema), async (req: AuthRequest, re
 // Only valid from a "no money yet" state (needed / pending). A record already
 // holding or carrying money is rejected — you don't stack a hold on top.
 
-router.post('/:id/record-preauth', authorize('admin', 'manager'), validate(recordPreauthSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/record-preauth', validate(recordPreauthSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { amount, method, reference, stripe_payment_intent_id, expires_in_days, notes } = req.body;
@@ -1268,7 +1280,7 @@ router.post('/:id/record-preauth', authorize('admin', 'manager'), validate(recor
 // receipt_required to-do flag. Card-machine excess (worldpay/amex/cash) needs a
 // receipt for audit — surfaced as an amber to-do (NeedsAttention bucket) until set.
 
-router.post('/:id/receipt', authorize('admin', 'manager'), validate(receiptSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/receipt', validate(receiptSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { receipt_url } = req.body;
@@ -1297,7 +1309,7 @@ router.post('/:id/receipt', authorize('admin', 'manager'), validate(receiptSchem
 // the phone should open. The phone uploads the receipt via the public
 // /api/mobile-upload/:token endpoint, which attaches it to this excess record.
 
-router.post('/:id/receipt-upload-token', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+router.post('/:id/receipt-upload-token', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const exists = await query(`SELECT id FROM job_excess WHERE id = $1`, [id]);
@@ -1330,7 +1342,7 @@ router.post('/:id/receipt-upload-token', authorize('admin', 'manager'), async (r
 // Returns the decrypted bank details for THIS record. Admin/manager only — this
 // is PII. Decryption happens here (response layer), never in SQL or logs.
 
-router.get('/:id/bank-details', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+router.get('/:id/bank-details', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const result = await query(
@@ -1371,7 +1383,7 @@ router.get('/:id/bank-details', authorize('admin', 'manager'), async (req: AuthR
 // details + when they were last used (staleness heads-up — staff reconfirm with
 // the client as standard). Admin/manager only.
 
-router.get('/:id/previous-bank-details', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+router.get('/:id/previous-bank-details', authorize(...MANAGER_ROLES), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     if (!isEncryptionConfigured()) {
@@ -1432,7 +1444,7 @@ router.get('/:id/previous-bank-details', authorize('admin', 'manager'), async (r
   }
 });
 
-router.post('/:id/capture', authorize('admin', 'manager'), validate(captureSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/capture', validate(captureSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { amount, method, invoice_id, receipt_url, reason, notes } = req.body;
@@ -1751,7 +1763,7 @@ router.post('/:id/capture', authorize('admin', 'manager'), validate(captureSchem
 //
 // Status transitions: pre_auth → released (terminal).
 
-router.post('/:id/release', authorize('admin', 'manager'), validate(releaseSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/release', validate(releaseSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { reason, notes } = req.body;
@@ -1864,7 +1876,7 @@ router.post('/:id/release', authorize('admin', 'manager'), validate(releaseSchem
 //   - OP-only record (no `hirehop_job_id`) → claim recorded in OP only,
 //     response flagged `op_only: true`.
 
-router.post('/:id/claim', authorize('admin', 'manager'), validate(claimSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { amount, invoice_id, notes } = req.body;
@@ -2037,7 +2049,7 @@ router.post('/:id/claim', authorize('admin', 'manager'), validate(claimSchema), 
 // only, no HH/Xero touchpoint to drift from. Response includes op_only: true so the
 // UI can flag it.
 
-router.post('/:id/reimburse', authorize('admin', 'manager'), validate(reimburseSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { amount, method, bank_details } = req.body;
@@ -2306,7 +2318,7 @@ router.post('/:id/waive', authorize('admin'), validate(waiveSchema), async (req:
 
 // ── POST /api/excess/:id/override — Manager override to allow dispatch without excess ──
 
-router.post('/:id/override', authorize('admin', 'manager'), validate(overrideSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/override', authorize(...MANAGER_ROLES), validate(overrideSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { reason, notes } = req.body;
@@ -2340,7 +2352,7 @@ router.post('/:id/override', authorize('admin', 'manager'), validate(overrideSch
 
 // ── POST /api/excess/:id/move — Move excess to a different Xero contact / person ──
 
-router.post('/:id/move', authorize('admin', 'manager'), validate(moveExcessSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/move', authorize(...MANAGER_ROLES), validate(moveExcessSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { xero_contact_id, xero_contact_name, client_name, person_id, reason } = req.body;
@@ -2390,7 +2402,7 @@ const linkDepositSchema = z.object({
   amount: z.number().min(0.01).optional(), // If provided, also updates excess_amount_taken
 });
 
-router.post('/:id/link-deposit', authorize('admin', 'manager'), validate(linkDepositSchema), async (req: AuthRequest, res: Response) => {
+router.post('/:id/link-deposit', validate(linkDepositSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { hh_deposit_id, amount } = req.body;
@@ -2459,7 +2471,7 @@ router.post('/:id/link-deposit', authorize('admin', 'manager'), validate(linkDep
 // status via deriveExcessStatus so a fresh `needed`/`not_required` surface
 // is presented to staff and the portal.
 
-router.post('/:id/unlink-deposit', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
+router.post('/:id/unlink-deposit', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
 
