@@ -21,6 +21,17 @@ export const STAFF_ROLES = [
   'weekend_manager',
 ] as const satisfies readonly AuthUser['role'][];
 
+// Manager tier — actions that move real money out the door (reimburse), waive
+// requirements, or override hard gates. Includes weekend_manager so the
+// weekend team isn't blocked from manager-level calls when admin/manager are
+// off. 'admin' alone is reserved for absolute / irreversible decisions
+// (e.g. waive an excess to £0).
+export const MANAGER_ROLES = [
+  'admin',
+  'manager',
+  'weekend_manager',
+] as const satisfies readonly AuthUser['role'][];
+
 if (!process.env.JWT_SECRET) {
   throw new Error('FATAL: JWT_SECRET environment variable is required');
 }
