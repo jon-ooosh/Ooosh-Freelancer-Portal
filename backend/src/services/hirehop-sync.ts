@@ -352,6 +352,21 @@ export async function syncContactsFromHireHop(userId: string): Promise<SyncResul
               );
             }
           }
+          // Migration 100 promoted xero_contact_id to a first-class column on
+          // organisations so job_excess inserts can pair to a real Xero
+          // contact at write time. Keep the column in lockstep with
+          // external_id_map — take the first non-empty ACC_ID as the canonical
+          // Xero contact id for the org. (Multi-Xero-binding cases are rare;
+          // they fall back to the most-recent-by-synced_at on backfill anyway.)
+          const canonicalXero = rep.ACC_IDS.find((a) => a.ACC_ID)?.ACC_ID;
+          if (canonicalXero) {
+            await client.query(
+              `UPDATE organisations
+               SET xero_contact_id = $1
+               WHERE id = $2 AND (xero_contact_id IS NULL OR xero_contact_id <> $1)`,
+              [canonicalXero, orgId]
+            );
+          }
         }
       }
 

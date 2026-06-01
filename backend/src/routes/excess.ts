@@ -16,7 +16,7 @@ import { authenticate, authorize, AuthRequest, STAFF_ROLES, MANAGER_ROLES } from
 import { validate } from '../middleware/validate';
 import { emailService } from '../services/email-service';
 import { hhBroker } from '../services/hirehop-broker';
-import { pushDepositToHH } from '../services/hh-deposit';
+import { pushDepositToHH, HH_BANK_IDS } from '../services/hh-deposit';
 import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 import { encryptJson, tryDecryptJson, isEncryptionConfigured } from '../services/encryption';
 import { createMobileUploadToken } from '../services/mobile-upload-token';
@@ -2403,12 +2403,6 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
     res.status(500).json({ error: 'Failed to record reimbursement', detail: errMsg });
   }
 });
-
-// HireHop bank account IDs (shared with money.ts)
-const HH_BANK_IDS: Record<string, number> = {
-  stripe_gbp: 267, worldpay: 169, amex: 165, wise_bacs: 265,
-  till_cash: 168, paypal: 173, lloyds_bank: 170, rolled_over: 265,
-};
 
 // ── POST /api/excess/:id/mark-externally-resolved ──
 // Cleanup action: money flowed in and back out of OP's awareness (e.g. portal

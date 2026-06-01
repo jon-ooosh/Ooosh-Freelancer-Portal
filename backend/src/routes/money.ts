@@ -14,7 +14,8 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { verifyApiKey } from '../middleware/api-key';
 import { hhBroker } from '../services/hirehop-broker';
-import { pushDepositToHH } from '../services/hh-deposit';
+import { pushDepositToHH, HH_BANK_IDS } from '../services/hh-deposit';
+import { getStripeClient, isStripeConfigured, isStripeError } from '../config/stripe';
 import { sendPaymentEmail, sendExcessEmail, sendLastMinuteAlert } from '../services/money-emails';
 import {
   triggerHireFormEmailOnConfirmation as triggerHireFormEmailOnConfirmationShared,
@@ -100,6 +101,18 @@ const recordPaymentSchema = z.object({
   (val) => (val.amount !== undefined && val.amount >= 0.01) || val.total_collected !== undefined,
   { message: 'Either amount (>= 0.01) or total_collected must be provided' }
 );
+
+// Refund a hire payment (deposit/balance/other) from the Money tab. Closes the
+// "OP first" loop for hire-side money — Stripe-paid deposits refund directly
+// via the Stripe API, others record-keep only. Excess refunds go through
+// /excess/:id/reimburse instead; this endpoint is hire-side only.
+const refundPaymentSchema = z.object({
+  hh_deposit_id: z.number().int().positive(),
+  amount: z.number().min(0.01),
+  method: z.enum(['stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank']),
+  reference: z.string().max(255).nullable().optional(),
+  notes: z.string().max(1000).nullable().optional(),
+});
 
 // ── GET /api/money/job-lookup/:hhJobNumber — Look up OP job by HireHop job number ──
 // Used by Payment Portal to resolve HH job numbers to OP UUIDs for subsequent API calls.
@@ -919,6 +932,43 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       d => !linkedHHDepositIds.has(d.hh_deposit_id)
     );
 
+    // Enrich hire-deposit rows with the original Stripe PaymentIntent (when we
+    // recorded one in job_payments). The frontend uses this to decide whether
+    // OP can originate the refund via the Stripe API or whether it's a
+    // record-keeping-only refund (BACS/cash). Best-effort — missing matches
+    // just leave stripe_payment_intent undefined.
+    if (deposits.length > 0 && job.id) {
+      try {
+        const hireDepIds = deposits.filter(d => !d.is_refund && d.id).map(d => d.id);
+        if (hireDepIds.length > 0) {
+          const opPayments = await query(
+            `SELECT hirehop_deposit_id, stripe_payment_intent, payment_method
+             FROM job_payments
+             WHERE job_id = $1 AND hirehop_deposit_id = ANY($2)
+               AND payment_type IN ('deposit', 'balance', 'other')`,
+            [job.id, hireDepIds]
+          );
+          const byHhDep = new Map<number, { stripe_payment_intent: string | null; payment_method: string | null }>();
+          for (const r of opPayments.rows) {
+            byHhDep.set(r.hirehop_deposit_id, {
+              stripe_payment_intent: r.stripe_payment_intent || null,
+              payment_method: r.payment_method || null,
+            });
+          }
+          for (const d of deposits) {
+            if (d.is_refund) continue;
+            const match = byHhDep.get(d.id);
+            if (match) {
+              (d as Record<string, unknown>).stripe_payment_intent = match.stripe_payment_intent;
+              (d as Record<string, unknown>).op_payment_method = match.payment_method;
+            }
+          }
+        }
+      } catch (enrichErr) {
+        console.error('[money] Deposit Stripe-PI enrichment failed (non-fatal):', enrichErr);
+      }
+    }
+
     res.json({
       data: {
         job: {
@@ -1301,6 +1351,186 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
   } catch (error) {
     console.error('[money] Record payment error:', error);
     res.status(500).json({ error: 'Failed to record payment' });
+  }
+});
+
+// ── POST /api/money/:jobId/refund-payment — Refund a hire payment ──
+//
+// OP-first refund flow for hire payments (deposits, balances, etc.). Mirrors
+// the excess /:id/reimburse flow but on the hire-side: looks up the original
+// HH deposit, finds the matching OP `job_payments` row (for the Stripe PI),
+// calls Stripe → posts negative HH payment application → records in OP.
+//
+// Stripe-paid deposits: OP originates the refund directly. Other methods (BACS,
+// cash, etc.) record-keep only — the real-world money movement happens off
+// system. The frontend Refund button is hidden on rows that are already a
+// refund leg (HH `credit < 0`).
+//
+// For excess refunds, use /excess/:id/reimburse instead — that path is wired
+// into the `refund_legs` dedup ledger and excess email templates.
+router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = String(req.params.jobId);
+    const { hh_deposit_id, amount, method, reference, notes } = req.body;
+
+    const isUuid = /^[0-9a-f]{8}-/.test(jobId);
+    const jobResult = await query(
+      isUuid
+        ? `SELECT id, hh_job_number, client_name FROM jobs WHERE id = $1`
+        : `SELECT id, hh_job_number, client_name FROM jobs WHERE hh_job_number = $1`,
+      [isUuid ? jobId : parseInt(jobId)]
+    );
+    if (jobResult.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    const job = jobResult.rows[0];
+
+    // Look up the matching OP job_payments row — gives us the Stripe PI and
+    // original amount for validation. Best-effort: HH-originating deposits
+    // may not have an OP row, in which case we just record-keep against HH.
+    const opPaymentRes = await query(
+      `SELECT id, amount, stripe_payment_intent, payment_method, payment_type
+       FROM job_payments
+       WHERE job_id = $1 AND hirehop_deposit_id = $2
+         AND payment_type IN ('deposit', 'balance', 'other')
+       ORDER BY payment_date DESC LIMIT 1`,
+      [job.id, hh_deposit_id]
+    );
+    const originalPayment: { id: number; amount: string; stripe_payment_intent: string | null; payment_method: string; payment_type: string } | null = opPaymentRes.rows[0] || null;
+    const stripePaymentIntent = originalPayment?.stripe_payment_intent || null;
+
+    // Validate amount against the original (when we know it). Allow up to the
+    // original — staff records partial refunds by calling this endpoint twice.
+    if (originalPayment) {
+      const originalAmount = parseFloat(originalPayment.amount);
+      const alreadyRefundedRes = await query(
+        `SELECT COALESCE(SUM(amount), 0) AS refunded
+         FROM job_payments
+         WHERE job_id = $1 AND hirehop_deposit_id = $2 AND payment_type = 'refund'`,
+        [job.id, hh_deposit_id]
+      );
+      const alreadyRefunded = parseFloat(alreadyRefundedRes.rows[0].refunded || '0');
+      const refundable = originalAmount - alreadyRefunded;
+      if (amount > refundable + 0.005) {
+        res.status(400).json({
+          error: 'Refund amount exceeds available',
+          detail: `Original: £${originalAmount.toFixed(2)}, already refunded: £${alreadyRefunded.toFixed(2)}, available: £${refundable.toFixed(2)}, requested: £${amount.toFixed(2)}`,
+        });
+        return;
+      }
+    }
+
+    // ── Step 0: Stripe refund (only when method=stripe_gbp + PI on the row) ──
+    let stripeRefundId: string | null = null;
+    const stripeRefundPath = method === 'stripe_gbp' && stripePaymentIntent;
+    if (stripeRefundPath) {
+      if (!isStripeConfigured()) {
+        res.status(503).json({ error: 'Stripe not configured' });
+        return;
+      }
+      try {
+        const stripe = getStripeClient();
+        const refund = await stripe.refunds.create({
+          payment_intent: stripePaymentIntent,
+          amount: Math.round(amount * 100),
+        });
+        stripeRefundId = refund.id;
+        console.log(`[money] Stripe refund created: ${refund.id} (£${amount.toFixed(2)} on PI ${stripePaymentIntent})`);
+      } catch (err) {
+        const msg = isStripeError(err) ? err.message : (err instanceof Error ? err.message : 'Unknown error');
+        console.error('[money] Stripe refund failed:', msg);
+        res.status(502).json({ error: 'Stripe refund failed', detail: msg });
+        return;
+      }
+    }
+
+    // ── Step 1: Push negative HH payment application against the deposit ──
+    let hhPushError: string | null = null;
+    let hhPaymentAppId: number | null = null;
+    if (job.hh_job_number) {
+      try {
+        const currentDate = new Date().toISOString().split('T')[0];
+        const hhBankId = HH_BANK_IDS[method] || 265;
+        const description = `${job.hh_job_number} - Refund${originalPayment?.payment_type ? ' (' + originalPayment.payment_type + ')' : ''}`;
+        const memo = `Hire payment refund — via ${method.replace(/_/g, ' ')}${reference ? ` (ref: ${reference})` : ''} (recorded via Ooosh OP)`;
+        const hhResult = await hhBroker.post('/php_functions/billing_payments_save.php', {
+          id: 0,
+          date: currentDate,
+          desc: description,
+          paid: amount,
+          memo,
+          bank: hhBankId,
+          OWNER: 0,
+          deposit: hh_deposit_id,
+          no_webhook: 1,
+        }, { priority: 'high' });
+        if (!hhResult.success || !hhResult.data) {
+          const errText = hhResult.error || 'HireHop did not accept the payment application';
+          if (stripeRefundPath) {
+            hhPushError = `Stripe refund processed, but HireHop paperwork push failed: ${errText}. Please retry the HH push manually or contact engineering.`;
+            console.error('[money] HH refund push failed after Stripe success:', errText);
+          } else {
+            res.status(502).json({ error: 'HireHop refund failed', detail: errText });
+            return;
+          }
+        } else {
+          hhPaymentAppId = (hhResult.data as { hh_id?: number; id?: number; ID?: number }).hh_id
+            ?? (hhResult.data as { hh_id?: number; id?: number; ID?: number }).id
+            ?? (hhResult.data as { hh_id?: number; id?: number; ID?: number }).ID
+            ?? null;
+        }
+      } catch (hhErr) {
+        const msg = hhErr instanceof Error ? hhErr.message : String(hhErr);
+        if (stripeRefundPath) {
+          hhPushError = `Stripe refund processed, but HireHop push threw: ${msg}.`;
+          console.error('[money] HH refund push threw after Stripe success:', msg);
+        } else {
+          res.status(502).json({ error: 'HireHop push error', detail: msg });
+          return;
+        }
+      }
+    }
+
+    // ── Step 2: Record in OP job_payments as a refund leg ──
+    const auditNotes = [
+      reference ? `Ref: ${reference}` : null,
+      notes || null,
+      stripeRefundId ? `Stripe refund ${stripeRefundId}` : null,
+      hhPaymentAppId ? `HH payment app ${hhPaymentAppId}` : null,
+    ].filter(Boolean).join(' — ');
+
+    const opResult = await query(
+      `INSERT INTO job_payments
+        (job_id, hirehop_job_id, payment_type, amount, payment_method,
+         payment_reference, stripe_payment_intent, payment_status, source,
+         hirehop_deposit_id, client_name, notes, payment_date, created_by)
+       VALUES ($1, $2, 'refund', $3, $4, $5, $6, 'completed', 'ooosh_op', $7, $8, $9, NOW(), $10)
+       RETURNING *`,
+      [
+        job.id,
+        job.hh_job_number,
+        amount,
+        method,
+        reference || null,
+        stripeRefundId || stripePaymentIntent || null,
+        hh_deposit_id,
+        job.client_name,
+        auditNotes || null,
+        req.user!.id,
+      ]
+    );
+
+    console.log(`[money] Hire refund recorded: £${amount} on job ${job.id} via ${method}${stripeRefundId ? ` (Stripe ${stripeRefundId})` : ''}${hhPushError ? ' [HH push failed]' : ''}`);
+    res.json({
+      data: opResult.rows[0],
+      ...(stripeRefundId ? { stripe_refund_id: stripeRefundId } : {}),
+      ...(hhPaymentAppId ? { hh_payment_application_id: hhPaymentAppId } : {}),
+      ...(hhPushError ? { hh_push_error: hhPushError } : {}),
+    });
+  } catch (error) {
+    console.error('[money] Refund payment error:', error);
+    res.status(500).json({ error: 'Failed to refund payment' });
   }
 });
 

@@ -349,11 +349,23 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
         [jobId]
       );
       if (existingExcess.rows.length === 0) {
+        // Migration 100: pair the new excess record to the client's Xero
+        // contact directly when known, so it lands in the correct ledger
+        // bucket from the start (instead of falling into the name-based
+        // workaround bucket added by migration 063).
+        const xeroLookup = await client.query(
+          `SELECT o.xero_contact_id
+           FROM jobs j
+           LEFT JOIN organisations o ON o.id = j.client_id
+           WHERE j.id = $1`,
+          [jobId]
+        );
+        const xeroContactId = xeroLookup.rows[0]?.xero_contact_id || null;
         await client.query(
           `INSERT INTO job_excess (
             job_id, hirehop_job_id, excess_amount_required, excess_status,
-            excess_calculation_basis, client_name, notes, created_by
-          ) VALUES ($1, $2, $3, 'needed', $4, $5, $6, $7)`,
+            excess_calculation_basis, client_name, xero_contact_id, notes, created_by
+          ) VALUES ($1, $2, $3, 'needed', $4, $5, $6, $7, $8)`,
           [
             jobId,
             job.hh_job_number,
@@ -361,10 +373,10 @@ export async function deriveRequirementsForJob(jobId: string): Promise<Derivatio
             `Standard £${STANDARD_EXCESS_PER_VAN.toLocaleString()} × ${flags.self_drive_count} self-drive vehicle(s)`,
             // Populate client_name so the ledger view can group this record
             // under the real client (via the 'name:' prefix added in migration
-            // 063) instead of dumping it into the catch-all UNLINKED bucket.
-            // Proper fix is still adding xero_contact_id on organisations —
-            // see CLAUDE.md Step 3 Phase A follow-ups.
+            // 063) when xero_contact_id isn't available. With migration 100
+            // landing, xero_contact_id is preferred when set.
             job.client_name || null,
+            xeroContactId,
             `Auto-created: ${flags.self_drive_count} self-drive vehicle(s) detected`,
             '00000000-0000-0000-0000-000000000000',
           ]

@@ -38,6 +38,11 @@ interface FinancialData {
       description: string | null; memo: string | null;
       is_excess: boolean; is_refund: boolean;
       bank_name: string | null; entered_by: string | null;
+      /** Original Stripe PaymentIntent (when OP has a matching job_payments row).
+       *  Presence enables OP-initiated Stripe refund on the row. */
+      stripe_payment_intent?: string | null;
+      /** Original OP-side payment method (when matched). Drives the modal's default. */
+      op_payment_method?: string | null;
     }>;
   };
   vat_adjustment: {
@@ -98,6 +103,65 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   // Link deposit state
   const [linkingDeposit, setLinkingDeposit] = useState<{ hh_deposit_id: number; amount: number } | null>(null);
   const [linkLoading, setLinkLoading] = useState(false);
+
+  // Refund modal — hire-side payment refund (deposit/balance/etc.). Stripe-paid
+  // rows refund directly via Stripe API; other methods record-keep only.
+  const [refundingDep, setRefundingDep] = useState<FinancialData['financial']['deposits'][number] | null>(null);
+  const [refundAmount, setRefundAmount] = useState('');
+  const [refundMethod, setRefundMethod] = useState<'stripe_gbp' | 'worldpay' | 'amex' | 'wise_bacs' | 'till_cash' | 'paypal' | 'lloyds_bank'>('stripe_gbp');
+  const [refundReference, setRefundReference] = useState('');
+  const [refundNotes, setRefundNotes] = useState('');
+  const [refundLoading, setRefundLoading] = useState(false);
+  const [refundError, setRefundError] = useState('');
+  const [refundResult, setRefundResult] = useState<{ stripe_refund_id?: string; hh_push_error?: string | null } | null>(null);
+
+  const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
+    setRefundingDep(dep);
+    setRefundAmount(String(dep.amount));
+    setRefundMethod(dep.stripe_payment_intent ? 'stripe_gbp' : (dep.op_payment_method as typeof refundMethod) || 'worldpay');
+    setRefundReference('');
+    setRefundNotes('');
+    setRefundError('');
+    setRefundResult(null);
+  };
+
+  const closeRefundModal = () => {
+    setRefundingDep(null);
+    setRefundError('');
+    setRefundResult(null);
+    if (refundResult) loadData();
+  };
+
+  const submitRefund = async () => {
+    if (!refundingDep) return;
+    const parsed = parseFloat(refundAmount);
+    if (isNaN(parsed) || parsed < 0.01) {
+      setRefundError('Enter a valid amount (£0.01 or more)');
+      return;
+    }
+    setRefundLoading(true);
+    setRefundError('');
+    try {
+      const resp = await api.post<{ data: unknown; stripe_refund_id?: string; hh_push_error?: string | null }>(
+        `/money/${jobId}/refund-payment`,
+        {
+          hh_deposit_id: refundingDep.id,
+          amount: parsed,
+          method: refundMethod,
+          reference: refundReference.trim() || null,
+          notes: refundNotes.trim() || null,
+        }
+      );
+      setRefundResult({
+        stripe_refund_id: resp.stripe_refund_id,
+        hh_push_error: resp.hh_push_error || null,
+      });
+    } catch (e) {
+      setRefundError(e instanceof Error ? e.message : 'Refund failed');
+    } finally {
+      setRefundLoading(false);
+    }
+  };
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -659,19 +723,30 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           return (
             <div className="divide-y divide-gray-100">
               {financial.deposits.map((dep) => (
-                <div key={dep.id} className="py-2.5 flex items-center justify-between">
+                <div key={dep.id} className="py-2.5 flex items-center justify-between gap-3">
                   <div className="flex-1">
                     <p className="text-sm text-gray-700">
                       {dep.date ? new Date(dep.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : '—'}
                       {dep.bank_name && <span className="text-gray-500"> — {dep.bank_name}</span>}
+                      {dep.stripe_payment_intent && !dep.is_refund && <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">Stripe</span>}
                     </p>
                     {dep.description && (
                       <p className="text-xs text-gray-400 mt-0.5">{dep.description}</p>
                     )}
                   </div>
-                  <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
-                    {dep.is_refund ? '-' : ''}£{Number(dep.amount).toFixed(2)}
-                  </p>
+                  <div className="flex items-center gap-3">
+                    <p className={`text-sm font-semibold ${dep.is_refund ? 'text-red-600' : 'text-gray-900'}`}>
+                      {dep.is_refund ? '-' : ''}£{Number(dep.amount).toFixed(2)}
+                    </p>
+                    {!dep.is_refund && (
+                      <button
+                        onClick={() => openRefundModal(dep)}
+                        className="text-xs text-ooosh-600 hover:text-ooosh-700 underline"
+                      >
+                        Refund
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -939,6 +1014,112 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           onClose={() => setActionExcess(null)}
           onUpdated={loadData}
         />
+      )}
+
+      {/* Hire payment refund modal */}
+      {refundingDep && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={closeRefundModal}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Refund Payment</h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  £{Number(refundingDep.amount).toFixed(2)} on {refundingDep.date ? new Date(refundingDep.date).toLocaleDateString('en-GB') : '—'}
+                  {refundingDep.bank_name && <> — {refundingDep.bank_name}</>}
+                </p>
+              </div>
+              <button onClick={closeRefundModal} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+            </div>
+
+            {refundResult ? (
+              <div className="px-5 py-5 space-y-3">
+                <div className="px-3 py-2 bg-green-50 border border-green-200 rounded text-sm text-green-800">
+                  Refund recorded successfully.
+                  {refundResult.stripe_refund_id && <div className="text-xs mt-1">Stripe refund: <code className="font-mono">{refundResult.stripe_refund_id}</code></div>}
+                </div>
+                {refundResult.hh_push_error && (
+                  <div className="px-3 py-2 bg-amber-50 border border-amber-300 rounded text-xs text-amber-900">
+                    <div className="font-semibold mb-1">HireHop paperwork push failed</div>
+                    {refundResult.hh_push_error}
+                  </div>
+                )}
+                <div className="flex justify-end">
+                  <button onClick={closeRefundModal} className="px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md">Close</button>
+                </div>
+              </div>
+            ) : (
+              <div className="px-5 py-4 space-y-3">
+                {refundingDep.stripe_payment_intent && (
+                  <div className="px-3 py-2 bg-purple-50 border border-purple-200 rounded text-xs text-purple-900">
+                    <strong>Stripe-paid</strong> — OP will originate the refund directly via the Stripe API. The matching payment-application appears in HireHop alongside.
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Amount £</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    max={refundingDep.amount}
+                    value={refundAmount}
+                    onChange={(e) => setRefundAmount(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                  />
+                  <p className="text-[11px] text-gray-500 mt-1">Max £{Number(refundingDep.amount).toFixed(2)} (partial refunds OK — submit again for the residual).</p>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Method</label>
+                  <select
+                    value={refundMethod}
+                    onChange={(e) => setRefundMethod(e.target.value as typeof refundMethod)}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                    disabled={!!refundingDep.stripe_payment_intent}
+                  >
+                    <option value="stripe_gbp">Stripe GBP</option>
+                    <option value="worldpay">Worldpay</option>
+                    <option value="amex">Amex</option>
+                    <option value="wise_bacs">Wise (BACS)</option>
+                    <option value="lloyds_bank">Lloyds Bank</option>
+                    <option value="till_cash">Cash</option>
+                    <option value="paypal">PayPal</option>
+                  </select>
+                  {refundingDep.stripe_payment_intent && (
+                    <p className="text-[11px] text-gray-500 mt-1">Locked to Stripe — original payment was made via Stripe.</p>
+                  )}
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Reference (optional)</label>
+                  <input
+                    type="text"
+                    value={refundReference}
+                    onChange={(e) => setRefundReference(e.target.value)}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                    placeholder="e.g. customer reference"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Notes (optional)</label>
+                  <textarea
+                    value={refundNotes}
+                    onChange={(e) => setRefundNotes(e.target.value)}
+                    rows={2}
+                    className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md"
+                    placeholder="Why is this being refunded?"
+                  />
+                </div>
+                {refundError && (
+                  <div className="px-3 py-2 bg-red-50 border border-red-200 rounded text-xs text-red-800">{refundError}</div>
+                )}
+                <div className="flex gap-2 justify-end pt-1">
+                  <button onClick={closeRefundModal} className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50">Cancel</button>
+                  <button onClick={submitRefund} disabled={refundLoading} className="px-4 py-2 text-sm font-medium text-white bg-ooosh-600 hover:bg-ooosh-700 rounded-md disabled:opacity-50">
+                    {refundLoading ? 'Processing...' : 'Confirm Refund'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
