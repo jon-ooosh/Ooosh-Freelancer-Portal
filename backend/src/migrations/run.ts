@@ -136,6 +136,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '099_excess_refund_legs.sql',
         '100_organisations_xero_contact_id.sql',
         '101_xero_bank_account_mapping.sql',
+        '102_user_cot_card_last4.sql',
       ];
 
       for (const migration of migrations) {

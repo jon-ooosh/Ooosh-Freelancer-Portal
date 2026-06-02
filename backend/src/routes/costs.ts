@@ -369,6 +369,20 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
       approvalState = 'verified';
     }
 
+    // COT-card payments are stamped with the uploader's name + their stored
+    // card last 4 (from Profile) — staff no longer enters either every time.
+    if (data.payment_method === 'cot_card') {
+      const me = await query(
+        `SELECT CONCAT(p.first_name, ' ', p.last_name) AS holder, u.cot_card_last4 AS last4
+           FROM users u JOIN people p ON p.id = u.person_id WHERE u.id = $1`,
+        [req.user!.id],
+      );
+      if (me.rows[0]) {
+        data.cot_card_holder = me.rows[0].holder?.trim() || null;
+        data.cot_card_last4 = me.rows[0].last4 || null;
+      }
+    }
+
     const cols = ['uploaded_by', 'approval_state'];
     const vals: unknown[] = [req.user!.id, approvalState];
     for (const c of WRITABLE) {

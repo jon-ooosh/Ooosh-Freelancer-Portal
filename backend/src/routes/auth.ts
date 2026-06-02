@@ -59,6 +59,9 @@ const changePasswordSchema = z.object({
 const updateProfileSchema = z.object({
   first_name: z.string().min(1).optional(),
   last_name: z.string().min(1).optional(),
+  // Staff's company-card last 4. Optional + nullable so the user can clear it.
+  // Stored on users (not people) — it's a staff-only operational field.
+  cot_card_last4: z.string().regex(/^\d{4}$/).optional().nullable(),
 });
 
 // Avatar upload config — images only, 5MB limit
@@ -246,6 +249,7 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   try {
     const result = await query(
       `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
+              u.cot_card_last4,
               p.first_name, p.last_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1`,
@@ -264,42 +268,54 @@ router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// PUT /api/auth/profile — update own profile (name only, not email/role)
+// PUT /api/auth/profile — update own profile (name + COT card last 4)
 router.put('/profile', authenticate, validate(updateProfileSchema), async (req: AuthRequest, res: Response) => {
   try {
-    const { first_name, last_name } = req.body;
+    const { first_name, last_name, cot_card_last4 } = req.body as {
+      first_name?: string; last_name?: string; cot_card_last4?: string | null
+    };
     const userId = req.user!.id;
 
-    const updates: string[] = [];
-    const params: unknown[] = [];
+    // people fields (name)
+    const peopleUpdates: string[] = [];
+    const peopleParams: unknown[] = [];
     let idx = 1;
+    if (first_name) { peopleUpdates.push(`first_name = $${idx++}`); peopleParams.push(first_name); }
+    if (last_name)  { peopleUpdates.push(`last_name = $${idx++}`);  peopleParams.push(last_name); }
 
-    if (first_name) {
-      updates.push(`first_name = $${idx}`);
-      params.push(first_name);
-      idx++;
-    }
-    if (last_name) {
-      updates.push(`last_name = $${idx}`);
-      params.push(last_name);
-      idx++;
+    // users fields (COT card last 4)
+    const usersUpdates: string[] = [];
+    const usersParams: unknown[] = [];
+    if (cot_card_last4 !== undefined) {
+      usersUpdates.push(`cot_card_last4 = $1`);
+      usersParams.push(cot_card_last4); // null clears, string sets
     }
 
-    if (updates.length === 0) {
+    if (!peopleUpdates.length && !usersUpdates.length) {
       res.status(400).json({ error: 'No fields to update' });
       return;
     }
 
-    params.push(userId);
-    await query(
-      `UPDATE people SET ${updates.join(', ')}, updated_at = NOW()
-       WHERE id = (SELECT person_id FROM users WHERE id = $${idx})`,
-      params
-    );
+    if (peopleUpdates.length) {
+      peopleParams.push(userId);
+      await query(
+        `UPDATE people SET ${peopleUpdates.join(', ')}, updated_at = NOW()
+         WHERE id = (SELECT person_id FROM users WHERE id = $${idx})`,
+        peopleParams
+      );
+    }
+    if (usersUpdates.length) {
+      usersParams.push(userId);
+      await query(
+        `UPDATE users SET ${usersUpdates.join(', ')} WHERE id = $${usersParams.length}`,
+        usersParams
+      );
+    }
 
     // Return updated user
     const result = await query(
       `SELECT u.id, u.email, u.role, u.avatar_url, u.force_password_change,
+              u.cot_card_last4,
               p.first_name, p.last_name
        FROM users u JOIN people p ON u.person_id = p.id
        WHERE u.id = $1`,
