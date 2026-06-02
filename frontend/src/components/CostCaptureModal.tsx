@@ -74,7 +74,6 @@ type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | 
 export default function CostCaptureModal({ onClose, onSaved, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
-  const fullName = user ? `${user.first_name} ${user.last_name}`.trim() : '';
   const isEdit = Boolean(existing);
 
   // ── Form state ───────────────────────────────────────────────────────────
@@ -535,9 +534,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               </div>
             </div>
 
-            {paymentMethod === 'cot_card' && (
+            {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
               <p className="text-xs text-gray-500 italic">
-                Stamped automatically as {fullName || 'you'} · card ending {user?.cot_card_last4 ? `····${user.cot_card_last4}` : '— set in Profile to enable reconciliation matching'}
+                Set your COT card last 4 in Profile to enable Xero reconciliation matching.
               </p>
             )}
 
@@ -553,8 +552,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                 </div>
                 {rechargeMode === 'partial' && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Recharge amount (£)</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Recharge amount (£, net of VAT)</label>
                     <input type="number" step="0.01" min="0" className={inputCls} value={rechargeAmount} onChange={(e) => setRechargeAmount(e.target.value)} />
+                    <p className="text-xs text-gray-400 mt-1">VAT will be added when this is billed via HireHop.</p>
                   </div>
                 )}
               </div>
