@@ -415,7 +415,7 @@ router.get('/fleet', async (req: FlexibleVehicleRequest, res: Response) => {
         return;
       }
       const r = await query('SELECT * FROM fleet_vehicles WHERE id = $1', [scope.vehicleId]);
-      res.json({ data: r.rows.map(mapDbRowToVehicle) });
+      res.json({ data: r.rows.map(row => mapDbRowToVehicle(row)) });
       return;
     }
 
@@ -450,7 +450,8 @@ router.get('/fleet', async (req: FlexibleVehicleRequest, res: Response) => {
     );
 
     // Map DB rows to the VM's Vehicle interface shape
-    const vehicles = result.rows.map(mapDbRowToVehicle);
+    const includeFinance = canViewVehicleFinance(req.user?.role);
+    const vehicles = result.rows.map(row => mapDbRowToVehicle(row, { includeFinance }));
 
     res.json({ data: vehicles });
   } catch (error) {
@@ -492,7 +493,7 @@ router.get('/fleet/:idOrReg', async (req: FlexibleVehicleRequest, res: Response)
       return;
     }
 
-    res.json(mapDbRowToVehicle(result.rows[0]));
+    res.json(mapDbRowToVehicle(result.rows[0], { includeFinance: canViewVehicleFinance(req.user?.role) }));
   } catch (error) {
     console.error('[vehicles/fleet] Detail error:', error);
     res.status(500).json({ error: 'Failed to load vehicle' });
@@ -528,6 +529,17 @@ const FLEET_FIELD_MAP: Record<string, string> = {
   wifi_network: 'wifi_network', wifiNetwork: 'wifi_network',
   finance_with: 'finance_with', financeWith: 'finance_with',
   finance_ends: 'finance_ends', financeEnds: 'finance_ends',
+  // Finance & lifecycle (migration 103) — admin-only (see FINANCE_FIELD_KEYS)
+  finance_start: 'finance_start', financeStart: 'finance_start',
+  finance_reference: 'finance_reference', financeReference: 'finance_reference',
+  purchase_cost: 'purchase_cost', purchaseCost: 'purchase_cost',
+  finance_cost: 'finance_cost', financeCost: 'finance_cost',
+  extra_costs: 'extra_costs', extraCosts: 'extra_costs',
+  sold_date: 'sold_date', soldDate: 'sold_date',
+  sale_price: 'sale_price', salePrice: 'sale_price',
+  sale_notes: 'sale_notes', saleNotes: 'sale_notes',
+  // Removal checklist (migration 103) — all-staff (JSONB, like setup_checklist)
+  removal_checklist: 'removal_checklist', removalChecklist: 'removal_checklist',
   co2_per_km: 'co2_per_km', co2PerKm: 'co2_per_km',
   recommended_tyre_psi_front: 'recommended_tyre_psi_front', recommendedTyrePsiFront: 'recommended_tyre_psi_front',
   recommended_tyre_psi_rear: 'recommended_tyre_psi_rear', recommendedTyrePsiRear: 'recommended_tyre_psi_rear',
@@ -574,10 +586,28 @@ const FLEET_FIELD_MAP: Record<string, string> = {
 /** Coerce a request value for its target DB column (uppercase reg, stringify jsonb). */
 function coerceFleetValue(key: string, dbCol: string, value: unknown): unknown {
   if (key === 'reg') return String(value).toUpperCase();
-  if (dbCol === 'setup_checklist' && typeof value !== 'string') {
+  if ((dbCol === 'setup_checklist' || dbCol === 'removal_checklist') && typeof value !== 'string') {
     return JSON.stringify(value ?? []);
   }
   return value;
+}
+
+/**
+ * Vehicle finance is ADMIN-ONLY (jon's call, May 2026). These DB columns are
+ * stripped from read payloads for non-admins and rejected on writes. The
+ * removal checklist (removal_checklist) and sold_date are deliberately NOT in
+ * here — they're operational and visible to all staff. Easy to widen the
+ * gate later by changing `canViewVehicleFinance`.
+ */
+const FINANCE_DB_COLUMNS = new Set([
+  'finance_with', 'finance_ends', 'finance_start', 'finance_reference',
+  'purchase_cost', 'finance_cost', 'extra_costs',
+  'sale_price', 'sale_notes',
+]);
+
+/** Whether this role may read/write vehicle finance fields. Admin only for now. */
+function canViewVehicleFinance(role: string | undefined): boolean {
+  return role === 'admin';
 }
 
 router.post('/fleet', async (req: AuthRequest, res: Response) => {
@@ -594,7 +624,9 @@ router.post('/fleet', async (req: AuthRequest, res: Response) => {
     const placeholders: string[] = [];
     const values: unknown[] = [];
     let idx = 1;
+    const financeAllowed = canViewVehicleFinance(req.user?.role);
     for (const [key, dbCol] of Object.entries(FLEET_FIELD_MAP)) {
+      if (FINANCE_DB_COLUMNS.has(dbCol) && !financeAllowed) continue;
       if (v[key] !== undefined && !columns.includes(dbCol)) {
         columns.push(dbCol);
         placeholders.push(`$${idx}`);
@@ -609,7 +641,7 @@ router.post('/fleet', async (req: AuthRequest, res: Response) => {
       values
     );
 
-    res.status(201).json(mapDbRowToVehicle(result.rows[0]));
+    res.status(201).json(mapDbRowToVehicle(result.rows[0], { includeFinance: financeAllowed }));
   } catch (error) {
     console.error('[vehicles/fleet] Create error:', error);
     if ((error as { code?: string }).code === '23505') {
@@ -634,7 +666,9 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
     const values: unknown[] = [];
     let idx = 1;
 
+    const financeAllowed = canViewVehicleFinance(req.user?.role);
     for (const [key, dbCol] of Object.entries(FLEET_FIELD_MAP)) {
+      if (FINANCE_DB_COLUMNS.has(dbCol) && !financeAllowed) continue;
       if (v[key] !== undefined) {
         // Avoid duplicate columns
         if (!fields.some(f => f.startsWith(`${dbCol} =`))) {
@@ -661,7 +695,7 @@ router.put('/fleet/:id', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    res.json(mapDbRowToVehicle(result.rows[0]));
+    res.json(mapDbRowToVehicle(result.rows[0], { includeFinance: financeAllowed }));
   } catch (error) {
     console.error('[vehicles/fleet] Update error:', error);
     res.status(500).json({ error: 'Failed to update vehicle' });
@@ -727,7 +761,7 @@ router.patch('/fleet/:id/current-mileage', async (req: FlexibleVehicleRequest, r
       ]
     ).catch(err => console.warn('[vehicles/current-mileage] audit insert failed:', err));
 
-    res.json(mapDbRowToVehicle(result.rows[0]));
+    res.json(mapDbRowToVehicle(result.rows[0], { includeFinance: canViewVehicleFinance(req.user?.role) }));
   } catch (error) {
     console.error('[vehicles/current-mileage] Correction error:', error);
     res.status(500).json({ error: 'Failed to correct mileage' });
@@ -774,7 +808,7 @@ router.patch('/fleet/by-reg/:reg/hire-status', async (req: FlexibleVehicleReques
     }
 
     console.log(`[vehicles/fleet] Hire status updated: ${reg} → ${status}`);
-    res.json({ success: true, vehicle: mapDbRowToVehicle(result.rows[0]) });
+    res.json({ success: true, vehicle: mapDbRowToVehicle(result.rows[0], { includeFinance: canViewVehicleFinance(req.user?.role) }) });
   } catch (error) {
     console.error('[vehicles/fleet] Hire status update error:', error);
     res.status(500).json({ error: 'Failed to update hire status' });
@@ -1339,6 +1373,14 @@ router.post(
         return;
       }
 
+      // Finance docs are admin-only (flagged so the general Files UI hides them
+      // and non-admins never receive them — see mapDbRowToVehicle).
+      const isFinance = req.body.is_finance === 'true' || req.body.is_finance === true;
+      if (isFinance && !canViewVehicleFinance(req.user?.role)) {
+        res.status(403).json({ error: 'Admin access required to upload finance documents' });
+        return;
+      }
+
       const ext = path.extname(req.file.originalname).toLowerCase();
       const fileType = ext.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i) ? 'image' : ext === '.pdf' ? 'document' : 'other';
       const fileId = uuid();
@@ -1352,6 +1394,7 @@ router.post(
         comment: req.body.comment || null,
         url: r2Key,
         type: fileType,
+        is_finance: isFinance,
         uploaded_at: new Date().toISOString(),
         uploaded_by: req.user?.email || 'system',
       };
@@ -1414,6 +1457,62 @@ router.delete('/fleet/:vehicleId/files', async (req: AuthRequest, res: Response)
   } catch (error) {
     console.error('[vehicles/files] Delete error:', error);
     res.status(500).json({ error: 'File delete failed' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1e. FINANCE PROVIDERS — /api/vehicles/finance-providers
+// Reusable picklist (category 'finance_provider', seeded in migration 103) for
+// the admin-only finance-with dropdown. Staff can add ad-hoc providers that
+// persist for reuse across the fleet. Admin only (matches finance visibility).
+// NOTE: mounted at /finance-providers (NOT /fleet/...) to avoid colliding with
+// the GET /fleet/:idOrReg route.
+// ═══════════════════════════════════════════════════════════════════════════
+
+router.get('/finance-providers', async (req: AuthRequest, res: Response) => {
+  try {
+    if (!canViewVehicleFinance(req.user?.role)) {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const result = await query(
+      `SELECT value, label FROM picklist_items
+       WHERE category = 'finance_provider' AND is_active = true
+       ORDER BY sort_order ASC, label ASC`
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('[vehicles/finance-providers] List error:', error);
+    res.status(500).json({ error: 'Failed to load finance providers' });
+  }
+});
+
+router.post('/finance-providers', async (req: AuthRequest, res: Response) => {
+  try {
+    if (!canViewVehicleFinance(req.user?.role)) {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+    const label = String(req.body?.label || '').trim();
+    if (!label) {
+      res.status(400).json({ error: 'label is required' });
+      return;
+    }
+    // Append after the current max sort_order so ad-hoc additions land at the end.
+    const maxRow = await query(
+      `SELECT COALESCE(MAX(sort_order), 0) AS max FROM picklist_items WHERE category = 'finance_provider'`
+    );
+    const nextOrder = Number(maxRow.rows[0]?.max || 0) + 1;
+    await query(
+      `INSERT INTO picklist_items (category, value, label, sort_order)
+       VALUES ('finance_provider', $1, $1, $2)
+       ON CONFLICT (category, value) DO UPDATE SET is_active = true`,
+      [label, nextOrder]
+    );
+    res.status(201).json({ value: label, label });
+  } catch (error) {
+    console.error('[vehicles/finance-providers] Create error:', error);
+    res.status(500).json({ error: 'Failed to add finance provider' });
   }
 });
 
@@ -5024,7 +5123,27 @@ async function proxyToNetlify(req: Request, res: Response): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Map a fleet_vehicles DB row to the VM's Vehicle interface shape */
-function mapDbRowToVehicle(row: Record<string, unknown>) {
+function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?: boolean } = {}) {
+  // Finance is admin-only — stripped unless the caller explicitly opts in
+  // (default false so any new call site fails closed rather than leaking).
+  const includeFinance = opts.includeFinance === true;
+  const num = (v: unknown) => (v == null || v === '' ? null : Number(v));
+  const fin = <T,>(v: T): T | null => (includeFinance ? v : null);
+
+  const purchaseCost = num(row.purchase_cost);
+  const financeCost = num(row.finance_cost);
+  const extraCosts = num(row.extra_costs);
+  const totalAcquisitionCost =
+    purchaseCost == null && financeCost == null && extraCosts == null
+      ? null
+      : (purchaseCost || 0) + (financeCost || 0) + (extraCosts || 0);
+
+  // Files: strip finance-flagged docs for non-admins so they never reach a
+  // non-admin browser (the general Files UI also filters them out for everyone
+  // so they only surface in the admin Finance section).
+  const rawFiles = Array.isArray(row.files) ? (row.files as Array<Record<string, unknown>>) : [];
+  const files = includeFinance ? rawFiles : rawFiles.filter(f => f.is_finance !== true);
+
   return {
     id: row.id as string,
     reg: row.reg as string,
@@ -5048,8 +5167,20 @@ function mapDbRowToVehicle(row: Record<string, unknown>) {
     ulezCompliant: row.ulez_compliant as boolean,
     spareKey: row.spare_key as boolean,
     wifiNetwork: row.wifi_network as string | null,
-    financeWith: row.finance_with as string | null,
-    financeEnds: formatDate(row.finance_ends),
+    // Finance (admin-only — null for non-admins)
+    financeWith: fin(row.finance_with as string | null),
+    financeEnds: fin(formatDate(row.finance_ends)),
+    financeStart: fin(formatDate(row.finance_start)),
+    financeReference: fin(row.finance_reference as string | null),
+    purchaseCost: fin(purchaseCost),
+    financeCost: fin(financeCost),
+    extraCosts: fin(extraCosts),
+    totalAcquisitionCost: fin(totalAcquisitionCost),
+    salePrice: fin(num(row.sale_price)),
+    saleNotes: fin(row.sale_notes as string | null),
+    // Disposal + removal — operational, visible to all staff
+    soldDate: formatDate(row.sold_date),
+    removalChecklist: Array.isArray(row.removal_checklist) ? row.removal_checklist : [],
     co2PerKm: row.co2_per_km ? Number(row.co2_per_km) : null,
     recommendedTyrePsiFront: row.recommended_tyre_psi_front ? Number(row.recommended_tyre_psi_front) : null,
     recommendedTyrePsiRear: row.recommended_tyre_psi_rear ? Number(row.recommended_tyre_psi_rear) : null,
@@ -5091,7 +5222,7 @@ function mapDbRowToVehicle(row: Record<string, unknown>) {
     seatLayout: row.seat_layout as string | null,
     notes: (row.notes as string | null) ?? null,
     setupChecklist: Array.isArray(row.setup_checklist) ? row.setup_checklist : [],
-    files: row.files || [],
+    files,
   };
 }
 

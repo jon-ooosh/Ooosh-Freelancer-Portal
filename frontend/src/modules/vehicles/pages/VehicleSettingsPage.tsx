@@ -4,7 +4,7 @@
  * and compliance threshold overrides.
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { vmPath } from '../config/route-paths'
@@ -13,6 +13,7 @@ import { updateVehicle, fetchComplianceSettings, updateComplianceSettings, DEFAU
 import type { ComplianceSettings } from '../lib/fleet-api'
 import { getOpAuthState } from '../adapters/auth-adapter'
 import { VAN_TYPES } from '../lib/van-matching'
+import { buildDefaultRemovalChecklist } from '../lib/removal-checklist'
 
 function EditableField({
   label,
@@ -225,7 +226,11 @@ export function VehicleSettingsPage() {
   const { data: vehicle, isLoading, isError } = useVehicle(id)
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  // Sale figures (price/notes) are admin-only; sold date + removal checklist
+  // are operational so any admin/manager who can reach this page may set them.
+  const isStrictAdmin = opAuth?.userRole === 'admin'
   const [actionLoading, setActionLoading] = useState(false)
+  const [showRemovalModal, setShowRemovalModal] = useState(false)
 
   const { data: complianceSettings } = useQuery({
     queryKey: ['compliance-settings'],
@@ -275,22 +280,42 @@ export function VehicleSettingsPage() {
     }
   }
 
-  const handleToggleSold = async () => {
-    const newGroup = vehicle.isOldSold ? 'active' : 'old_sold'
-    const confirmMsg = vehicle.isOldSold
-      ? `Reactivate ${vehicle.reg} and return it to the active fleet?`
-      : `Mark ${vehicle.reg} as Old & Sold? It will be moved out of the active fleet.`
-    if (!window.confirm(confirmMsg)) return
+  const handleReactivate = async () => {
+    if (!window.confirm(`Reactivate ${vehicle.reg} and return it to the active fleet?`)) return
     setActionLoading(true)
     try {
-      await updateVehicle(vehicle.id, { fleet_group: newGroup, is_active: newGroup === 'active' })
+      await updateVehicle(vehicle.id, { fleet_group: 'active', is_active: true })
       queryClient.invalidateQueries({ queryKey: ['vehicles'] })
-      if (newGroup === 'old_sold') {
-        navigate(vmPath('/vehicles'))
-      }
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to update')
     } finally {
+      setActionLoading(false)
+    }
+  }
+
+  // Removal / disposal: mark sold (+ sale data), seed the removal checklist so
+  // the off-system jobs are tracked, then leave the page.
+  const handleRemoval = async (sale: { soldDate: string; salePrice: string; saleNotes: string }) => {
+    setActionLoading(true)
+    try {
+      const payload: Record<string, unknown> = {
+        fleet_group: 'old_sold',
+        is_active: false,
+        sold_date: sale.soldDate || null,
+        // Seed the removal checklist (unless one already exists, preserved server-side merge).
+        removal_checklist: buildDefaultRemovalChecklist(),
+      }
+      // Sale figures are admin-only — the API ignores them for non-admins anyway,
+      // but only send them when the field was shown.
+      if (isStrictAdmin) {
+        payload.sale_price = sale.salePrice ? Number(sale.salePrice) : null
+        payload.sale_notes = sale.saleNotes || null
+      }
+      await updateVehicle(vehicle.id, payload)
+      queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+      navigate(vmPath('/vehicles'))
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to mark as sold')
       setActionLoading(false)
     }
   }
@@ -363,12 +388,8 @@ export function VehicleSettingsPage() {
         <EditableField label="Rear tyre PSI" value={vehicle.recommendedTyrePsiRear} type="number" onSave={v => saveField('recommended_tyre_psi_rear', v)} />
       </div>
 
-      {/* Finance */}
-      <div className="rounded-lg border border-gray-200 bg-white p-4">
-        <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Finance</h3>
-        <EditableField label="Finance with" value={vehicle.financeWith} type="text" onSave={v => saveField('finance_with', v)} />
-        <EditableField label="Finance ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
-      </div>
+      {/* Finance & lifecycle now lives on the vehicle detail page (admin-only
+          "Finance & Lifecycle" section) — kept off Settings so there's one home. */}
 
       {/* Compliance Alert Thresholds (fleet-wide) */}
       <div className="rounded-lg border border-gray-200 bg-white p-4">
@@ -395,23 +416,23 @@ export function VehicleSettingsPage() {
         <ComplianceValueRow label="Rossetts — alert this far ahead" settingsKey="rossetts_warning_days" suffix="d" settings={compliance} onSave={saveThreshold} />
       </div>
 
-      {/* Danger zone */}
+      {/* Danger zone — sell / removal */}
       <div className="rounded-lg border border-red-200 bg-white p-4">
         <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-red-500">Danger Zone</h3>
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm font-medium text-gray-900">
-              {vehicle.isOldSold ? 'Reactivate Vehicle' : 'Mark as Old & Sold'}
+              {vehicle.isOldSold ? 'Reactivate Vehicle' : 'Sell / Remove from Fleet'}
             </p>
             <p className="text-xs text-gray-500">
               {vehicle.isOldSold
                 ? 'Return this vehicle to the active fleet'
-                : 'Remove from active fleet. Can be reactivated later.'}
+                : 'Records the sale and starts the removal checklist. Can be reactivated later.'}
             </p>
           </div>
           <button
             type="button"
-            onClick={handleToggleSold}
+            onClick={vehicle.isOldSold ? handleReactivate : () => setShowRemovalModal(true)}
             disabled={actionLoading}
             className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 ${
               vehicle.isOldSold
@@ -419,7 +440,99 @@ export function VehicleSettingsPage() {
                 : 'border border-red-200 text-red-700 hover:bg-red-50'
             }`}
           >
-            {actionLoading ? 'Processing...' : vehicle.isOldSold ? 'Reactivate' : 'Mark as Sold'}
+            {actionLoading ? 'Processing...' : vehicle.isOldSold ? 'Reactivate' : 'Sell / Remove'}
+          </button>
+        </div>
+      </div>
+
+      {showRemovalModal && (
+        <RemovalModal
+          reg={vehicle.reg}
+          showSaleFigures={isStrictAdmin}
+          loading={actionLoading}
+          onClose={() => setShowRemovalModal(false)}
+          onConfirm={handleRemoval}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Modal for selling / removing a vehicle — captures sale data + confirms. */
+function RemovalModal({
+  reg, showSaleFigures, loading, onClose, onConfirm,
+}: {
+  reg: string
+  showSaleFigures: boolean
+  loading: boolean
+  onClose: () => void
+  onConfirm: (sale: { soldDate: string; salePrice: string; saleNotes: string }) => void
+}) {
+  const today = new Date().toISOString().slice(0, 10)
+  const [soldDate, setSoldDate] = useState(today)
+  const [salePrice, setSalePrice] = useState('')
+  const [saleNotes, setSaleNotes] = useState('')
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-lg bg-white p-5 shadow-xl" onClick={e => e.stopPropagation()}>
+        <h3 className="text-lg font-bold text-ooosh-navy">Sell / Remove {reg}</h3>
+        <p className="mt-1 text-sm text-gray-500">
+          This moves the van out of the active fleet and starts the removal checklist
+          (HireHop, TTS360, insurers, DVLA). It can be reactivated later.
+        </p>
+
+        <div className="mt-4 space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-gray-600">Sale / removal date</label>
+            <input
+              type="date" value={soldDate} onChange={e => setSoldDate(e.target.value)}
+              className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none"
+            />
+          </div>
+          {showSaleFigures && (
+            <>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-600">Sale price (£)</label>
+                <input
+                  type="number" min="0" step="0.01" value={salePrice} placeholder="e.g. 12500"
+                  onChange={e => setSalePrice(e.target.value)}
+                  className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-gray-600">Sale notes</label>
+                <textarea
+                  value={saleNotes} rows={3} placeholder="Buyer, condition, any relevant details…"
+                  onChange={e => setSaleNotes(e.target.value)}
+                  className="w-full rounded border border-gray-300 px-2.5 py-1.5 text-sm focus:border-blue-400 focus:outline-none"
+                />
+              </div>
+            </>
+          )}
+          {!showSaleFigures && (
+            <p className="rounded border border-gray-200 bg-gray-50 px-2.5 py-2 text-xs text-gray-500">
+              Sale price &amp; notes are admin-only and can be added afterwards by an admin from the vehicle's Finance &amp; Lifecycle section.
+            </p>
+          )}
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-lg border border-gray-200 px-4 py-2 text-sm text-gray-600 hover:bg-gray-50">
+            Cancel
+          </button>
+          <button
+            type="button" disabled={loading}
+            onClick={() => onConfirm({ soldDate, salePrice, saleNotes })}
+            className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+          >
+            {loading ? 'Processing…' : 'Confirm Sale & Remove'}
           </button>
         </div>
       </div>

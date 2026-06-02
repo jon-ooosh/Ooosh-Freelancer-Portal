@@ -8,6 +8,8 @@ import { getDateUrgency } from '../types/vehicle'
 import { vmPath } from '../config/route-paths'
 import { createVehicle, uploadVehicleFile, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
 import { buildDefaultChecklist } from '../lib/setup-checklist'
+import { lifespanCountdown, sellByDate } from '../lib/vehicle-lifecycle'
+import { FinanceProviderSelect } from '../components/FinanceLifecycleSection'
 import type { SetupChecklistItem } from '../types/vehicle'
 import { getServiceMileageStatus, getRossettsStatus, URGENCY_TEXT } from '../lib/service-status'
 import { isSetupPending, checklistProgress } from '../lib/setup-checklist'
@@ -278,6 +280,66 @@ function FleetTable({
   )
 }
 
+/**
+ * Admin-only finance & lifecycle board — the whole-fleet "Monday" overview of
+ * who finance is with, start/end dates, and the 5-year sell window + countdown.
+ */
+function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
+  const COUNTDOWN_CLS: Record<string, string> = {
+    ok: 'text-gray-600',
+    soon: 'text-amber-600 font-medium',
+    overdue: 'text-red-600 font-semibold',
+  }
+  return (
+    <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+      <table className="min-w-full text-left">
+        <thead>
+          <tr className="border-b border-gray-200 bg-gray-50 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+            <th className="px-3 py-2">Reg</th>
+            <th className="px-2 py-2">Finance with</th>
+            <th className="px-2 py-2">Start</th>
+            <th className="px-2 py-2">Ends</th>
+            <th className="px-2 py-2">5-yr sell-by</th>
+            <th className="px-2 py-2">Countdown</th>
+            <th className="px-2 py-2 text-center">Docs</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {vehicles.map(vehicle => {
+            const countdown = lifespanCountdown(vehicle.dateFirstReg)
+            const sellBy = sellByDate(vehicle.dateFirstReg)
+            const docCount = (vehicle.files || []).filter(f => f.is_finance === true).length
+            return (
+              <tr key={vehicle.id} className="hover:bg-gray-50">
+                <td className="whitespace-nowrap px-3 py-2">
+                  <Link to={vmPath(`/vehicles/${vehicle.id}`)} className="text-sm font-bold text-ooosh-navy hover:underline">
+                    {vehicle.reg}
+                  </Link>
+                  {vehicle.isOldSold && (
+                    <span className="ml-1.5 inline-block rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] font-medium text-orange-700 align-middle">sold</span>
+                  )}
+                </td>
+                <td className="whitespace-nowrap px-2 py-2 text-xs text-gray-700">{vehicle.financeWith || '—'}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-gray-600">{compactDate(vehicle.financeStart)}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-gray-600">{compactDate(vehicle.financeEnds)}</td>
+                <td className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-gray-600">
+                  {sellBy ? compactDate(sellBy.toISOString().slice(0, 10)) : '—'}
+                </td>
+                <td className={`whitespace-nowrap px-2 py-2 text-xs ${countdown ? COUNTDOWN_CLS[countdown.urgency] : 'text-gray-400'}`}>
+                  {vehicle.isOldSold ? '—' : countdown ? (countdown.urgency === 'overdue' ? countdown.text : `${countdown.text} left`) : '—'}
+                </td>
+                <td className="whitespace-nowrap px-2 py-2 text-center text-xs text-gray-500">
+                  {docCount > 0 ? `📎 ${docCount}` : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 /** Simple type filter pills */
 const VEHICLE_TYPES = ['Premium', 'Basic', 'Panel', 'Vito']
 
@@ -293,13 +355,20 @@ export function VehiclesPage() {
   const [showAddForm, setShowAddForm] = useState(false)
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
+  // Finance is admin-only — the Finance board view + finance fields on the add
+  // form only render for strict admins.
+  const isStrictAdmin = opAuth?.userRole === 'admin'
 
-  // View mode — dense table (default, glanceable at a desk) vs cards (mobile-
-  // friendly). Persisted so each user keeps their preference.
-  const [viewMode, setViewMode] = useState<'table' | 'cards'>(
-    () => (localStorage.getItem('fleet-view-mode') === 'cards' ? 'cards' : 'table'),
-  )
-  const setView = (mode: 'table' | 'cards') => {
+  // View mode — dense table (default, glanceable at a desk), cards (mobile-
+  // friendly), or finance (admin-only finance/lifecycle columns). Persisted.
+  type FleetView = 'table' | 'cards' | 'finance'
+  const [viewMode, setViewMode] = useState<FleetView>(() => {
+    const stored = localStorage.getItem('fleet-view-mode')
+    if (stored === 'cards') return 'cards'
+    if (stored === 'finance' && isStrictAdmin) return 'finance'
+    return 'table'
+  })
+  const setView = (mode: FleetView) => {
     setViewMode(mode)
     localStorage.setItem('fleet-view-mode', mode)
   }
@@ -355,6 +424,15 @@ export function VehiclesPage() {
             >
               Cards
             </button>
+            {isStrictAdmin && (
+              <button
+                onClick={() => setView('finance')}
+                className={`border-l border-gray-200 px-3 py-1.5 text-sm font-medium ${viewMode === 'finance' ? 'bg-ooosh-navy text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}
+                title="Finance & lifecycle view (admin only)"
+              >
+                Finance
+              </button>
+            )}
           </div>
           {isAdmin && (
             <button
@@ -377,6 +455,7 @@ export function VehiclesPage() {
       {/* Add Vehicle form */}
       {showAddForm && (
         <AddVehicleForm
+          isAdmin={isStrictAdmin}
           onClose={() => setShowAddForm(false)}
           onCreated={() => {
             setShowAddForm(false)
@@ -530,6 +609,8 @@ export function VehiclesPage() {
               ? 'No vehicles match your filters'
               : 'No vehicles found'}
           </div>
+        ) : viewMode === 'finance' && isStrictAdmin ? (
+          <FleetFinanceTable vehicles={sortedVehicles} />
         ) : viewMode === 'table' ? (
           <FleetTable
             vehicles={sortedVehicles}
@@ -552,6 +633,7 @@ const NUMERIC_FIELDS = new Set([
   'seats', 'last_service_mileage', 'next_service_due', 'max_mass_kg',
   'cylinder_capacity_cc', 'mpg', 'co2_per_km',
   'recommended_tyre_psi_front', 'recommended_tyre_psi_rear',
+  'purchase_cost', 'finance_cost', 'extra_costs',
 ])
 
 /** Collapsible section wrapper for the add-vehicle form. */
@@ -573,11 +655,12 @@ function FormSection({ title, defaultOpen = false, children }: { title: string; 
 }
 
 /** Inline form for adding a new vehicle — full onboarding capture + setup checklist. */
-function AddVehicleForm({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+function AddVehicleForm({ isAdmin, onClose, onCreated }: { isAdmin: boolean; onClose: () => void; onCreated: () => void }) {
   const [form, setForm] = useState<Record<string, string>>({ simple_type: 'Premium', fuel_type: 'diesel' })
   const [rossettsApplicable, setRossettsApplicable] = useState(false)
   const [checklist, setChecklist] = useState<SetupChecklistItem[]>(() => buildDefaultChecklist())
   const [v5File, setV5File] = useState<File | null>(null)
+  const [financeDocFile, setFinanceDocFile] = useState<File | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [warning, setWarning] = useState<string | null>(null)
@@ -633,6 +716,17 @@ function AddVehicleForm({ onClose, onCreated }: { onClose: () => void; onCreated
           await uploadVehicleFile(created.id, v5File, 'V5 Document', 'Uploaded at vehicle setup')
         } catch {
           setWarning(`${created.reg} was created, but the V5 upload failed. You can add it from the vehicle's Files section.`)
+          setIsSaving(false)
+          return
+        }
+      }
+      // Finance doc (admin only) — flagged is_finance so it lands in the
+      // admin-only Finance & Lifecycle section, not the general Files list.
+      if (financeDocFile && isAdmin) {
+        try {
+          await uploadVehicleFile(created.id, financeDocFile, 'Finance agreement', 'Uploaded at vehicle setup', true)
+        } catch {
+          setWarning(`${created.reg} was created, but the finance document upload failed. You can add it from the vehicle's Finance & Lifecycle section.`)
           setIsSaving(false)
           return
         }
@@ -722,7 +816,7 @@ function AddVehicleForm({ onClose, onCreated }: { onClose: () => void; onCreated
           </div>
         </FormSection>
 
-        <FormSection title="Specs & Finance">
+        <FormSection title="Specs">
           <div className="grid grid-cols-2 gap-3">
             {field('oil_type', 'Oil type', 'text', 'e.g. 5W-30')}
             {field('coolant_type', 'Coolant type', 'text')}
@@ -731,10 +825,45 @@ function AddVehicleForm({ onClose, onCreated }: { onClose: () => void; onCreated
             {field('co2_per_km', 'CO2 (g/km)', 'number')}
             {field('recommended_tyre_psi_front', 'Tyre PSI (front)', 'number')}
             {field('recommended_tyre_psi_rear', 'Tyre PSI (rear)', 'number')}
-            {field('finance_with', 'Finance with', 'text')}
-            {field('finance_ends', 'Finance ends', 'date')}
           </div>
         </FormSection>
+
+        {/* Finance & Lifecycle — admin only (matches finance visibility) */}
+        {isAdmin && (
+          <FormSection title="Finance & Lifecycle (admin only)">
+            <div className="rounded border border-gray-100">
+              <div className="px-1">
+                <FinanceProviderSelect value={form.finance_with || null} onSave={v => set('finance_with', v || '')} />
+              </div>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              {field('finance_reference', 'Finance reference', 'text', 'Agreement / account ref')}
+              {field('finance_start', 'Finance start', 'date')}
+              {field('finance_ends', 'Finance ends', 'date')}
+            </div>
+            <div className="mt-3">
+              <p className="mb-1 text-[11px] font-medium text-gray-500">Acquisition cost</p>
+              <div className="grid grid-cols-3 gap-2">
+                {field('purchase_cost', 'Purchase (£)', 'number')}
+                {field('finance_cost', 'Finance (£)', 'number')}
+                {field('extra_costs', 'Extras (£)', 'number')}
+              </div>
+              <p className="mt-1 text-[11px] text-gray-400">
+                Total: £{(Number(form.purchase_cost || 0) + Number(form.finance_cost || 0) + Number(form.extra_costs || 0)).toLocaleString()}
+              </p>
+            </div>
+            <div className="mt-3">
+              <label className="mb-1 block text-xs font-medium text-gray-600">Finance document scan (if on finance)</label>
+              <input
+                type="file"
+                accept=".pdf,.jpg,.jpeg,.png,.webp"
+                onChange={e => setFinanceDocFile(e.target.files?.[0] || null)}
+                className="block w-full text-xs text-gray-600 file:mr-2 file:rounded file:border-0 file:bg-ooosh-navy file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-white hover:file:bg-ooosh-navy/90"
+              />
+              {financeDocFile && <p className="mt-1 text-[11px] text-gray-500">{financeDocFile.name}</p>}
+            </div>
+          </FormSection>
+        )}
 
         {/* Setup checklist — always open, the safety net */}
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">

@@ -157,17 +157,21 @@ export async function updateComplianceSettings(updates: Partial<ComplianceSettin
 
 /**
  * Upload a file to a vehicle's files JSONB array.
+ * `isFinance` flags it as an admin-only finance document — hidden from the
+ * general Files UI and stripped from non-admin payloads server-side.
  */
 export async function uploadVehicleFile(
   vehicleId: string,
   file: File,
   label?: string,
   comment?: string,
+  isFinance?: boolean,
 ): Promise<{ name: string; url: string; type: string }> {
   const form = new FormData()
   form.append('file', file)
   if (label) form.append('label', label)
   if (comment) form.append('comment', comment)
+  if (isFinance) form.append('is_finance', 'true')
 
   const response = await apiFetch(`/fleet/${vehicleId}/files`, {
     method: 'POST',
@@ -178,6 +182,30 @@ export async function uploadVehicleFile(
     throw new Error(err.error || 'File upload failed')
   }
   return response.json() as Promise<{ name: string; url: string; type: string }>
+}
+
+export interface FinanceProvider { value: string; label: string }
+
+/** Finance-provider picklist (admin only). Seeded in migration 103, extendable. */
+export async function fetchFinanceProviders(): Promise<FinanceProvider[]> {
+  const response = await apiFetch('/finance-providers')
+  if (!response.ok) throw new Error(`Failed to load finance providers: ${response.status}`)
+  const result = await response.json() as { data: FinanceProvider[] }
+  return result.data
+}
+
+/** Add an ad-hoc finance provider (admin only). Returns the new entry. */
+export async function addFinanceProvider(label: string): Promise<FinanceProvider> {
+  const response = await apiFetch('/finance-providers', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label }),
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(err.error || 'Failed to add finance provider')
+  }
+  return response.json() as Promise<FinanceProvider>
 }
 
 /**

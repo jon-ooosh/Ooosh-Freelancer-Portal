@@ -41,8 +41,20 @@ export interface Vehicle {
   ulezCompliant: boolean
   spareKey: boolean
   wifiNetwork: string | null      // EE, Vodafone, THREE, N/A
+  // Finance & lifecycle (migration 103) — ADMIN-ONLY (null for non-admins)
   financeWith: string | null
   financeEnds: string | null      // YYYY-MM-DD
+  financeStart: string | null     // YYYY-MM-DD — when the finance agreement started
+  financeReference: string | null // agreement / account reference
+  purchaseCost: number | null     // acquisition cost breakdown...
+  financeCost: number | null
+  extraCosts: number | null       // doc fees, admin charges, etc.
+  totalAcquisitionCost: number | null  // derived sum of the three
+  salePrice: number | null        // disposal price (admin-only)
+  saleNotes: string | null        // disposal notes (admin-only)
+  // Disposal + removal — operational, visible to ALL staff
+  soldDate: string | null         // YYYY-MM-DD — when the van was sold
+  removalChecklist: SetupChecklistItem[]  // off-system jobs when a van leaves the fleet
   fuelType: string | null
   mpg: number | null
   // Hire status (from Fleet Master board column color_mm0v8bak)
@@ -92,6 +104,7 @@ export interface VehicleFile {
   comment: string | null
   url: string
   type: 'document' | 'image' | 'other'
+  is_finance?: boolean   // admin-only finance docs — hidden from the general Files UI
   uploaded_at: string
   uploaded_by: string
 }
