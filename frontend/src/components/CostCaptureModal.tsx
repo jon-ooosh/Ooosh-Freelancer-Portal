@@ -49,14 +49,22 @@ const COST_CATEGORIES: { group: string; label: string; xeroCode: string; costTyp
   { group: 'Office & other', label: 'Something else',                    xeroCode: '429', costType: 'overhead' },
 ];
 
-const PAYMENT_METHODS: { value: CostPaymentMethod; label: string }[] = [
-  { value: 'cot_card', label: 'Company card (COT)' },
-  { value: 'petty_cash', label: 'Petty cash' },
-  { value: 'paypal', label: 'PayPal' },
-  { value: 'reimburse_me', label: 'Reimburse me' },
-  { value: 'not_yet_paid', label: 'Not yet paid (bill to pay)' },
-  { value: 'other', label: 'Other' },
+// Paid-now methods push as a Xero Spend Money on the mapped bank/card account.
+// Pay-later methods land as an authorised ACCPAY bill on approval, paid later.
+const PAYMENT_METHODS: { group: string; value: CostPaymentMethod; label: string }[] = [
+  { group: 'Paid already', value: 'cot_card',        label: 'Company card (COT)' },
+  { group: 'Paid already', value: 'amex',            label: 'Amex card' },
+  { group: 'Paid already', value: 'lloyds_cc',       label: 'Lloyds credit card' },
+  { group: 'Paid already', value: 'petty_cash',      label: 'Petty cash' },
+  { group: 'Paid already', value: 'paypal',          label: 'PayPal' },
+  { group: 'Paid already', value: 'wise',            label: 'Wise bank transfer' },
+  { group: 'Paid already', value: 'lloyds_transfer', label: 'Lloyds bank transfer' },
+  { group: 'Pay later',    value: 'not_yet_paid',    label: 'Supplier bill (pay later)' },
+  { group: 'Pay later',    value: 'reimburse_me',    label: 'Reimburse me (pay later)' },
 ];
+const PAYMENT_METHOD_GROUPS = Array.from(new Set(PAYMENT_METHODS.map((m) => m.group)));
+// Keep in step with BILL_METHODS in backend routes/costs.ts + cost-xero-push.ts.
+const BILL_METHODS: CostPaymentMethod[] = ['not_yet_paid', 'reimburse_me'];
 
 const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
   { value: 'paid', label: 'Paid' },
@@ -74,7 +82,6 @@ type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | 
 export default function CostCaptureModal({ onClose, onSaved, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
-  const fullName = user ? `${user.first_name} ${user.last_name}`.trim() : '';
   const isEdit = Boolean(existing);
 
   // ── Form state ───────────────────────────────────────────────────────────
@@ -171,7 +178,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // ── Misc effects ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (isEdit) return;
-    setPaymentStatus(paymentMethod === 'not_yet_paid' ? 'awaiting_payment' : 'paid');
+    setPaymentStatus(BILL_METHODS.includes(paymentMethod) ? 'awaiting_payment' : 'paid');
   }, [paymentMethod, isEdit]);
 
   useEffect(() => {
@@ -524,7 +531,13 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Payment method</label>
                 <select className={inputCls} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as CostPaymentMethod)}>
-                  {PAYMENT_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                  {PAYMENT_METHOD_GROUPS.map((g) => (
+                    <optgroup key={g} label={g}>
+                      {PAYMENT_METHODS.filter((m) => m.group === g).map((m) => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </optgroup>
+                  ))}
                 </select>
               </div>
               <div>
@@ -535,9 +548,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               </div>
             </div>
 
-            {paymentMethod === 'cot_card' && (
+            {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
               <p className="text-xs text-gray-500 italic">
-                Stamped automatically as {fullName || 'you'} · card ending {user?.cot_card_last4 ? `····${user.cot_card_last4}` : '— set in Profile to enable reconciliation matching'}
+                Set your COT card last 4 in Profile to enable Xero reconciliation matching.
               </p>
             )}
 
@@ -553,8 +566,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                 </div>
                 {rechargeMode === 'partial' && (
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Recharge amount (£)</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Recharge amount (£, net of VAT)</label>
                     <input type="number" step="0.01" min="0" className={inputCls} value={rechargeAmount} onChange={(e) => setRechargeAmount(e.target.value)} />
+                    <p className="text-xs text-gray-400 mt-1">VAT will be added when this is billed via HireHop.</p>
                   </div>
                 )}
               </div>

@@ -487,3 +487,182 @@ Frontend hub + manual capture shipped (PR #592) and tested live. Decisions + fol
 **Activation:** add `ANTHROPIC_API_KEY=sk-ant-...` to `backend/.env` and restart `ooosh-portal`. No migration, no other config.
 
 **Cost ceiling:** Haiku 4.5 input is $1/1M tokens (output $5/1M). System prompt ~600 tokens cached after request 1; per-image overhead ~1000–1500 tokens depending on resolution; output JSON ~200 tokens. **Per-receipt: ~£0.001–£0.002**, dropping further as cache reads accumulate. Negligible at Ooosh volumes.
+
+---
+
+## Roadmap & handoff (Jun 2026)
+
+### Status: Phase 1 functionally complete
+
+What's **live and working** in production (as of this handoff):
+
+| Capability | State |
+|---|---|
+| Costs hub at `/money/costs` (4 views, stats, filters, search) | ✅ live |
+| Capture modal: receipt upload + preview, single category picker (16 plain-English options, grouped under People/Vehicles/Equipment/Office), supplier autocomplete from Xero contacts, smart 20% VAT auto-calc, Job picker for recharge | ✅ live |
+| **AI receipt extraction** via Claude Haiku 4.5 vision — pre-fills supplier, date, amounts, description, category, with confidence-coloured banner | ✅ live |
+| Mobile full-screen modal, two-pane resizable layout on desktop, click-outside / Esc to close | ✅ live |
+| Edit + Delete on rows (Delete = admin/manager), Xero-lock-aware | ✅ live |
+| COT card holder + last 4 stamped server-side from user Profile | ✅ live |
+| `xero_account_code` is captured on every cost (from the picker) | ✅ live |
+| **Push to Xero on save** — Spend Money on the mapped bank account + receipt attached (auto + manual retry) | ✅ live |
+| Settings → Xero Bank Accounts mapping UI (live dropdown of Xero bank accounts) | ✅ live |
+| Sync-state badges in hub (Sent / Synced / Reconciled / Failed / Not synced / Pending) with Push now | ✅ live |
+| Payables workflow (verify → approve → pay), recharge flag-and-confirm | ✅ live |
+
+### Operational clarifications (not bugs)
+
+- **"Skipped: Bank account mapping missing"** when clicking Push now: this is expected for payment methods you left unmapped in Settings (typically "Other" / "Reimburse me"). Pick a different method on the cost, or map the method in Settings → Xero Bank Accounts.
+- **"Stamped automatically as..."** notice removed from the modal (Jun 2026 cleanup) — only shows the "set last 4 in Profile" hint when the user hasn't set theirs.
+- **Recharge → Partial amount** is now labelled "net of VAT" — VAT is added at HireHop bill time.
+
+### Open design questions (next chat)
+
+These are the meaty items left for Phase 2. None block live use of the current system.
+
+#### 1. Recharge push to HireHop (Component 5 / Component 11)
+
+Today's behaviour: staff flag a cost for recharge (none / full / partial); the cost row stamps `recharge_mode` + `recharge_amount`. The HireHop push is **not wired** — the original spec says "flag-and-confirm, never auto-push" and notes the prerequisite is "create the small set of generic HH recharge stock items, capture their IDs."
+
+The design work needed:
+- **HH stock item IDs**: agree the recharge categories that map to stock items in HH. Probable set: `Fuel`, `Parking & tolls`, `Travel (taxis/trains)`, `Vehicle damage`, `Sub-hire`, `Other recharge`. Each needs a stock item created in HireHop manually, and the resulting stock ID stored in `system_settings` (similar pattern to the Xero bank account mapping). We *already know how to create line items in HH* — the "add extra driver" / `additional driver charge` flow does this against stock ID 1324. So mechanically this is straightforward once the IDs exist.
+- **Mapping cost category → HH stock item**: most of the 16 OP categories map naturally (Fuel → "Fuel" stock, Parking → "Parking & tolls", Travel → "Travel", Vehicle repairs/upkeep → "Vehicle damage", Sub-hire → "Sub-hire", everything else → "Other recharge"). Could live as another `system_settings` mapping.
+- **Closed-job handling**: HireHop refuses line-item adds on closed jobs (we know this from the PCN tool). When push fails, surface the error inline ("Cannot add to HH — job closed. Create the bill another way.") and leave `recharge_mode='full|partial'` + `recharged_to_hh_at=NULL` so the cost sits in the **Recharges** view as a known-unresolved item. Don't block save.
+- **The big conceptual issue jon raised — quoted vs actual**: many costs on a job are *already represented by a quote line* (e.g. a £300 D&C delivery quote already includes the freelancer's anticipated fee + travel + fuel). The freelancer's £200 invoice + £25 train + £35 fuel receipt are the *actuals* against the quote, not new line items to bill the client. Pushing them to HH would double-bill. This is **Component 5 territory — Freelancer expected-vs-actual variance** — and it needs the cost capture flow to distinguish:
+  - **Pass-through cost** (already covered by the quote, just tracking spend) — never recharge, do NOT push.
+  - **Above-and-beyond cost** (incurred for the job, not covered by the quote) — eligible for recharge push.
+
+  Today the flag is one binary (`recharge_mode`). Probably wants an extra `cost_intent` field on the cost row: `quote_actual` (matches a quote line — reconcile only) vs `extra` (recharge to client). The capture modal would let staff pick, default to "quote_actual" when linked to a job that already has a delivery quote.
+
+#### 2. Vehicle picker on the capture modal
+
+When a cost is `cost_type='vehicle'`, we should know **which vehicle**. The DB already has `costs.vehicle_id` (FK to `fleet_vehicles`); the modal doesn't expose it yet. Small enhancement: a vehicle search picker mirroring the Job picker, debounced search via `/api/vehicles/fleet?search=…`. Pre-fills from `presetVehicleId` when entered from a Vehicle Detail page (entry point not yet built).
+
+The reg comes along once `vehicle_id` is set — no additional storage.
+
+#### 3. Xero reconciliation sync (`bill_created/attached` → `reconciled`)
+
+Right now `xero_sync_state` reaches `attached` when we push + attach. Xero/Codat's bank-matching flips the bank-feed line to reconciled, but OP doesn't notice. A daily scheduler that polls `GET /BankTransactions?where=IsReconciled==true AND ModifiedDateUTC>=lastCheck` and updates matching OP costs would close the loop. Small piece — `services/cost-xero-reconcile-sync.ts` + a cron entry, no new schema.
+
+#### 4. Entry points
+
+The modal already accepts `presetJobId / presetVehicleId / presetIssueId`. Need the buttons on:
+- **Job Detail → Money tab**: "+ Add cost" with the job preset (and the cost-intent default = `quote_actual`).
+- **Vehicle Detail**: "+ Add cost" with the vehicle preset (default category `vehicle`).
+- **Issue Detail (Problems register)**: "+ Add cost to this issue" with the issue preset (default category `parts` / `vehicle repairs`).
+
+Each is a small mount, no new backend work.
+
+#### 5. Deferred / nice-to-have
+
+- ACCPAY bills (supplier bills) — needs `accounting.invoices` scope added to the Custom Connection. Defer until "not yet paid" volume warrants it.
+- Edit-after-push mirroring to Xero (update existing transaction; void-and-recreate when reconciled).
+- Bundled-invoice **allocation split** UI (the backend allocations endpoint exists, no UI yet — `PUT /api/costs/:id/allocations`).
+- COT card register per staff (currently each user sets their own in Profile; admin-managed could replace).
+- `/money/costs/reports` analytics dashboard (P&L by category, spend by job, etc.).
+
+### Suggested order for the next chat
+
+1. **Design Component 5 (quote-actual vs extra cost)** — biggest conceptual piece. Adds `cost_intent` column or similar, modal UX changes, and the variance display on the Job Detail Money tab.
+2. **HH stock items + recharge push wiring** — once jon creates the small set of HH stock items and shares the IDs, the push code is a small service + mapping in `system_settings`. Failed-on-closed-job handling is part of this.
+3. **Vehicle picker on modal** — quick win.
+4. **Xero reconciliation sync** — quick win.
+5. **Entry points on Job / Vehicle / Issue Detail pages**.
+
+### How to pick this up
+
+Read this spec (`docs/COST-CAPTURE-RECHARGE-SPEC.md`) — it has running build notes for every round of work to date. The key implementation files:
+
+- `backend/src/routes/costs.ts` — all the cost API endpoints
+- `backend/src/services/cost-xero-push.ts` — push state machine
+- `backend/src/services/cost-receipt-extract.ts` — AI extraction
+- `backend/src/services/xero-broker.ts` — Xero API gateway
+- `frontend/src/components/CostCaptureModal.tsx` — the capture/edit modal
+- `frontend/src/pages/CostsPage.tsx` — the hub
+- `frontend/src/components/XeroBankAccountsSection.tsx` — settings mapping
+
+---
+
+## Build notes — Phase A: real payment instruments + payables-as-bills (Jun 2026)
+
+First chunk of the "finish Cost Capture" work. Resolves the "Other won't sync"
+dead-end and turns "Not yet paid" into a proper Xero purchase-ledger flow.
+Decisions taken with jon up front:
+
+- **"Other" removed.** A Xero Spend Money must book against a real bank account;
+  "Other" has none, so it could never reconcile and sat stuck on "Not synced".
+  The "unsure / sort later" case is now handled properly by "Not yet paid"
+  landing a bill in Xero. Migration 105 nulls existing `other` rows (rather than
+  guessing a method) and tightens the CHECK constraint.
+- **Real instruments added:** Amex card, Lloyds credit card, Wise transfer,
+  Lloyds bank transfer (alongside COT card, petty cash, PayPal). Credit cards are
+  just BANK-type accounts in Xero, so they push as Spend Money identically — the
+  liability sits on the card account exactly like real life.
+- **"Not yet paid" + "Reimburse me" are now pay-later BILLS.** They land as an
+  **AUTHORISED ACCPAY bill** in Xero on OP **approval** (so they show in Xero's
+  "Bills to pay"). When marked paid (date — may be future — + method), a
+  **Payment is recorded against the bill** on the bank account mapped to that pay
+  method. This is the correct accounting treatment, not a workaround: Spend Money
+  = paid now; Bill + Payment = pay later.
+- **"Reimburse me" bills are raised against the STAFF MEMBER**, not the receipt
+  vendor (the vendor's already been paid by the staff member — the company owes
+  the staff member). The vendor is noted on the bill line and the receipt
+  attached as evidence. Bill contact defaults to the uploader's name.
+
+### Two-camp model
+
+| Camp | Methods | Xero object | Bank account |
+|---|---|---|---|
+| Paid-now | cot_card, amex, lloyds_cc, petty_cash, paypal, wise, lloyds_transfer | Spend Money (on save, once paid) | `xero_bank_<method>` mapping |
+| Pay-later | not_yet_paid, reimburse_me | Authorised ACCPAY bill (on approval) → Payment (on mark-paid) | bill needs none; payment uses `xero_bank_<paid_method>` mapping |
+
+### Lifecycle (pay-later)
+
+```
+capture (awaiting_payment, approval_state=verified)   → nothing in Xero yet
+  → admin approve                                       → AUTHORISED bill + receipt in Xero (xero_sync_state=attached)
+  → admin Mark paid (date + method)                     → Payment recorded against the bill (xero_payment_id set)
+  → (later) Codat bank line matches                      → reconciled (future sync)
+```
+
+The push service (`cost-xero-push.ts`) is idempotent and resumable — "Push now"
+does the right next step at any stage. `recordBillPayment` guards on
+`xero_payment_id` so a re-run never double-pays.
+
+### ⚠️ Gated on a Xero scope (one-line flip)
+
+ACCPAY bills + payments need the **`accounting.transactions`** scope on the Xero
+Custom Connection (currently NOT granted). Until then, the bill push soft-skips
+with a calm "needs accounting.transactions scope" advisory (grey "Not synced"
+pill, not a red error) — everything else (Spend Money, reads) keeps working.
+
+**To enable bills:**
+1. Tick `accounting.transactions` on the Ooosh Custom Connection in the Xero
+   developer portal + reconnect.
+2. Uncomment the `accounting.transactions` line in `DEFAULT_SCOPES`
+   (`backend/src/config/xero.ts`) + redeploy. (Order matters — requesting an
+   ungranted scope fails the whole client_credentials token mint and breaks the
+   working reads.)
+3. Existing approved bills: hit **Push now** in `/money/costs` to create them.
+
+### What shipped
+
+- Migration 105: retire `other` (null existing + tighten constraint), add the 4
+  new instruments to the bank-account mapping, drop `xero_bank_other` +
+  `xero_bank_reimburse_me` (reimburse is a bill now), add `paid_value_date` +
+  `xero_payment_id` columns.
+- Backend: payment-method enum updated; `BILL_METHODS` split; `/approve` fires
+  the bill creation; `/pay` captures the value date + method and fires the
+  payment-against-bill push; `cost-xero-push.ts` rewritten to two flows;
+  `xero-broker.payInvoice()` added.
+- Frontend: modal payment-method picker grouped into Paid already / Pay later;
+  Settings → Xero Bank Accounts lists the new instruments; CostsPage Xero badges
+  are bill-aware (In Xero / Bill paid); a "Mark bill paid" modal captures date +
+  method.
+
+### Still to do (next chunks)
+
+- Component 5 — `cost_intent` (quote-actual vs extra) before any HH recharge push.
+- HH recharge stock items + push (needs the HH stock IDs).
+- Vehicle picker on the modal; Xero reconciliation sync; entry points on
+  Job/Vehicle/Issue detail pages.

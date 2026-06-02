@@ -139,7 +139,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '102_user_cot_card_last4.sql',
         '103_encrypt_driver_pii.sql',
         '104_vehicle_finance_lifecycle.sql',
-        '105_reconcile_vehicle_finance_columns.sql',
+        '105_cost_payment_methods_bills.sql',
+        '106_reconcile_vehicle_finance_columns.sql',
       ];
 
       for (const migration of migrations) {

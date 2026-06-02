@@ -1,4 +1,4 @@
--- Migration 105: Reconcile vehicle finance columns
+-- Migration 106: Reconcile vehicle finance columns
 --
 -- Migration 104 shipped twice with different column sets: an early version with
 -- purchase_cost / finance_cost / extra_costs, then a revised version with the
