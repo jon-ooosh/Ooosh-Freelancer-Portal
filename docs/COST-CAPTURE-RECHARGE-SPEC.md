@@ -580,3 +580,89 @@ Read this spec (`docs/COST-CAPTURE-RECHARGE-SPEC.md`) — it has running build n
 - `frontend/src/components/CostCaptureModal.tsx` — the capture/edit modal
 - `frontend/src/pages/CostsPage.tsx` — the hub
 - `frontend/src/components/XeroBankAccountsSection.tsx` — settings mapping
+
+---
+
+## Build notes — Phase A: real payment instruments + payables-as-bills (Jun 2026)
+
+First chunk of the "finish Cost Capture" work. Resolves the "Other won't sync"
+dead-end and turns "Not yet paid" into a proper Xero purchase-ledger flow.
+Decisions taken with jon up front:
+
+- **"Other" removed.** A Xero Spend Money must book against a real bank account;
+  "Other" has none, so it could never reconcile and sat stuck on "Not synced".
+  The "unsure / sort later" case is now handled properly by "Not yet paid"
+  landing a bill in Xero. Migration 105 nulls existing `other` rows (rather than
+  guessing a method) and tightens the CHECK constraint.
+- **Real instruments added:** Amex card, Lloyds credit card, Wise transfer,
+  Lloyds bank transfer (alongside COT card, petty cash, PayPal). Credit cards are
+  just BANK-type accounts in Xero, so they push as Spend Money identically — the
+  liability sits on the card account exactly like real life.
+- **"Not yet paid" + "Reimburse me" are now pay-later BILLS.** They land as an
+  **AUTHORISED ACCPAY bill** in Xero on OP **approval** (so they show in Xero's
+  "Bills to pay"). When marked paid (date — may be future — + method), a
+  **Payment is recorded against the bill** on the bank account mapped to that pay
+  method. This is the correct accounting treatment, not a workaround: Spend Money
+  = paid now; Bill + Payment = pay later.
+- **"Reimburse me" bills are raised against the STAFF MEMBER**, not the receipt
+  vendor (the vendor's already been paid by the staff member — the company owes
+  the staff member). The vendor is noted on the bill line and the receipt
+  attached as evidence. Bill contact defaults to the uploader's name.
+
+### Two-camp model
+
+| Camp | Methods | Xero object | Bank account |
+|---|---|---|---|
+| Paid-now | cot_card, amex, lloyds_cc, petty_cash, paypal, wise, lloyds_transfer | Spend Money (on save, once paid) | `xero_bank_<method>` mapping |
+| Pay-later | not_yet_paid, reimburse_me | Authorised ACCPAY bill (on approval) → Payment (on mark-paid) | bill needs none; payment uses `xero_bank_<paid_method>` mapping |
+
+### Lifecycle (pay-later)
+
+```
+capture (awaiting_payment, approval_state=verified)   → nothing in Xero yet
+  → admin approve                                       → AUTHORISED bill + receipt in Xero (xero_sync_state=attached)
+  → admin Mark paid (date + method)                     → Payment recorded against the bill (xero_payment_id set)
+  → (later) Codat bank line matches                      → reconciled (future sync)
+```
+
+The push service (`cost-xero-push.ts`) is idempotent and resumable — "Push now"
+does the right next step at any stage. `recordBillPayment` guards on
+`xero_payment_id` so a re-run never double-pays.
+
+### ⚠️ Gated on a Xero scope (one-line flip)
+
+ACCPAY bills + payments need the **`accounting.transactions`** scope on the Xero
+Custom Connection (currently NOT granted). Until then, the bill push soft-skips
+with a calm "needs accounting.transactions scope" advisory (grey "Not synced"
+pill, not a red error) — everything else (Spend Money, reads) keeps working.
+
+**To enable bills:**
+1. Tick `accounting.transactions` on the Ooosh Custom Connection in the Xero
+   developer portal + reconnect.
+2. Uncomment the `accounting.transactions` line in `DEFAULT_SCOPES`
+   (`backend/src/config/xero.ts`) + redeploy. (Order matters — requesting an
+   ungranted scope fails the whole client_credentials token mint and breaks the
+   working reads.)
+3. Existing approved bills: hit **Push now** in `/money/costs` to create them.
+
+### What shipped
+
+- Migration 105: retire `other` (null existing + tighten constraint), add the 4
+  new instruments to the bank-account mapping, drop `xero_bank_other` +
+  `xero_bank_reimburse_me` (reimburse is a bill now), add `paid_value_date` +
+  `xero_payment_id` columns.
+- Backend: payment-method enum updated; `BILL_METHODS` split; `/approve` fires
+  the bill creation; `/pay` captures the value date + method and fires the
+  payment-against-bill push; `cost-xero-push.ts` rewritten to two flows;
+  `xero-broker.payInvoice()` added.
+- Frontend: modal payment-method picker grouped into Paid already / Pay later;
+  Settings → Xero Bank Accounts lists the new instruments; CostsPage Xero badges
+  are bill-aware (In Xero / Bill paid); a "Mark bill paid" modal captures date +
+  method.
+
+### Still to do (next chunks)
+
+- Component 5 — `cost_intent` (quote-actual vs extra) before any HH recharge push.
+- HH recharge stock items + push (needs the HH stock IDs).
+- Vehicle picker on the modal; Xero reconciliation sync; entry points on
+  Job/Vehicle/Issue detail pages.

@@ -977,7 +977,12 @@ export type PaymentTerms = 'standard' | 'credit_7' | 'credit_14' | 'credit_30' |
 
 // ── Cost Capture & Recharge ──────────────────────────────────────────────────
 export type CostType = 'overhead' | 'job' | 'vehicle' | 'stock' | 'parts' | 'freelancer_invoice';
-export type CostPaymentMethod = 'cot_card' | 'petty_cash' | 'paypal' | 'reimburse_me' | 'not_yet_paid' | 'other';
+// Paid-now instruments push as a Xero Spend Money on the mapped bank/card
+// account. 'reimburse_me' + 'not_yet_paid' are pay-later — they land as an
+// authorised ACCPAY bill on OP approval, with a payment recorded later.
+export type CostPaymentMethod =
+  | 'cot_card' | 'amex' | 'lloyds_cc' | 'petty_cash' | 'paypal' | 'wise' | 'lloyds_transfer'
+  | 'reimburse_me' | 'not_yet_paid';
 export type CostPaymentStatus = 'paid' | 'awaiting_payment' | 'awaiting_invoice';
 export type CostRechargeMode = 'none' | 'full' | 'partial';
 export type CostApprovalState = 'submitted' | 'verified' | 'approved' | 'paid';
@@ -1020,11 +1025,13 @@ export interface Cost {
   approved_at: string | null;
   paid_by: string | null;
   paid_at: string | null;
+  paid_value_date: string | null;
   paid_method: string | null;
   receipt_r2_key: string | null;
   receipt_filename: string | null;
   xero_sync_state: CostXeroSyncState;
   xero_object_id: string | null;
+  xero_payment_id: string | null;
   xero_synced_at: string | null;
   xero_error: string | null;
   status: CostStatus;

@@ -1,13 +1,14 @@
 /**
  * XeroBankAccountsSection — admin maps OP payment methods → Xero bank accounts.
  *
- * Settings page section. For each OP payment method (Company card / Petty cash /
- * PayPal / Reimburse me / Other) the admin picks the Xero bank account that
- * Spend Money transactions for that method should post against. Stored in
- * system_settings under category `xero_bank_accounts`.
+ * Settings page section. For each paid-now instrument (card / transfer / cash)
+ * the admin picks the Xero bank account that money for that method posts to.
+ * Used both for the Spend Money push (paid-now costs) AND for recording a
+ * payment against a bill when a pay-later cost is marked paid by that method.
+ * Stored in system_settings under category `xero_bank_accounts`.
  *
- * Unmapped methods: cost-xero-push records 'error' with an explanatory message
- * and skips that cost (visible in /money/costs with a Retry button).
+ * Unmapped methods: cost-xero-push leaves the cost on a calm "Not synced"
+ * advisory (visible in /money/costs with a Push now button once mapped).
  */
 import { useState, useEffect } from 'react';
 import { api } from '../services/api';
@@ -16,11 +17,13 @@ interface BankAccount { AccountID: string; Code: string | null; Name: string; La
 interface SystemSetting { key: string; value: string | null; label: string }
 
 const ORDER = [
-  { key: 'xero_bank_cot_card',     hint: 'Company card (COT)' },
-  { key: 'xero_bank_petty_cash',   hint: 'Petty cash' },
-  { key: 'xero_bank_paypal',       hint: 'PayPal' },
-  { key: 'xero_bank_reimburse_me', hint: 'Reimburse me (staff repays)' },
-  { key: 'xero_bank_other',        hint: 'Other' },
+  { key: 'xero_bank_cot_card',        hint: 'Company card (COT)' },
+  { key: 'xero_bank_amex',            hint: 'Amex card' },
+  { key: 'xero_bank_lloyds_cc',       hint: 'Lloyds credit card' },
+  { key: 'xero_bank_petty_cash',      hint: 'Petty cash' },
+  { key: 'xero_bank_paypal',          hint: 'PayPal' },
+  { key: 'xero_bank_wise',            hint: 'Wise bank transfer' },
+  { key: 'xero_bank_lloyds_transfer', hint: 'Lloyds bank transfer' },
 ];
 
 export default function XeroBankAccountsSection() {
@@ -97,8 +100,9 @@ export default function XeroBankAccountsSection() {
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Xero Bank Accounts</h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Map each payment method to a Xero bank account so captured costs push as Spend Money there
-            (ready for one-click reconciliation against the bank feed).
+            Map each payment instrument to a Xero bank account. Paid-now costs push as Spend Money there;
+            bill payments (supplier bills, staff reimbursements) post against it when marked paid — both
+            ready for one-click reconciliation against the bank feed.
           </p>
         </div>
         {!editing ? (

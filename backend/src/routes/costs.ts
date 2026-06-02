@@ -54,7 +54,12 @@ const STAFF_COST_ACCOUNT_CODES = [
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
 const COST_TYPES = ['overhead', 'job', 'vehicle', 'stock', 'parts', 'freelancer_invoice'] as const;
-const PAYMENT_METHODS = ['cot_card', 'petty_cash', 'paypal', 'reimburse_me', 'not_yet_paid', 'other'] as const;
+const PAYMENT_METHODS = [
+  'cot_card', 'amex', 'lloyds_cc', 'petty_cash', 'paypal', 'wise', 'lloyds_transfer',
+  'reimburse_me', 'not_yet_paid',
+] as const;
+// Pay-later methods land as an authorised ACCPAY bill on approval (vs Spend Money).
+const BILL_METHODS = ['not_yet_paid', 'reimburse_me'] as const;
 const PAYMENT_STATUSES = ['paid', 'awaiting_payment', 'awaiting_invoice'] as const;
 const RECHARGE_MODES = ['none', 'full', 'partial'] as const;
 
@@ -390,10 +395,10 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
 
-    // A payable (not yet paid / awaiting payment) enters the approval workflow.
-    // If the booker is uploading it, they vouch for it inline → 'verified'.
+    // A payable (anything not already paid) enters the approval workflow. If the
+    // booker is uploading it, they vouch for it inline → 'verified'.
     let approvalState: string | null = null;
-    if (data.payment_status === 'not_yet_paid' || data.payment_status === 'awaiting_payment') {
+    if (data.payment_status && data.payment_status !== 'paid') {
       approvalState = 'verified';
     }
 
@@ -560,6 +565,12 @@ router.post('/:id/approve', authorize(...ADMIN_ONLY), async (req: AuthRequest, r
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
     await audit(req.user!.id, req.params.id as string, 'cost_approved', null, { approval_state: 'approved' });
+
+    // Pay-later methods create their authorised ACCPAY bill in Xero on approval.
+    if ((BILL_METHODS as readonly string[]).includes(result.rows[0].payment_method)) {
+      const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
+      pushCostToXeroBackground(result.rows[0].id);
+    }
     res.json({ data: result.rows[0] });
   } catch (err) {
     console.error('[costs] approve error:', err);
@@ -568,7 +579,10 @@ router.post('/:id/approve', authorize(...ADMIN_ONLY), async (req: AuthRequest, r
 });
 
 const paySchema = z.object({
+  // The bank/card instrument the payment went out from (drives which Xero bank
+  // account the payment posts against). One of the paid-now method keys.
   paid_method: z.string().trim().max(40).optional().nullable(),
+  // The date money actually moves — may be future, for a scheduled payment.
   paid_date: z.string().trim().max(20).optional().nullable(),
 });
 
@@ -576,17 +590,25 @@ router.post('/:id/pay', authorize(...ADMIN_ONLY), async (req: AuthRequest, res: 
   try {
     const parse = paySchema.safeParse(req.body ?? {});
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
-    const { paid_method } = parse.data;
+    const { paid_method, paid_date } = parse.data;
 
     const result = await query(
       `UPDATE costs
        SET approval_state = 'paid', payment_status = 'paid',
-           paid_by = $1, paid_at = NOW(), paid_method = COALESCE($2, paid_method)
-       WHERE id = $3 RETURNING *`,
-      [req.user!.id, paid_method ?? null, req.params.id],
+           paid_by = $1, paid_at = NOW(), paid_method = COALESCE($2, paid_method),
+           paid_value_date = COALESCE($3::date, paid_value_date, CURRENT_DATE)
+       WHERE id = $4 RETURNING *`,
+      [req.user!.id, paid_method ?? null, paid_date || null, req.params.id],
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
-    await audit(req.user!.id, req.params.id as string, 'cost_paid', null, { approval_state: 'paid', paid_method });
+    await audit(req.user!.id, req.params.id as string, 'cost_paid', null, { approval_state: 'paid', paid_method, paid_date });
+
+    // Record the payment against the Xero bill (pay-later methods). Idempotent —
+    // the push skips if the payment is already recorded (xero_payment_id set).
+    if ((BILL_METHODS as readonly string[]).includes(result.rows[0].payment_method)) {
+      const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
+      pushCostToXeroBackground(result.rows[0].id);
+    }
     res.json({ data: result.rows[0] });
   } catch (err) {
     console.error('[costs] pay error:', err);
