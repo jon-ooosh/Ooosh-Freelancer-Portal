@@ -71,8 +71,12 @@ export interface CreateBillInput {
 }
 
 export interface CreateSpendMoneyInput {
-  bankAccountCode: string;
-  contactName: string;
+  /** Either bankAccountId (Xero AccountID / UUID) or bankAccountCode is required. */
+  bankAccountId?: string;
+  bankAccountCode?: string;
+  /** Either contactId or contactName is required. */
+  contactId?: string;
+  contactName?: string;
   date?: string;
   reference?: string;
   lineItems: XeroLineItem[];
@@ -346,7 +350,11 @@ class XeroBroker {
 
   /** Spend money (petty cash / PayPal / reimbursement not on a bank feed). */
   async createSpendMoney(input: CreateSpendMoneyInput): Promise<{ BankTransactionID: string }> {
-    const contact = await this.getOrCreateContact(input.contactName);
+    const contactID = input.contactId
+      ?? (await this.getOrCreateContact(input.contactName ?? 'Unknown supplier')).ContactID;
+    const bankAccount = input.bankAccountId
+      ? { AccountID: input.bankAccountId }
+      : { Code: input.bankAccountCode };
     const r = await this.request<{ BankTransactions: Array<{ BankTransactionID: string }> }>(
       'PUT',
       '/BankTransactions',
@@ -355,8 +363,8 @@ class XeroBroker {
           BankTransactions: [
             {
               Type: 'SPEND',
-              Contact: { ContactID: contact.ContactID },
-              BankAccount: { Code: input.bankAccountCode },
+              Contact: { ContactID: contactID },
+              BankAccount: bankAccount,
               Date: input.date,
               Reference: input.reference,
               LineAmountTypes: input.lineAmountTypes || 'Inclusive',
@@ -367,6 +375,14 @@ class XeroBroker {
       }
     );
     return r.BankTransactions[0];
+  }
+
+  /** All ACTIVE bank accounts in the chart of accounts (Type=BANK). */
+  async getBankAccounts(): Promise<Array<XeroAccount & { BankAccountNumber?: string }>> {
+    const r = await this.request<{ Accounts: Array<XeroAccount & { BankAccountNumber?: string }> }>(
+      'GET', '/Accounts', { query: { where: 'Type=="BANK" AND Status=="ACTIVE"' } }
+    );
+    return r.Accounts || [];
   }
 
   /** Attach a receipt file to an invoice or bank transaction. */

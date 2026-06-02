@@ -428,3 +428,24 @@ Frontend hub + manual capture shipped (PR #592) and tested live. Decisions + fol
 **Supplier autocomplete from Xero contacts.** Typing in the Supplier field debounces (300ms) and queries `GET /api/costs/xero/suppliers?search=` — backed by a new `xeroBroker.searchContacts()` method using Xero's `searchTerm` (active contacts, capped at 10). Picks an existing supplier with one click; free-text is still allowed (resolved at push time via `getOrCreateContact`). Degrades silently if Xero is unreachable.
 
 **Grouped categories.** The "What's this cost for?" picker is now grouped under headings — People / Vehicles / Equipment / Office & other — using native `<optgroup>`. Helps staff land on the right choice. The "Crew travel" label is broadened to "Travel (taxis, trains etc.)"; same Xero code (325).
+
+## Build notes — Xero push wired (1 Jun 2026)
+
+**Spend Money + receipt attach, automatic on save.** Once a paid cost is saved, the backend fires `services/cost-xero-push.ts` in `setImmediate` (so the API response isn't blocked on Xero). It creates a Spend Money on the mapped bank account, then downloads the receipt from R2 and attaches it via `PUT /BankTransactions/{id}/Attachments/{filename}`. Codat's bank-feed line auto-suggests the Spend Money for one-click reconciliation — replaces the "wall of un-reconciled lines" Ooosh have been wading through.
+
+**State machine (`costs.xero_sync_state`).**
+- `pending` → not yet pushed (fresh / unpushable)
+- `bill_created` → Spend Money created (rendered "Sent")
+- `attached` → + receipt attached (rendered "Synced")
+- `reconciled` → bank line matched in Xero (future — set by webhook/sync)
+- `error` → push failed; `xero_error` carries the message; **Retry** button in `/money/costs`
+
+**Bank-account mapping** lives in `system_settings` under category `xero_bank_accounts`, one row per OP payment method (`xero_bank_cot_card / petty_cash / paypal / reimburse_me / other`). Values are Xero `AccountID` UUIDs. Admin sets the mapping via a new **Settings → Xero Bank Accounts** section that pulls the live bank-account list from `GET /api/costs/xero/bank-accounts`. Unmapped methods surface as a soft error on the cost with a retry once mapped.
+
+**Forward-only by design.** A cost already in `bill_created` / `attached` / `reconciled` is idempotent — the push skips it. PATCH retriggers the push *only* when the cost is `pending` / `error` / has no `xero_object_id`. Edits to already-pushed costs are deliberately not auto-mirrored to Xero yet — that's a follow-up (update existing transaction when `bill_created` / `attached`, void-and-recreate once `reconciled`).
+
+**ACCPAY (supplier bills) still deferred.** `not_yet_paid` costs hold in OP as payables; the push only fires once staff flip them to paid (with a `paid_method`). Needs `accounting.invoices` scope on the Custom Connection — flag for when the volume warrants it.
+
+**Supplier fuzzy-match guard (not yet built).** Today free-text supplier entry creates a new Xero contact if no exact-name match — risks typo duplicates. Follow-up: at save time, surface "did you mean…?" suggestions when the input is close to an existing contact but not exact; at push time, do a `searchTerm` query as a final guard before falling back to `getOrCreateContact`.
+
+**AI receipt extraction (next stage).** Claude vision reads the uploaded receipt and pre-fills supplier / date / amounts / category — reduces both manual data entry and the misclassification risk that surfaced in testing. Needs `ANTHROPIC_API_KEY`.

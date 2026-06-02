@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { Navigate } from 'react-router-dom';
+import XeroBankAccountsSection from '../components/XeroBankAccountsSection';
 
 interface TeamUser {
   id: string;
@@ -528,6 +529,9 @@ function SettingsContent() {
 
       {/* Out-of-Hours return settings — admin & manager */}
       <OohSettingsSection />
+
+      {/* Xero bank account mapping — admin & manager */}
+      <XeroBankAccountsSection />
 
       {/* Vehicle Issues settings — admin & manager */}
       <VehicleIssueSettingsSection />

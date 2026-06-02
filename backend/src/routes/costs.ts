@@ -278,6 +278,30 @@ router.get('/xero/accounts', authorize(...STAFF_ROLES), async (req: AuthRequest,
   }
 });
 
+// Lists Xero bank accounts (Type=BANK, ACTIVE) for the Settings → Xero Bank
+// Accounts mapping UI. Returns AccountID, Name, Code, last 4 of bank number.
+router.get('/xero/bank-accounts', authorize(...VERIFY_ROLES), async (_req: AuthRequest, res: Response) => {
+  try {
+    const { isXeroConfigured } = await import('../config/xero');
+    if (!isXeroConfigured()) {
+      return res.status(503).json({ error: 'Xero not configured (XERO_CLIENT_ID / XERO_CLIENT_SECRET missing)' });
+    }
+    const { xeroBroker } = await import('../services/xero-broker');
+    const accounts = await xeroBroker.getBankAccounts();
+    res.json({
+      data: accounts.map((a) => ({
+        AccountID: a.AccountID,
+        Code: a.Code || null,
+        Name: a.Name,
+        Last4: a.BankAccountNumber ? String(a.BankAccountNumber).slice(-4) : null,
+      })),
+    });
+  } catch (err) {
+    console.error('[costs] xero bank-accounts error:', err);
+    res.status(502).json({ error: 'Xero request failed', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // Supplier autocomplete for the capture modal — fuzzy-searches Xero contacts.
 // Stops staff creating duplicate suppliers from typos. Free-text entry still
 // allowed; the supplier→Xero contact resolution happens at push time.
@@ -356,6 +380,12 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
       `INSERT INTO costs (${cols.join(', ')}) VALUES (${placeholders}) RETURNING *`,
       vals,
     );
+
+    // Background push to Xero for paid costs — non-blocking; the cost row's
+    // xero_sync_state + xero_error carry success/failure for the UI.
+    const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
+    pushCostToXeroBackground(result.rows[0].id);
+
     res.status(201).json({ data: result.rows[0] });
   } catch (err) {
     console.error('[costs] create error:', err);
@@ -384,10 +414,35 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
       vals,
     );
     if (!result.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
-    res.json({ data: result.rows[0] });
+
+    // Background push to Xero if the cost isn't already attached/reconciled.
+    // The push service itself guards on state — safe to call unconditionally.
+    const updated = result.rows[0];
+    if (!updated.xero_object_id || updated.xero_sync_state === 'error' || updated.xero_sync_state === 'pending') {
+      const { pushCostToXeroBackground } = await import('../services/cost-xero-push');
+      pushCostToXeroBackground(updated.id);
+    }
+
+    res.json({ data: updated });
   } catch (err) {
     console.error('[costs] update error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Manual retry — staff-triggered push for anything stuck. Runs the same push
+// service synchronously and returns the result for UI feedback.
+router.post('/:id/sync-xero', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const { pushCostToXero } = await import('../services/cost-xero-push');
+    const result = await pushCostToXero(id);
+    const after = await query('SELECT * FROM costs WHERE id = $1', [id]);
+    if (!after.rows.length) return res.status(404).json({ error: 'Cost not found' });
+    res.json({ data: after.rows[0], result });
+  } catch (err) {
+    console.error('[costs] sync-xero error:', err);
+    res.status(500).json({ error: 'Internal server error', detail: err instanceof Error ? err.message : String(err) });
   }
 });
 

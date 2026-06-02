@@ -135,6 +135,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '098_stripe_webhooks.sql',
         '099_excess_refund_legs.sql',
         '100_organisations_xero_contact_id.sql',
+        '101_xero_bank_account_mapping.sql',
       ];
 
       for (const migration of migrations) {
