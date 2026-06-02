@@ -498,7 +498,7 @@ router.post(
 
       if (send_client_email !== false) (async () => {
         try {
-          const target = await resolveClientEmailTarget(jobId);
+          const target = await resolveClientEmailTarget(jobId, 'job_cancelled_client');
 
           // Three balance states the email needs to convey, mutually exclusive:
           //   1. refundAmount > 0      — we owe the client

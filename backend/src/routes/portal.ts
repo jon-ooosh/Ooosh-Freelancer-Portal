@@ -1473,7 +1473,7 @@ router.post('/jobs/:quoteId/complete', (req: PortalRequest, res: Response, next:
       // the address book. Without this the delivery note silently disappears.
       let completionFallback: { jobId: string; clientName: string | null; jobNumber: string | null; jobName: string | null } | null = null;
       if (recipients.size === 0 && ctx.job_id) {
-        const target = await resolveClientEmailTarget(ctx.job_id);
+        const target = await resolveClientEmailTarget(ctx.job_id, 'delivery_note');
         if (target.isFallback) {
           recipients.add(target.primaryEmail);
           completionFallback = {

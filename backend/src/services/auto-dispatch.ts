@@ -7,18 +7,20 @@
  *   - Freelancer portal completion of last delivery (portal.ts)
  *   - Staff in-person book-out (hire-forms.ts PATCH)
  *
- * Adds a sanity check: before flipping OP, if HireHop status (synced
- * `jobs.status` integer) is < 5 (not yet Dispatched in HH — i.e. still
- * Booked / Prepped / Part Dispatched / earlier), fire a warning email
- * to info@ + a bell notification to the acting user explaining that the
- * job is being marked On Hire in OP while not all items are dispatched
- * in HH. Then proceed with the flip + writeback regardless — the email
- * is informational, not blocking.
+ * The dispatch sanity check (warning when HH status hasn't caught up to 5)
+ * used to fire inline from here on every call, which (a) re-fired for every
+ * driver/van on a multi-driver job, and (b) tripped false positives while
+ * the synced `jobs.status` was stale relative to live HireHop.
+ *
+ * Replaced May 2026 by a 15-min scheduler scan (config/scheduler.ts) that
+ * runs ~30 min after dispatch, by which time the local copy has caught up
+ * via the 30-min polling sync. The scanner uses `jobs.under_dispatch_warned_at`
+ * (migration 102) as a dedup marker so at most ONE warning fires per
+ * dispatch. We also clear the marker on transition out of `dispatched`
+ * (e.g. on return) so a re-dispatched job can warn afresh.
  */
 import { query } from '../config/database';
 import { writeBackStatusToHireHop } from './hirehop-writeback';
-import { emailService } from './email-service';
-import { getFrontendUrl } from '../config/app-urls';
 
 export interface AutoDispatchOptions {
   /** OP job UUID */
@@ -77,64 +79,10 @@ export async function autoDispatchJob(opts: AutoDispatchOptions): Promise<AutoDi
 
   result.hhStatusAtCheck = job.status;
 
-  // ── Sanity check: HH status < 5 (anything pre-Dispatched, including
-  // Part Dispatched 4) → warning email + bell notification.
-  // Fires regardless of OP state — covers retries where the pipeline is
-  // already 'dispatched' but HH never moved (the original under-dispatch).
-  const hhStatus: number | null = job.status;
-  if (hhStatus !== null && hhStatus < 5) {
-    result.underDispatchedWarningFired = true;
-    const frontendUrl = getFrontendUrl();
-    const opJobUrl = `${frontendUrl}/jobs/${opts.jobId}`;
-    const hhJobUrl = job.hh_job_number
-      ? `https://myhirehop.com/job.php?id=${job.hh_job_number}`
-      : '';
-    const hhStatusLabel = HH_STATUS_LABELS[hhStatus] || `Status ${hhStatus}`;
-    const jobRef = job.hh_job_number
-      ? `J-${job.hh_job_number}`
-      : (job.job_name || 'Unknown job');
-
-    // Email to info@ — non-blocking, log on failure
-    try {
-      await emailService.send('under_dispatched_warning', {
-        to: 'info@oooshtours.co.uk',
-        variables: {
-          jobRef,
-          jobName: job.job_name || '',
-          jobNumber: job.hh_job_number ? String(job.hh_job_number) : '',
-          source: SOURCE_LABELS[opts.source],
-          actorLabel: opts.actorLabel,
-          hhStatusLabel,
-          hhStatusCode: String(hhStatus),
-          opJobUrl,
-          hhJobUrl,
-        },
-      });
-    } catch (err) {
-      console.error('[auto-dispatch] under-dispatched warning email failed:', err);
-    }
-
-    // Bell notification to acting user (if staff JWT — warehouse PIN /
-    // portal freelancers won't have a user_id and skip this).
-    if (opts.actorUserId) {
-      try {
-        await query(
-          `INSERT INTO notifications (user_id, type, priority, title, content,
-                                       entity_type, entity_id, action_url)
-           VALUES ($1, 'system', 'high', $2, $3, 'jobs', $4, $5)`,
-          [
-            opts.actorUserId,
-            `${jobRef}: marked On Hire but HH not fully dispatched`,
-            `You just marked ${jobRef} as On Hire, but HireHop status is still "${hhStatusLabel}". Some items may not be dispatched in HH. Please confirm.`,
-            opts.jobId,
-            opJobUrl,
-          ]
-        );
-      } catch (err) {
-        console.warn('[auto-dispatch] bell notification insert failed:', err);
-      }
-    }
-  }
+  // Sanity-check email moved to scheduled scanner (config/scheduler.ts +
+  // services/under-dispatch-scanner.ts) — see header comment.
+  // result.underDispatchedWarningFired stays false here; the scanner
+  // marks `jobs.under_dispatch_warned_at` instead.
 
   // ── OP flip: confirmed/prepped/prepping → dispatched.
   // Whitelist guard so we never regress a job past dispatch. Idempotent:
@@ -182,7 +130,12 @@ export async function autoDispatchJob(opts: AutoDispatchOptions): Promise<AutoDi
   return result;
 }
 
-const HH_STATUS_LABELS: Record<number, string> = {
+// System user UUID (migration 031) — used for non-user-attributed interactions.
+const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
+
+/** Public HH-status integer → human label map. Used by the dispatch sanity
+ *  scanner when composing the warning email. */
+export const HH_STATUS_LABELS: Record<number, string> = {
   0: '0 — Enquiry',
   1: '1 — Provisional',
   2: '2 — Booked',
@@ -196,12 +149,3 @@ const HH_STATUS_LABELS: Record<number, string> = {
   10: '10 — Not Interested',
   11: '11 — Completed',
 };
-
-const SOURCE_LABELS: Record<AutoDispatchOptions['source'], string> = {
-  warehouse: 'Warehouse customer collection',
-  portal: 'Freelancer portal completion',
-  'staff-bookout': 'Staff in-person book-out',
-};
-
-// System user UUID (migration 031) — used for non-user-attributed interactions.
-const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';

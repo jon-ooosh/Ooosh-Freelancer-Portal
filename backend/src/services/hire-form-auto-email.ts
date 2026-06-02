@@ -175,7 +175,13 @@ export async function sendHireFormEmailForJob(
   // the form would never go out at all.
   let sentToFallback = false;
   if (contacts.length === 0) {
-    const target = await resolveClientEmailTarget(job.id);
+    // Note: the broad `resolveHireFormContacts` picker is the primary
+    // recipient source here. The per-bucket `hire_forms` override is
+    // only consulted via the info@ fallback path below — i.e. when the
+    // broad picker returns nothing AND a hire_forms override exists.
+    // (Today's behaviour: broad picker wins.) Tighter override-first
+    // behaviour for hire forms is a follow-up.
+    const target = await resolveClientEmailTarget(job.id, 'hire_form_request');
     if (target.isFallback) {
       contacts.push({ email: target.primaryEmail, name: target.primaryFirstName });
       sentToFallback = true;
