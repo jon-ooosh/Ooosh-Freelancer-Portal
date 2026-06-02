@@ -17,12 +17,20 @@
 
 ALTER TABLE fleet_vehicles
   -- Finance details (admin-only)
-  ADD COLUMN IF NOT EXISTS finance_start     DATE,
-  ADD COLUMN IF NOT EXISTS finance_reference TEXT,
-  -- Acquisition cost breakdown (admin-only). Total = derived sum, not stored.
-  ADD COLUMN IF NOT EXISTS purchase_cost     NUMERIC(12,2),
-  ADD COLUMN IF NOT EXISTS finance_cost      NUMERIC(12,2),
-  ADD COLUMN IF NOT EXISTS extra_costs       NUMERIC(12,2),
+  ADD COLUMN IF NOT EXISTS finance_start       DATE,
+  ADD COLUMN IF NOT EXISTS finance_reference   TEXT,
+  -- Finance agreement figures (admin-only). "Total payable" + "cost of finance"
+  -- are DERIVED at render (not stored): total = deposit + monthly×term + fees;
+  -- cost of finance = total − cash_price. For an outright-owned van, leave the
+  -- finance figures blank and cash_price IS the total cost.
+  ADD COLUMN IF NOT EXISTS cash_price          NUMERIC(12,2),  -- inc-VAT cash price of the van
+  ADD COLUMN IF NOT EXISTS deposit_paid        NUMERIC(12,2),
+  ADD COLUMN IF NOT EXISTS amount_financed     NUMERIC(12,2),
+  ADD COLUMN IF NOT EXISTS monthly_payment     NUMERIC(12,2),
+  ADD COLUMN IF NOT EXISTS finance_term_months INTEGER,
+  -- Fees as a JSONB array of { label, amount } so different agreements can add
+  -- their own (acceptance, option-to-purchase, doc fees, etc.). Summed at render.
+  ADD COLUMN IF NOT EXISTS finance_fees        JSONB NOT NULL DEFAULT '[]'::jsonb,
   -- Disposal record (admin-only)
   ADD COLUMN IF NOT EXISTS sold_date         DATE,
   ADD COLUMN IF NOT EXISTS sale_price        NUMERIC(12,2),

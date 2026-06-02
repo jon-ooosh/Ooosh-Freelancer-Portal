@@ -46,10 +46,16 @@ export interface Vehicle {
   financeEnds: string | null      // YYYY-MM-DD
   financeStart: string | null     // YYYY-MM-DD — when the finance agreement started
   financeReference: string | null // agreement / account reference
-  purchaseCost: number | null     // acquisition cost breakdown...
-  financeCost: number | null
-  extraCosts: number | null       // doc fees, admin charges, etc.
-  totalAcquisitionCost: number | null  // derived sum of the three
+  // Finance agreement figures (admin-only)
+  cashPrice: number | null        // inc-VAT cash price of the van
+  depositPaid: number | null
+  amountFinanced: number | null
+  monthlyPayment: number | null
+  financeTermMonths: number | null
+  financeFees: FinanceFee[]        // { label, amount } — acceptance/option/doc fees etc.
+  financeFeesTotal: number | null  // derived sum of fees
+  totalPayable: number | null      // derived: actual total paid over the van's life
+  costOfFinance: number | null     // derived: total payable − cash price (financing premium)
   salePrice: number | null        // disposal price (admin-only)
   saleNotes: string | null        // disposal notes (admin-only)
   // Disposal + removal — operational, visible to ALL staff
@@ -88,6 +94,11 @@ export interface Vehicle {
   isOldSold: boolean              // true = from Monday "Old and sold" group
   // Raw data for anything we haven't mapped yet
   _raw?: Record<string, unknown>
+}
+
+export interface FinanceFee {
+  label: string
+  amount: number
 }
 
 export interface SetupChecklistItem {
