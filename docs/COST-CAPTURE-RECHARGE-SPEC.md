@@ -461,3 +461,9 @@ Frontend hub + manual capture shipped (PR #592) and tested live. Decisions + fol
 **Optgroup styling.** Global rule in `styles/index.css` makes `<optgroup>` labels bold/dark on a light-grey strip across every `<select>` in the app — fixes the muddy default look the "What's this cost for?" picker (and any other future grouped select) inherited from Chrome.
 
 **Re: COT reconciliation.** The Spend Money we push waits for Codat's bank-feed line; Xero's matching engine auto-suggests our Spend Money against the line — staff/accountant one-click reconcile. Future enhancement: poll Xero `/BankTransactions` for `IsReconciled=true` and flip our `xero_sync_state` to `reconciled` automatically.
+
+## Build notes — testing round 5 (2 Jun 2026)
+
+**Job picker in the modal.** "Link to job (optional — needed to recharge)" with debounced job search against `/api/search` (filtered to `type='job'`). Lights up the existing recharge controls. Pre-fills from `presetJobId` for entry-point integrations OR from `existing.job_id` on edit (displays `hh_job_number` + `job_name` when available). Sends `job_id` on both create AND edit so staff can change/clear the link later.
+
+**Push now on "Not synced".** The soft "Not synced" pill kept a Push now button. Lets staff re-trigger after fixing the underlying gap (e.g. mapping just set in Settings) without having to edit/save to nudge the push.

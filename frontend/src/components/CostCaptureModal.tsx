@@ -68,8 +68,11 @@ const SPLIT_KEY = 'ooosh_cost_modal_split_pct';
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 interface XeroContactLite { ContactID: string; Name: string }
+interface JobSuggestion { id: string; type: string; name: string; subtitle?: string }
+type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | null }) | null | undefined;
 
 export default function CostCaptureModal({ onClose, onSaved, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
+  const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
   const fullName = user ? `${user.first_name} ${user.last_name}`.trim() : '';
   const isEdit = Boolean(existing);
@@ -82,6 +85,16 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [amountNet, setAmountNet] = useState(existing?.amount_net != null ? String(existing.amount_net) : '');
   const [assumeVat20, setAssumeVat20] = useState(!isEdit);
   const [description, setDescription] = useState(existing?.description || '');
+
+  // Job link (needed to enable recharge). Pre-fill from existing cost or preset.
+  const initialJobLabel = existingRow?.hh_job_number
+    ? `#${existingRow.hh_job_number}${existingRow.job_name ? ' – ' + existingRow.job_name : ''}`
+    : existingRow?.job_id ? '(linked job)' : '';
+  const [linkedJobId, setLinkedJobId] = useState<string | null>(existing?.job_id || presetJobId || null);
+  const [linkedJobLabel, setLinkedJobLabel] = useState<string>(initialJobLabel);
+  const [jobSearch, setJobSearch] = useState('');
+  const [jobSuggestions, setJobSuggestions] = useState<JobSuggestion[]>([]);
+  const [jobFocused, setJobFocused] = useState(false);
   const [categoryCode, setCategoryCode] = useState(existing?.xero_account_code || (presetVehicleId ? '406' : presetIssueId ? '473' : ''));
   const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>(existing?.payment_method || 'cot_card');
   const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>(existing?.payment_status || 'paid');
@@ -109,6 +122,18 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }, 300);
     return () => clearTimeout(t);
   }, [supplierName]);
+
+  // Job picker — debounced search against the global /api/search, filtered to type='job'.
+  useEffect(() => {
+    if (jobSearch.trim().length < 2) { setJobSuggestions([]); return; }
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.get<{ results: JobSuggestion[] }>(`/search?q=${encodeURIComponent(jobSearch.trim())}&limit=10`);
+        setJobSuggestions((r.results || []).filter((x) => x.type === 'job').slice(0, 8));
+      } catch { setJobSuggestions([]); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [jobSearch]);
 
   // ── Resizable split (md+ only) ───────────────────────────────────────────
   const [leftPct, setLeftPct] = useState<number>(() => Number(localStorage.getItem(SPLIT_KEY)) || 45);
@@ -191,7 +216,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     } catch { setError('Could not open the saved receipt.'); }
   }, [existing]);
 
-  const canRecharge = Boolean(presetJobId || existing?.job_id);
+  const canRecharge = Boolean(linkedJobId);
 
   async function handleSave() {
     setError('');
@@ -229,9 +254,10 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         receipt_r2_key: receiptKey,
         receipt_filename: receiptName,
         notes: notes || null,
+        // Always send job_id so edit-mode can change/clear the link.
+        job_id: linkedJobId || null,
       };
       if (!isEdit) {
-        payload.job_id = presetJobId || null;
         payload.vehicle_id = presetVehicleId || null;
         payload.platform_issue_id = presetIssueId || null;
         payload.status = 'confirmed';
@@ -355,6 +381,49 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
               <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What was this for?" />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Link to job <span className="text-gray-400 font-normal">(optional — needed to recharge)</span>
+              </label>
+              {linkedJobId ? (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md border border-purple-200">
+                    {linkedJobLabel || '(linked job)'}
+                  </span>
+                  <button type="button"
+                    onClick={() => { setLinkedJobId(null); setLinkedJobLabel(''); setJobSearch(''); setJobSuggestions([]); }}
+                    className="text-xs text-red-600 hover:underline">
+                    Remove link
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <input className={inputCls} value={jobSearch}
+                    onChange={(e) => setJobSearch(e.target.value)}
+                    onFocus={() => setJobFocused(true)}
+                    onBlur={() => setTimeout(() => setJobFocused(false), 150)}
+                    placeholder="Search by job number or name" autoComplete="off" />
+                  {jobFocused && jobSuggestions.length > 0 && (
+                    <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-md shadow-lg">
+                      {jobSuggestions.map((s) => (
+                        <button key={s.id} type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setLinkedJobId(s.id);
+                            setLinkedJobLabel(s.name);
+                            setJobSearch('');
+                            setJobSuggestions([]);
+                          }}
+                          className="block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50">
+                          {s.name}{s.subtitle ? <span className="text-gray-400"> · {s.subtitle}</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
