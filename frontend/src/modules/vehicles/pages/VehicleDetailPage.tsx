@@ -18,6 +18,7 @@ import { getAuthHeaders } from '../config/api-config'
 import { getDateUrgency } from '../types/vehicle'
 import type { DateUrgency, DateUrgencyMode, VehicleFile, SetupChecklistItem } from '../types/vehicle'
 import { mergeChecklist, buildDefaultChecklist, checklistProgress } from '../lib/setup-checklist'
+import { FinanceLifecycleSection, RemovalChecklistCard } from '../components/FinanceLifecycleSection'
 import { VAN_TYPES } from '../lib/van-matching'
 
 function formatDate(dateStr: string | null): string {
@@ -256,6 +257,8 @@ export function VehicleDetailPage() {
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
   const canEditMileage = isAdmin || opAuth?.userRole === 'weekend_manager'
+  // Finance is stricter than the page's admin/manager gate — admin only.
+  const isStrictAdmin = opAuth?.userRole === 'admin'
 
   const saveField = async (field: string, value: string | number | boolean | null) => {
     if (!vehicle) return
@@ -525,7 +528,7 @@ export function VehicleDetailPage() {
         />
         <RossettsDueRow vehicle={vehicle} settings={cs} />
         <EditableRow label="Warranty Expires" value={vehicle.warrantyExpires} type="date" onSave={v => saveField('warranty_expires', v)} />
-        <EditableRow label="Finance Ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
+        {/* Finance Ends moved to the admin-only Finance & Lifecycle section */}
       </div>
 
       {/* Insurance Details (collapsible — fleet insurance, rarely needed per-van) */}
@@ -675,7 +678,7 @@ export function VehicleDetailPage() {
           )}
         </div>
         <EditableRow label="Wifi Network" value={vehicle.wifiNetwork} type="text" onSave={v => saveField('wifi_network', v)} />
-        <EditableRow label="Finance With" value={vehicle.financeWith} type="text" onSave={v => saveField('finance_with', v)} />
+        {/* Finance With moved to the admin-only Finance & Lifecycle section */}
         <EditableRow label="ULEZ Compliant" value={vehicle.ulezCompliant} type="toggle" onSave={v => saveField('ulez_compliant', v)} />
         <EditableRow label="Spare Key" value={vehicle.spareKey} type="toggle" onSave={v => saveField('spare_key', v)} />
       </div>
@@ -683,8 +686,16 @@ export function VehicleDetailPage() {
       {/* Notes */}
       <NotesCard vehicleId={vehicle.id} notes={vehicle.notes} />
 
-      {/* Vehicle Files */}
-      <VehicleFilesSection vehicleId={vehicle.id} files={vehicle.files || []} />
+      {/* Removal checklist — all staff, shown once a van is sold */}
+      <RemovalChecklistCard vehicle={vehicle} onChange={() => queryClient.invalidateQueries({ queryKey: ['vehicles'] })} />
+
+      {/* Finance & Lifecycle — admin only */}
+      {isStrictAdmin && (
+        <FinanceLifecycleSection vehicle={vehicle} onChange={() => queryClient.invalidateQueries({ queryKey: ['vehicles'] })} />
+      )}
+
+      {/* Vehicle Files (finance docs excluded — they live in Finance & Lifecycle) */}
+      <VehicleFilesSection vehicleId={vehicle.id} files={(vehicle.files || []).filter(f => !f.is_finance)} />
 
       </>}
     </div>

@@ -138,6 +138,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '101_xero_bank_account_mapping.sql',
         '102_user_cot_card_last4.sql',
         '103_encrypt_driver_pii.sql',
+        '104_vehicle_finance_lifecycle.sql',
       ];
 
       for (const migration of migrations) {
