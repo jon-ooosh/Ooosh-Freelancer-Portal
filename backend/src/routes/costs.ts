@@ -11,11 +11,19 @@
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
+import multer from 'multer';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 
 const router = Router();
 router.use(authenticate);
+
+// Multer for the AI-extract endpoint — same 10MB limit as the generic file
+// uploader; accepts images + PDF (the receipts staff actually capture).
+const extractUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
 
 // Manager+ can verify a payable; only admin can approve / mark paid.
 const VERIFY_ROLES = ['admin', 'manager'] as const;
@@ -299,6 +307,26 @@ router.get('/xero/bank-accounts', authorize(...VERIFY_ROLES), async (_req: AuthR
   } catch (err) {
     console.error('[costs] xero bank-accounts error:', err);
     res.status(502).json({ error: 'Xero request failed', detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// AI receipt extraction — multipart upload of an image or PDF, returns the
+// extracted fields for the capture modal to pre-fill. Inert when
+// ANTHROPIC_API_KEY isn't set (clean 503; capture still works manually).
+router.post('/extract', authorize(...STAFF_ROLES), extractUpload.single('file'), async (req: AuthRequest, res: Response) => {
+  try {
+    const { isAnthropicConfigured } = await import('../config/anthropic');
+    if (!isAnthropicConfigured()) {
+      return res.status(503).json({ error: 'AI extraction not configured (ANTHROPIC_API_KEY missing on server)' });
+    }
+    if (!req.file) return res.status(400).json({ error: 'No file provided' });
+
+    const { extractReceipt } = await import('../services/cost-receipt-extract');
+    const result = await extractReceipt(req.file.buffer, req.file.mimetype);
+    res.json({ data: result });
+  } catch (err) {
+    console.error('[costs] extract error:', err);
+    res.status(500).json({ error: 'Extraction failed', detail: err instanceof Error ? err.message : String(err) });
   }
 });
 

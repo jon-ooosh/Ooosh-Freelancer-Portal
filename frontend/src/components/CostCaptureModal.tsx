@@ -68,8 +68,11 @@ const SPLIT_KEY = 'ooosh_cost_modal_split_pct';
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 interface XeroContactLite { ContactID: string; Name: string }
+interface JobSuggestion { id: string; type: string; name: string; subtitle?: string }
+type ExistingRow = (Cost & { hh_job_number?: number | null; job_name?: string | null }) | null | undefined;
 
 export default function CostCaptureModal({ onClose, onSaved, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
+  const existingRow = existing as ExistingRow;
   const { user } = useAuthStore();
   const fullName = user ? `${user.first_name} ${user.last_name}`.trim() : '';
   const isEdit = Boolean(existing);
@@ -82,6 +85,16 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [amountNet, setAmountNet] = useState(existing?.amount_net != null ? String(existing.amount_net) : '');
   const [assumeVat20, setAssumeVat20] = useState(!isEdit);
   const [description, setDescription] = useState(existing?.description || '');
+
+  // Job link (needed to enable recharge). Pre-fill from existing cost or preset.
+  const initialJobLabel = existingRow?.hh_job_number
+    ? `#${existingRow.hh_job_number}${existingRow.job_name ? ' – ' + existingRow.job_name : ''}`
+    : existingRow?.job_id ? '(linked job)' : '';
+  const [linkedJobId, setLinkedJobId] = useState<string | null>(existing?.job_id || presetJobId || null);
+  const [linkedJobLabel, setLinkedJobLabel] = useState<string>(initialJobLabel);
+  const [jobSearch, setJobSearch] = useState('');
+  const [jobSuggestions, setJobSuggestions] = useState<JobSuggestion[]>([]);
+  const [jobFocused, setJobFocused] = useState(false);
   const [categoryCode, setCategoryCode] = useState(existing?.xero_account_code || (presetVehicleId ? '406' : presetIssueId ? '473' : ''));
   const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>(existing?.payment_method || 'cot_card');
   const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>(existing?.payment_status || 'paid');
@@ -90,6 +103,10 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [notes, setNotes] = useState(existing?.notes || '');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string>('');
+  const [aiPrefilled, setAiPrefilled] = useState(false);
+  const [aiConfidence, setAiConfidence] = useState<'high' | 'medium' | 'low' | null>(null);
   const [receiptIsPdf, setReceiptIsPdf] = useState(false);
 
   const [saving, setSaving] = useState(false);
@@ -109,6 +126,18 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }, 300);
     return () => clearTimeout(t);
   }, [supplierName]);
+
+  // Job picker — debounced search against the global /api/search, filtered to type='job'.
+  useEffect(() => {
+    if (jobSearch.trim().length < 2) { setJobSuggestions([]); return; }
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.get<{ results: JobSuggestion[] }>(`/search?q=${encodeURIComponent(jobSearch.trim())}&limit=10`);
+        setJobSuggestions((r.results || []).filter((x) => x.type === 'job').slice(0, 8));
+      } catch { setJobSuggestions([]); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [jobSearch]);
 
   // ── Resizable split (md+ only) ───────────────────────────────────────────
   const [leftPct, setLeftPct] = useState<number>(() => Number(localStorage.getItem(SPLIT_KEY)) || 45);
@@ -183,6 +212,55 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }
   };
 
+  // AI extraction — POSTs the receipt to /api/costs/extract and pre-fills form.
+  // The backend uses Claude vision (Haiku) + prompt caching on the system prompt.
+  async function extractReceipt() {
+    if (!receiptFile) return;
+    setExtracting(true);
+    setExtractError('');
+    setAiPrefilled(false);
+    try {
+      const fd = new FormData();
+      fd.append('file', receiptFile);
+      const res = await api.upload<{
+        data: {
+          supplier: string | null;
+          cost_date: string | null;
+          amount_gross: number | null;
+          amount_vat: number | null;
+          amount_net: number | null;
+          description: string | null;
+          category_code: string | null;
+          confidence: 'high' | 'medium' | 'low';
+          supplier_matched?: { from: string; to: string };
+        };
+      }>('/costs/extract', fd);
+      const ex = res.data;
+      if (ex.supplier) setSupplierName(ex.supplier);
+      if (ex.cost_date) setCostDate(ex.cost_date);
+      if (ex.description) setDescription(ex.description);
+      if (ex.category_code) setCategoryCode(ex.category_code);
+      // Amounts: prefer gross (most reliably present on receipts) and let the
+      // existing 20% VAT auto-calc fill net/VAT; if only net came back, drive
+      // from net instead. Both helpers respect assumeVat20.
+      if (ex.amount_gross != null) onGrossChange(String(ex.amount_gross));
+      else if (ex.amount_net != null) onNetChange(String(ex.amount_net));
+      if (ex.amount_vat != null && !assumeVat20) setAmountVat(String(ex.amount_vat));
+      setAiPrefilled(true);
+      setAiConfidence(ex.confidence);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // 503 from the backend = no API key. Don't make it look like a bug.
+      if (msg.includes('not configured')) {
+        setExtractError('AI extraction isn\'t enabled on the server yet — fill in the form manually.');
+      } else {
+        setExtractError(msg);
+      }
+    } finally {
+      setExtracting(false);
+    }
+  }
+
   const viewExistingReceipt = useCallback(async () => {
     if (!existing?.receipt_r2_key) return;
     try {
@@ -191,7 +269,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     } catch { setError('Could not open the saved receipt.'); }
   }, [existing]);
 
-  const canRecharge = Boolean(presetJobId || existing?.job_id);
+  const canRecharge = Boolean(linkedJobId);
 
   async function handleSave() {
     setError('');
@@ -229,9 +307,10 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         receipt_r2_key: receiptKey,
         receipt_filename: receiptName,
         notes: notes || null,
+        // Always send job_id so edit-mode can change/clear the link.
+        job_id: linkedJobId || null,
       };
       if (!isEdit) {
-        payload.job_id = presetJobId || null;
         payload.vehicle_id = presetVehicleId || null;
         payload.platform_issue_id = presetIssueId || null;
         payload.status = 'confirmed';
@@ -265,7 +344,34 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           <div className="px-6 py-4 border-b md:border-b-0 md:border-r border-gray-100 md:overflow-y-auto" style={leftPaneStyle}>
             <label className="block text-sm font-medium text-gray-700 mb-2">Receipt</label>
             <input type="file" accept="image/*,application/pdf" className="text-sm mb-3"
-              onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} />
+              onChange={(e) => {
+                setReceiptFile(e.target.files?.[0] || null);
+                setAiPrefilled(false);
+                setAiConfidence(null);
+                setExtractError('');
+              }} />
+            {receiptFile && !isEdit && (
+              <div className="mb-3">
+                <button type="button" onClick={extractReceipt} disabled={extracting}
+                  className="w-full px-3 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+                  {extracting ? 'Extracting details…' : '✨ Extract details with AI'}
+                </button>
+                {aiPrefilled && (
+                  <div className={`mt-2 px-3 py-2 text-xs rounded-md border ${
+                    aiConfidence === 'high' ? 'bg-green-50 border-green-200 text-green-800'
+                      : aiConfidence === 'medium' ? 'bg-amber-50 border-amber-200 text-amber-800'
+                      : 'bg-red-50 border-red-200 text-red-800'
+                  }`}>
+                    Pre-filled from receipt (confidence: <strong>{aiConfidence}</strong>) — please check and correct anything wrong before saving.
+                  </div>
+                )}
+                {extractError && (
+                  <div className="mt-2 px-3 py-2 text-xs bg-red-50 border border-red-200 text-red-700 rounded-md">
+                    {extractError}
+                  </div>
+                )}
+              </div>
+            )}
             {receiptPreview && !receiptIsPdf && (
               <img src={receiptPreview} alt="Receipt preview" onClick={() => window.open(receiptPreview, '_blank')}
                 className="w-full max-h-[60vh] object-contain rounded border border-gray-200 cursor-zoom-in bg-white" />
@@ -355,6 +461,49 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
               <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What was this for?" />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Link to job <span className="text-gray-400 font-normal">(optional — needed to recharge)</span>
+              </label>
+              {linkedJobId ? (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-3 py-1.5 text-sm bg-purple-50 text-purple-700 rounded-md border border-purple-200">
+                    {linkedJobLabel || '(linked job)'}
+                  </span>
+                  <button type="button"
+                    onClick={() => { setLinkedJobId(null); setLinkedJobLabel(''); setJobSearch(''); setJobSuggestions([]); }}
+                    className="text-xs text-red-600 hover:underline">
+                    Remove link
+                  </button>
+                </div>
+              ) : (
+                <div className="relative">
+                  <input className={inputCls} value={jobSearch}
+                    onChange={(e) => setJobSearch(e.target.value)}
+                    onFocus={() => setJobFocused(true)}
+                    onBlur={() => setTimeout(() => setJobFocused(false), 150)}
+                    placeholder="Search by job number or name" autoComplete="off" />
+                  {jobFocused && jobSuggestions.length > 0 && (
+                    <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-md shadow-lg">
+                      {jobSuggestions.map((s) => (
+                        <button key={s.id} type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setLinkedJobId(s.id);
+                            setLinkedJobLabel(s.name);
+                            setJobSearch('');
+                            setJobSuggestions([]);
+                          }}
+                          className="block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50">
+                          {s.name}{s.subtitle ? <span className="text-gray-400"> · {s.subtitle}</span> : null}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div>
