@@ -13,6 +13,7 @@ import { validate } from '../middleware/validate';
 import { generateDriverSnapshot, loadDriverDocuments, type DriverSnapshotData } from '../services/driver-snapshot-pdf';
 import { uploadToR2 } from '../config/r2';
 import { fetchLogo } from '../services/hire-form-pdf';
+import { encryptDriverPiiInto, decryptDriverRow, decryptDriverRows } from '../services/driver-pii';
 
 const router = Router();
 router.use(authenticate);
@@ -201,7 +202,7 @@ router.get('/', async (req: AuthRequest, res: Response) => {
     );
 
     res.json({
-      data: result.rows,
+      data: decryptDriverRows(result.rows),
       pagination: {
         page: parseInt(page as string),
         limit: pageLimit,
@@ -282,7 +283,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    res.json({ data: result.rows[0] });
+    res.json({ data: decryptDriverRow(result.rows[0]) });
   } catch (error) {
     console.error('[drivers] Detail error:', error);
     res.status(500).json({ error: 'Failed to load driver' });
@@ -406,7 +407,10 @@ router.post('/', validate(createDriverSchema), async (req: AuthRequest, res: Res
       ]
     );
 
-    res.status(201).json({ data: result.rows[0] });
+    const created = result.rows[0];
+    // Dual-write encrypted PII companions (Phase 1). Plaintext stays in place.
+    await encryptDriverPiiInto({ query }, created.id, d);
+    res.status(201).json({ data: created });
   } catch (error) {
     console.error('[drivers] Create error:', error);
     res.status(500).json({ error: 'Failed to create driver' });
@@ -511,7 +515,10 @@ router.put('/:id', authorize('admin', 'manager'), validate(updateDriverSchema), 
       );
     }
 
-    res.json({ data: result.rows[0] });
+    // Dual-write encrypted PII companions for whichever PII fields changed.
+    await encryptDriverPiiInto({ query }, String(id), updates);
+    const updated = decryptDriverRow(result.rows[0]);
+    res.json({ data: updated });
   } catch (error) {
     console.error('[drivers] Update error:', error);
     res.status(500).json({ error: 'Failed to update driver' });
@@ -734,7 +741,7 @@ router.post('/:id/snapshot', authorize('admin', 'manager'), async (req: AuthRequ
       res.status(404).json({ error: 'Driver not found' });
       return;
     }
-    const d = result.rows[0];
+    const d = decryptDriverRow(result.rows[0]);
 
     // Load document files from R2
     const documents = await loadDriverDocuments(d.files || []);
@@ -843,7 +850,7 @@ router.post('/:id/generate-snapshot', authenticate, async (req: AuthRequest, res
     if (driverResult.rows.length === 0) {
       return res.status(404).json({ error: 'Driver not found' });
     }
-    const driver = driverResult.rows[0];
+    const driver = decryptDriverRow(driverResult.rows[0]);
 
     const documents = await loadDriverDocuments(driver.files || []);
     let logoImage: Buffer | null = null;
