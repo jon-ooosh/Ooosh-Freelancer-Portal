@@ -65,6 +65,7 @@ export default function CostsPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [showCapture, setShowCapture] = useState(false);
   const [editing, setEditing] = useState<CostRow | null>(null);
+  const [payTarget, setPayTarget] = useState<CostRow | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -91,13 +92,29 @@ export default function CostsPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  async function runAction(id: string, action: 'verify' | 'approve' | 'pay') {
+  async function runAction(id: string, action: 'verify' | 'approve') {
     setActionBusy(id + action);
     try {
       await api.post(`/costs/${id}/${action}`, {});
       await load();
     } catch (err) {
       alert(err instanceof Error ? err.message : `Failed to ${action}`);
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  // Mark a bill paid: captures the value date (may be future) + the method the
+  // money went out from. The backend records the payment against the Xero bill
+  // on that method's mapped bank account.
+  async function payCost(id: string, paidDate: string, paidMethod: string) {
+    setActionBusy(id + 'pay');
+    try {
+      await api.post(`/costs/${id}/pay`, { paid_date: paidDate, paid_method: paidMethod });
+      setPayTarget(null);
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to mark paid');
     } finally {
       setActionBusy(null);
     }
@@ -255,7 +272,7 @@ export default function CostsPage() {
                   <td className="px-3 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
                       {view === 'payable' && (
-                        <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} />
+                        <PayableActions cost={c} isManager={isManager} isAdmin={isAdmin} busy={actionBusy} onAction={runAction} onPay={() => setPayTarget(c)} />
                       )}
                       {view === 'recharge' && !c.recharged_to_hh_at && (
                         <button disabled={actionBusy === c.id + 'recharge'} onClick={() => confirmRecharge(c)}
@@ -294,16 +311,94 @@ export default function CostsPage() {
           onSaved={() => { setEditing(null); load(); }}
         />
       )}
+      {payTarget && (
+        <PayModal
+          cost={payTarget}
+          busy={actionBusy === payTarget.id + 'pay'}
+          onClose={() => setPayTarget(null)}
+          onSubmit={(date, method) => payCost(payTarget.id, date, method)}
+        />
+      )}
     </div>
   );
 }
 
-function PayableActions({ cost, isManager, isAdmin, busy, onAction }: {
+// Bank/card instruments money can go out from — drives which Xero bank account
+// a bill payment posts to. Keep in step with the paid-now methods in
+// CostCaptureModal + backend SPEND_MONEY_METHODS.
+const PAID_NOW_METHODS = [
+  { value: 'wise', label: 'Wise bank transfer' },
+  { value: 'lloyds_transfer', label: 'Lloyds bank transfer' },
+  { value: 'cot_card', label: 'Company card (COT)' },
+  { value: 'amex', label: 'Amex card' },
+  { value: 'lloyds_cc', label: 'Lloyds credit card' },
+  { value: 'petty_cash', label: 'Petty cash' },
+  { value: 'paypal', label: 'PayPal' },
+];
+
+function PayModal({ cost, busy, onClose, onSubmit }: {
+  cost: CostRow;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (paidDate: string, paidMethod: string) => void;
+}) {
+  const [paidDate, setPaidDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paidMethod, setPaidMethod] = useState('wise');
+  const isReimburse = cost.payment_method === 'reimburse_me';
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">Mark bill paid</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          <p className="text-sm text-gray-600">
+            {isReimburse ? 'Reimbursement to ' : 'Payment to '}
+            <strong>{isReimburse ? (cost.uploaded_by_name || 'staff') : (cost.supplier_name || 'supplier')}</strong>
+            {' '}of <strong>{gbp(cost.amount_gross)}</strong>.
+          </p>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Payment date</label>
+            <input type="date" value={paidDate} onChange={(e) => setPaidDate(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500" />
+            <p className="text-xs text-gray-400 mt-1">A future date schedules the payment in Xero for that day.</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Paid from</label>
+            <select value={paidMethod} onChange={(e) => setPaidMethod(e.target.value)}
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500">
+              {PAID_NOW_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+            <p className="text-xs text-gray-400 mt-1">Records the payment against the bill on this account's Xero feed.</p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-gray-200">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">Cancel</button>
+          <button onClick={() => onSubmit(paidDate, paidMethod)} disabled={busy}
+            className="px-4 py-2 text-sm text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+            {busy ? 'Saving…' : 'Mark paid'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PayableActions({ cost, isManager, isAdmin, busy, onAction, onPay }: {
   cost: Cost;
   isManager: boolean;
   isAdmin: boolean;
   busy: string | null;
-  onAction: (id: string, a: 'verify' | 'approve' | 'pay') => void;
+  onAction: (id: string, a: 'verify' | 'approve') => void;
+  onPay: () => void;
 }) {
   const s = cost.approval_state;
   if (s === 'paid') return <span className="text-xs text-green-600">Paid</span>;
@@ -314,7 +409,7 @@ function PayableActions({ cost, isManager, isAdmin, busy, onAction }: {
     return <ActionBtn busy={busy === cost.id + 'approve'} onClick={() => onAction(cost.id, 'approve')} label="Approve" />;
   }
   if (s === 'approved' && isAdmin) {
-    return <ActionBtn busy={busy === cost.id + 'pay'} onClick={() => onAction(cost.id, 'pay')} label="Mark paid" />;
+    return <ActionBtn busy={busy === cost.id + 'pay'} onClick={onPay} label="Mark paid" />;
   }
   return <span className="text-xs text-gray-400">{s ? `awaiting ${s === 'verified' ? 'approval' : 'payment'}` : '—'}</span>;
 }
@@ -329,17 +424,25 @@ function ActionBtn({ busy, onClick, label }: { busy: boolean; onClick: () => voi
 }
 
 function XeroCell({ cost, busy, onRetry }: { cost: Cost; busy: boolean; onRetry: () => void }) {
-  if (cost.payment_status !== 'paid') {
+  const isBill = cost.payment_method === 'not_yet_paid' || cost.payment_method === 'reimburse_me';
+  // Paid-now costs have nothing to push until they're paid. Bills push on
+  // approval, so show their state regardless of payment status.
+  if (!isBill && cost.payment_status !== 'paid') {
     return <span className="text-xs text-gray-400">—</span>;
   }
   if (cost.xero_sync_state === 'reconciled') {
     return <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">Reconciled</span>;
   }
   if (cost.xero_sync_state === 'attached') {
+    if (isBill) {
+      return cost.xero_payment_id
+        ? <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800" title="Bill paid in Xero">Bill paid</span>
+        : <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="Bill in Xero, awaiting payment">In Xero</span>;
+    }
     return <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800">Synced</span>;
   }
   if (cost.xero_sync_state === 'bill_created') {
-    return <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="In Xero; receipt attach pending">Sent</span>;
+    return <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="In Xero; receipt attach pending">{isBill ? 'Bill created' : 'Sent'}</span>;
   }
   if (cost.xero_sync_state === 'error') {
     return (

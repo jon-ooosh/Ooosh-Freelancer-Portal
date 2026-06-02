@@ -44,14 +44,23 @@ export const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0';
 // transactions + creating SPEND money (banktransactions), supplier linkage
 // (contacts) and receipt upload (attachments).
 //
-// NOT granted: `accounting.transactions` — the scope governing ACCPAY *Invoices*
-// (supplier bills). createBill() in the broker will 403 until that scope is added
-// to the connection and it's reconnected. Everything else works as-is.
+// `accounting.transactions` governs ACCPAY *Invoices* (supplier bills) AND
+// *Payments* (recording a payment against a bill). The pay-later flow
+// (not_yet_paid / reimburse_me) needs it; createBill() + payInvoice() in the
+// broker 403 until it's granted. The push service soft-handles that 403 (calm
+// "needs Xero bills scope" advisory, not a red error), so everything else keeps
+// working in the meantime.
+//
+// TO ENABLE BILLS: (1) tick `accounting.transactions` on the Ooosh Custom
+// Connection in the Xero developer portal + reconnect, THEN (2) uncomment the
+// line below and redeploy. Order matters — requesting an ungranted scope fails
+// the whole client_credentials token mint and breaks the working reads.
 const DEFAULT_SCOPES = [
   'accounting.banktransactions',
   'accounting.settings',
   'accounting.contacts',
   'accounting.attachments',
+  // 'accounting.transactions',  // ← uncomment AFTER granting it in Xero (enables ACCPAY bills + payments)
 ].join(' ');
 
 export function getXeroConfig(): XeroConfig {

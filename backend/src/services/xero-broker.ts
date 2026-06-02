@@ -348,6 +348,39 @@ class XeroBroker {
     return r.Invoices[0];
   }
 
+  /**
+   * Record a payment against an ACCPAY bill (flips it Awaiting Payment → Paid).
+   * The payment posts to the chosen bank account on the given date (which may be
+   * future, for a scheduled payment). Governed by the `accounting.transactions`
+   * scope — same gate as createBill().
+   */
+  async payInvoice(input: {
+    invoiceId: string;
+    accountId: string;
+    amount: number;
+    date?: string;        // YYYY-MM-DD; defaults to today in Xero if omitted
+    reference?: string;
+  }): Promise<{ PaymentID: string }> {
+    const r = await this.request<{ Payments: Array<{ PaymentID: string }> }>(
+      'PUT',
+      '/Payments',
+      {
+        body: {
+          Payments: [
+            {
+              Invoice: { InvoiceID: input.invoiceId },
+              Account: { AccountID: input.accountId },
+              Amount: input.amount,
+              Date: input.date,
+              Reference: input.reference,
+            },
+          ],
+        },
+      }
+    );
+    return r.Payments[0];
+  }
+
   /** Spend money (petty cash / PayPal / reimbursement not on a bank feed). */
   async createSpendMoney(input: CreateSpendMoneyInput): Promise<{ BankTransactionID: string }> {
     const contactID = input.contactId
