@@ -351,13 +351,19 @@ function XeroCell({ cost, busy, onRetry }: { cost: Cost; busy: boolean; onRetry:
       </div>
     );
   }
-  // pending + advisory xero_error → soft "Not synced" pill (no Retry — staff
-  // need to address the underlying gap, e.g. missing bank-account mapping).
+  // pending + advisory xero_error → soft "Not synced" pill. Push now stays
+  // available so staff can re-trigger after fixing the underlying gap (e.g.
+  // they've just set the bank-account mapping).
   if (cost.xero_error) {
     return (
-      <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600" title={cost.xero_error}>
-        Not synced
-      </span>
+      <div className="flex items-center gap-2">
+        <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600" title={cost.xero_error}>
+          Not synced
+        </span>
+        <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
+          {busy ? '…' : 'Push now'}
+        </button>
+      </div>
     );
   }
   // pending (paid but not yet pushed — likely scheduler just queued it)

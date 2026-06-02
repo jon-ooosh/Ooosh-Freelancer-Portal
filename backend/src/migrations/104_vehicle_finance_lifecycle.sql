@@ -1,4 +1,4 @@
--- Migration 103: Vehicle finance & lifecycle (acquisition → finance → disposal)
+-- Migration 104: Vehicle finance & lifecycle (acquisition → finance → disposal)
 --
 -- Extends the fleet_vehicles "lifespan" story so admins can track the full
 -- financial life of a van: what we paid/financed (acquisition cost breakdown),
