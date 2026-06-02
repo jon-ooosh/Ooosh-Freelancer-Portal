@@ -26,7 +26,7 @@ import {
   mergeRemovalChecklist,
   removalProgress,
 } from '../lib/removal-checklist'
-import type { Vehicle, VehicleFile, SetupChecklistItem } from '../types/vehicle'
+import type { Vehicle, VehicleFile, SetupChecklistItem, FinanceFee } from '../types/vehicle'
 
 function fmtDate(d: string | null): string {
   if (!d) return '—'
@@ -147,44 +147,66 @@ export function FinanceProviderSelect({ value, onSave }: { value: string | null;
   )
 }
 
-/** Live acquisition cost breakdown — three boxes summing to a read-only total. */
-function AcquisitionCosts({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () => void }) {
-  const [purchase, setPurchase] = useState(vehicle.purchaseCost?.toString() ?? '')
-  const [finance, setFinance] = useState(vehicle.financeCost?.toString() ?? '')
-  const [extra, setExtra] = useState(vehicle.extraCosts?.toString() ?? '')
+/**
+ * Finance agreement editor — cash price, deposit, amount financed, monthly ×
+ * term, and a dynamic list of fees. Shows the live "Total payable" (what we
+ * actually pay over the van's life) and "Cost of finance" (the premium over
+ * the cash price). For an outright-owned van, just fill in the cash price.
+ */
+function FinanceAgreement({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () => void }) {
+  const [cashPrice, setCashPrice] = useState(vehicle.cashPrice?.toString() ?? '')
+  const [deposit, setDeposit] = useState(vehicle.depositPaid?.toString() ?? '')
+  const [financed, setFinanced] = useState(vehicle.amountFinanced?.toString() ?? '')
+  const [monthly, setMonthly] = useState(vehicle.monthlyPayment?.toString() ?? '')
+  const [term, setTerm] = useState(vehicle.financeTermMonths?.toString() ?? '')
+  const [fees, setFees] = useState<FinanceFee[]>(vehicle.financeFees ?? [])
   const [saving, setSaving] = useState(false)
 
-  // Re-sync when the vehicle reloads (e.g. after another edit).
+  // Re-sync when the vehicle reloads (e.g. after another edit elsewhere).
   useEffect(() => {
-    setPurchase(vehicle.purchaseCost?.toString() ?? '')
-    setFinance(vehicle.financeCost?.toString() ?? '')
-    setExtra(vehicle.extraCosts?.toString() ?? '')
-  }, [vehicle.purchaseCost, vehicle.financeCost, vehicle.extraCosts])
+    setCashPrice(vehicle.cashPrice?.toString() ?? '')
+    setDeposit(vehicle.depositPaid?.toString() ?? '')
+    setFinanced(vehicle.amountFinanced?.toString() ?? '')
+    setMonthly(vehicle.monthlyPayment?.toString() ?? '')
+    setTerm(vehicle.financeTermMonths?.toString() ?? '')
+    setFees(vehicle.financeFees ?? [])
+  }, [vehicle.cashPrice, vehicle.depositPaid, vehicle.amountFinanced, vehicle.monthlyPayment, vehicle.financeTermMonths, vehicle.financeFees])
 
   const toNum = (s: string) => (s.trim() === '' ? null : Number(s))
-  const total = (toNum(purchase) || 0) + (toNum(finance) || 0) + (toNum(extra) || 0)
-  const dirty =
-    toNum(purchase) !== (vehicle.purchaseCost ?? null) ||
-    toNum(finance) !== (vehicle.financeCost ?? null) ||
-    toNum(extra) !== (vehicle.extraCosts ?? null)
+
+  // Live totals — mirror the backend derivation exactly.
+  const feesTotal = fees.reduce((s, f) => s + (Number(f.amount) || 0), 0)
+  const repayments = (toNum(monthly) || 0) * (toNum(term) || 0)
+  const isFinanced = repayments > 0 || (toNum(financed) || 0) > 0
+  const totalPayable = isFinanced
+    ? (toNum(deposit) || 0) + repayments + feesTotal
+    : (toNum(cashPrice) || 0) + feesTotal
+  const costOfFinance = isFinanced && toNum(cashPrice) != null ? totalPayable - (toNum(cashPrice) || 0) : null
+
+  const cleanFees = fees
+    .map(f => ({ label: (f.label || '').trim(), amount: Number(f.amount) || 0 }))
+    .filter(f => f.label || f.amount)
 
   const save = async () => {
     setSaving(true)
     try {
       await updateVehicle(vehicle.id, {
-        purchase_cost: toNum(purchase),
-        finance_cost: toNum(finance),
-        extra_costs: toNum(extra),
+        cash_price: toNum(cashPrice),
+        deposit_paid: toNum(deposit),
+        amount_financed: toNum(financed),
+        monthly_payment: toNum(monthly),
+        finance_term_months: toNum(term),
+        finance_fees: cleanFees,
       })
       onSaved()
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to save costs')
+      alert(err instanceof Error ? err.message : 'Failed to save finance details')
     } finally {
       setSaving(false)
     }
   }
 
-  const box = (label: string, val: string, set: (v: string) => void) => (
+  const money = (label: string, val: string, set: (v: string) => void) => (
     <div>
       <label className="mb-1 block text-[11px] font-medium text-gray-500">{label}</label>
       <div className="relative">
@@ -200,24 +222,71 @@ function AcquisitionCosts({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () 
 
   return (
     <div>
-      <div className="grid grid-cols-3 gap-2">
-        {box('Purchase cost', purchase, setPurchase)}
-        {box('Finance cost', finance, setFinance)}
-        {box('Extra costs (doc fees, etc.)', extra, setExtra)}
-      </div>
-      <div className="mt-3 flex items-center justify-between">
-        <div className="text-sm">
-          <span className="text-gray-500">Total cost: </span>
-          <span className="font-semibold text-ooosh-navy">{formatGbp(total)}</span>
+      <div className="grid grid-cols-2 gap-2">
+        {money('Cash price (inc VAT)', cashPrice, setCashPrice)}
+        {money('Deposit paid', deposit, setDeposit)}
+        {money('Amount financed', financed, setFinanced)}
+        {money('Monthly payment', monthly, setMonthly)}
+        <div>
+          <label className="mb-1 block text-[11px] font-medium text-gray-500">Term (months)</label>
+          <input
+            type="number" min="0" step="1" value={term}
+            onChange={e => setTerm(e.target.value)}
+            className="w-full rounded border border-gray-200 px-2 py-1.5 text-sm focus:border-blue-300 focus:outline-none"
+          />
         </div>
-        {dirty && (
-          <button
-            type="button" onClick={save} disabled={saving}
-            className="rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-ooosh-navy/90 disabled:opacity-50"
-          >
-            {saving ? 'Saving…' : 'Save costs'}
-          </button>
+      </div>
+
+      {/* Fees — dynamic list */}
+      <div className="mt-3">
+        <div className="mb-1 flex items-center justify-between">
+          <span className="text-[11px] font-medium text-gray-500">Fees (acceptance, option-to-purchase, doc, etc.)</span>
+          <button type="button" onClick={() => setFees(f => [...f, { label: '', amount: 0 }])} className="text-xs font-medium text-ooosh-blue hover:underline">+ Add fee</button>
+        </div>
+        {fees.length === 0 && <p className="text-[11px] text-gray-400">No fees added.</p>}
+        <div className="space-y-1.5">
+          {fees.map((fee, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                type="text" value={fee.label} placeholder="Fee name (e.g. Acceptance fee)"
+                onChange={e => setFees(list => list.map((f, j) => j === i ? { ...f, label: e.target.value } : f))}
+                className="flex-1 rounded border border-gray-200 px-2 py-1 text-sm focus:border-blue-300 focus:outline-none"
+              />
+              <div className="relative w-28">
+                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-xs text-gray-400">£</span>
+                <input
+                  type="number" min="0" step="0.01" value={fee.amount || ''}
+                  onChange={e => setFees(list => list.map((f, j) => j === i ? { ...f, amount: Number(e.target.value) || 0 } : f))}
+                  className="w-full rounded border border-gray-200 pl-5 pr-2 py-1 text-sm focus:border-blue-300 focus:outline-none"
+                />
+              </div>
+              <button type="button" onClick={() => setFees(list => list.filter((_, j) => j !== i))} className="text-xs text-gray-400 hover:text-red-600">✕</button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Derived totals */}
+      <div className="mt-3 rounded border border-gray-100 bg-gray-50 px-3 py-2 text-sm">
+        <div className="flex items-center justify-between">
+          <span className="text-gray-500">Total payable (actual cost)</span>
+          <span className="font-semibold text-ooosh-navy">{formatGbp(totalPayable)}</span>
+        </div>
+        {costOfFinance != null && (
+          <div className="mt-1 flex items-center justify-between text-xs">
+            <span className="text-gray-400">of which cost of finance</span>
+            <span className="font-medium text-gray-600">{formatGbp(costOfFinance)}</span>
+          </div>
         )}
+      </div>
+
+      <div className="mt-3 flex justify-end">
+        <button
+          type="button" onClick={save} disabled={saving}
+          className="rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-ooosh-navy/90 disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : 'Save finance details'}
+        </button>
       </div>
     </div>
   )
@@ -343,10 +412,10 @@ export function FinanceLifecycleSection({ vehicle, onChange }: { vehicle: Vehicl
       <FinanceField label="Finance start" value={vehicle.financeStart} type="date" onSave={v => saveField('finance_start', v)} />
       <FinanceField label="Finance ends" value={vehicle.financeEnds} type="date" onSave={v => saveField('finance_ends', v)} />
 
-      {/* Acquisition cost */}
+      {/* Finance agreement / cost */}
       <div className="mt-4 border-t border-gray-100 pt-3">
-        <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Acquisition Cost</h4>
-        <AcquisitionCosts vehicle={vehicle} onSaved={onChange} />
+        <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-500">Finance / Cost</h4>
+        <FinanceAgreement vehicle={vehicle} onSaved={onChange} />
       </div>
 
       {/* Lifespan / sell window */}

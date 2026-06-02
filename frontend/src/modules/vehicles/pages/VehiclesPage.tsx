@@ -8,7 +8,7 @@ import { getDateUrgency } from '../types/vehicle'
 import { vmPath } from '../config/route-paths'
 import { createVehicle, uploadVehicleFile, fetchComplianceSettings, DEFAULT_COMPLIANCE } from '../lib/fleet-api'
 import { buildDefaultChecklist } from '../lib/setup-checklist'
-import { lifespanCountdown, sellByDate } from '../lib/vehicle-lifecycle'
+import { lifespanCountdown, sellByDate, formatGbp } from '../lib/vehicle-lifecycle'
 import { FinanceProviderSelect } from '../components/FinanceLifecycleSection'
 import type { SetupChecklistItem } from '../types/vehicle'
 import { getServiceMileageStatus, getRossettsStatus, URGENCY_TEXT } from '../lib/service-status'
@@ -155,6 +155,43 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
   )
 }
 
+// ── Click-to-sort table helpers (shared by the fleet + finance tables) ──────
+type SortState = { col: string; dir: 'asc' | 'desc' }
+function nextSort(prev: SortState | null, col: string): SortState {
+  if (prev?.col === col) return { col, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+  return { col, dir: 'asc' }
+}
+/** Compare two sort values; nulls/blanks always sort last regardless of dir. */
+function cmpVals(a: string | number | null, b: string | number | null, dir: 'asc' | 'desc'): number {
+  const na = a == null || a === ''
+  const nb = b == null || b === ''
+  if (na && nb) return 0
+  if (na) return 1
+  if (nb) return -1
+  const r = typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b))
+  return dir === 'desc' ? -r : r
+}
+function SortTh({ label, col, sort, onSort, className = '', align = 'left' }: {
+  label: string
+  col: string
+  sort: SortState | null
+  onSort: (col: string) => void
+  className?: string
+  align?: 'left' | 'right' | 'center'
+}) {
+  const active = sort?.col === col
+  const alignCls = align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'
+  return (
+    <th
+      onClick={() => onSort(col)}
+      className={`cursor-pointer select-none hover:text-gray-700 ${alignCls} ${className}`}
+      title="Sort"
+    >
+      {label}<span className="text-gray-400">{active ? (sort!.dir === 'asc' ? ' ▲' : ' ▼') : ''}</span>
+    </th>
+  )
+}
+
 /** Compact date for the dense table — "26 May 26". */
 function compactDate(dateStr: string | null): string {
   if (!dateStr) return '—'
@@ -206,25 +243,47 @@ function FleetTable({
   allocatedVehicleIds: Set<string>
   settings: ComplianceSettings
 }) {
+  const [sort, setSort] = useState<SortState | null>(null)
+  const onSort = (col: string) => setSort(s => nextSort(s, col))
+
+  const accessor = (v: Vehicle, col: string): string | number | null => {
+    switch (col) {
+      case 'reg': return v.reg
+      case 'type': return v.simpleType || ''
+      case 'status': return statusLabel(v, allocatedVehicleIds.has(v.id)).label
+      case 'mileage': return v.currentMileage
+      case 'service': return getServiceMileageStatus(v, settings.service_mileage_warning_miles).milesRemaining
+      case 'mot': return v.motDue
+      case 'tax': return v.taxDue
+      case 'tfl': return v.tflDue
+      case 'rossetts': return getRossettsStatus(v, settings).dueDate
+      case 'warranty': return v.warrantyExpires
+      default: return null
+    }
+  }
+  const rows = sort
+    ? [...vehicles].sort((a, b) => cmpVals(accessor(a, sort.col), accessor(b, sort.col), sort.dir))
+    : vehicles
+
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
       <table className="min-w-full text-left">
         <thead>
           <tr className="border-b border-gray-200 bg-gray-50 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-            <th className="px-3 py-2">Reg</th>
-            <th className="px-2 py-2">Type</th>
-            <th className="px-2 py-2">Status</th>
-            <th className="px-2 py-2 text-right">Mileage</th>
-            <th className="px-2 py-2">Service</th>
-            <th className="px-2 py-2">MOT</th>
-            <th className="px-2 py-2">Tax</th>
-            <th className="px-2 py-2">TFL</th>
-            <th className="px-2 py-2">Rossetts</th>
-            <th className="px-2 py-2">Warranty</th>
+            <SortTh label="Reg" col="reg" sort={sort} onSort={onSort} className="px-3 py-2" />
+            <SortTh label="Type" col="type" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Status" col="status" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Mileage" col="mileage" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
+            <SortTh label="Service" col="service" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="MOT" col="mot" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Tax" col="tax" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="TFL" col="tfl" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Rossetts" col="rossetts" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Warranty" col="warranty" sort={sort} onSort={onSort} className="px-2 py-2" />
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
-          {vehicles.map(vehicle => {
+          {rows.map(vehicle => {
             const svc = getServiceMileageStatus(vehicle, settings.service_mileage_warning_miles)
             const ross = getRossettsStatus(vehicle, settings)
             const status = statusLabel(vehicle, allocatedVehicleIds.has(vehicle.id))
@@ -280,32 +339,67 @@ function FleetTable({
   )
 }
 
+/** Finance-end date colour: green once past (paid off), amber as it nears. */
+function financeEndClass(dateStr: string | null): string {
+  if (!dateStr) return 'text-gray-400'
+  const days = (new Date(dateStr + 'T00:00:00').getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+  if (days < 0) return 'text-green-600 font-semibold'  // paid off ✓
+  if (days <= 60) return 'text-amber-600 font-medium'  // nearly there
+  return 'text-gray-600'
+}
+
 /**
  * Admin-only finance & lifecycle board — the whole-fleet "Monday" overview of
- * who finance is with, start/end dates, and the 5-year sell window + countdown.
+ * finance, the actual cost (incl. financing), and the 5-year sell window. All
+ * columns sortable; dates colour-coded (finance-end goes green once paid off).
  */
 function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
+  const [sort, setSort] = useState<SortState | null>(null)
+  const onSort = (col: string) => setSort(s => nextSort(s, col))
+
   const COUNTDOWN_CLS: Record<string, string> = {
     ok: 'text-gray-600',
     soon: 'text-amber-600 font-medium',
     overdue: 'text-red-600 font-semibold',
   }
+
+  const accessor = (v: Vehicle, col: string): string | number | null => {
+    switch (col) {
+      case 'reg': return v.reg
+      case 'with': return v.financeWith || ''
+      case 'start': return v.financeStart
+      case 'ends': return v.financeEnds
+      case 'deposit': return v.depositPaid
+      case 'financed': return v.amountFinanced
+      case 'total': return v.totalPayable
+      case 'sellby': { const d = sellByDate(v.dateFirstReg); return d ? d.getTime() : null }
+      case 'countdown': return lifespanCountdown(v.dateFirstReg)?.months ?? null
+      default: return null
+    }
+  }
+  const rows = sort
+    ? [...vehicles].sort((a, b) => cmpVals(accessor(a, sort.col), accessor(b, sort.col), sort.dir))
+    : vehicles
+
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
       <table className="min-w-full text-left">
         <thead>
           <tr className="border-b border-gray-200 bg-gray-50 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
-            <th className="px-3 py-2">Reg</th>
-            <th className="px-2 py-2">Finance with</th>
-            <th className="px-2 py-2">Start</th>
-            <th className="px-2 py-2">Ends</th>
-            <th className="px-2 py-2">5-yr sell-by</th>
-            <th className="px-2 py-2">Countdown</th>
+            <SortTh label="Reg" col="reg" sort={sort} onSort={onSort} className="px-3 py-2" />
+            <SortTh label="Finance with" col="with" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Start" col="start" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Ends" col="ends" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Deposit" col="deposit" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
+            <SortTh label="Financed" col="financed" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
+            <SortTh label="Total payable" col="total" sort={sort} onSort={onSort} className="px-2 py-2" align="right" />
+            <SortTh label="5-yr sell-by" col="sellby" sort={sort} onSort={onSort} className="px-2 py-2" />
+            <SortTh label="Countdown" col="countdown" sort={sort} onSort={onSort} className="px-2 py-2" />
             <th className="px-2 py-2 text-center">Docs</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
-          {vehicles.map(vehicle => {
+          {rows.map(vehicle => {
             const countdown = lifespanCountdown(vehicle.dateFirstReg)
             const sellBy = sellByDate(vehicle.dateFirstReg)
             const docCount = (vehicle.files || []).filter(f => f.is_finance === true).length
@@ -321,7 +415,19 @@ function FleetFinanceTable({ vehicles }: { vehicles: Vehicle[] }) {
                 </td>
                 <td className="whitespace-nowrap px-2 py-2 text-xs text-gray-700">{vehicle.financeWith || '—'}</td>
                 <td className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-gray-600">{compactDate(vehicle.financeStart)}</td>
-                <td className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-gray-600">{compactDate(vehicle.financeEnds)}</td>
+                <td className={`whitespace-nowrap px-2 py-2 text-xs tabular-nums ${financeEndClass(vehicle.financeEnds)}`}>
+                  {compactDate(vehicle.financeEnds)}
+                  {vehicle.financeEnds && new Date(vehicle.financeEnds + 'T00:00:00').getTime() < Date.now() && ' ✓'}
+                </td>
+                <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-gray-600">
+                  {vehicle.depositPaid != null ? formatGbp(vehicle.depositPaid) : '—'}
+                </td>
+                <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-gray-600">
+                  {vehicle.amountFinanced != null ? formatGbp(vehicle.amountFinanced) : '—'}
+                </td>
+                <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums font-medium text-gray-800">
+                  {vehicle.totalPayable != null ? formatGbp(vehicle.totalPayable) : '—'}
+                </td>
                 <td className="whitespace-nowrap px-2 py-2 text-xs tabular-nums text-gray-600">
                   {sellBy ? compactDate(sellBy.toISOString().slice(0, 10)) : '—'}
                 </td>
@@ -633,7 +739,7 @@ const NUMERIC_FIELDS = new Set([
   'seats', 'last_service_mileage', 'next_service_due', 'max_mass_kg',
   'cylinder_capacity_cc', 'mpg', 'co2_per_km',
   'recommended_tyre_psi_front', 'recommended_tyre_psi_rear',
-  'purchase_cost', 'finance_cost', 'extra_costs',
+  'cash_price', 'deposit_paid', 'amount_financed', 'monthly_payment', 'finance_term_months',
 ])
 
 /** Collapsible section wrapper for the add-vehicle form. */
@@ -842,14 +948,16 @@ function AddVehicleForm({ isAdmin, onClose, onCreated }: { isAdmin: boolean; onC
               {field('finance_ends', 'Finance ends', 'date')}
             </div>
             <div className="mt-3">
-              <p className="mb-1 text-[11px] font-medium text-gray-500">Acquisition cost</p>
-              <div className="grid grid-cols-3 gap-2">
-                {field('purchase_cost', 'Purchase (£)', 'number')}
-                {field('finance_cost', 'Finance (£)', 'number')}
-                {field('extra_costs', 'Extras (£)', 'number')}
+              <p className="mb-1 text-[11px] font-medium text-gray-500">Finance / cost</p>
+              <div className="grid grid-cols-2 gap-3">
+                {field('cash_price', 'Cash price inc VAT (£)', 'number')}
+                {field('deposit_paid', 'Deposit paid (£)', 'number')}
+                {field('amount_financed', 'Amount financed (£)', 'number')}
+                {field('monthly_payment', 'Monthly payment (£)', 'number')}
+                {field('finance_term_months', 'Term (months)', 'number')}
               </div>
               <p className="mt-1 text-[11px] text-gray-400">
-                Total: £{(Number(form.purchase_cost || 0) + Number(form.finance_cost || 0) + Number(form.extra_costs || 0)).toLocaleString()}
+                Fees + total payable are worked out on the vehicle's Finance &amp; Lifecycle section after adding.
               </p>
             </div>
             <div className="mt-3">

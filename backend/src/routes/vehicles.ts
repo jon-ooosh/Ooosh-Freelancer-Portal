@@ -529,16 +529,19 @@ const FLEET_FIELD_MAP: Record<string, string> = {
   wifi_network: 'wifi_network', wifiNetwork: 'wifi_network',
   finance_with: 'finance_with', financeWith: 'finance_with',
   finance_ends: 'finance_ends', financeEnds: 'finance_ends',
-  // Finance & lifecycle (migration 103) — admin-only (see FINANCE_FIELD_KEYS)
+  // Finance & lifecycle (migration 104) — admin-only (see FINANCE_FIELD_KEYS)
   finance_start: 'finance_start', financeStart: 'finance_start',
   finance_reference: 'finance_reference', financeReference: 'finance_reference',
-  purchase_cost: 'purchase_cost', purchaseCost: 'purchase_cost',
-  finance_cost: 'finance_cost', financeCost: 'finance_cost',
-  extra_costs: 'extra_costs', extraCosts: 'extra_costs',
+  cash_price: 'cash_price', cashPrice: 'cash_price',
+  deposit_paid: 'deposit_paid', depositPaid: 'deposit_paid',
+  amount_financed: 'amount_financed', amountFinanced: 'amount_financed',
+  monthly_payment: 'monthly_payment', monthlyPayment: 'monthly_payment',
+  finance_term_months: 'finance_term_months', financeTermMonths: 'finance_term_months',
+  finance_fees: 'finance_fees', financeFees: 'finance_fees',
   sold_date: 'sold_date', soldDate: 'sold_date',
   sale_price: 'sale_price', salePrice: 'sale_price',
   sale_notes: 'sale_notes', saleNotes: 'sale_notes',
-  // Removal checklist (migration 103) — all-staff (JSONB, like setup_checklist)
+  // Removal checklist (migration 104) — all-staff (JSONB, like setup_checklist)
   removal_checklist: 'removal_checklist', removalChecklist: 'removal_checklist',
   co2_per_km: 'co2_per_km', co2PerKm: 'co2_per_km',
   recommended_tyre_psi_front: 'recommended_tyre_psi_front', recommendedTyrePsiFront: 'recommended_tyre_psi_front',
@@ -586,7 +589,7 @@ const FLEET_FIELD_MAP: Record<string, string> = {
 /** Coerce a request value for its target DB column (uppercase reg, stringify jsonb). */
 function coerceFleetValue(key: string, dbCol: string, value: unknown): unknown {
   if (key === 'reg') return String(value).toUpperCase();
-  if ((dbCol === 'setup_checklist' || dbCol === 'removal_checklist') && typeof value !== 'string') {
+  if ((dbCol === 'setup_checklist' || dbCol === 'removal_checklist' || dbCol === 'finance_fees') && typeof value !== 'string') {
     return JSON.stringify(value ?? []);
   }
   return value;
@@ -601,7 +604,8 @@ function coerceFleetValue(key: string, dbCol: string, value: unknown): unknown {
  */
 const FINANCE_DB_COLUMNS = new Set([
   'finance_with', 'finance_ends', 'finance_start', 'finance_reference',
-  'purchase_cost', 'finance_cost', 'extra_costs',
+  'cash_price', 'deposit_paid', 'amount_financed', 'monthly_payment',
+  'finance_term_months', 'finance_fees',
   'sale_price', 'sale_notes',
 ]);
 
@@ -5130,13 +5134,32 @@ function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?
   const num = (v: unknown) => (v == null || v === '' ? null : Number(v));
   const fin = <T,>(v: T): T | null => (includeFinance ? v : null);
 
-  const purchaseCost = num(row.purchase_cost);
-  const financeCost = num(row.finance_cost);
-  const extraCosts = num(row.extra_costs);
-  const totalAcquisitionCost =
-    purchaseCost == null && financeCost == null && extraCosts == null
-      ? null
-      : (purchaseCost || 0) + (financeCost || 0) + (extraCosts || 0);
+  // Finance agreement figures + derived totals (see migration 104).
+  const cashPrice = num(row.cash_price);
+  const depositPaid = num(row.deposit_paid);
+  const amountFinanced = num(row.amount_financed);
+  const monthlyPayment = num(row.monthly_payment);
+  const financeTermMonths = num(row.finance_term_months);
+  const financeFees = Array.isArray(row.finance_fees)
+    ? (row.finance_fees as Array<{ label?: string; amount?: number }>)
+    : [];
+  const financeFeesTotal = financeFees.reduce((s, f) => s + (Number(f.amount) || 0), 0);
+  const repayments = (monthlyPayment || 0) * (financeTermMonths || 0);
+  const isFinanced = repayments > 0 || (amountFinanced || 0) > 0;
+  // Total ACTUALLY paid over the van's life: financed → deposit + repayments +
+  // fees; owned outright → cash price + fees. Null when nothing's entered.
+  const anyFinanceData =
+    cashPrice != null || depositPaid != null || amountFinanced != null ||
+    monthlyPayment != null || financeTermMonths != null || financeFees.length > 0;
+  const totalPayable = !anyFinanceData
+    ? null
+    : isFinanced
+      ? (depositPaid || 0) + repayments + financeFeesTotal
+      : (cashPrice || 0) + financeFeesTotal;
+  // The financing premium over the cash price (only meaningful when financed
+  // AND a cash price was recorded).
+  const costOfFinance =
+    isFinanced && cashPrice != null && totalPayable != null ? totalPayable - cashPrice : null;
 
   // Files: strip finance-flagged docs for non-admins so they never reach a
   // non-admin browser (the general Files UI also filters them out for everyone
@@ -5172,10 +5195,15 @@ function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?
     financeEnds: fin(formatDate(row.finance_ends)),
     financeStart: fin(formatDate(row.finance_start)),
     financeReference: fin(row.finance_reference as string | null),
-    purchaseCost: fin(purchaseCost),
-    financeCost: fin(financeCost),
-    extraCosts: fin(extraCosts),
-    totalAcquisitionCost: fin(totalAcquisitionCost),
+    cashPrice: fin(cashPrice),
+    depositPaid: fin(depositPaid),
+    amountFinanced: fin(amountFinanced),
+    monthlyPayment: fin(monthlyPayment),
+    financeTermMonths: fin(financeTermMonths),
+    financeFees: includeFinance ? financeFees : [],
+    financeFeesTotal: fin(financeFeesTotal),
+    totalPayable: fin(totalPayable),
+    costOfFinance: fin(costOfFinance),
     salePrice: fin(num(row.sale_price)),
     saleNotes: fin(row.sale_notes as string | null),
     // Disposal + removal — operational, visible to all staff
