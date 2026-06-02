@@ -187,6 +187,20 @@ function FinanceAgreement({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () 
     .map(f => ({ label: (f.label || '').trim(), amount: Number(f.amount) || 0 }))
     .filter(f => f.label || f.amount)
 
+  // Dirty check — so the Save button only shows when there's something to save
+  // (and disappears once saved, confirming the write went through).
+  const eq = (a: number | null, b: number | null | undefined) => (a ?? null) === (b ?? null)
+  const savedFees = (vehicle.financeFees ?? [])
+    .map(f => ({ label: (f.label || '').trim(), amount: Number(f.amount) || 0 }))
+    .filter(f => f.label || f.amount)
+  const dirty =
+    !eq(toNum(cashPrice), vehicle.cashPrice) ||
+    !eq(toNum(deposit), vehicle.depositPaid) ||
+    !eq(toNum(financed), vehicle.amountFinanced) ||
+    !eq(toNum(monthly), vehicle.monthlyPayment) ||
+    !eq(toNum(term), vehicle.financeTermMonths) ||
+    JSON.stringify(cleanFees) !== JSON.stringify(savedFees)
+
   const save = async () => {
     setSaving(true)
     try {
@@ -236,6 +250,9 @@ function FinanceAgreement({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () 
           />
         </div>
       </div>
+      <p className="mt-1.5 text-[11px] text-gray-400">
+        Cash price = the <strong>inc-VAT</strong> total price of the van (the agreement's "Total Cash Price inc VAT"). Used only to work out the cost of finance.
+      </p>
 
       {/* Fees — dynamic list */}
       <div className="mt-3">
@@ -280,13 +297,17 @@ function FinanceAgreement({ vehicle, onSaved }: { vehicle: Vehicle; onSaved: () 
         )}
       </div>
 
-      <div className="mt-3 flex justify-end">
-        <button
-          type="button" onClick={save} disabled={saving}
-          className="rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-ooosh-navy/90 disabled:opacity-50"
-        >
-          {saving ? 'Saving…' : 'Save finance details'}
-        </button>
+      <div className="mt-3 flex items-center justify-end gap-2">
+        {dirty || saving ? (
+          <button
+            type="button" onClick={save} disabled={saving}
+            className="rounded-lg bg-ooosh-navy px-3 py-1.5 text-xs font-medium text-white hover:bg-ooosh-navy/90 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save finance details'}
+          </button>
+        ) : (
+          <span className="text-[11px] text-gray-400">All changes saved ✓</span>
+        )}
       </div>
     </div>
   )
