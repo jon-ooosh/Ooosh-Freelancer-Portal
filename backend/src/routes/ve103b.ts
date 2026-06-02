@@ -8,6 +8,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { query } from '../config/database';
+import { decryptDriverRow } from '../services/driver-pii';
 import { uploadToR2, getFromR2, isR2Configured } from '../config/r2';
 import { generateVE103BPDF, formatDateForVE103B, resolveDriverAddressLines } from '../services/ve103b-pdf';
 import emailService from '../services/email-service';
@@ -73,6 +74,9 @@ router.post('/generate', async (req: AuthRequest, res) => {
         d.address_full,
         d.address_line1,
         d.address_line2,
+        d.address_full_encrypted,
+        d.address_line1_encrypted,
+        d.address_line2_encrypted,
         d.city,
         d.postcode,
         -- Job fields
@@ -90,7 +94,7 @@ router.post('/generate', async (req: AuthRequest, res) => {
       return;
     }
 
-    const row = assignmentResult.rows[0];
+    const row = decryptDriverRow(assignmentResult.rows[0]);
 
     // Validate required data
     if (!row.vehicle_reg) {

@@ -27,6 +27,7 @@ import {
   logFallbackToTimeline,
 } from '../services/money-emails';
 import { resolveHireFormContacts } from '../services/hire-form-contacts';
+import { encryptDriverPiiInto, decryptDriverRow } from '../services/driver-pii';
 import {
   findOverlappingAssignments,
   buildConflictPayload,
@@ -295,6 +296,21 @@ router.post('/', authenticateOrApiKey, (req: AuthRequest, _res: Response, next: 
         ]
       );
       driverId = driverResult.rows[0].id;
+    }
+
+    // Dual-write encrypted PII companions (Phase 1) for the fields this write
+    // set. date_of_birth/address_line1/2 are overwritten directly above;
+    // dvla_check_code uses COALESCE on update, so only encrypt it when a real
+    // value was supplied (mirrors the plaintext COALESCE — don't clear the
+    // encrypted copy when the plaintext copy was preserved).
+    {
+      const piiForEnc: Record<string, unknown> = {
+        date_of_birth: f.date_of_birth || null,
+        address_line1: f.address_line1 || null,
+        address_line2: f.address_line2 || null,
+      };
+      if (f.dvla_check_code) piiForEnc.dvla_check_code = f.dvla_check_code;
+      await encryptDriverPiiInto(client, driverId, piiForEnc);
     }
 
     // 2. Referral status — accept from hire form app or detect from endorsements
@@ -2456,7 +2472,7 @@ async function sendReferralNotification(
     );
 
     if (driverResult.rows.length === 0) return;
-    const driver = driverResult.rows[0];
+    const driver = decryptDriverRow(driverResult.rows[0]);
 
     // Build human-readable reasons
     const reasons: string[] = [];

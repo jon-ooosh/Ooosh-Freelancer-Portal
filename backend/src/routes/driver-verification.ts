@@ -20,6 +20,7 @@ import multer from 'multer';
 import path from 'path';
 import { v4 as uuid } from 'uuid';
 import { query } from '../config/database';
+import { encryptDriverPiiInto, decryptDriverRow, DRIVER_PII_FIELDS } from '../services/driver-pii';
 import { uploadToR2, isR2Configured } from '../config/r2';
 import { emailService } from '../services/email-service';
 
@@ -168,7 +169,7 @@ router.get('/status', authenticateHireForm, async (req: HireFormRequest, res: Re
       return;
     }
 
-    const driver = result.rows[0];
+    const driver = decryptDriverRow(result.rows[0]);
     const status = buildDriverStatusResponse(driver);
     res.json(status);
   } catch (error) {
@@ -198,7 +199,7 @@ router.post('/next-step', authenticateHireForm, async (req: HireFormRequest, res
       [email]
     );
 
-    const driver = result.rows[0] || null;
+    const driver = result.rows[0] ? decryptDriverRow(result.rows[0]) : null;
     const analysis = analyzeDocuments(driver);
     const nextStep = calculateNextStep(analysis, currentStep, addressMismatch);
 
@@ -331,6 +332,10 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
 
     const setClauses: string[] = [];
     const params: unknown[] = [];
+    // Capture the encryptable PII fields actually written (post-normalisation)
+    // for the Phase 1 dual-write follow-up below.
+    const writtenPii: Record<string, unknown> = {};
+    const piiFieldSet = new Set<string>(DRIVER_PII_FIELDS);
 
     for (const [key, value] of Object.entries(updates)) {
       // Normalise: accept both camelCase and snake_case
@@ -342,6 +347,7 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       }
       params.push(coerced);
       setClauses.push(`${dbField} = $${params.length}`);
+      if (piiFieldSet.has(dbField)) writtenPii[dbField] = coerced;
     }
 
     if (setClauses.length === 0) {
@@ -381,6 +387,9 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
       );
 
       const driverId = result.rows[0]?.id;
+
+      // Dual-write encrypted PII companions (Phase 1).
+      if (driverId) await encryptDriverPiiInto({ query }, driverId, writtenPii);
 
       // Fire referral notification if requires_referral just changed to true
       if (referralBeingSet && !wasAlreadyReferred && driverId) {
@@ -425,6 +434,9 @@ router.post('/update', authenticateHireForm, async (req: HireFormRequest, res: R
         `UPDATE drivers SET ${setClauses.join(', ')} WHERE id = $${params.length + 1}`,
         [...params.slice(0, -1), newId] // replace email param with id
       );
+
+      // Dual-write encrypted PII companions (Phase 1).
+      await encryptDriverPiiInto({ query }, newId, writtenPii);
 
       // Fire referral notification for new driver created with referral flag
       if (referralBeingSet) {
