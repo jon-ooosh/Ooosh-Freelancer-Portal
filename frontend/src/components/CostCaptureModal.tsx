@@ -103,6 +103,10 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [notes, setNotes] = useState(existing?.notes || '');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string>('');
+  const [aiPrefilled, setAiPrefilled] = useState(false);
+  const [aiConfidence, setAiConfidence] = useState<'high' | 'medium' | 'low' | null>(null);
   const [receiptIsPdf, setReceiptIsPdf] = useState(false);
 
   const [saving, setSaving] = useState(false);
@@ -208,6 +212,55 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }
   };
 
+  // AI extraction — POSTs the receipt to /api/costs/extract and pre-fills form.
+  // The backend uses Claude vision (Haiku) + prompt caching on the system prompt.
+  async function extractReceipt() {
+    if (!receiptFile) return;
+    setExtracting(true);
+    setExtractError('');
+    setAiPrefilled(false);
+    try {
+      const fd = new FormData();
+      fd.append('file', receiptFile);
+      const res = await api.upload<{
+        data: {
+          supplier: string | null;
+          cost_date: string | null;
+          amount_gross: number | null;
+          amount_vat: number | null;
+          amount_net: number | null;
+          description: string | null;
+          category_code: string | null;
+          confidence: 'high' | 'medium' | 'low';
+          supplier_matched?: { from: string; to: string };
+        };
+      }>('/costs/extract', fd);
+      const ex = res.data;
+      if (ex.supplier) setSupplierName(ex.supplier);
+      if (ex.cost_date) setCostDate(ex.cost_date);
+      if (ex.description) setDescription(ex.description);
+      if (ex.category_code) setCategoryCode(ex.category_code);
+      // Amounts: prefer gross (most reliably present on receipts) and let the
+      // existing 20% VAT auto-calc fill net/VAT; if only net came back, drive
+      // from net instead. Both helpers respect assumeVat20.
+      if (ex.amount_gross != null) onGrossChange(String(ex.amount_gross));
+      else if (ex.amount_net != null) onNetChange(String(ex.amount_net));
+      if (ex.amount_vat != null && !assumeVat20) setAmountVat(String(ex.amount_vat));
+      setAiPrefilled(true);
+      setAiConfidence(ex.confidence);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // 503 from the backend = no API key. Don't make it look like a bug.
+      if (msg.includes('not configured')) {
+        setExtractError('AI extraction isn\'t enabled on the server yet — fill in the form manually.');
+      } else {
+        setExtractError(msg);
+      }
+    } finally {
+      setExtracting(false);
+    }
+  }
+
   const viewExistingReceipt = useCallback(async () => {
     if (!existing?.receipt_r2_key) return;
     try {
@@ -291,7 +344,34 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           <div className="px-6 py-4 border-b md:border-b-0 md:border-r border-gray-100 md:overflow-y-auto" style={leftPaneStyle}>
             <label className="block text-sm font-medium text-gray-700 mb-2">Receipt</label>
             <input type="file" accept="image/*,application/pdf" className="text-sm mb-3"
-              onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} />
+              onChange={(e) => {
+                setReceiptFile(e.target.files?.[0] || null);
+                setAiPrefilled(false);
+                setAiConfidence(null);
+                setExtractError('');
+              }} />
+            {receiptFile && !isEdit && (
+              <div className="mb-3">
+                <button type="button" onClick={extractReceipt} disabled={extracting}
+                  className="w-full px-3 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
+                  {extracting ? 'Extracting details…' : '✨ Extract details with AI'}
+                </button>
+                {aiPrefilled && (
+                  <div className={`mt-2 px-3 py-2 text-xs rounded-md border ${
+                    aiConfidence === 'high' ? 'bg-green-50 border-green-200 text-green-800'
+                      : aiConfidence === 'medium' ? 'bg-amber-50 border-amber-200 text-amber-800'
+                      : 'bg-red-50 border-red-200 text-red-800'
+                  }`}>
+                    Pre-filled from receipt (confidence: <strong>{aiConfidence}</strong>) — please check and correct anything wrong before saving.
+                  </div>
+                )}
+                {extractError && (
+                  <div className="mt-2 px-3 py-2 text-xs bg-red-50 border border-red-200 text-red-700 rounded-md">
+                    {extractError}
+                  </div>
+                )}
+              </div>
+            )}
             {receiptPreview && !receiptIsPdf && (
               <img src={receiptPreview} alt="Receipt preview" onClick={() => window.open(receiptPreview, '_blank')}
                 className="w-full max-h-[60vh] object-contain rounded border border-gray-200 cursor-zoom-in bg-white" />

@@ -467,3 +467,23 @@ Frontend hub + manual capture shipped (PR #592) and tested live. Decisions + fol
 **Job picker in the modal.** "Link to job (optional — needed to recharge)" with debounced job search against `/api/search` (filtered to `type='job'`). Lights up the existing recharge controls. Pre-fills from `presetJobId` for entry-point integrations OR from `existing.job_id` on edit (displays `hh_job_number` + `job_name` when available). Sends `job_id` on both create AND edit so staff can change/clear the link later.
 
 **Push now on "Not synced".** The soft "Not synced" pill kept a Push now button. Lets staff re-trigger after fixing the underlying gap (e.g. mapping just set in Settings) without having to edit/save to nudge the push.
+
+## AI receipt extraction (Jun 2026)
+
+**Endpoint:** `POST /api/costs/extract` (multipart, STAFF_ROLES). Accepts image (JPEG/PNG/GIF/WebP) or PDF. Returns structured JSON: `supplier / cost_date / amount_gross / amount_vat / amount_net / description / category_code / confidence` (+ optional `supplier_matched` when canonicalised against an existing Xero contact).
+
+**Model:** Claude Haiku 4.5 via `@anthropic-ai/sdk`. Fast, ~£0.001/receipt at current rates.
+
+**Prompt caching:** the system prompt + 16-code category enum is byte-identical across every call (no timestamps, no per-request state). One `cache_control: { type: 'ephemeral' }` breakpoint on it — from request 2 onwards the prefix serves at ~10% input cost. Cache hit visible in `usage.cache_read_input_tokens` (logged for telemetry).
+
+**Structured output:** `output_config.format: { type: 'json_schema', schema: ... }` enforces the response shape — `category_code` is constrained to the 16-value enum, amounts are numeric, confidence is `high|medium|low`. No regex / no markdown-code-fence stripping needed.
+
+**Supplier canonicalisation:** post-extraction we hit `xeroBroker.searchContacts(supplier, 5)` and substring-match against existing Xero contacts (case-insensitive both ways). Replaces typo variants with the canonical Xero name; `supplier_matched: { from, to }` returned for visibility. Fails silently if Xero is unreachable.
+
+**UX:** `✨ Extract details with AI` button on the receipt pane (create mode only) — appears once a file is selected. Pre-fills supplier, date, amounts (via `onGrossChange` so the 20% VAT auto-calc fires), description, category. Shows a confidence-coloured banner: green / amber / red. Staff verify and correct before saving.
+
+**Inert without key:** `isAnthropicConfigured()` guard returns 503 cleanly. The button shows a friendly "AI extraction isn't enabled on the server yet" message instead of an error trace — capture still works manually with the existing form.
+
+**Activation:** add `ANTHROPIC_API_KEY=sk-ant-...` to `backend/.env` and restart `ooosh-portal`. No migration, no other config.
+
+**Cost ceiling:** Haiku 4.5 input is $1/1M tokens (output $5/1M). System prompt ~600 tokens cached after request 1; per-image overhead ~1000–1500 tokens depending on resolution; output JSON ~200 tokens. **Per-receipt: ~£0.001–£0.002**, dropping further as cache reads accumulate. Negligible at Ooosh volumes.
