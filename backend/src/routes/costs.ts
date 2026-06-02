@@ -278,6 +278,26 @@ router.get('/xero/accounts', authorize(...STAFF_ROLES), async (req: AuthRequest,
   }
 });
 
+// Supplier autocomplete for the capture modal — fuzzy-searches Xero contacts.
+// Stops staff creating duplicate suppliers from typos. Free-text entry still
+// allowed; the supplier→Xero contact resolution happens at push time.
+router.get('/xero/suppliers', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Response) => {
+  try {
+    const { isXeroConfigured } = await import('../config/xero');
+    if (!isXeroConfigured()) return res.json({ data: [] }); // silent fallback — typing still works
+    const search = typeof req.query.search === 'string' ? req.query.search : '';
+    if (search.trim().length < 2) return res.json({ data: [] });
+    const { xeroBroker } = await import('../services/xero-broker');
+    const contacts = await xeroBroker.searchContacts(search, 10);
+    res.json({ data: contacts });
+  } catch (err) {
+    // Suggestions are non-blocking — log and degrade silently so a Xero blip
+    // doesn't break capture entirely.
+    console.error('[costs] xero suppliers error:', err);
+    res.json({ data: [] });
+  }
+});
+
 // ── Get one (with allocations) ───────────────────────────────────────────────
 
 router.get('/:id', async (req: AuthRequest, res: Response) => {

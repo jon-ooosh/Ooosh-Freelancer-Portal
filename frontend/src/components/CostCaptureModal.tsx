@@ -2,12 +2,17 @@
  * CostCaptureModal — capture or edit a cost/receipt for the Cost Capture &
  * Recharge module. Creates (POST) or updates (PATCH) a `costs` row.
  *
- * One plain-English "What's this cost for?" picker drives both the Xero account
- * code and the internal cost_type (staff never see codes or accountant terms).
- * Receipt is at the top (AI extraction — fast-follow — will fill the rest from
- * it). Net/VAT/Gross auto-calculate at 20% (toggle off to edit manually).
+ * Layout: two panes on md+ (receipt left, form right, draggable divider that
+ * remembers width). Stacks on mobile. Click backdrop or press Esc to close.
+ *
+ * The "What's this cost for?" picker groups options under headings and drives
+ * both the Xero account code and the internal cost_type (staff never see codes
+ * or accountant terms). Supplier field autocompletes from existing Xero
+ * contacts so we don't accumulate typo-duplicates.
+ *
+ * Net / VAT / Gross auto-calculate at 20% (toggle off to edit manually).
  */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode } from '../../../shared/types';
@@ -21,27 +26,27 @@ interface Props {
   presetIssueId?: string | null;
 }
 
-// Single source of truth for the staff-facing category picker. Each choice maps
-// to a Xero account code (for the eventual push) + an internal cost_type (for
-// filtering/reporting). Staff see only `label`. Keep in step with
-// STAFF_COST_ACCOUNT_CODES in backend routes/costs.ts.
-const COST_CATEGORIES: { label: string; xeroCode: string; costType: CostType }[] = [
-  { label: 'Freelance crew invoices', xeroCode: '320', costType: 'freelancer_invoice' },
-  { label: 'Crew travel (taxis, trains, etc.)', xeroCode: '325', costType: 'job' },
-  { label: 'Sub-hire of equipment', xeroCode: '326', costType: 'job' },
-  { label: 'Vehicle servicing & upkeep', xeroCode: '406', costType: 'vehicle' },
-  { label: 'Vehicle repairs (bodywork, glass)', xeroCode: '409', costType: 'vehicle' },
-  { label: 'Fuel', xeroCode: '410', costType: 'vehicle' },
-  { label: 'Parking', xeroCode: '411', costType: 'vehicle' },
-  { label: 'Parking fines / PCNs', xeroCode: '399', costType: 'vehicle' },
-  { label: 'Equipment repairs & spares', xeroCode: '473', costType: 'parts' },
-  { label: 'New equipment (backline, staging)', xeroCode: '764', costType: 'stock' },
-  { label: 'Shop stock', xeroCode: '310', costType: 'stock' },
-  { label: 'Postage / courier', xeroCode: '425', costType: 'overhead' },
-  { label: 'Office supplies (milk, cleaning)', xeroCode: '494', costType: 'overhead' },
-  { label: 'Office equipment', xeroCode: '710', costType: 'overhead' },
-  { label: 'Computer equipment', xeroCode: '720', costType: 'overhead' },
-  { label: 'Something else', xeroCode: '429', costType: 'overhead' },
+// Single source of truth for the staff-facing category picker. Each choice
+// maps to a Xero account code (for the eventual push) + an internal cost_type
+// (for filtering/reporting). Staff see only `label`, grouped under `group`.
+// Keep in step with STAFF_COST_ACCOUNT_CODES in backend routes/costs.ts.
+const COST_CATEGORIES: { group: string; label: string; xeroCode: string; costType: CostType }[] = [
+  { group: 'People',         label: 'Freelance crew invoices',           xeroCode: '320', costType: 'freelancer_invoice' },
+  { group: 'People',         label: 'Travel (taxis, trains etc.)',       xeroCode: '325', costType: 'job' },
+  { group: 'Vehicles',       label: 'Vehicle servicing & upkeep',        xeroCode: '406', costType: 'vehicle' },
+  { group: 'Vehicles',       label: 'Vehicle repairs (bodywork, glass)', xeroCode: '409', costType: 'vehicle' },
+  { group: 'Vehicles',       label: 'Fuel',                              xeroCode: '410', costType: 'vehicle' },
+  { group: 'Vehicles',       label: 'Parking',                           xeroCode: '411', costType: 'vehicle' },
+  { group: 'Vehicles',       label: 'Parking fines / PCNs',              xeroCode: '399', costType: 'vehicle' },
+  { group: 'Equipment',      label: 'Sub-hire of equipment',             xeroCode: '326', costType: 'job' },
+  { group: 'Equipment',      label: 'Equipment repairs & spares',        xeroCode: '473', costType: 'parts' },
+  { group: 'Equipment',      label: 'New equipment (backline, staging)', xeroCode: '764', costType: 'stock' },
+  { group: 'Equipment',      label: 'Shop stock',                        xeroCode: '310', costType: 'stock' },
+  { group: 'Office & other', label: 'Postage / courier',                 xeroCode: '425', costType: 'overhead' },
+  { group: 'Office & other', label: 'Office supplies (milk, cleaning)',  xeroCode: '494', costType: 'overhead' },
+  { group: 'Office & other', label: 'Office equipment',                  xeroCode: '710', costType: 'overhead' },
+  { group: 'Office & other', label: 'Computer equipment',                xeroCode: '720', costType: 'overhead' },
+  { group: 'Office & other', label: 'Something else',                    xeroCode: '429', costType: 'overhead' },
 ];
 
 const PAYMENT_METHODS: { value: CostPaymentMethod; label: string }[] = [
@@ -60,21 +65,24 @@ const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
 ];
 
 const LAST4_KEY = 'ooosh_cot_last4';
+const SPLIT_KEY = 'ooosh_cost_modal_split_pct';
 const round2 = (n: number) => Math.round(n * 100) / 100;
+
+interface XeroContactLite { ContactID: string; Name: string }
 
 export default function CostCaptureModal({ onClose, onSaved, existing, presetJobId, presetVehicleId, presetIssueId }: Props) {
   const { user } = useAuthStore();
   const fullName = user ? `${user.first_name} ${user.last_name}`.trim() : '';
   const isEdit = Boolean(existing);
 
+  // ── Form state ───────────────────────────────────────────────────────────
   const [supplierName, setSupplierName] = useState(existing?.supplier_name || '');
   const [costDate, setCostDate] = useState(() => (existing?.cost_date ? existing.cost_date.slice(0, 10) : new Date().toISOString().slice(0, 10)));
   const [amountGross, setAmountGross] = useState(existing?.amount_gross != null ? String(existing.amount_gross) : '');
   const [amountVat, setAmountVat] = useState(existing?.amount_vat != null ? String(existing.amount_vat) : '');
   const [amountNet, setAmountNet] = useState(existing?.amount_net != null ? String(existing.amount_net) : '');
-  const [assumeVat20, setAssumeVat20] = useState(!isEdit); // don't clobber existing amounts on edit
+  const [assumeVat20, setAssumeVat20] = useState(!isEdit);
   const [description, setDescription] = useState(existing?.description || '');
-  // Category selected by Xero code; derive label + cost_type from the map.
   const [categoryCode, setCategoryCode] = useState(existing?.xero_account_code || (presetVehicleId ? '406' : presetIssueId ? '473' : ''));
   const [paymentMethod, setPaymentMethod] = useState<CostPaymentMethod>(existing?.payment_method || 'cot_card');
   const [cardHolder, setCardHolder] = useState(existing?.cot_card_holder || fullName);
@@ -90,8 +98,51 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  // 'not yet paid' is a payable. Only auto-drive status when not editing an
-  // existing record (so we don't stomp a manually-set status on edit).
+  // ── Supplier autocomplete (Xero contact search) ──────────────────────────
+  const [supplierSuggestions, setSupplierSuggestions] = useState<XeroContactLite[]>([]);
+  const [supplierFocused, setSupplierFocused] = useState(false);
+
+  useEffect(() => {
+    if (supplierName.trim().length < 2) { setSupplierSuggestions([]); return; }
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.get<{ data: XeroContactLite[] }>(`/costs/xero/suppliers?search=${encodeURIComponent(supplierName.trim())}`);
+        setSupplierSuggestions(r.data || []);
+      } catch { setSupplierSuggestions([]); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [supplierName]);
+
+  // ── Resizable split (md+ only) ───────────────────────────────────────────
+  const [leftPct, setLeftPct] = useState<number>(() => Number(localStorage.getItem(SPLIT_KEY)) || 45);
+  const [isDesktop, setIsDesktop] = useState(() => typeof window !== 'undefined' && window.innerWidth >= 768);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef(false);
+
+  useEffect(() => {
+    const onResize = () => setIsDesktop(window.innerWidth >= 768);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!draggingRef.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const pct = ((e.clientX - rect.left) / rect.width) * 100;
+      const clamped = Math.min(70, Math.max(25, pct));
+      setLeftPct(clamped);
+      localStorage.setItem(SPLIT_KEY, String(Math.round(clamped)));
+    };
+    const onUp = () => { draggingRef.current = false; document.body.style.userSelect = ''; };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  // ── Misc effects ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (isEdit) return;
     setPaymentStatus(paymentMethod === 'not_yet_paid' ? 'awaiting_payment' : 'paid');
@@ -103,7 +154,6 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  // Receipt preview for a newly-selected file (object URL, revoked on change).
   useEffect(() => {
     if (!receiptFile) { setReceiptPreview(null); setReceiptIsPdf(false); return; }
     const url = URL.createObjectURL(receiptFile);
@@ -112,6 +162,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     return () => URL.revokeObjectURL(url);
   }, [receiptFile]);
 
+  // ── Amount handlers ──────────────────────────────────────────────────────
   const onGrossChange = (v: string) => {
     setAmountGross(v);
     if (assumeVat20 && v !== '') {
@@ -140,9 +191,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     try {
       const { blob } = await api.blob(`/files/download?key=${encodeURIComponent(existing.receipt_r2_key)}`);
       window.open(URL.createObjectURL(blob), '_blank');
-    } catch {
-      setError('Could not open the saved receipt.');
-    }
+    } catch { setError('Could not open the saved receipt.'); }
   }, [existing]);
 
   const canRecharge = Boolean(presetJobId || existing?.job_id);
@@ -162,7 +211,6 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         receiptKey = up.r2_key;
         receiptName = up.filename;
       }
-
       if (paymentMethod === 'cot_card' && cardLast4) localStorage.setItem(LAST4_KEY, cardLast4);
 
       const cat = COST_CATEGORIES.find((c) => c.xeroCode === categoryCode);
@@ -205,29 +253,29 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   }
 
   const inputCls = 'w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500';
+  const groups = Array.from(new Set(COST_CATEGORIES.map((c) => c.group)));
+  const leftPaneStyle: React.CSSProperties = isDesktop ? { width: `${leftPct}%` } : {};
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 overflow-y-auto p-4">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl my-8" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 bg-black/40 flex items-start justify-center z-50 overflow-y-auto p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-5xl my-4 max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">{isEdit ? 'Edit Cost' : 'Capture Cost'}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
 
-        <div className="px-6 py-4 space-y-4">
-          {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
-
-          {/* Receipt first — AI extraction (fast-follow) will fill the rest from it */}
-          <div className="bg-gray-50 border border-dashed border-gray-300 rounded-md p-3">
+        <div ref={containerRef} className="flex flex-col md:flex-row flex-1 min-h-0">
+          {/* LEFT: receipt pane */}
+          <div className="overflow-y-auto px-6 py-4 border-b md:border-b-0 md:border-r border-gray-100" style={leftPaneStyle}>
             <label className="block text-sm font-medium text-gray-700 mb-2">Receipt</label>
-            <input type="file" accept="image/*,application/pdf" className="text-sm mb-2"
+            <input type="file" accept="image/*,application/pdf" className="text-sm mb-3"
               onChange={(e) => setReceiptFile(e.target.files?.[0] || null)} />
             {receiptPreview && !receiptIsPdf && (
               <img src={receiptPreview} alt="Receipt preview" onClick={() => window.open(receiptPreview, '_blank')}
-                className="w-full max-h-64 object-contain rounded border border-gray-200 cursor-zoom-in bg-white" />
+                className="w-full max-h-[60vh] object-contain rounded border border-gray-200 cursor-zoom-in bg-white" />
             )}
             {receiptPreview && receiptIsPdf && (
-              <embed src={receiptPreview} type="application/pdf" className="w-full h-64 rounded border border-gray-200" />
+              <embed src={receiptPreview} type="application/pdf" className="w-full h-[60vh] rounded border border-gray-200" />
             )}
             {!receiptFile && existing?.receipt_filename && (
               <div className="text-sm text-gray-600 flex items-center gap-2">
@@ -236,109 +284,149 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                 <span className="text-gray-400">· choose a file above to replace</span>
               </div>
             )}
+            {!receiptFile && !existing?.receipt_filename && (
+              <div className="text-sm text-gray-400 italic">No receipt attached yet — choose a file above.</div>
+            )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
-              <input className={inputCls} value={supplierName} onChange={(e) => setSupplierName(e.target.value)} placeholder="e.g. TTS360, Shell" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
-              <input type="date" className={inputCls} value={costDate} onChange={(e) => setCostDate(e.target.value)} />
-            </div>
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-sm font-medium text-gray-700">Amounts</span>
-              <label className="flex items-center gap-1.5 text-xs text-gray-600">
-                <input type="checkbox" checked={assumeVat20} onChange={(e) => setAssumeVat20(e.target.checked)} />
-                Auto 20% VAT
-              </label>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Gross (£) *</label>
-                <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">VAT (£)</label>
-                <input type="number" step="0.01" min="0" className={`${inputCls} ${assumeVat20 ? 'bg-gray-100' : ''}`}
-                  value={amountVat} onChange={(e) => setAmountVat(e.target.value)} disabled={assumeVat20} />
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Net (£)</label>
-                <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => onNetChange(e.target.value)} />
-              </div>
-            </div>
-            {assumeVat20 && <p className="text-xs text-gray-400 mt-1">Enter gross or net — the other two fill in. Untick to edit all three.</p>}
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-            <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What was this for?" />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">What's this cost for?</label>
-            <select className={inputCls} value={categoryCode} onChange={(e) => setCategoryCode(e.target.value)}>
-              <option value="">— select —</option>
-              {COST_CATEGORIES.map((c) => <option key={c.xeroCode} value={c.xeroCode}>{c.label}</option>)}
-            </select>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Payment method</label>
-              <select className={inputCls} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as CostPaymentMethod)}>
-                {PAYMENT_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Payment status</label>
-              <select className={inputCls} value={paymentStatus} onChange={(e) => setPaymentStatus(e.target.value as CostPaymentStatus)}>
-                {PAYMENT_STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-              </select>
-            </div>
-          </div>
-
-          {paymentMethod === 'cot_card' && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Card holder</label>
-                <input className={inputCls} value={cardHolder} onChange={(e) => setCardHolder(e.target.value)} />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Card last 4</label>
-                <input maxLength={4} className={inputCls} value={cardLast4} onChange={(e) => setCardLast4(e.target.value.replace(/\D/g, ''))}
-                  placeholder="remembered for next time" />
-              </div>
-            </div>
+          {/* Draggable divider (md+ only) */}
+          {isDesktop && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              title="Drag to resize"
+              onMouseDown={(e) => { e.preventDefault(); draggingRef.current = true; document.body.style.userSelect = 'none'; }}
+              className="hidden md:block w-1 bg-gray-200 hover:bg-purple-400 cursor-col-resize transition-colors"
+            />
           )}
 
-          {canRecharge && (
+          {/* RIGHT: form pane */}
+          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+            {error && <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-md px-3 py-2">{error}</div>}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="relative">
+                <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
+                <input className={inputCls} value={supplierName}
+                  onChange={(e) => setSupplierName(e.target.value)}
+                  onFocus={() => setSupplierFocused(true)}
+                  onBlur={() => setTimeout(() => setSupplierFocused(false), 150)}
+                  placeholder="e.g. TTS360, Shell" autoComplete="off" />
+                {supplierFocused && supplierSuggestions.length > 0 && (
+                  <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-gray-200 rounded-md shadow-lg">
+                    {supplierSuggestions.map((s) => (
+                      <button key={s.ContactID} type="button"
+                        onMouseDown={(e) => { e.preventDefault(); setSupplierName(s.Name); setSupplierSuggestions([]); }}
+                        className="block w-full text-left px-3 py-1.5 text-sm hover:bg-purple-50">
+                        {s.Name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                <input type="date" className={inputCls} value={costDate} onChange={(e) => setCostDate(e.target.value)} />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-sm font-medium text-gray-700">Amounts</span>
+                <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                  <input type="checkbox" checked={assumeVat20} onChange={(e) => setAssumeVat20(e.target.checked)} />
+                  Auto 20% VAT
+                </label>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Gross (£) *</label>
+                  <input type="number" step="0.01" min="0" className={inputCls} value={amountGross} onChange={(e) => onGrossChange(e.target.value)} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">VAT (£)</label>
+                  <input type="number" step="0.01" min="0" className={`${inputCls} ${assumeVat20 ? 'bg-gray-100' : ''}`}
+                    value={amountVat} onChange={(e) => setAmountVat(e.target.value)} disabled={assumeVat20} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">Net (£)</label>
+                  <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => onNetChange(e.target.value)} />
+                </div>
+              </div>
+              {assumeVat20 && <p className="text-xs text-gray-400 mt-1">Enter gross or net — the other two fill in. Untick to edit all three.</p>}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+              <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What was this for?" />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">What's this cost for?</label>
+              <select className={inputCls} value={categoryCode} onChange={(e) => setCategoryCode(e.target.value)}>
+                <option value="">— select —</option>
+                {groups.map((group) => (
+                  <optgroup key={group} label={group}>
+                    {COST_CATEGORIES.filter((c) => c.group === group).map((c) => (
+                      <option key={c.xeroCode} value={c.xeroCode}>{c.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Recharge to client</label>
-                <select className={inputCls} value={rechargeMode} onChange={(e) => setRechargeMode(e.target.value as CostRechargeMode)}>
-                  <option value="none">No recharge</option>
-                  <option value="full">Full</option>
-                  <option value="partial">Partial</option>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Payment method</label>
+                <select className={inputCls} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as CostPaymentMethod)}>
+                  {PAYMENT_METHODS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
                 </select>
               </div>
-              {rechargeMode === 'partial' && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Recharge amount (£)</label>
-                  <input type="number" step="0.01" min="0" className={inputCls} value={rechargeAmount} onChange={(e) => setRechargeAmount(e.target.value)} />
-                </div>
-              )}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Payment status</label>
+                <select className={inputCls} value={paymentStatus} onChange={(e) => setPaymentStatus(e.target.value as CostPaymentStatus)}>
+                  {PAYMENT_STATUSES.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
+              </div>
             </div>
-          )}
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
-            <textarea className={inputCls} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+            {paymentMethod === 'cot_card' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Card holder</label>
+                  <input className={inputCls} value={cardHolder} onChange={(e) => setCardHolder(e.target.value)} />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Card last 4</label>
+                  <input maxLength={4} className={inputCls} value={cardLast4} onChange={(e) => setCardLast4(e.target.value.replace(/\D/g, ''))}
+                    placeholder="remembered for next time" />
+                </div>
+              </div>
+            )}
+
+            {canRecharge && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Recharge to client</label>
+                  <select className={inputCls} value={rechargeMode} onChange={(e) => setRechargeMode(e.target.value as CostRechargeMode)}>
+                    <option value="none">No recharge</option>
+                    <option value="full">Full</option>
+                    <option value="partial">Partial</option>
+                  </select>
+                </div>
+                {rechargeMode === 'partial' && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Recharge amount (£)</label>
+                    <input type="number" step="0.01" min="0" className={inputCls} value={rechargeAmount} onChange={(e) => setRechargeAmount(e.target.value)} />
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+              <textarea className={inputCls} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+            </div>
           </div>
         </div>
 

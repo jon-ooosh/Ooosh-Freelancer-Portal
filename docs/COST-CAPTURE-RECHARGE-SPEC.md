@@ -420,3 +420,11 @@ Frontend hub + manual capture shipped (PR #592) and tested live. Decisions + fol
 **Xero-lock semantics (forward-design for when the push lands).** Edit/Delete are OP-only today (nothing is pushed yet). Once the push is wired: while a record is still draft/unreconciled in Xero, edits propagate (update bill) and delete voids it; once it's authorised/reconciled in Xero it's locked — the UI blocks edit/delete and offers void-and-recreate. The hub already guards `xero_sync_state === 'reconciled'` on delete as the seed of this.
 
 **Bigger receipt preview.** Image receipts render full-width (max 256px tall, click to open full size); PDFs render an inline `<embed>` preview.
+
+## Build notes — testing round 3 (30 May 2026)
+
+**Two-pane resizable modal.** On md+ the capture modal now splits into a receipt-preview pane (left) and form pane (right) with a draggable divider. Width persists per-user in `localStorage` (`ooosh_cost_modal_split_pct`), clamped 25–70%. Mobile keeps the stacked layout. Click backdrop (or Esc) to dismiss.
+
+**Supplier autocomplete from Xero contacts.** Typing in the Supplier field debounces (300ms) and queries `GET /api/costs/xero/suppliers?search=` — backed by a new `xeroBroker.searchContacts()` method using Xero's `searchTerm` (active contacts, capped at 10). Picks an existing supplier with one click; free-text is still allowed (resolved at push time via `getOrCreateContact`). Degrades silently if Xero is unreachable.
+
+**Grouped categories.** The "What's this cost for?" picker is now grouped under headings — People / Vehicles / Equipment / Office & other — using native `<optgroup>`. Helps staff land on the right choice. The "Crew travel" label is broadened to "Travel (taxis, trains etc.)"; same Xero code (325).
