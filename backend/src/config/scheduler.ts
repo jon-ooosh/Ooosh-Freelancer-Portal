@@ -445,6 +445,40 @@ export function startScheduler() {
   });
   console.log('Scheduler: Notification escalation scheduled every 15 minutes');
 
+  // ── Dispatch + return sanity scanners ────────────────────────────────
+  // Every 15 min, deferred + de-duped. Replaces the inline "fire as soon
+  // as we book out / as soon as HH says returned" warnings that spammed
+  // info@ during multi-driver hires and timing races between the
+  // book-out PATCH, the HH writeback (no_webhook=1, so no inbound
+  // refresh), and the 30-min polling sync.
+  //
+  // Dispatch scan grace = 30 min (one full sync cycle), so by the time
+  // the scanner picks a candidate the cached HH `jobs.status` has had
+  // time to refresh and the warning is real.
+  //
+  // Return scan grace = 20 min — gives desk-side check-in time to
+  // happen after the HH webhook fires.
+  //
+  // Markers (under_dispatch_warned_at, returned_bookedout_warned_at,
+  // migration 102) guarantee at most ONE email per transition.
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      const { runDispatchSanityScan, runReturnedBookedOutScan } = await import('../services/sanity-check-scanner');
+      const [dispatch, returned] = await Promise.all([
+        runDispatchSanityScan(),
+        runReturnedBookedOutScan(),
+      ]);
+      if (dispatch.warned > 0 || returned.warned > 0) {
+        console.log(
+          `Scheduler: Sanity scans — dispatch ${dispatch.warned}/${dispatch.checked}, returned ${returned.warned}/${returned.checked}`
+        );
+      }
+    } catch (err) {
+      console.error('Scheduler: Sanity scans failed:', err);
+    }
+  });
+  console.log('Scheduler: Dispatch + return sanity scans scheduled every 15 minutes');
+
   // ── Reminder Scanner (due-date reminders) ────────────────────────────
   // Hourly — fires `reminder` requirements with a due_date <= today that
   // haven't been dispatched yet. Works regardless of phase or job status,

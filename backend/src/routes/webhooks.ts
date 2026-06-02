@@ -11,7 +11,6 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../config/database';
 import { HH_TO_PIPELINE } from '../services/hirehop-writeback';
-import { alertReturnedWithStillBookedOutVans } from '../services/vehicle-emails';
 import { verifyApiKey } from '../middleware/api-key';
 import {
   triggerHireFormEmailOnConfirmation,
@@ -216,9 +215,19 @@ async function handleJobStatusChange(
     const enquiryStages = ['new_enquiry', 'quoting', 'chasing', 'paused', 'provisional'];
     const clearChase = !enquiryStages.includes(newPipelineStatus);
 
+    // Sanity-check marker clears (migration 102) — when leaving a state
+    // the scanner watches over, drop its marker so the next entry to
+    // that state is allowed to warn afresh.
+    const clearDispatchMarker =
+      job.pipeline_status === 'dispatched' && newPipelineStatus !== 'dispatched';
+    const clearReturnedMarker =
+      job.pipeline_status === 'returned' && newPipelineStatus !== 'returned';
+
     await query(
       `UPDATE jobs SET pipeline_status = $1, pipeline_status_changed_at = NOW(), updated_at = NOW()
          ${clearChase ? ', next_chase_date = NULL' : ''}
+         ${clearDispatchMarker ? ', under_dispatch_warned_at = NULL' : ''}
+         ${clearReturnedMarker ? ', returned_bookedout_warned_at = NULL' : ''}
        WHERE id = $2`,
       [newPipelineStatus, job.id],
     );
@@ -255,14 +264,11 @@ async function handleJobStatusChange(
 
     statusChanges.pipeline_status = { from: job.pipeline_status, to: newPipelineStatus };
 
-    // Safety net: flag if the job just moved INTO 'returned' but vans on the
-    // job are still booked out. Non-blocking — emails info@ so staff spot it.
-    if (newPipelineStatus === 'returned' && job.pipeline_status !== 'returned') {
-      void alertReturnedWithStillBookedOutVans({
-        jobId: job.id,
-        triggerSource: `HireHop webhook (HH status ${oldHHStatus} → ${newHHStatus})`,
-      });
-    }
+    // Returned-bookedout safety net is now the scheduled scanner (see
+    // services/sanity-check-scanner.ts). It picks the job up after a
+    // 20-min grace, dedupes by vehicle (multi-driver hire = one van),
+    // and stamps `returned_bookedout_warned_at` so at most one email
+    // fires per transition.
 
     // Hire form email + silent-skip alerting on confirmation. Pre-May 2026
     // the HH webhook didn't trigger this, so any job confirmed by HH staff

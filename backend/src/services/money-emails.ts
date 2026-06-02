@@ -5,6 +5,7 @@
 import { query } from '../config/database';
 import { emailService } from './email-service';
 import { getFrontendUrl } from '../config/app-urls';
+import { resolveRoutingOverride } from './email-routing';
 
 /** Refund timescale based on payment method */
 export function getRefundTimescale(paymentMethod: string): string {
@@ -41,25 +42,51 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
   ccEmails: string[];
 }> {
   // First pass: per-job contact selection (migration 086). When staff have
-  // explicitly ticked who's on THIS hire via the New Enquiry contact picker,
-  // those rows ARE the recipient list — primary becomes the `to`, the rest
-  // are CCs. Replaces the org-level lookup entirely when present (the whole
-  // point of per-job selection is "Sarah's at this org but THIS hire is Tom").
-  // Falls through to the org-level logic below when the job has no
-  // job_contacts rows (legacy jobs, HH-synced jobs, anything pre-migration-086).
-  const jobContactsResult = await query(
+  // explicitly ticked who's on THIS hire via the contact picker, those rows
+  // ARE the recipient list — primary becomes the `to`, the rest are CCs.
+  // Replaces the org-level lookup entirely when present (the whole point of
+  // per-job selection is "Sarah's at this org but THIS hire is Tom").
+  //
+  // IMPORTANT (Issue 1 fix, May 2026): we ask "does this job have ANY
+  // job_contacts rows" FIRST, regardless of whether they have emails.
+  // Pre-fix the email filter was inside this query, so an emailless primary
+  // returned zero rows and the function silently fell through to the org
+  // spray — exactly the splatter-gun bug. Now: if there are rows but none
+  // reachable, return `null` and let resolveClientEmailTarget route to
+  // info@ with the "no client email on file" banner.
+  const jobContactsRows = await query(
     `SELECT p.email, p.first_name, p.last_name, jc.is_primary
      FROM job_contacts jc
      JOIN people p ON p.id = jc.person_id
      WHERE jc.job_id = $1
-       AND p.email IS NOT NULL AND p.email <> ''
        AND p.is_deleted = false
      ORDER BY jc.is_primary DESC, p.first_name ASC`,
     [jobId]
   );
-  if (jobContactsResult.rows.length > 0) {
-    const primary = jobContactsResult.rows[0];
-    const ccEmails = jobContactsResult.rows.slice(1).map((r: any) => r.email).filter(Boolean);
+  if (jobContactsRows.rows.length > 0) {
+    // Job HAS per-job contacts — this is staff intent. Use only reachable
+    // ones; if none reachable, signal fallback (don't fall through to org).
+    const reachable = jobContactsRows.rows.filter(
+      (r: any) => r.email && r.email.trim()
+    );
+    if (reachable.length === 0) {
+      // Configured contacts but all unreachable → info@ fallback
+      const jobResult = await query(
+        `SELECT client_name FROM jobs WHERE id = $1`,
+        [jobId]
+      );
+      return {
+        primaryEmail: null,
+        primaryFirstName: jobResult.rows[0]?.client_name?.split(' ')[0] || null,
+        ccEmails: [],
+      };
+    }
+    // Preserve the staff-chosen primary if reachable; else the next
+    // reachable contact takes the `to` slot (rather than dropping the
+    // email entirely). This is rare in practice — the UI guard blocks
+    // setting an emailless person as primary on new selections.
+    const primary = reachable[0];
+    const ccEmails = reachable.slice(1).map((r: any) => r.email);
     return {
       primaryEmail: primary.email,
       primaryFirstName: primary.first_name || primary.email?.split('@')[0] || null,
@@ -176,10 +203,16 @@ export async function getJobEmailRecipients(jobId: string): Promise<{
 /** Resolve an email target for a job, falling back to info@oooshtours.co.uk
  *  when no client contact is reachable via the address book.
  *
+ *  When `templateId` is supplied, the per-bucket routing override
+ *  (jobs.email_routing, migration 102) takes precedence — see
+ *  services/email-routing.ts for how templates map to buckets. If the
+ *  bucket has no override or the template isn't bucketed, falls back to
+ *  the default primary path.
+ *
  *  Callers get a guaranteed recipient and a flag telling them whether the
  *  message is being redirected. Use `buildFallbackBanner` + `logFallbackToTimeline`
  *  to alert staff and leave an audit trail when `isFallback` is true. */
-export async function resolveClientEmailTarget(jobId: string): Promise<{
+export async function resolveClientEmailTarget(jobId: string, templateId?: string): Promise<{
   primaryEmail: string;
   primaryFirstName: string;
   ccEmails: string[];
@@ -188,6 +221,23 @@ export async function resolveClientEmailTarget(jobId: string): Promise<{
   jobNumber: string | null;
   jobName: string | null;
 }> {
+  // Per-role override pass — only when a templateId is supplied and the
+  // template is mapped to a bucket with at least one reachable person.
+  if (templateId) {
+    const override = await resolveRoutingOverride(jobId, templateId);
+    if (override) {
+      return {
+        primaryEmail: override.primaryEmail,
+        primaryFirstName: override.primaryFirstName || 'there',
+        ccEmails: override.ccEmails,
+        isFallback: false,
+        clientName: null,
+        jobNumber: null,
+        jobName: null,
+      };
+    }
+  }
+
   const recipients = await getJobEmailRecipients(jobId);
   if (recipients.primaryEmail) {
     return {
@@ -329,9 +379,9 @@ export async function sendPaymentEmail(opts: {
   isConfirmingBooking: boolean;
 }): Promise<{ sent: boolean; reason?: 'no_recipient' | 'error'; error?: string; isFallback?: boolean }> {
   const { jobId, amount, bankName, isConfirmingBooking } = opts;
-  const target = await resolveClientEmailTarget(jobId);
-
   const templateId = isConfirmingBooking ? 'booking_confirmed_deposit' : 'payment_received';
+  const target = await resolveClientEmailTarget(jobId, templateId);
+
   const jobResult = await query(
     `SELECT job_name, hh_job_number, job_date, job_end, out_date, return_date FROM jobs WHERE id = $1`,
     [jobId]
@@ -438,7 +488,8 @@ export async function sendExcessEmail(opts: {
   // Fall back to job client contacts if no driver email.
   // If nothing is reachable, resolveClientEmailTarget returns info@ with isFallback=true
   // so the message still lands somewhere and staff get an amber banner + timeline entry.
-  const target = await resolveClientEmailTarget(jobId);
+  // templateId passed through so per-bucket excess routing overrides take effect.
+  const target = await resolveClientEmailTarget(jobId, templateId);
   let isFallback = false;
   if (!recipientEmail) {
     recipientEmail = target.primaryEmail;

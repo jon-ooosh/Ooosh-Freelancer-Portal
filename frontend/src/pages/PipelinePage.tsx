@@ -995,18 +995,28 @@ function NewEnquiryModal({
         // override a manual selection mid-load if state somehow lingers).
         if (tickedExistingPersonIds.size === 0 && pendingContacts.filter(c => c.target === 'client').length === 0) {
           let defaultId: string | null = null;
-          // Rule 1: person-first flow
+          // Rule 1: person-first flow — honour the user's click even if
+          // emailless (they explicitly picked this person). The lead-contact
+          // emailless guard below catches it before they hit Submit.
           if (personFirstClickedId && active.some(p => p.person_id === personFirstClickedId)) {
             defaultId = personFirstClickedId;
-          }
-          // Rule 2: single contact
-          else if (active.length === 1) {
-            defaultId = active[0].person_id;
-          }
-          // Rule 3: org-level primary
-          else if (active.length > 1) {
-            const primary = active.find(p => p.is_primary);
-            if (primary) defaultId = primary.person_id;
+          } else {
+            // Rules 2 & 3 prefer reachable contacts so the auto-default
+            // doesn't land on someone who can't receive emails (Issue 1 —
+            // splatter-gun fix companion). If every candidate is
+            // emailless, fall back to today's behaviour so SOMETHING gets
+            // ticked.
+            const reachable = active.filter(p => p.person_email && p.person_email.trim());
+            const pool = reachable.length > 0 ? reachable : active;
+            // Rule 2: single contact
+            if (pool.length === 1) {
+              defaultId = pool[0].person_id;
+            }
+            // Rule 3: org-level primary
+            else if (pool.length > 1) {
+              const primary = pool.find(p => p.is_primary);
+              if (primary) defaultId = primary.person_id;
+            }
           }
           if (defaultId) {
             setTickedExistingPersonIds(new Set([defaultId]));
@@ -1071,7 +1081,13 @@ function NewEnquiryModal({
   // click-again-promote-to-lead pattern. First-clicked auto-becomes lead
   // (only if no lead exists yet). Subsequent clicks on a non-lead chip
   // promote it. Click on the current lead is a no-op (use X to deselect).
-  const handleChipClick = (key: string) => {
+  //
+  // `hasEmail` defaults to true. When false (emailless contact), the
+  // promote-to-lead step is blocked — the contact can still be ticked as
+  // a CC but won't become the star. Mirrors the JobContactsCard guard
+  // and stops staff inadvertently selecting an unreachable primary
+  // (Issue 1 — splatter-gun fix companion).
+  const handleChipClick = (key: string, hasEmail = true) => {
     // Is this an existing person (key looks like a UUID) or a pending entry
     // (key looks like _tempId)? The toggle logic differs slightly.
     const isPending = key.startsWith('c-');
@@ -1080,18 +1096,21 @@ function NewEnquiryModal({
       : tickedExistingPersonIds.has(key);
 
     if (!isTicked) {
-      // Select. Become lead if no current lead.
+      // Select. Become lead if no current lead AND the contact is reachable.
       if (!isPending) {
         setTickedExistingPersonIds(prev => new Set(prev).add(key));
       }
       // (Pending entries are already in the array; "selected" === "exists")
-      setLeadContactKey(prev => prev ?? key);
+      if (hasEmail) {
+        setLeadContactKey(prev => prev ?? key);
+      }
       return;
     }
 
     // Already selected. If lead, no-op (use X to deselect).
     if (leadContactKey === key) return;
-    // Promote to lead.
+    // Promote to lead — blocked if emailless.
+    if (!hasEmail) return;
     setLeadContactKey(key);
   };
 
@@ -1685,6 +1704,7 @@ function NewEnquiryModal({
                   {clientPeople.map(p => {
                     const ticked = tickedExistingPersonIds.has(p.person_id);
                     const isLead = leadContactKey === p.person_id;
+                    const hasEmail = !!(p.person_email && p.person_email.trim());
                     return (
                       <span
                         key={p.id}
@@ -1695,12 +1715,21 @@ function NewEnquiryModal({
                               ? 'bg-blue-50 border-blue-200 text-blue-800'
                               : 'bg-gray-50 border-gray-200 text-gray-500 hover:bg-gray-100'
                         }`}
-                        onClick={() => handleChipClick(p.person_id)}
-                        title={isLead ? 'Lead contact' : ticked ? 'Click again to make lead contact' : 'Click to select for this hire'}
+                        onClick={() => handleChipClick(p.person_id, hasEmail)}
+                        title={
+                          isLead
+                            ? 'Lead contact'
+                            : ticked
+                              ? (hasEmail ? 'Click again to make lead contact' : 'No email — can\'t be lead contact')
+                              : (hasEmail ? 'Click to select for this hire' : 'Click to add as CC (no email — can\'t be lead)')
+                        }
                       >
                         {isLead && <span title="Lead contact">★</span>}
                         <span className={isLead ? 'font-bold' : 'font-medium'}>{p.person_name}</span>
                         {p.role && <span className="opacity-60">({p.role})</span>}
+                        {!hasEmail && (
+                          <span className="opacity-50 italic text-[10px]" title="No email on file">⚠ no email</span>
+                        )}
                         {ticked && (
                           <button
                             type="button"

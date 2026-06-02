@@ -14,7 +14,6 @@ import {
   hireFormResultIsAnomaly,
   sendConfirmationSilentSkipAlert,
 } from '../services/confirmation-hooks';
-import { alertReturnedWithStillBookedOutVans } from '../services/vehicle-emails';
 import { reactivateAutoCancelledRequirements } from '../services/requirement-cleanup';
 
 const router = Router();
@@ -703,6 +702,16 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
       updates.push(`hold_reason_detail = NULL`);
     }
 
+    // Sanity-check markers (migration 102) — clear when leaving the
+    // state they apply to, so a re-entered state can warn afresh on
+    // the next scanner sweep.
+    if (fromStatus === 'dispatched' && pipeline_status !== 'dispatched') {
+      updates.push(`under_dispatch_warned_at = NULL`);
+    }
+    if (fromStatus === 'returned' && pipeline_status !== 'returned') {
+      updates.push(`returned_bookedout_warned_at = NULL`);
+    }
+
     // Clear lost fields when moving out of lost (re-opening)
     if (fromStatus === 'lost' && pipeline_status !== 'lost') {
       updates.push(`lost_reason = NULL`);
@@ -809,14 +818,11 @@ router.patch('/:id/status', validate(updateStatusSchema), async (req: AuthReques
 
     await logAudit(req.user!.id, 'jobs', jobId, 'update', currentJob, result.rows[0]);
 
-    // Safety net: flag if the job just moved INTO 'returned' but vans on the
-    // job are still booked out. Non-blocking — emails info@ so staff spot it.
-    if (pipeline_status === 'returned' && fromStatus !== 'returned') {
-      void alertReturnedWithStillBookedOutVans({
-        jobId,
-        triggerSource: `Manual UI (user ${req.user!.email || req.user!.id})`,
-      });
-    }
+    // Returned-bookedout safety net is now the scheduled scanner (see
+    // services/sanity-check-scanner.ts). The scanner picks the job up
+    // after a 20-min grace, dedupes by vehicle (multi-driver hire = one
+    // van), and stamps `returned_bookedout_warned_at` so at most one
+    // email fires per transition.
 
     // Lost cleanup — flag the items the user opted to keep alive past close-out.
     // The actual auto-cancellation pass runs AFTER the event-trigger pass below
@@ -1619,6 +1625,88 @@ router.post('/:jobId/contacts/add-person', validate(addContactSchema), async (re
     }
   } catch (error) {
     console.error('Add job contact error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================================================
+// EMAIL ROUTING — per-bucket recipient overrides per job (migration 102)
+// ============================================================================
+// See services/email-routing.ts for the canonical bucket list + the
+// template-to-bucket map. Storage is `jobs.email_routing JSONB`; empty
+// object = "every template goes to the primary job_contact." When a
+// bucket has UUIDs, they replace the default recipient list for any
+// template mapped to that bucket.
+
+// GET /api/pipeline/:jobId/email-routing
+// Returns { routing: { bucket_id: [person_uuid, ...] } } — sparse;
+// only buckets with at least one override are present. UI uses this
+// + the ticked contact list (from /contacts) to render the picker.
+router.get('/:jobId/email-routing', async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const result = await query(
+      `SELECT email_routing FROM jobs WHERE id = $1 AND is_deleted = false`,
+      [jobId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+    res.json({ routing: result.rows[0].email_routing || {} });
+  } catch (error) {
+    console.error('Get email routing error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /api/pipeline/:jobId/email-routing
+// Idempotent replace. Body: { routing: { bucket_id: [person_uuid, ...] } }
+// Only bucket keys in EMAIL_BUCKETS are accepted; unknown keys are
+// rejected so a typo doesn't silently get persisted into JSONB.
+const putEmailRoutingSchema = z.object({
+  routing: z.record(z.string(), z.array(z.string().uuid())),
+});
+
+router.put('/:jobId/email-routing', validate(putEmailRoutingSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobId = req.params.jobId as string;
+    const { routing } = req.body as z.infer<typeof putEmailRoutingSchema>;
+
+    const { EMAIL_BUCKETS } = await import('../services/email-routing');
+    const validBucketIds = new Set(EMAIL_BUCKETS.map(b => b.id));
+
+    // Sparse cleanup: drop empty arrays + reject unknown bucket keys.
+    const cleaned: Record<string, string[]> = {};
+    for (const [bucket, ids] of Object.entries(routing)) {
+      if (!validBucketIds.has(bucket as 'bookings_payments')) {
+        res.status(400).json({ error: `Unknown email bucket: ${bucket}` });
+        return;
+      }
+      if (Array.isArray(ids) && ids.length > 0) {
+        cleaned[bucket] = ids;
+      }
+    }
+
+    const result = await query(
+      `UPDATE jobs SET email_routing = $1::jsonb, updated_at = NOW()
+       WHERE id = $2 AND is_deleted = false
+       RETURNING id`,
+      [JSON.stringify(cleaned), jobId]
+    );
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    await logAudit(req.user!.id, 'jobs', jobId, 'update', {}, {
+      email_routing_updated: true,
+      buckets: Object.keys(cleaned),
+    });
+
+    res.status(204).send();
+  } catch (error) {
+    console.error('Update email routing error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
