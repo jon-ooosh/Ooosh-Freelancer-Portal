@@ -120,6 +120,20 @@ export default function CostsPage() {
     }
   }
 
+  async function retrySync(c: CostRow) {
+    setActionBusy(c.id + 'sync');
+    try {
+      const r = await api.post<{ result: { error?: string; skipped?: string } }>(`/costs/${c.id}/sync-xero`, {});
+      if (r.result?.error) alert(`Xero push failed: ${r.result.error}`);
+      else if (r.result?.skipped) alert(`Skipped: ${r.result.skipped}`);
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to retry sync');
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
   async function confirmRecharge(c: CostRow) {
     setActionBusy(c.id + 'recharge');
     try {
@@ -204,6 +218,7 @@ export default function CostsPage() {
                 <th className="px-3 py-2 text-left font-medium">Linked</th>
                 <th className="px-3 py-2 text-left font-medium">Uploaded by</th>
                 <th className="px-3 py-2 text-left font-medium">Status</th>
+                <th className="px-3 py-2 text-left font-medium">Xero</th>
                 <th className="px-3 py-2 text-right font-medium">Actions</th>
               </tr>
             </thead>
@@ -233,6 +248,9 @@ export default function CostsPage() {
                         recharge{c.recharged_to_hh_at ? ' ✓' : ''}
                       </span>
                     )}
+                  </td>
+                  <td className="px-3 py-2">
+                    <XeroCell cost={c} busy={actionBusy === c.id + 'sync'} onRetry={() => retrySync(c)} />
                   </td>
                   <td className="px-3 py-2 text-right whitespace-nowrap">
                     <div className="flex items-center justify-end gap-2">
@@ -307,6 +325,40 @@ function ActionBtn({ busy, onClick, label }: { busy: boolean; onClick: () => voi
       className="px-2 py-1 text-xs text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50">
       {busy ? '…' : label}
     </button>
+  );
+}
+
+function XeroCell({ cost, busy, onRetry }: { cost: Cost; busy: boolean; onRetry: () => void }) {
+  if (cost.payment_status !== 'paid') {
+    return <span className="text-xs text-gray-400">—</span>;
+  }
+  if (cost.xero_sync_state === 'reconciled') {
+    return <span className="px-2 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">Reconciled</span>;
+  }
+  if (cost.xero_sync_state === 'attached') {
+    return <span className="px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-800">Synced</span>;
+  }
+  if (cost.xero_sync_state === 'bill_created') {
+    return <span className="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800" title="In Xero; receipt attach pending">Sent</span>;
+  }
+  if (cost.xero_sync_state === 'error') {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="px-2 py-0.5 text-xs rounded-full bg-red-100 text-red-800" title={cost.xero_error || ''}>Failed</span>
+        <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
+          {busy ? '…' : 'Retry'}
+        </button>
+      </div>
+    );
+  }
+  // pending (paid but not yet pushed — likely scheduler just queued it)
+  return (
+    <div className="flex items-center gap-2">
+      <span className="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-700">Pending</span>
+      <button disabled={busy} onClick={onRetry} className="text-xs text-purple-700 hover:underline disabled:opacity-50">
+        {busy ? '…' : 'Push now'}
+      </button>
+    </div>
   );
 }
 
