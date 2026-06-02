@@ -449,3 +449,15 @@ Frontend hub + manual capture shipped (PR #592) and tested live. Decisions + fol
 **Supplier fuzzy-match guard (not yet built).** Today free-text supplier entry creates a new Xero contact if no exact-name match — risks typo duplicates. Follow-up: at save time, surface "did you mean…?" suggestions when the input is close to an existing contact but not exact; at push time, do a `searchTerm` query as a final guard before falling back to `getOrCreateContact`.
 
 **AI receipt extraction (next stage).** Claude vision reads the uploaded receipt and pre-fills supplier / date / amounts / category — reduces both manual data entry and the misclassification risk that surfaced in testing. Needs `ANTHROPIC_API_KEY`.
+
+## Build notes — testing round 4 (1 Jun 2026)
+
+**Card holder + last 4 are now stamped from the user's Profile.** Migration 102 adds `users.cot_card_last4`; users set it on their own Profile page. On cost create (and edit) with `payment_method='cot_card'`, the backend looks up the uploader's name + their stored last 4 and stamps both on the cost. The modal no longer asks staff to enter either every time.
+
+**Unmapped payment methods are a soft skip, not a red error.** `cost-xero-push.ts` distinguishes "no bank account mapped for this method" from a real push failure — it leaves `xero_sync_state='pending'` and writes an advisory note into `xero_error`. The CostsPage renders this as a grey "Not synced" pill (tooltip explains why), instead of the red "Failed + Retry" we were showing. Methods the user deliberately leaves unmapped (e.g. Reimburse me / Other) stay calm in the hub.
+
+**Capture modal on mobile.** Full-screen below `sm` (no surrounding grey, no rounded corners, full-height). The two panes (receipt + form) now share a single scroll on mobile — previously the receipt pane was sticky and ate input height.
+
+**Optgroup styling.** Global rule in `styles/index.css` makes `<optgroup>` labels bold/dark on a light-grey strip across every `<select>` in the app — fixes the muddy default look the "What's this cost for?" picker (and any other future grouped select) inherited from Chrome.
+
+**Re: COT reconciliation.** The Spend Money we push waits for Codat's bank-feed line; Xero's matching engine auto-suggests our Spend Money against the line — staff/accountant one-click reconcile. Future enhancement: poll Xero `/BankTransactions` for `IsReconciled=true` and flip our `xero_sync_state` to `reconciled` automatically.

@@ -8,6 +8,7 @@ interface User {
   last_name: string;
   avatar_url?: string | null;
   force_password_change?: boolean;
+  cot_card_last4?: string | null;
 }
 
 interface AuthState {

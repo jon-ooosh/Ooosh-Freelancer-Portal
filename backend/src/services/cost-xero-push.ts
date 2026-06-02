@@ -109,11 +109,15 @@ export async function pushCostToXero(costId: string): Promise<PushResult> {
   const bankSettingKey = `xero_bank_${cost.payment_method}`;
   const bankAccountId = await getSystemSetting(bankSettingKey);
   if (!bankAccountId) {
-    await recordError(
-      costId,
-      `No Xero bank account mapped for "${cost.payment_method}" — set it in Settings → Xero Bank Accounts and retry`
+    // Soft skip — staff have deliberately left this method unmapped (or just
+    // haven't configured it yet). Keep state='pending' so the UI shows a calm
+    // "Not synced" badge rather than a red "Failed"; advisory text in
+    // xero_error explains why a retry wouldn't help.
+    await query(
+      `UPDATE costs SET xero_error = $1 WHERE id = $2`,
+      [`No Xero bank account mapped for "${cost.payment_method}" — set it in Settings → Xero Bank Accounts to enable sync`, costId],
     );
-    return { pushed: false, error: 'Bank account mapping missing' };
+    return { pushed: false, skipped: 'Bank account mapping missing' };
   }
 
   // Build line item. Xero auto-applies the account's default tax rate when

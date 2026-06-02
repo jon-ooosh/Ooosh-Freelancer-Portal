@@ -193,3 +193,21 @@ body {
   outline-offset: 2px;
   border-radius: 4px;
 }
+
+/* Optgroup labels — make headings clearly distinct from options. Without this,
+   Chrome on macOS renders optgroup labels in a barely-different grey that
+   feels like noise. Affects all <select> in the app. */
+optgroup {
+  font-weight: 700;
+  color: #1f2937;
+  font-style: normal;
+  background-color: #f3f4f6;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+optgroup > option {
+  font-weight: 400;
+  color: #111827;
+  background-color: #ffffff;
+  padding-left: 8px;
+}

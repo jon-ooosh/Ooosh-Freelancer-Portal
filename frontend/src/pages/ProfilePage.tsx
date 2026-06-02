@@ -44,6 +44,7 @@ export default function ProfilePage() {
   // Profile fields
   const [firstName, setFirstName] = useState(user?.first_name || '');
   const [lastName, setLastName] = useState(user?.last_name || '');
+  const [cotLast4, setCotLast4] = useState(user?.cot_card_last4 || '');
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileMsg, setProfileMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -70,11 +71,16 @@ export default function ProfilePage() {
     setProfileMsg(null);
 
     try {
-      const result = await api.put<{ first_name: string; last_name: string }>('/auth/profile', {
-        first_name: firstName,
-        last_name: lastName,
+      const payload: Record<string, unknown> = { first_name: firstName, last_name: lastName };
+      // Only include cot_card_last4 if it's a valid 4-digit string or explicit clear
+      if (cotLast4 === '') payload.cot_card_last4 = null;
+      else if (/^\d{4}$/.test(cotLast4)) payload.cot_card_last4 = cotLast4;
+      const result = await api.put<{ first_name: string; last_name: string; cot_card_last4: string | null }>('/auth/profile', payload);
+      updateUser({
+        first_name: result.first_name,
+        last_name: result.last_name,
+        cot_card_last4: result.cot_card_last4 ?? null,
       });
-      updateUser({ first_name: result.first_name, last_name: result.last_name });
       setProfileMsg({ type: 'success', text: 'Profile updated.' });
     } catch (err) {
       setProfileMsg({ type: 'error', text: err instanceof Error ? err.message : 'Failed to update profile' });
@@ -294,6 +300,22 @@ export default function ProfilePage() {
               className="w-full rounded border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-500"
             />
             <p className="text-xs text-gray-400 mt-1">Contact an admin to change your email.</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">COT card last 4</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              maxLength={4}
+              value={cotLast4}
+              onChange={(e) => setCotLast4(e.target.value.replace(/\D/g, ''))}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+              placeholder="last 4 digits"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Stamped onto your captured costs paid on the company card — helps Xero reconcile them.
+              Clear the field to remove.
+            </p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
