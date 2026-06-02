@@ -678,10 +678,31 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
 
           if (absAmount > 0) {
             if (ownerDepositId) {
-              // Deposit applied to invoice — deposit already counted in kind=6.
-              // Track for reconciliation so we know how much of the invoice was
-              // paid via deposits vs direct payments.
-              if (!isExcess) {
+              // A kind=3 row booked against a deposit (OWNER_DEPOSIT set) is one
+              // of two things, distinguished by OWNER (the invoice it's applied to):
+              //   • OWNER non-zero  → deposit applied to an invoice. Already counted
+              //     in kind=6; tracked here for invoice reconciliation. (HH dual-
+              //     publishes this with an invoice-side twin, deduped by data.ID.)
+              //   • OWNER zero + negative credit → deposit REFUNDED to the client
+              //     (money out). Subtract from deposit totals + surface as a refund.
+              // Proven against job 15577 (application: OWNER=11648, INVOICE_NUMBER
+              // set) vs job 16043 (refund: OWNER=0, INVOICE_NUMBER=""). Excess
+              // kind=3 rows are left untouched here (handled by the excess flows).
+              const appliedToInvoice = data.OWNER != null && parseInt(String(data.OWNER)) > 0;
+              if (!isExcess && creditAmount < 0 && !appliedToInvoice) {
+                deposits.push({
+                  id: appId,
+                  amount: absAmount,
+                  date: data.DATE || row.date || '',
+                  description: description || null,
+                  memo: memo || null,
+                  is_excess: false,
+                  is_refund: true,
+                  bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                  entered_by: data.CREATE_USER_NAME || null,
+                });
+                totalHireDeposits -= absAmount;
+              } else if (!isExcess) {
                 hireDepositAppliedToInvoices += absAmount;
               }
             } else if (creditAmount < 0 && description) {
@@ -1504,22 +1525,43 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       `INSERT INTO job_payments
         (job_id, hirehop_job_id, payment_type, amount, payment_method,
          payment_reference, stripe_payment_intent, payment_status, source,
-         hirehop_deposit_id, client_name, notes, payment_date, created_by)
-       VALUES ($1, $2, 'refund', $3, $4, $5, $6, 'completed', 'ooosh_op', $7, $8, $9, NOW(), $10)
+         hirehop_deposit_id, client_name, notes, payment_date, recorded_by)
+       VALUES ($1, $2, 'refund', $3, $4, $5, $6, 'completed', 'op', $7, $8, $9, NOW(), $10)
        RETURNING *`,
       [
         job.id,
         job.hh_job_number,
         amount,
         method,
-        reference || null,
-        stripeRefundId || stripePaymentIntent || null,
+        // For refund rows: payment_reference carries the Stripe refund id
+        // (when present) so the webhook can dedup against it. The original
+        // PI stays on stripe_payment_intent for cross-reference.
+        stripeRefundId || reference || null,
+        stripePaymentIntent || null,
         hh_deposit_id,
         job.client_name,
         auditNotes || null,
         req.user!.id,
       ]
     );
+
+    // ── Step 3: Trigger Xero sync (best-effort — HH push already succeeded, so
+    // OP and HH are in sync. Without this the refund lands in HH billing but
+    // never posts through to Xero. Mirrors the excess reimburse path. ────────
+    if (hhPaymentAppId) {
+      try {
+        await hhBroker.post('/php_functions/accounting/tasks.php', {
+          hh_package_type: 1,
+          hh_acc_package_id: 3,
+          hh_task: 'post_payment',
+          hh_id: hhPaymentAppId,
+          hh_acc_id: '',
+        }, { priority: 'high' });
+        console.log('[money] Xero sync triggered for hire refund payment application');
+      } catch (e) {
+        console.error('[money] Xero sync for hire refund failed (non-fatal — payment posted, sync may catch up later):', e);
+      }
+    }
 
     console.log(`[money] Hire refund recorded: £${amount} on job ${job.id} via ${method}${stripeRefundId ? ` (Stripe ${stripeRefundId})` : ''}${hhPushError ? ' [HH push failed]' : ''}`);
     res.json({

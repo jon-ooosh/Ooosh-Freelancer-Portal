@@ -73,6 +73,12 @@ const AUTOPULL_SEAT_ROUND_TABLE = 2822;
 const AUTOPULL_SEAT_FORWARD_FACING = 2823;
 const SEAT_PARENT_LIST_ID = 1645; // "Rear seats:" stock item
 
+// VE103B certificate — chargeable HH stock item (CATEGORY_ID 355 "Misc Sale Item",
+// £25 one-off). Its presence on a job is sales' signal that the vehicle is going
+// abroad and needs a VE103B. One cert per vehicle going abroad, so the line
+// QUANTITY = number of vans going abroad = number of certs needed.
+const VE103B_CERT_LIST_ID = 1023;
+
 // ── Derived flags shape ──────────────────────────────────────────────────
 
 export type VehicleSlotMode = 'self_drive' | 'van_and_driver';
@@ -96,6 +102,8 @@ export interface DerivedFlags {
   self_drive_count: number;           // Number of slots with mode='self_drive'
   van_and_driver_count: number;       // Number of slots with mode='van_and_driver'
   seat_config: 'round_table' | 'forward_facing' | null;
+  ve103b_required: boolean;           // VE103B cert item (1023) present on the job
+  vans_going_abroad: number;          // Count of certs needed (= qty of item 1023)
   has_backline: boolean;
   backline_item_count: number;
   has_rehearsal: boolean;
@@ -124,6 +132,8 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     self_drive_count: 0,
     van_and_driver_count: 0,
     seat_config: null,
+    ve103b_required: false,
+    vans_going_abroad: 0,
     has_backline: false,
     backline_item_count: 0,
     has_rehearsal: false,
@@ -175,6 +185,12 @@ export function deriveFlags(items: HHLineItem[], slotModes: VehicleSlotModes = {
     // Count physical items (non-virtual) for item count.
     // But include ALL items (including virtual parents) for prep time,
     // since preptimemins is often set on the stock type (virtual parent) not individual children.
+    // ── VE103B certificate (stock item 1023) → vehicle going abroad ──
+    if (item.LIST_ID === VE103B_CERT_LIST_ID && item.kind !== 0) {
+      flags.ve103b_required = true;
+      flags.vans_going_abroad += Math.max(1, item.QUANTITY);
+    }
+
     if (BACKLINE_CATEGORIES.includes(item.CATEGORY_ID) && item.kind === 2) {
       if (!item.VIRTUAL) {
         flags.has_backline = true;
