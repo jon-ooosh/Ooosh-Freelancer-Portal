@@ -112,6 +112,9 @@ const refundPaymentSchema = z.object({
   method: z.enum(['stripe_gbp', 'worldpay', 'amex', 'wise_bacs', 'till_cash', 'paypal', 'lloyds_bank']),
   reference: z.string().max(255).nullable().optional(),
   notes: z.string().max(1000).nullable().optional(),
+  // When set, an existing OP `job_payments` pending-refund IOU (e.g. created by
+  // a cancellation) is marked completed instead of inserting a new refund row.
+  pending_refund_id: z.number().int().positive().nullable().optional(),
 });
 
 // ── GET /api/money/job-lookup/:hhJobNumber — Look up OP job by HireHop job number ──
@@ -990,6 +993,32 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       }
     }
 
+    // Pending refunds — OP-only `job_payments` IOUs (e.g. created by a
+    // cancellation) awaiting processing. Surfaced so staff can action them from
+    // the Money tab via POST /refund-payment with pending_refund_id. No HH/Stripe
+    // link yet; the process step picks a deposit to refund against.
+    let pendingRefunds: Array<{ id: number; amount: number; method: string | null; notes: string | null; date: string }> = [];
+    if (job.id) {
+      try {
+        const pr = await query(
+          `SELECT id, amount, payment_method, notes, payment_date
+           FROM job_payments
+           WHERE job_id = $1 AND payment_type = 'refund' AND payment_status = 'pending'
+           ORDER BY payment_date DESC`,
+          [job.id]
+        );
+        pendingRefunds = pr.rows.map((r: { id: number; amount: string; payment_method: string | null; notes: string | null; payment_date: string }) => ({
+          id: r.id,
+          amount: parseFloat(r.amount),
+          method: r.payment_method || null,
+          notes: r.notes || null,
+          date: r.payment_date,
+        }));
+      } catch (e) {
+        console.error('[money] Pending refunds fetch failed (non-fatal):', e);
+      }
+    }
+
     res.json({
       data: {
         job: {
@@ -1013,6 +1042,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           deposit_paid: depositPaid,
           deposit_percent: depositPercent,
           deposits,
+          pending_refunds: pendingRefunds,
         },
         excess: {
           records: excessRecords,
@@ -1392,7 +1422,7 @@ router.post('/:jobId/record-payment', validate(recordPaymentSchema), async (req:
 router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req: AuthRequest, res: Response) => {
   try {
     const jobId = String(req.params.jobId);
-    const { hh_deposit_id, amount, method, reference, notes } = req.body;
+    const { hh_deposit_id, amount, method, reference, notes, pending_refund_id } = req.body;
 
     const isUuid = /^[0-9a-f]{8}-/.test(jobId);
     const jobResult = await query(
@@ -1438,6 +1468,21 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
           error: 'Refund amount exceeds available',
           detail: `Original: £${originalAmount.toFixed(2)}, already refunded: £${alreadyRefunded.toFixed(2)}, available: £${refundable.toFixed(2)}, requested: £${amount.toFixed(2)}`,
         });
+        return;
+      }
+    }
+
+    // If processing an existing pending IOU, validate it belongs to this job and
+    // is still pending BEFORE we move any money (Stripe/HH), so a bad id can't
+    // leave a real refund recorded against nothing.
+    if (pending_refund_id) {
+      const pendingCheck = await query(
+        `SELECT id FROM job_payments
+         WHERE id = $1 AND job_id = $2 AND payment_type = 'refund' AND payment_status = 'pending'`,
+        [pending_refund_id, job.id]
+      );
+      if (pendingCheck.rows.length === 0) {
+        res.status(404).json({ error: 'Pending refund not found, not on this job, or already processed' });
         return;
       }
     }
@@ -1521,29 +1566,65 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       hhPaymentAppId ? `HH payment app ${hhPaymentAppId}` : null,
     ].filter(Boolean).join(' — ');
 
-    const opResult = await query(
-      `INSERT INTO job_payments
-        (job_id, hirehop_job_id, payment_type, amount, payment_method,
-         payment_reference, stripe_payment_intent, payment_status, source,
-         hirehop_deposit_id, client_name, notes, payment_date, recorded_by)
-       VALUES ($1, $2, 'refund', $3, $4, $5, $6, 'completed', 'op', $7, $8, $9, NOW(), $10)
-       RETURNING *`,
-      [
-        job.id,
-        job.hh_job_number,
-        amount,
-        method,
-        // For refund rows: payment_reference carries the Stripe refund id
-        // (when present) so the webhook can dedup against it. The original
-        // PI stays on stripe_payment_intent for cross-reference.
-        stripeRefundId || reference || null,
-        stripePaymentIntent || null,
-        hh_deposit_id,
-        job.client_name,
-        auditNotes || null,
-        req.user!.id,
-      ]
-    );
+    // For refund rows: payment_reference carries the Stripe refund id (when
+    // present) so the webhook can dedup against it. The original PI stays on
+    // stripe_payment_intent for cross-reference.
+    const refundReferenceCol = stripeRefundId || reference || null;
+
+    let opResult;
+    if (pending_refund_id) {
+      // Processing an existing pending IOU (e.g. a cancellation refund). Mark it
+      // completed in place rather than inserting a duplicate. The validity guard
+      // above already confirmed it belongs to this job and is still pending.
+      opResult = await query(
+        `UPDATE job_payments SET
+           payment_status      = 'completed',
+           amount              = $2,
+           payment_method      = $3,
+           payment_reference   = $4,
+           stripe_payment_intent = $5,
+           hirehop_job_id      = $6,
+           hirehop_deposit_id  = $7,
+           source              = 'op',
+           notes               = $8,
+           payment_date        = NOW(),
+           recorded_by         = $9
+         WHERE id = $1
+         RETURNING *`,
+        [
+          pending_refund_id,
+          amount,
+          method,
+          refundReferenceCol,
+          stripePaymentIntent || null,
+          job.hh_job_number,
+          hh_deposit_id,
+          auditNotes || null,
+          req.user!.id,
+        ]
+      );
+    } else {
+      opResult = await query(
+        `INSERT INTO job_payments
+          (job_id, hirehop_job_id, payment_type, amount, payment_method,
+           payment_reference, stripe_payment_intent, payment_status, source,
+           hirehop_deposit_id, client_name, notes, payment_date, recorded_by)
+         VALUES ($1, $2, 'refund', $3, $4, $5, $6, 'completed', 'op', $7, $8, $9, NOW(), $10)
+         RETURNING *`,
+        [
+          job.id,
+          job.hh_job_number,
+          amount,
+          method,
+          refundReferenceCol,
+          stripePaymentIntent || null,
+          hh_deposit_id,
+          job.client_name,
+          auditNotes || null,
+          req.user!.id,
+        ]
+      );
+    }
 
     // ── Step 3: Trigger Xero sync (best-effort — HH push already succeeded, so
     // OP and HH are in sync. Without this the refund lands in HH billing but
