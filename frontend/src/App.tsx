@@ -24,6 +24,7 @@ import IssuesPage from './pages/IssuesPage';
 import ProblemsPage from './pages/ProblemsPage';
 import IssueDetailPage from './pages/IssueDetailPage';
 import ExcessLedgerPage from './pages/ExcessLedgerPage';
+import MoneyOverviewPage from './pages/MoneyOverviewPage';
 import CostsPage from './pages/CostsPage';
 import VE103BCertificatesPage from './pages/VE103BCertificatesPage';
 import InboxPage from './pages/InboxPage';
@@ -163,6 +164,7 @@ export default function App() {
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />
                 <Route path="/people/duplicates" element={<DuplicatesPage />} />
                 <Route path="/data-cleanup" element={<DataCleanupPage />} />
+                <Route path="/money/overview" element={<MoneyOverviewPage />} />
                 <Route path="/money/excess" element={<ExcessLedgerPage />} />
                 <Route path="/money/costs" element={<CostsPage />} />
                 <Route path="/vehicles/ve103b" element={<VE103BCertificatesPage />} />
