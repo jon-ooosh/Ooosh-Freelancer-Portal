@@ -1567,7 +1567,7 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       [job.id, hh_deposit_id]
     );
     const originalPayment: { id: number; amount: string; stripe_payment_intent: string | null; payment_method: string; payment_type: string } | null = opPaymentRes.rows[0] || null;
-    const stripePaymentIntent = originalPayment?.stripe_payment_intent || null;
+    let stripePaymentIntent = originalPayment?.stripe_payment_intent || null;
 
     // Validate amount against the original (when we know it). Allow up to the
     // original — staff records partial refunds by calling this endpoint twice.
@@ -1605,6 +1605,44 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       }
     }
 
+    // ── PaymentIntent recovery (Stripe refunds) ──────────────────────────────
+    // Deposits taken via the payment portal / recorded straight in HireHop often
+    // have NO OP job_payments row carrying the Stripe PaymentIntent — the pi_
+    // lives only in the HH deposit's memo ("Stripe: https://…/payments/pi_…").
+    // Without this, a stripe_gbp refund found no PI and silently fell back to
+    // record-only (job 15197 incident: client never actually refunded in Stripe
+    // while OP/HH/Xero showed it done). Recover the pi_ from the HH deposit memo
+    // so the refund actually hits Stripe.
+    if (method === 'stripe_gbp' && !stripePaymentIntent && job.hh_job_number) {
+      try {
+        const billing = await hhBroker.get('/php_functions/billing_list.php',
+          { main_id: job.hh_job_number, type: 1 }, { priority: 'high', cacheTTL: 60 });
+        const rows = ((billing.data as { rows?: Array<Record<string, any>> } | null)?.rows) || [];
+        const depRow = rows.find((r) => parseInt(String(r?.data?.ID ?? '0')) === Number(hh_deposit_id));
+        const memo = String(depRow?.data?.MEMO || '');
+        const m = memo.match(/pi_[A-Za-z0-9]+/);
+        if (m) {
+          stripePaymentIntent = m[0];
+          console.log(`[money] Recovered Stripe PI ${stripePaymentIntent} from HH deposit ${hh_deposit_id} memo`);
+        }
+      } catch (e) {
+        console.error('[money] PI recovery from HH memo failed (non-fatal):', e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Loud-fail: a stripe_gbp refund with no recoverable PaymentIntent must NOT
+    // silently record-only — that's how job 15197 looked "done" while the money
+    // never moved. Stop before any HH/Xero paperwork and tell staff to refund in
+    // Stripe directly (then record here under the actual rail if they want the
+    // paperwork). Non-Stripe methods are unaffected — they're record-only by design.
+    if (method === 'stripe_gbp' && !stripePaymentIntent) {
+      res.status(422).json({
+        error: 'No Stripe PaymentIntent found for this deposit',
+        detail: 'This is marked as a Stripe refund but OP can\'t find the original Stripe PaymentIntent — neither on the OP payment record nor in the HireHop deposit memo. Refund it directly in the Stripe dashboard. (Picking a non-Stripe method here records the paperwork only and does not move money.)',
+      });
+      return;
+    }
+
     // ── Step 0: Stripe refund (only when method=stripe_gbp + PI on the row) ──
     let stripeRefundId: string | null = null;
     const stripeRefundPath = method === 'stripe_gbp' && stripePaymentIntent;
@@ -1616,7 +1654,7 @@ router.post('/:jobId/refund-payment', validate(refundPaymentSchema), async (req:
       try {
         const stripe = getStripeClient();
         const refund = await stripe.refunds.create({
-          payment_intent: stripePaymentIntent,
+          payment_intent: stripePaymentIntent as string,
           amount: Math.round(amount * 100),
         });
         stripeRefundId = refund.id;
