@@ -805,4 +805,22 @@ export function startScheduler() {
     }
   }, { timezone: 'Europe/London' });
   console.log('Scheduler: Pre-auth expiry reconciliation scheduled daily at 09:40 Europe/London');
+
+  // ── Job financials backfill — nightly 03:00 Europe/London ────────────
+  // Slow-burn fills the job_financials cache (powering /money/overview) for
+  // jobs whose Money tab hasn't been opened recently. Drives the live
+  // /summary endpoint (zero-drift), paced 4s apart so it never starves
+  // daytime traffic — and 03:00 is past the 02:00 backup / 02:30 retention.
+  cron.schedule('0 3 * * *', async () => {
+    try {
+      const { backfillJobFinancials } = await import('../services/job-financials-backfill');
+      const r = await backfillJobFinancials({ limit: 300, delayMs: 4000, staleAfterDays: 7 });
+      if (r.candidates > 0) {
+        console.log(`Scheduler: Job financials backfill — ${r.processed} synced, ${r.failed} failed, ${r.candidates} candidates`);
+      }
+    } catch (err) {
+      console.error('Scheduler: Job financials backfill failed:', err);
+    }
+  }, { timezone: 'Europe/London' });
+  console.log('Scheduler: Job financials backfill scheduled daily at 03:00 Europe/London');
 }

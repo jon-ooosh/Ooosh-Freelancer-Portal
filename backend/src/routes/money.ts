@@ -65,6 +65,104 @@ async function authenticateFlexible(req: Request, res: Response, next: NextFunct
 // Apply flexible auth to all money routes
 router.use(authenticateFlexible as any);
 
+// ── GET /api/money/overview — Global financial dashboard ──
+//
+// Reads the OP-cached `job_financials` table (populated write-through from the
+// Money tab /summary) + live `job_excess` (excess is OP-owned, real-time) +
+// pending `job_payments` refund IOUs. NO HireHop calls — instant. Figures are
+// as fresh as the last time each job's Money tab was viewed (or the nightly
+// backfill); each row carries last_synced_at so staleness is visible.
+//
+// Staff-only (admin/manager) — read of cross-job financials. Registered before
+// the parametrised /:jobId routes (single-segment path, no collision anyway).
+router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
+  try {
+    // Balances outstanding — anything still owed on a non-dead job, biggest first.
+    const balances = await query(
+      `SELECT jf.job_id, j.hh_job_number, j.job_name,
+              COALESCE(j.client_name, j.company_name) AS client_name,
+              j.pipeline_status, j.job_date, j.job_end, j.return_date,
+              jf.hire_value_inc_vat, jf.total_hire_deposits, jf.balance_outstanding,
+              jf.vat_saved, jf.last_synced_at
+       FROM job_financials jf
+       JOIN jobs j ON j.id = jf.job_id
+       WHERE jf.balance_outstanding > 0.01
+         AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
+       ORDER BY jf.balance_outstanding DESC
+       LIMIT 200`
+    );
+
+    // Deposits pending — confirmed-ish jobs with no hire deposit recorded yet.
+    const depositsPending = await query(
+      `SELECT jf.job_id, j.hh_job_number, j.job_name,
+              COALESCE(j.client_name, j.company_name) AS client_name,
+              j.pipeline_status, j.job_date, j.out_date,
+              jf.hire_value_inc_vat, jf.total_hire_deposits, jf.last_synced_at
+       FROM job_financials jf
+       JOIN jobs j ON j.id = jf.job_id
+       WHERE COALESCE(jf.total_hire_deposits, 0) <= 0.01
+         AND jf.hire_value_inc_vat > 0.01
+         AND COALESCE(j.pipeline_status, '') IN ('confirmed', 'prepping', 'prepped')
+       ORDER BY j.out_date ASC NULLS LAST
+       LIMIT 200`
+    );
+
+    // Excess held — live from job_excess (real money or pre-auth hold still with us).
+    const excessHeld = await query(
+      `SELECT je.id AS excess_id, je.job_id, j.hh_job_number,
+              COALESCE(j.client_name, j.company_name) AS client_name,
+              je.excess_status,
+              COALESCE(je.excess_amount_taken, 0) AS amount_taken,
+              COALESCE(je.amount_held, 0) AS amount_held,
+              COALESCE(j.return_date, j.job_end) AS finished_on
+       FROM job_excess je
+       LEFT JOIN jobs j ON j.id = je.job_id
+       WHERE je.excess_status IN ('taken', 'partially_paid', 'pre_auth')
+         AND (COALESCE(je.excess_amount_taken, 0) + COALESCE(je.amount_held, 0)) > 0.01
+       ORDER BY COALESCE(j.return_date, j.job_end) ASC NULLS LAST
+       LIMIT 200`
+    );
+
+    // Pending refunds — cancellation IOUs awaiting processing, across all jobs.
+    const pendingRefunds = await query(
+      `SELECT jp.id, jp.job_id, j.hh_job_number,
+              COALESCE(j.client_name, j.company_name) AS client_name,
+              jp.amount, jp.notes, jp.payment_date
+       FROM job_payments jp
+       LEFT JOIN jobs j ON j.id = jp.job_id
+       WHERE jp.payment_type = 'refund' AND jp.payment_status = 'pending'
+       ORDER BY jp.payment_date ASC
+       LIMIT 200`
+    );
+
+    const sum = (rows: Array<Record<string, unknown>>, col: string) =>
+      rows.reduce((acc, r) => acc + parseFloat(String(r[col] ?? 0)), 0);
+
+    res.json({
+      data: {
+        balances_outstanding: balances.rows,
+        deposits_pending: depositsPending.rows,
+        excess_held: excessHeld.rows,
+        pending_refunds: pendingRefunds.rows,
+        totals: {
+          balance_outstanding: sum(balances.rows, 'balance_outstanding'),
+          balances_count: balances.rows.length,
+          deposits_pending_count: depositsPending.rows.length,
+          excess_held: excessHeld.rows.reduce(
+            (a, r) => a + parseFloat(String(r.amount_taken)) + parseFloat(String(r.amount_held)), 0),
+          excess_held_count: excessHeld.rows.length,
+          pending_refunds: sum(pendingRefunds.rows, 'amount'),
+          pending_refunds_count: pendingRefunds.rows.length,
+        },
+      },
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] Overview error:', msg);
+    res.status(500).json({ error: 'Failed to load money overview', detail: msg });
+  }
+});
+
 // ── HireHop bank account labels (for emails) ──
 const PAYMENT_METHODS_LABELS: Record<string, string> = {
   stripe_gbp: 'Stripe GBP',
@@ -1017,6 +1115,26 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       } catch (e) {
         console.error('[money] Pending refunds fetch failed (non-fatal):', e);
       }
+    }
+
+    // Write-through cache for the global /money/overview dashboard. The figures
+    // are already computed above; persist them to job_financials so the
+    // dashboard can read OP only (no HH calls at page load). Best-effort —
+    // never let a cache write break the Money tab. Pre-migration-108 envs
+    // simply skip (undefined_table caught here).
+    if (job.id) {
+      query(
+        `INSERT INTO job_financials
+           (job_id, hire_value_inc_vat, total_hire_deposits, balance_outstanding, vat_saved, last_synced_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())
+         ON CONFLICT (job_id) DO UPDATE SET
+           hire_value_inc_vat  = EXCLUDED.hire_value_inc_vat,
+           total_hire_deposits = EXCLUDED.total_hire_deposits,
+           balance_outstanding = EXCLUDED.balance_outstanding,
+           vat_saved           = EXCLUDED.vat_saved,
+           last_synced_at      = NOW()`,
+        [job.id, effectiveHireValueIncVat, totalHireDeposits, effectiveBalanceOutstanding, vatAdjustment ? vatAdjustment.vatSaved : 0]
+      ).catch((e) => console.error('[money] job_financials write-through failed (non-fatal):', e.message));
     }
 
     res.json({

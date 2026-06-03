@@ -64,6 +64,7 @@ const navItems: NavItem[] = [
     path: '/money-menu',
     label: 'Money',
     children: [
+      { path: '/money/overview', label: 'Overview', roles: ['admin', 'manager'] },
       { path: '/money/excess', label: 'Excess', roles: ['admin', 'manager'] },
       { path: '/money/costs', label: 'Costs', roles: ['admin', 'manager', 'staff'] },
     ],

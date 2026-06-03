@@ -1132,6 +1132,9 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 - [x] **OP-initiated Stripe refunds — excess** (`/excess/:id/reimburse` with `method='stripe_gbp'` + `stripe_payment_intent_id` on the record). Calls `stripe.refunds.create()` directly; HH paperwork pushed best-effort once Stripe succeeds; `refund_legs` JSONB pre-records the leg so the incoming `charge.refunded` webhook is a no-op.
 - [x] **OP-initiated Stripe refunds — hire payments** (`POST /api/money/:jobId/refund-payment`). Money tab payment-history rows render a Refund button; Stripe-paid rows lock the method to `stripe_gbp` and refund via the API; other methods record-keep only (negative HH payment application + OP `job_payments` row). Same hh_push_error surfacing pattern as the excess flow. Multiple partial refunds against one deposit allowed (cumulative cap = original amount).
 - [x] **Stripe webhook reciprocity** — OP-initiated refunds and the corresponding `charge.refunded` webhook dedup on `stripe_refund_<id>` keys across both paths.
+- [x] **Hire `refund-payment` Xero two-step fix (Jun 2026)** — the hire-side refund endpoint pushed `billing_payments_save.php` but never fired the `accounting/tasks.php` `post_payment` task, so OP refunds landed in HireHop billing but **never posted to Xero**. Every other money-out path (excess reimburse/claim/capture, deposit record) already did the two-step — this was the only miss. Now fires `post_payment` after the HH push (best-effort, mirrors the excess path). Caught via job 16043 (Oz Touring double £720 deposit refund).
+- [x] **Deposit-refund display fix (Jun 2026)** — the Money tab reader mis-bucketed a deposit refund (a `kind=3` row booked against a deposit, so it carries `OWNER_DEPOSIT`) as "deposit applied to invoice" and never subtracted it → job showed full pre-refund deposits + negative outstanding. Fix: within the `OWNER_DEPOSIT` branch, a negative-credit row with `OWNER = 0` (no invoice) is a deposit refund → subtract from `totalHireDeposits` + surface as a refund line. Genuine deposit→invoice applications have `OWNER` = the invoice id (non-zero) and are untouched. Proven against job 15577 (`OWNER=11648`) vs 16043 (`OWNER=0`). Also fixes OP's own refund button (its push produces the same `OWNER:0` shape). Money tab reads HH live, so affected jobs self-heal on next load.
+- [x] **Process pending cancellation refunds (Jun 2026)** — cancellations create a bare `job_payments` IOU (`payment_type='refund'`, `payment_status='pending'`, no HH/Stripe link) that nothing ever actioned. Now: `/summary` returns `financial.pending_refunds`; `/refund-payment` accepts an optional `pending_refund_id` that validates the IOU (belongs to job + still pending, **before** any money moves) then marks it `completed` in place (reusing the Stripe + HH + Xero path) rather than inserting a duplicate. MoneyTab renders pending refunds as an amber "Awaiting refund" row with a "Process refund" button → modal with a deposit picker + an explicit **"When you confirm:"** panel (Stripe auto-refund vs record-only, HH+Xero paperwork, IOU marked complete).
 
 **Still future:**
 - [ ] **Initial card collection from OP** (PaymentIntent create). "Take Card Payment" button on Money tab → amount → Stripe payment link or embedded checkout → portal-style flow without leaving OP.
@@ -1139,7 +1142,7 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 
 ##### Global Money Views
 - [x] `/money/excess` — Insurance excess ledger (client balances, all records, drill-down)
-- [ ] `/money/overview` — Global financial dashboard (deposits pending, balances outstanding, excess held) — *replaces Stream 6 dashboard widget*
+- [~] `/money/overview` — Global financial dashboard (deposits pending, balances outstanding, excess held) — *replaces Stream 6 dashboard widget*. **IN PROGRESS (Jun 2026).** Data strategy "Option C": money figures cached into a dedicated `job_financials` table (NOT bolted onto `jobs`), populated two ways — (a) write-through whenever the Money tab `/summary` runs for a job (self-heals operationally-live jobs as staff open them), and (b) a nightly slow-burn script (low-priority broker, stalest-first) backfilling history without hammering the HH rate limit. Dashboard reads OP only → instant, with a `last_synced_at` freshness stamp. Excess-held is already real-time from `job_excess` (no HH needed). First cut: Balances Outstanding / Deposits Pending / Excess Held / pending cancellation refunds, admin+manager gated, per-row drill-through to the job.
 - [ ] `/money/payments` — All recorded payments across all jobs (future)
 
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
@@ -2614,7 +2617,7 @@ Application-level AES-256-GCM encryption for fields that must never sit in the d
 
 **Retrofit checklist (apply on jon's timeline — build once, encrypt incrementally):**
 - [x] Client bank details (reimbursement) — done in PR 3
-- [ ] Driver hire-form PII: POA documents, licence, passport, DVLA record data
+- [~] Driver PII — **Phase 1 SHIPPED (Jun 2026, migration 103)**: `date_of_birth`, `dvla_check_code`, `address_line1`, `address_line2`, `address_full`, `licence_address` on `drivers`. Dual-write (plaintext kept + `*_encrypted` companions), reads prefer encrypted with plaintext fallback (`services/driver-pii.ts` — `encryptDriverPiiInto`/`decryptDriverRow`). Backfill: `scripts/encrypt-driver-pii.ts` (dry-run default, `--commit`, `--verify` key round-trip). Live backfill done (246 drivers / 900 fields, 0 remaining). **`licence_number` + `postcode` deliberately NOT encrypted** — used in live ILIKE/exact search; need a blind-index to encrypt (separate follow-up). **Phase 2 STILL TODO** (no rush — Phase 1 is correct, plaintext just still co-exists): (a) convert the two ALIASED hire-form PDF read paths (`hire-forms.ts` ~1110 + ~2028 — `d.date_of_birth AS driver_dob` etc., which `decryptDriverRow` can't match; inventoried in the `driver-pii.ts` header), then (b) a migration to null the plaintext columns + stop the plaintext write. Passport expiry + the searched fields are later slices.
 - [ ] Card-machine receipt scan storage (the scan files themselves; metadata flag already on `job_excess`)
 - [ ] Freelancer PII (held in `people` / `drivers`)
 
@@ -2900,7 +2903,7 @@ The picker promote checkbox keys off this — it only renders for selected conta
 - [x] CORS restricted to configured FRONTEND_URL
 
 **Known gaps (to address):**
-- [ ] Field-level encryption for sensitive PII (DVLA data, passport numbers) — need application-level AES-256 encryption with key in env var. Data encrypted at rest, decrypted on read by authorised users only.
+- [~] Field-level encryption for sensitive PII (AES-256-GCM, `services/encryption.ts`, key in `ENCRYPTION_KEY` env). **Live:** client bank details + driver PII Phase 1 (DOB, addresses, DVLA check code — see the Retrofit checklist under Shared Utilities). **Remaining:** driver PII Phase 2 (null plaintext), passport numbers, the searched fields (`licence_number`/`postcode` — need a blind-index), freelancer PII, receipt scans.
 - [ ] RBAC on PUT endpoints for people/organisations (currently any authenticated user can edit)
 - [ ] Data retention/expiry policy for PII (GDPR compliance)
 - [ ] Secrets rotation documentation
