@@ -62,6 +62,16 @@ const personOrgRoleSchema = z.object({
   notes: z.string().optional().nullable(),
 });
 
+// In-place edit of an existing role — change the role title, primary flag,
+// start date or notes without losing the record. organisation_id is NOT
+// editable here (moving a person to a different org = end + re-add).
+const personOrgRoleUpdateSchema = z.object({
+  role: z.string().min(1).optional(),
+  is_primary: z.boolean().optional(),
+  start_date: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
 // GET /api/people — list with search and pagination
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
@@ -443,6 +453,64 @@ router.post('/:id/roles', validate(personOrgRoleSchema), async (req: AuthRequest
     res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error('Add role error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/people/:id/roles/:roleId — edit a role in place (role title,
+// primary flag, start date, notes). Audit-logged with before/after.
+router.patch('/:id/roles/:roleId', validate(personOrgRoleUpdateSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const current = await query(
+      'SELECT * FROM person_organisation_roles WHERE id = $1 AND person_id = $2',
+      [req.params.roleId, req.params.id]
+    );
+
+    if (current.rows.length === 0) {
+      res.status(404).json({ error: 'Role not found' });
+      return;
+    }
+    const existing = current.rows[0];
+
+    // Build a partial update from only the supplied fields.
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    let i = 1;
+    for (const field of ['role', 'is_primary', 'start_date', 'notes'] as const) {
+      if (req.body[field] !== undefined) {
+        updates.push(`${field} = $${i++}`);
+        values.push(req.body[field]);
+      }
+    }
+
+    if (updates.length === 0) {
+      res.json(existing);
+      return;
+    }
+
+    // If promoting to primary, demote any other active primary on the same org.
+    if (req.body.is_primary === true && !existing.is_primary) {
+      await query(
+        `UPDATE person_organisation_roles
+         SET is_primary = false, updated_at = NOW()
+         WHERE organisation_id = $1 AND status = 'active' AND is_primary = true AND id != $2`,
+        [existing.organisation_id, req.params.roleId]
+      );
+    }
+
+    values.push(req.params.roleId);
+    const result = await query(
+      `UPDATE person_organisation_roles
+       SET ${updates.join(', ')}, updated_at = NOW()
+       WHERE id = $${i} RETURNING *`,
+      values
+    );
+
+    await logAudit(req.user!.id, 'person_organisation_roles', req.params.roleId as string, 'update', existing, result.rows[0]);
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Edit role error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

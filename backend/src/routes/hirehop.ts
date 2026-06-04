@@ -255,8 +255,11 @@ router.get('/jobs', async (req: AuthRequest, res: Response) => {
            WHERE vha.job_id = jobs.id
              AND vha.return_overnight = TRUE
              AND vha.status NOT IN ('cancelled', 'returned')
-         ) AS has_ooh_return
-       FROM jobs ${whereClause}
+         ) AS has_ooh_return,
+         jf.hire_value_inc_vat::float8 AS hire_value_inc_vat
+       FROM jobs
+       LEFT JOIN job_financials jf ON jf.job_id = jobs.id
+       ${whereClause}
        ORDER BY ${orderBy}
        LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
