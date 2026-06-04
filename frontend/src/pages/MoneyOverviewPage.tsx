@@ -27,6 +27,7 @@ interface ExcessHeldRow {
   excess_id: string; job_id: string; hh_job_number: number | null;
   client_name: string | null; excess_status: string;
   amount_taken: string; amount_held: string; finished_on: string | null;
+  hire_finished: boolean;
 }
 interface PendingRefundRow {
   id: number; job_id: string; hh_job_number: number | null;
@@ -41,6 +42,8 @@ interface OverviewData {
     balance_outstanding: number; balances_count: number;
     deposits_pending_count: number;
     excess_held: number; excess_held_count: number;
+    excess_held_upcoming: number; excess_held_upcoming_count: number;
+    excess_held_past: number; excess_held_past_count: number;
     pending_refunds: number; pending_refunds_count: number;
   };
 }
@@ -89,10 +92,22 @@ export default function MoneyOverviewPage() {
 
   const t = data.totals;
 
-  const cards: { key: typeof tab; label: string; value: string; sub: string; accent: string }[] = [
+  const cards: { key: typeof tab; label: string; value: string; sub: string; subNode?: React.ReactNode; accent: string }[] = [
     { key: 'balances', label: 'Balances Outstanding', value: gbp(t.balance_outstanding), sub: `${t.balances_count} job${t.balances_count === 1 ? '' : 's'} owing`, accent: 'text-red-700' },
     { key: 'deposits', label: 'Deposits Pending', value: String(t.deposits_pending_count), sub: 'confirmed, no deposit yet', accent: 'text-amber-700' },
-    { key: 'excess', label: 'Excess Held', value: gbp(t.excess_held), sub: `${t.excess_held_count} record${t.excess_held_count === 1 ? '' : 's'}`, accent: 'text-blue-700' },
+    {
+      key: 'excess', label: 'Excess Held', value: gbp(t.excess_held), accent: 'text-blue-700',
+      sub: `${t.excess_held_count} records`,
+      // Split: legit-to-hold (upcoming/active) vs the actionable "should be back" backlog.
+      subNode: (
+        <>
+          {gbp(t.excess_held_upcoming)} upcoming
+          {' · '}
+          <span className="text-amber-700 font-medium">{gbp(t.excess_held_past)} to return</span>
+          {t.excess_held_past_count > 0 && <span className="text-gray-400"> ({t.excess_held_past_count})</span>}
+        </>
+      ),
+    },
     { key: 'refunds', label: 'Pending Refunds', value: gbp(t.pending_refunds), sub: `${t.pending_refunds_count} to process`, accent: 'text-purple-700' },
   ];
 
@@ -116,7 +131,7 @@ export default function MoneyOverviewPage() {
           >
             <p className="text-xs text-gray-500">{c.label}</p>
             <p className={`text-xl font-bold ${c.accent}`}>{c.value}</p>
-            <p className="text-[11px] text-gray-400 mt-0.5">{c.sub}</p>
+            <p className="text-[11px] text-gray-400 mt-0.5">{c.subNode ?? c.sub}</p>
           </button>
         ))}
       </div>
@@ -171,7 +186,10 @@ export default function MoneyOverviewPage() {
                 <JobRef hh={r.hh_job_number} name={null} />,
                 r.client_name || '—',
                 <Pill text={r.excess_status} />,
-                fmtDate(r.finished_on),
+                <span>
+                  {fmtDate(r.finished_on)}
+                  {r.hire_finished && <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">to return</span>}
+                </span>,
                 gbp(r.amount_taken),
                 parseFloat(r.amount_held) > 0 ? <span className="text-blue-700">{gbp(r.amount_held)}</span> : '—',
               ],

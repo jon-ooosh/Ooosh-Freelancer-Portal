@@ -114,7 +114,8 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
               je.excess_status,
               COALESCE(je.excess_amount_taken, 0) AS amount_taken,
               COALESCE(je.amount_held, 0) AS amount_held,
-              COALESCE(j.return_date, j.job_end) AS finished_on
+              COALESCE(j.return_date, j.job_end) AS finished_on,
+              (COALESCE(j.return_date, j.job_end) < CURRENT_DATE) AS hire_finished
        FROM job_excess je
        LEFT JOIN jobs j ON j.id = je.job_id
        WHERE je.excess_status IN ('taken', 'partially_paid', 'pre_auth')
@@ -138,6 +139,16 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
     const sum = (rows: Array<Record<string, unknown>>, col: string) =>
       rows.reduce((acc, r) => acc + parseFloat(String(r[col] ?? 0)), 0);
 
+    // Split excess held into "for upcoming/active hires" (legit to hold) vs
+    // "past hire end" (should mostly be reimbursed/rolled over — the
+    // actionable backlog). Records with no linked job date count as upcoming.
+    let excessHeldUpcoming = 0, excessHeldPast = 0, excessUpcomingCount = 0, excessPastCount = 0;
+    for (const r of excessHeld.rows as Array<Record<string, unknown>>) {
+      const amt = parseFloat(String(r.amount_taken ?? 0)) + parseFloat(String(r.amount_held ?? 0));
+      if (r.hire_finished === true) { excessHeldPast += amt; excessPastCount++; }
+      else { excessHeldUpcoming += amt; excessUpcomingCount++; }
+    }
+
     res.json({
       data: {
         balances_outstanding: balances.rows,
@@ -148,9 +159,12 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
           balance_outstanding: sum(balances.rows, 'balance_outstanding'),
           balances_count: balances.rows.length,
           deposits_pending_count: depositsPending.rows.length,
-          excess_held: excessHeld.rows.reduce(
-            (a, r) => a + parseFloat(String(r.amount_taken)) + parseFloat(String(r.amount_held)), 0),
+          excess_held: excessHeldUpcoming + excessHeldPast,
           excess_held_count: excessHeld.rows.length,
+          excess_held_upcoming: excessHeldUpcoming,
+          excess_held_upcoming_count: excessUpcomingCount,
+          excess_held_past: excessHeldPast,
+          excess_held_past_count: excessPastCount,
           pending_refunds: sum(pendingRefunds.rows, 'amount'),
           pending_refunds_count: pendingRefunds.rows.length,
         },
