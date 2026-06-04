@@ -1142,8 +1142,21 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 
 ##### Global Money Views
 - [x] `/money/excess` — Insurance excess ledger (client balances, all records, drill-down)
-- [~] `/money/overview` — Global financial dashboard (deposits pending, balances outstanding, excess held) — *replaces Stream 6 dashboard widget*. **IN PROGRESS (Jun 2026).** Data strategy "Option C": money figures cached into a dedicated `job_financials` table (NOT bolted onto `jobs`), populated two ways — (a) write-through whenever the Money tab `/summary` runs for a job (self-heals operationally-live jobs as staff open them), and (b) a nightly slow-burn script (low-priority broker, stalest-first) backfilling history without hammering the HH rate limit. Dashboard reads OP only → instant, with a `last_synced_at` freshness stamp. Excess-held is already real-time from `job_excess` (no HH needed). First cut: Balances Outstanding / Deposits Pending / Excess Held / pending cancellation refunds, admin+manager gated, per-row drill-through to the job.
+- [x] `/money/overview` — Global financial dashboard (deposits pending, balances outstanding, excess held, pending refunds) — *replaces Stream 6 dashboard widget*. **SHIPPED (Jun 2026).** Data strategy "Option C": money figures cached into a dedicated `job_financials` table (NOT bolted onto `jobs`), populated two ways — (a) write-through whenever the Money tab `/summary` runs for a job (self-heals operationally-live jobs as staff open them), and (b) a nightly 03:00 slow-burn (`services/job-financials-backfill.ts` + `scripts/backfill-job-financials.ts`, drives the live `/summary` endpoint over localhost so there's one computation path — zero drift). Dashboard reads OP only → instant, with a `last_synced_at` freshness stamp. Admin+manager gated, per-row drill-through. Excess Held is split **upcoming vs to-return** (finished-hire backlog), and the table is search + click-to-sort with pipeline-aligned status colours. Excess Held reads the canonical `v_excess_held` view (see below) so it agrees with `/money/excess`.
 - [ ] `/money/payments` — All recorded payments across all jobs (future)
+
+##### Canonical "excess held" — single source of truth (migration 109, Jun 2026)
+
+`v_excess_held` is the ONE definition of "excess actually held right now", used by every surface so they agree (they used to each compute it differently and disagree). Per-record:
+```
+held_amount = max(excess_amount_taken + amount_held − claim_amount − reimbursement_amount, 0)
+              for excess_status NOT IN ('rolled_over','released','not_required')
+```
+- Excludes `rolled_over` (the cash moved to the forward record — counting both double-counted, the original bug behind the `/money/excess` "Total Held" overstatement) and `released` (pre-auth ended) and `not_required` (top-N £0 loser). `reimbursed`/`fully_claimed` net to 0 naturally; live `pre_auth` holds count via `amount_held`.
+- **Consumers (all read `v_excess_held`):** `client_excess_ledger` view's `balance_held` (migration 109 redefined it to sum from `v_excess_held`; other columns unchanged), `/money/overview` Excess Held card + table, and the dashboard "Unreimbursed Excess" bucket (`routes/dashboard.ts`, which also excludes `pre_auth` since a hold isn't returnable cash). **Any new "how much excess do we hold" surface MUST read `v_excess_held`** rather than re-summing `excess_amount_taken` — that's how the drift happened.
+- This only changed AGGREGATION-for-display; the excess lifecycle (collect/claim/reimburse/rollover/pre-auth) is untouched. The view is reversible.
+- **Stale backlog:** `scripts/reconcile-stale-excess.ts` (dry-run default, `--commit`, `--days=N`) clears the historic backlog — finished-hire `taken`/`partially_paid` records with NO claims/holds, marked `reimbursed` (reimbursement_amount topped to taken → held→0). Direct DB update, **no client emails / HH pushes / Stripe calls**. Records with claims or partial reimbursements are reported for manual review, never auto-committed.
+- **Receipts Outstanding bucket** is forward-only from **1 Jun 2026** (migration 110 cleared the migration-087 historic backfill flags; dashboard query also guards `created_at >= 1 Jun` + self-retires once the hire is `completed`). **Pre-auth Holds Expiring bucket** is now action-only (`held_expires_at` between today and +2 days — past-expiry holds, which can't be actioned, are dropped).
 
 #### Step 4: Status Transition Engine ← MOSTLY COMPLETE
 Bidirectional job status sync — depends on excess tracking for gate conditions.

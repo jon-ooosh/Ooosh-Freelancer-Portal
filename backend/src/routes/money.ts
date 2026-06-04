@@ -107,19 +107,22 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
        LIMIT 200`
     );
 
-    // Excess held — live from job_excess (real money or pre-auth hold still with us).
+    // Excess held — from the canonical v_excess_held view (single source of
+    // truth: max(taken+held−claims−reimburse,0), rolled_over/released/not_required
+    // excluded). amount_taken/amount_held kept for the per-row breakdown display.
     const excessHeld = await query(
       `SELECT je.id AS excess_id, je.job_id, j.hh_job_number,
               COALESCE(j.client_name, j.company_name) AS client_name,
               je.excess_status,
               COALESCE(je.excess_amount_taken, 0) AS amount_taken,
               COALESCE(je.amount_held, 0) AS amount_held,
+              h.held_amount,
               COALESCE(j.return_date, j.job_end) AS finished_on,
               (COALESCE(j.return_date, j.job_end) < CURRENT_DATE) AS hire_finished
-       FROM job_excess je
+       FROM v_excess_held h
+       JOIN job_excess je ON je.id = h.excess_id
        LEFT JOIN jobs j ON j.id = je.job_id
-       WHERE je.excess_status IN ('taken', 'partially_paid', 'pre_auth')
-         AND (COALESCE(je.excess_amount_taken, 0) + COALESCE(je.amount_held, 0)) > 0.01
+       WHERE h.held_amount > 0.01
        ORDER BY COALESCE(j.return_date, j.job_end) ASC NULLS LAST
        LIMIT 200`
     );
@@ -144,7 +147,7 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
     // actionable backlog). Records with no linked job date count as upcoming.
     let excessHeldUpcoming = 0, excessHeldPast = 0, excessUpcomingCount = 0, excessPastCount = 0;
     for (const r of excessHeld.rows as Array<Record<string, unknown>>) {
-      const amt = parseFloat(String(r.amount_taken ?? 0)) + parseFloat(String(r.amount_held ?? 0));
+      const amt = parseFloat(String(r.held_amount ?? 0));
       if (r.hire_finished === true) { excessHeldPast += amt; excessPastCount++; }
       else { excessHeldUpcoming += amt; excessUpcomingCount++; }
     }
