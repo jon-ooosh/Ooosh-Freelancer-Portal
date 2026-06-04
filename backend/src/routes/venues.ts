@@ -36,6 +36,7 @@ const createVenueSchema = z.object({
   default_miles_from_base: z.number().optional().nullable(),
   default_drive_time_mins: z.number().int().optional().nullable(),
   default_return_cost: z.number().optional().nullable(),
+  default_tolls_amount: z.number().optional().nullable(),
   tags: z.array(z.string()).optional().default([]),
   files: z.array(fileSchema).optional().default([]),
   // AI text fields
@@ -126,7 +127,7 @@ router.post('/', validate(createVenueSchema), async (req: AuthRequest, res: Resp
       name, organisation_id, address, city, postcode, country, latitude, longitude,
       w3w_address, load_in_address, loading_bay_info, access_codes, parking_info,
       approach_notes, technical_notes, general_notes,
-      default_miles_from_base, default_drive_time_mins, default_return_cost,
+      default_miles_from_base, default_drive_time_mins, default_return_cost, default_tolls_amount,
       tags, files,
     } = req.body;
 
@@ -135,15 +136,15 @@ router.post('/', validate(createVenueSchema), async (req: AuthRequest, res: Resp
         name, organisation_id, address, city, postcode, country, latitude, longitude,
         w3w_address, load_in_address, loading_bay_info, access_codes, parking_info,
         approach_notes, technical_notes, general_notes,
-        default_miles_from_base, default_drive_time_mins, default_return_cost,
+        default_miles_from_base, default_drive_time_mins, default_return_cost, default_tolls_amount,
         tags, files, created_by
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
        RETURNING *`,
       [
         name, organisation_id, address, city, postcode, country, latitude, longitude,
         w3w_address, load_in_address, loading_bay_info, access_codes, parking_info,
         approach_notes, technical_notes, general_notes,
-        default_miles_from_base, default_drive_time_mins, default_return_cost,
+        default_miles_from_base, default_drive_time_mins, default_return_cost, default_tolls_amount,
         tags, JSON.stringify(files), req.user!.id,
       ]
     );

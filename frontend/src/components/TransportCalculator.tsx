@@ -465,6 +465,16 @@ export default function TransportCalculator({
   const [venueOriginalMiles, setVenueOriginalMiles] = useState<number | null>(null);
   const [venueOriginalDriveTime, setVenueOriginalDriveTime] = useState<number | null>(null);
   const [creatingVenue, setCreatingVenue] = useState(false);
+  // Quick-add venue form (captures address + travel defaults inline so a
+  // freshly-created venue feeds the calc and doesn't need editing later).
+  const [showVenueForm, setShowVenueForm] = useState(false);
+  const [nvName, setNvName] = useState('');
+  const [nvAddress, setNvAddress] = useState('');
+  const [nvCity, setNvCity] = useState('');
+  const [nvPostcode, setNvPostcode] = useState('');
+  const [nvMiles, setNvMiles] = useState('');
+  const [nvDriveTime, setNvDriveTime] = useState('');
+  const [nvTolls, setNvTolls] = useState('');
 
   // Load settings + venues on open
   useEffect(() => {
@@ -473,6 +483,7 @@ export default function TransportCalculator({
     setError(null);
     setSuccess(null);
     setStep(1);
+    setShowVenueForm(false);
 
     // Parse dates from HireHop props
     const parsedDate = toDateInput(jobDate);
@@ -608,15 +619,46 @@ export default function TransportCalculator({
     setFormData(prev => ({ ...prev, expenses: prev.expenses.filter(exp => exp.id !== id) }));
   }, []);
 
+  // Open the inline quick-add form, seeding the name from what was typed.
+  function openVenueForm() {
+    setNvName(venueSearch.trim());
+    setNvAddress('');
+    setNvCity('');
+    setNvPostcode('');
+    setNvMiles('');
+    setNvDriveTime('');
+    setNvTolls('');
+    setShowVenueForm(true);
+    setVenueDropdownOpen(false);
+  }
+
   async function handleCreateVenue() {
-    if (!venueSearch.trim()) return;
+    const name = nvName.trim() || venueSearch.trim();
+    if (!name) return;
     setCreatingVenue(true);
     try {
+      const miles = nvMiles.trim() ? parseFloat(nvMiles) : null;
+      const driveTime = nvDriveTime.trim() ? parseInt(nvDriveTime, 10) : null;
+      const tolls = nvTolls.trim() ? parseFloat(nvTolls) : null;
       const newVenue = await api.post<{ id: string; name: string }>('/venues', {
-        name: venueSearch.trim(),
+        name,
+        address: nvAddress.trim() || null,
+        city: nvCity.trim() || null,
+        postcode: nvPostcode.trim() || null,
+        default_miles_from_base: miles !== null && !isNaN(miles) ? miles : null,
+        default_drive_time_mins: driveTime !== null && !isNaN(driveTime) ? driveTime : null,
+        default_tolls_amount: tolls !== null && !isNaN(tolls) ? tolls : null,
       });
-      const created: VenueOption = { id: newVenue.id, name: newVenue.name ?? venueSearch.trim() };
+      const created: VenueOption = {
+        id: newVenue.id,
+        name: newVenue.name ?? name,
+        address: nvAddress.trim() || null,
+        default_miles_from_base: miles !== null && !isNaN(miles) ? miles : null,
+        default_drive_time_mins: driveTime !== null && !isNaN(driveTime) ? driveTime : null,
+      };
       setVenues(prev => [...prev, created]);
+      setVenueSearch(created.name);
+      setShowVenueForm(false);
       handleVenueSelect(created);
     } catch {
       setError('Failed to create venue');
@@ -1034,11 +1076,10 @@ export default function TransportCalculator({
                             {venueSearch.trim().length > 0 && !venues.some(v => v.name.toLowerCase() === venueSearch.trim().toLowerCase()) && (
                               <button
                                 type="button"
-                                onClick={handleCreateVenue}
-                                disabled={creatingVenue}
+                                onClick={openVenueForm}
                                 className="w-full px-4 py-2 text-left hover:bg-ooosh-50 border-t border-gray-100 text-sm text-ooosh-600 font-medium"
                               >
-                                {creatingVenue ? 'Creating...' : `➕ Create "${venueSearch.trim()}" as new venue`}
+                                {`➕ Create "${venueSearch.trim()}" as new venue`}
                               </button>
                             )}
                           </div>
@@ -1054,6 +1095,56 @@ export default function TransportCalculator({
                            (formData.distanceMiles !== (venueOriginalMiles ?? 0) || formData.driveTimeMinutes !== (venueOriginalDriveTime ?? 0)) && (
                             <p className="text-xs text-amber-600 mt-0.5">📍 Changed from saved values — will update venue on save</p>
                           )}
+                        </div>
+                      )}
+
+                      {showVenueForm && (
+                        <div className="mt-3 border border-ooosh-200 bg-ooosh-50/50 rounded-lg p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-sm font-semibold text-gray-900">New venue details</h4>
+                            <button type="button" onClick={() => setShowVenueForm(false)} className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Venue name *</label>
+                            <input type="text" value={nvName} onChange={(e) => setNvName(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Address</label>
+                            <textarea value={nvAddress} onChange={(e) => setNvAddress(e.target.value)} rows={2} placeholder="Street address" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">City / Town</label>
+                              <input type="text" value={nvCity} onChange={(e) => setNvCity(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Postcode</label>
+                              <input type="text" value={nvPostcode} onChange={(e) => setNvPostcode(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-3 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Miles (one-way)</label>
+                              <input type="number" min="0" value={nvMiles} onChange={(e) => setNvMiles(e.target.value)} placeholder="From Maps" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Drive time (min)</label>
+                              <input type="number" min="0" value={nvDriveTime} onChange={(e) => setNvDriveTime(e.target.value)} placeholder="From Maps" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Tolls (£)</label>
+                              <input type="number" min="0" step="0.01" value={nvTolls} onChange={(e) => setNvTolls(e.target.value)} placeholder="Optional" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-500">Miles &amp; drive time pre-fill the calculation and are saved to the venue for next time.</p>
+                          <button
+                            type="button"
+                            onClick={handleCreateVenue}
+                            disabled={creatingVenue || !nvName.trim()}
+                            className="w-full px-4 py-2 bg-ooosh-600 text-white rounded-lg text-sm font-medium hover:bg-ooosh-700 disabled:opacity-50"
+                          >
+                            {creatingVenue ? 'Creating…' : 'Create venue & use it'}
+                          </button>
                         </div>
                       )}
                     </div>
