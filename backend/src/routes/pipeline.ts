@@ -183,10 +183,12 @@ router.get('/', async (req: AuthRequest, res: Response) => {
          WHERE jo.job_id = j.id) as linked_organisations,
         (j.next_chase_date IS NOT NULL
          AND j.next_chase_date <= CURRENT_DATE
-         AND j.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')) as is_chasing
+         AND j.pipeline_status IN ('new_enquiry', 'quoting', 'paused', 'provisional')) as is_chasing,
+        jf.hire_value_inc_vat::float8 as hire_value_inc_vat
       FROM jobs j
       LEFT JOIN people m1p ON m1p.id = j.manager1_person_id
       LEFT JOIN people m2p ON m2p.id = j.manager2_person_id
+      LEFT JOIN job_financials jf ON jf.job_id = j.id
       WHERE ${where}
       ORDER BY ${sortCol} ${sortOrder} NULLS LAST, j.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,

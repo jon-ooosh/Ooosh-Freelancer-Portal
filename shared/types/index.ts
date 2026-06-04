@@ -386,6 +386,11 @@ export interface Job {
   confirmed_at: string | null;
   // Financial
   job_value: number | null;
+  // Cached VAT-adjusted hire value (inc VAT) from job_financials. Reflects what
+  // the client actually owes; populated by the Money tab write-through + nightly
+  // backfill. Display surfaces (Jobs list, Pipeline cards) prefer this over the
+  // legacy/estimate job_value. Null when no cached figure exists yet.
+  hire_value_inc_vat?: number | null;
   // Lost
   lost_reason: string | null;
   lost_detail: string | null;
