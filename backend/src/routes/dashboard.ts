@@ -316,18 +316,13 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // older "excess awaiting collection" rule (we're good at taking excess
       // up front, slack on returning it).
       query(`
-        SELECT COUNT(*) as count,
-               COALESCE(
-                 SUM(GREATEST(
-                   COALESCE(je.excess_amount_taken, 0),
-                   COALESCE(je.excess_amount_required, 0)
-                 )),
-                 0
-               ) as total_amount
-        FROM job_excess je
+        SELECT COUNT(*) as count, COALESCE(SUM(h.held_amount), 0) as total_amount
+        FROM v_excess_held h
+        JOIN job_excess je ON je.id = h.excess_id
         LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
         LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
-        WHERE je.excess_status IN ('taken','partially_paid')
+        WHERE h.held_amount > 0.01
+          AND je.excess_status <> 'pre_auth'
           AND (j.pipeline_status IN ('returned_incomplete','returned','completed')
                OR j.status IN (6, 7, 11))
           AND COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE - INTERVAL '5 days'
@@ -521,21 +516,20 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
       // Show oldest first (longest sitting on our books).
       query(`
         SELECT je.id AS excess_id, je.excess_status,
-               GREATEST(
-                 COALESCE(je.excess_amount_taken, 0),
-                 COALESCE(je.excess_amount_required, 0)
-               ) AS excess_amount_required,
+               h.held_amount AS excess_amount_required,
                COALESCE(d.full_name, j.client_name) AS driver_name,
                fv.reg AS vehicle_reg,
                j.id as job_uuid, j.hh_job_number, j.job_name,
                COALESCE(j.return_date, j.job_end) AS hire_ended_at,
                (CURRENT_DATE - COALESCE(j.return_date, j.job_end)::date) AS days_since_finish
-        FROM job_excess je
+        FROM v_excess_held h
+        JOIN job_excess je ON je.id = h.excess_id
         LEFT JOIN vehicle_hire_assignments vha ON vha.id = je.assignment_id
         LEFT JOIN drivers d ON d.id = vha.driver_id
         LEFT JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
         LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
-        WHERE je.excess_status IN ('taken','partially_paid')
+        WHERE h.held_amount > 0.01
+          AND je.excess_status <> 'pre_auth'
           AND (j.pipeline_status IN ('returned_incomplete','returned','completed')
                OR j.status IN (6, 7, 11))
           AND COALESCE(j.return_date, j.job_end)::date <= CURRENT_DATE - INTERVAL '5 days'
@@ -627,6 +621,7 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
         WHERE je.excess_status = 'pre_auth'
           AND je.held_expires_at IS NOT NULL
+          AND je.held_expires_at::date >= CURRENT_DATE
           AND je.held_expires_at::date <= CURRENT_DATE + INTERVAL '2 days'
         ORDER BY je.held_expires_at ASC
         LIMIT 10
@@ -650,6 +645,11 @@ router.get('/operations', async (req: AuthRequest, res: Response) => {
         LEFT JOIN jobs j ON j.id = COALESCE(vha.job_id, je.job_id)
         WHERE je.receipt_required = TRUE
           AND je.receipt_uploaded_at IS NULL
+          -- Forward-looking only: the migration 087 backfill flagged all
+          -- historic card records; the requirement applies from 1 Jun 2026.
+          AND je.created_at >= DATE '2026-06-01'
+          -- Self-retire once the hire is completed.
+          AND NOT (COALESCE(j.pipeline_status, '') = 'completed' OR COALESCE(j.status, 0) = 11)
         ORDER BY je.updated_at DESC
         LIMIT 10
       `),

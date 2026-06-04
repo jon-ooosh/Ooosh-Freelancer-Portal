@@ -143,6 +143,8 @@ async function runMigrations(direction: 'up' | 'down') {
         '106_reconcile_vehicle_finance_columns.sql',
         '107_email_routing_and_sanity_markers.sql',
         '108_job_financials.sql',
+        '109_canonical_excess_held.sql',
+        '110_receipt_required_forward_only.sql',
       ];
 
       for (const migration of migrations) {
