@@ -379,6 +379,8 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     const excessResult = await query(
       `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_amount_taken,
               je.amount_held, je.amount_released,
+              je.claim_amount, je.reimbursement_amount,
+              je.reimbursement_date, je.reimbursement_method,
               je.held_at, je.held_expires_at, je.released_at,
               je.excess_status, je.excess_calculation_basis, je.payment_method,
               je.payment_reference, je.payment_date, je.hh_deposit_id,
@@ -449,6 +451,14 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
         excess_amount: required, // alias for Payment Portal compat
         excess: required, // alias — Payment Portal sorts on `.excess`
         excess_amount_taken: taken,
+        // Resolution breakdown — surfaces what actually happened to collected
+        // excess (claimed to invoice / reimbursed to client) on the Money tab
+        // Insurance Excess card. Without these the card could only show
+        // collected vs required, hiding the claim/reimburse split (job 15291).
+        claim_amount: parseFloat(r.claim_amount || 0),
+        reimbursement_amount: parseFloat(r.reimbursement_amount || 0),
+        reimbursement_date: r.reimbursement_date,
+        reimbursement_method: r.reimbursement_method,
         // Pre-auth lifecycle (migration 087) — held = on hold (not yet captured);
         // released = was held, then voided without capture (terminal info).
         amount_held: held,

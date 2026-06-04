@@ -156,6 +156,18 @@ const reimburseSchema = z.object({
   // Captured at reimburse time when the method is a bank transfer. Stored
   // encrypted on this record + stamps bank_details_last_used_at.
   bank_details: bankDetailsSchema.nullable().optional(),
+  // When this reimbursement leaves a residual (refunding LESS than the held
+  // balance), classify what happens to the remainder:
+  //   false/omitted → "still owed to client" — record stays partially_reimbursed,
+  //                    the residual remains HELD (we'll refund it later).
+  //   true          → "retained by Ooosh" (damage/admin) — the residual is booked
+  //                    as a claim (claim_amount += residual), record flips to
+  //                    reimbursed, held → 0. No HH push (the money was already
+  //                    applied/used in HireHop; this just classifies it in OP).
+  // Without this distinction a retained residual sits as phantom-held forever —
+  // OP told the client "£30 retained" but never recorded it as a claim, so the
+  // canonical held formula kept showing the £30 (e.g. job 14871).
+  retain_residual: z.boolean().optional(),
 });
 
 const waiveSchema = z.object({
@@ -2103,7 +2115,7 @@ router.post('/:id/claim', validate(claimSchema), async (req: AuthRequest, res: R
 router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSchema), async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
-    const { amount, method, bank_details } = req.body;
+    const { amount, method, bank_details, retain_residual } = req.body;
 
     // Get the current excess record to determine partial vs full
     const currentResult = await query(`SELECT * FROM job_excess WHERE id = $1`, [id]);
@@ -2123,10 +2135,23 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
       });
       return;
     }
-    // Partial only if there's still UNACCOUNTED-FOR balance after this reimburse.
-    // Must factor in prior claims, otherwise a £100 deposit with £40 claimed +
-    // £60 reimbursed flags as partial when it's actually fully resolved.
+    // "Partial refund" (client got back LESS than the full held balance) — drives
+    // the email template + retained-amount line. Must factor in prior claims,
+    // otherwise a £100 deposit with £40 claimed + £60 reimbursed flags as partial
+    // when it's actually fully resolved.
     const isPartial = (alreadyReimbursed + amount + claimed) < amountTaken - 0.005;
+
+    // The unaccounted-for balance left AFTER this reimburse (taken minus everything
+    // reimbursed + claimed). Positive only when isPartial.
+    const residual = Math.max(amountTaken - alreadyReimbursed - amount - claimed, 0);
+    // When staff flag the residual as retained (kept by Ooosh — damage/admin),
+    // book it as a claim so held → 0 and the record fully resolves. Otherwise it
+    // stays genuinely HELD (still owed to the client, to be refunded later).
+    const retainResidual = !!retain_residual && residual > 0.005;
+    const newClaimAmount = retainResidual ? claimed + residual : claimed;
+    // Record is fully resolved when there's no unaccounted balance OR the residual
+    // is being retained as a claim. Only the "still owed" case stays partial.
+    const resolvedStatus = (!isPartial || retainResidual) ? 'reimbursed' : 'partially_reimbursed';
 
     // ── Step 0: Stripe refund — when method=stripe_gbp + the record carries a
     // PaymentIntent reference, OP originates the refund directly via the Stripe
@@ -2289,10 +2314,15 @@ router.post('/:id/reimburse', authorize(...MANAGER_ROLES), validate(reimburseSch
         reimbursement_amount = COALESCE(reimbursement_amount, 0) + $2,
         reimbursement_date = NOW(),
         reimbursement_method = $3,
+        claim_amount = $5,
+        notes = CASE WHEN $6::numeric > 0
+                  THEN COALESCE(notes, '') || ' [£' || to_char($6::numeric, 'FM999990.00')
+                       || ' residual retained as claim ' || to_char(NOW(), 'YYYY-MM-DD') || ']'
+                  ELSE notes END,
         updated_at = NOW()
       WHERE id = $4
       RETURNING *`,
-      [isPartial ? 'partially_reimbursed' : 'reimbursed', amount, method, id]
+      [resolvedStatus, amount, method, id, newClaimAmount, retainResidual ? residual : 0]
     );
 
     const excess = result.rows[0];

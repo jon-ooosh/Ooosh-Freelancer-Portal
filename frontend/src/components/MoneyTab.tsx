@@ -649,6 +649,24 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
                       </>
                     )}
                   </p>
+                  {/* Resolution breakdown — what actually happened to collected
+                      excess. Without this the card showed only collected vs
+                      required, hiding claim/reimburse splits (job 15291). */}
+                  {(Number(record.claim_amount || 0) > 0 || Number(record.reimbursement_amount || 0) > 0) && (
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {Number(record.claim_amount || 0) > 0 && (
+                        <span className="text-orange-700">Claimed to invoice: £{Number(record.claim_amount).toFixed(2)}</span>
+                      )}
+                      {Number(record.claim_amount || 0) > 0 && Number(record.reimbursement_amount || 0) > 0 && ' · '}
+                      {Number(record.reimbursement_amount || 0) > 0 && (
+                        <span className="text-emerald-700">
+                          Reimbursed: £{Number(record.reimbursement_amount).toFixed(2)}
+                          {record.reimbursement_date && ` on ${new Date(record.reimbursement_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                          {record.reimbursement_method && ` (${record.reimbursement_method.replace(/_/g, ' ')})`}
+                        </span>
+                      )}
+                    </p>
+                  )}
                   {record.excess_status === 'pre_auth' && record.held_expires_at && (() => {
                     const daysLeft = Math.ceil((new Date(record.held_expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
                     const cls = daysLeft <= 1 ? 'text-red-600' : daysLeft <= 2 ? 'text-amber-600' : 'text-sky-600';

@@ -269,6 +269,12 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
     ? excess.payment_method
     : 'wise_bacs';
   const [reimburseMethod, setReimburseMethod] = useState(initialReimburseMethod);
+  // When refunding LESS than the held balance, classify the remainder: false =
+  // still owed to the client (stays held), true = retained by Ooosh (booked as a
+  // claim, record resolves). Defaults to "still owed" — the safe, reversible
+  // choice. See backend reimburse handler for the held-vs-resolved split.
+  const [retainResidual, setRetainResidual] = useState(false);
+  const reimburseResidual = amountHeld - (parseFloat(reimburseAmount) || 0);
 
   // Waive form
   const [waiveReason, setWaiveReason] = useState('');
@@ -488,6 +494,8 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
               amount: parseFloat(reimburseAmount),
               method: reimburseMethod,
               bank_details: bankDetails,
+              // Only meaningful when a residual remains (backend guards anyway).
+              retain_residual: reimburseResidual > 0.005 ? retainResidual : false,
             }
           );
           if (resp.warning) {
@@ -1109,6 +1117,43 @@ export default function ExcessPaymentModal({ excess, onClose, onUpdated, initial
                     ))}
                   </select>
                 </div>
+
+                {/* Residual handling — only when refunding less than the held
+                    balance. Forces a conscious choice so the remainder doesn't
+                    sit as phantom-held (the job 14871 bug). */}
+                {reimburseResidual > 0.005 && (
+                  <div className="border border-amber-200 bg-amber-50 rounded-md p-3 space-y-2">
+                    <p className="text-xs font-semibold text-amber-900">
+                      £{reimburseResidual.toFixed(2)} will remain after this refund. What happens to it?
+                    </p>
+                    <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="residual"
+                        checked={!retainResidual}
+                        onChange={() => setRetainResidual(false)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <strong>Still owed to the client</strong> — keep it held and refund later.
+                        Record stays <em>Partially Reimbursed</em>.
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-2 text-xs text-gray-700 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="residual"
+                        checked={retainResidual}
+                        onChange={() => setRetainResidual(true)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <strong>Retained by Ooosh</strong> (damage / admin) — booked as a claim,
+                        nothing left held. Record resolves to <em>Reimbursed</em>.
+                      </span>
+                    </label>
+                  </div>
+                )}
 
                 {/* Bank details — only for bank-transfer methods. Stored encrypted,
                     scoped to this record. Reuse-from-previous offered when the
