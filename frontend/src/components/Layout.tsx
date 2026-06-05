@@ -37,6 +37,7 @@ const navItems: NavItem[] = [
     path: '/operations-menu',
     label: 'Operations',
     children: [
+      { path: '/quick', label: '⚡ Quick Log (mobile)' },
       { path: '/operations/transport', label: 'Crew & Transport' },
       { path: '/operations/backline', label: 'Backline' },
       { path: '/storage', label: 'Storage' },
