@@ -720,7 +720,9 @@ export function startScheduler() {
         if (e.hh_job_number && sentJobNumbers.has(e.hh_job_number)) { skipped++; continue; }
         try {
           // Triggered-by null = scheduler attribution (system user).
-          const result = await sendBriefingEmail(e.id, undefined, null);
+          // Pass the trigger reason so the right dedup marker is stamped
+          // (urgent is tracked separately from the standard review).
+          const result = await sendBriefingEmail(e.id, undefined, null, e.trigger_reason);
           if (result.success) sent++;
           else { failed++; console.warn(`Scheduler: Pre-hire review send failed for ${e.id}:`, result.error); }
         } catch (err) {
