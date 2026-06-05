@@ -99,6 +99,27 @@ class XeroApiError extends Error {
   }
 }
 
+// Xero wraps the useful reason for a 400 "A validation exception occurred" in
+// Elements[].ValidationErrors[].Message (PUT /Invoices, /BankTransactions,
+// /Payments). Surface those so the cost row's error is actionable rather than
+// the generic top-level message.
+function extractXeroErrorMessage(json: Record<string, unknown>, status: number): string {
+  const top = (json.Message as string) || (json.detail as string) || '';
+  const elements = json.Elements as Array<{ ValidationErrors?: Array<{ Message?: string }> }> | undefined;
+  const details: string[] = [];
+  if (Array.isArray(elements)) {
+    for (const el of elements) {
+      for (const ve of el.ValidationErrors || []) {
+        if (ve.Message) details.push(ve.Message);
+      }
+    }
+  }
+  if (details.length) {
+    return top ? `${top}: ${details.join('; ')}` : details.join('; ');
+  }
+  return top || `Xero error ${status}`;
+}
+
 // ── Rate limiter (simple token bucket) ──────────────────────────────────────
 
 const RATE = { maxTokens: 55, windowMs: 60_000, minDelayMs: 250 };
@@ -263,8 +284,7 @@ class XeroBroker {
 
       const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (!res.ok) {
-        const msg = (json.Message as string) || (json.detail as string) || `Xero error ${res.status}`;
-        throw new XeroApiError(res.status, msg, json);
+        throw new XeroApiError(res.status, extractXeroErrorMessage(json, res.status), json);
       }
       return json as T;
     }
