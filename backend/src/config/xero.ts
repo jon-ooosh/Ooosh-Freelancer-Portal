@@ -46,18 +46,26 @@ export const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0';
 //
 // `accounting.transactions` governs ACCPAY *Invoices* (supplier bills) AND
 // *Payments* (recording a payment against a bill) — the pay-later flow
-// (not_yet_paid / reimburse_me) needs it. Granted on the Ooosh Custom
-// Connection Jun 2026. The push service still soft-handles a 403 here (calm
-// "needs Xero bills scope" advisory, not a red error) as a safety net if the
-// grant is ever revoked. IMPORTANT: a scope listed here MUST be granted on the
-// connection — requesting an ungranted scope fails the whole client_credentials
-// token mint and breaks ALL Xero reads. Never add a scope before granting it.
+// (not_yet_paid / reimburse_me) needs it.
+//
+// ⚠️ It is REQUESTED ON EVERY TOKEN MINT, so it must be genuinely active on the
+// Custom Connection or the whole client_credentials token request fails with
+// `invalid_scope` — breaking ALL Xero calls (reads + spend-money), not just
+// bills. We enabled it Jun 2026 and the live token mint came back `invalid_scope`
+// (the scope wasn't actually active on the connection), so it's commented back
+// out to keep Xero working. The push service soft-handles the resulting 403 on
+// bill calls (calm "needs Xero bills scope" advisory).
+//
+// TO RE-ENABLE SAFELY: confirm the scope is active on the connection FIRST (the
+// proper fix is to request it in a *separate* token only used for bill ops, so
+// an ungranted scope can never take down the base reads — see the bills-token
+// work). Until then leave it commented.
 const DEFAULT_SCOPES = [
   'accounting.banktransactions',
   'accounting.settings',
   'accounting.contacts',
   'accounting.attachments',
-  'accounting.transactions',  // ACCPAY bills + payments (granted on the Custom Connection Jun 2026)
+  // 'accounting.transactions',  // ← bills + payments; see warning above before re-enabling
 ].join(' ');
 
 export function getXeroConfig(): XeroConfig {
