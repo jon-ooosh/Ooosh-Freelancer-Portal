@@ -82,15 +82,18 @@ async function recordAdvisory(costId: string, message: string): Promise<void> {
   );
 }
 
-// A 403 on a bill/payment write means the accounting.transactions scope isn't
-// on the Custom Connection yet. Treat as an advisory, not a failure — flipping
-// the scope on + Push now resolves it.
+// A bill/payment write fails until the granular bill scopes are granted on the
+// Custom Connection. Two shapes: the isolated bills-token mint rejects the scope
+// (invalid_scope), or the API call returns 401/403 insufficient_scope. Treat all
+// as a calm advisory, not a red failure — granting the scopes + Push now fixes it.
 function isScopeError(err: unknown): boolean {
-  return err instanceof XeroApiError && err.status === 403;
+  if (!(err instanceof XeroApiError)) return false;
+  if (err.status === 401 || err.status === 403) return true;
+  return /invalid_scope/i.test(err.message);
 }
 
 const SCOPE_ADVISORY =
-  'Xero bills not enabled yet — grant the "accounting.transactions" scope on the Custom Connection, then Push now';
+  'Xero bills not enabled yet — grant the "accounting.invoices" + "accounting.payments" scopes on the Custom Connection (re-authorise it), then Push now';
 
 interface PushResult {
   pushed: boolean;
