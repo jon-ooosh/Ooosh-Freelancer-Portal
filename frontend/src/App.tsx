@@ -33,6 +33,7 @@ import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
+import HoldingPage from './pages/HoldingPage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
@@ -159,6 +160,8 @@ export default function App() {
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
                 <Route path="/storage" element={<StoragePage />} />
+                <Route path="/holding" element={<HoldingPage view="held" />} />
+                <Route path="/holding/lost-property" element={<HoldingPage view="lost_property" />} />
                 <Route path="/operations/problems/:id" element={<IssueDetailPage />} />
                 <Route path="/drivers" element={<DriversPage />} />
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />

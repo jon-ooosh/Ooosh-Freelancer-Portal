@@ -255,8 +255,15 @@ const linkSchema = z.object({
 router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof linkSchema>;
 
+  // If only an HH job number was supplied, resolve the OP job UUID so the
+  // needed_by deadline derivation (which reads jobs.out_date by id) can fire.
+  let jobId = b.job_id ?? null;
+  if (!jobId && b.hh_job_number) {
+    const j = await query(`SELECT id FROM jobs WHERE hh_job_number = $1`, [b.hh_job_number]);
+    if (j.rows.length > 0) jobId = j.rows[0].id;
+  }
+
   // Resolve the job's out_date so forward-looking kinds get a needed_by deadline
-  let neededBySql = 'needed_by';
   const result = await query(
     `UPDATE held_items SET
         owner_person_id       = COALESCE($1, owner_person_id),
@@ -269,12 +276,12 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
         needed_by             = CASE
           WHEN $4 IS NOT NULL AND kind IN ('incoming','temp_storage') AND needed_by IS NULL
           THEN (SELECT out_date::date FROM jobs WHERE id = $4)
-          ELSE ${neededBySql} END,
+          ELSE needed_by END,
         updated_at            = NOW()
      WHERE id = $6 RETURNING *`,
     [
       b.owner_person_id ?? null, b.owner_organisation_id ?? null, b.client_name_text ?? null,
-      b.job_id ?? null, b.hh_job_number ?? null, req.params.id,
+      jobId, b.hh_job_number ?? null, req.params.id,
     ]
   );
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
