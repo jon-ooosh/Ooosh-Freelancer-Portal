@@ -990,6 +990,10 @@ export type CostPaymentMethod =
   | 'reimburse_me' | 'not_yet_paid';
 export type CostPaymentStatus = 'paid' | 'awaiting_payment' | 'awaiting_invoice';
 export type CostRechargeMode = 'none' | 'full' | 'partial';
+// Job-linked costs only. quote_actual = part of an existing quote (track, never
+// recharge — already billed via the quote); extra = above-and-beyond, eligible
+// for client recharge. NULL on overhead/vehicle costs with no job.
+export type CostIntent = 'quote_actual' | 'extra';
 export type CostApprovalState = 'submitted' | 'verified' | 'approved' | 'paid';
 export type CostXeroSyncState = 'pending' | 'bill_created' | 'attached' | 'reconciled' | 'error';
 export type CostStatus = 'draft' | 'confirmed' | 'resolved';
@@ -1021,6 +1025,7 @@ export interface Cost {
   vehicle_fuel_log_id: string | null;
   recharge_mode: CostRechargeMode;
   recharge_amount: number | null;
+  cost_intent: CostIntent | null;
   recharged_to_hh_at: string | null;
   recharge_hh_item_id: string | null;
   approval_state: CostApprovalState | null;

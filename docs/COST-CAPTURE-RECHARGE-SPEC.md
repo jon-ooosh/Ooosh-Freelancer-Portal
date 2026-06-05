@@ -666,3 +666,50 @@ pill, not a red error) — everything else (Spend Money, reads) keeps working.
 - HH recharge stock items + push (needs the HH stock IDs).
 - Vehicle picker on the modal; Xero reconciliation sync; entry points on
   Job/Vehicle/Issue detail pages.
+
+---
+
+## Build notes — Phase B: cost_intent (quote-actual vs extra) (Jun 2026)
+
+The conceptual piece flagged in the Phase 1 handoff. A job often already carries
+a quote (e.g. a £300 D&C delivery). The freelancer's fee + train + fuel logged
+against it are **actuals consumed by that quote**, not new charges — recharging
+them would double-bill. `cost_intent` distinguishes the two. This is the gate
+that makes the Phase C HireHop recharge push safe.
+
+Decisions taken with jon: **job-level total** variance (not per-quote), and
+**default to "part of the quote"** when the linked job has a quote.
+
+### Model
+- `cost_intent` (migration 112): `quote_actual` | `extra`, NULL on overhead /
+  vehicle costs with no job. Existing rows stay NULL (the recharge guard only
+  blocks `quote_actual`, so NULL behaves exactly as before).
+- **quote_actual** — part of fulfilling a quote. Tracked for variance, **never
+  recharged** (already billed via the quote). Backend hard-guards: the recharge
+  endpoint 400s on a `quote_actual` cost, and create/update coerce
+  recharge_mode->'none' (defence-in-depth behind the modal disabling the control).
+- **extra** — incurred for the job but not covered by a quote. Recharge controls
+  stay available; Phase C's HH push will filter to `extra` only.
+
+### Capture modal
+- When a job is linked, an intent toggle appears ("Part of the quote" / "Extra").
+  Default: the modal fetches the job's quotes once on link — `quote_actual` if it
+  has any, else `extra`. Skips once the user touches the toggle, and in edit mode
+  (seeded from the cost, inferring for legacy rows: recharge-flagged -> extra).
+- "Part of the quote" hides the recharge controls + shows a one-line note.
+
+### Money tab — "Job Costs" panel
+- **Expected (from quotes)** = sum of quote freelancer fees (the crew/transport
+  cost baseline). **Actuals (part of quote)** = sum of quote_actual cost gross.
+  **Variance** = actuals - expected (red over / green under). Client-quoted total
+  shown as a muted reference line.
+- **Extra costs** listed separately with their recharge status.
+- Legacy unclassified (NULL-intent) costs surfaced in a footnote so nothing's
+  hidden from the totals.
+- Reads `/costs/by-job/:jobId` + `/quotes?job_id=` - best-effort, non-blocking;
+  hidden when the job has neither costs nor quotes.
+
+### Still to do
+- Phase C - HH recharge stock items + push (filters to `extra`; needs the HH
+  stock IDs). Vehicle picker on the modal; Xero reconciliation sync; entry points
+  on Job / Vehicle / Issue detail pages.

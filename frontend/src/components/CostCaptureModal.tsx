@@ -15,7 +15,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode } from '../../../shared/types';
+import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
 
 interface Props {
   onClose: () => void;
@@ -107,6 +107,12 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>(existing?.payment_status || 'paid');
   const [rechargeMode, setRechargeMode] = useState<CostRechargeMode>(existing?.recharge_mode || 'none');
   const [rechargeAmount, setRechargeAmount] = useState(existing?.recharge_amount != null ? String(existing.recharge_amount) : '');
+  // Intent: only meaningful when a job is linked. Seed from the existing cost,
+  // inferring for legacy rows (recharge flagged → extra, else part of a quote).
+  const [costIntent, setCostIntent] = useState<CostIntent>(
+    existing?.cost_intent || (existing?.recharge_mode && existing.recharge_mode !== 'none' ? 'extra' : 'quote_actual'),
+  );
+  const [intentTouched, setIntentTouched] = useState(isEdit);
   const [notes, setNotes] = useState(existing?.notes || '');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
@@ -145,6 +151,21 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }, 300);
     return () => clearTimeout(t);
   }, [jobSearch]);
+
+  // Default the intent when a job is linked: "part of the quote" if the job
+  // already carries a quote (the common D&C case), else "extra". Skips once the
+  // user has touched the toggle, and in edit mode (seeded from the cost).
+  useEffect(() => {
+    if (intentTouched || !linkedJobId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.get<{ data: unknown[] }>(`/quotes?job_id=${linkedJobId}`);
+        if (!cancelled) setCostIntent((r.data?.length || 0) > 0 ? 'quote_actual' : 'extra');
+      } catch { /* leave default */ }
+    })();
+    return () => { cancelled = true; };
+  }, [linkedJobId, intentTouched]);
 
   // ── Resizable split (md+ only) ───────────────────────────────────────────
   const [leftPct, setLeftPct] = useState<number>(() => Number(localStorage.getItem(SPLIT_KEY)) || 45);
@@ -276,7 +297,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     } catch { setError('Could not open the saved receipt.'); }
   }, [existing]);
 
-  const canRecharge = Boolean(linkedJobId);
+  // Recharge is only possible on a job-linked cost that's flagged "extra" — a
+  // quote_actual cost is already billed via its quote.
+  const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
 
   async function handleSave() {
     setError('');
@@ -311,6 +334,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         payment_status: paymentStatus,
         recharge_mode: canRecharge ? rechargeMode : 'none',
         recharge_amount: canRecharge && rechargeMode !== 'none' && rechargeAmount ? Number(rechargeAmount) : null,
+        cost_intent: linkedJobId ? costIntent : null,
         receipt_r2_key: receiptKey,
         receipt_filename: receiptName,
         notes: notes || null,
@@ -551,6 +575,33 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
               <p className="text-xs text-gray-500 italic">
                 Set your COT card last 4 in Profile to enable Xero reconciliation matching.
+              </p>
+            )}
+
+            {linkedJobId && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Is this part of a quote?</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { v: 'quote_actual' as CostIntent, label: 'Part of the quote', sub: "Actual against the job's quote — not recharged" },
+                    { v: 'extra' as CostIntent, label: 'Extra', sub: 'Above-and-beyond — can recharge the client' },
+                  ]).map((o) => (
+                    <button key={o.v} type="button"
+                      onClick={() => { setCostIntent(o.v); setIntentTouched(true); }}
+                      className={`text-left px-3 py-2 rounded-md border text-sm ${
+                        costIntent === o.v ? 'border-purple-500 bg-purple-50 ring-1 ring-purple-500' : 'border-gray-300 hover:bg-gray-50'
+                      }`}>
+                      <div className="font-medium text-gray-800">{o.label}</div>
+                      <div className="text-xs text-gray-500">{o.sub}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {linkedJobId && costIntent === 'quote_actual' && (
+              <p className="text-xs text-gray-500 italic">
+                Already billed to the client via the quote — no recharge. It'll show as an actual against the job on the Money tab.
               </p>
             )}
 
