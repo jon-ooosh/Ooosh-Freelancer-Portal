@@ -44,28 +44,26 @@ export const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0';
 // transactions + creating SPEND money (banktransactions), supplier linkage
 // (contacts) and receipt upload (attachments).
 //
-// `accounting.transactions` governs ACCPAY *Invoices* (supplier bills) AND
-// *Payments* (recording a payment against a bill) — the pay-later flow
-// (not_yet_paid / reimburse_me) needs it.
+// Xero moved to GRANULAR scopes: apps created on/after 2 Mar 2026 (the Ooosh
+// Custom Connection is May 2026) cannot use the old broad `accounting.transactions`
+// at all — requesting it returns `invalid_scope`. The pay-later bill flow needs
+// the granular scopes instead:
+//   accounting.invoices  → create/read ACCPAY supplier bills
+//   accounting.payments  → record a Payment against a bill
 //
-// ⚠️ It is REQUESTED ON EVERY TOKEN MINT, so it must be genuinely active on the
-// Custom Connection or the whole client_credentials token request fails with
-// `invalid_scope` — breaking ALL Xero calls (reads + spend-money), not just
-// bills. We enabled it Jun 2026 and the live token mint came back `invalid_scope`
-// (the scope wasn't actually active on the connection), so it's commented back
-// out to keep Xero working. The push service soft-handles the resulting 403 on
-// bill calls (calm "needs Xero bills scope" advisory).
-//
-// TO RE-ENABLE SAFELY: confirm the scope is active on the connection FIRST (the
-// proper fix is to request it in a *separate* token only used for bill ops, so
-// an ungranted scope can never take down the base reads — see the bills-token
-// work). Until then leave it commented.
+// These are NOT in DEFAULT_SCOPES. They're requested in an ISOLATED bills token
+// (see xero-broker getToken(bills=true)) used only by createBill / payInvoice /
+// invoice-attach. If they're not yet granted on the connection, only that token
+// fails — the base token (the 4 scopes below) keeps reads + Spend Money working.
+// Grant them on the Custom Connection (which deactivates + must be re-authorised
+// when scopes change), and bills start working with no code change.
+export const XERO_BILLS_SCOPES = 'accounting.invoices accounting.payments';
+
 const DEFAULT_SCOPES = [
   'accounting.banktransactions',
   'accounting.settings',
   'accounting.contacts',
   'accounting.attachments',
-  // 'accounting.transactions',  // ← bills + payments; see warning above before re-enabling
 ].join(' ');
 
 export function getXeroConfig(): XeroConfig {

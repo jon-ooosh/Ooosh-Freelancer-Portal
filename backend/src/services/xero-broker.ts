@@ -17,6 +17,7 @@ import {
   XERO_IDENTITY_URL,
   XERO_CONNECTIONS_URL,
   XERO_API_BASE,
+  XERO_BILLS_SCOPES,
 } from '../config/xero';
 
 // ── Types ────────────────────────────────────────────────────────────────
@@ -136,15 +137,16 @@ class RateLimiter {
 
 class XeroBroker {
   private limiter = new RateLimiter();
+  // Two token caches: the base token (DEFAULT_SCOPES — reads + Spend Money,
+  // always mintable) and an isolated bills token (base + granular bill scopes).
+  // Keeping them separate means an ungranted bill scope only fails bill ops; it
+  // can never break the base reads.
   private token: { value: string; expiresAt: number } | null = null;
+  private billsToken: { value: string; expiresAt: number } | null = null;
   private tenant: { id: string; name: string } | null = null;
 
-  /** Mint (or reuse cached) access token via client_credentials. */
-  private async getToken(forceFresh = false): Promise<string> {
-    if (!forceFresh && this.token && Date.now() < this.token.expiresAt - 60_000) {
-      return this.token.value;
-    }
-    const { clientId, clientSecret, scopes } = getXeroConfig();
+  private async mintToken(scope: string): Promise<{ value: string; expiresAt: number }> {
+    const { clientId, clientSecret } = getXeroConfig();
     const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
     const res = await fetch(XERO_IDENTITY_URL, {
       method: 'POST',
@@ -152,7 +154,7 @@ class XeroBroker {
         Authorization: `Basic ${basic}`,
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: new URLSearchParams({ grant_type: 'client_credentials', scope: scopes }),
+      body: new URLSearchParams({ grant_type: 'client_credentials', scope }),
     });
     const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (!res.ok || !body.access_token) {
@@ -163,8 +165,24 @@ class XeroBroker {
       );
     }
     const expiresIn = Number(body.expires_in) || 1800;
-    this.token = { value: String(body.access_token), expiresAt: Date.now() + expiresIn * 1000 };
-    return this.token.value;
+    return { value: String(body.access_token), expiresAt: Date.now() + expiresIn * 1000 };
+  }
+
+  /**
+   * Mint (or reuse cached) access token via client_credentials. `bills=true`
+   * uses the isolated bills token (base scopes + accounting.invoices/payments) —
+   * a failure here (e.g. scopes not yet granted → invalid_scope) is contained to
+   * bill operations and never touches the base token.
+   */
+  private async getToken(forceFresh = false, bills = false): Promise<string> {
+    const cache = bills ? this.billsToken : this.token;
+    if (!forceFresh && cache && Date.now() < cache.expiresAt - 60_000) {
+      return cache.value;
+    }
+    const { scopes } = getXeroConfig();
+    const minted = await this.mintToken(bills ? `${scopes} ${XERO_BILLS_SCOPES}` : scopes);
+    if (bills) this.billsToken = minted; else this.token = minted;
+    return minted.value;
   }
 
   /** Resolve the single tenant for this Custom Connection (cached). */
@@ -185,13 +203,14 @@ class XeroBroker {
   private async request<T>(
     method: string,
     path: string,
-    opts: { query?: Record<string, string>; body?: unknown; rawBody?: { buffer: Buffer; contentType: string } } = {}
+    opts: { query?: Record<string, string>; body?: unknown; rawBody?: { buffer: Buffer; contentType: string }; billsScope?: boolean } = {}
   ): Promise<T> {
+    const bills = opts.billsScope === true;
     let lastErr: unknown;
     for (let attempt = 1; attempt <= RETRY.maxAttempts; attempt++) {
       await this.limiter.acquire();
       const forceFresh = attempt > 1 && lastErr instanceof XeroApiError && lastErr.status === 401;
-      const token = await this.getToken(forceFresh);
+      const token = await this.getToken(forceFresh, bills);
       const tenant = await this.getTenant(token);
 
       const url = new URL(`${XERO_API_BASE}${path}`);
@@ -224,7 +243,11 @@ class XeroBroker {
       }
 
       if (res.status === 401) {
-        this.token = null; // force re-mint next loop
+        // Insufficient scope on a bill call surfaces as 401 (Xero sends
+        // WWW-Authenticate: insufficient_scope). Re-minting won't help if the
+        // scope simply isn't granted, but one retry covers a genuinely stale
+        // token; the push layer treats a thrown 401 as a scope advisory.
+        if (bills) this.billsToken = null; else this.token = null;
         lastErr = new XeroApiError(401, 'Xero token rejected (re-minting)');
         if (attempt < RETRY.maxAttempts) continue;
         throw lastErr;
@@ -343,6 +366,7 @@ class XeroBroker {
             },
           ],
         },
+        billsScope: true,
       }
     );
     return r.Invoices[0];
@@ -376,6 +400,7 @@ class XeroBroker {
             },
           ],
         },
+        billsScope: true,
       }
     );
     return r.Payments[0];
@@ -429,7 +454,9 @@ class XeroBroker {
     return this.request(
       'PUT',
       `/${entity}/${entityId}/Attachments/${encodeURIComponent(filename)}`,
-      { rawBody: { buffer, contentType } }
+      // Attaching to an invoice (a bill) needs the bills token; bank-transaction
+      // attachments use the base token (accounting.attachments already granted).
+      { rawBody: { buffer, contentType }, billsScope: entity === 'Invoices' },
     );
   }
 }
