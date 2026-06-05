@@ -62,7 +62,9 @@ router.post('/:jobId/send', async (req: AuthRequest, res: Response) => {
   try {
     const jobId = (req.params as Record<string, string>).jobId;
     const triggeredBy = req.user?.id || null;
-    const result = await sendBriefingEmail(jobId, undefined, triggeredBy);
+    // Manual send stamps the standard review marker, so it suppresses the
+    // auto 5-day/3-day sends (but not the <=1-day urgent nudge).
+    const result = await sendBriefingEmail(jobId, undefined, triggeredBy, 'manual');
     if (!result.success) {
       const status = result.error === 'Job not found' ? 404 : 500;
       res.status(status).json({ error: result.error || 'Failed to send briefing' });

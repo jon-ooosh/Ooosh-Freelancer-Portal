@@ -118,6 +118,16 @@ export default function OrganisationDetailPage() {
   const [relDirection, setRelDirection] = useState<'forward' | 'reverse'>('forward');
   const [relSaving, setRelSaving] = useState(false);
 
+  // Edit relationship type in place
+  const [editingRelId, setEditingRelId] = useState<string | null>(null);
+  const [editRelType, setEditRelType] = useState<OrgRelationshipType>('manages');
+  const [editRelSaving, setEditRelSaving] = useState(false);
+
+  // Edit a person's role at this org in place
+  const [editingPersonRoleId, setEditingPersonRoleId] = useState<string | null>(null);
+  const [editPersonRole, setEditPersonRole] = useState('');
+  const [editPersonRoleSaving, setEditPersonRoleSaving] = useState(false);
+
   // Add person — search-first; if no match (or coincidental match) we let
   // the user fall through to a "create new" inline form.
   const [showAddPerson, setShowAddPerson] = useState(false);
@@ -322,6 +332,42 @@ export default function OrganisationDetailPage() {
     }
   }
 
+  // Edit the relationship type (direction is preserved — to flip direction,
+  // remove and re-add). editRelType holds the new type from this org's view.
+  async function handleEditRelationship(relId: string) {
+    if (editRelSaving) return;
+    setEditRelSaving(true);
+    try {
+      await api.put(`/organisations/${id}/relationships/${relId}`, {
+        relationship_type: editRelType,
+      });
+      setEditingRelId(null);
+      loadOrg();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to update relationship');
+    } finally {
+      setEditRelSaving(false);
+    }
+  }
+
+  // Edit a person's role at this org. Uses the person-roles PATCH endpoint
+  // (roleId is the person_organisation_roles row id, exposed as p.id).
+  async function handleEditPersonRole(personId: string, roleId: string) {
+    if (!editPersonRole.trim() || editPersonRoleSaving) return;
+    setEditPersonRoleSaving(true);
+    try {
+      await api.patch(`/people/${personId}/roles/${roleId}`, {
+        role: editPersonRole.trim(),
+      });
+      setEditingPersonRoleId(null);
+      loadOrg();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to update role');
+    } finally {
+      setEditPersonRoleSaving(false);
+    }
+  }
+
   // Get display text for a relationship from this org's perspective
   function getRelationshipDisplay(rel: OrganisationRelationship) {
     const isFrom = rel.from_org_id === id;
@@ -371,6 +417,12 @@ export default function OrganisationDetailPage() {
             <span className="text-sm text-gray-500 mr-2">
               {activePeople.length} active {activePeople.length === 1 ? 'person' : 'people'}
             </span>
+            <button
+              onClick={() => navigate(`/pipeline?newEnquiry=1&client=${org.id}`)}
+              className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 transition-colors"
+            >
+              + New Enquiry
+            </button>
             <button
               onClick={() => setShowEdit(true)}
               className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
@@ -765,7 +817,41 @@ export default function OrganisationDetailPage() {
                           )}
                         </td>
                         <td className="px-6 py-4">
+                          {editingPersonRoleId === p.id ? (
+                            <div className="flex items-center gap-2">
+                              <select
+                                value={editPersonRole}
+                                onChange={e => setEditPersonRole(e.target.value)}
+                                className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                              >
+                                <option value="">Select a role...</option>
+                                {PERSON_ORG_ROLES_WITH_MAIN_CONTACT.map(r => (
+                                  <option key={r} value={r}>{r}</option>
+                                ))}
+                                {editPersonRole && !PERSON_ORG_ROLES_WITH_MAIN_CONTACT.includes(editPersonRole) && (
+                                  <option value={editPersonRole}>{editPersonRole}</option>
+                                )}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => handleEditPersonRole(p.person_id, p.id)}
+                                disabled={!editPersonRole.trim() || editPersonRoleSaving}
+                                className="text-xs bg-ooosh-600 text-white px-2 py-1 rounded hover:bg-ooosh-700 disabled:opacity-50"
+                              >
+                                {editPersonRoleSaving ? 'Saving...' : 'Save'}
+                              </button>
+                              <button type="button" onClick={() => setEditingPersonRoleId(null)} className="text-xs text-gray-500 hover:text-gray-700 underline">Cancel</button>
+                            </div>
+                          ) : (
+                          <>
                           <span className="text-sm text-gray-700">{p.role}</span>
+                          <button
+                            type="button"
+                            onClick={() => { setEditingPersonRoleId(p.id); setEditPersonRole(p.role); }}
+                            className="ml-2 text-xs text-gray-500 hover:text-ooosh-700 underline"
+                          >
+                            Edit
+                          </button>
                           {p.is_primary ? (
                             <>
                               <span className="ml-2 text-xs bg-ooosh-100 text-ooosh-700 px-1.5 py-0.5 rounded-full">Primary</span>
@@ -787,6 +873,8 @@ export default function OrganisationDetailPage() {
                             >
                               Make primary
                             </button>
+                          )}
+                          </>
                           )}
                         </td>
                         <td className="px-6 py-4 text-sm text-gray-500">
@@ -874,10 +962,23 @@ export default function OrganisationDetailPage() {
                   <div className="bg-white rounded-xl shadow-sm border border-gray-200 divide-y divide-gray-100">
                     {activeRels.map((rel) => {
                       const { label, linkedOrg } = getRelationshipDisplay(rel);
+                      const isFrom = rel.from_org_id === id;
                       return (
                         <div key={rel.id} className="px-6 py-4 flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <span className="text-sm text-gray-500 w-36">{label}</span>
+                          <div className="flex items-center gap-3 flex-wrap">
+                            {editingRelId === rel.id ? (
+                              <select
+                                value={editRelType}
+                                onChange={e => setEditRelType(e.target.value as OrgRelationshipType)}
+                                className="text-sm rounded border border-gray-300 px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                              >
+                                {Object.entries(ORG_RELATIONSHIP_LABELS).map(([key, labels]) => (
+                                  <option key={key} value={key}>{isFrom ? labels.forward : labels.reverse}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className="text-sm text-gray-500 w-36">{label}</span>
+                            )}
                             <Link
                               to={`/organisations/${linkedOrg.id}`}
                               className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700"
@@ -888,12 +989,33 @@ export default function OrganisationDetailPage() {
                               {linkedOrg.type}
                             </span>
                           </div>
-                          <button
-                            onClick={() => handleDeleteRelationship(rel.id)}
-                            className="text-xs text-gray-400 hover:text-red-500 transition-colors"
-                          >
-                            Remove
-                          </button>
+                          {editingRelId === rel.id ? (
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => handleEditRelationship(rel.id)}
+                                disabled={editRelSaving}
+                                className="text-xs bg-ooosh-600 text-white px-2 py-1 rounded hover:bg-ooosh-700 disabled:opacity-50"
+                              >
+                                {editRelSaving ? 'Saving...' : 'Save'}
+                              </button>
+                              <button onClick={() => setEditingRelId(null)} className="text-xs text-gray-500 hover:text-gray-700 underline">Cancel</button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={() => { setEditingRelId(rel.id); setEditRelType(rel.relationship_type as OrgRelationshipType); }}
+                                className="text-xs text-gray-400 hover:text-ooosh-600 transition-colors"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeleteRelationship(rel.id)}
+                                className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          )}
                         </div>
                       );
                     })}

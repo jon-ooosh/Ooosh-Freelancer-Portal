@@ -636,7 +636,19 @@ export default function JobContactsCard({ jobId, onChanged }: JobContactsCardPro
               )}
               <button
                 type="button"
-                onClick={() => { setShowCreateForm(true); setError(''); }}
+                onClick={() => {
+                  // Carry the typed name across into the create form — split
+                  // on first whitespace into first/last (mirrors the Org "Add
+                  // Person" + New Enquiry flows).
+                  const trimmed = search.trim();
+                  if (trimmed && !firstName && !lastName) {
+                    const parts = trimmed.split(/\s+/);
+                    setFirstName(parts[0] || '');
+                    setLastName(parts.slice(1).join(' ') || '');
+                  }
+                  setShowCreateForm(true);
+                  setError('');
+                }}
                 className="text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
               >
                 + Create new contact instead

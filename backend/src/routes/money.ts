@@ -379,6 +379,8 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
     const excessResult = await query(
       `SELECT je.id AS excess_id, je.excess_amount_required, je.excess_amount_taken,
               je.amount_held, je.amount_released,
+              je.claim_amount, je.reimbursement_amount,
+              je.reimbursement_date, je.reimbursement_method,
               je.held_at, je.held_expires_at, je.released_at,
               je.excess_status, je.excess_calculation_basis, je.payment_method,
               je.payment_reference, je.payment_date, je.hh_deposit_id,
@@ -449,6 +451,14 @@ router.get('/:jobId/excess-info', async (req: AuthRequest, res: Response) => {
         excess_amount: required, // alias for Payment Portal compat
         excess: required, // alias — Payment Portal sorts on `.excess`
         excess_amount_taken: taken,
+        // Resolution breakdown — surfaces what actually happened to collected
+        // excess (claimed to invoice / reimbursed to client) on the Money tab
+        // Insurance Excess card. Without these the card could only show
+        // collected vs required, hiding the claim/reimburse split (job 15291).
+        claim_amount: parseFloat(r.claim_amount || 0),
+        reimbursement_amount: parseFloat(r.reimbursement_amount || 0),
+        reimbursement_date: r.reimbursement_date,
+        reimbursement_method: r.reimbursement_method,
         // Pre-auth lifecycle (migration 087) — held = on hold (not yet captured);
         // released = was held, then voided without capture (terminal info).
         amount_held: held,
@@ -690,6 +700,31 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       return bank?.NAME || null;
     }
 
+    // Pre-pass: collect IDs of kind=6 deposits classified as excess. The kind=3
+    // payment-application rows reference their source deposit via OWNER_DEPOSIT.
+    // Classifying excess-ness of an application by that membership — NOT by the
+    // application row's own description, which is empty on the surviving
+    // deposit-side twin — is the deterministic signal for "excess money applied
+    // to the hire invoice". Proven against job 15607 (app 11547, £450 excess→
+    // invoice, DESCRIPTION=""). Mirrors the Payment Portal's PASS 1 in
+    // get-job-details-v2.js. Must run before the main loop so the set is complete
+    // regardless of row order.
+    const excessDepositIds = new Set<string>();
+    if (bl?.rows && Array.isArray(bl.rows)) {
+      for (const row of bl.rows) {
+        if (parseInt(row.kind ?? '0') !== 6) continue;
+        const data = row.data || {};
+        const creditAmount = parseFloat(row.credit || data.credit || '0');
+        if (creditAmount <= 0) continue; // deposits only, skip refunds/negatives
+        const desc = String(data.DESCRIPTION || row.desc || '');
+        const memo = String(data.MEMO || '');
+        if (isExcessPayment(desc + ' ' + memo)) {
+          const depositId = parseInt(data.ID || row.number || String(row.id).replace('e', '') || '0');
+          if (depositId > 0) excessDepositIds.add(String(depositId));
+        }
+      }
+    }
+
     if (bl?.rows && Array.isArray(bl.rows)) {
       for (const row of bl.rows) {
         const kind = parseInt(row.kind ?? '0');
@@ -807,7 +842,33 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
               // set) vs job 16043 (refund: OWNER=0, INVOICE_NUMBER=""). Excess
               // kind=3 rows are left untouched here (handled by the excess flows).
               const appliedToInvoice = data.OWNER != null && parseInt(String(data.OWNER)) > 0;
-              if (!isExcess && creditAmount < 0 && !appliedToInvoice) {
+              const isFromExcessDeposit = excessDepositIds.has(String(ownerDepositId));
+              if (isFromExcessDeposit) {
+                // kind=3 sourced from an EXCESS deposit (membership in the kind=6
+                // pre-pass set, NOT the empty description on this twin).
+                if (appliedToInvoice) {
+                  // Excess money applied to the hire invoice = excess paying down the
+                  // hire. Credit it to hire deposits so the balance reflects it, AND
+                  // record it as applied-to-invoice so the reconciliation gap below
+                  // doesn't ALSO count it as a direct invoice payment (double-count).
+                  // Surfaced as a hire payment line for transparency (matches the
+                  // portal's "Excess Usage" line). Proven against job 15607 (£450).
+                  totalHireDeposits += absAmount;
+                  hireDepositAppliedToInvoices += absAmount;
+                  deposits.push({
+                    id: appId,
+                    amount: absAmount,
+                    date: data.DATE || row.date || '',
+                    description: 'Excess applied to hire invoice',
+                    memo: memo || null,
+                    is_excess: false,
+                    is_refund: false,
+                    bank_name: getBankName(data.ACC_ACCOUNT_ID),
+                    entered_by: data.CREATE_USER_NAME || null,
+                  });
+                }
+                // OWNER=0 (excess refund / release) → left to the excess flow, untouched.
+              } else if (!isExcess && creditAmount < 0 && !appliedToInvoice) {
                 deposits.push({
                   id: appId,
                   amount: absAmount,
