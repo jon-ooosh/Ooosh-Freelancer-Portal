@@ -1052,6 +1052,104 @@ export interface CostAllocation {
   created_at: string;
 }
 
+// Holding module — "Held for Clients" / "Lost Property" / temp storage
+// One engine; `kind` drives behaviour + display home. See docs/HOLDING-MODULE-SPEC.md.
+export type HeldItemKind = 'incoming' | 'lost_property' | 'temp_storage';
+
+export type HeldItemStatus =
+  | 'expected'
+  | 'arrived'
+  | 'stored'
+  | 'client_notified'
+  | 'collection_arranged'
+  | 'collected'
+  | 'given_to_client'
+  | 'shipped_back'
+  | 'disposed'
+  | 'unclaimed'
+  | 'cancelled';
+
+export type HeldItemFoundIn = 'van' | 'rehearsal' | 'backline' | 'elsewhere';
+export type HeldItemImportCharge = 'yes' | 'no' | 'unknown';
+
+export interface HeldItemLocation {
+  id: string;
+  name: string;
+  sort_order: number;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface HeldItem {
+  id: string;
+  kind: HeldItemKind;
+  status: HeldItemStatus;
+  owner_unknown: boolean;
+
+  // Who (nullable until identified)
+  owner_person_id: string | null;
+  owner_organisation_id: string | null;
+  client_name_text: string | null;
+  job_id: string | null;
+  hh_job_number: number | null;
+
+  // What
+  description: string | null;
+  box_count: number | null;
+  received_count: number | null;
+  condition_notes: string | null;
+  photos: FileAttachment[];
+
+  // Where from (lost property)
+  found_in: HeldItemFoundIn | null;
+  found_vehicle_id: string | null;
+  found_location_text: string | null;
+
+  // Where now
+  storage_location_id: string | null;
+  storage_location_text: string | null;
+  storage_room_id: string | null;
+
+  // Inbound (incoming)
+  expected_date: string | null;
+  import_charge_flag: HeldItemImportCharge | null;
+
+  // Deadline (forward-looking kinds)
+  needed_by: string | null;
+
+  // Money (deferred)
+  chargeable: boolean;
+  storage_started_at: string | null;
+  charge_notes: string | null;
+
+  // Out
+  collected_at: string | null;
+  collected_by: string | null;
+  return_method: string | null;
+  tracking_number: string | null;
+  disposed_at: string | null;
+
+  // Chase (lost property)
+  escalation_level: number;
+  last_chased_at: string | null;
+  dispose_after: string | null;
+
+  // Meta
+  arrived_at: string | null;
+  found_date: string | null;
+  notes: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+
+  // Joined display fields (populated by list/detail endpoints)
+  owner_person_name?: string | null;
+  owner_organisation_name?: string | null;
+  storage_location_name?: string | null;
+  job_name?: string | null;
+  found_vehicle_reg?: string | null;
+}
+
 // API response wrappers
 export interface PaginatedResponse<T> {
   data: T[];
