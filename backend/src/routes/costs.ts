@@ -88,6 +88,7 @@ const createSchema = z.object({
   vehicle_fuel_log_id: z.string().uuid().optional().nullable(),
   recharge_mode: z.enum(RECHARGE_MODES).optional(),
   recharge_amount: money.optional().nullable(),
+  cost_intent: z.enum(['quote_actual', 'extra']).optional().nullable(),
   receipt_r2_key: z.string().trim().max(500).optional().nullable(),
   receipt_filename: z.string().trim().max(200).optional().nullable(),
   status: z.enum(['draft', 'confirmed', 'resolved']).optional(),
@@ -119,8 +120,18 @@ const WRITABLE = [
   'description', 'category', 'xero_account_code', 'cost_type', 'payment_method',
   'cot_card_holder', 'cot_card_last4', 'payment_status', 'job_id', 'vehicle_id',
   'quote_assignment_id', 'platform_issue_id', 'vehicle_service_log_id', 'vehicle_fuel_log_id',
-  'recharge_mode', 'recharge_amount', 'receipt_r2_key', 'receipt_filename', 'status', 'notes',
+  'recharge_mode', 'recharge_amount', 'cost_intent', 'receipt_r2_key', 'receipt_filename', 'status', 'notes',
 ] as const;
+
+// A quote_actual cost is already billed via its quote — it can never carry a
+// recharge. Coerce recharge off server-side (defence-in-depth; the modal also
+// disables the controls) so a stale recharge flag can't slip a double-bill through.
+function coerceRechargeForIntent(data: Record<string, unknown>) {
+  if (data.cost_intent === 'quote_actual') {
+    data.recharge_mode = 'none';
+    data.recharge_amount = null;
+  }
+}
 
 async function audit(userId: string, costId: string, action: string, prev: unknown, next: unknown) {
   try {
@@ -394,6 +405,7 @@ router.post('/', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Respon
     const parse = createSchema.safeParse(req.body);
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
+    coerceRechargeForIntent(data);
 
     // A payable (anything not already paid) enters the approval workflow. If the
     // booker is uploading it, they vouch for it inline → 'verified'.
@@ -447,6 +459,7 @@ router.patch('/:id', authorize(...STAFF_ROLES), async (req: AuthRequest, res: Re
     const parse = updateSchema.safeParse(req.body);
     if (!parse.success) { res.status(400).json({ error: 'Invalid input', issues: parse.error.issues }); return; }
     const data = parse.data as Record<string, unknown>;
+    coerceRechargeForIntent(data);
 
     const sets: string[] = [];
     const vals: unknown[] = [];
@@ -522,6 +535,10 @@ router.post('/:id/recharge', authorize(...STAFF_ROLES), async (req: AuthRequest,
     if (!existing.rows.length) { res.status(404).json({ error: 'Cost not found' }); return; }
     const cost = existing.rows[0];
     if (!cost.job_id) { res.status(400).json({ error: 'Cost must be linked to a job before it can be recharged' }); return; }
+    if (cost.cost_intent === 'quote_actual') {
+      res.status(400).json({ error: 'This cost is part of a quote (already billed via the quote) — mark it as "Extra" to recharge it.' });
+      return;
+    }
 
     const amount = recharge_mode === 'full' ? (cost.amount_gross ?? recharge_amount) : recharge_amount;
     const result = await query(
