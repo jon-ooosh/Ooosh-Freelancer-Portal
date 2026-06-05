@@ -34,6 +34,7 @@ import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
 import HoldingPage from './pages/HoldingPage';
+import QuickActionsPage from './pages/QuickActionsPage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
@@ -131,6 +132,8 @@ export default function App() {
       <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
+      {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
+      <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
       <Route path="/warehouse" element={<WarehousePinPage />} />
       <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />
