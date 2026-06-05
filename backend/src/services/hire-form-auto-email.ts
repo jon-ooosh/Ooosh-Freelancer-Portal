@@ -21,7 +21,6 @@
 import { query } from '../config/database';
 import emailService from './email-service';
 import { resolveClientEmailTarget, buildFallbackBanner, logFallbackToTimeline } from './money-emails';
-import { resolveHireFormContacts } from './hire-form-contacts';
 import { sendConfirmationSilentSkipAlert } from './confirmation-hooks';
 
 export interface AutoEmailResult {
@@ -145,14 +144,25 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
 }
 
 /**
- * Send hire form email(s) for a specific job to client contacts.
- * Returns the number of emails sent.
+ * Send the hire form email for a specific job to the routed client contact.
+ * Returns the number of emails sent (0 or 1).
  *
- * Uses the broad `resolveHireFormContacts` resolver (covers client_id + people
- * + job_organisations links + HH contact-name match), so management/booking
- * agents linked via job_organisations are reached. If still 0 contacts after
- * the resolver, falls back to info@ with the amber "no client email" banner +
- * fires a silent-skip alert.
+ * Recipient resolution goes through `resolveClientEmailTarget(job, templateId)`
+ * — the SAME routing-aware path that payment / excess / delivery emails use:
+ *   1. per-job email-routing override for the `hire_forms` bucket
+ *      ("Hire forms & driver" on the Job Detail routing panel), then
+ *   2. the per-job contact selection (job_contacts) — primary becomes the
+ *      `to`, the other ticked contacts become CC, then
+ *   3. org-level fallbacks, then
+ *   4. info@ with the amber "no client email on file" banner.
+ *
+ * This deliberately does NOT use the broad `resolveHireFormContacts` resolver
+ * (client org email + every org person + job_organisations links + HH
+ * contact-name match). That resolver is the additive *candidate picker* for
+ * the manual "Send hire form" UI, where staff tick who to include. Using it
+ * for the AUTO send blasted a separate email to every reachable address
+ * (band gmail, org emails, management contacts…) instead of the people
+ * actually selected on the hire — fixed Jun 2026.
  *
  * `isLateBackstop` flags the missed-initial backstop case so we can surface
  * via the silent-skip alert that the auto-emailer slipped a window.
@@ -162,86 +172,47 @@ export async function sendHireFormEmailForJob(
   isChase: boolean,
   opts: { isLateBackstop?: boolean } = {}
 ): Promise<number> {
-  // Use the shared broad resolver — same surface as the manual send picker.
-  const resolved = await resolveHireFormContacts(job.id);
-  let contacts: Array<{ email: string; name: string }> = resolved.map(c => ({
-    email: c.email,
-    name: c.name,
-  }));
+  const templateId = isChase ? 'hire_form_chase' : 'hire_form_request';
 
-  // Safety net: if the broad resolver returned nothing, route the email to
-  // info@ once (with the amber "no client email on file" banner + timeline
-  // entry) so staff can forward and update the address book. Without this
-  // the form would never go out at all.
-  let sentToFallback = false;
-  if (contacts.length === 0) {
-    // Note: the broad `resolveHireFormContacts` picker is the primary
-    // recipient source here. The per-bucket `hire_forms` override is
-    // only consulted via the info@ fallback path below — i.e. when the
-    // broad picker returns nothing AND a hire_forms override exists.
-    // (Today's behaviour: broad picker wins.) Tighter override-first
-    // behaviour for hire forms is a follow-up.
-    const target = await resolveClientEmailTarget(job.id, 'hire_form_request');
-    if (target.isFallback) {
-      contacts.push({ email: target.primaryEmail, name: target.primaryFirstName });
-      sentToFallback = true;
-    }
-  }
-
-  // If contacts is STILL empty (info@ fallback didn't resolve either — should
-  // not happen unless email config is missing), fire a silent-skip alert and
-  // return 0. Better than logging "0/0 sent" and silently giving up.
-  if (contacts.length === 0) {
-    console.warn(`[Hire Form Auto-Email] Job ${job.hh_job_number}: no contacts resolved AND info@ fallback failed`);
-    sendConfirmationSilentSkipAlert({
-      jobId: job.id,
-      jobNumber: job.hh_job_number,
-      jobName: job.job_name ?? null,
-      clientName: job.client_name ?? null,
-      triggerSource: 'status_change',
-      issues: [{
-        kind: 'hire_form_email',
-        reason: 'auto-emailer resolved 0 contacts and the info@ fallback did not resolve either — check email service configuration',
-        context: opts.isLateBackstop ? 'Late backstop fire (4-5 days out, no initial ever sent)' : undefined,
-      }],
-    }).catch(e => console.error('[Hire Form Auto-Email] Silent-skip alert failed:', e));
-    return 0;
-  }
+  // Routing-aware resolution — honours the "Hire forms & driver" override,
+  // then the ticked job_contacts (primary = to, rest = CC), then org
+  // fallbacks, then info@. Always returns a deliverable primaryEmail.
+  const target = await resolveClientEmailTarget(job.id, templateId);
+  const sentToFallback = target.isFallback;
+  const ccEmails = target.ccEmails || [];
 
   const hireFormUrl = `https://hireforms.oooshtours.co.uk/?job=${job.hh_job_number}`;
   const jobDate = job.job_date ? new Date(job.job_date) : null;
   const startDay = jobDate ? jobDate.toLocaleDateString('en-GB', { weekday: 'long' }) : '';
   const startDate = jobDate ? jobDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
-  const templateId = isChase ? 'hire_form_chase' : 'hire_form_request';
 
   let sent = 0;
   const sentEmails: string[] = [];
-  for (const contact of contacts) {
-    try {
-      await emailService.send(templateId, {
-        to: contact.email,
-        variables: {
-          clientName: contact.name || 'there',
-          jobNumber: String(job.hh_job_number),
-          jobName: job.job_name || '',
-          startDay,
-          startDate,
-          hireFormUrl,
-        },
-        prependBanner: sentToFallback
-          ? buildFallbackBanner({
-              jobId: job.id,
-              clientName: job.client_name || job.company_name || null,
-              jobNumber: String(job.hh_job_number),
-              jobName: job.job_name || null,
-            })
-          : undefined,
-      });
-      sent++;
-      sentEmails.push(contact.email);
-    } catch (err) {
-      console.warn(`[Hire Form Auto-Email] Failed to send to ${contact.email}:`, err);
-    }
+  try {
+    await emailService.send(templateId, {
+      to: target.primaryEmail,
+      cc: ccEmails.length > 0 ? ccEmails : undefined,
+      variables: {
+        clientName: target.primaryFirstName || 'there',
+        jobNumber: String(job.hh_job_number),
+        jobName: job.job_name || '',
+        startDay,
+        startDate,
+        hireFormUrl,
+      },
+      prependBanner: sentToFallback
+        ? buildFallbackBanner({
+            jobId: job.id,
+            clientName: job.client_name || job.company_name || null,
+            jobNumber: String(job.hh_job_number),
+            jobName: job.job_name || null,
+          })
+        : undefined,
+    });
+    sent = 1;
+    sentEmails.push(target.primaryEmail, ...ccEmails);
+  } catch (err) {
+    console.warn(`[Hire Form Auto-Email] Failed to send to ${target.primaryEmail}:`, err);
   }
 
   if (sentToFallback && sent > 0) {
@@ -290,6 +261,6 @@ export async function sendHireFormEmailForJob(
     }
   }
 
-  console.log(`[Hire Form Auto-Email] ${isChase ? 'Chase' : 'Initial'} for job ${job.hh_job_number}: sent to ${sent}/${contacts.length} contacts (${sentEmails.join(', ') || 'none'})`);
+  console.log(`[Hire Form Auto-Email] ${isChase ? 'Chase' : 'Initial'} for job ${job.hh_job_number}: ${sent > 0 ? `sent to ${sentEmails.join(', ')}${sentToFallback ? ' (info@ fallback)' : ''}` : 'send failed'}`);
   return sent;
 }
