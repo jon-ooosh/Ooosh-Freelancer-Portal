@@ -713,3 +713,47 @@ Decisions taken with jon: **job-level total** variance (not per-quote), and
 - Phase C - HH recharge stock items + push (filters to `extra`; needs the HH
   stock IDs). Vehicle picker on the modal; Xero reconciliation sync; entry points
   on Job / Vehicle / Issue detail pages.
+
+---
+
+## Build notes — capture modal round 2 (Jun 2026)
+
+Live-testing feedback after the bill flow went end-to-end. Modal correctness +
+UX, plus the Xero tax-treatment that makes No-VAT actually mean No-VAT.
+
+**VAT controls — 20% / No VAT / Manual.** Replaced the single "Auto 20%"
+checkbox with a 3-way segmented control. The document is authoritative: AI
+extraction returns `vat_treatment` (`standard` | `no_vat`) and drives the mode —
+**no VAT is assumed unless it's shown** (the original bug — freelance invoices
+were being force-split at 20%). No VAT → gross = net, vat = 0. Manual → edit all
+three. Default (before AI / on manual category pick) is category-driven:
+freelance crew invoices → No VAT, everything else → 20%.
+
+**Correct Xero tax treatment on push.** Both Spend Money and bill line items now
+set an explicit `TaxType`: a No-VAT cost pushes as `NONE` (so it no longer
+inherits the account's 20% default and over-reclaims), a VAT cost resolves the
+org's purchase tax type for the implied rate via `xeroBroker.getPurchaseTaxType()`
+(cached; falls back to the account default if unresolved). The implied rate is
+derived from vat/net so 5%/other rates resolve too.
+
+**Freelance → pay-later default.** Selecting "Freelance crew invoices" defaults
+the payment method to "Supplier bill (pay later)" (and No VAT) — until the user
+overrides. Applies via AI category detection too.
+
+**Job-number suggestion chip.** AI extraction returns a `job_number` if the
+invoice clearly references one (e.g. "Attention: Ooosh Tours (#15291)"). Shown as
+a tap-to-link suggestion — never auto-linked; clicking resolves it to a real job
+via search and links it (or says it couldn't find it).
+
+**In-modal quote comparison.** When a job is linked, a compact "This job so far"
+box shows client-quoted total, our cost estimate (Σ quote freelancer fees) and
+costs logged so far (quote-actuals + extras), so staff can judge Part-of-quote vs
+Extra at capture time. Reuses `/quotes?job_id` + `/costs/by-job`.
+
+**Polish.** AI Extract button enlarged + relabelled "Auto-fill from receipt (AI)"
+with a helper line. Left receipt pane restructured to a single scroll (fixed
+header + flex-fill preview; the PDF/image scrolls inside that area) — kills the
+double scrollbar.
+
+No migration. Backend: `cost-receipt-extract.ts` (schema + prompt),
+`xero-broker.ts` (tax-type resolver), `cost-xero-push.ts` (TaxType on lines).

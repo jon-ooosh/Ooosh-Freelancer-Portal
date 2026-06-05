@@ -38,6 +38,7 @@ export interface XeroTaxRate {
   TaxType: string;
   EffectiveRate: number;
   Status?: string;
+  CanApplyToExpenses?: boolean;
 }
 
 export interface XeroTrackingCategory {
@@ -318,6 +319,35 @@ class XeroBroker {
   async getTaxRates(): Promise<XeroTaxRate[]> {
     const r = await this.request<{ TaxRates: XeroTaxRate[] }>('GET', '/TaxRates');
     return r.TaxRates || [];
+  }
+
+  /**
+   * Resolve the org's purchase TaxType for a given rate (e.g. 20 → INPUT2-style
+   * code, whatever this org uses). Cached per rate. Returns null if none found
+   * (caller falls back). Used so a No-VAT cost pushes as NONE and a 20% cost
+   * pushes with the correct input-VAT type rather than inheriting the account's
+   * default rate.
+   */
+  private taxTypeByRate = new Map<number, string | null>();
+  async getPurchaseTaxType(rate: number): Promise<string | null> {
+    const key = Math.round(rate);
+    if (this.taxTypeByRate.has(key)) return this.taxTypeByRate.get(key)!;
+    let resolved: string | null = null;
+    try {
+      const rates = await this.getTaxRates();
+      const match = rates.find(
+        (r) =>
+          (!r.Status || r.Status === 'ACTIVE') &&
+          r.CanApplyToExpenses !== false &&
+          typeof r.EffectiveRate === 'number' &&
+          Math.abs(r.EffectiveRate - key) < 0.01,
+      );
+      resolved = match?.TaxType ?? null;
+    } catch {
+      resolved = null;
+    }
+    this.taxTypeByRate.set(key, resolved);
+    return resolved;
   }
 
   async getTrackingCategories(): Promise<XeroTrackingCategory[]> {

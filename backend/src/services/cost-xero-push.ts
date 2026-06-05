@@ -110,6 +110,8 @@ interface CostRow {
   payment_status: string;
   approval_state: string | null;
   amount_gross: string | number | null;
+  amount_vat: string | number | null;
+  amount_net: string | number | null;
   xero_account_code: string | null;
   xero_object_id: string | null;
   xero_payment_id: string | null;
@@ -151,6 +153,18 @@ function addDaysISO(iso: string | undefined, days: number): string {
   return base.toISOString().slice(0, 10);
 }
 
+// Resolve the Xero TaxType for a cost's line. No VAT recorded → 'NONE' (so a
+// freelancer's no-VAT invoice doesn't inherit the account's 20% default). VAT
+// recorded → the org's purchase tax type for the implied rate (fallback: leave
+// undefined so Xero applies the account default, which is correct for 20%).
+async function resolveLineTaxType(cost: CostRow): Promise<string | undefined> {
+  const vat = Number(cost.amount_vat || 0);
+  const net = Number(cost.amount_net || 0);
+  if (vat <= 0) return 'NONE';
+  const rate = net > 0 ? Math.round((vat / net) * 100) : 20;
+  return (await xeroBroker.getPurchaseTaxType(rate)) || undefined;
+}
+
 async function attachReceipt(
   cost: CostRow,
   entity: 'Invoices' | 'BankTransactions',
@@ -190,7 +204,8 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
   }
 
   const description = (cost.description || cost.category || cost.supplier_name || 'Cost').toString().slice(0, 4000);
-  const lineItem = { Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code) };
+  const taxType = await resolveLineTaxType(cost);
+  const lineItem = { Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code), ...(taxType ? { TaxType: taxType } : {}) };
 
   let bankTransactionID: string;
   try {
@@ -261,6 +276,7 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     const baseDesc = (cost.description || cost.category || 'Cost').toString();
     const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
 
+    const taxType = await resolveLineTaxType(cost);
     let invoiceID: string;
     try {
       const bill = await xeroBroker.createBill({
@@ -270,7 +286,7 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
         reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
         status: 'AUTHORISED',
         lineAmountTypes: 'Inclusive',
-        lineItems: [{ Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code) }],
+        lineItems: [{ Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code), ...(taxType ? { TaxType: taxType } : {}) }],
       });
       invoiceID = bill.InvoiceID;
     } catch (err) {
