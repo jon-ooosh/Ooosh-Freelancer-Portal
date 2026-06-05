@@ -142,6 +142,15 @@ function dateOnly(v: string | null | undefined): string | undefined {
   return v ? new Date(v).toISOString().slice(0, 10) : undefined;
 }
 
+// Xero requires a DueDate on an ACCPAY bill. Default to invoice date + 30 days
+// (no per-supplier terms tracked yet); staff set the real payment date at
+// "Mark paid" anyway, so this just drives the Bills-to-pay aging.
+function addDaysISO(iso: string | undefined, days: number): string {
+  const base = iso ? new Date(`${iso}T00:00:00Z`) : new Date();
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
+}
+
 async function attachReceipt(
   cost: CostRow,
   entity: 'Invoices' | 'BankTransactions',
@@ -257,6 +266,7 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
       const bill = await xeroBroker.createBill({
         contactName,
         date: dateOnly(cost.cost_date),
+        dueDate: addDaysISO(dateOnly(cost.cost_date), 30),
         reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
         status: 'AUTHORISED',
         lineAmountTypes: 'Inclusive',
