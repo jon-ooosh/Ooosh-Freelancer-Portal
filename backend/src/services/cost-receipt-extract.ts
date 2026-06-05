@@ -56,9 +56,11 @@ Allowed category_code values (pick the best fit from the receipt's contents, or 
 
 Extraction rules:
 - Amounts are pounds: parse "£12.50" → 12.50. Use null when not visible.
-- If only the gross total is visible, set gross and leave net/vat null (the system will compute at 20% VAT downstream).
+- VAT: ONLY treat the cost as VAT-bearing if the document explicitly shows a VAT amount or a VAT line/number. Many UK sole-traders and freelancers are not VAT-registered and their invoices show NO VAT — for those, set amount_vat to 0, amount_net equal to amount_gross, and vat_treatment to "no_vat". When a VAT amount IS shown, set vat_treatment to "standard" and return the actual gross/net/vat from the document. NEVER invent or assume 20% VAT that isn't printed.
+- If only a gross total is visible and no VAT is shown, treat it as no_vat (net = gross, vat = 0).
 - supplier: the merchant's canonical company name as printed on the receipt header (e.g. "TTS360 Ltd", "Shell U.K. Limited", "Halfords Autocentres") — NOT the tagline, address line, or "thank you" line. Strip trailing punctuation.
 - cost_date: format YYYY-MM-DD. Receipt dates are usually DD/MM/YYYY (UK). Null if not visible.
+- job_number: if the document clearly references an Ooosh job/booking number (e.g. "Job 15291", "#15291", "Attention: Ooosh Tours (#15291)", "your ref 15291"), return JUST the digits as a string. Otherwise null. Do NOT guess from invoice numbers, phone numbers, postcodes, dates, or amounts — only a clear job/booking reference.
 - description: 1-2 line summary of what was bought (e.g. "Brake pads and disc rotors", "5 packs of D'Addario strings").
 - confidence: "high" when every key field reads cleanly; "medium" with some guessing on amounts or supplier; "low" on poor image quality or non-receipt input.
 - Vehicle work: prefer 406 for routine maintenance, 409 for accident/breakage repairs.
@@ -73,6 +75,8 @@ const SCHEMA = {
     amount_gross: { type: ['number', 'null'] },
     amount_vat: { type: ['number', 'null'] },
     amount_net: { type: ['number', 'null'] },
+    vat_treatment: { type: 'string', enum: ['standard', 'no_vat'] },
+    job_number: { type: ['string', 'null'] },
     description: { type: ['string', 'null'] },
     category_code: {
       anyOf: [
@@ -84,7 +88,7 @@ const SCHEMA = {
   },
   required: [
     'supplier', 'cost_date', 'amount_gross', 'amount_vat', 'amount_net',
-    'description', 'category_code', 'confidence',
+    'vat_treatment', 'job_number', 'description', 'category_code', 'confidence',
   ],
   additionalProperties: false,
 };
@@ -95,6 +99,8 @@ export interface ExtractedReceipt {
   amount_gross: number | null;
   amount_vat: number | null;
   amount_net: number | null;
+  vat_treatment: 'standard' | 'no_vat';
+  job_number: string | null;
   description: string | null;
   category_code: string | null;
   confidence: 'high' | 'medium' | 'low';
