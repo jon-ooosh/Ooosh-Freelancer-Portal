@@ -8,6 +8,7 @@ import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import HireHistoryTab from '../components/HireHistoryTab';
+import HeldItemsSection from '../components/HeldItemsSection';
 import { PERSON_ORG_ROLES } from '@shared/index';
 
 interface FileAttachment {
@@ -90,7 +91,7 @@ export default function PersonDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess' | 'held'>('timeline');
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
@@ -472,12 +473,13 @@ export default function PersonDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['timeline', 'hire_history', 'details', 'relationships', 'excess'] as const).map((tab) => {
+          {(['timeline', 'hire_history', 'details', 'relationships', 'excess', 'held'] as const).map((tab) => {
             const totalOrgs = (person.organisations || []).length;
             const label = tab === 'timeline' ? 'Activity Timeline'
               : tab === 'hire_history' ? 'Hire History'
               : tab === 'details' ? 'Details'
               : tab === 'excess' ? 'Excess History'
+              : tab === 'held' ? 'Held Items'
               : `Relationships${totalOrgs ? ` (${totalOrgs})` : ''}`;
             return (
               <button
@@ -944,6 +946,10 @@ export default function PersonDetailPage() {
       {/* Excess History Tab */}
       {activeTab === 'excess' && id && (
         <ExcessHistorySection entityType="person" entityId={id} />
+      )}
+
+      {activeTab === 'held' && id && (
+        <HeldItemsSection entityType="person" entityId={id} />
       )}
 
       {/* Edit Panel */}

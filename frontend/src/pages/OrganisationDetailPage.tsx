@@ -9,6 +9,7 @@ import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import { IssuesListSection } from '../components/IssuesListSection';
 import HireHistoryTab from '../components/HireHistoryTab';
+import HeldItemsSection from '../components/HeldItemsSection';
 import { ORG_RELATIONSHIP_LABELS, PERSON_ORG_ROLES_WITH_MAIN_CONTACT, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -99,7 +100,7 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues'>('people');
+  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held'>('people');
   const [issuesCount, setIssuesCount] = useState<number | null>(null);
 
   // Edit/delete
@@ -598,7 +599,7 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues'] as const).map((tab) => {
+          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
             // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
             // matching the Hire History tab content. Falls back to local linked_jobs.length only
@@ -612,6 +613,7 @@ export default function OrganisationDetailPage() {
               : tab === 'timeline' ? 'Activity Timeline'
               : tab === 'excess' ? 'Excess History'
               : tab === 'issues' ? `Issues${issuesCount ? ` (${issuesCount})` : ''}`
+              : tab === 'held' ? 'Held Items'
               : 'Details';
             return (
               <button
@@ -1287,6 +1289,11 @@ export default function OrganisationDetailPage() {
       {/* Excess History Tab */}
       {activeTab === 'excess' && id && (
         <ExcessHistorySection entityType="organisation" entityId={id} />
+      )}
+
+      {/* Held Items Tab — Holding module (incoming / temp storage / lost property) */}
+      {activeTab === 'held' && id && (
+        <HeldItemsSection entityType="organisation" entityId={id} />
       )}
 
       {/* Issues Tab — OP job_issues backed (Stage 3, May 2026).

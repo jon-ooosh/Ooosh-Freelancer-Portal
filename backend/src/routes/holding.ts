@@ -215,7 +215,10 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
   await logAudit(req.user!.id, 'held_items', item.id, 'create', null, item);
 
   // If already linked to a job, log it on that job's timeline
-  if (item.job_id) await logToJobTimeline(item, req.user!.id, 'logged');
+  if (item.job_id) {
+    await logToJobTimeline(item, req.user!.id, 'logged');
+    if (item.kind === 'incoming') await ensureMerchRequirement(item.job_id);
+  }
 
   res.status(201).json({ data: item });
 });
@@ -288,11 +291,10 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
   const item = result.rows[0];
   await logAudit(req.user!.id, 'held_items', item.id, 'update', null, item);
 
-  if (item.job_id) await logToJobTimeline(item, req.user!.id, 'linked');
-
-  // TODO (Stage 4): when an `incoming` item links to a job with a near out_date,
-  //   auto-create/attach the `merch` pre-hire requirement so it surfaces on the
-  //   prep checklist + dashboard progress strip.
+  if (item.job_id) {
+    await logToJobTimeline(item, req.user!.id, 'linked');
+    if (item.kind === 'incoming') await ensureMerchRequirement(item.job_id);
+  }
 
   res.json({ data: item });
 });
@@ -392,6 +394,27 @@ async function logToJobTimeline(item: Record<string, unknown>, userId: string, v
     );
   } catch (err) {
     console.warn('[holding] failed to log job timeline interaction:', err);
+  }
+}
+
+// When an incoming delivery is linked to a job, make sure the job's pre-hire
+// prep checklist carries a `merch` requirement so the boxes surface on the
+// checklist + dashboard progress strip ("do something with these before the
+// van leaves"). Idempotent — only creates if one doesn't already exist.
+async function ensureMerchRequirement(jobId: string): Promise<void> {
+  try {
+    const existing = await query(
+      `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'merch' AND phase = 'pre_hire'`,
+      [jobId]
+    );
+    if (existing.rows.length > 0) return;
+    await query(
+      `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+       VALUES ($1, 'merch', 'in_progress', $2, true, 'holding', 'pre_hire')`,
+      [jobId, 'Incoming items logged in Holding — load before dispatch']
+    );
+  } catch (err) {
+    console.warn('[holding] failed to ensure merch requirement:', err);
   }
 }
 
