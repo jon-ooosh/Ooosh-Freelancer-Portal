@@ -147,6 +147,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '110_receipt_required_forward_only.sql',
         '111_pre_hire_review_sent_markers.sql',
         '112_cost_intent.sql',
+        '113_holding_module.sql',
       ];
 
       for (const migration of migrations) {
