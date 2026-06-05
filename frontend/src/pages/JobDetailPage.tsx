@@ -4,6 +4,7 @@ import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
+import HeldItemsSection from '../components/HeldItemsSection';
 import TransportCalculator from '../components/TransportCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
@@ -3693,6 +3694,15 @@ export default function JobDetailPage() {
               broken / dispute / other tracking. Hidden when empty so it
               doesn't clutter clean jobs; "+ Log Problem" button sits inside. */}
           {id && <JobProblemsPanel jobId={id} />}
+
+          {/* Holding — incoming deliveries / temp storage / lost property linked
+              to this job, plus a nudge if the client has lost property held.
+              Hidden when empty so clean jobs stay clean. */}
+          {id && <HeldItemsSection entityType="job" entityId={id} heading="📦 Held for Clients" openOnly hideWhenEmpty />}
+          {job.client_id && (
+            <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['lost_property']} openOnly hideWhenEmpty
+              heading="🔍 This client has lost property held" />
+          )}
 
           <JobPrepChecklist
             key={prepChecklistKey}
