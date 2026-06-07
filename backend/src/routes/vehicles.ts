@@ -2112,7 +2112,15 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
        JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
        WHERE fv.reg = $1
          AND vha.status IN ('booked_out', 'active', 'returned')
-       ORDER BY vha.updated_at DESC
+       -- A live (booked_out/active) row ALWAYS wins over a returned one,
+       -- regardless of updated_at. Otherwise a stale returned row whose
+       -- updated_at gets bumped by a background pass (sync / fleet-status /
+       -- dedup) after a fresh book-out masks the live rows and the van
+       -- wrongly reads as "already checked in" (RX24SZG, jobs 15429→15781,
+       -- 27 May 2026). Only fall back to a returned row when none are live.
+       ORDER BY
+         CASE WHEN vha.status IN ('booked_out', 'active') THEN 0 ELSE 1 END,
+         vha.updated_at DESC
        LIMIT 1`,
       [vehicleReg]
     );

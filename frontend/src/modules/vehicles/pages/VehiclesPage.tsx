@@ -129,7 +129,7 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
         <div className="flex border-t border-gray-100">
           {vehicle.hireStatus === 'On Hire' && (
             <Link
-              to={vmPath(`/check-in?vehicle=${encodeURIComponent(vehicle.reg)}`)}
+              to={vmPath(`/check-in?vehicle=${encodeURIComponent(vehicle.id)}`)}
               className="flex-1 py-2 text-center text-xs font-medium text-gray-500 hover:bg-gray-50 hover:text-ooosh-navy active:bg-gray-100 border-r border-gray-100"
             >
               Check In
