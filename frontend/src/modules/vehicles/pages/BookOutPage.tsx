@@ -1417,6 +1417,22 @@ export function BookOutPage() {
         </div>
       )}
 
+      {/* Non-blocking wash reminder — van flagged at prep as needing an
+          external wash. Surfaced here (not a hard gate) so a dirty van isn't
+          sent to a client by accident; doesn't block book-out. */}
+      {(() => {
+        const washVehicle = vehicles.find(v => v.id === form.vehicleId)
+        if (!washVehicle?.needsExternalWash) return null
+        return (
+          <div className="mx-4 mt-2 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2">
+            <span className="text-sm">🧼</span>
+            <p className="text-xs font-medium text-amber-800">
+              {washVehicle.reg} is flagged as needing an external wash — give it a once-over before it goes out. This won't block book-out.
+            </p>
+          </div>
+        )
+      })()}
+
       {/* Step content */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {STEPS[step] === 'Select Vehicle' && (

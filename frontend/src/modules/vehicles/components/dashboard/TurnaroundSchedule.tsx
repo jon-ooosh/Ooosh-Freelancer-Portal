@@ -47,6 +47,7 @@ type Row = {
   prepWindowDays: number | null
   prepUrgency: 'green' | 'amber' | 'orange' | 'red' | 'none'
   complianceFlags: ComplianceFlagDto[]
+  needsExternalWash: boolean
 }
 
 type Response = {
@@ -318,6 +319,14 @@ function RowCard({
         )}
         <StatePill status={row.hireStatus} />
         <PrepWindowBadge row={row} />
+        {row.needsExternalWash && (
+          <span
+            className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-700"
+            title="Flagged at prep as needing an external wash (not a fault)"
+          >
+            🧼 Needs wash
+          </span>
+        )}
       </div>
 
       {/* Detail rows: only render lines that carry actual info — staff already

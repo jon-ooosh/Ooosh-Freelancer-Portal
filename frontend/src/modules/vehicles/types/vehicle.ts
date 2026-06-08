@@ -65,6 +65,10 @@ export interface Vehicle {
   mpg: number | null
   // Hire status (from Fleet Master board column color_mm0v8bak)
   hireStatus: string              // Available, On Hire, Prep Needed, Not Ready, or ''
+  // "Needs external wash" marker (migration 114) — carwash to-do, NOT a fault.
+  // Set by a prep recording bodywork "To be cleaned"; cleared by a clean prep
+  // or the "Mark as washed" action. Non-blocking badge across the vehicle UI.
+  needsExternalWash: boolean
   // CO2 emissions (g/km from Fleet Manager board)
   co2PerKm: number | null
   // Tyre reference — front and rear may differ
