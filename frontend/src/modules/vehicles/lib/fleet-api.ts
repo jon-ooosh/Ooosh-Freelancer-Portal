@@ -91,6 +91,24 @@ export async function correctCurrentMileage(id: string, mileage: number, reason?
 }
 
 /**
+ * Clear the "needs external wash" marker once the van has been to the carwash.
+ * Returns the updated vehicle. Audited server-side.
+ */
+export async function markVehicleWashed(id: string): Promise<Vehicle> {
+  const response = await apiFetch(`/fleet/${encodeURIComponent(id)}/mark-washed`, {
+    method: 'PATCH',
+  })
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(err.error || `Failed to mark vehicle as washed: ${response.status}`)
+  }
+
+  const result = await response.json() as { vehicle: Vehicle }
+  return result.vehicle
+}
+
+/**
  * Create a new vehicle. Returns the created vehicle.
  */
 export async function createVehicle(fields: Record<string, unknown>): Promise<Vehicle> {

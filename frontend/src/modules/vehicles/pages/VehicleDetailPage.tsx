@@ -9,7 +9,7 @@ import { VehicleLocationTab } from '../components/tracking/VehicleLocationTab'
 import { PrepHistoryTab } from '../components/prep/PrepHistoryTab'
 import ServiceHistoryTab from '../components/service/ServiceHistoryTab'
 import { VehicleEventsHistory } from '../components/events/VehicleEventsHistory'
-import { updateVehicle, correctCurrentMileage, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile } from '../lib/fleet-api'
+import { updateVehicle, correctCurrentMileage, fetchComplianceSettings, DEFAULT_COMPLIANCE, uploadVehicleFile, deleteVehicleFile, markVehicleWashed } from '../lib/fleet-api'
 import { checkMileagePlausibility } from '../lib/mileage-sanity'
 import { getRossettsStatus, URGENCY_DOT, URGENCY_TEXT } from '../lib/service-status'
 import type { ComplianceSettings } from '../lib/fleet-api'
@@ -253,6 +253,7 @@ export function VehicleDetailPage() {
   }, [id])
   const [editingTracker, setEditingTracker] = useState(false)
   const [trackerInput, setTrackerInput] = useState('')
+  const [washing, setWashing] = useState(false)
   const queryClient = useQueryClient()
   const opAuth = getOpAuthState()
   const isAdmin = opAuth?.userRole === 'admin' || opAuth?.userRole === 'manager'
@@ -369,6 +370,31 @@ export function VehicleDetailPage() {
           )}
           {vehicle.spareKey && (
             <Badge className="bg-gray-100 text-gray-600">Spare key</Badge>
+          )}
+          {vehicle.needsExternalWash && (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-800"
+              title="Flagged at prep as needing an external wash — not a fault"
+            >
+              🧼 Needs external wash
+              <button
+                onClick={async () => {
+                  setWashing(true)
+                  try {
+                    await markVehicleWashed(vehicle.id)
+                    await queryClient.invalidateQueries({ queryKey: ['vehicles'] })
+                  } catch (err) {
+                    alert(err instanceof Error ? err.message : 'Failed to mark as washed')
+                  } finally {
+                    setWashing(false)
+                  }
+                }}
+                disabled={washing}
+                className="rounded-full bg-sky-700 px-1.5 py-0.5 text-[10px] font-semibold text-white hover:bg-sky-800 disabled:opacity-50"
+              >
+                {washing ? '…' : 'Mark as washed'}
+              </button>
+            </span>
           )}
         </div>
 

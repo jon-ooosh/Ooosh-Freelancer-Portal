@@ -110,6 +110,14 @@ function VehicleCard({ vehicle, isAllocated }: { vehicle: Vehicle; isAllocated: 
               ⚙ Setup {checklistProgress(vehicle.setupChecklist).done}/{checklistProgress(vehicle.setupChecklist).total}
             </span>
           )}
+          {vehicle.needsExternalWash && (
+            <span
+              className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-sky-100 text-sky-700"
+              title="Flagged at prep as needing an external wash (not a fault)"
+            >
+              🧼 Needs wash
+            </span>
+          )}
         </div>
 
         {/* Key dates that need attention */}
@@ -311,6 +319,14 @@ function FleetTable({
                   <span className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${status.cls}`}>
                     {status.label}
                   </span>
+                  {vehicle.needsExternalWash && (
+                    <span
+                      className="ml-1.5 inline-block rounded-full bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 align-middle"
+                      title="Flagged at prep as needing an external wash (not a fault)"
+                    >
+                      🧼 wash
+                    </span>
+                  )}
                 </td>
                 <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-gray-600">
                   {vehicle.currentMileage != null ? vehicle.currentMileage.toLocaleString() : '—'}
