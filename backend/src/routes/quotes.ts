@@ -5,6 +5,7 @@ import { authenticate, authorize, AuthRequest } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
   calculateCosts,
+  applyCrewMultiplier,
   CalculatorSettings,
   CalculatorInput,
 } from '../services/crew-transport-calculator';
@@ -210,6 +211,11 @@ const calculateSchema = z.object({
   travelCost: z.number().min(0).optional().nullable(),
   dayRateOverride: z.number().optional().nullable(),
   clientRateOverride: z.number().optional().nullable(),
+  applyMinHours: z.boolean().optional().nullable(),
+  oohOverride: z.object({
+    earlyStartMins: z.number(),
+    lateFinishMins: z.number(),
+  }).optional().nullable(),
   expenses: z.array(z.object({
     type: z.string(),
     description: z.string(),
@@ -256,22 +262,6 @@ const saveQuoteSchema = calculateSchema.extend({
   freelancerNotes: z.string().optional().nullable(),
   crewCount: z.number().int().min(1).optional().nullable(),
 });
-
-// Apply crew-count multiplication to a calculator result. Per-crew costs scale;
-// fuel / transport / expenses (already accounted for once at the trip level) do not.
-function applyCrewMultiplier(single: ReturnType<typeof calculateCosts>, crewCount: number) {
-  if (crewCount <= 1) return single;
-  return {
-    ...single,
-    clientChargeLabour: Math.round(single.clientChargeLabour * crewCount * 100) / 100,
-    clientChargeTotal: Math.round(single.clientChargeTotal * crewCount * 100) / 100,
-    clientChargeTotalRounded: Math.round(single.clientChargeTotalRounded * crewCount),
-    freelancerFee: Math.round(single.freelancerFee * crewCount * 100) / 100,
-    freelancerFeeRounded: Math.ceil((single.freelancerFeeRounded * crewCount) / 5) * 5,
-    ourTotalCost: Math.round(single.ourTotalCost * crewCount * 100) / 100,
-    ourMargin: Math.round((single.clientChargeTotalRounded * crewCount) - (single.ourTotalCost * crewCount) * 100) / 100,
-  };
-}
 
 // Insert one quote row. Used twice when creating delivery + collection siblings.
 async function insertQuoteRow(
@@ -394,6 +384,15 @@ router.post('/', validate(saveQuoteSchema), async (req: AuthRequest, res: Respon
       travelCost: req.body.travelCost ?? undefined,
       dayRateOverride: req.body.dayRateOverride,
       clientRateOverride: req.body.clientRateOverride,
+      applyMinHours: req.body.applyMinHours ?? undefined,
+      // Manual OOH override: reconstruct from the flat oohManual + early/late fields the
+      // calculator sends. When oohManual is off, leave undefined so the engine auto-derives.
+      oohOverride: req.body.oohManual
+        ? {
+            earlyStartMins: Number(req.body.earlyStartMins) || 0,
+            lateFinishMins: Number(req.body.lateFinishMins) || 0,
+          }
+        : null,
       expenses: req.body.expenses || [],
     };
 
@@ -709,6 +708,14 @@ router.put('/:id', validate(editQuoteSchema), async (req: AuthRequest, res: Resp
         travelCost: updatedQuote.travel_cost != null ? Number(updatedQuote.travel_cost) : undefined,
         dayRateOverride: updatedQuote.day_rate_override != null ? Number(updatedQuote.day_rate_override) : undefined,
         clientRateOverride: updatedQuote.client_rate_override != null ? Number(updatedQuote.client_rate_override) : undefined,
+        // Preserve a manually-set OOH override across edits (apply_min_hours isn't persisted,
+        // so the min-hours floor falls back to the engine default on recalc).
+        oohOverride: updatedQuote.ooh_manual
+          ? {
+              earlyStartMins: Number(updatedQuote.early_start_mins) || 0,
+              lateFinishMins: Number(updatedQuote.late_finish_mins) || 0,
+            }
+          : null,
         expenses: Array.isArray(updatedQuote.expenses) ? updatedQuote.expenses : (updatedQuote.expenses ? JSON.parse(updatedQuote.expenses) : []),
       };
       const newCrewCount = (reInput.jobType === 'crewed' && Number(updatedQuote.crew_count) > 1) ? Number(updatedQuote.crew_count) : 1;
