@@ -173,23 +173,38 @@ When an item is **linked** to a person/org and/or a job, the link **cascades**:
 
 ---
 
-## 5. Forward-looking items → pre-hire checklist tie-in (the time-sensitive bit)
+## 5. Forward-looking items → pre-hire checklist tie-in (DERIVED, not manual)
 
-The killer requirement: incoming/temp-storage items linked to a job must surface as *"do something
-with these before the van leaves."*
+**Updated Jun 2026 — agreed model.** The pre-hire `merch` requirement is **status-reactive**
+(same model as `excess_resolve`): it is **derived from the actual `held_items` on the job**, never
+hand-ticked. `services/holding-requirement-sync.ts` `syncMerchRequirementStatus(jobId)` recomputes it
+on every held-item mutation (create / link / receive / give / ship / dispose / cancel / merch-form).
+This kills the staleness problem — the pip can't drift from reality because it's computed.
 
-Reuse the **existing `merch` requirement type** (`job_requirements`, migration 021 —
-"Merch Receiving": Request sent → Some received → All received → Notified client → Given to client).
-When an `incoming` item is linked to a job:
+**The pip answers one question:** *"is there anything we're holding or still awaiting for this client
+that we haven't handed over yet?"*
 
-- Auto-create/attach the `merch` requirement card if not already present.
-- "Given to client" = loaded into the van.
-- It inherits the **dashboard progress strip**, overdue logic, and the reminder/notification engine
-  **for free**.
-- `needed_by` derives from the job's `out_date`; an optional reminder fires the morning prep is due
-  ("load these 5 boxes by Thursday AM").
+| State | Light | Rule |
+|---|---|---|
+| No incoming items logged | ⚪ grey (`not_started`) | nothing to track |
+| Anything still `expected` (awaited) OR here-but-not-given | 🟡 amber (`in_progress`) | notes: "2 here to give · 1 awaited" |
+| Everything `given_to_client` / `shipped_back` / `disposed` | 🟢 green (`done`) | nothing left |
 
-This is the cleanest integration — no new prep-tracking surface, it rides the requirement engine.
+**"All given = green" is deliberately honest** — we never claim everything has *arrived* (more can
+always turn up). A surprise parcel logged after green **re-opens to amber automatically**. The escape
+hatch for "the client's 2nd parcel never came" is the **"Won't arrive"** action on an `expected`
+item → `status='cancelled'`, dropping it from the calc so the pip greens cleanly. **Never gates
+dispatch** — soft "something to do" signal only.
+
+The rich **Held panel** and this **pip** are the *same truth*, two views.
+
+**Pre/post + FYI placement:**
+- **incoming** → pre-hire pip (above).
+- **temp_storage + lost_property** → NOT on the prep ticker. Right-sidebar **FYI** on the Job View
+  ("📦 Also holding (FYI)", client-wide via the org) + (TODO) the pre-hire review email heads-up.
+
+**Known gap:** `merch` is not in `job-progress-strip.ts`, so the pip shows on the Job Detail pre-hire
+X/Y counter + requirement card, but NOT on the dashboard "Today" strip. Add a `merch` slot if wanted.
 
 ---
 
@@ -356,17 +371,40 @@ for linked items; for unknown/unlinked items, capture a recipient at notify time
 
 ---
 
-## 13. Build order (when we go)
+## 13. Build status (Jun 2026)
 
-1. Migration: `held_items` + `held_item_locations` + seed locations.
-2. Backend `routes/holding.ts`: CRUD, link-owner/job (with cascade), notify, mark-collected,
-   ship-back, chase-review list + send.
-3. Backline/check-in/prep contextual "log" hooks + Job View sidebar surfacing.
-4. `merch` requirement auto-create on incoming→job link.
-5. Module pages: "Held for Clients" + "Lost Property" views under Operations.
-6. Mobile quick-action page (PWA manifest) + the 5 v1 buttons.
-7. Public inbound form + label PDF + staff-auth acknowledge-receipt QR page.
-8. Chase review page + daily scan + digest email + gradient templates.
-9. Address-book "Held Items" tab + Storage-client "Packages held" tab.
+✅ **Done + deployed:**
+1. Migrations 113 (held_items + held_item_locations), 115 (contact_email/phone), 116 (received_by).
+2. Backend `routes/holding.ts`: CRUD, link cascade, notify (real email), collected/ship-back/dispose,
+   chase endpoint (email TODO), by-person/org/job reads, job-number search, label re-download.
+   **NB: staff names join `people` via `users.person_id` — `users` has no name columns.**
+3. Module pages "Held for Clients" + "Lost Property" (`/holding`, `/holding/lost-property`).
+4. Mobile quick-action page `/quick` (PWA-installable). "Package arrived" is search-first
+   (receive-existing-or-create) to avoid duplicates.
+5. Public inbound merch form `/merch-form` + label PDF (QR, printer-friendly) + staff-auth
+   acknowledge-receipt page `/holding/receipt/:id` + client-picker "Send merch form" on Job View.
+6. Address-book "Held Items" tab (Person + Org). Job Overview "Held for Clients" panel (incoming).
+7. **Derived merch pip** (`services/holding-requirement-sync.ts`, status-reactive — see §5) +
+   "Won't arrive" cancel action + temp/lost FYI in Job View right sidebar.
 
-Streams 2–9 mostly independent once 1 lands.
+🔲 **Remaining (for a fresh chat):**
+- **Pre-hire review email heads-up** — add a Holding summary to `services/pre-hire-briefing.ts`
+  (`buildBriefing` → new `holding` field on `JobBriefing`; render block in
+  `email-templates/pre-hire-briefing.ts`). Phrasings agreed: "2 packages here to give to the client",
+  "3 boxes were expected, nothing marked as arrived yet", + temp-storage/lost-property aide-mémoire
+  lines. Big email-critical file — integrate carefully, can't easily smoke-test.
+- **Stage 8 — lost-property chase**: the `/:id/chase` endpoint exists but only bumps the level
+  (email is a TODO). Build: chase review page (human-gated queue — `GET /holding/chases/review`
+  already returns the due list), daily scan (assembles the review, does NOT auto-send), gradient
+  wk1/wk2/wk3 client email templates (`holding_chase`). Per spec §7B — a human approves the batch,
+  never auto-fire. `escalation_level` + `last_chased_at` columns already exist.
+- **Stage 9 — Storage-client "Packages held" cross-link**: a tab/section on the Storage module
+  showing held_items for a storage client (the Amazon-deluge case).
+- **Dedupe nudge on desktop create** — the mobile flow is search-first; the desktop HoldingPage
+  CreateModal isn't. Low priority.
+- **`merch` → dashboard progress strip** — add a slot in `job-progress-strip.ts` if the pip should
+  show on the dashboard "Today" strip (currently only on the Job Detail checklist).
+- **Shared-UI refactor** — 3 copies of the location/photo capture block (QuickLogSheet, CreateModal,
+  HoldingReceiptPage). Tidy-only.
+
+Streams independent.

@@ -2210,7 +2210,68 @@ Standalone OP-native module replacing the Monday.com "Storage Clients" board. Oo
 - **Address-book "Storage" tab** on Org/Person detail (mirrors Hire History / Excess History pattern).
 - **Waiting-list → vacancy matching** suggestions on move-out.
 - **Signed T&Cs snapshot PDF** (acceptance + signature image recorded; PDF generation not yet wired).
-- Temp storage / incoming deliveries — deliberately NOT here; belongs with the future Incoming Deliveries module (spec §10).
+- Temp storage / incoming deliveries — deliberately NOT here; belongs with the Holding module (Step 10).
+
+#### Step 10: Holding Module — "Held for Clients" / "Lost Property" / temp storage ← MOSTLY BUILT (Jun 2026)
+
+The unified "things we're temporarily holding for a client" module. **One engine** (`held_items`), one
+`kind` discriminator (`incoming` / `lost_property` / `temp_storage`) that drives behaviour + display
+home. Replaces the Monday "Things being sent to us" + "Lost property & temporary storage" boards and
+the merch/lost-property JotForms. **Full spec: `docs/HOLDING-MODULE-SPEC.md`.**
+
+**Storage:** migrations 113 (`held_items` + `held_item_locations` seeded picklist), 115
+(`contact_email`/`contact_phone`), 116 (`received_by`). One table; `kind` discriminator. Soft states,
+no hard deletes. **Two temperaments:** incoming/temp = forward-looking (date-pressured); lost_property
+= backward-looking (opportunistic, slow chase).
+
+**Backend** `routes/holding.ts` (STAFF_ROLES) + a PUBLIC section before the auth gate (inbound merch
+form). Endpoints: list (search incl. job number), `/locations`, by-person/org/job reads, CRUD,
+`/:id/link` (the unknown→owner/job **backfill cascade** — derives `needed_by` from job out_date),
+`/:id/collected` `/ship-back` `/dispose` `/notify` (real client email via `holding_received`),
+`/:id/chase` (lost property — bumps level; **gradient chase email is the remaining Stage 8 TODO**),
+`POST /send-merch-form` (client-picker-controlled link email), `GET /:id/label` (re-download),
+public `GET /public/job/:n` + `POST /public/merch-form` (creates item, links job, generates labels,
+emails them). **⚠️ Staff names: join `people` via `users.person_id` — `users` has NO name columns
+(this caused a full-API outage Jun 2026; `express-async-errors` now shields async route rejections).**
+
+**Frontend:** `/holding` + `/holding/lost-property` (HoldingPage, view-driven), `/holding/receipt/:id`
+(staff QR-scan receive flow, two-phase → notify), `/merch-form` (public, no Layout), `/quick`
+(QuickActionsPage — mobile PWA launcher; "Package arrived" is **search-first**: receive an
+expected/known delivery or fall through to create, so staff don't make duplicates). Reusable
+`HeldItemsSection` (by person/org/job; `bare`/`kinds`/`hideWhenEmpty`/`heading`/`openOnly` opts) on
+Person/Org "Held Items" tabs + Job Overview. `SendMerchFormButton` on Job Overview. Label PDF
+(`services/holding-label-pdf.ts`, pdf-lib + `qrcode` dep, printer-friendly black-on-white, one page
+per box, QR → staff receipt page).
+
+**Derived merch pip (the key design decision, Jun 2026):** the pre-hire `merch` requirement is
+**status-reactive, NOT hand-ticked** — `services/holding-requirement-sync.ts`
+`syncMerchRequirementStatus(jobId)` recomputes it from the job's `held_items` on every mutation (same
+pattern as `excess_resolve`). Pip = *"anything we're holding/awaiting for this client we haven't given
+yet?"* — grey (none) / amber (anything `expected` or here-not-given) / green (all
+`given_to_client`/`shipped_back`/`disposed`). **"All given = green" is honest** (we never claim
+everything arrived — a surprise parcel re-opens it to amber). **"Won't arrive"** action cancels an
+`expected` item so the pip can green. **Never gates dispatch.** The Held panel + the pip are the same
+truth, two views. `merch` is NOT in `job-progress-strip.ts` (shows on Job Detail checklist counter,
+not the dashboard strip — add a slot if wanted). NOT touched by the HH derivation engine (OP-only).
+temp_storage + lost_property are NOT on the ticker — they're **right-sidebar FYI** on the Job View
+("📦 Also holding (FYI)", client-wide via org).
+
+**Remaining (next chat):**
+- **Pre-hire review email heads-up** — add a Holding summary to `services/pre-hire-briefing.ts`
+  (`JobBriefing.holding` field + `buildBriefing` query + render block in
+  `email-templates/pre-hire-briefing.ts`). Phrasings: "2 packages here to give to the client",
+  "3 boxes were expected, nothing marked as arrived yet", + temp/lost aide-mémoire. Email-critical
+  file — integrate carefully.
+- **Stage 8 — lost-property chase**: review page (human-gated; `GET /holding/chases/review` ready),
+  daily scan that ASSEMBLES the batch (never auto-sends), gradient wk1/wk2/wk3 `holding_chase`
+  templates. Per spec §7B (a human approves the send — the Monday lesson: never auto-fire a
+  "we'll dispose of your stuff" email).
+- **Stage 9 — Storage-client "Packages held"** cross-link tab (Amazon-deluge case).
+- Desktop CreateModal search-first dedupe nudge; shared-UI refactor (3 copies of location/photo
+  capture); `merch` dashboard-strip slot. All low priority.
+
+**Branch:** `claude/zen-allen-V8knQ` (PR #666). Deploy adds the `qrcode` dep (run `npm install`) and
+migrations 113/115/116.
 
 ### External Tools (already built, need repointing from Monday.com → Ooosh API)
 

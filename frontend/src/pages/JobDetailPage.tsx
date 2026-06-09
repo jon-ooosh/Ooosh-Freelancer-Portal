@@ -3696,19 +3696,15 @@ export default function JobDetailPage() {
               doesn't clutter clean jobs; "+ Log Problem" button sits inside. */}
           {id && <JobProblemsPanel jobId={id} />}
 
-          {/* Holding — one panel: items held for this job, a lost-property nudge,
-              and the "send merch form" action. */}
+          {/* Holding — incoming deliveries to give this client (the actionable
+              list). Temp storage + lost property are FYI in the right sidebar. */}
           {id && (
             <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
               <div className="flex items-center justify-between gap-3">
                 <h3 className="text-sm font-semibold text-gray-800">📦 Held for Clients</h3>
                 {job.hh_job_number && <SendMerchFormButton jobId={id} hhJobNumber={job.hh_job_number} />}
               </div>
-              <HeldItemsSection entityType="job" entityId={id} bare emptyHint="Nothing held for this job yet." />
-              {job.client_id && (
-                <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['lost_property']} bare openOnly hideWhenEmpty
-                  heading="🔍 Client also has lost property held" />
-              )}
+              <HeldItemsSection entityType="job" entityId={id} kinds={['incoming']} bare emptyHint="Nothing held for this job yet." />
             </div>
           )}
 
@@ -5334,6 +5330,14 @@ export default function JobDetailPage() {
       {/* Client trading history sidebar (desktop only) */}
       {showClientHistory && (
         <div className="hidden lg:block w-72 shrink-0">
+          {/* Holding FYI — temp storage + lost property we hold for this client.
+              Informational only (not on the prep ticker). Hidden when empty. */}
+          {job.client_id && (
+            <div className="mb-4">
+              <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['temp_storage', 'lost_property']}
+                openOnly hideWhenEmpty heading="📦 Also holding (FYI)" />
+            </div>
+          )}
           <div className="sticky top-4 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
             <h3 className="text-sm font-semibold text-gray-700 mb-3">
               Client History — {job.client_name || job.company_name}

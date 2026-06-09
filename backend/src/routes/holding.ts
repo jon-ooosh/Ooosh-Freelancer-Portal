@@ -21,6 +21,7 @@ import { isR2Configured, uploadToR2 } from '../config/r2';
 import { emailService } from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 import { buildMerchLabelPdf } from '../services/holding-label-pdf';
+import { syncMerchRequirementStatus } from '../services/holding-requirement-sync';
 
 const router = Router();
 
@@ -84,21 +85,14 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
   );
   const item = ins.rows[0];
 
-  // Forward-looking: surface on the job prep checklist
+  // Forward-looking: surface on the job prep checklist (derived merch pip)
   if (jobId) {
     try {
       await query(
         `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
         [`📦 Incoming delivery declared via merch form: ${description} from ${b.band_name}`, jobId, SYSTEM_USER_ID]
       );
-      const existing = await query(`SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'merch' AND phase = 'pre_hire'`, [jobId]);
-      if (existing.rows.length === 0) {
-        await query(
-          `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
-           VALUES ($1, 'merch', 'in_progress', $2, true, 'holding', 'pre_hire')`,
-          [jobId, 'Incoming merch declared via form — load before dispatch']
-        );
-      }
+      await syncMerchRequirementStatus(jobId);
     } catch (err) { console.warn('[holding] merch-form job side-effects failed:', err); }
   }
 
@@ -376,7 +370,7 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
   // If already linked to a job, log it on that job's timeline
   if (item.job_id) {
     await logToJobTimeline(item, req.user!.id, 'logged');
-    if (item.kind === 'incoming') await ensureMerchRequirement(item.job_id);
+    await syncMerchRequirementStatus(item.job_id);
   }
 
   res.status(201).json({ data: item });
@@ -408,6 +402,7 @@ router.put('/:id', validate(createSchema.partial()), async (req: AuthRequest, re
   );
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
+  if (result.rows[0].job_id) await syncMerchRequirementStatus(result.rows[0].job_id);
   res.json({ data: result.rows[0] });
 });
 
@@ -459,7 +454,7 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
 
   if (item.job_id) {
     await logToJobTimeline(item, req.user!.id, 'linked');
-    if (item.kind === 'incoming') await ensureMerchRequirement(item.job_id);
+    await syncMerchRequirementStatus(item.job_id);
   }
 
   res.json({ data: item });
@@ -486,7 +481,10 @@ router.post('/:id/collected', validate(collectedSchema), async (req: AuthRequest
     [status, b.collected_by ?? null, b.notes ?? null, req.params.id]
   );
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
-  if (result.rows[0].job_id) await logToJobTimeline(result.rows[0], req.user!.id, status === 'given_to_client' ? 'given to client' : 'collected');
+  if (result.rows[0].job_id) {
+    await logToJobTimeline(result.rows[0], req.user!.id, status === 'given_to_client' ? 'given to client' : 'collected');
+    await syncMerchRequirementStatus(result.rows[0].job_id);
+  }
   res.json({ data: result.rows[0] });
 });
 
@@ -506,6 +504,7 @@ router.post('/:id/ship-back', validate(shipBackSchema), async (req: AuthRequest,
   );
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
+  if (result.rows[0].job_id) await syncMerchRequirementStatus(result.rows[0].job_id);
   res.json({ data: result.rows[0] });
 });
 
@@ -517,6 +516,7 @@ router.post('/:id/dispose', async (req: AuthRequest, res: Response) => {
   );
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
+  if (result.rows[0].job_id) await syncMerchRequirementStatus(result.rows[0].job_id);
   res.json({ data: result.rows[0] });
 });
 
@@ -566,7 +566,10 @@ router.post('/:id/notify', async (req: AuthRequest, res: Response) => {
     [req.params.id]
   );
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
-  if (result.rows[0].job_id) await logToJobTimeline(result.rows[0], req.user!.id, emailed ? `client notified (${to})` : 'marked client notified');
+  if (result.rows[0].job_id) {
+    await logToJobTimeline(result.rows[0], req.user!.id, emailed ? `client notified (${to})` : 'marked client notified');
+    await syncMerchRequirementStatus(result.rows[0].job_id);
+  }
   res.json({ data: result.rows[0], emailed, notified_to: emailed ? to : null });
 });
 
@@ -596,27 +599,6 @@ async function logToJobTimeline(item: Record<string, unknown>, userId: string, v
     );
   } catch (err) {
     console.warn('[holding] failed to log job timeline interaction:', err);
-  }
-}
-
-// When an incoming delivery is linked to a job, make sure the job's pre-hire
-// prep checklist carries a `merch` requirement so the boxes surface on the
-// checklist + dashboard progress strip ("do something with these before the
-// van leaves"). Idempotent — only creates if one doesn't already exist.
-async function ensureMerchRequirement(jobId: string): Promise<void> {
-  try {
-    const existing = await query(
-      `SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'merch' AND phase = 'pre_hire'`,
-      [jobId]
-    );
-    if (existing.rows.length > 0) return;
-    await query(
-      `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
-       VALUES ($1, 'merch', 'in_progress', $2, true, 'holding', 'pre_hire')`,
-      [jobId, 'Incoming items logged in Holding — load before dispatch']
-    );
-  } catch (err) {
-    console.warn('[holding] failed to ensure merch requirement:', err);
   }
 }
 
