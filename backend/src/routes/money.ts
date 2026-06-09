@@ -92,11 +92,12 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
               o.reason       AS override_reason,
               o.notes        AS override_notes,
               o.resolved_at  AS override_resolved_at,
-              (u.first_name || ' ' || u.last_name) AS override_resolved_by_name
+              COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS override_resolved_by_name
        FROM job_financials jf
        JOIN jobs j ON j.id = jf.job_id
        LEFT JOIN job_balance_overrides o ON o.job_id = jf.job_id
        LEFT JOIN users u ON u.id = o.resolved_by
+       LEFT JOIN people pu ON pu.id = u.person_id
        WHERE jf.balance_outstanding > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
        ORDER BY jf.balance_outstanding DESC
@@ -1371,9 +1372,11 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // in Xero / written off — migration 117). Surfaced as a banner on the Money
     // tab; the live HH balance above is still shown (staff source of truth).
     const overrideResult = await query(
-      `SELECT o.reason, o.notes, o.resolved_at, (u.first_name || ' ' || u.last_name) AS resolved_by_name
+      `SELECT o.reason, o.notes, o.resolved_at,
+              COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS resolved_by_name
        FROM job_balance_overrides o
        LEFT JOIN users u ON u.id = o.resolved_by
+       LEFT JOIN people pu ON pu.id = u.person_id
        WHERE o.job_id = $1`,
       [job.id]
     );
@@ -1434,9 +1437,10 @@ router.get('/:jobId/payments', async (req: AuthRequest, res: Response) => {
     const { jobId } = req.params;
 
     const result = await query(
-      `SELECT jp.*, (u.first_name || ' ' || u.last_name) AS recorded_by_name
+      `SELECT jp.*, COALESCE(NULLIF(TRIM(pu.first_name || ' ' || pu.last_name), ''), u.email) AS recorded_by_name
        FROM job_payments jp
        LEFT JOIN users u ON u.id = jp.recorded_by
+       LEFT JOIN people pu ON pu.id = u.person_id
        WHERE jp.job_id = $1
        ORDER BY jp.payment_date DESC`,
       [jobId]
