@@ -92,7 +92,7 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
               o.reason       AS override_reason,
               o.notes        AS override_notes,
               o.resolved_at  AS override_resolved_at,
-              u.name         AS override_resolved_by_name
+              (u.first_name || ' ' || u.last_name) AS override_resolved_by_name
        FROM job_financials jf
        JOIN jobs j ON j.id = jf.job_id
        LEFT JOIN job_balance_overrides o ON o.job_id = jf.job_id
@@ -1371,7 +1371,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
     // in Xero / written off — migration 117). Surfaced as a banner on the Money
     // tab; the live HH balance above is still shown (staff source of truth).
     const overrideResult = await query(
-      `SELECT o.reason, o.notes, o.resolved_at, u.name AS resolved_by_name
+      `SELECT o.reason, o.notes, o.resolved_at, (u.first_name || ' ' || u.last_name) AS resolved_by_name
        FROM job_balance_overrides o
        LEFT JOIN users u ON u.id = o.resolved_by
        WHERE o.job_id = $1`,
@@ -1434,7 +1434,7 @@ router.get('/:jobId/payments', async (req: AuthRequest, res: Response) => {
     const { jobId } = req.params;
 
     const result = await query(
-      `SELECT jp.*, u.name AS recorded_by_name
+      `SELECT jp.*, (u.first_name || ' ' || u.last_name) AS recorded_by_name
        FROM job_payments jp
        LEFT JOIN users u ON u.id = jp.recorded_by
        WHERE jp.job_id = $1
