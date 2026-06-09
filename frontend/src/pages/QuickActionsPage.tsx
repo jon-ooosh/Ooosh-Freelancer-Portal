@@ -65,9 +65,12 @@ export default function QuickActionsPage() {
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-slate-900 text-white text-sm px-5 py-3 rounded-full shadow-lg z-50">{toast}</div>
       )}
 
-      {(active === 'package' || active === 'lost') && (
-        <QuickLogSheet kind={active === 'package' ? 'incoming' : 'lost_property'} locations={locations}
-          onClose={() => setActive(null)} onSaved={() => done(active === 'package' ? '✓ Package logged' : '✓ Lost property logged')} />
+      {active === 'package' && (
+        <PackageArrivedSheet locations={locations} onClose={() => setActive(null)} onSaved={() => done('✓ Package logged')} />
+      )}
+      {active === 'lost' && (
+        <QuickLogSheet kind="lost_property" locations={locations}
+          onClose={() => setActive(null)} onSaved={() => done('✓ Lost property logged')} />
       )}
       {active === 'handover' && <HandoverSheet onClose={() => setActive(null)} onSaved={() => done('✓ Marked collected')} />}
     </div>
@@ -105,6 +108,63 @@ async function uploadPhotos(files: FileList | null, onDone: (a: { name: string; 
     }
     onDone(out);
   } catch (e) { onErr(e instanceof Error ? e.message : 'Upload failed'); } finally { setBusy(false); }
+}
+
+// ── Package arrived — search FIRST (receive an expected/known one), then create ──
+// Collapses "is it already on the list?" and "log a new one" into one screen so
+// staff don't flick between pages.
+function PackageArrivedSheet({ locations, onClose, onSaved }: { locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
+  const navigate = useNavigate();
+  const [mode, setMode] = useState<'search' | 'create'>('search');
+  const [q, setQ] = useState('');
+  const [items, setItems] = useState<HeldItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const t = setTimeout(async () => {
+      setLoading(true);
+      try {
+        const qs = new URLSearchParams();
+        if (q.trim()) qs.set('search', q.trim());
+        const r = await api.get<{ data: HeldItem[] }>(`/holding?${qs.toString()}`);
+        setItems(r.data.filter((i) => i.kind === 'incoming' || i.kind === 'temp_storage'));
+      } finally { setLoading(false); }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  if (mode === 'create') {
+    // Reuse the create form; its Cancel returns to search rather than closing.
+    return <QuickLogSheet kind="incoming" locations={locations} onClose={() => setMode('search')} onSaved={onSaved} />;
+  }
+
+  return (
+    <Sheet title="📦 Package arrived" onClose={onClose}>
+      <div className="max-w-md mx-auto">
+        <p className="text-sm text-slate-500 mb-2">Is it already expected? Search by job #, client or description — tap to receive it. If it's not listed, log it as new.</p>
+        <input autoFocus className={inputCls} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search expected deliveries…" />
+        <div className="mt-3 space-y-2">
+          {loading && <p className="text-slate-400 text-sm text-center py-3">Loading…</p>}
+          {!loading && items.length === 0 && <p className="text-slate-400 text-sm text-center py-3">Nothing matching — log it as new below.</p>}
+          {items.map((h) => (
+            <button key={h.id} onClick={() => navigate(`/holding/receipt/${h.id}`)}
+              className="w-full text-left border border-slate-200 rounded-xl px-4 py-3 active:bg-slate-50">
+              <p className="font-medium text-slate-800">{h.description || 'Delivery'}
+                <span className={`ml-2 text-[10px] px-1.5 py-0.5 rounded capitalize ${h.status === 'expected' ? 'bg-amber-100 text-amber-800' : 'bg-blue-100 text-blue-700'}`}>{h.status.replace(/_/g, ' ')}</span></p>
+              <p className="text-xs text-slate-500">
+                {h.owner_person_name || h.owner_organisation_name || h.client_name_text || (h.owner_unknown ? '❓ Unknown' : '—')}
+                {h.hh_job_number ? ` · #${h.hh_job_number}` : ''}{h.box_count ? ` · ${h.box_count} box(es)` : ''}
+              </p>
+            </button>
+          ))}
+        </div>
+        <button onClick={() => setMode('create')}
+          className="w-full mt-4 border-2 border-dashed border-slate-300 rounded-xl py-3 text-slate-600 font-medium">
+          + Not listed — log a new package
+        </button>
+      </div>
+    </Sheet>
+  );
 }
 
 // ── Package arrived / Lost property ─────────────────────────────────────────

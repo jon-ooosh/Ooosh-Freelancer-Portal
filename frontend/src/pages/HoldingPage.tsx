@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
@@ -28,8 +29,23 @@ const STATUS_COLOUR: Record<string, string> = {
 };
 const statusLabel = (s: string) => s.replace(/_/g, ' ');
 const KIND_LABEL: Record<HeldItemKind, string> = {
-  incoming: 'Incoming', temp_storage: 'Temp storage', lost_property: 'Lost property',
+  incoming: 'Delivery', temp_storage: 'Temp storage', lost_property: 'Lost property',
 };
+
+// Inline photo thumbnail — authenticated blob fetch (download endpoint needs the JWT header)
+function PhotoThumb({ photoKey, onOpen }: { photoKey: string; onOpen: () => void }) {
+  const [src, setSrc] = useState('');
+  useEffect(() => {
+    let url = '';
+    api.blob(`/files/download?key=${encodeURIComponent(photoKey)}`)
+      .then(({ blob }) => { url = URL.createObjectURL(blob); setSrc(url); })
+      .catch(() => {});
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [photoKey]);
+  return src
+    ? <img src={src} onClick={onOpen} className="w-20 h-20 object-cover rounded-lg border border-slate-200 cursor-pointer hover:opacity-90" alt="" />
+    : <div className="w-20 h-20 rounded-lg bg-slate-100 animate-pulse" />;
+}
 const FOUND_IN_LABEL: Record<string, string> = {
   van: 'Van', rehearsal: 'Rehearsal room', backline: 'Backline', elsewhere: 'Somewhere else',
 };
@@ -396,10 +412,20 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Client" value={client || (h.owner_unknown ? 'Unknown' : '—')} />
-          <Field label="HireHop job" value={h.hh_job_number ? `#${h.hh_job_number}` : '—'} />
+          <div>
+            <p className="text-xs text-slate-400">HireHop job</p>
+            {h.hh_job_number
+              ? (h.job_id ? <Link to={`/jobs/${h.job_id}`} className="text-ooosh-600 hover:underline">#{h.hh_job_number} →</Link> : <p className="text-slate-800">#{h.hh_job_number}</p>)
+              : <p className="text-slate-800">—</p>}
+          </div>
           {h.kind !== 'lost_property' && <Field label="Boxes" value={h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—')} />}
-          {h.kind === 'incoming' && <Field label="Expected" value={fmtDate(h.expected_date)} />}
-          {h.kind !== 'lost_property' && <Field label="Needed by" value={fmtDate(h.needed_by)} />}
+          {/* Before arrival: show expected / needed-by. After: show the arrival log. */}
+          {h.kind !== 'lost_property' && h.status === 'expected' && <>
+            <Field label="Expected" value={fmtDate(h.expected_date)} />
+            <Field label="Needed by" value={fmtDate(h.needed_by)} />
+          </>}
+          {h.kind !== 'lost_property' && h.status !== 'expected' && h.arrived_at &&
+            <Field label="Arrived" value={`${fmtDate(h.arrived_at)}${h.received_by_name ? ` by ${h.received_by_name}` : ''}`} />}
           {h.kind === 'lost_property' && <Field label="Found in" value={h.found_in ? `${FOUND_IN_LABEL[h.found_in]}${h.found_vehicle_reg ? ` (${h.found_vehicle_reg})` : (h.found_location_text ? ` (${h.found_location_text})` : '')}` : '—'} />}
           {h.kind === 'lost_property' && <Field label="Found date" value={fmtDate(h.found_date)} />}
           <Field label="Location" value={h.storage_location_name || h.storage_location_text || '—'} />
@@ -410,13 +436,10 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
 
         {h.notes && <p className="text-slate-600"><span className="text-xs text-slate-400">Notes: </span>{h.notes}</p>}
 
-        {/* Photos */}
+        {/* Photos — inline thumbnails */}
         {(h.photos || []).length > 0 && (
           <div className="flex flex-wrap gap-2">
-            {h.photos.map((p, idx) => (
-              <button key={idx} onClick={() => viewPhoto(p.url)}
-                className="text-xs bg-slate-100 rounded px-2 py-1 hover:bg-slate-200">📷 {p.name || `Photo ${idx + 1}`}</button>
-            ))}
+            {h.photos.map((p, idx) => <PhotoThumb key={idx} photoKey={p.url} onOpen={() => viewPhoto(p.url)} />)}
           </div>
         )}
 
