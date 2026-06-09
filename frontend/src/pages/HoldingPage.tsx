@@ -464,6 +464,10 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
             )}
             <CollectButton id={id} kind={h.kind} busy={busy} onAction={action} />
             <ShipBackButton id={id} busy={busy} onAction={action} />
+            {h.kind === 'incoming' && h.status === 'expected' && (
+              <button disabled={!!busy} onClick={() => { if (confirm("Mark this as not arriving? It'll drop off the prep checklist.")) action('cancel', async () => { await api.put(`/holding/${id}`, { status: 'cancelled' }); onClose(); }); }}
+                className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">✕ Won't arrive</button>
+            )}
             {h.kind === 'lost_property' && (
               <button disabled={!!busy} onClick={() => action('chase', async () => { await api.post(`/holding/${id}/chase`, {}); setMsg('Chase logged (escalation bumped).'); })}
                 className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs">📨 Log chase (lvl {h.escalation_level})</button>
