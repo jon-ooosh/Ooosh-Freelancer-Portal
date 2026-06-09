@@ -19,6 +19,45 @@ const templates: Record<string, EmailTemplate> = {
 
   // ── Client-facing templates ────────────────────────────────────────────
 
+  merch_form_request: {
+    variant: 'client',
+    preheader: 'Sending items to Ooosh ahead of your hire?',
+    subject: 'Sending us merch / equipment? — {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Sending items to us?</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        If you're sending merch, instruments or equipment to us ahead of
+        <strong>{{jobName}}</strong> (job <strong>#{{jobNumber}}</strong>), please let us know what's
+        coming using the short form below. We'll email you back printable labels to attach to each box —
+        <strong>we can't accept items without a label</strong>.
+      </p>
+      <p style="margin:0 0 24px;">
+        <a href="{{formUrl}}" style="display:inline-block;background-color:#7B5EA7;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:15px;font-weight:600;">Tell us what you're sending →</a>
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">{{message}}</p>
+    `,
+  },
+
+  merch_label: {
+    variant: 'client',
+    preheader: 'Your delivery labels are attached',
+    subject: 'Your Ooosh delivery labels — {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your delivery labels</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Thanks for letting us know. Your labels for <strong>{{jobName}}</strong>
+        (job <strong>#{{jobNumber}}</strong>) are attached as a PDF — please print and attach
+        <strong>one per box</strong> ({{boxCount}} expected). Items received without a label may be
+        delayed or subject to storage charges.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
+        We'll let you know when your items arrive with us.
+      </p>
+    `,
+  },
+
   booking_confirmation: {
     variant: 'client',
     preheader: 'Your booking with Ooosh Tours has been confirmed',
