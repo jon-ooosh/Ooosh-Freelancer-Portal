@@ -3704,7 +3704,7 @@ export default function JobDetailPage() {
                 <h3 className="text-sm font-semibold text-gray-800">📦 Held for Clients</h3>
                 {job.hh_job_number && <SendMerchFormButton jobId={id} hhJobNumber={job.hh_job_number} />}
               </div>
-              <HeldItemsSection entityType="job" entityId={id} bare openOnly emptyHint="Nothing held for this job yet." />
+              <HeldItemsSection entityType="job" entityId={id} bare emptyHint="Nothing held for this job yet." />
               {job.client_id && (
                 <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['lost_property']} bare openOnly hideWhenEmpty
                   heading="🔍 Client also has lost property held" />

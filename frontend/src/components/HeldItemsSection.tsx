@@ -92,7 +92,13 @@ export function HeldItemsSection({
           <div className="space-y-2">{open.map((h) => <Row key={h.id} h={h} context={entityType} />)}</div>
         </div>
       )}
-      {done.length > 0 && (
+      {done.length > 0 && bare && (
+        // Bare (job panel): show resolved inline, greyed — so "given to client" stays visible.
+        <div className={open.length > 0 ? 'mt-2 space-y-2' : 'space-y-2'}>
+          {done.map((h) => <Row key={h.id} h={h} context={entityType} />)}
+        </div>
+      )}
+      {done.length > 0 && !bare && (
         <div className={open.length > 0 ? 'mt-4 pt-4 border-t border-gray-100' : ''}>
           <button type="button" onClick={() => setShowDone((s) => !s)}
             className="w-full flex items-center justify-between text-xs font-semibold uppercase tracking-wide text-green-700 hover:text-green-800">
@@ -109,14 +115,23 @@ export function HeldItemsSection({
 
 function Row({ h, context }: { h: HeldItem; context: string }) {
   const client = h.owner_person_name || h.owner_organisation_name || h.client_name_text;
-  const sub = [
-    h.storage_location_name || h.storage_location_text,
-    context !== 'job' && h.hh_job_number ? `J-${h.hh_job_number}` : null,
-    context === 'job' && client ? client : null,
-    h.kind === 'lost_property' ? `found ${fmtDate(h.found_date)}` : (h.needed_by ? `needed ${fmtDate(h.needed_by)}` : null),
-  ].filter(Boolean).join(' · ');
+  const isTerminal = TERMINAL.has(h.status);
+  // For resolved rows, show the outcome (given/collected/shipped/disposed) rather than location.
+  let outcome: string | null = null;
+  if (h.status === 'given_to_client' || h.status === 'collected') {
+    outcome = `${h.status === 'given_to_client' ? 'Given' : 'Collected'}${h.collected_by ? ` to ${h.collected_by}` : ''}${h.collected_at ? ` · ${fmtDate(h.collected_at)}` : ''}`;
+  } else if (h.status === 'shipped_back') outcome = `Shipped back${h.collected_at ? ` · ${fmtDate(h.collected_at)}` : ''}`;
+  else if (h.status === 'disposed') outcome = 'Disposed';
+  const sub = isTerminal
+    ? outcome
+    : [
+        h.storage_location_name || h.storage_location_text,
+        context !== 'job' && h.hh_job_number ? `J-${h.hh_job_number}` : null,
+        context === 'job' && client ? client : null,
+        h.kind === 'lost_property' ? `found ${fmtDate(h.found_date)}` : (h.needed_by ? `needed ${fmtDate(h.needed_by)}` : null),
+      ].filter(Boolean).join(' · ');
   return (
-    <Link to={viewHref(h)} className="block rounded border border-gray-200 bg-gray-50/40 px-3 py-2 hover:border-ooosh-300 hover:bg-ooosh-50/40">
+    <Link to={viewHref(h)} className={`block rounded border border-gray-200 px-3 py-2 hover:border-ooosh-300 hover:bg-ooosh-50/40 ${isTerminal ? 'bg-gray-50 opacity-60' : 'bg-gray-50/40'}`}>
       <div className="flex items-start gap-2">
         <span className="text-base leading-none mt-0.5">{KIND_EMOJI[h.kind]}</span>
         <div className="min-w-0 flex-1">

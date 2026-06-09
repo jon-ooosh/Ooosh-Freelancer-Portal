@@ -1151,6 +1151,7 @@ export interface HeldItem {
   found_date: string | null;
   notes: string | null;
   created_by: string | null;
+  received_by: string | null;
   created_at: string;
   updated_at: string;
 
@@ -1160,6 +1161,7 @@ export interface HeldItem {
   storage_location_name?: string | null;
   job_name?: string | null;
   found_vehicle_reg?: string | null;
+  received_by_name?: string | null;
 }
 
 // API response wrappers

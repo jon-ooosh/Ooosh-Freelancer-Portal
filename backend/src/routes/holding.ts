@@ -186,13 +186,15 @@ const SELECT_WITH_JOINS = `
          o.name                                    AS owner_organisation_name,
          loc.name                                  AS storage_location_name,
          j.job_name                                AS job_name,
-         fv.reg                                    AS found_vehicle_reg
+         fv.reg                                    AS found_vehicle_reg,
+         (rb.first_name || ' ' || rb.last_name)    AS received_by_name
   FROM held_items h
   LEFT JOIN people p              ON p.id = h.owner_person_id
   LEFT JOIN organisations o       ON o.id = h.owner_organisation_id
   LEFT JOIN held_item_locations loc ON loc.id = h.storage_location_id
   LEFT JOIN jobs j                ON j.id = h.job_id
   LEFT JOIN fleet_vehicles fv     ON fv.id = h.found_vehicle_id
+  LEFT JOIN users rb              ON rb.id = h.received_by
 `;
 
 // ════════════════════════ LOCATIONS (picklist) ════════════════════════
@@ -267,7 +269,8 @@ router.get('/', async (req: AuthRequest, res: Response) => {
   if (owner_unknown === 'true') { sql += ` AND h.owner_unknown = true`; }
   if (include_done !== 'true') { sql += ` AND h.status NOT IN ('collected','given_to_client','shipped_back','disposed','cancelled')`; }
   if (search) {
-    sql += ` AND (h.description ILIKE $${i} OR h.client_name_text ILIKE $${i} OR h.notes ILIKE $${i})`;
+    sql += ` AND (h.description ILIKE $${i} OR h.client_name_text ILIKE $${i} OR h.notes ILIKE $${i}
+                  OR CAST(h.hh_job_number AS TEXT) ILIKE $${i})`;
     params.push(`%${search}%`);
     i++;
   }
@@ -388,6 +391,13 @@ router.put('/:id', validate(createSchema.partial()), async (req: AuthRequest, re
   for (const [k, v] of Object.entries(b)) {
     fields.push(`${k} = $${i++}`);
     params.push(k === 'photos' ? JSON.stringify(v) : v);
+  }
+  // When staff mark a declared/undeclared delivery as arrived/stored, stamp the
+  // arrival clock + who booked it in (only the first time — preserve the original).
+  if (b.status === 'stored' || b.status === 'arrived') {
+    fields.push(`arrived_at = COALESCE(arrived_at, NOW())`);
+    fields.push(`received_by = COALESCE(received_by, $${i++})`);
+    params.push(req.user!.id);
   }
   if (fields.length === 0) { res.status(400).json({ error: 'No fields to update' }); return; }
   params.push(req.params.id);
