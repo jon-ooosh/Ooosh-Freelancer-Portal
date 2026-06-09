@@ -280,19 +280,22 @@ export default function MoneyOverviewPage() {
   const [resolveTarget, setResolveTarget] = useState<BalanceRow | 'bulk' | null>(null);
   const [showResolved, setShowResolved] = useState(false);
   const [toast, setToast] = useState('');
+  // Default view = confirmed-onwards (real money owed / upcoming). Toggle to
+  // include speculative enquiry-stage jobs (new enquiry / quoting / provisional).
+  const [includeSpeculative, setIncludeSpeculative] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const res = await api.get<{ data: OverviewData }>('/money/overview');
+      const res = await api.get<{ data: OverviewData }>(`/money/overview${includeSpeculative ? '?include_speculative=1' : ''}`);
       setData(res.data);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load overview');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [includeSpeculative]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -427,14 +430,22 @@ export default function MoneyOverviewPage() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
         {tab === 'balances' && (
           <>
-            {isAdmin && (
-              <div className="flex justify-end px-4 pt-3">
+            <div className="flex items-center justify-between px-4 pt-3">
+              <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={includeSpeculative}
+                  onChange={(e) => setIncludeSpeculative(e.target.checked)}
+                />
+                Show enquiries / provisional
+              </label>
+              {isAdmin && (
                 <button
                   onClick={() => setResolveTarget('bulk')}
                   className="text-xs text-gray-500 hover:text-ooosh-700 underline"
                 >Bulk resolve old balances…</button>
-              </div>
-            )}
+              )}
+            </div>
             <Table
               columns={balanceColumns}
               empty="No outstanding balances on synced jobs."

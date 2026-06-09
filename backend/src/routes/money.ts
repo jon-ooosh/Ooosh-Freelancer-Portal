@@ -75,8 +75,16 @@ router.use(authenticateFlexible as any);
 //
 // Staff-only (admin/manager) — read of cross-job financials. Registered before
 // the parametrised /:jobId routes (single-segment path, no collision anyway).
-router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
+router.get('/overview', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
   try {
+    // By default the Balances Outstanding list shows only confirmed-onwards jobs
+    // (what we're actually owed / have upcoming). Speculative enquiry-stage jobs
+    // (new_enquiry / quoting / paused / provisional) have a "balance" that isn't
+    // real money owed — excluded unless ?include_speculative=1 (UI toggle).
+    const includeSpeculative = req.query.include_speculative === '1' || req.query.include_speculative === 'true';
+    const speculativeFilter = includeSpeculative
+      ? ''
+      : `AND COALESCE(j.pipeline_status, '') NOT IN ('new_enquiry', 'quoting', 'paused', 'provisional')`;
     // Balances outstanding — anything still owed on a non-dead job, biggest
     // first. Jobs with a business-level balance override (admin flagged the HH
     // balance as settled in Xero / written off / etc.) are split into a separate
@@ -100,6 +108,7 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
        LEFT JOIN people pu ON pu.id = u.person_id
        WHERE jf.balance_outstanding > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
+         ${speculativeFilter}
        ORDER BY jf.balance_outstanding DESC
        LIMIT 400`
     );
