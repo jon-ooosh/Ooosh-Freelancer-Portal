@@ -11,6 +11,8 @@ import { useEffect, useState, ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { EntitySearch } from '../components/holding/EntitySearch';
+import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
 const PURPLE = '#7B5EA7';
@@ -170,13 +172,18 @@ function PackageArrivedSheet({ locations, onClose, onSaved }: { locations: HeldI
 // ── Package arrived / Lost property ─────────────────────────────────────────
 function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming' | 'lost_property'; locations: HeldItemLocation[]; onClose: () => void; onSaved: () => void }) {
   const [f, setF] = useState({
-    description: '', box_count: '', client_name_text: '', owner_unknown: false, hh_job_number: '',
+    description: '', box_count: '', client_name_text: '',
+    owner_organisation_id: null as string | null, org_name: '',
+    owner_person_id: null as string | null, person_name: '',
+    owner_unknown: false, hh_job_number: '',
     found_in: 'van', found_location_text: '', storage_location_id: '', storage_location_text: '', notes: '',
   });
   const [photos, setPhotos] = useState<{ name: string; url: string; type: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+  // After saving lost property we offer to notify the client (§7 / §11).
+  const [savedItem, setSavedItem] = useState<HeldItem | null>(null);
   const GIVEN = '__given__';
   const givenStraight = f.storage_location_id === GIVEN;
   const somewhereElse = locations.find((l) => l.id === f.storage_location_id)?.name === 'Somewhere else';
@@ -184,11 +191,13 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
   async function save() {
     setSaving(true); setErr('');
     try {
-      await api.post('/holding', {
+      const r = await api.post<{ data: HeldItem }>('/holding', {
         kind,
         owner_unknown: f.owner_unknown,
         description: f.description || null,
         box_count: kind === 'incoming' && f.box_count ? Number(f.box_count) : null,
+        owner_organisation_id: f.owner_unknown ? null : f.owner_organisation_id,
+        owner_person_id: f.owner_unknown ? null : f.owner_person_id,
         client_name_text: f.owner_unknown ? null : (f.client_name_text || null),
         hh_job_number: f.hh_job_number ? Number(f.hh_job_number) : null,
         found_in: kind === 'lost_property' ? f.found_in : null,
@@ -199,8 +208,18 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
         notes: f.notes || null,
         photos,
       });
+      // Lost property (not given straight back) → offer to notify the client now.
+      if (kind === 'lost_property' && !givenStraight && r.data) { setSavedItem(r.data); setSaving(false); return; }
       onSaved();
     } catch (e) { setErr(e instanceof Error ? e.message : 'Save failed'); } finally { setSaving(false); }
+  }
+
+  if (savedItem) {
+    return (
+      <NotifyClientModal item={savedItem}
+        onClose={onSaved}
+        onSent={() => onSaved()} />
+    );
   }
 
   return (
@@ -226,18 +245,24 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
           </div>
         )}
 
-        <div>
-          <label className="flex items-center gap-2 text-sm text-slate-600 mb-2">
+        {/* Owner — HireHop job # first; we derive the client from it */}
+        <div className="border border-slate-200 rounded-xl p-3 space-y-3">
+          <label className="flex items-center gap-2 text-sm text-slate-600">
             <input type="checkbox" className="w-5 h-5" checked={f.owner_unknown} onChange={(e) => setF({ ...f, owner_unknown: e.target.checked })} />
             Don't know whose it is (link later)
           </label>
           {!f.owner_unknown && (
-            <input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} placeholder="Client / band name (optional)" />
+            <>
+              <div><label className="block text-sm text-slate-500 mb-1">HireHop job #</label>
+                <input className={inputCls} type="number" inputMode="numeric" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="e.g. 15816" />
+                <p className="text-[11px] text-slate-400 mt-1">Enter the job # and we link the job &amp; client for you. Only fill the boxes below if there's no job.</p>
+              </div>
+              <EntitySearch kind="organisations" label="Client / band" value={f.org_name} compact onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
+              <EntitySearch kind="people" label="Or a person" value={f.person_name} compact onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
+              <input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} placeholder="…or just a name (free text)" />
+            </>
           )}
         </div>
-
-        <div><label className="block text-sm text-slate-500 mb-1">HireHop job # (optional)</label>
-          <input className={inputCls} type="number" inputMode="numeric" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="e.g. 15816" /></div>
 
         <div><label className="block text-sm text-slate-500 mb-1">Where are you putting it?</label>
           <select className={inputCls} value={f.storage_location_id} onChange={(e) => setF({ ...f, storage_location_id: e.target.value })}>

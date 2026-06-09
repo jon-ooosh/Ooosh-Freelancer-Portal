@@ -17,7 +17,8 @@ import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
-import { isR2Configured, uploadToR2 } from '../config/r2';
+import { isR2Configured, uploadToR2, getFromR2 } from '../config/r2';
+import type { Readable } from 'stream';
 import { emailService } from '../services/email-service';
 import { frontendLink } from '../config/app-urls';
 import { buildMerchLabelPdf } from '../services/holding-label-pdf';
@@ -328,6 +329,18 @@ const createSchema = z.object({
 router.post('/', validate(createSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof createSchema>;
 
+  // Smart link: if an HH job number was given but no job_id, resolve the job and
+  // derive the client from it (HH number is the primary field — enter it and we
+  // do the rest). An explicitly-picked owner always wins over the derived one.
+  const jobCtx = await resolveJobContext(b.hh_job_number);
+  const jobId = b.job_id ?? jobCtx.jobId;
+  const ownerGiven = !!(b.owner_organisation_id || b.owner_person_id || b.client_name_text) || b.owner_unknown;
+  const ownerOrgId = b.owner_organisation_id ?? (ownerGiven ? null : jobCtx.clientOrgId);
+  const clientNameText = b.client_name_text ?? ((ownerGiven || ownerOrgId) ? null : jobCtx.clientName);
+  const ownerUnknown = (b.owner_unknown ?? false) && !ownerOrgId && !b.owner_person_id;
+  // needed_by for forward-looking kinds from the job's out_date (unless given)
+  const neededBy = b.needed_by ?? (jobCtx.outDate && (b.kind === 'incoming' || b.kind === 'temp_storage') ? jobCtx.outDate : null);
+
   // Default status by kind: incoming with no arrival = expected, everything else stored
   const status = b.status ?? (b.kind === 'incoming' && !b.received_count ? 'expected' : 'stored');
   // Stamp the receipt/found clock
@@ -351,14 +364,14 @@ router.post('/', validate(createSchema), async (req: AuthRequest, res: Response)
         ${arrivedAt ?? 'NULL'}, ${foundDate ?? 'NULL'}, $28
      ) RETURNING *`,
     [
-      b.kind, status, b.owner_unknown ?? false,
-      b.owner_person_id ?? null, b.owner_organisation_id ?? null, b.client_name_text ?? null,
-      b.job_id ?? null, b.hh_job_number ?? null,
+      b.kind, status, ownerUnknown,
+      b.owner_person_id ?? null, ownerOrgId, clientNameText,
+      jobId, b.hh_job_number ?? null,
       b.description ?? null, b.box_count ?? null, b.received_count ?? null,
       b.condition_notes ?? null, JSON.stringify(b.photos ?? []),
       b.found_in ?? null, b.found_vehicle_id ?? null, b.found_location_text ?? null,
       b.storage_location_id ?? null, b.storage_location_text ?? null, b.storage_room_id ?? null,
-      b.expected_date ?? null, b.import_charge_flag ?? null, b.needed_by ?? null,
+      b.expected_date ?? null, b.import_charge_flag ?? null, neededBy,
       b.chargeable ?? false, b.storage_started_at ?? null, b.charge_notes ?? null,
       b.dispose_after ?? null, b.notes ?? null,
       req.user!.id,
@@ -419,13 +432,14 @@ const linkSchema = z.object({
 router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Response) => {
   const b = req.body as z.infer<typeof linkSchema>;
 
-  // If only an HH job number was supplied, resolve the OP job UUID so the
-  // needed_by deadline derivation (which reads jobs.out_date by id) can fire.
-  let jobId = b.job_id ?? null;
-  if (!jobId && b.hh_job_number) {
-    const j = await query(`SELECT id FROM jobs WHERE hh_job_number = $1`, [b.hh_job_number]);
-    if (j.rows.length > 0) jobId = j.rows[0].id;
-  }
+  // If an HH job number was supplied, resolve the OP job + its client so we can
+  // backfill both the job link and the owner from one entry (HH number first).
+  const jobCtx = await resolveJobContext(b.hh_job_number);
+  const jobId = b.job_id ?? jobCtx.jobId;
+  // An explicitly-picked owner always wins; otherwise derive the org from the job.
+  const ownerGiven = !!(b.owner_organisation_id || b.owner_person_id || b.client_name_text);
+  const ownerOrgId = b.owner_organisation_id ?? (ownerGiven ? null : jobCtx.clientOrgId);
+  const clientNameText = b.client_name_text ?? ((ownerGiven || ownerOrgId) ? null : jobCtx.clientName);
 
   // Resolve the job's out_date so forward-looking kinds get a needed_by deadline
   const result = await query(
@@ -444,7 +458,7 @@ router.post('/:id/link', validate(linkSchema), async (req: AuthRequest, res: Res
         updated_at            = NOW()
      WHERE id = $6 RETURNING *`,
     [
-      b.owner_person_id ?? null, b.owner_organisation_id ?? null, b.client_name_text ?? null,
+      b.owner_person_id ?? null, ownerOrgId, clientNameText,
       jobId, b.hh_job_number ?? null, req.params.id,
     ]
   );
@@ -520,57 +534,146 @@ router.post('/:id/dispose', async (req: AuthRequest, res: Response) => {
   res.json({ data: result.rows[0] });
 });
 
-// Notify the client their items have arrived. Emails the contact captured on
-// the record (or the job's client contacts as a fallback), flips status to
-// client_notified, and reports who got it so the UI can show clear feedback.
-router.post('/:id/notify', async (req: AuthRequest, res: Response) => {
-  const cur = await query(
-    `SELECT h.*, j.job_name, j.hh_job_number AS job_hh
-     FROM held_items h LEFT JOIN jobs j ON j.id = h.job_id WHERE h.id = $1`,
+// Candidate recipients for the notify picker. Pulls from the linked job's
+// contacts (same resolver as hire forms) plus the owner org/person emails and
+// any contact captured on the record — so it works even for jobless lost
+// property. Deduped by email; the frontend renders tickboxes + add-a-new.
+router.get('/:id/notify-contacts', async (req: AuthRequest, res: Response) => {
+  const r = await query(
+    `SELECT h.id, h.job_id, h.contact_email, h.client_name_text,
+            h.owner_organisation_id, h.owner_person_id,
+            o.email AS org_email, o.name AS org_name,
+            p.email AS person_email, (p.first_name || ' ' || p.last_name) AS person_name
+     FROM held_items h
+     LEFT JOIN organisations o ON o.id = h.owner_organisation_id
+     LEFT JOIN people p        ON p.id = h.owner_person_id
+     WHERE h.id = $1`,
     [req.params.id]
   );
+  if (r.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
+  const h = r.rows[0];
+
+  const out: { email: string; name: string; source: string }[] = [];
+  const push = (email: string | null, name: string | null, source: string) => {
+    if (email && email.includes('@')) out.push({ email, name: name || '', source });
+  };
+
+  push(h.contact_email, h.person_name || h.client_name_text, 'record_contact');
+  push(h.person_email, h.person_name, 'owner_person');
+  push(h.org_email, h.org_name, 'owner_org');
+
+  if (h.job_id) {
+    try {
+      const { resolveHireFormContacts } = await import('../services/hire-form-contacts');
+      for (const c of await resolveHireFormContacts(h.job_id)) push(c.email, c.name, c.source);
+    } catch { /* job contacts optional */ }
+  }
+
+  const deduped = out.filter((c, i, a) => a.findIndex((x) => x.email.toLowerCase() === c.email.toLowerCase()) === i);
+  res.json({ data: deduped });
+});
+
+// Notify the client — "your items arrived" (incoming) or "we found lost
+// property" (lost property). Staff pick the recipients (multi-select from the
+// linked job/owner contacts, add-a-new email, or none). When no recipients are
+// supplied we fall back to the auto-resolved single contact (backward compat).
+// Lost-property notifications attach the item photos so the client sees what we
+// found. Flips status to client_notified and reports who got it.
+const notifySchema = z.object({
+  recipients: z.array(z.object({ email: z.string().email(), name: z.string().optional().nullable() })).max(10).optional(),
+  message: z.string().max(2000).optional().nullable(),
+});
+
+router.post('/:id/notify', validate(notifySchema), async (req: AuthRequest, res: Response) => {
+  const body = req.body as z.infer<typeof notifySchema>;
+  const cur = await query(`${SELECT_WITH_JOINS} WHERE h.id = $1`, [req.params.id]);
   if (cur.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   const h = cur.rows[0];
 
-  // Resolve recipient: the contact captured on the record wins; else the job's
-  // client contacts via the shared resolver.
-  let to: string | null = h.contact_email || null;
-  if (!to && h.job_id) {
-    try {
-      const { resolveClientEmailTarget } = await import('../services/money-emails');
-      const target = await resolveClientEmailTarget(h.job_id);
-      to = target?.primaryEmail || null;
-    } catch { /* fall through */ }
+  // Resolve recipients. Explicit list (from the picker) wins; else fall back to
+  // the contact captured on the record, then the job's primary client contact.
+  let recipients: { email: string; name?: string | null }[] = body.recipients ?? [];
+  if (recipients.length === 0) {
+    if (h.contact_email) recipients = [{ email: h.contact_email, name: h.owner_person_name || h.client_name_text }];
+    else if (h.job_id) {
+      try {
+        const { resolveClientEmailTarget } = await import('../services/money-emails');
+        const target = await resolveClientEmailTarget(h.job_id);
+        if (target?.primaryEmail) recipients = [{ email: target.primaryEmail, name: h.owner_person_name || h.client_name_text }];
+      } catch { /* fall through */ }
+    }
+  }
+  // Dedup by email
+  recipients = recipients.filter((r, i, a) => a.findIndex((x) => x.email.toLowerCase() === r.email.toLowerCase()) === i);
+
+  const isLost = h.kind === 'lost_property';
+  const clientName = h.owner_person_name || h.client_name_text || 'there';
+  const jobNumber = String(h.hh_job_number || '');
+
+  // Lost property: attach the item photos so the client sees what we found.
+  let attachments: { filename: string; content: Buffer; contentType: string }[] | undefined;
+  if (isLost && Array.isArray(h.photos) && h.photos.length > 0) {
+    attachments = [];
+    for (const [idx, p] of (h.photos as { name?: string; url: string }[]).slice(0, 5).entries()) {
+      try {
+        const obj = await getFromR2(p.url);
+        const buf = await streamToBuffer(obj.Body as Readable);
+        const ext = (p.name || p.url).split('.').pop()?.toLowerCase() || 'jpg';
+        attachments.push({ filename: p.name || `lost-property-${idx + 1}.${ext}`, content: buf, contentType: ext === 'png' ? 'image/png' : 'image/jpeg' });
+      } catch (err) { console.warn('[holding] notify photo attach failed:', err); }
+    }
   }
 
-  let emailed = false;
-  if (to) {
-    const received = h.received_count ? ` (${h.received_count} item${h.received_count === 1 ? '' : 's'})` : '';
+  const results = await Promise.all(recipients.map(async (r) => {
     try {
-      await emailService.send('holding_received', {
-        to,
-        variables: {
-          clientName: h.owner_person_name || h.client_name_text || 'there',
-          jobName: h.job_name || h.client_name_text || 'your hire',
-          jobNumber: String(h.hh_job_number || h.job_hh || ''),
-          receivedSummary: received,
-        },
-      });
-      emailed = true;
-    } catch (err) { console.warn('[holding] notify email failed:', err); }
-  }
+      if (isLost) {
+        await emailService.send('holding_lost_property_found', {
+          to: r.email,
+          variables: {
+            clientName: r.name || clientName,
+            foundContext: buildFoundContext(h),
+            itemDescription: h.description || '',
+            disposeAfterDate: formatDisposeDate(h),
+            jobNumber,
+            message: body.message || '',
+          },
+          attachments,
+        });
+      } else {
+        const received = h.received_count ? ` (${h.received_count} item${h.received_count === 1 ? '' : 's'})` : '';
+        await emailService.send('holding_received', {
+          to: r.email,
+          variables: {
+            clientName: r.name || clientName,
+            jobName: h.job_name || h.client_name_text || 'your hire',
+            jobNumber,
+            receivedSummary: received,
+          },
+        });
+      }
+      return { email: r.email, success: true };
+    } catch (e) { return { email: r.email, success: false, error: e instanceof Error ? e.message : 'Send failed' }; }
+  }));
 
+  const sent = results.filter((r) => r.success);
+  const emailed = sent.length > 0;
+
+  // Flip to client_notified when we actually emailed someone, or when this was a
+  // plain "mark notified" with no recipients attempted. If sends were attempted
+  // but all failed, leave the status alone so it doesn't read as done.
+  const markNotified = emailed || recipients.length === 0;
   const result = await query(
-    `UPDATE held_items SET status = CASE WHEN status IN ('expected','arrived','stored') THEN 'client_notified' ELSE status END,
+    `UPDATE held_items SET status = CASE WHEN $2 AND status IN ('expected','arrived','stored') THEN 'client_notified' ELSE status END,
         updated_at = NOW() WHERE id = $1 RETURNING *`,
-    [req.params.id]
+    [req.params.id, markNotified]
   );
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
   if (result.rows[0].job_id) {
-    await logToJobTimeline(result.rows[0], req.user!.id, emailed ? `client notified (${to})` : 'marked client notified');
+    const who = sent.map((r) => r.email).join(', ');
+    await logToJobTimeline(result.rows[0], req.user!.id, emailed ? `client notified (${who})` : 'marked client notified');
     await syncMerchRequirementStatus(result.rows[0].job_id);
   }
-  res.json({ data: result.rows[0], emailed, notified_to: emailed ? to : null });
+  res.json({ data: result.rows[0], emailed, sent: sent.length, failed: results.length - sent.length, results });
 });
 
 // Send a chase (from the human-gated review queue). Bumps the escalation level.
@@ -588,6 +691,54 @@ router.post('/:id/chase', async (req: AuthRequest, res: Response) => {
 });
 
 // ════════════════════════ helpers ════════════════════════
+
+/**
+ * Resolve a HireHop job number to its OP job + client. The HH number is the
+ * primary smart field on the capture forms: enter it and we derive the job
+ * link, the client org/name, and the out_date (for needed_by). Returns nulls
+ * when the number doesn't match a synced job (so the raw number is still kept).
+ */
+async function resolveJobContext(hhJobNumber: number | null | undefined): Promise<{
+  jobId: string | null; clientOrgId: string | null; clientName: string | null; outDate: string | null;
+}> {
+  if (!hhJobNumber) return { jobId: null, clientOrgId: null, clientName: null, outDate: null };
+  const j = await query(
+    `SELECT id, client_id, client_name, out_date FROM jobs WHERE hh_job_number = $1`,
+    [hhJobNumber]
+  );
+  if (j.rows.length === 0) return { jobId: null, clientOrgId: null, clientName: null, outDate: null };
+  const r = j.rows[0];
+  return { jobId: r.id, clientOrgId: r.client_id ?? null, clientName: r.client_name ?? null, outDate: r.out_date ?? null };
+}
+
+async function streamToBuffer(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+/**
+ * The "while …" clause for the lost-property found email, derived from where
+ * the item was found. Plain text (the template wraps it in a sentence).
+ */
+function buildFoundContext(h: Record<string, unknown>): string {
+  const reg = (h.found_vehicle_reg as string) || (h.found_location_text as string) || '';
+  switch (h.found_in) {
+    case 'van': return reg ? `checking your hire van ${reg} back in` : 'checking your hire van back in';
+    case 'rehearsal': return 'de-prepping your rehearsal room';
+    case 'backline': return 'checking your backline back in';
+    default: return 'finishing up after your recent hire';
+  }
+}
+
+/** dd/mm/yyyy disposal date — explicit dispose_after, else found_date + 14 days. */
+function formatDisposeDate(h: Record<string, unknown>): string {
+  let d: Date | null = null;
+  if (h.dispose_after) d = new Date(h.dispose_after as string);
+  else if (h.found_date) { d = new Date(h.found_date as string); d.setDate(d.getDate() + 14); }
+  if (!d || isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-GB');
+}
 
 async function logToJobTimeline(item: Record<string, unknown>, userId: string, verb: string): Promise<void> {
   try {

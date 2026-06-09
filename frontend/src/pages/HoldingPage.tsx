@@ -2,6 +2,8 @@ import { useEffect, useState, useCallback, ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
+import { EntitySearch } from '../components/holding/EntitySearch';
+import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -49,50 +51,6 @@ function PhotoThumb({ photoKey, onOpen }: { photoKey: string; onOpen: () => void
 const FOUND_IN_LABEL: Record<string, string> = {
   van: 'Van', rehearsal: 'Rehearsal room', backline: 'Backline', elsewhere: 'Somewhere else',
 };
-
-// ── Reusable entity search (orgs / people) ──────────────────────────────────
-function EntitySearch({ kind, value, label, onPick }: {
-  kind: 'organisations' | 'people'; value: string; label: string;
-  onPick: (id: string | null, name: string) => void;
-}) {
-  const [q, setQ] = useState('');
-  const [results, setResults] = useState<{ id: string; name: string }[]>([]);
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    if (!q.trim()) { setResults([]); return; }
-    const t = setTimeout(async () => {
-      try {
-        const r = await api.get<{ data: Array<Record<string, string>> }>(`/${kind}?search=${encodeURIComponent(q)}&limit=8`);
-        setResults(r.data.map((x) => ({ id: x.id, name: kind === 'people' ? `${x.first_name || ''} ${x.last_name || ''}`.trim() : x.name })));
-        setOpen(true);
-      } catch { /* ignore */ }
-    }, 250);
-    return () => clearTimeout(t);
-  }, [q, kind]);
-  return (
-    <div className="relative">
-      <label className="block text-xs font-medium text-slate-500 mb-1">{label}</label>
-      {value ? (
-        <div className="flex items-center gap-2 border border-slate-300 rounded-lg px-3 py-2 bg-slate-50">
-          <span className="text-sm flex-1">{value}</span>
-          <button type="button" onClick={() => { onPick(null, ''); setQ(''); }} className="text-xs text-red-500">clear</button>
-        </div>
-      ) : (
-        <>
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={`Search ${kind}…`} className={inputCls} />
-          {open && results.length > 0 && (
-            <div className="absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow max-h-48 overflow-y-auto">
-              {results.map((r) => (
-                <button type="button" key={r.id} onClick={() => { onPick(r.id, r.name); setOpen(false); }}
-                  className="block w-full text-left px-3 py-2 text-sm hover:bg-slate-50">{r.name}</button>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
@@ -317,7 +275,7 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
           </div>
         )}
 
-        {/* Owner */}
+        {/* Owner — HireHop job # first; we derive the client from it */}
         <div className="border border-slate-200 rounded-lg p-3 space-y-2">
           <label className="flex items-center gap-2 text-sm text-slate-600">
             <input type="checkbox" checked={f.owner_unknown} onChange={(e) => setF({ ...f, owner_unknown: e.target.checked })} />
@@ -325,10 +283,13 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
           </label>
           {!f.owner_unknown && (
             <>
+              <div><label className="block text-xs text-slate-500 mb-1">HireHop job #</label>
+                <input className={inputCls} type="number" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="e.g. 15816" />
+                <p className="text-[11px] text-slate-400 mt-1">Enter the job number and we'll link the job &amp; client automatically — no need to fill the boxes below unless there's no job (or you want to override).</p>
+              </div>
               <EntitySearch kind="organisations" label="Client / band (organisation)" value={f.org_name} onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
               <EntitySearch kind="people" label="Or a person" value={f.person_name} onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
               <div><label className="block text-xs text-slate-500 mb-1">Or just a name (free text)</label><input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} /></div>
-              <div><label className="block text-xs text-slate-500 mb-1">HireHop job # (optional)</label><input className={inputCls} type="number" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="e.g. 15816" /></div>
             </>
           )}
         </div>
@@ -381,6 +342,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
   const [linkOpen, setLinkOpen] = useState(false);
+  const [notifyOpen, setNotifyOpen] = useState(false);
 
   const load = useCallback(async () => { setH((await api.get<{ data: HeldItem }>(`/holding/${id}`)).data); }, [id]);
   useEffect(() => { load(); }, [load]);
@@ -458,9 +420,9 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
         {/* Actions */}
         {isOpen && (
           <div className="flex flex-wrap gap-2 pt-2 border-t">
-            {(client || h.owner_organisation_name) && (h.status === 'expected' || h.status === 'arrived' || h.status === 'stored') && (
-              <button disabled={!!busy} onClick={() => action('notify', async () => { await api.post(`/holding/${id}/notify`, {}); setMsg('Marked client notified.'); })}
-                className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">✉ Mark client notified</button>
+            {(h.status === 'expected' || h.status === 'arrived' || h.status === 'stored' || h.status === 'client_notified') && (
+              <button disabled={!!busy} onClick={() => setNotifyOpen(true)}
+                className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">✉ Notify client</button>
             )}
             <CollectButton id={id} kind={h.kind} busy={busy} onAction={action} />
             <ShipBackButton id={id} busy={busy} onAction={action} />
@@ -478,6 +440,10 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
           </div>
         )}
       </div>
+      {notifyOpen && (
+        <NotifyClientModal item={h} onClose={() => setNotifyOpen(false)}
+          onSent={(n) => { setNotifyOpen(false); setMsg(n > 0 ? `Sent to ${n} recipient${n === 1 ? '' : 's'}.` : 'Marked notified.'); load(); onChange(); }} />
+      )}
     </Modal>
   );
 }

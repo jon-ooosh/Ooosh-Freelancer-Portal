@@ -35,6 +35,30 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  holding_lost_property_found: {
+    variant: 'client',
+    preheader: 'We found some lost property after your hire',
+    subject: 'Lost property found after your hire{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">We found some lost property</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        While {{foundContext}}, we found some lost property — see the attached photo(s) for details.
+      </p>
+      {{#if itemDescription}}<p style="margin:0 0 16px;padding:12px 14px;background-color:#f8fafc;border-radius:8px;font-size:15px;color:#1e293b;line-height:1.6;"><strong>{{itemDescription}}</strong></p>{{/if}}
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We can hold lost property for up to 14 days{{#if disposeAfterDate}} (until <strong>{{disposeAfterDate}}</strong>){{/if}}, after which it
+        may be disposed of. We're happy to arrange shipping if that's easier — this is usually chargeable.
+      </p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        To sort out collection or shipping, please get in touch as soon as you can:<br>
+        ✉ <a href="mailto:info@oooshtours.co.uk" style="color:#7B5EA7;text-decoration:none;">info@oooshtours.co.uk</a>
+        &nbsp;&nbsp;☎ +44 1273 911382
+      </p>
+      {{#if message}}<p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">{{message}}</p>{{/if}}
+    `,
+  },
+
   merch_form_request: {
     variant: 'client',
     preheader: 'Sending items to Ooosh ahead of your hire?',
