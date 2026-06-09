@@ -5,6 +5,7 @@ import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '..
 import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
 import HeldItemsSection from '../components/HeldItemsSection';
+import SendMerchFormButton from '../components/SendMerchFormButton';
 import TransportCalculator from '../components/TransportCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
@@ -3702,6 +3703,12 @@ export default function JobDetailPage() {
           {job.client_id && (
             <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['lost_property']} openOnly hideWhenEmpty
               heading="🔍 This client has lost property held" />
+          )}
+          {job.hh_job_number && (
+            <div className="bg-white rounded-xl border border-gray-200 px-4 py-3 flex items-center justify-between">
+              <span className="text-sm text-slate-500">Client sending merch or equipment ahead of the hire?</span>
+              <SendMerchFormButton jobId={id || ''} hhJobNumber={job.hh_job_number} />
+            </div>
           )}
 
           <JobPrepChecklist

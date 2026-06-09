@@ -10,17 +10,171 @@
  *
  * See docs/HOLDING-MODULE-SPEC.md.
  */
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
 import { query } from '../config/database';
 import { authenticate, authorize, AuthRequest, STAFF_ROLES } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { logAudit } from '../middleware/audit';
+import { isR2Configured, uploadToR2 } from '../config/r2';
+import { emailService } from '../services/email-service';
+import { frontendLink } from '../config/app-urls';
+import { buildMerchLabelPdf } from '../services/holding-label-pdf';
 
 const router = Router();
 
+const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
+
+// ════════════════════════════════════════════════════════════════════════
+// PUBLIC — inbound merch form (no JWT). MUST be before the staff auth gate.
+// Replaces the JotForm. Client tells us what they're sending; we create the
+// held_item, generate labels, and email them back.
+// ════════════════════════════════════════════════════════════════════════
+
+const publicLimiter = rateLimit({ windowMs: 60_000, max: 20, message: { error: 'Too many requests' }, standardHeaders: true, legacyHeaders: false });
+
+// Light job context so the form can confirm "this is for <client>"
+router.get('/public/job/:hhJobNumber', publicLimiter, async (req: Request, res: Response) => {
+  const n = Number(req.params.hhJobNumber);
+  if (!Number.isFinite(n)) { res.status(400).json({ error: 'Invalid job number' }); return; }
+  const r = await query(`SELECT job_name, client_name FROM jobs WHERE hh_job_number = $1`, [n]);
+  if (r.rows.length === 0) { res.status(404).json({ error: 'not_found' }); return; }
+  res.json({ data: { job_name: r.rows[0].job_name, client_name: r.rows[0].client_name } });
+});
+
+const merchFormSchema = z.object({
+  band_name: z.string().min(1).max(200),
+  hh_job_number: z.number().int().optional().nullable(),
+  box_count: z.number().int().min(1).max(99),
+  expected_date: z.string().optional().nullable(),
+  import_charge_flag: z.enum(['yes', 'no', 'unknown']).optional().nullable(),
+  contact_email: z.string().email(),
+  contact_phone: z.string().optional().nullable(),
+  notes: z.string().optional().nullable(),
+});
+
+router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), async (req: Request, res: Response) => {
+  const b = req.body as z.infer<typeof merchFormSchema>;
+
+  // Resolve the OP job if the HH number matches one we know
+  let jobId: string | null = null;
+  let jobName: string | null = null;
+  if (b.hh_job_number) {
+    const j = await query(`SELECT id, job_name FROM jobs WHERE hh_job_number = $1`, [b.hh_job_number]);
+    if (j.rows.length > 0) { jobId = j.rows[0].id; jobName = j.rows[0].job_name; }
+  }
+
+  const contactLine = [b.contact_email, b.contact_phone].filter(Boolean).join(' · ');
+  const notes = [b.notes, contactLine ? `Contact: ${contactLine}` : null].filter(Boolean).join('\n') || null;
+
+  const ins = await query(
+    `INSERT INTO held_items (
+        kind, status, owner_unknown, client_name_text, job_id, hh_job_number,
+        description, box_count, expected_date, import_charge_flag, needed_by, notes, created_by
+     ) VALUES ('incoming', 'expected', false, $1, $2, $3, $4, $5, $6, $7,
+        CASE WHEN $2::uuid IS NOT NULL THEN (SELECT out_date::date FROM jobs WHERE id = $2::uuid) ELSE NULL END,
+        $8, $9) RETURNING *`,
+    [
+      b.band_name, jobId, b.hh_job_number ?? null,
+      `${b.box_count} box(es) of merch/equipment`, b.box_count,
+      b.expected_date || null, b.import_charge_flag ?? null, notes, SYSTEM_USER_ID,
+    ]
+  );
+  const item = ins.rows[0];
+
+  // Forward-looking: surface on the job prep checklist
+  if (jobId) {
+    try {
+      await query(
+        `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
+        [`📦 Incoming delivery declared via merch form: ${b.box_count} box(es) from ${b.band_name}`, jobId, SYSTEM_USER_ID]
+      );
+      const existing = await query(`SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'merch' AND phase = 'pre_hire'`, [jobId]);
+      if (existing.rows.length === 0) {
+        await query(
+          `INSERT INTO job_requirements (job_id, requirement_type, status, notes, is_auto, source, phase)
+           VALUES ($1, 'merch', 'in_progress', $2, true, 'holding', 'pre_hire')`,
+          [jobId, 'Incoming merch declared via form — load before dispatch']
+        );
+      }
+    } catch (err) { console.warn('[holding] merch-form job side-effects failed:', err); }
+  }
+
+  // Generate labels + email them back to the client (best-effort)
+  let labelEmailed = false;
+  try {
+    const pdf = await buildMerchLabelPdf({ heldItemId: item.id, hhJobNumber: b.hh_job_number ?? null, clientName: b.band_name, boxCount: b.box_count });
+    if (isR2Configured()) {
+      await uploadToR2(`files/holding/labels/${item.id}.pdf`, pdf, 'application/pdf').catch((e) => console.warn('[holding] label R2 upload failed:', e));
+    }
+    await emailService.send('merch_label', {
+      to: b.contact_email,
+      variables: {
+        clientName: b.band_name,
+        jobName: jobName || b.band_name,
+        jobNumber: String(b.hh_job_number || ''),
+        boxCount: String(b.box_count),
+      },
+      attachments: [{ filename: `ooosh-labels-${b.hh_job_number || item.id}.pdf`, content: pdf, contentType: 'application/pdf' }],
+    });
+    labelEmailed = true;
+  } catch (err) { console.warn('[holding] label generation/email failed:', err); }
+
+  res.status(201).json({ data: { id: item.id, label_emailed: labelEmailed } });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// STAFF — everything below requires a staff JWT.
+// ════════════════════════════════════════════════════════════════════════
+
 router.use(authenticate);
 router.use(authorize(...STAFF_ROLES));
+
+// Send the inbound merch-form link to chosen client contacts (client-picker
+// controlled — never a blast). Recipients come from the same picker the hire
+// form uses; the frontend passes the selected ones.
+const sendFormSchema = z.object({
+  hh_job_number: z.number().int(),
+  recipients: z.array(z.object({ email: z.string().email(), name: z.string().optional() })).min(1).max(10),
+  message: z.string().optional().nullable(),
+});
+
+router.post('/send-merch-form', validate(sendFormSchema), async (req: AuthRequest, res: Response) => {
+  const b = req.body as z.infer<typeof sendFormSchema>;
+  const j = await query(`SELECT job_name, client_name FROM jobs WHERE hh_job_number = $1`, [b.hh_job_number]);
+  const jobName = j.rows[0]?.job_name || `Job #${b.hh_job_number}`;
+  const formUrl = frontendLink(`/merch-form?job=${b.hh_job_number}`);
+
+  const results = await Promise.all(b.recipients.map(async (r) => {
+    try {
+      await emailService.send('merch_form_request', {
+        to: r.email,
+        variables: {
+          clientName: r.name || 'there',
+          jobName,
+          jobNumber: String(b.hh_job_number),
+          formUrl,
+          message: b.message || '',
+        },
+      });
+      return { email: r.email, success: true };
+    } catch (e) { return { email: r.email, success: false, error: e instanceof Error ? e.message : 'Send failed' }; }
+  }));
+
+  res.json({ data: { sent: results.filter((r) => r.success).length, failed: results.filter((r) => !r.success).length, results } });
+});
+
+// Re-download / regenerate the label PDF for a held item
+router.get('/:id/label', async (req: AuthRequest, res: Response) => {
+  const r = await query(`SELECT id, hh_job_number, client_name_text, box_count FROM held_items WHERE id = $1`, [req.params.id]);
+  if (r.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
+  const h = r.rows[0];
+  const pdf = await buildMerchLabelPdf({ heldItemId: h.id, hhJobNumber: h.hh_job_number, clientName: h.client_name_text || 'Client', boxCount: h.box_count || 1 });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="ooosh-labels-${h.hh_job_number || h.id}.pdf"`);
+  res.send(pdf);
+});
 
 const TERMINAL = ['collected', 'given_to_client', 'shipped_back', 'disposed', 'cancelled'];
 
