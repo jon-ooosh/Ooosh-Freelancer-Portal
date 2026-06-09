@@ -1143,7 +1143,7 @@ OP is now the staff control surface for the FULL post-collection money loop. Ini
 ##### Global Money Views
 - [x] `/money/excess` — Insurance excess ledger (client balances, all records, drill-down)
 - [x] `/money/overview` — Global financial dashboard (deposits pending, balances outstanding, excess held, pending refunds) — *replaces Stream 6 dashboard widget*. **SHIPPED (Jun 2026).** Data strategy "Option C": money figures cached into a dedicated `job_financials` table (NOT bolted onto `jobs`), populated two ways — (a) write-through whenever the Money tab `/summary` runs for a job (self-heals operationally-live jobs as staff open them), and (b) a nightly 03:00 slow-burn (`services/job-financials-backfill.ts` + `scripts/backfill-job-financials.ts`, drives the live `/summary` endpoint over localhost so there's one computation path — zero drift). Dashboard reads OP only → instant, with a `last_synced_at` freshness stamp. Admin+manager gated, per-row drill-through. Excess Held is split **upcoming vs to-return** (finished-hire backlog), and the table is search + click-to-sort with pipeline-aligned status colours. Excess Held reads the canonical `v_excess_held` view (see below) so it agrees with `/money/excess`.
-- [x] **Balance overrides — "ignore this outstanding balance" (Jun 2026, migration 111).** Business-level resolution of an HH-derived hire balance that the business (via Xero) considers settled. **Staff treat HireHop as truth; the business treats Xero as truth, and they legitimately diverge** — a payment applied in Xero that never fed back to HH, an internal / 100%-discounted job not zeroed in HH, a since-corrected HH↔Xero error still showing in HH, or a plain write-off. The override is a **pure OP annotation — it touches neither HireHop nor Xero.** Storage: dedicated `job_balance_overrides` table (`job_id` PK, `reason`, `notes`, `resolved_by`, `resolved_at`) — deliberately separate from `job_financials` so the financials write-through / nightly backfill can never clobber a business decision. **Reasons:** `xero_settled | internal_discounted | hh_xero_corrected | write_off | other`. **Effect:** resolved jobs drop out of `/money/overview` active Balances Outstanding list + headline total, surfaced in a collapsible "Resolved (N) · £X ignored" section (reason / who / when / Undo). The raw HH-derived figure is preserved (not zeroed). **Per-job Money tab** still shows the live HH balance (staff truth) with a grey "Balance resolved (business adjustment)" banner so staff understand why HH shows money owed; admin can Resolve / Undo from there too. **Endpoints (admin only):** `POST /api/money/:jobId/resolve-balance` (reason+notes, upsert), `DELETE /api/money/:jobId/resolve-balance` (undo), `POST /api/money/balances/bulk-resolve` (`{ job_ids[] }` or `{ finished_before: YYYY-MM-DD }` for the old 2022/2023 backlog sweep). All audit-logged (`resolve_balance` / `unresolve_balance` / `bulk_resolve_balance`). This is the hire-balance sibling of the excess `mark-externally-resolved` action — same "OP knows the figure but the business settled it elsewhere" model.
+- [x] **Balance overrides — "ignore this outstanding balance" (Jun 2026, migration 117).** Business-level resolution of an HH-derived hire balance that the business (via Xero) considers settled. **Staff treat HireHop as truth; the business treats Xero as truth, and they legitimately diverge** — a payment applied in Xero that never fed back to HH, an internal / 100%-discounted job not zeroed in HH, a since-corrected HH↔Xero error still showing in HH, or a plain write-off. The override is a **pure OP annotation — it touches neither HireHop nor Xero.** Storage: dedicated `job_balance_overrides` table (`job_id` PK, `reason`, `notes`, `resolved_by`, `resolved_at`) — deliberately separate from `job_financials` so the financials write-through / nightly backfill can never clobber a business decision. **Reasons:** `xero_settled | internal_discounted | hh_xero_corrected | write_off | other`. **Effect:** resolved jobs drop out of `/money/overview` active Balances Outstanding list + headline total, surfaced in a collapsible "Resolved (N) · £X ignored" section (reason / who / when / Undo). The raw HH-derived figure is preserved (not zeroed). **Per-job Money tab** still shows the live HH balance (staff truth) with a grey "Balance resolved (business adjustment)" banner so staff understand why HH shows money owed; admin can Resolve / Undo from there too. **Endpoints (admin only):** `POST /api/money/:jobId/resolve-balance` (reason+notes, upsert), `DELETE /api/money/:jobId/resolve-balance` (undo), `POST /api/money/balances/bulk-resolve` (`{ job_ids[] }` or `{ finished_before: YYYY-MM-DD }` for the old 2022/2023 backlog sweep). All audit-logged (`resolve_balance` / `unresolve_balance` / `bulk_resolve_balance`). This is the hire-balance sibling of the excess `mark-externally-resolved` action — same "OP knows the figure but the business settled it elsewhere" model.
 - [ ] `/money/payments` — All recorded payments across all jobs (future)
 
 ##### Canonical "excess held" — single source of truth (migration 109, Jun 2026)
@@ -2835,6 +2835,10 @@ Book-out is the canonical moment dates get LOCKED on the assignment. Before book
 Every client-facing email sender resolves recipients in this exact order:
 
 ```
+0. email_routing override   ← per-bucket override (jobs.email_routing JSONB,
+                              migration 107). Only consulted when sender
+                              passes a templateId mapped to a bucket. See
+                              "Email routing (per-bucket overrides)" below.
 1. job_contacts            ← primary = `to`, rest = CC (REPLACES org-level when non-empty)
 2. person_organisation_roles  via client_id OR any job_organisations link
 3. organisations.email     (client org's own column, then any linked org)
@@ -2842,7 +2846,9 @@ Every client-facing email sender resolves recipients in this exact order:
 5. info@oooshtours.co.uk   (safety net, banner injected)
 ```
 
-When `job_contacts` has rows for a job, they ARE the recipient list. The org-level lookup is NOT merged — that's the point of per-job selection ("Sarah's at this org but THIS hire is Tom"). Steps 2-5 only run when the job has zero `job_contacts` rows.
+When `job_contacts` has rows for a job, they ARE the recipient list. The org-level lookup is NOT merged — that's the point of per-job selection ("Sarah's at this org but THIS hire is Tom"). Steps 2-4 only run when the job has zero `job_contacts` rows.
+
+**Round 7 fix (Jun 2026) — emailless primary now routes to info@ rather than org spray.** Pre-round-7, `getJobEmailRecipients` filtered emailless contacts INSIDE the `job_contacts` query, so a primary with no email returned zero rows and was indistinguishable from "no contacts picked." Resolution silently fell through to step 2 and sprayed the whole org's roles list. Live incident: Riverjuke #16007 with Adam Williams (emailless) ticked as primary; the booking-confirmed email went to all four Tour Managers via step 2. **Fixed:** detect `job_contacts` rows FIRST regardless of email. If rows exist but none are reachable → skip steps 2-4 and land on step 5 (info@ fallback with banner). If reachable rows exist, use them (primary if reachable, else first reachable as `to` so a single emailless primary doesn't drop the email entirely). **The UI complement** is an emailless-primary guard on both `JobContactsCard` and the New Enquiry contact picker (emailless contacts still tick as CC, just can't be the star) + a default-primary auto-tick on `JobContactsCard` when the job has no `job_contacts` rows yet AND a clear default exists (org-level primary, or sole reachable candidate). Saves immediately, removes the "tick the only option" friction on single-contact orgs.
 
 **Implementations:**
 - `getJobEmailRecipients` (`services/money-emails.ts`) — used by `resolveClientEmailTarget`, drives payment/excess/cancellation/portal/vehicle/hire-form-auto emails
@@ -2884,6 +2890,66 @@ The picker promote checkbox keys off this — it only renders for selected conta
 - Staff add a contact via the Job Detail UI but the banner doesn't clear → make sure the parent component is wired to refresh on the `onChanged` callback (re-runs `loadJob()` which re-fetches `has_client_email`).
 - New email sender added but recipients are wrong → confirm it routes via `resolveClientEmailTarget` / `getJobEmailRecipients`. Don't write a fresh `SELECT email FROM organisations WHERE id = $client_id` — that bypasses the rule.
 - Future `job_person_roles` work (SPEC §2.3 — Enquirer / Authoriser / Payer / Site Contact / Driver / Booker per-job roles) will extend or replace this. `job_contacts` was the round-1-to-6 stepping stone; the role-keyed routing model is captured in "Future Enhancements".
+
+### Email routing (per-bucket overrides) ✅ SHIPPED Jun 2026
+
+Layered on top of `job_contacts`. The base behaviour ("every client email goes to the primary `job_contact`") is right for ~95% of jobs. For the cases where a specific email category needs to go to a different person — typically invoices to an accountant, hire forms to a tour manager — `jobs.email_routing` (JSONB, migration 107) stores per-bucket recipient arrays that REPLACE the default primary for any template mapped to that bucket.
+
+**Storage:** sparse JSONB on `jobs.email_routing`. Shape: `{ bucket_id: [person_uuid, ...] }`. Empty / absent bucket = "default to primary." Empty array also means default. The endpoint drops empty arrays server-side so the JSONB stays clean.
+
+**Five buckets** (canonical list in `backend/services/email-routing.ts` — frontend mirror in `JobContactsCard`):
+
+| Bucket id | Label | Covers |
+|---|---|---|
+| `bookings_payments` | Bookings & payments | `booking_confirmed_deposit`, `payment_received`, `last_minute_booking`, `job_cancelled_client` |
+| `send_invoice` | Send invoice | **Reserved** — HH/Xero send invoices today, no template currently mapped. Picker shows the slot so a future OP-driven invoice template lands cleanly. |
+| `hire_forms` | Hire forms & driver | `hire_form_request`, `hire_form_chase` |
+| `excess` | Insurance excess | Every active lifecycle template (`excess_payment_confirmed`, `excess_preauth_confirmed`, `excess_preauth_released`, `excess_partial_received`, `excess_reimbursed`, `excess_partially_reimbursed`, `excess_claimed`, `excess_rolled_over_applied`) |
+| `delivery_on_day` | Delivery / on-the-day | `delivery_note`, `collection_confirmation`, `vehicle_checked_in` |
+
+**The full bucket→template map lives in `TEMPLATE_BUCKETS` (`backend/services/email-routing.ts`)** — when adding a new template, decide whether it belongs in a bucket and add it there. Internal/staff/freelancer templates (`referral_alert`, `mid_tour_driver`, `compliance_reminder`, `under_dispatched_warning`, `freelancer_assignment`, `file_resend`, `ooh_return_*`, `hire_form_fallback_alert`, etc.) are deliberately unbucketed — they have their own routing rules.
+
+**Resolution at send time:** `resolveClientEmailTarget(jobId, templateId?)` (`services/money-emails.ts`). When `templateId` is supplied AND mapped to a bucket AND that bucket has UUIDs AND at least one UUID resolves to a person with an email, the override wins — first reachable becomes `to`, the rest are CC. Stale UUIDs (deleted people, emailless people) are silently skipped. If EVERY override UUID is unreachable, falls through to the default path rather than dropping the email (a stale override shouldn't drop comms).
+
+**Callers (already wired):** `sendPaymentEmail`, `sendExcessEmail` (`services/money-emails.ts`), cancellation client email (`routes/cancellations.ts`), portal delivery-note fallback (`routes/portal.ts`), hire-form auto-email fallback (`services/hire-form-auto-email.ts`). Any NEW client-facing template should pass its `templateId` when calling `resolveClientEmailTarget` — otherwise overrides won't apply for that template.
+
+**Known limitation:** the hire-form auto-emailer's primary path uses the broader `resolveHireFormContacts` picker, not `resolveClientEmailTarget`. So an override on the `hire_forms` bucket only takes effect via the info@-fallback branch (when the broad picker finds nothing). Tightening the broad picker to consult the override first is a follow-up.
+
+**UI:** collapsed "Email routing" section on `<JobContactsCard>` with a one-line `All emails → [primary]` summary in the common case. Expanding shows 5 rows of multi-select chip pickers from the ticked contact list — multiple recipients per bucket supported. Hidden when no contacts are ticked. Persists via `PUT /api/pipeline/:jobId/email-routing` (idempotent replace, debounced 400ms). Unknown bucket keys are rejected at the endpoint so a typo doesn't silently land in JSONB.
+
+**Endpoints** (under `/api/pipeline/:jobId`):
+- `GET /email-routing` — returns `{ routing: { bucket_id: [...] } }` (sparse, only populated buckets)
+- `PUT /email-routing` — body `{ routing: { ... } }`, idempotent replace
+
+**Storage cleanup on contact removal:** when staff unticks a contact in `JobContactsCard`, the component drops their UUID from every routing bucket and persists. Without this the JSONB would accumulate stale UUIDs (backend silently skips them, but the UI state stays honest).
+
+### Sanity-check scanners (deferred + de-duped warnings) ✅ SHIPPED Jun 2026
+
+Pattern for safety-net warning emails that previously fired inline and spammed staff. Two live consumers (dispatch + return), both following the same shape — copy the shape if you add a third.
+
+**The pattern:**
+1. The action that USED to fire the inline warning (e.g. book-out PATCH calling `autoDispatchJob`) no longer sends an email. It just performs its core work.
+2. A scheduled scanner runs every 15 min (`cron.schedule('*/15 * * * *', ...)` in `config/scheduler.ts`).
+3. The scanner finds candidates that have been in the "concerning" state for longer than a grace window (long enough that the relevant background sync / desk-side action has had time to land).
+4. For each candidate, **stamp the dedup marker FIRST**, then send the email. Stamp-first is deliberate — a transient send failure shouldn't cause the next 15-min sweep to re-fire. The cost is "one rare email that didn't actually send" vs "duplicate emails on every scan if a template/SMTP issue persists." The latter is the spam pattern we're trying to eliminate.
+5. **Clear the marker on transition out of the "concerning" state**, so a re-entered state can warn afresh.
+
+**Live consumers** (`services/sanity-check-scanner.ts`):
+
+| Scanner | Trigger condition | Grace window | Marker (migration 107) |
+|---|---|---|---|
+| `runDispatchSanityScan` | `pipeline_status='dispatched'` AND `status<5` AND no marker yet | 30 min (one full polling-sync cycle, so cached HH `jobs.status` has refreshed) | `jobs.under_dispatch_warned_at` |
+| `runReturnedBookedOutScan` | `pipeline_status='returned'` AND any `vehicle_hire_assignments` row still `booked_out`/`active` AND no marker yet | 20 min (desk-side check-in time after HH webhook fires Returned) | `jobs.returned_bookedout_warned_at` |
+
+**Marker clears** are wired into `routes/pipeline.ts` (`PATCH /:id/status`) and `routes/webhooks.ts` (HH inbound status changes) — both clear the matching marker when leaving the watched state.
+
+**Why deferred + grace:** the original inline pattern fired the moment the trigger happened, but two real-world facts make that a false-positive generator: (a) the polling sync is every 30 min, so the cached `jobs.status` lags live HireHop by up to that long; (b) the writeback uses `no_webhook=1` (loop prevention), so the action that triggered the warning doesn't refresh the cached copy either. By the time the scanner sweeps after the grace window, both background sync and desk-side action have had time to land — when the warning fires, it's pointing at a real gap.
+
+**Why stamp-first:** the original inline pattern ALSO fired once per (driver, van, job) triple on multi-driver hires — three drivers on one van = three `autoDispatchJob` calls = three warning emails for one logical dispatch. The marker reduces that to one regardless of how many calls the trigger generates. Multi-driver-per-van also drove the separate `vehicle-emails.ts` dedupe-by-vehicle change (see "Returned-bookedout dedupe by vehicle" below).
+
+**Adding a third scanner:** copy the existing two — same shape, new marker column, new grace window. Wire the marker clear into every pipeline_status transition writer. Don't put the email send back inline at the trigger site, even "for the urgent case" — the spam pattern always comes back.
+
+**Returned-bookedout dedupe by vehicle** (`services/vehicle-emails.ts`, `buildAndSendReturnedBookedOutAlert`): per the documented data model, multiple drivers sharing one van = multiple `vehicle_hire_assignments` rows with the SAME `vehicle_id`. The pre-refactor email counted those rows literally, producing "3 van(s) still booked out — RX73TCJ, RX73TCJ, RX73TCJ" for a single multi-driver hire. The replacement groups by `vehicle_id` in SQL and renders each van once, with `(N drivers)` suffix when N > 1. **Any future "count of vans" or "count of things on a job" rendering must dedupe by `vehicle_id` first**, not by row count. The data model puts one row per (driver, van, job).
 
 ## Security
 

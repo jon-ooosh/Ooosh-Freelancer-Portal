@@ -31,7 +31,7 @@ interface FinancialData {
     total_hire_deposits: number;
     total_excess_deposits: number;
     balance_outstanding: number;
-    // Business-level balance override (migration 111) — admin flagged the HH
+    // Business-level balance override (migration 117) — admin flagged the HH
     // balance as settled in Xero / written off. Null when not overridden.
     balance_override?: {
       reason: string; notes: string | null;
@@ -90,7 +90,7 @@ const PAYMENT_METHODS_BASE = [
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
 ];
 
-// Business-level balance-override reasons (migration 111). Mirrors the list on
+// Business-level balance-override reasons (migration 117). Mirrors the list on
 // MoneyOverviewPage — kept local to avoid a cross-file dependency for 5 strings.
 const BALANCE_REASONS = [
   { value: 'xero_settled', label: 'Settled in Xero (not fed back to HireHop)' },
@@ -100,6 +100,25 @@ const BALANCE_REASONS = [
   { value: 'other', label: 'Other' },
 ];
 const BALANCE_REASON_LABEL: Record<string, string> = Object.fromEntries(BALANCE_REASONS.map((r) => [r.value, r.label]));
+
+interface JobCostLite {
+  id: string;
+  supplier_name: string | null;
+  description: string | null;
+  category: string | null;
+  amount_gross: number | null;
+  cost_intent: 'quote_actual' | 'extra' | null;
+  recharge_mode: 'none' | 'full' | 'partial';
+  recharge_amount: number | null;
+  recharged_to_hh_at: string | null;
+}
+interface JobQuoteLite {
+  id: string;
+  freelancer_fee: number | null;
+  freelancer_fee_rounded: number | null;
+  client_fee: number | null;
+  status: string | null;
+}
 
 export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
@@ -142,6 +161,10 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [refundLoading, setRefundLoading] = useState(false);
   const [refundError, setRefundError] = useState('');
   const [refundResult, setRefundResult] = useState<{ stripe_refund_id?: string; hh_push_error?: string | null } | null>(null);
+
+  // Job costs (Cost Capture) — quoted-vs-actual variance + extra/recharge list.
+  const [jobCosts, setJobCosts] = useState<JobCostLite[]>([]);
+  const [jobQuotes, setJobQuotes] = useState<JobQuoteLite[]>([]);
 
   const openRefundModal = (dep: FinancialData['financial']['deposits'][number]) => {
     setRefundingDep(dep);
@@ -278,7 +301,7 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
     }
   }, [jobId]);
 
-  // Business-level balance override (migration 111) — admin marks the HH-derived
+  // Business-level balance override (migration 117) — admin marks the HH-derived
   // balance as settled in Xero / written off. Doesn't touch HireHop or Xero.
   const submitResolveBalance = async () => {
     setBalSaving(true); setBalError('');
@@ -302,6 +325,20 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   };
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Job costs + quotes for the quoted-vs-actual panel. Best-effort, non-blocking.
+  const loadJobCosts = useCallback(async () => {
+    try {
+      const [costsRes, quotesRes] = await Promise.all([
+        api.get<{ data: JobCostLite[] }>(`/costs/by-job/${jobId}`).catch(() => ({ data: [] })),
+        api.get<{ data: JobQuoteLite[] }>(`/quotes?job_id=${jobId}`).catch(() => ({ data: [] })),
+      ]);
+      setJobCosts(costsRes.data || []);
+      setJobQuotes(quotesRes.data || []);
+    } catch { /* non-blocking */ }
+  }, [jobId]);
+
+  useEffect(() => { loadJobCosts(); }, [loadJobCosts]);
 
   // Escape key closes payment modal
   useEffect(() => {
@@ -958,6 +995,9 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
         )}
       </div>
 
+      {/* Job costs vs quotes (Cost Capture) */}
+      <JobCostsPanel costs={jobCosts} quotes={jobQuotes} />
+
       {/* Record Payment Form */}
       {showPaymentForm && (() => {
         // Smart payment options
@@ -1488,6 +1528,100 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             )}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// Quoted-vs-actual variance + extra/recharge breakdown for a job's captured
+// costs. "Quoted (our cost)" sums the job's quote freelancer fees — the
+// expected transport/crew cost. "Actuals" sums the quote_actual costs. Extra
+// costs are listed separately (eligible for client recharge). Hidden when the
+// job has neither costs nor quotes.
+function JobCostsPanel({ costs, quotes }: { costs: JobCostLite[]; quotes: JobQuoteLite[] }) {
+  const m = (n: number) => `£${n.toFixed(2)}`;
+  const num = (n: number | null | undefined) => Number(n || 0);
+
+  if (!costs.length && !quotes.length) return null;
+
+  const liveQuotes = quotes.filter((q) => q.status !== 'cancelled');
+  const quotedCost = liveQuotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
+  const clientQuoted = liveQuotes.reduce((s, q) => s + num(q.client_fee), 0);
+
+  const actualCosts = costs.filter((c) => c.cost_intent === 'quote_actual');
+  const extraCosts = costs.filter((c) => c.cost_intent === 'extra');
+  const unclassified = costs.filter((c) => c.cost_intent == null);
+
+  const actualsTotal = actualCosts.reduce((s, c) => s + num(c.amount_gross), 0);
+  const extraTotal = extraCosts.reduce((s, c) => s + num(c.amount_gross), 0);
+  const unclassifiedTotal = unclassified.reduce((s, c) => s + num(c.amount_gross), 0);
+  const variance = actualsTotal - quotedCost;
+
+  const varianceLabel = quotedCost === 0
+    ? 'No quote to compare against'
+    : variance > 0.005 ? `${m(variance)} over the quote`
+    : variance < -0.005 ? `${m(-variance)} under the quote`
+    : 'On the quote';
+  const varianceColour = quotedCost === 0 ? 'text-gray-500'
+    : variance > 0.005 ? 'text-red-600' : 'text-green-600';
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg p-6 mb-6">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-lg font-semibold text-gray-900">Job Costs</h3>
+        <a href="/money/costs" className="text-sm text-purple-700 hover:underline">Costs hub →</a>
+      </div>
+
+      {/* Quoted vs actual */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+        <div className="rounded-md border border-gray-200 p-3">
+          <div className="text-xs text-gray-500">Expected (from quotes)</div>
+          <div className="text-lg font-semibold text-gray-900">{m(quotedCost)}</div>
+          <div className="text-xs text-gray-400">crew / transport cost</div>
+        </div>
+        <div className="rounded-md border border-gray-200 p-3">
+          <div className="text-xs text-gray-500">Actuals (part of quote)</div>
+          <div className="text-lg font-semibold text-gray-900">{m(actualsTotal)}</div>
+          <div className="text-xs text-gray-400">{actualCosts.length} cost{actualCosts.length === 1 ? '' : 's'}</div>
+        </div>
+        <div className="rounded-md border border-gray-200 p-3">
+          <div className="text-xs text-gray-500">Variance</div>
+          <div className={`text-lg font-semibold ${varianceColour}`}>{varianceLabel}</div>
+        </div>
+      </div>
+      {clientQuoted > 0 && (
+        <p className="text-xs text-gray-400 -mt-2 mb-4">Client quoted {m(clientQuoted)} for transport / crew.</p>
+      )}
+
+      {/* Extra (rechargeable) costs */}
+      {extraCosts.length > 0 && (
+        <div className="border-t border-gray-100 pt-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-gray-700">Extra costs (not in a quote)</span>
+            <span className="text-sm font-semibold text-gray-900">{m(extraTotal)}</span>
+          </div>
+          <ul className="space-y-1">
+            {extraCosts.map((c) => (
+              <li key={c.id} className="flex items-center justify-between text-sm">
+                <span className="text-gray-600 truncate">{c.supplier_name || c.description || c.category || 'Cost'}</span>
+                <span className="flex items-center gap-2">
+                  <span className="text-gray-900">{m(num(c.amount_gross))}</span>
+                  {c.recharge_mode !== 'none' && (
+                    <span className="px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-700">
+                      recharge{c.recharged_to_hh_at ? ' ✓' : ' pending'}
+                    </span>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {unclassified.length > 0 && (
+        <p className="text-xs text-gray-400 mt-3">
+          {unclassified.length} older cost{unclassified.length === 1 ? '' : 's'} ({m(unclassifiedTotal)}) not yet classified as quote/extra — edit them on the Costs hub to include here.
+        </p>
       )}
     </div>
   );

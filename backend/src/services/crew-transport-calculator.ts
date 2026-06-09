@@ -4,6 +4,22 @@
  * Ported from the standalone Ooosh D&C Calculator.
  * Three job types: delivery, collection, crewed
  * Two pricing modes: hourly, dayrate
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * CANONICAL ENGINE — SINGLE SOURCE OF TRUTH.
+ * This file is imported by BOTH the backend (routes/quotes.ts, the save +
+ * HireHop-push path) AND the frontend (components/TransportCalculator.tsx,
+ * the calculator modal display) via the Vite/tsconfig `@calc` alias. The
+ * number the modal shows is computed here, and the number saved + pushed to
+ * HireHop is computed here — so they can never drift.
+ *
+ * RULES for anyone editing this file:
+ *   • Keep it PURE — no Node-only or backend-only imports (it gets bundled
+ *     into the browser). Plain TS + Math/String/Array only.
+ *   • Keep it free of unused locals/params — the frontend typechecks it under
+ *     stricter tsconfig flags (noUnusedLocals / noUnusedParameters) than the
+ *     backend, so an unused var here breaks the frontend build.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 
 export interface CalculatorSettings {
@@ -52,6 +68,11 @@ export interface CalculatorInput {
   travelCost?: number;         // Fare for the public-transport leg(s). Same convention as travelTimeMins.
   dayRateOverride?: number;    // Override freelancer day rate
   clientRateOverride?: number; // Override client charge (per-day in dayrate mode, total in hourly mode)
+  applyMinHours?: boolean;     // Hourly mode: enforce the minimum-hours floor. Defaults to true
+                               // (undefined/null are treated as true) so existing callers are unchanged.
+  oohOverride?: { earlyStartMins: number; lateFinishMins: number } | null;
+                               // Hourly mode: manual out-of-hours override. When set, these values
+                               // replace the auto OOH split derived from arrival/drive time.
   expenses: ExpenseItem[];
 }
 
@@ -165,9 +186,11 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
     jobType, calculationMode, distanceMiles, driveTimeMins, arrivalTime,
     workDurationHrs = 0, numDays = 1, setupExtraHrs = 0, setupPremium = 0,
     travelMethod, travelTimeMins = 0, travelCost = 0,
-    dayRateOverride, clientRateOverride, expenses,
+    dayRateOverride, clientRateOverride, applyMinHours, oohOverride = null, expenses,
   } = input;
 
+  // Min-hours floor is on unless explicitly disabled (undefined/null → on).
+  const enforceMinHours = applyMinHours !== false;
   const setupMins = setupExtraHrs * 60;
 
   // ── Leg model ──
@@ -222,10 +245,21 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
   const finishMins = departureMins + totalEngagedMins;
 
   // ── OOH split ──
-  const { normalMins, oohMins } = calculateOohSplit(
-    departureMins < 0 ? departureMins + 1440 : departureMins,
-    finishMins % 1440
-  );
+  // Manual override (hourly only): caller supplies early-start / late-finish minutes
+  // directly. Otherwise derive the split from the departure/finish times.
+  const overrideEarly = oohOverride && calculationMode !== 'dayrate' ? Math.max(0, oohOverride.earlyStartMins || 0) : null;
+  const overrideLate = oohOverride && calculationMode !== 'dayrate' ? Math.max(0, oohOverride.lateFinishMins || 0) : null;
+  let normalMins: number;
+  let oohMins: number;
+  if (overrideEarly !== null && overrideLate !== null) {
+    oohMins = overrideEarly + overrideLate;
+    normalMins = Math.max(0, totalEngagedMins - oohMins);
+  } else {
+    ({ normalMins, oohMins } = calculateOohSplit(
+      departureMins < 0 ? departureMins + 1440 : departureMins,
+      finishMins % 1440
+    ));
+  }
 
   const normalHours = normalMins / 60;
   const oohHours = oohMins / 60;
@@ -268,7 +302,7 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
     freelancerFee = freelancerNormal + freelancerOoh + setupPremium;
 
     // Enforce minimum hours
-    if (totalHours < settings.min_hours_threshold && totalHours > 0) {
+    if (enforceMinHours && totalHours < settings.min_hours_threshold && totalHours > 0) {
       const minFreelancerFee = settings.min_hours_threshold * settings.freelancer_hourly_day + setupPremium;
       freelancerFee = Math.max(freelancerFee, minFreelancerFee);
     }
@@ -282,7 +316,7 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
       clientChargeLabour = clientNormal + clientOoh;
 
       // Enforce minimum hours for client too
-      if (totalHours < settings.min_hours_threshold && totalHours > 0) {
+      if (enforceMinHours && totalHours < settings.min_hours_threshold && totalHours > 0) {
         const minClientCharge = settings.min_hours_threshold * settings.client_hourly_day;
         clientChargeLabour = Math.max(clientChargeLabour, minClientCharge);
       }
@@ -324,8 +358,12 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
     ourMargin: round2(ourMargin),
     estimatedTimeMinutes: Math.round(totalEngagedMins),
     estimatedTimeHours: round2(totalHours),
-    autoEarlyStartMinutes: Math.round(oohMins > 0 && departureMins < 480 ? 480 - Math.max(departureMins, 0) : 0),
-    autoLateFinishMinutes: Math.round(oohMins > 0 && finishMins > 1380 ? finishMins - 1380 : 0),
+    autoEarlyStartMinutes: overrideEarly !== null
+      ? Math.round(overrideEarly)
+      : Math.round(oohMins > 0 && departureMins < 480 ? 480 - Math.max(departureMins, 0) : 0),
+    autoLateFinishMinutes: overrideLate !== null
+      ? Math.round(overrideLate)
+      : Math.round(oohMins > 0 && finishMins > 1380 ? finishMins - 1380 : 0),
     departureTimeMinutes: Math.round(departureMins < 0 ? departureMins + 1440 : departureMins),
     finishTimeMinutes: Math.round(finishMins % 1440),
     breakdown: {
@@ -350,4 +388,28 @@ export function calculateCosts(input: CalculatorInput, settings: CalculatorSetti
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * Apply crew-count multiplication to a calculated result.
+ * Per-crew costs (labour, fee, total, margin) scale by headcount; fuel /
+ * transport / expenses are accounted for once at the trip level and do not.
+ *
+ * Used by BOTH the backend save path and the frontend display so a multi-crew
+ * quote shows and saves the same figure.
+ */
+export function applyCrewMultiplier(single: CalculatedCosts, crewCount: number): CalculatedCosts {
+  if (crewCount <= 1) return single;
+  const scaledClientRounded = Math.round(single.clientChargeTotalRounded * crewCount);
+  const scaledOurCost = round2(single.ourTotalCost * crewCount);
+  return {
+    ...single,
+    clientChargeLabour: round2(single.clientChargeLabour * crewCount),
+    clientChargeTotal: round2(single.clientChargeTotal * crewCount),
+    clientChargeTotalRounded: scaledClientRounded,
+    freelancerFee: round2(single.freelancerFee * crewCount),
+    freelancerFeeRounded: Math.ceil((single.freelancerFeeRounded * crewCount) / 5) * 5,
+    ourTotalCost: scaledOurCost,
+    ourMargin: round2(scaledClientRounded - scaledOurCost),
+  };
 }

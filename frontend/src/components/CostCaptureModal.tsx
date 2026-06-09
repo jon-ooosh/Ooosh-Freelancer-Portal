@@ -15,7 +15,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
-import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode } from '../../../shared/types';
+import type { Cost, CostType, CostPaymentMethod, CostPaymentStatus, CostRechargeMode, CostIntent } from '../../../shared/types';
 
 interface Props {
   onClose: () => void;
@@ -66,6 +66,8 @@ const PAYMENT_METHOD_GROUPS = Array.from(new Set(PAYMENT_METHODS.map((m) => m.gr
 // Keep in step with BILL_METHODS in backend routes/costs.ts + cost-xero-push.ts.
 const BILL_METHODS: CostPaymentMethod[] = ['not_yet_paid', 'reimburse_me'];
 
+type VatMode = 'vat20' | 'none' | 'manual';
+
 const PAYMENT_STATUSES: { value: CostPaymentStatus; label: string }[] = [
   { value: 'paid', label: 'Paid' },
   { value: 'awaiting_payment', label: 'Awaiting payment' },
@@ -90,7 +92,20 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [amountGross, setAmountGross] = useState(existing?.amount_gross != null ? String(existing.amount_gross) : '');
   const [amountVat, setAmountVat] = useState(existing?.amount_vat != null ? String(existing.amount_vat) : '');
   const [amountNet, setAmountNet] = useState(existing?.amount_net != null ? String(existing.amount_net) : '');
-  const [assumeVat20, setAssumeVat20] = useState(!isEdit);
+  // VAT handling: 20% (auto gross↔net), No VAT (net=gross, vat=0), or Manual
+  // (edit all three). Default driven by category / AI; never assume 20% silently.
+  const inferVatMode = (): VatMode => {
+    if (!isEdit) return 'vat20';
+    const g = Number(existing?.amount_gross || 0);
+    const v = Number(existing?.amount_vat || 0);
+    const n = Number(existing?.amount_net || 0);
+    if (v <= 0 && (n === 0 || Math.abs(n - g) < 0.005)) return 'none';
+    if (n > 0 && Math.abs(v - n * 0.2) < 0.02) return 'vat20';
+    return 'manual';
+  };
+  const [vatMode, setVatMode] = useState<VatMode>(inferVatMode);
+  const [vatTouched, setVatTouched] = useState(isEdit);
+  const [paymentTouched, setPaymentTouched] = useState(isEdit);
   const [description, setDescription] = useState(existing?.description || '');
 
   // Job link (needed to enable recharge). Pre-fill from existing cost or preset.
@@ -107,6 +122,12 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [paymentStatus, setPaymentStatus] = useState<CostPaymentStatus>(existing?.payment_status || 'paid');
   const [rechargeMode, setRechargeMode] = useState<CostRechargeMode>(existing?.recharge_mode || 'none');
   const [rechargeAmount, setRechargeAmount] = useState(existing?.recharge_amount != null ? String(existing.recharge_amount) : '');
+  // Intent: only meaningful when a job is linked. Seed from the existing cost,
+  // inferring for legacy rows (recharge flagged → extra, else part of a quote).
+  const [costIntent, setCostIntent] = useState<CostIntent>(
+    existing?.cost_intent || (existing?.recharge_mode && existing.recharge_mode !== 'none' ? 'extra' : 'quote_actual'),
+  );
+  const [intentTouched, setIntentTouched] = useState(isEdit);
   const [notes, setNotes] = useState(existing?.notes || '');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
@@ -115,6 +136,11 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   const [aiPrefilled, setAiPrefilled] = useState(false);
   const [aiConfidence, setAiConfidence] = useState<'high' | 'medium' | 'low' | null>(null);
   const [receiptIsPdf, setReceiptIsPdf] = useState(false);
+  // AI-spotted job number (suggestion only — staff confirm to link).
+  const [suggestedJobNumber, setSuggestedJobNumber] = useState<string | null>(null);
+  const [linkingSuggestion, setLinkingSuggestion] = useState(false);
+  // Compact quote-vs-actuals summary shown when a job is linked.
+  const [jobSummary, setJobSummary] = useState<{ quotedCost: number; clientQuoted: number; actuals: number; extra: number } | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -145,6 +171,56 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     }, 300);
     return () => clearTimeout(t);
   }, [jobSearch]);
+
+  // When a job is linked, pull its quotes + existing costs to (a) default the
+  // intent — "part of the quote" if the job carries a quote, else "extra" — and
+  // (b) show the compact quoted-vs-actuals comparison so staff can judge whether
+  // a cost is covered by the quote or genuinely above-and-beyond.
+  useEffect(() => {
+    if (!linkedJobId) { setJobSummary(null); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [quotesRes, costsRes] = await Promise.all([
+          api.get<{ data: Array<{ freelancer_fee: number | null; freelancer_fee_rounded: number | null; client_fee: number | null; status: string | null }> }>(`/quotes?job_id=${linkedJobId}`).catch(() => ({ data: [] })),
+          api.get<{ data: Array<{ id: string; amount_gross: number | null; cost_intent: string | null }> }>(`/costs/by-job/${linkedJobId}`).catch(() => ({ data: [] })),
+        ]);
+        if (cancelled) return;
+        const quotes = (quotesRes.data || []).filter((q) => q.status !== 'cancelled');
+        const num = (n: number | null | undefined) => Number(n || 0);
+        const quotedCost = quotes.reduce((s, q) => s + num(q.freelancer_fee_rounded ?? q.freelancer_fee), 0);
+        const clientQuoted = quotes.reduce((s, q) => s + num(q.client_fee), 0);
+        const costs = (costsRes.data || []).filter((c) => c.id !== existing?.id);
+        const actuals = costs.filter((c) => c.cost_intent === 'quote_actual').reduce((s, c) => s + num(c.amount_gross), 0);
+        const extra = costs.filter((c) => c.cost_intent === 'extra').reduce((s, c) => s + num(c.amount_gross), 0);
+        setJobSummary({ quotedCost, clientQuoted, actuals, extra });
+        if (!intentTouched) setCostIntent(quotes.length > 0 ? 'quote_actual' : 'extra');
+      } catch { /* leave defaults */ }
+    })();
+    return () => { cancelled = true; };
+  }, [linkedJobId, intentTouched, existing?.id]);
+
+  // Confirm an AI-spotted job number → resolve it to a real job and link it.
+  async function linkSuggestedJob() {
+    if (!suggestedJobNumber) return;
+    setLinkingSuggestion(true);
+    try {
+      const r = await api.get<{ results: JobSuggestion[] }>(`/search?q=${encodeURIComponent(suggestedJobNumber)}&limit=10`);
+      const job = (r.results || []).find((x) => x.type === 'job'
+        && (x.name?.includes(suggestedJobNumber) || x.subtitle?.includes(suggestedJobNumber)));
+      if (job) {
+        setLinkedJobId(job.id);
+        setLinkedJobLabel(job.name);
+        setSuggestedJobNumber(null);
+      } else {
+        setError(`Couldn't find job #${suggestedJobNumber} — search for it manually below.`);
+      }
+    } catch {
+      setError('Job lookup failed — search for it manually below.');
+    } finally {
+      setLinkingSuggestion(false);
+    }
+  }
 
   // ── Resizable split (md+ only) ───────────────────────────────────────────
   const [leftPct, setLeftPct] = useState<number>(() => Number(localStorage.getItem(SPLIT_KEY)) || 45);
@@ -181,6 +257,32 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     setPaymentStatus(BILL_METHODS.includes(paymentMethod) ? 'awaiting_payment' : 'paid');
   }, [paymentMethod, isEdit]);
 
+  // Category-driven defaults: a freelance crew invoice is usually NOT VAT-bearing
+  // and paid later; most other supplier costs carry 20% VAT and are paid now.
+  // Applied until the user overrides each control (and never in edit mode).
+  useEffect(() => {
+    if (isEdit || !categoryCode) return;
+    const cat = COST_CATEGORIES.find((c) => c.xeroCode === categoryCode);
+    const isFreelance = cat?.costType === 'freelancer_invoice';
+    if (!vatTouched) {
+      const mode: VatMode = isFreelance ? 'none' : 'vat20';
+      setVatMode(mode);
+      const gross = parseFloat(amountGross);
+      if (!isNaN(gross)) {
+        if (mode === 'vat20') {
+          const net = round2(gross / 1.2);
+          setAmountNet(net.toFixed(2));
+          setAmountVat(round2(gross - net).toFixed(2));
+        } else {
+          setAmountNet(gross.toFixed(2));
+          setAmountVat('0.00');
+        }
+      }
+    }
+    if (!paymentTouched) setPaymentMethod(isFreelance ? 'not_yet_paid' : 'cot_card');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categoryCode]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
@@ -198,24 +300,46 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
   // ── Amount handlers ──────────────────────────────────────────────────────
   const onGrossChange = (v: string) => {
     setAmountGross(v);
-    if (assumeVat20 && v !== '') {
-      const gross = parseFloat(v);
-      if (!isNaN(gross)) {
-        const net = round2(gross / 1.2);
-        setAmountNet(net.toFixed(2));
-        setAmountVat(round2(gross - net).toFixed(2));
-      }
+    if (v === '') return;
+    const gross = parseFloat(v);
+    if (isNaN(gross)) return;
+    if (vatMode === 'vat20') {
+      const net = round2(gross / 1.2);
+      setAmountNet(net.toFixed(2));
+      setAmountVat(round2(gross - net).toFixed(2));
+    } else if (vatMode === 'none') {
+      setAmountNet(gross.toFixed(2));
+      setAmountVat('0.00');
     }
   };
   const onNetChange = (v: string) => {
     setAmountNet(v);
-    if (assumeVat20 && v !== '') {
-      const net = parseFloat(v);
-      if (!isNaN(net)) {
-        const vat = round2(net * 0.2);
-        setAmountVat(vat.toFixed(2));
-        setAmountGross(round2(net + vat).toFixed(2));
-      }
+    if (v === '') return;
+    const net = parseFloat(v);
+    if (isNaN(net)) return;
+    if (vatMode === 'vat20') {
+      const vat = round2(net * 0.2);
+      setAmountVat(vat.toFixed(2));
+      setAmountGross(round2(net + vat).toFixed(2));
+    } else if (vatMode === 'none') {
+      setAmountVat('0.00');
+      setAmountGross(net.toFixed(2));
+    }
+  };
+
+  // Recompute amounts when the VAT mode changes (keep gross fixed as the anchor).
+  const applyVatMode = (mode: VatMode) => {
+    setVatMode(mode);
+    setVatTouched(true);
+    const gross = parseFloat(amountGross);
+    if (isNaN(gross)) return;
+    if (mode === 'vat20') {
+      const net = round2(gross / 1.2);
+      setAmountNet(net.toFixed(2));
+      setAmountVat(round2(gross - net).toFixed(2));
+    } else if (mode === 'none') {
+      setAmountNet(gross.toFixed(2));
+      setAmountVat('0.00');
     }
   };
 
@@ -236,6 +360,8 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
           amount_gross: number | null;
           amount_vat: number | null;
           amount_net: number | null;
+          vat_treatment: 'standard' | 'no_vat';
+          job_number: string | null;
           description: string | null;
           category_code: string | null;
           confidence: 'high' | 'medium' | 'low';
@@ -247,12 +373,27 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
       if (ex.cost_date) setCostDate(ex.cost_date);
       if (ex.description) setDescription(ex.description);
       if (ex.category_code) setCategoryCode(ex.category_code);
-      // Amounts: prefer gross (most reliably present on receipts) and let the
-      // existing 20% VAT auto-calc fill net/VAT; if only net came back, drive
-      // from net instead. Both helpers respect assumeVat20.
-      if (ex.amount_gross != null) onGrossChange(String(ex.amount_gross));
-      else if (ex.amount_net != null) onNetChange(String(ex.amount_net));
-      if (ex.amount_vat != null && !assumeVat20) setAmountVat(String(ex.amount_vat));
+      // The document is authoritative on VAT: no VAT shown → No VAT, never an
+      // assumed 20%. Drive the VAT mode from the extraction, then fill amounts.
+      const mode: VatMode = ex.vat_treatment === 'standard' ? 'vat20' : 'none';
+      setVatMode(mode);
+      setVatTouched(true);
+      const gross = ex.amount_gross;
+      if (gross != null) {
+        setAmountGross(String(gross));
+        if (mode === 'vat20') {
+          const net = round2(gross / 1.2);
+          setAmountNet(net.toFixed(2));
+          setAmountVat(round2(gross - net).toFixed(2));
+        } else {
+          setAmountNet(gross.toFixed(2));
+          setAmountVat('0.00');
+        }
+      } else if (ex.amount_net != null) {
+        setAmountNet(String(ex.amount_net));
+      }
+      // Job number is a suggestion only — staff confirm before it links.
+      setSuggestedJobNumber(!linkedJobId && ex.job_number ? ex.job_number.replace(/\D/g, '') || null : null);
       setAiPrefilled(true);
       setAiConfidence(ex.confidence);
     } catch (err) {
@@ -276,7 +417,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
     } catch { setError('Could not open the saved receipt.'); }
   }, [existing]);
 
-  const canRecharge = Boolean(linkedJobId);
+  // Recharge is only possible on a job-linked cost that's flagged "extra" — a
+  // quote_actual cost is already billed via its quote.
+  const canRecharge = Boolean(linkedJobId) && costIntent === 'extra';
 
   async function handleSave() {
     setError('');
@@ -311,6 +454,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         payment_status: paymentStatus,
         recharge_mode: canRecharge ? rechargeMode : 'none',
         recharge_amount: canRecharge && rechargeMode !== 'none' && rechargeAmount ? Number(rechargeAmount) : null,
+        cost_intent: linkedJobId ? costIntent : null,
         receipt_r2_key: receiptKey,
         receipt_filename: receiptName,
         notes: notes || null,
@@ -347,8 +491,9 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
         </div>
 
         <div ref={containerRef} className="flex flex-col md:flex-row flex-1 min-h-0 overflow-y-auto md:overflow-hidden">
-          {/* LEFT: receipt pane */}
-          <div className="px-6 py-4 border-b md:border-b-0 md:border-r border-gray-100 md:overflow-y-auto" style={leftPaneStyle}>
+          {/* LEFT: receipt pane — single scroll: a non-scrolling header over a
+              flex-fill preview area (the PDF/image scrolls inside that area). */}
+          <div className="px-6 py-4 border-b md:border-b-0 md:border-r border-gray-100 flex flex-col md:min-h-0" style={leftPaneStyle}>
             <label className="block text-sm font-medium text-gray-700 mb-2">Receipt</label>
             <input type="file" accept="image/*,application/pdf" className="text-sm mb-3"
               onChange={(e) => {
@@ -356,13 +501,18 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                 setAiPrefilled(false);
                 setAiConfidence(null);
                 setExtractError('');
+                setSuggestedJobNumber(null);
               }} />
             {receiptFile && !isEdit && (
               <div className="mb-3">
                 <button type="button" onClick={extractReceipt} disabled={extracting}
-                  className="w-full px-3 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50">
-                  {extracting ? 'Extracting details…' : '✨ Extract details with AI'}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 text-base font-semibold text-white bg-purple-600 hover:bg-purple-700 rounded-lg shadow-sm ring-1 ring-purple-300 disabled:opacity-50">
+                  <span className="text-lg">✨</span>
+                  {extracting ? 'Reading receipt…' : 'Auto-fill from receipt (AI)'}
                 </button>
+                {!aiPrefilled && !extracting && !extractError && (
+                  <p className="mt-1.5 text-xs text-center text-gray-500">Reads the supplier, amounts, VAT &amp; category for you.</p>
+                )}
                 {aiPrefilled && (
                   <div className={`mt-2 px-3 py-2 text-xs rounded-md border ${
                     aiConfidence === 'high' ? 'bg-green-50 border-green-200 text-green-800'
@@ -372,6 +522,12 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                     Pre-filled from receipt (confidence: <strong>{aiConfidence}</strong>) — please check and correct anything wrong before saving.
                   </div>
                 )}
+                {suggestedJobNumber && !linkedJobId && (
+                  <button type="button" onClick={linkSuggestedJob} disabled={linkingSuggestion}
+                    className="mt-2 w-full px-3 py-2 text-xs text-left rounded-md border border-purple-200 bg-purple-50 text-purple-800 hover:bg-purple-100 disabled:opacity-50">
+                    📎 Looks like <strong>job #{suggestedJobNumber}</strong> on this invoice — {linkingSuggestion ? 'linking…' : 'tap to link it'}
+                  </button>
+                )}
                 {extractError && (
                   <div className="mt-2 px-3 py-2 text-xs bg-red-50 border border-red-200 text-red-700 rounded-md">
                     {extractError}
@@ -379,23 +535,25 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                 )}
               </div>
             )}
-            {receiptPreview && !receiptIsPdf && (
-              <img src={receiptPreview} alt="Receipt preview" onClick={() => window.open(receiptPreview, '_blank')}
-                className="w-full max-h-[60vh] object-contain rounded border border-gray-200 cursor-zoom-in bg-white" />
-            )}
-            {receiptPreview && receiptIsPdf && (
-              <embed src={receiptPreview} type="application/pdf" className="w-full h-[60vh] rounded border border-gray-200" />
-            )}
-            {!receiptFile && existing?.receipt_filename && (
-              <div className="text-sm text-gray-600 flex items-center gap-2">
-                <span>📄 {existing.receipt_filename}</span>
-                <button type="button" onClick={viewExistingReceipt} className="text-purple-700 hover:underline">View</button>
-                <span className="text-gray-400">· choose a file above to replace</span>
-              </div>
-            )}
-            {!receiptFile && !existing?.receipt_filename && (
-              <div className="text-sm text-gray-400 italic">No receipt attached yet — choose a file above.</div>
-            )}
+            <div className="mt-1 md:flex-1 md:min-h-0 md:overflow-auto">
+              {receiptPreview && !receiptIsPdf && (
+                <img src={receiptPreview} alt="Receipt preview" onClick={() => window.open(receiptPreview, '_blank')}
+                  className="w-full max-h-[50vh] md:max-h-none md:h-full object-contain rounded border border-gray-200 cursor-zoom-in bg-white" />
+              )}
+              {receiptPreview && receiptIsPdf && (
+                <embed src={receiptPreview} type="application/pdf" className="w-full h-[50vh] md:h-full rounded border border-gray-200" />
+              )}
+              {!receiptFile && existing?.receipt_filename && (
+                <div className="text-sm text-gray-600 flex items-center gap-2">
+                  <span>📄 {existing.receipt_filename}</span>
+                  <button type="button" onClick={viewExistingReceipt} className="text-purple-700 hover:underline">View</button>
+                  <span className="text-gray-400">· choose a file above to replace</span>
+                </div>
+              )}
+              {!receiptFile && !existing?.receipt_filename && (
+                <div className="text-sm text-gray-400 italic">No receipt attached yet — choose a file above.</div>
+              )}
+            </div>
           </div>
 
           {/* Draggable divider (md+ only) */}
@@ -440,12 +598,22 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             </div>
 
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
                 <span className="text-sm font-medium text-gray-700">Amounts</span>
-                <label className="flex items-center gap-1.5 text-xs text-gray-600">
-                  <input type="checkbox" checked={assumeVat20} onChange={(e) => setAssumeVat20(e.target.checked)} />
-                  Auto 20% VAT
-                </label>
+                <div className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs">
+                  {([
+                    { v: 'vat20' as VatMode, label: '20% VAT' },
+                    { v: 'none' as VatMode, label: 'No VAT' },
+                    { v: 'manual' as VatMode, label: 'Manual' },
+                  ]).map((o, i) => (
+                    <button key={o.v} type="button" onClick={() => applyVatMode(o.v)}
+                      className={`px-2.5 py-1 ${i > 0 ? 'border-l border-gray-300' : ''} ${
+                        vatMode === o.v ? 'bg-purple-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+                      }`}>
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
@@ -454,15 +622,18 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">VAT (£)</label>
-                  <input type="number" step="0.01" min="0" className={`${inputCls} ${assumeVat20 ? 'bg-gray-100' : ''}`}
-                    value={amountVat} onChange={(e) => setAmountVat(e.target.value)} disabled={assumeVat20} />
+                  <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode !== 'manual' ? 'bg-gray-100' : ''}`}
+                    value={amountVat} onChange={(e) => setAmountVat(e.target.value)} disabled={vatMode !== 'manual'} />
                 </div>
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">Net (£)</label>
-                  <input type="number" step="0.01" min="0" className={inputCls} value={amountNet} onChange={(e) => onNetChange(e.target.value)} />
+                  <input type="number" step="0.01" min="0" className={`${inputCls} ${vatMode === 'none' ? 'bg-gray-100' : ''}`}
+                    value={amountNet} onChange={(e) => onNetChange(e.target.value)} disabled={vatMode === 'none'} />
                 </div>
               </div>
-              {assumeVat20 && <p className="text-xs text-gray-400 mt-1">Enter gross or net — the other two fill in. Untick to edit all three.</p>}
+              {vatMode === 'vat20' && <p className="text-xs text-gray-400 mt-1">20% VAT — enter gross or net, the other two fill in.</p>}
+              {vatMode === 'none' && <p className="text-xs text-gray-400 mt-1">No VAT (e.g. a non-VAT-registered freelancer) — gross = net, no VAT reclaimed.</p>}
+              {vatMode === 'manual' && <p className="text-xs text-gray-400 mt-1">Manual — enter all three figures exactly as shown on the receipt.</p>}
             </div>
 
             <div>
@@ -513,6 +684,15 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
               )}
             </div>
 
+            {linkedJobId && jobSummary && (jobSummary.clientQuoted > 0 || jobSummary.quotedCost > 0 || jobSummary.actuals > 0 || jobSummary.extra > 0) && (
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 space-y-0.5">
+                <div className="font-medium text-gray-700">This job so far</div>
+                {jobSummary.clientQuoted > 0 && <div>Quoted to client: <strong>£{jobSummary.clientQuoted.toFixed(2)}</strong>{jobSummary.quotedCost > 0 && <span className="text-gray-400"> (our cost est. £{jobSummary.quotedCost.toFixed(2)})</span>}</div>}
+                <div>Costs logged against the quote: <strong>£{jobSummary.actuals.toFixed(2)}</strong>{jobSummary.extra > 0 && <span> · extras: <strong>£{jobSummary.extra.toFixed(2)}</strong></span>}</div>
+                <div className="text-gray-400">Use this to decide if this cost is covered by the quote (Part of the quote) or above-and-beyond (Extra).</div>
+              </div>
+            )}
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">What's this cost for?</label>
               <select className={inputCls} value={categoryCode} onChange={(e) => setCategoryCode(e.target.value)}>
@@ -530,7 +710,7 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Payment method</label>
-                <select className={inputCls} value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value as CostPaymentMethod)}>
+                <select className={inputCls} value={paymentMethod} onChange={(e) => { setPaymentMethod(e.target.value as CostPaymentMethod); setPaymentTouched(true); }}>
                   {PAYMENT_METHOD_GROUPS.map((g) => (
                     <optgroup key={g} label={g}>
                       {PAYMENT_METHODS.filter((m) => m.group === g).map((m) => (
@@ -551,6 +731,33 @@ export default function CostCaptureModal({ onClose, onSaved, existing, presetJob
             {paymentMethod === 'cot_card' && !user?.cot_card_last4 && (
               <p className="text-xs text-gray-500 italic">
                 Set your COT card last 4 in Profile to enable Xero reconciliation matching.
+              </p>
+            )}
+
+            {linkedJobId && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Is this part of a quote?</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { v: 'quote_actual' as CostIntent, label: 'Part of the quote', sub: "Actual against the job's quote — not recharged" },
+                    { v: 'extra' as CostIntent, label: 'Extra', sub: 'Above-and-beyond — can recharge the client' },
+                  ]).map((o) => (
+                    <button key={o.v} type="button"
+                      onClick={() => { setCostIntent(o.v); setIntentTouched(true); }}
+                      className={`text-left px-3 py-2 rounded-md border text-sm ${
+                        costIntent === o.v ? 'border-purple-500 bg-purple-50 ring-1 ring-purple-500' : 'border-gray-300 hover:bg-gray-50'
+                      }`}>
+                      <div className="font-medium text-gray-800">{o.label}</div>
+                      <div className="text-xs text-gray-500">{o.sub}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {linkedJobId && costIntent === 'quote_actual' && (
+              <p className="text-xs text-gray-500 italic">
+                Already billed to the client via the quote — no recharge. It'll show as an actual against the job on the Money tab.
               </p>
             )}
 

@@ -4,6 +4,8 @@ import { api } from '../services/api';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ActivityTimeline from '../components/ActivityTimeline';
 import JobProblemsPanel from '../components/JobProblemsPanel';
+import HeldItemsSection from '../components/HeldItemsSection';
+import SendMerchFormButton from '../components/SendMerchFormButton';
 import TransportCalculator from '../components/TransportCalculator';
 import RequirementCard from '../components/RequirementCard';
 import type { JobRequirement } from '../components/RequirementCard';
@@ -3693,6 +3695,22 @@ export default function JobDetailPage() {
               broken / dispute / other tracking. Hidden when empty so it
               doesn't clutter clean jobs; "+ Log Problem" button sits inside. */}
           {id && <JobProblemsPanel jobId={id} />}
+
+          {/* Holding — one panel: items held for this job, a lost-property nudge,
+              and the "send merch form" action. */}
+          {id && (
+            <div className="bg-white rounded-xl border border-gray-200 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold text-gray-800">📦 Held for Clients</h3>
+                {job.hh_job_number && <SendMerchFormButton jobId={id} hhJobNumber={job.hh_job_number} />}
+              </div>
+              <HeldItemsSection entityType="job" entityId={id} bare emptyHint="Nothing held for this job yet." />
+              {job.client_id && (
+                <HeldItemsSection entityType="organisation" entityId={job.client_id} kinds={['lost_property']} bare openOnly hideWhenEmpty
+                  heading="🔍 Client also has lost property held" />
+              )}
+            </div>
+          )}
 
           <JobPrepChecklist
             key={prepChecklistKey}

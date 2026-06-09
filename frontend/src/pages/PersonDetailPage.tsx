@@ -8,6 +8,7 @@ import FileUpload from '../components/FileUpload';
 import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import HireHistoryTab from '../components/HireHistoryTab';
+import HeldItemsSection from '../components/HeldItemsSection';
 import { PERSON_ORG_ROLES } from '@shared/index';
 
 interface FileAttachment {
@@ -90,7 +91,7 @@ export default function PersonDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess'>('timeline');
+  const [activeTab, setActiveTab] = useState<'timeline' | 'hire_history' | 'details' | 'relationships' | 'excess' | 'held'>('timeline');
 
   // Edit panel
   const [showEdit, setShowEdit] = useState(false);
@@ -114,6 +115,12 @@ export default function PersonDetailPage() {
   const [repointSelectedOrg, setRepointSelectedOrg] = useState<{ id: string; name: string } | null>(null);
   const [repointRole, setRepointRole] = useState('');
   const [endingSaving, setEndingSaving] = useState(false);
+
+  // Edit role in place
+  const [editingRoleId, setEditingRoleId] = useState<string | null>(null);
+  const [editRole, setEditRole] = useState('');
+  const [editIsPrimary, setEditIsPrimary] = useState(false);
+  const [editSaving, setEditSaving] = useState(false);
 
   useEffect(() => {
     if (id) {
@@ -178,6 +185,29 @@ export default function PersonDetailPage() {
       console.error('Failed to add role:', err);
     } finally {
       setRoleSubmitting(false);
+    }
+  }
+
+  function startEditRole(org: { id: string; role: string; is_primary?: boolean }) {
+    setEditingRoleId(org.id);
+    setEditRole(org.role);
+    setEditIsPrimary(!!org.is_primary);
+  }
+
+  async function handleEditRole(roleId: string) {
+    if (!editRole.trim() || editSaving) return;
+    setEditSaving(true);
+    try {
+      await api.patch(`/people/${id}/roles/${roleId}`, {
+        role: editRole.trim(),
+        is_primary: editIsPrimary,
+      });
+      setEditingRoleId(null);
+      loadPerson();
+    } catch (err) {
+      console.error('Failed to edit role:', err);
+    } finally {
+      setEditSaving(false);
     }
   }
 
@@ -312,6 +342,22 @@ export default function PersonDetailPage() {
               </span>
             )}
             <button
+              onClick={() => {
+                // Client on an enquiry is always an organisation. Pre-fill the
+                // person's primary (or first) linked org and tick them as the
+                // contact. No org → open the picker plainly.
+                const primaryOrg = activeOrgs.find(o => o.is_primary) || activeOrgs[0];
+                if (primaryOrg) {
+                  navigate(`/pipeline?newEnquiry=1&client=${primaryOrg.organisation_id}&contact=${person.id}`);
+                } else {
+                  navigate('/pipeline?newEnquiry=1');
+                }
+              }}
+              className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 transition-colors"
+            >
+              + New Enquiry
+            </button>
+            <button
               onClick={() => setShowEdit(true)}
               className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
             >
@@ -427,12 +473,13 @@ export default function PersonDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['timeline', 'hire_history', 'details', 'relationships', 'excess'] as const).map((tab) => {
+          {(['timeline', 'hire_history', 'details', 'relationships', 'excess', 'held'] as const).map((tab) => {
             const totalOrgs = (person.organisations || []).length;
             const label = tab === 'timeline' ? 'Activity Timeline'
               : tab === 'hire_history' ? 'Hire History'
               : tab === 'details' ? 'Details'
               : tab === 'excess' ? 'Excess History'
+              : tab === 'held' ? 'Held Items'
               : `Relationships${totalOrgs ? ` (${totalOrgs})` : ''}`;
             return (
               <button
@@ -680,26 +727,75 @@ export default function PersonDetailPage() {
                 {activeOrgs.map((org) => (
                   <div
                     key={org.id}
-                    className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 flex items-center justify-between"
+                    className="bg-white rounded-xl shadow-sm border border-gray-200 p-4"
                   >
-                    <Link to={`/organisations/${org.organisation_id}`} className="flex-1 hover:text-ooosh-600">
-                      <span className="font-medium text-gray-900">{org.organisation_name}</span>
-                      <span className="ml-2 text-sm text-gray-500">{org.role}</span>
-                      {org.is_primary && (
-                        <span className="ml-2 text-xs bg-ooosh-100 text-ooosh-700 px-2 py-0.5 rounded-full">Primary</span>
-                      )}
-                    </Link>
-                    <div className="flex items-center gap-2">
-                      {org.start_date && (
-                        <span className="text-xs text-gray-400">Since {formatDate(org.start_date)}</span>
-                      )}
-                      <button
-                        onClick={() => { setEndingRoleId(org.id); setEndReason(''); setEndRepoint(false); setRepointSelectedOrg(null); setRepointRole(''); }}
-                        className="text-xs text-red-500 hover:text-red-700 px-2 py-1 border border-red-200 rounded hover:bg-red-50"
-                      >
-                        End
-                      </button>
-                    </div>
+                    {editingRoleId === org.id ? (
+                      <div className="space-y-3">
+                        <div className="font-medium text-gray-900">{org.organisation_name}</div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 uppercase mb-1">Role / Title</label>
+                          <select
+                            value={editRole}
+                            onChange={e => setEditRole(e.target.value)}
+                            className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                          >
+                            <option value="">Select a role...</option>
+                            {PERSON_ORG_ROLES.map(r => (
+                              <option key={r} value={r}>{r}</option>
+                            ))}
+                            {editRole && !PERSON_ORG_ROLES.includes(editRole) && (
+                              <option value={editRole}>{editRole}</option>
+                            )}
+                          </select>
+                        </div>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={editIsPrimary}
+                            onChange={e => setEditIsPrimary(e.target.checked)}
+                            className="rounded border-gray-300 text-ooosh-600 focus:ring-ooosh-500"
+                          />
+                          <span className="text-sm text-gray-700">Primary organisation</span>
+                        </label>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleEditRole(org.id)}
+                            disabled={!editRole.trim() || editSaving}
+                            className="bg-ooosh-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-ooosh-700 transition-colors disabled:opacity-50"
+                          >
+                            {editSaving ? 'Saving...' : 'Save'}
+                          </button>
+                          <button onClick={() => setEditingRoleId(null)} className="px-4 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50">Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between">
+                        <Link to={`/organisations/${org.organisation_id}`} className="flex-1 hover:text-ooosh-600">
+                          <span className="font-medium text-gray-900">{org.organisation_name}</span>
+                          <span className="ml-2 text-sm text-gray-500">{org.role}</span>
+                          {org.is_primary && (
+                            <span className="ml-2 text-xs bg-ooosh-100 text-ooosh-700 px-2 py-0.5 rounded-full">Primary</span>
+                          )}
+                        </Link>
+                        <div className="flex items-center gap-2">
+                          {org.start_date && (
+                            <span className="text-xs text-gray-400">Since {formatDate(org.start_date)}</span>
+                          )}
+                          <button
+                            onClick={() => startEditRole(org)}
+                            className="text-xs text-gray-500 hover:text-ooosh-700 px-2 py-1 border border-gray-200 rounded hover:bg-gray-50"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => { setEndingRoleId(org.id); setEndReason(''); setEndRepoint(false); setRepointSelectedOrg(null); setRepointRole(''); }}
+                            className="text-xs text-red-500 hover:text-red-700 px-2 py-1 border border-red-200 rounded hover:bg-red-50"
+                          >
+                            End
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -850,6 +946,10 @@ export default function PersonDetailPage() {
       {/* Excess History Tab */}
       {activeTab === 'excess' && id && (
         <ExcessHistorySection entityType="person" entityId={id} />
+      )}
+
+      {activeTab === 'held' && id && (
+        <HeldItemsSection entityType="person" entityId={id} />
       )}
 
       {/* Edit Panel */}

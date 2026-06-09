@@ -789,11 +789,19 @@ export interface SendBriefingResult {
  * @param recipient   — defaults to PRE_HIRE_BRIEFING_RECIPIENT env or info@
  * @param triggeredBy — optional UUID of the staff user who clicked manually;
  *                       null/undefined = scheduler / system attribution.
+ * @param triggerReason — which dedup marker to stamp on success. 'urgent'
+ *                       stamps pre_hire_urgent_sent_at; everything else
+ *                       ('manual' | 'standard' | 'transport_early' | undefined)
+ *                       stamps pre_hire_review_sent_at. The scheduler's
+ *                       eligibility check reads these so a job's standard
+ *                       review fires at most once (manual counts), while the
+ *                       <=1-day urgent nudge can still fire once on top.
  */
 export async function sendBriefingEmail(
   jobId: string,
   recipient?: string,
   triggeredBy?: string | null,
+  triggerReason?: 'manual' | 'standard' | 'transport_early' | 'urgent',
 ): Promise<SendBriefingResult> {
   const briefing = await buildBriefing(jobId);
   if (!briefing) {
@@ -829,6 +837,19 @@ export async function sendBriefingEmail(
     );
   } catch (err) {
     console.warn(`[pre-hire-briefing] interaction log failed for job ${jobId}:`, err);
+  }
+
+  // Stamp the persistent dedup marker so the scheduler doesn't re-fire.
+  // 'urgent' is tracked separately so it can still fire once after a
+  // standard/manual review. Best-effort, but log loudly — a missed marker
+  // write is what lets a duplicate through tomorrow.
+  try {
+    const column = triggerReason === 'urgent'
+      ? 'pre_hire_urgent_sent_at'
+      : 'pre_hire_review_sent_at';
+    await query(`UPDATE jobs SET ${column} = NOW() WHERE id = $1`, [jobId]);
+  } catch (err) {
+    console.error(`[pre-hire-briefing] failed to stamp dedup marker for job ${jobId}:`, err);
   }
 
   return {
@@ -912,8 +933,15 @@ export interface EligibleJob {
  *   - 5 days to out_date AND has D&C quote or crew (transport-heavy / earlier)
  *   - 1 day to out_date AND any hire form missing (urgent)
  *
- * Each job is sent at most once per day (we let the email_log dedupe at the
- * scheduler level — if a job already received a briefing today we skip it).
+ * Dedup is persistent (migration 111), not per-day:
+ *   - The standard/transport_early triggers are skipped once
+ *     pre_hire_review_sent_at is set (a manual send stamps this too, so a
+ *     manual review suppresses the auto 5-day/3-day sends).
+ *   - The urgent trigger is skipped once pre_hire_urgent_sent_at is set, but
+ *     is allowed to fire even after a standard/manual review — it's the
+ *     important last-chance nudge.
+ * The scheduler keeps a same-day email_log check as a cheap backstop against
+ * a marker-write failure coinciding with a same-day cron restart.
  */
 export async function findEligibleJobs(): Promise<EligibleJob[]> {
   // Pull confirmed jobs starting in the next 5 days. Frontend baseUrl
@@ -921,6 +949,7 @@ export async function findEligibleJobs(): Promise<EligibleJob[]> {
   const result = await query(
     `SELECT j.id, j.hh_job_number, j.job_name, j.client_name, j.company_name,
             j.out_date, j.job_date,
+            j.pre_hire_review_sent_at, j.pre_hire_urgent_sent_at,
             COALESCE(j.out_date::date, j.job_date::date) AS effective_date,
             (COALESCE(j.out_date::date, j.job_date::date) - CURRENT_DATE) AS days_to_out,
             EXISTS(
@@ -957,13 +986,21 @@ export async function findEligibleJobs(): Promise<EligibleJob[]> {
     const days_to_out = parseInt(((row.days_to_out as number | string) || '0').toString(), 10);
     const is_transport_heavy = (row.has_transport_quote as boolean) || (row.has_crew as boolean);
     const has_unsigned_driver = (row.has_unsigned_driver as boolean);
+    const reviewSent = !!row.pre_hire_review_sent_at;
+    const urgentSent = !!row.pre_hire_urgent_sent_at;
 
+    // Persistent dedup: a standard/transport_early review fires at most once
+    // (manual send stamps the same marker); the urgent nudge fires at most
+    // once but is independent of the standard marker.
     let trigger: EligibleJob['trigger_reason'] | null = null;
     if (days_to_out <= 1 && has_unsigned_driver) {
+      if (urgentSent) continue;
       trigger = 'urgent';
     } else if (days_to_out === 3) {
+      if (reviewSent) continue;
       trigger = 'standard';
     } else if (days_to_out === 5 && is_transport_heavy) {
+      if (reviewSent) continue;
       trigger = 'transport_early';
     }
     if (!trigger) continue;

@@ -1103,6 +1103,40 @@ router.get('/:id/suggestions', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// GET /api/organisations/:id/relationship-suggestions
+// "Quick associate" cheap win: orgs connected to this one through a shared
+// person (via person_organisation_roles) that aren't ALREADY directly related.
+// Distinct from /:id/suggestions, which returns orgs already in a relationship.
+router.get('/:id/relationship-suggestions', async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await query(
+      `SELECT DISTINCT o.id, o.name, o.type,
+              p.first_name || ' ' || p.last_name AS via_person
+       FROM person_organisation_roles por1
+       JOIN person_organisation_roles por2
+         ON por2.person_id = por1.person_id
+        AND por2.organisation_id <> por1.organisation_id
+       JOIN organisations o ON o.id = por2.organisation_id AND o.is_deleted = false
+       JOIN people p ON p.id = por1.person_id AND p.is_deleted = false
+       WHERE por1.organisation_id = $1
+         AND por1.status = 'active'
+         AND por2.status = 'active'
+         AND o.id NOT IN (
+           SELECT CASE WHEN r.from_org_id = $1 THEN r.to_org_id ELSE r.from_org_id END
+           FROM organisation_relationships r
+           WHERE (r.from_org_id = $1 OR r.to_org_id = $1) AND r.status = 'active'
+         )
+       ORDER BY o.name
+       LIMIT 8`,
+      [req.params.id]
+    );
+    res.json({ data: result.rows });
+  } catch (error) {
+    console.error('Get relationship suggestions error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/organisations/:id/do-not-hire — Toggle do-not-hire flag
 router.post('/:id/do-not-hire', authorize('admin', 'manager'), async (req: AuthRequest, res: Response) => {
   try {

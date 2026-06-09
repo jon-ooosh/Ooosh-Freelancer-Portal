@@ -17,7 +17,7 @@ interface BalanceRow {
   job_date: string | null; job_end: string | null; return_date: string | null;
   hire_value_inc_vat: string; total_hire_deposits: string; balance_outstanding: string;
   vat_saved: string; last_synced_at: string;
-  // Present only on resolved rows (migration 111 business override).
+  // Present only on resolved rows (migration 117 business override).
   override_reason?: string | null; override_notes?: string | null;
   override_resolved_at?: string | null; override_resolved_by_name?: string | null;
 }
@@ -96,7 +96,7 @@ function JobRef({ hh, name }: { hh: number | null; name: string | null }) {
   );
 }
 
-// Business-level balance-override reasons (migration 111).
+// Business-level balance-override reasons (migration 117).
 const RESOLVE_REASONS = [
   { value: 'xero_settled', label: 'Settled in Xero (not fed back to HireHop)' },
   { value: 'internal_discounted', label: 'Internal / discounted job' },

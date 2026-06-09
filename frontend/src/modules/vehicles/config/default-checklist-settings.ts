@@ -130,7 +130,12 @@ const BRIEFING_VITO: ChecklistItem[] = [
 
 const PREP_ALL: ChecklistItem[] = [
   // Vehicle Exterior
-  item('Bodywork', 'Vehicle Exterior', ['Washed and clean', 'To be cleaned'], ['To be cleaned']),
+  // "To be cleaned" is deliberately NOT a flag value — a van awaiting an
+  // external wash is a carwash to-do, not a fault, so it must not spawn a
+  // Problems-register issue. It instead sets the vehicle's "needs external
+  // wash" marker (see PrepPage completion handler). Auto-cleared when a
+  // later prep records "Washed and clean".
+  item('Bodywork', 'Vehicle Exterior', ['Washed and clean', 'To be cleaned'], []),
   item('Windscreen', 'Vehicle Exterior', ['Ok', 'Problem'], ['Problem']),
   item('Other glass', 'Vehicle Exterior', ['Ok', 'Problem'], ['Problem']),
   item('Wingmirrors', 'Vehicle Exterior', ['Ok', 'Problem'], ['Problem']),
@@ -162,7 +167,9 @@ const PREP_ALL: ChecklistItem[] = [
   item('Heating & AC', 'Front Cab', ['Tested & working', 'Problem', 'N/A'], ['Problem']),
   item('Electric windows', 'Front Cab', ['Tested & working', 'Problem'], ['Problem']),
   item('Power sockets — 240v & 12v (cab)', 'Front Cab', ['Tested & all working ok', 'Fixed & now all working', 'N/A'], [], { detailPrompts: FIXED_ISSUE }),
-  item('Fire extinguisher', 'Front Cab', ['Present', 'Problem'], ['Problem']),
+  // "N/A" covers vans that legitimately aren't fitted with an extinguisher —
+  // a non-flag option, so it records the answer without raising a false issue.
+  item('Fire extinguisher', 'Front Cab', ['Present', 'Problem', 'N/A'], ['Problem']),
   item('Scraper & de-icer', 'Front Cab', ['Present', 'Replaced & now all present', 'N/A'], [], { detailPrompts: REPLACED_PRESENT }),
   item('Spare bulbs, torch', 'Front Cab', ['Present', 'Replaced & now all present', 'N/A'], [], { detailPrompts: REPLACED_PRESENT }),
   item('Info stickers (height, AdBlue top up etc)', 'Front Cab', ['Present', 'Replaced & now all present', 'N/A'], [], { detailPrompts: REPLACED_PRESENT }),

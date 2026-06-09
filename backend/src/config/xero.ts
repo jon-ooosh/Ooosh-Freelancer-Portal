@@ -44,23 +44,26 @@ export const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0';
 // transactions + creating SPEND money (banktransactions), supplier linkage
 // (contacts) and receipt upload (attachments).
 //
-// `accounting.transactions` governs ACCPAY *Invoices* (supplier bills) AND
-// *Payments* (recording a payment against a bill). The pay-later flow
-// (not_yet_paid / reimburse_me) needs it; createBill() + payInvoice() in the
-// broker 403 until it's granted. The push service soft-handles that 403 (calm
-// "needs Xero bills scope" advisory, not a red error), so everything else keeps
-// working in the meantime.
+// Xero moved to GRANULAR scopes: apps created on/after 2 Mar 2026 (the Ooosh
+// Custom Connection is May 2026) cannot use the old broad `accounting.transactions`
+// at all — requesting it returns `invalid_scope`. The pay-later bill flow needs
+// the granular scopes instead:
+//   accounting.invoices  → create/read ACCPAY supplier bills
+//   accounting.payments  → record a Payment against a bill
 //
-// TO ENABLE BILLS: (1) tick `accounting.transactions` on the Ooosh Custom
-// Connection in the Xero developer portal + reconnect, THEN (2) uncomment the
-// line below and redeploy. Order matters — requesting an ungranted scope fails
-// the whole client_credentials token mint and breaks the working reads.
+// These are NOT in DEFAULT_SCOPES. They're requested in an ISOLATED bills token
+// (see xero-broker getToken(bills=true)) used only by createBill / payInvoice /
+// invoice-attach. If they're not yet granted on the connection, only that token
+// fails — the base token (the 4 scopes below) keeps reads + Spend Money working.
+// Grant them on the Custom Connection (which deactivates + must be re-authorised
+// when scopes change), and bills start working with no code change.
+export const XERO_BILLS_SCOPES = 'accounting.invoices accounting.payments';
+
 const DEFAULT_SCOPES = [
   'accounting.banktransactions',
   'accounting.settings',
   'accounting.contacts',
   'accounting.attachments',
-  // 'accounting.transactions',  // ← uncomment AFTER granting it in Xero (enables ACCPAY bills + payments)
 ].join(' ');
 
 export function getXeroConfig(): XeroConfig {

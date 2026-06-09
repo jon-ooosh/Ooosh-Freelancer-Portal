@@ -155,6 +155,16 @@ function formatCurrency(value: number | null): string {
   return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 }
 
+// Prefer the cached inc-VAT hire value (what the client owes) over the
+// legacy/estimate job_value. Returns a numeric amount (coerced) plus a flag
+// for whether it came from the cached figure (drives the tooltip).
+function pipelineDisplayValue(job: Job): { amount: number | null; incVat: boolean } {
+  if (job.hire_value_inc_vat != null) return { amount: job.hire_value_inc_vat, incVat: true };
+  if (job.job_value == null) return { amount: null, incVat: false };
+  const n = typeof job.job_value === 'number' ? job.job_value : parseFloat(String(job.job_value));
+  return { amount: isNaN(n) ? null : n, incVat: false };
+}
+
 function formatDateRange(start: string | null, end: string | null): string {
   if (!start) return '';
   const s = new Date(start);
@@ -210,10 +220,10 @@ function sortJobs(jobs: Job[], mode: SortMode): Job[] {
         return bDate - aDate;
       }
       case 'value_high': {
-        return (b.job_value || 0) - (a.job_value || 0);
+        return (pipelineDisplayValue(b).amount || 0) - (pipelineDisplayValue(a).amount || 0);
       }
       case 'value_low': {
-        return (a.job_value || 0) - (b.job_value || 0);
+        return (pipelineDisplayValue(a).amount || 0) - (pipelineDisplayValue(b).amount || 0);
       }
       case 'newest': {
         return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
@@ -440,9 +450,17 @@ function PipelineCard({
             </span>
           )}
         </div>
-        <span className="text-sm font-semibold text-gray-900">
-          {formatCurrency(job.job_value)}
-        </span>
+        {(() => {
+          const { amount, incVat } = pipelineDisplayValue(job);
+          return (
+            <span
+              className="text-sm font-semibold text-gray-900"
+              title={amount == null ? undefined : incVat ? 'Hire value (inc. VAT)' : 'Estimated value'}
+            >
+              {formatCurrency(amount)}
+            </span>
+          );
+        })()}
       </div>
 
       {/* Row 2: Job name */}
@@ -756,10 +774,14 @@ function NewEnquiryModal({
   isOpen,
   onClose,
   onCreated,
+  prefillClientId,
+  prefillContactId,
 }: {
   isOpen: boolean;
   onClose: () => void;
   onCreated: (jobId?: string) => void;
+  prefillClientId?: string | null;
+  prefillContactId?: string | null;
 }) {
   const [clientName, setClientName] = useState('');
   const [clientId, setClientId] = useState<string | null>(null);
@@ -1032,6 +1054,28 @@ function NewEnquiryModal({
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);
+
+  // Pre-fill the client (and optionally a contact) when opened from a client's
+  // detail page via ?client=<orgId>&contact=<personId>. Fires once per open.
+  // Seeding personFirstClickedId before clientId lets the existing cascade
+  // auto-tick the contact when the org's people load.
+  const prefillAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!isOpen) { prefillAppliedRef.current = false; return; }
+    if (prefillAppliedRef.current || !prefillClientId) return;
+    prefillAppliedRef.current = true;
+    if (prefillContactId) setPersonFirstClickedId(prefillContactId);
+    (async () => {
+      try {
+        const data = await api.get<{ name: string }>(`/organisations/${prefillClientId}`);
+        setClientName(data.name);
+        setClientId(prefillClientId);
+        fetchClientHistory(prefillClientId, data.name, null);
+      } catch {
+        // Org not found / fetch failed — leave the picker empty for manual selection.
+      }
+    })();
+  }, [isOpen, prefillClientId, prefillContactId, fetchClientHistory]);
 
   // Escape key to close
   useEffect(() => {
@@ -3358,7 +3402,7 @@ export default function PipelinePage() {
             {visibleColumns.map((status) => {
               const config = PIPELINE_STATUS_CONFIG[status];
               const columnJobs = jobsByStatus[status];
-              const columnValue = columnJobs.reduce((sum, j) => sum + (j.job_value || 0), 0);
+              const columnValue = columnJobs.reduce((sum, j) => sum + (pipelineDisplayValue(j).amount || 0), 0);
 
               return (
                 <div
@@ -3492,7 +3536,14 @@ export default function PipelinePage() {
                     {formatDateRange(job.job_date, job.job_end)}
                   </td>
                   <td className="px-4 py-3 text-sm font-medium text-gray-900 text-right">
-                    {formatCurrency(job.job_value)}
+                    {(() => {
+                      const { amount, incVat } = pipelineDisplayValue(job);
+                      return (
+                        <span title={amount == null ? undefined : incVat ? 'Hire value (inc. VAT)' : 'Estimated value'}>
+                          {formatCurrency(amount)}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="px-4 py-3">
                     {job.likelihood && (
@@ -3600,11 +3651,15 @@ export default function PipelinePage() {
       {/* Modals */}
       <NewEnquiryModal
         isOpen={showNewEnquiry}
+        prefillClientId={searchParams.get('client')}
+        prefillContactId={searchParams.get('contact')}
         onClose={() => {
           setShowNewEnquiry(false);
-          if (searchParams.get('newEnquiry')) {
+          if (searchParams.get('newEnquiry') || searchParams.get('client') || searchParams.get('contact')) {
             const next = new URLSearchParams(searchParams);
             next.delete('newEnquiry');
+            next.delete('client');
+            next.delete('contact');
             setSearchParams(next, { replace: true });
           }
         }}

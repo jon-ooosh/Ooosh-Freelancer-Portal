@@ -9,6 +9,7 @@ import ActivityTimeline from '../components/ActivityTimeline';
 import ExcessHistorySection from '../components/ExcessHistorySection';
 import { IssuesListSection } from '../components/IssuesListSection';
 import HireHistoryTab from '../components/HireHistoryTab';
+import HeldItemsSection from '../components/HeldItemsSection';
 import { ORG_RELATIONSHIP_LABELS, PERSON_ORG_ROLES_WITH_MAIN_CONTACT, type OrgRelationshipType, type OrganisationRelationship } from '../../../shared/types';
 import { useAuthStore } from '../hooks/useAuthStore';
 
@@ -88,6 +89,24 @@ const typeColors: Record<string, string> = {
   supplier: 'bg-gray-100 text-gray-700',
 };
 
+// Org types offered when creating a new org inline (matches OrganisationForm)
+const ORG_TYPE_OPTIONS = [
+  'band', 'client', 'management', 'label', 'agency', 'promoter',
+  'venue', 'festival', 'supplier', 'hire_company', 'booking_agent', 'other',
+];
+
+// Sensible default org type to pre-select when creating the other party of a
+// relationship, inferred from the relationship type (forward direction). Always
+// editable — staff override freely. Falls back to 'band' (the dominant case).
+const INFERRED_ORG_TYPE: Record<string, string> = {
+  manages: 'band',
+  books_for: 'band',
+  does_accounts_for: 'band',
+  promotes: 'band',
+  represents: 'band',
+  supplies: 'client',
+};
+
 export default function OrganisationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -99,7 +118,7 @@ export default function OrganisationDetailPage() {
   const [showDnoForm, setShowDnoForm] = useState(false);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues'>('people');
+  const [activeTab, setActiveTab] = useState<'people' | 'relationships' | 'hire_history' | 'timeline' | 'details' | 'excess' | 'issues' | 'held'>('people');
   const [issuesCount, setIssuesCount] = useState<number | null>(null);
 
   // Edit/delete
@@ -117,6 +136,21 @@ export default function OrganisationDetailPage() {
   const [relType, setRelType] = useState<OrgRelationshipType>('manages');
   const [relDirection, setRelDirection] = useState<'forward' | 'reverse'>('forward');
   const [relSaving, setRelSaving] = useState(false);
+  // Create-new-org inline (within the relationship modal)
+  const [relCreating, setRelCreating] = useState(false);
+  const [relNewName, setRelNewName] = useState('');
+  const [relNewType, setRelNewType] = useState('band');
+  const [relSuggestions, setRelSuggestions] = useState<Array<{ id: string; name: string; type: string; via_person: string }>>([]);
+
+  // Edit relationship type in place
+  const [editingRelId, setEditingRelId] = useState<string | null>(null);
+  const [editRelType, setEditRelType] = useState<OrgRelationshipType>('manages');
+  const [editRelSaving, setEditRelSaving] = useState(false);
+
+  // Edit a person's role at this org in place
+  const [editingPersonRoleId, setEditingPersonRoleId] = useState<string | null>(null);
+  const [editPersonRole, setEditPersonRole] = useState('');
+  const [editPersonRoleSaving, setEditPersonRoleSaving] = useState(false);
 
   // Add person — search-first; if no match (or coincidental match) we let
   // the user fall through to a "create new" inline form.
@@ -191,6 +225,20 @@ export default function OrganisationDetailPage() {
     }, 250);
     return () => clearTimeout(timeout);
   }, [relOrgSearch, id]);
+
+  // Load "quick associate" suggestions (orgs sharing a person, not yet linked)
+  // when the relationship modal opens.
+  useEffect(() => {
+    if (!showAddRelationship || !id) { setRelSuggestions([]); return; }
+    (async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string; via_person: string }> }>(
+          `/organisations/${id}/relationship-suggestions`
+        );
+        setRelSuggestions(data.data || []);
+      } catch { setRelSuggestions([]); }
+    })();
+  }, [showAddRelationship, id]);
 
   useEffect(() => {
     if (personSearch.length < 2) { setPersonResults([]); return; }
@@ -290,15 +338,50 @@ export default function OrganisationDetailPage() {
         to_org_id,
         relationship_type: relType,
       });
-      setShowAddRelationship(false);
-      setRelSelectedOrg(null);
-      setRelOrgSearch('');
+      resetRelationshipModal();
       loadOrg();
     } catch (err: any) {
       alert(err?.response?.data?.error || 'Failed to add relationship');
     } finally {
       setRelSaving(false);
     }
+  }
+
+  // Open the inline create-new form, prefilling the name from the search box
+  // and the type inferred from the currently-selected relationship type.
+  function startCreateOrg() {
+    setRelNewName(relOrgSearch.trim());
+    setRelNewType(INFERRED_ORG_TYPE[relType] || 'band');
+    setRelCreating(true);
+  }
+
+  // Create the org with just name + type, then drop into the relationship
+  // type/direction step with the new org pre-selected.
+  async function handleCreateOrgForRelationship() {
+    if (!relNewName.trim() || !id) return;
+    setRelSaving(true);
+    try {
+      const created = await api.post<{ id: string; name: string; type: string }>('/organisations', {
+        name: relNewName.trim(),
+        type: relNewType,
+      });
+      setRelSelectedOrg({ id: created.id, name: created.name, type: created.type });
+      setRelCreating(false);
+      setRelOrgResults([]);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to create organisation');
+    } finally {
+      setRelSaving(false);
+    }
+  }
+
+  function resetRelationshipModal() {
+    setShowAddRelationship(false);
+    setRelSelectedOrg(null);
+    setRelOrgSearch('');
+    setRelOrgResults([]);
+    setRelCreating(false);
+    setRelNewName('');
   }
 
   async function handleTogglePrimary(roleId: string, makePrimary: boolean) {
@@ -319,6 +402,42 @@ export default function OrganisationDetailPage() {
       loadOrg();
     } catch (err) {
       console.error('Failed to delete relationship:', err);
+    }
+  }
+
+  // Edit the relationship type (direction is preserved — to flip direction,
+  // remove and re-add). editRelType holds the new type from this org's view.
+  async function handleEditRelationship(relId: string) {
+    if (editRelSaving) return;
+    setEditRelSaving(true);
+    try {
+      await api.put(`/organisations/${id}/relationships/${relId}`, {
+        relationship_type: editRelType,
+      });
+      setEditingRelId(null);
+      loadOrg();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to update relationship');
+    } finally {
+      setEditRelSaving(false);
+    }
+  }
+
+  // Edit a person's role at this org. Uses the person-roles PATCH endpoint
+  // (roleId is the person_organisation_roles row id, exposed as p.id).
+  async function handleEditPersonRole(personId: string, roleId: string) {
+    if (!editPersonRole.trim() || editPersonRoleSaving) return;
+    setEditPersonRoleSaving(true);
+    try {
+      await api.patch(`/people/${personId}/roles/${roleId}`, {
+        role: editPersonRole.trim(),
+      });
+      setEditingPersonRoleId(null);
+      loadOrg();
+    } catch (err: any) {
+      alert(err?.response?.data?.error || err?.message || 'Failed to update role');
+    } finally {
+      setEditPersonRoleSaving(false);
     }
   }
 
@@ -371,6 +490,12 @@ export default function OrganisationDetailPage() {
             <span className="text-sm text-gray-500 mr-2">
               {activePeople.length} active {activePeople.length === 1 ? 'person' : 'people'}
             </span>
+            <button
+              onClick={() => navigate(`/pipeline?newEnquiry=1&client=${org.id}`)}
+              className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 transition-colors"
+            >
+              + New Enquiry
+            </button>
             <button
               onClick={() => setShowEdit(true)}
               className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50 transition-colors"
@@ -546,7 +671,7 @@ export default function OrganisationDetailPage() {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
         <nav className="flex gap-6">
-          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues'] as const).map((tab) => {
+          {(['people', 'relationships', 'hire_history', 'timeline', 'details', 'excess', 'issues', 'held'] as const).map((tab) => {
             const relCount = (org.relationships || []).filter(r => r.status === 'active').length;
             // linked_job_count comes from the backend's UNION of job_organisations + jobs.client_id,
             // matching the Hire History tab content. Falls back to local linked_jobs.length only
@@ -560,6 +685,7 @@ export default function OrganisationDetailPage() {
               : tab === 'timeline' ? 'Activity Timeline'
               : tab === 'excess' ? 'Excess History'
               : tab === 'issues' ? `Issues${issuesCount ? ` (${issuesCount})` : ''}`
+              : tab === 'held' ? 'Held Items'
               : 'Details';
             return (
               <button
@@ -765,7 +891,41 @@ export default function OrganisationDetailPage() {
                           )}
                         </td>
                         <td className="px-6 py-4">
+                          {editingPersonRoleId === p.id ? (
+                            <div className="flex items-center gap-2">
+                              <select
+                                value={editPersonRole}
+                                onChange={e => setEditPersonRole(e.target.value)}
+                                className="rounded border border-gray-300 px-2 py-1 text-sm focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                              >
+                                <option value="">Select a role...</option>
+                                {PERSON_ORG_ROLES_WITH_MAIN_CONTACT.map(r => (
+                                  <option key={r} value={r}>{r}</option>
+                                ))}
+                                {editPersonRole && !PERSON_ORG_ROLES_WITH_MAIN_CONTACT.includes(editPersonRole) && (
+                                  <option value={editPersonRole}>{editPersonRole}</option>
+                                )}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => handleEditPersonRole(p.person_id, p.id)}
+                                disabled={!editPersonRole.trim() || editPersonRoleSaving}
+                                className="text-xs bg-ooosh-600 text-white px-2 py-1 rounded hover:bg-ooosh-700 disabled:opacity-50"
+                              >
+                                {editPersonRoleSaving ? 'Saving...' : 'Save'}
+                              </button>
+                              <button type="button" onClick={() => setEditingPersonRoleId(null)} className="text-xs text-gray-500 hover:text-gray-700 underline">Cancel</button>
+                            </div>
+                          ) : (
+                          <>
                           <span className="text-sm text-gray-700">{p.role}</span>
+                          <button
+                            type="button"
+                            onClick={() => { setEditingPersonRoleId(p.id); setEditPersonRole(p.role); }}
+                            className="ml-2 text-xs text-gray-500 hover:text-ooosh-700 underline"
+                          >
+                            Edit
+                          </button>
                           {p.is_primary ? (
                             <>
                               <span className="ml-2 text-xs bg-ooosh-100 text-ooosh-700 px-1.5 py-0.5 rounded-full">Primary</span>
@@ -787,6 +947,8 @@ export default function OrganisationDetailPage() {
                             >
                               Make primary
                             </button>
+                          )}
+                          </>
                           )}
                         </td>
                         <td className="px-6 py-4 text-sm text-gray-500">
@@ -857,7 +1019,7 @@ export default function OrganisationDetailPage() {
           {/* Add relationship button */}
           <div className="flex justify-end">
             <button
-              onClick={() => { setShowAddRelationship(true); setRelSelectedOrg(null); setRelOrgSearch(''); }}
+              onClick={() => { setShowAddRelationship(true); setRelSelectedOrg(null); setRelOrgSearch(''); setRelCreating(false); setRelNewName(''); }}
               className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 transition-colors"
             >
               + Add Relationship
@@ -874,10 +1036,23 @@ export default function OrganisationDetailPage() {
                   <div className="bg-white rounded-xl shadow-sm border border-gray-200 divide-y divide-gray-100">
                     {activeRels.map((rel) => {
                       const { label, linkedOrg } = getRelationshipDisplay(rel);
+                      const isFrom = rel.from_org_id === id;
                       return (
                         <div key={rel.id} className="px-6 py-4 flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <span className="text-sm text-gray-500 w-36">{label}</span>
+                          <div className="flex items-center gap-3 flex-wrap">
+                            {editingRelId === rel.id ? (
+                              <select
+                                value={editRelType}
+                                onChange={e => setEditRelType(e.target.value as OrgRelationshipType)}
+                                className="text-sm rounded border border-gray-300 px-2 py-1 focus:border-ooosh-500 focus:outline-none focus:ring-1 focus:ring-ooosh-500"
+                              >
+                                {Object.entries(ORG_RELATIONSHIP_LABELS).map(([key, labels]) => (
+                                  <option key={key} value={key}>{isFrom ? labels.forward : labels.reverse}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className="text-sm text-gray-500 w-36">{label}</span>
+                            )}
                             <Link
                               to={`/organisations/${linkedOrg.id}`}
                               className="text-sm font-medium text-ooosh-600 hover:text-ooosh-700"
@@ -888,12 +1063,33 @@ export default function OrganisationDetailPage() {
                               {linkedOrg.type}
                             </span>
                           </div>
-                          <button
-                            onClick={() => handleDeleteRelationship(rel.id)}
-                            className="text-xs text-gray-400 hover:text-red-500 transition-colors"
-                          >
-                            Remove
-                          </button>
+                          {editingRelId === rel.id ? (
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => handleEditRelationship(rel.id)}
+                                disabled={editRelSaving}
+                                className="text-xs bg-ooosh-600 text-white px-2 py-1 rounded hover:bg-ooosh-700 disabled:opacity-50"
+                              >
+                                {editRelSaving ? 'Saving...' : 'Save'}
+                              </button>
+                              <button onClick={() => setEditingRelId(null)} className="text-xs text-gray-500 hover:text-gray-700 underline">Cancel</button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={() => { setEditingRelId(rel.id); setEditRelType(rel.relationship_type as OrgRelationshipType); }}
+                                className="text-xs text-gray-400 hover:text-ooosh-600 transition-colors"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => handleDeleteRelationship(rel.id)}
+                                className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -1054,35 +1250,119 @@ export default function OrganisationDetailPage() {
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Add Relationship</h3>
 
-            {/* Step 1: Search and select org */}
+            {/* Relationship type — chosen up front so a new org's type can be
+                inferred from it. Visible across both steps. */}
+            <label className="block text-sm font-medium text-gray-700 mb-1">Relationship type</label>
+            <select
+              value={relType}
+              onChange={(e) => setRelType(e.target.value as OrgRelationshipType)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4"
+            >
+              {Object.entries(ORG_RELATIONSHIP_LABELS).map(([key, labels]) => (
+                <option key={key} value={key}>{labels.forward}</option>
+              ))}
+            </select>
+
+            {/* Step 1: Search / create org */}
             {!relSelectedOrg ? (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Search for organisation</label>
-                <input
-                  type="text"
-                  value={relOrgSearch}
-                  onChange={(e) => setRelOrgSearch(e.target.value)}
-                  placeholder="Type to search organisations..."
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
-                  autoFocus
-                />
-                {relOrgResults.length > 0 && (
-                  <div className="mt-2 border border-gray-200 rounded-lg max-h-60 overflow-y-auto">
-                    {relOrgResults.map((o) => (
-                      <button
-                        key={o.id}
-                        onClick={() => { setRelSelectedOrg(o); setRelOrgResults([]); }}
-                        className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100 last:border-b-0"
-                      >
-                        <span className="text-sm font-medium text-gray-900">{o.name}</span>
-                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs ${typeColors[o.type] || 'bg-gray-100 text-gray-700'}`}>
-                          {o.type}
-                        </span>
-                      </button>
+              relCreating ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">New organisation name</label>
+                  <input
+                    type="text"
+                    value={relNewName}
+                    onChange={(e) => setRelNewName(e.target.value)}
+                    placeholder="Organisation name"
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 focus:ring-ooosh-500 focus:border-ooosh-500"
+                    autoFocus
+                  />
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                  <select
+                    value={relNewType}
+                    onChange={(e) => setRelNewType(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-2"
+                  >
+                    {ORG_TYPE_OPTIONS.map((t) => (
+                      <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>
                     ))}
-                  </div>
-                )}
-              </div>
+                  </select>
+                  <p className="text-xs text-gray-400 mb-3">Just name + type for now — add full details later on the new org's page.</p>
+                  <button
+                    onClick={() => setRelCreating(false)}
+                    className="text-xs text-gray-500 hover:text-gray-700"
+                  >
+                    ← Back to search
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Search for organisation</label>
+                  <input
+                    type="text"
+                    value={relOrgSearch}
+                    onChange={(e) => setRelOrgSearch(e.target.value)}
+                    placeholder="Type to search organisations..."
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                    autoFocus
+                  />
+                  {relOrgResults.length > 0 && (
+                    <div className="mt-2 border border-gray-200 rounded-lg max-h-60 overflow-y-auto">
+                      {relOrgResults.map((o) => (
+                        <button
+                          key={o.id}
+                          onClick={() => { setRelSelectedOrg(o); setRelOrgResults([]); }}
+                          className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100 last:border-b-0"
+                        >
+                          <span className="text-sm font-medium text-gray-900">{o.name}</span>
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs ${typeColors[o.type] || 'bg-gray-100 text-gray-700'}`}>
+                            {o.type}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* No match → offer to create */}
+                  {relOrgSearch.trim().length >= 2 && relOrgResults.length === 0 && (
+                    <button
+                      onClick={startCreateOrg}
+                      className="mt-2 w-full text-left px-4 py-3 border border-dashed border-ooosh-300 rounded-lg text-sm text-ooosh-700 hover:bg-ooosh-50"
+                    >
+                      + Create <strong>{relOrgSearch.trim()}</strong> as a new organisation
+                    </button>
+                  )}
+
+                  {/* Quick associate — orgs connected via a shared person, not yet linked */}
+                  {!relOrgSearch.trim() && relSuggestions.length > 0 && (
+                    <div className="mt-4">
+                      <p className="text-xs font-medium text-gray-500 mb-2">Quick associate — connected via shared people</p>
+                      <div className="flex flex-wrap gap-2">
+                        {relSuggestions.map((s) => (
+                          <button
+                            key={s.id}
+                            onClick={() => setRelSelectedOrg({ id: s.id, name: s.name, type: s.type })}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 text-xs hover:bg-gray-50"
+                            title={`via ${s.via_person}`}
+                          >
+                            <span className="font-medium text-gray-900">{s.name}</span>
+                            <span className={`inline-flex px-1.5 py-0.5 rounded-full ${typeColors[s.type] || 'bg-gray-100 text-gray-700'}`}>{s.type}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Manual create fallback (before typing) */}
+                  {relOrgSearch.trim().length < 2 && (
+                    <button
+                      onClick={startCreateOrg}
+                      className="mt-3 text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                    >
+                      + Create a new organisation instead
+                    </button>
+                  )}
+                </div>
+              )
             ) : (
               <div>
                 {/* Selected org */}
@@ -1098,18 +1378,6 @@ export default function OrganisationDetailPage() {
                     Change
                   </button>
                 </div>
-
-                {/* Relationship type */}
-                <label className="block text-sm font-medium text-gray-700 mb-1">Relationship type</label>
-                <select
-                  value={relType}
-                  onChange={(e) => setRelType(e.target.value as OrgRelationshipType)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3"
-                >
-                  {Object.entries(ORG_RELATIONSHIP_LABELS).map(([key, labels]) => (
-                    <option key={key} value={key}>{labels.forward}</option>
-                  ))}
-                </select>
 
                 {/* Direction */}
                 <label className="block text-sm font-medium text-gray-700 mb-2">Direction</label>
@@ -1138,11 +1406,20 @@ export default function OrganisationDetailPage() {
 
             <div className="flex justify-end gap-2 mt-4 pt-4 border-t">
               <button
-                onClick={() => { setShowAddRelationship(false); setRelSelectedOrg(null); setRelOrgSearch(''); }}
+                onClick={resetRelationshipModal}
                 className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
               >
                 Cancel
               </button>
+              {relCreating && !relSelectedOrg && (
+                <button
+                  onClick={handleCreateOrgForRelationship}
+                  disabled={relSaving || !relNewName.trim()}
+                  className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
+                >
+                  {relSaving ? 'Creating...' : 'Create & continue'}
+                </button>
+              )}
               {relSelectedOrg && (
                 <button
                   onClick={handleAddRelationship}
@@ -1165,6 +1442,11 @@ export default function OrganisationDetailPage() {
       {/* Excess History Tab */}
       {activeTab === 'excess' && id && (
         <ExcessHistorySection entityType="organisation" entityId={id} />
+      )}
+
+      {/* Held Items Tab — Holding module (incoming / temp storage / lost property) */}
+      {activeTab === 'held' && id && (
+        <HeldItemsSection entityType="organisation" entityId={id} />
       )}
 
       {/* Issues Tab — OP job_issues backed (Stage 3, May 2026).

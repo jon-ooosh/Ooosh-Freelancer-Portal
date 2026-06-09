@@ -78,6 +78,9 @@ interface Job {
   end_time: string | null;
   manager1_name: string | null;
   job_value: number | null;
+  // Cached inc-VAT hire value (job_financials). Preferred for display; falls
+  // back to the legacy/estimate job_value when not yet computed.
+  hire_value_inc_vat?: number | null;
   pipeline_status: string | null;
   has_ooh_return?: boolean;
 }
@@ -467,7 +470,17 @@ export default function JobsPage() {
 
   function formatCurrency(value: number | null) {
     if (value == null) return '';
-    return `\u00A3${value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const n = typeof value === 'number' ? value : parseFloat(String(value));
+    if (isNaN(n)) return '';
+    return `\u00A3${n.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  }
+
+  // Prefer the cached inc-VAT hire value (what the client owes); fall back to
+  // the legacy/estimate job_value. `incVat` flags which one we showed so the
+  // tooltip can explain it.
+  function jobDisplayValue(job: Job): { amount: number | null; incVat: boolean } {
+    if (job.hire_value_inc_vat != null) return { amount: job.hire_value_inc_vat, incVat: true };
+    return { amount: job.job_value, incVat: false };
   }
 
   function happeningLabel(categories: HappeningCategory[]): { text: string; colour: string } {
@@ -558,7 +571,14 @@ export default function JobsPage() {
           )}
         </td>
         <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600 font-medium">
-          {formatCurrency(job.job_value)}
+          {(() => {
+            const { amount, incVat } = jobDisplayValue(job);
+            return (
+              <span title={amount == null ? undefined : incVat ? 'Hire value (inc. VAT)' : 'Estimated value'}>
+                {formatCurrency(amount)}
+              </span>
+            );
+          })()}
         </td>
         <td className="px-4 py-3 whitespace-nowrap">
           {showRequirements && progress ? (
@@ -634,7 +654,12 @@ export default function JobsPage() {
           <>
             <span className="text-gray-700 font-medium">{formatDateRange(job.job_date, job.job_end)}</span>
             {job.out_time && <span className="text-blue-500">· {job.out_time.slice(0, 5)}</span>}
-            {job.job_value != null && <span>· {formatCurrency(job.job_value)}</span>}
+            {(() => {
+              const { amount, incVat } = jobDisplayValue(job);
+              return amount != null ? (
+                <span title={incVat ? 'Hire value (inc. VAT)' : 'Estimated value'}>· {formatCurrency(amount)}</span>
+              ) : null;
+            })()}
             {job.manager1_name && <span>· {job.manager1_name}</span>}
           </>
         }

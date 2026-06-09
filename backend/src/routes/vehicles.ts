@@ -820,6 +820,47 @@ router.patch('/fleet/by-reg/:reg/hire-status', async (req: FlexibleVehicleReques
 });
 
 /**
+ * PATCH /api/vehicles/fleet/:id/mark-washed
+ * Clears the "needs external wash" marker once a van has been to the carwash.
+ * Staff action (the marker is also auto-cleared by a later prep recording the
+ * bodywork as "Washed and clean").
+ */
+router.patch('/fleet/:id/mark-washed', async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.id || null;
+
+    const existing = await query('SELECT needs_external_wash FROM fleet_vehicles WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Vehicle not found' });
+      return;
+    }
+    const previousValue = existing.rows[0].needs_external_wash === true;
+
+    const result = await query(
+      'UPDATE fleet_vehicles SET needs_external_wash = false WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, previous_values, new_values)
+       VALUES ($1, 'fleet_vehicle', $2, 'mark_washed', $3, $4)`,
+      [
+        userId,
+        id,
+        JSON.stringify({ needs_external_wash: previousValue }),
+        JSON.stringify({ needs_external_wash: false }),
+      ]
+    ).catch(err => console.warn('[vehicles/mark-washed] audit insert failed:', err));
+
+    res.json({ success: true, vehicle: mapDbRowToVehicle(result.rows[0], { includeFinance: canViewVehicleFinance(req.user?.role) }) });
+  } catch (error) {
+    console.error('[vehicles/fleet] Mark washed error:', error);
+    res.status(500).json({ error: 'Failed to mark vehicle as washed' });
+  }
+});
+
+/**
  * POST /api/vehicles/fleet/bulk
  * Bulk upsert vehicles (for one-time Monday.com data import).
  */
@@ -2112,7 +2153,15 @@ router.get('/check-in-eligibility', async (req: AuthRequest, res: Response) => {
        JOIN fleet_vehicles fv ON fv.id = vha.vehicle_id
        WHERE fv.reg = $1
          AND vha.status IN ('booked_out', 'active', 'returned')
-       ORDER BY vha.updated_at DESC
+       -- A live (booked_out/active) row ALWAYS wins over a returned one,
+       -- regardless of updated_at. Otherwise a stale returned row whose
+       -- updated_at gets bumped by a background pass (sync / fleet-status /
+       -- dedup) after a fresh book-out masks the live rows and the van
+       -- wrongly reads as "already checked in" (RX24SZG, jobs 15429→15781,
+       -- 27 May 2026). Only fall back to a returned row when none are live.
+       ORDER BY
+         CASE WHEN vha.status IN ('booked_out', 'active') THEN 0 ELSE 1 END,
+         vha.updated_at DESC
        LIMIT 1`,
       [vehicleReg]
     );
@@ -2607,6 +2656,47 @@ router.post('/save-prep', async (req: AuthRequest, res: Response) => {
     }
 
     await writeR2Json(indexKey, indexData);
+
+    // "Needs external wash" marker. A bodywork answer of "To be cleaned" sets
+    // the flag (carwash to-do, NOT a Problems-register issue); "Washed and
+    // clean" clears it. Any other answer (or no bodywork item) leaves the
+    // current value untouched, so a prep that skips bodywork never wrongly
+    // clears an existing flag.
+    //
+    // NOTE: these strings must match the Bodywork item's option labels in the
+    // checklist settings (Settings → Checklists → Prep). If those labels are
+    // renamed, update the matching here too.
+    try {
+      const sections: any[] = Array.isArray(data?.sections) ? data.sections : [];
+      let bodyworkValue: string | null = null;
+      for (const sec of sections) {
+        const items: any[] = Array.isArray(sec?.items) ? sec.items : [];
+        const bodywork = items.find(
+          (it) => typeof it?.name === 'string' && it.name.toLowerCase().includes('bodywork'),
+        );
+        if (bodywork && typeof bodywork.value === 'string') {
+          bodyworkValue = bodywork.value;
+          break;
+        }
+      }
+      if (bodyworkValue != null) {
+        const v = bodyworkValue.trim().toLowerCase();
+        let washUpdate: boolean | null = null;
+        if (v === 'to be cleaned' || v === 'needs external wash' || v === 'needs wash') {
+          washUpdate = true;
+        } else if (v === 'washed and clean') {
+          washUpdate = false;
+        }
+        if (washUpdate !== null) {
+          await query(
+            'UPDATE fleet_vehicles SET needs_external_wash = $1 WHERE reg = $2',
+            [washUpdate, reg],
+          );
+        }
+      }
+    } catch (err) {
+      console.warn('[vehicles/prep] Failed to update needs_external_wash:', err);
+    }
 
     res.json({ success: true, eventId });
   } catch (error) {
@@ -4593,7 +4683,8 @@ router.get('/turnaround-schedule', async (req: AuthRequest, res: Response) => {
         fv.insurance_due,
         fv.tfl_due,
         fv.current_mileage,
-        fv.next_service_due
+        fv.next_service_due,
+        fv.needs_external_wash
       FROM fleet_vehicles fv
       WHERE fv.is_active = true
         AND COALESCE(fv.fleet_group, 'active') = 'active'
@@ -4611,6 +4702,7 @@ router.get('/turnaround-schedule', async (req: AuthRequest, res: Response) => {
       tfl_due: string | null;
       current_mileage: number | null;
       next_service_due: number | null;
+      needs_external_wash: boolean | null;
     };
     const vehicles = vehiclesResult.rows as VehicleRow[];
     if (vehicles.length === 0) {
@@ -4805,6 +4897,7 @@ router.get('/turnaround-schedule', async (req: AuthRequest, res: Response) => {
       prepWindowDays: number | null;
       prepUrgency: 'green' | 'amber' | 'orange' | 'red' | 'none';
       complianceFlags: ComplianceFlag[];
+      needsExternalWash: boolean;
     };
 
     const rows: Row[] = vehicles.map((v) => {
@@ -4909,6 +5002,7 @@ router.get('/turnaround-schedule', async (req: AuthRequest, res: Response) => {
         prepWindowDays,
         prepUrgency: urgencyForWindow(prepWindowDays),
         complianceFlags: flags,
+        needsExternalWash: v.needs_external_wash === true,
       } as Row;
     });
 
@@ -5190,6 +5284,8 @@ function mapDbRowToVehicle(row: Record<string, unknown>, opts: { includeFinance?
     ulezCompliant: row.ulez_compliant as boolean,
     spareKey: row.spare_key as boolean,
     wifiNetwork: row.wifi_network as string | null,
+    // "Needs external wash" marker — carwash to-do, not a fault (migration 114)
+    needsExternalWash: row.needs_external_wash === true,
     // Finance (admin-only — null for non-admins)
     financeWith: fin(row.finance_with as string | null),
     financeEnds: fin(formatDate(row.finance_ends)),

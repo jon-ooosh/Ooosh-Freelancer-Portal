@@ -33,6 +33,10 @@ import FillGapPage from './pages/FillGapPage';
 import FreelancerBookoutShell from './pages/FreelancerBookoutShell';
 import StoragePage from './pages/StoragePage';
 import StorageTcsAcceptPage from './pages/StorageTcsAcceptPage';
+import HoldingPage from './pages/HoldingPage';
+import HoldingReceiptPage from './pages/HoldingReceiptPage';
+import QuickActionsPage from './pages/QuickActionsPage';
+import MerchFormPage from './pages/MerchFormPage';
 import WarehousePinPage from './pages/WarehousePinPage';
 import WarehouseCollectionsPage from './pages/WarehouseCollectionsPage';
 import OohReturnParkingPage from './pages/OohReturnParkingPage';
@@ -130,6 +134,10 @@ export default function App() {
       <Route path="/m/receipt/:token" element={<MobileReceiptUploadPage />} />
       {/* Public storage T&Cs acceptance — token-authenticated, no Layout wrapper */}
       <Route path="/storage-tcs/:token" element={<StorageTcsAcceptPage />} />
+      {/* Public inbound merch-delivery form (no login) — replaces the JotForm */}
+      <Route path="/merch-form" element={<MerchFormPage />} />
+      {/* Mobile quick-action launcher — staff JWT, full-screen, no Layout chrome */}
+      <Route path="/quick" element={<ProtectedRoute><QuickActionsPage /></ProtectedRoute>} />
       {/* Warehouse kiosk — own PIN-based session, no Layout wrapper */}
       <Route path="/warehouse" element={<WarehousePinPage />} />
       <Route path="/warehouse/collections" element={<WarehouseCollectionsPage />} />
@@ -159,6 +167,9 @@ export default function App() {
                 <Route path="/operations/issues/:id" element={<IssuesPage />} />
                 <Route path="/operations/problems" element={<ProblemsPage />} />
                 <Route path="/storage" element={<StoragePage />} />
+                <Route path="/holding" element={<HoldingPage view="held" />} />
+                <Route path="/holding/lost-property" element={<HoldingPage view="lost_property" />} />
+                <Route path="/holding/receipt/:id" element={<HoldingReceiptPage />} />
                 <Route path="/operations/problems/:id" element={<IssueDetailPage />} />
                 <Route path="/drivers" element={<DriversPage />} />
                 <Route path="/drivers/:id" element={<DriverDetailPage />} />

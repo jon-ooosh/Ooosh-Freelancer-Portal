@@ -2,28 +2,14 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
 import { TimeInput, normalizeTimeInput } from './TimeInput';
 import type { QuoteJobType, QuoteCalcMode, QuoteWhatIsIt, QuoteExpenseItem } from '@shared/index';
+// Canonical calculation engine — shared with the backend save / HireHop-push path.
+// What the modal shows below is exactly what gets saved and pushed (no second engine).
+import { calculateCosts, applyCrewMultiplier } from '@calc';
+import type { CalculatorInput, CalculatedCosts, CalculatorSettings, ExpenseItem } from '@calc';
 
 // =============================================================================
 // TYPES
 // =============================================================================
-
-interface CostingSettings {
-  freelancer_hourly_day: number;
-  freelancer_hourly_night: number;
-  client_hourly_day: number;
-  client_hourly_night: number;
-  driver_day_rate: number;
-  admin_cost_per_hour: number;
-  fuel_price_per_litre: number;
-  handover_time_mins: number;
-  unload_time_mins: number;
-  expense_markup_percent: number;
-  min_hours_threshold: number;
-  min_client_charge_floor: number;
-  day_rate_client_markup: number;
-  fuel_efficiency_mpg: number;
-  expense_variance_threshold: number;
-}
 
 interface VenueOption {
   id: string;
@@ -31,27 +17,6 @@ interface VenueOption {
   address?: string | null;
   default_miles_from_base?: number | null;
   default_drive_time_mins?: number | null;
-}
-
-interface CalculatedResult {
-  clientChargeLabour: number;
-  clientChargeFuel: number;
-  clientChargeExpenses: number;
-  clientChargeTotal: number;
-  clientChargeTotalRounded: number;
-  freelancerFee: number;
-  freelancerFeeRounded: number;
-  expectedFuelCost: number;
-  expensesIncluded: number;
-  expensesNotIncluded: number;
-  ourTotalCost: number;
-  ourMargin: number;
-  estimatedTimeMinutes: number;
-  estimatedTimeHours: number;
-  autoEarlyStartMinutes: number;
-  autoLateFinishMinutes: number;
-  departureTimeMinutes: number;
-  finishTimeMinutes: number;
 }
 
 interface FormData {
@@ -97,12 +62,6 @@ interface FormData {
 // =============================================================================
 // HELPERS
 // =============================================================================
-
-function roundToNearestFive(amount: number): number {
-  const lower = Math.floor(amount / 5) * 5;
-  if (amount - lower <= 1) return lower;
-  return lower + 5;
-}
 
 function formatDateUK(dateStr: string): string {
   if (!dateStr) return '';
@@ -160,203 +119,62 @@ function calculateDaysBetween(startDate: string, endDate: string): number {
 }
 
 // =============================================================================
-// CALCULATION ENGINE (mirrors backend)
+// CALCULATOR INPUT BUILDER
 // =============================================================================
+//
+// Maps the modal's form state to the canonical engine's CalculatorInput. This is
+// the ONE place form fields become calculator inputs — both the live display
+// (calculateCosts below) and the save payload (handleSave) derive from it, so the
+// number shown is exactly the number saved and pushed to HireHop.
+//
+// Note: leg modelling (round-trip vs one-way) is the engine's job and is driven by
+// `travelMethod` — 'own_way'/blank collapse to 'vehicle' (van both ways), matching
+// the backend exactly.
 
-function calculateAutoOOH(
-  arrivalTime: string,
-  driveTimeMinutes: number,
-  totalEngagedMinutes: number,
-): { earlyStartMinutes: number; lateFinishMinutes: number; departureTime: number; finishTime: number } {
-  if (!arrivalTime || totalEngagedMinutes <= 0) {
-    return { earlyStartMinutes: 0, lateFinishMinutes: 0, departureTime: 0, finishTime: 0 };
-  }
-  const [h, m] = arrivalTime.split(':').map(Number);
-  const arrivalMins = h * 60 + m;
-  const departureTime = arrivalMins - driveTimeMinutes;
-  const finishTime = departureTime + totalEngagedMinutes;
-  const OOH_START = 8 * 60;
-  const OOH_END = 23 * 60;
-  return {
-    earlyStartMinutes: Math.max(0, OOH_START - departureTime),
-    lateFinishMinutes: Math.max(0, finishTime - OOH_END),
-    departureTime,
-    finishTime,
-  };
-}
-
-function calculateCosts(formData: FormData, settings: CostingSettings): CalculatedResult {
-  const singleResult = calculateSingleCrewCosts(formData, settings);
-  const cc = formData.jobType === 'crewed' && formData.crewCount > 1 ? formData.crewCount : 1;
-  if (cc <= 1) return singleResult;
-
-  // Multi-crew: multiply labour/fee costs, keep time/fuel unchanged
-  return {
-    ...singleResult,
-    clientChargeLabour: r2(singleResult.clientChargeLabour * cc),
-    clientChargeTotal: r2(singleResult.clientChargeTotal * cc),
-    clientChargeTotalRounded: Math.round(singleResult.clientChargeTotalRounded * cc),
-    freelancerFee: r2(singleResult.freelancerFee * cc),
-    freelancerFeeRounded: Math.ceil((singleResult.freelancerFeeRounded * cc) / 5) * 5,
-    ourTotalCost: r2(singleResult.ourTotalCost * cc),
-    ourMargin: r2((singleResult.clientChargeTotalRounded * cc) - (singleResult.ourTotalCost * cc)),
-  };
-}
-
-function calculateSingleCrewCosts(formData: FormData, settings: CostingSettings): CalculatedResult {
-  const {
-    jobType, whatIsIt, distanceMiles, driveTimeMinutes,
-    workDurationHours, calculationMode, numberOfDays,
-    addCollection, dayRateOverride, clientDayRateOverride, applyMinHours, expenses,
-    includesSetupWork, setupExtraTimeHours, setupFixedPremium,
-    arrivalTime, oohManualOverride, earlyStartMinutes: manualEarlyStart, lateFinishMinutes: manualLateFinish,
-    travelMethod, travelTimeMins, travelCost,
-  } = formData;
-
-  const markupMultiplier = 1 + (settings.expense_markup_percent / 100);
-  const effectiveDayRate = dayRateOverride !== null ? dayRateOverride : settings.driver_day_rate;
-  const isVehicle = whatIsIt === 'vehicle';
-  const isThereAndBack = !isVehicle || addCollection;
-  const isDC = jobType === 'delivery' || jobType === 'collection';
-  const transportCost = travelMethod === 'public_transport' ? travelCost : 0;
-  const totalMiles = isThereAndBack ? distanceMiles * 2 : distanceMiles;
-  const fuelCost = (totalMiles * settings.fuel_price_per_litre) / settings.fuel_efficiency_mpg;
-
-  const expensesIncluded = expenses
-    .filter(e => e.included && e.category !== 'fuel')
-    .reduce((sum, e) => sum + (e.category === 'pd' && e.pdDays ? e.amount * e.pdDays : e.amount), 0);
-  const expensesNotIncluded = expenses
-    .filter(e => !e.included && e.category !== 'fuel')
-    .reduce((sum, e) => sum + (e.category === 'pd' && e.pdDays ? e.amount * e.pdDays : e.amount), 0);
-  const fuelExpense = expenses.find(e => e.category === 'fuel');
-  const fuelIncluded = fuelExpense?.included ?? true;
-
-  // DAY RATE MODE
-  if (calculationMode === 'dayrate') {
-    let freelancerFee = effectiveDayRate * numberOfDays;
-    if (isDC && includesSetupWork && setupFixedPremium > 0) freelancerFee += setupFixedPremium;
-    const freelancerFeeRounded = roundToNearestFive(freelancerFee);
-
-    let clientChargeLabour: number;
-    if (clientDayRateOverride !== null) {
-      clientChargeLabour = clientDayRateOverride * numberOfDays;
-      if (isDC && includesSetupWork && setupFixedPremium > 0) clientChargeLabour += setupFixedPremium * markupMultiplier;
-    } else {
-      clientChargeLabour = freelancerFeeRounded * settings.day_rate_client_markup;
-    }
-
-    const clientChargeExpenses = expensesIncluded * markupMultiplier;
-    const clientChargeFuel = fuelIncluded ? fuelCost * markupMultiplier : 0;
-    const clientChargeTransport = transportCost * markupMultiplier;
-    const clientChargeTotal = clientChargeLabour + clientChargeFuel + clientChargeExpenses + clientChargeTransport;
-    const clientChargeTotalRounded = Math.max(settings.min_client_charge_floor || 0, Math.round(clientChargeTotal));
-    const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded + transportCost;
-
-    return {
-      clientChargeLabour: r2(clientChargeLabour),
-      clientChargeFuel: r2(clientChargeFuel),
-      clientChargeExpenses: r2(clientChargeExpenses),
-      clientChargeTotal: r2(clientChargeTotal),
-      clientChargeTotalRounded,
-      freelancerFee: r2(freelancerFee),
-      freelancerFeeRounded,
-      expectedFuelCost: r2(fuelCost),
-      expensesIncluded: r2(expensesIncluded),
-      expensesNotIncluded: r2(expensesNotIncluded),
-      ourTotalCost: r2(ourTotalCost),
-      ourMargin: r2(clientChargeTotalRounded - ourTotalCost),
-      estimatedTimeMinutes: numberOfDays * 8 * 60,
-      estimatedTimeHours: numberOfDays * 8,
-      autoEarlyStartMinutes: 0,
-      autoLateFinishMinutes: 0,
-      departureTimeMinutes: 0,
-      finishTimeMinutes: 0,
-    };
+function buildCalculatorInput(fd: FormData): CalculatorInput {
+  // Normalise arrival time identically to the save path (default 09:00).
+  let arrivalTime = fd.arrivalTime || '09:00';
+  if (!/^\d{2}:\d{2}$/.test(arrivalTime)) {
+    arrivalTime = normalizeTimeInput(arrivalTime) || '09:00';
   }
 
-  // HOURLY MODE
-  let totalDriveMinutes = 0;
-  let handlingTime = 0;
-  if (isThereAndBack) {
-    totalDriveMinutes = driveTimeMinutes * 2;
-    handlingTime = settings.unload_time_mins;
-  } else {
-    totalDriveMinutes = driveTimeMinutes + (travelMethod === 'public_transport' ? travelTimeMins : 0);
-    handlingTime = settings.handover_time_mins;
-  }
+  // Same expense filtering + shaping the save uses. The engine ignores the fuel
+  // line's amount (it derives fuel from distance), so its value here is irrelevant.
+  const expenses: ExpenseItem[] = fd.expenses
+    .filter(e => e.category === 'fuel' || e.amount > 0 || (e.category === 'pd' && !!e.pdDays && e.amount > 0))
+    .map(e => ({
+      type: e.category,
+      description: e.label + (e.description ? `: ${e.description}` : ''),
+      amount: e.category === 'pd' && e.pdDays ? e.amount * e.pdDays : e.amount,
+      includedInCharge: e.included,
+    }));
 
-  const workMinutes = jobType === 'crewed' ? workDurationHours * 60 : 0;
-  const setupMinutes = (isDC && includesSetupWork) ? setupExtraTimeHours * 60 : 0;
-  const totalMinutes = totalDriveMinutes + handlingTime + workMinutes + setupMinutes;
-  const totalHours = totalMinutes / 60;
-
-  let earlyStartMinutes = 0;
-  let lateFinishMinutes = 0;
-  let departureTimeMinutes = 0;
-  let finishTimeMinutes = 0;
-
-  if (oohManualOverride) {
-    earlyStartMinutes = manualEarlyStart;
-    lateFinishMinutes = manualLateFinish;
-  } else if (arrivalTime && driveTimeMinutes > 0) {
-    const ooh = calculateAutoOOH(arrivalTime, driveTimeMinutes, totalMinutes);
-    earlyStartMinutes = ooh.earlyStartMinutes;
-    lateFinishMinutes = ooh.lateFinishMinutes;
-    departureTimeMinutes = ooh.departureTime;
-    finishTimeMinutes = ooh.finishTime;
-  }
-
-  const normalMinutes = totalMinutes - earlyStartMinutes - lateFinishMinutes;
-  const outOfHoursMinutes = earlyStartMinutes + lateFinishMinutes;
-  const normalHours = Math.max(0, normalMinutes) / 60;
-  const outOfHoursHrs = outOfHoursMinutes / 60;
-
-  let freelancerLabourPay = (normalHours * settings.freelancer_hourly_day) + (outOfHoursHrs * settings.freelancer_hourly_night);
-  if (isDC && includesSetupWork && setupFixedPremium > 0) freelancerLabourPay += setupFixedPremium;
-  if (applyMinHours) {
-    const minPay = settings.min_hours_threshold * settings.freelancer_hourly_day;
-    if (freelancerLabourPay < minPay && totalHours > 0) freelancerLabourPay = minPay;
-  }
-  const freelancerFeeRounded = roundToNearestFive(freelancerLabourPay);
-
-  let clientLabourCharge = (normalHours * settings.client_hourly_day) + (outOfHoursHrs * settings.client_hourly_night);
-  if (applyMinHours) {
-    const minClientChargeLab = settings.min_hours_threshold * settings.client_hourly_day;
-    if (clientLabourCharge < minClientChargeLab && totalHours > 0) clientLabourCharge = minClientChargeLab;
-  }
-  clientLabourCharge += totalHours * settings.admin_cost_per_hour;
-  if (isDC && includesSetupWork && setupFixedPremium > 0) clientLabourCharge += setupFixedPremium * markupMultiplier;
-
-  const clientFuelCharge = fuelIncluded ? fuelCost : 0;
-  const clientExpenseCharge = expensesIncluded * markupMultiplier;
-  const clientTransportCharge = transportCost * markupMultiplier;
-  const clientChargeTotal = clientLabourCharge + clientFuelCharge + clientExpenseCharge + clientTransportCharge;
-  const clientChargeTotalRounded = Math.max(settings.min_client_charge_floor || 0, Math.round(clientChargeTotal));
-  const ourTotalCost = freelancerFeeRounded + fuelCost + expensesIncluded + transportCost;
+  // Setup time/premium only count when the "includes setup work" box is ticked.
+  const setupExtraHrs = fd.includesSetupWork ? Number(fd.setupExtraTimeHours) || 0 : 0;
+  const setupPremium = fd.includesSetupWork ? Number(fd.setupFixedPremium) || 0 : 0;
 
   return {
-    clientChargeLabour: r2(clientLabourCharge),
-    clientChargeFuel: r2(clientFuelCharge),
-    clientChargeExpenses: r2(clientExpenseCharge),
-    clientChargeTotal: r2(clientChargeTotal),
-    clientChargeTotalRounded,
-    freelancerFee: r2(freelancerLabourPay),
-    freelancerFeeRounded,
-    expectedFuelCost: r2(fuelCost),
-    expensesIncluded: r2(expensesIncluded),
-    expensesNotIncluded: r2(expensesNotIncluded),
-    ourTotalCost: r2(ourTotalCost),
-    ourMargin: r2(clientChargeTotalRounded - ourTotalCost),
-    estimatedTimeMinutes: totalMinutes,
-    estimatedTimeHours: r2(totalHours),
-    autoEarlyStartMinutes: earlyStartMinutes,
-    autoLateFinishMinutes: lateFinishMinutes,
-    departureTimeMinutes,
-    finishTimeMinutes,
+    jobType: (fd.jobType || 'delivery') as QuoteJobType,
+    calculationMode: fd.calculationMode === 'hourly' ? 'hourly' : 'dayrate',
+    distanceMiles: Number(fd.distanceMiles) || 0,
+    driveTimeMins: Number(fd.driveTimeMinutes) || 0,
+    arrivalTime,
+    workDurationHrs: Number(fd.workDurationHours) || 0,
+    numDays: Math.max(1, Number(fd.numberOfDays) || 1),
+    setupExtraHrs,
+    setupPremium,
+    travelMethod: fd.travelMethod === 'public_transport' ? 'public_transport' : 'vehicle',
+    travelTimeMins: Number(fd.travelTimeMins) || 0,
+    travelCost: Number(fd.travelCost) || 0,
+    dayRateOverride: fd.dayRateOverride != null ? Number(fd.dayRateOverride) : undefined,
+    clientRateOverride: fd.clientDayRateOverride != null ? Number(fd.clientDayRateOverride) : undefined,
+    applyMinHours: fd.applyMinHours,
+    oohOverride: fd.oohManualOverride
+      ? { earlyStartMins: Number(fd.earlyStartMinutes) || 0, lateFinishMins: Number(fd.lateFinishMinutes) || 0 }
+      : null,
+    expenses,
   };
 }
-
-function r2(n: number): number { return Math.round(n * 100) / 100; }
 
 // =============================================================================
 // INITIAL STATE
@@ -451,7 +269,7 @@ export default function TransportCalculator({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [settings, setSettings] = useState<CostingSettings | null>(null);
+  const [settings, setSettings] = useState<CalculatorSettings | null>(null);
   const [formData, setFormData] = useState<FormData>(INITIAL_FORM);
   const [venues, setVenues] = useState<VenueOption[]>([]);
   const [venueSearch, setVenueSearch] = useState('');
@@ -465,6 +283,16 @@ export default function TransportCalculator({
   const [venueOriginalMiles, setVenueOriginalMiles] = useState<number | null>(null);
   const [venueOriginalDriveTime, setVenueOriginalDriveTime] = useState<number | null>(null);
   const [creatingVenue, setCreatingVenue] = useState(false);
+  // Quick-add venue form (captures address + travel defaults inline so a
+  // freshly-created venue feeds the calc and doesn't need editing later).
+  const [showVenueForm, setShowVenueForm] = useState(false);
+  const [nvName, setNvName] = useState('');
+  const [nvAddress, setNvAddress] = useState('');
+  const [nvCity, setNvCity] = useState('');
+  const [nvPostcode, setNvPostcode] = useState('');
+  const [nvMiles, setNvMiles] = useState('');
+  const [nvDriveTime, setNvDriveTime] = useState('');
+  const [nvTolls, setNvTolls] = useState('');
 
   // Load settings + venues on open
   useEffect(() => {
@@ -473,6 +301,7 @@ export default function TransportCalculator({
     setError(null);
     setSuccess(null);
     setStep(1);
+    setShowVenueForm(false);
 
     // Parse dates from HireHop props
     const parsedDate = toDateInput(jobDate);
@@ -557,7 +386,12 @@ export default function TransportCalculator({
     }
   }
 
-  const costs = settings && formData.jobType ? calculateCosts(formData as FormData & { jobType: QuoteJobType }, settings) : null;
+  // Display costs come straight from the canonical engine, fed the exact same
+  // input the save sends — so the figures below === the saved + pushed figures.
+  const crewMultiplier = formData.jobType === 'crewed' && formData.crewCount > 1 ? formData.crewCount : 1;
+  const costs: CalculatedCosts | null = settings && formData.jobType
+    ? applyCrewMultiplier(calculateCosts(buildCalculatorInput(formData), settings), crewMultiplier)
+    : null;
 
   const updateField = useCallback(<K extends keyof FormData>(field: K, value: FormData[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -608,15 +442,46 @@ export default function TransportCalculator({
     setFormData(prev => ({ ...prev, expenses: prev.expenses.filter(exp => exp.id !== id) }));
   }, []);
 
+  // Open the inline quick-add form, seeding the name from what was typed.
+  function openVenueForm() {
+    setNvName(venueSearch.trim());
+    setNvAddress('');
+    setNvCity('');
+    setNvPostcode('');
+    setNvMiles('');
+    setNvDriveTime('');
+    setNvTolls('');
+    setShowVenueForm(true);
+    setVenueDropdownOpen(false);
+  }
+
   async function handleCreateVenue() {
-    if (!venueSearch.trim()) return;
+    const name = nvName.trim() || venueSearch.trim();
+    if (!name) return;
     setCreatingVenue(true);
     try {
+      const miles = nvMiles.trim() ? parseFloat(nvMiles) : null;
+      const driveTime = nvDriveTime.trim() ? parseInt(nvDriveTime, 10) : null;
+      const tolls = nvTolls.trim() ? parseFloat(nvTolls) : null;
       const newVenue = await api.post<{ id: string; name: string }>('/venues', {
-        name: venueSearch.trim(),
+        name,
+        address: nvAddress.trim() || null,
+        city: nvCity.trim() || null,
+        postcode: nvPostcode.trim() || null,
+        default_miles_from_base: miles !== null && !isNaN(miles) ? miles : null,
+        default_drive_time_mins: driveTime !== null && !isNaN(driveTime) ? driveTime : null,
+        default_tolls_amount: tolls !== null && !isNaN(tolls) ? tolls : null,
       });
-      const created: VenueOption = { id: newVenue.id, name: newVenue.name ?? venueSearch.trim() };
+      const created: VenueOption = {
+        id: newVenue.id,
+        name: newVenue.name ?? name,
+        address: nvAddress.trim() || null,
+        default_miles_from_base: miles !== null && !isNaN(miles) ? miles : null,
+        default_drive_time_mins: driveTime !== null && !isNaN(driveTime) ? driveTime : null,
+      };
       setVenues(prev => [...prev, created]);
+      setVenueSearch(created.name);
+      setShowVenueForm(false);
       handleVenueSelect(created);
     } catch {
       setError('Failed to create venue');
@@ -631,36 +496,32 @@ export default function TransportCalculator({
     setError(null);
 
     try {
-      // Normalize arrival time to HH:MM format
-      let arrivalTime = formData.arrivalTime || '09:00';
-      if (!/^\d{2}:\d{2}$/.test(arrivalTime)) {
-        arrivalTime = normalizeTimeInput(arrivalTime) || '09:00';
-      }
+      // Build the canonical calculator input — the SAME object the display used —
+      // so the backend recomputes (and HireHop receives) exactly what's on screen.
+      const input = buildCalculatorInput(formData);
+      const arrivalTime = input.arrivalTime;
 
-      // Filter expenses: only send ones with amount > 0 or fuel
-      const expensesToSend = formData.expenses
-        .filter(e => e.category === 'fuel' || e.amount > 0 || (e.category === 'pd' && e.pdDays && e.amount > 0))
-        .map(e => ({
-          type: e.category,
-          description: e.label + (e.description ? `: ${e.description}` : ''),
-          amount: Number(e.category === 'fuel' ? costs.expectedFuelCost : (e.category === 'pd' && e.pdDays ? e.amount * e.pdDays : e.amount)) || 0,
-          includedInCharge: e.included,
-        }));
+      // Payload expenses come from the engine input; only the fuel line's display
+      // amount is swapped to the engine-derived figure (engine ignores it for calc).
+      const expensesToSend = input.expenses.map(e =>
+        e.type === 'fuel' ? { ...e, amount: Number(costs.expectedFuelCost) || 0 } : e,
+      );
 
       const saveResult = await api.post<{ id: string }>('/quotes', {
         jobId: jobId || null,
-        jobType: formData.jobType,
-        calculationMode: formData.calculationMode === 'hourly' ? 'hourly' : 'dayrate',
-        distanceMiles: Number(formData.distanceMiles) || 0,
-        driveTimeMins: Number(formData.driveTimeMinutes) || 0,
+        jobType: input.jobType,
+        calculationMode: input.calculationMode,
+        distanceMiles: input.distanceMiles,
+        driveTimeMins: input.driveTimeMins,
         arrivalTime,
-        workDurationHrs: Number(formData.workDurationHours) || 0,
-        numDays: Math.max(1, Number(formData.numberOfDays) || 1),
-        setupExtraHrs: Number(formData.setupExtraTimeHours) || 0,
-        setupPremium: Number(formData.setupFixedPremium) || 0,
-        travelMethod: formData.travelMethod === 'public_transport' ? 'public_transport' : 'vehicle',
-        dayRateOverride: formData.dayRateOverride != null ? Number(formData.dayRateOverride) : null,
-        clientRateOverride: formData.clientDayRateOverride != null ? Number(formData.clientDayRateOverride) : null,
+        workDurationHrs: input.workDurationHrs,
+        numDays: input.numDays,
+        setupExtraHrs: input.setupExtraHrs,
+        setupPremium: input.setupPremium,
+        travelMethod: input.travelMethod,
+        dayRateOverride: input.dayRateOverride ?? null,
+        clientRateOverride: input.clientRateOverride ?? null,
+        applyMinHours: input.applyMinHours ?? null,
         expenses: expensesToSend,
         venueId: formData.selectedVenueId || null,
         venueName: formData.destination || null,
@@ -677,10 +538,10 @@ export default function TransportCalculator({
         workType: formData.workType || null,
         workDescription: formData.workDescription || null,
         oohManual: formData.oohManualOverride,
-        earlyStartMins: costs.autoEarlyStartMinutes,
-        lateFinishMins: costs.autoLateFinishMinutes,
-        travelTimeMins: formData.travelTimeMins || null,
-        travelCost: formData.travelCost || null,
+        earlyStartMins: input.oohOverride ? input.oohOverride.earlyStartMins : costs.autoEarlyStartMinutes,
+        lateFinishMins: input.oohOverride ? input.oohOverride.lateFinishMins : costs.autoLateFinishMinutes,
+        travelTimeMins: input.travelTimeMins || null,
+        travelCost: input.travelCost || null,
         internalNotes: formData.internalNotes || null,
         freelancerNotes: formData.freelancerNotes || null,
         crewCount: formData.crewCount > 1 ? formData.crewCount : 1,
@@ -1034,11 +895,10 @@ export default function TransportCalculator({
                             {venueSearch.trim().length > 0 && !venues.some(v => v.name.toLowerCase() === venueSearch.trim().toLowerCase()) && (
                               <button
                                 type="button"
-                                onClick={handleCreateVenue}
-                                disabled={creatingVenue}
+                                onClick={openVenueForm}
                                 className="w-full px-4 py-2 text-left hover:bg-ooosh-50 border-t border-gray-100 text-sm text-ooosh-600 font-medium"
                               >
-                                {creatingVenue ? 'Creating...' : `➕ Create "${venueSearch.trim()}" as new venue`}
+                                {`➕ Create "${venueSearch.trim()}" as new venue`}
                               </button>
                             )}
                           </div>
@@ -1054,6 +914,56 @@ export default function TransportCalculator({
                            (formData.distanceMiles !== (venueOriginalMiles ?? 0) || formData.driveTimeMinutes !== (venueOriginalDriveTime ?? 0)) && (
                             <p className="text-xs text-amber-600 mt-0.5">📍 Changed from saved values — will update venue on save</p>
                           )}
+                        </div>
+                      )}
+
+                      {showVenueForm && (
+                        <div className="mt-3 border border-ooosh-200 bg-ooosh-50/50 rounded-lg p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <h4 className="text-sm font-semibold text-gray-900">New venue details</h4>
+                            <button type="button" onClick={() => setShowVenueForm(false)} className="text-xs text-gray-500 hover:text-gray-700">Cancel</button>
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Venue name *</label>
+                            <input type="text" value={nvName} onChange={(e) => setNvName(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-medium text-gray-600 mb-1">Address</label>
+                            <textarea value={nvAddress} onChange={(e) => setNvAddress(e.target.value)} rows={2} placeholder="Street address" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">City / Town</label>
+                              <input type="text" value={nvCity} onChange={(e) => setNvCity(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Postcode</label>
+                              <input type="text" value={nvPostcode} onChange={(e) => setNvPostcode(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-3 gap-3">
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Miles (one-way)</label>
+                              <input type="number" min="0" value={nvMiles} onChange={(e) => setNvMiles(e.target.value)} placeholder="From Maps" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Drive time (min)</label>
+                              <input type="number" min="0" value={nvDriveTime} onChange={(e) => setNvDriveTime(e.target.value)} placeholder="From Maps" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">Tolls (£)</label>
+                              <input type="number" min="0" step="0.01" value={nvTolls} onChange={(e) => setNvTolls(e.target.value)} placeholder="Optional" className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-500">Miles &amp; drive time pre-fill the calculation and are saved to the venue for next time.</p>
+                          <button
+                            type="button"
+                            onClick={handleCreateVenue}
+                            disabled={creatingVenue || !nvName.trim()}
+                            className="w-full px-4 py-2 bg-ooosh-600 text-white rounded-lg text-sm font-medium hover:bg-ooosh-700 disabled:opacity-50"
+                          >
+                            {creatingVenue ? 'Creating…' : 'Create venue & use it'}
+                          </button>
                         </div>
                       )}
                     </div>
@@ -1485,7 +1395,7 @@ function ExpenseRow({ expense, fuelCost, numberOfDays, onChange, onRemove }: {
 }
 
 function OOHDisplay({ costs, formData, onToggleOverride, onChangeEarly, onChangeLate }: {
-  costs: CalculatedResult; formData: FormData;
+  costs: CalculatedCosts; formData: FormData;
   onToggleOverride: () => void; onChangeEarly: (v: number) => void; onChangeLate: (v: number) => void;
 }) {
   const hasArrivalTime = !!formData.arrivalTime && formData.driveTimeMinutes > 0;

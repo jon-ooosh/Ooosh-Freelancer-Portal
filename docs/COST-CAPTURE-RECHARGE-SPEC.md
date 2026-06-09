@@ -666,3 +666,94 @@ pill, not a red error) — everything else (Spend Money, reads) keeps working.
 - HH recharge stock items + push (needs the HH stock IDs).
 - Vehicle picker on the modal; Xero reconciliation sync; entry points on
   Job/Vehicle/Issue detail pages.
+
+---
+
+## Build notes — Phase B: cost_intent (quote-actual vs extra) (Jun 2026)
+
+The conceptual piece flagged in the Phase 1 handoff. A job often already carries
+a quote (e.g. a £300 D&C delivery). The freelancer's fee + train + fuel logged
+against it are **actuals consumed by that quote**, not new charges — recharging
+them would double-bill. `cost_intent` distinguishes the two. This is the gate
+that makes the Phase C HireHop recharge push safe.
+
+Decisions taken with jon: **job-level total** variance (not per-quote), and
+**default to "part of the quote"** when the linked job has a quote.
+
+### Model
+- `cost_intent` (migration 112): `quote_actual` | `extra`, NULL on overhead /
+  vehicle costs with no job. Existing rows stay NULL (the recharge guard only
+  blocks `quote_actual`, so NULL behaves exactly as before).
+- **quote_actual** — part of fulfilling a quote. Tracked for variance, **never
+  recharged** (already billed via the quote). Backend hard-guards: the recharge
+  endpoint 400s on a `quote_actual` cost, and create/update coerce
+  recharge_mode->'none' (defence-in-depth behind the modal disabling the control).
+- **extra** — incurred for the job but not covered by a quote. Recharge controls
+  stay available; Phase C's HH push will filter to `extra` only.
+
+### Capture modal
+- When a job is linked, an intent toggle appears ("Part of the quote" / "Extra").
+  Default: the modal fetches the job's quotes once on link — `quote_actual` if it
+  has any, else `extra`. Skips once the user touches the toggle, and in edit mode
+  (seeded from the cost, inferring for legacy rows: recharge-flagged -> extra).
+- "Part of the quote" hides the recharge controls + shows a one-line note.
+
+### Money tab — "Job Costs" panel
+- **Expected (from quotes)** = sum of quote freelancer fees (the crew/transport
+  cost baseline). **Actuals (part of quote)** = sum of quote_actual cost gross.
+  **Variance** = actuals - expected (red over / green under). Client-quoted total
+  shown as a muted reference line.
+- **Extra costs** listed separately with their recharge status.
+- Legacy unclassified (NULL-intent) costs surfaced in a footnote so nothing's
+  hidden from the totals.
+- Reads `/costs/by-job/:jobId` + `/quotes?job_id=` - best-effort, non-blocking;
+  hidden when the job has neither costs nor quotes.
+
+### Still to do
+- Phase C - HH recharge stock items + push (filters to `extra`; needs the HH
+  stock IDs). Vehicle picker on the modal; Xero reconciliation sync; entry points
+  on Job / Vehicle / Issue detail pages.
+
+---
+
+## Build notes — capture modal round 2 (Jun 2026)
+
+Live-testing feedback after the bill flow went end-to-end. Modal correctness +
+UX, plus the Xero tax-treatment that makes No-VAT actually mean No-VAT.
+
+**VAT controls — 20% / No VAT / Manual.** Replaced the single "Auto 20%"
+checkbox with a 3-way segmented control. The document is authoritative: AI
+extraction returns `vat_treatment` (`standard` | `no_vat`) and drives the mode —
+**no VAT is assumed unless it's shown** (the original bug — freelance invoices
+were being force-split at 20%). No VAT → gross = net, vat = 0. Manual → edit all
+three. Default (before AI / on manual category pick) is category-driven:
+freelance crew invoices → No VAT, everything else → 20%.
+
+**Correct Xero tax treatment on push.** Both Spend Money and bill line items now
+set an explicit `TaxType`: a No-VAT cost pushes as `NONE` (so it no longer
+inherits the account's 20% default and over-reclaims), a VAT cost resolves the
+org's purchase tax type for the implied rate via `xeroBroker.getPurchaseTaxType()`
+(cached; falls back to the account default if unresolved). The implied rate is
+derived from vat/net so 5%/other rates resolve too.
+
+**Freelance → pay-later default.** Selecting "Freelance crew invoices" defaults
+the payment method to "Supplier bill (pay later)" (and No VAT) — until the user
+overrides. Applies via AI category detection too.
+
+**Job-number suggestion chip.** AI extraction returns a `job_number` if the
+invoice clearly references one (e.g. "Attention: Ooosh Tours (#15291)"). Shown as
+a tap-to-link suggestion — never auto-linked; clicking resolves it to a real job
+via search and links it (or says it couldn't find it).
+
+**In-modal quote comparison.** When a job is linked, a compact "This job so far"
+box shows client-quoted total, our cost estimate (Σ quote freelancer fees) and
+costs logged so far (quote-actuals + extras), so staff can judge Part-of-quote vs
+Extra at capture time. Reuses `/quotes?job_id` + `/costs/by-job`.
+
+**Polish.** AI Extract button enlarged + relabelled "Auto-fill from receipt (AI)"
+with a helper line. Left receipt pane restructured to a single scroll (fixed
+header + flex-fill preview; the PDF/image scrolls inside that area) — kills the
+double scrollbar.
+
+No migration. Backend: `cost-receipt-extract.ts` (schema + prompt),
+`xero-broker.ts` (tax-type resolver), `cost-xero-push.ts` (TaxType on lines).
