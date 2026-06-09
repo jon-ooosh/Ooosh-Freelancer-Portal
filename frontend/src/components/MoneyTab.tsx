@@ -6,6 +6,7 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
+import { useAuthStore } from '../hooks/useAuthStore';
 import { getPaymentState, PAYMENT_STATE_LABELS, PAYMENT_STATE_CLASSES } from '../services/paymentState';
 import ExcessPaymentModal, { statusLabel, statusColor } from './ExcessPaymentModal';
 import type { JobExcess } from '../../../shared/types';
@@ -30,6 +31,12 @@ interface FinancialData {
     total_hire_deposits: number;
     total_excess_deposits: number;
     balance_outstanding: number;
+    // Business-level balance override (migration 111) — admin flagged the HH
+    // balance as settled in Xero / written off. Null when not overridden.
+    balance_override?: {
+      reason: string; notes: string | null;
+      resolved_at: string | null; resolved_by_name: string | null;
+    } | null;
     required_deposit: number;
     deposit_paid: boolean;
     deposit_percent: number;
@@ -83,10 +90,27 @@ const PAYMENT_METHODS_BASE = [
   { value: 'lloyds_bank', label: 'Lloyds Bank' },
 ];
 
+// Business-level balance-override reasons (migration 111). Mirrors the list on
+// MoneyOverviewPage — kept local to avoid a cross-file dependency for 5 strings.
+const BALANCE_REASONS = [
+  { value: 'xero_settled', label: 'Settled in Xero (not fed back to HireHop)' },
+  { value: 'internal_discounted', label: 'Internal / discounted job' },
+  { value: 'hh_xero_corrected', label: 'Corrected HireHop↔Xero error' },
+  { value: 'write_off', label: 'Write-off (bad debt / goodwill)' },
+  { value: 'other', label: 'Other' },
+];
+const BALANCE_REASON_LABEL: Record<string, string> = Object.fromEntries(BALANCE_REASONS.map((r) => [r.value, r.label]));
+
 export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
   const [data, setData] = useState<FinancialData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
+  const [showResolveBalance, setShowResolveBalance] = useState(false);
+  const [balReason, setBalReason] = useState('xero_settled');
+  const [balNotes, setBalNotes] = useState('');
+  const [balSaving, setBalSaving] = useState(false);
+  const [balError, setBalError] = useState('');
 
   // Record payment form
   const [showPaymentForm, setShowPaymentForm] = useState(false);
@@ -253,6 +277,29 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
       setLoading(false);
     }
   }, [jobId]);
+
+  // Business-level balance override (migration 111) — admin marks the HH-derived
+  // balance as settled in Xero / written off. Doesn't touch HireHop or Xero.
+  const submitResolveBalance = async () => {
+    setBalSaving(true); setBalError('');
+    try {
+      await api.post(`/money/${jobId}/resolve-balance`, { reason: balReason, notes: balNotes || null });
+      setShowResolveBalance(false); setBalNotes('');
+      await loadData();
+    } catch (e) {
+      setBalError(e instanceof Error ? e.message : 'Failed to resolve');
+    } finally {
+      setBalSaving(false);
+    }
+  };
+  const undoResolveBalance = async () => {
+    try {
+      await api.delete(`/money/${jobId}/resolve-balance`);
+      await loadData();
+    } catch (e) {
+      setBalError(e instanceof Error ? e.message : 'Failed to undo');
+    }
+  };
 
   useEffect(() => { loadData(); }, [loadData]);
 
@@ -493,10 +540,40 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
             </div>
 
             <div className="flex items-center justify-between">
-              <p className={`text-sm font-semibold ${financial.balance_outstanding > 0 ? 'text-red-600' : 'text-green-600'}`}>
+              <p className={`text-sm font-semibold ${financial.balance_override ? 'text-gray-400 line-through' : financial.balance_outstanding > 0 ? 'text-red-600' : 'text-green-600'}`}>
                 Balance Outstanding: £{financial.balance_outstanding.toFixed(2)}
               </p>
+              {/* Admin: resolve a stray HH balance the business considers settled
+                  (Xero source of truth). Only when there's a balance + not already
+                  resolved. */}
+              {isAdmin && !financial.balance_override && financial.balance_outstanding > 0.01 && (
+                <button
+                  onClick={() => { setBalError(''); setShowResolveBalance(true); }}
+                  className="text-xs text-gray-500 hover:text-ooosh-700 underline"
+                >Resolve balance…</button>
+              )}
             </div>
+
+            {/* Business-override banner — shown to everyone so staff understand
+                why HireHop still shows money owed. */}
+            {financial.balance_override && (
+              <div className="mt-2 p-3 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-600 flex items-start justify-between gap-3">
+                <div>
+                  <span className="font-semibold text-gray-700">Balance resolved (business adjustment)</span>
+                  {' — '}{BALANCE_REASON_LABEL[financial.balance_override.reason] || financial.balance_override.reason}.
+                  {financial.balance_override.notes && <span className="block mt-0.5 text-gray-500">{financial.balance_override.notes}</span>}
+                  <span className="block mt-0.5 text-gray-400">
+                    {financial.balance_override.resolved_by_name || '—'}
+                    {financial.balance_override.resolved_at && ` · ${new Date(financial.balance_override.resolved_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`}
+                    {' · HireHop figure left untouched'}
+                  </span>
+                </div>
+                {isAdmin && (
+                  <button onClick={undoResolveBalance} className="text-[11px] text-gray-400 hover:text-red-600 underline whitespace-nowrap">Undo</button>
+                )}
+              </div>
+            )}
+            {balError && <p className="text-xs text-red-600 mt-1">{balError}</p>}
 
             {/* Deposit to Secure info */}
             {financial.hire_value_inc_vat > 0 && !financial.deposit_paid && (
@@ -1141,6 +1218,39 @@ export default function MoneyTab({ jobId, job, onJobChanged }: MoneyTabProps) {
           onClose={() => setActionExcess(null)}
           onUpdated={loadData}
         />
+      )}
+
+      {/* Resolve-balance modal (business adjustment — admin only) */}
+      {showResolveBalance && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setShowResolveBalance(false)}>
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">Resolve balance</h3>
+            <p className="text-xs text-gray-500 mb-3">
+              Marks this £{data?.financial.balance_outstanding.toFixed(2)} balance as settled for business purposes.
+              Doesn't touch HireHop or Xero — the live figure above stays as-is, it just stops counting on the Money Overview.
+            </p>
+            <div className="mb-3">
+              <label className="block text-xs font-medium text-gray-600 mb-1">Reason</label>
+              <select value={balReason} onChange={(e) => setBalReason(e.target.value)}
+                className="w-full text-sm border border-gray-300 rounded-md px-3 py-2">
+                {BALANCE_REASONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+              </select>
+            </div>
+            <div className="mb-4">
+              <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+              <textarea value={balNotes} onChange={(e) => setBalNotes(e.target.value)} rows={2}
+                className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 resize-y" />
+            </div>
+            {balError && <p className="text-xs text-red-600 mb-3">{balError}</p>}
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowResolveBalance(false)} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={submitResolveBalance} disabled={balSaving}
+                className="px-4 py-1.5 text-sm font-medium text-white bg-ooosh-600 rounded-md hover:bg-ooosh-700 disabled:opacity-50">
+                {balSaving ? 'Saving…' : 'Resolve'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Hire payment refund modal */}

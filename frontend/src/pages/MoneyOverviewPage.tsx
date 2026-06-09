@@ -9,6 +9,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
+import { useAuthStore } from '../hooks/useAuthStore';
 
 interface BalanceRow {
   job_id: string; hh_job_number: number | null; job_name: string | null;
@@ -16,6 +17,9 @@ interface BalanceRow {
   job_date: string | null; job_end: string | null; return_date: string | null;
   hire_value_inc_vat: string; total_hire_deposits: string; balance_outstanding: string;
   vat_saved: string; last_synced_at: string;
+  // Present only on resolved rows (migration 111 business override).
+  override_reason?: string | null; override_notes?: string | null;
+  override_resolved_at?: string | null; override_resolved_by_name?: string | null;
 }
 interface DepositPendingRow {
   job_id: string; hh_job_number: number | null; job_name: string | null;
@@ -35,11 +39,13 @@ interface PendingRefundRow {
 }
 interface OverviewData {
   balances_outstanding: BalanceRow[];
+  balances_resolved: BalanceRow[];
   deposits_pending: DepositPendingRow[];
   excess_held: ExcessHeldRow[];
   pending_refunds: PendingRefundRow[];
   totals: {
     balance_outstanding: number; balances_count: number;
+    balances_resolved_total: number; balances_resolved_count: number;
     deposits_pending_count: number;
     excess_held: number; excess_held_count: number;
     excess_held_upcoming: number; excess_held_upcoming_count: number;
@@ -87,6 +93,104 @@ function JobRef({ hh, name }: { hh: number | null; name: string | null }) {
       <span className="font-medium text-ooosh-700">#{hh ?? '—'}</span>
       {name && <span className="text-gray-500 text-xs block">{name}</span>}
     </span>
+  );
+}
+
+// Business-level balance-override reasons (migration 111).
+const RESOLVE_REASONS = [
+  { value: 'xero_settled', label: 'Settled in Xero (not fed back to HireHop)' },
+  { value: 'internal_discounted', label: 'Internal / discounted job' },
+  { value: 'hh_xero_corrected', label: 'Corrected HireHop↔Xero error' },
+  { value: 'write_off', label: 'Write-off (bad debt / goodwill)' },
+  { value: 'other', label: 'Other' },
+];
+const REASON_LABEL: Record<string, string> = Object.fromEntries(RESOLVE_REASONS.map((r) => [r.value, r.label]));
+
+// Resolve-balance modal — single (a BalanceRow) or bulk ('bulk', date-based).
+// Admin only. Flags the HH-derived balance as a business adjustment; does NOT
+// touch HireHop or Xero.
+function ResolveBalanceModal({ target, onClose, onDone }: {
+  target: BalanceRow | 'bulk';
+  onClose: () => void;
+  onDone: (msg: string) => void;
+}) {
+  const isBulk = target === 'bulk';
+  const [reason, setReason] = useState('xero_settled');
+  const [notes, setNotes] = useState('');
+  const [beforeDate, setBeforeDate] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const submit = async () => {
+    setSaving(true); setErr('');
+    try {
+      if (isBulk) {
+        if (!beforeDate) throw new Error('Pick a "finished before" date');
+        const res = await api.post<{ resolved: number }>('/money/balances/bulk-resolve', {
+          reason, notes: notes || null, finished_before: beforeDate,
+        });
+        onDone(`Resolved ${res.resolved} balance${res.resolved === 1 ? '' : 's'}`);
+      } else {
+        await api.post(`/money/${target.job_id}/resolve-balance`, { reason, notes: notes || null });
+        onDone('Balance resolved');
+      }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-lg font-semibold text-gray-900 mb-1">
+          {isBulk ? 'Bulk resolve outstanding balances' : 'Resolve balance'}
+        </h3>
+        {isBulk ? (
+          <p className="text-xs text-gray-500 mb-3">
+            Flags every still-outstanding (non-cancelled) job that finished before the chosen date as resolved.
+            Doesn't touch HireHop or Xero — it just removes them from the active Outstanding list.
+          </p>
+        ) : (
+          <p className="text-xs text-gray-500 mb-3">
+            #{target.hh_job_number ?? '—'}{target.client_name ? ` · ${target.client_name}` : ''} · {gbp(target.balance_outstanding)} outstanding.
+            Doesn't touch HireHop or Xero.
+          </p>
+        )}
+
+        {isBulk && (
+          <div className="mb-3">
+            <label className="block text-xs font-medium text-gray-600 mb-1">Finished before</label>
+            <input type="date" value={beforeDate} onChange={(e) => setBeforeDate(e.target.value)}
+              className="w-full text-sm border border-gray-300 rounded-md px-3 py-2" />
+          </div>
+        )}
+
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-600 mb-1">Reason</label>
+          <select value={reason} onChange={(e) => setReason(e.target.value)}
+            className="w-full text-sm border border-gray-300 rounded-md px-3 py-2">
+            {RESOLVE_REASONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
+          </select>
+        </div>
+
+        <div className="mb-4">
+          <label className="block text-xs font-medium text-gray-600 mb-1">Notes (optional)</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2}
+            className="w-full text-sm border border-gray-300 rounded-md px-3 py-2 resize-y" />
+        </div>
+
+        {err && <p className="text-xs text-red-600 mb-3">{err}</p>}
+
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+          <button onClick={submit} disabled={saving}
+            className="px-4 py-1.5 text-sm font-medium text-white bg-ooosh-600 rounded-md hover:bg-ooosh-700 disabled:opacity-50">
+            {saving ? 'Saving…' : isBulk ? 'Resolve matching' : 'Resolve'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -172,6 +276,10 @@ export default function MoneyOverviewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [tab, setTab] = useState<'balances' | 'deposits' | 'excess' | 'refunds'>('balances');
+  const isAdmin = useAuthStore((s) => s.user?.role) === 'admin';
+  const [resolveTarget, setResolveTarget] = useState<BalanceRow | 'bulk' | null>(null);
+  const [showResolved, setShowResolved] = useState(false);
+  const [toast, setToast] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -188,13 +296,23 @@ export default function MoneyOverviewPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  const undoResolve = useCallback(async (jobId: string) => {
+    try {
+      await api.delete(`/money/${jobId}/resolve-balance`);
+      setToast('Balance override removed');
+      load();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : 'Failed to undo');
+    }
+  }, [load]);
+
   if (loading) return <div className="p-6 text-gray-500">Loading financial overview…</div>;
   if (error) return <div className="p-6 text-red-600">{error}</div>;
   if (!data) return null;
 
   const t = data.totals;
   const cards: { key: typeof tab; label: string; value: string; sub: string; subNode?: React.ReactNode; accent: string }[] = [
-    { key: 'balances', label: 'Balances Outstanding', value: gbp(t.balance_outstanding), sub: `${t.balances_count} job${t.balances_count === 1 ? '' : 's'} owing`, accent: 'text-red-700' },
+    { key: 'balances', label: 'Balances Outstanding', value: gbp(t.balance_outstanding), sub: `${t.balances_count} owing${t.balances_resolved_count ? ` · ${t.balances_resolved_count} resolved` : ''}`, accent: 'text-red-700' },
     { key: 'deposits', label: 'Deposits Pending', value: String(t.deposits_pending_count), sub: 'confirmed, no deposit yet', accent: 'text-amber-700' },
     {
       key: 'excess', label: 'Excess Held', value: gbp(t.excess_held), accent: 'text-blue-700',
@@ -223,8 +341,22 @@ export default function MoneyOverviewPage() {
       fmtDate(r.job_end || r.return_date),
       gbp(r.hire_value_inc_vat),
       <span className="font-semibold text-red-700">{gbp(r.balance_outstanding)}</span>,
+      ...(isAdmin ? [
+        <button
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setResolveTarget(r); }}
+          className="text-xs text-gray-500 hover:text-ooosh-700 underline whitespace-nowrap"
+        >Resolve</button>,
+      ] : []),
     ],
   }));
+
+  const balanceColumns: Col[] = [
+    { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
+    { label: 'Status', sortable: true }, { label: 'Finishes', sortable: true },
+    { label: 'Hire value', sortable: true, align: 'right' },
+    { label: 'Outstanding', sortable: true, align: 'right' },
+    ...(isAdmin ? [{ label: '', align: 'right' as const }] : []),
+  ];
 
   const depositRows: Row[] = data.deposits_pending.map((r) => ({
     key: r.job_id, href: jobHref(r),
@@ -294,16 +426,72 @@ export default function MoneyOverviewPage() {
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
         {tab === 'balances' && (
-          <Table
-            columns={[
-              { label: 'Job', sortable: true }, { label: 'Client', sortable: true },
-              { label: 'Status', sortable: true }, { label: 'Finishes', sortable: true },
-              { label: 'Hire value', sortable: true, align: 'right' },
-              { label: 'Outstanding', sortable: true, align: 'right' },
-            ]}
-            empty="No outstanding balances on synced jobs."
-            rows={balanceRows}
-          />
+          <>
+            {isAdmin && (
+              <div className="flex justify-end px-4 pt-3">
+                <button
+                  onClick={() => setResolveTarget('bulk')}
+                  className="text-xs text-gray-500 hover:text-ooosh-700 underline"
+                >Bulk resolve old balances…</button>
+              </div>
+            )}
+            <Table
+              columns={balanceColumns}
+              empty="No outstanding balances on synced jobs."
+              rows={balanceRows}
+            />
+            {data.balances_resolved.length > 0 && (
+              <div className="border-t border-gray-100">
+                <button
+                  onClick={() => setShowResolved((v) => !v)}
+                  className="w-full text-left px-4 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                >
+                  <span>{showResolved ? '▾' : '▸'}</span>
+                  Resolved ({t.balances_resolved_count}) · {gbp(t.balances_resolved_total)} ignored
+                </button>
+                {showResolved && (
+                  <div className="overflow-x-auto pb-2">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-gray-100 text-left text-xs text-gray-400">
+                          <th className="px-4 py-1.5 font-medium">Job</th>
+                          <th className="px-4 py-1.5 font-medium">Client</th>
+                          <th className="px-4 py-1.5 font-medium">Reason</th>
+                          <th className="px-4 py-1.5 font-medium text-right">Was outstanding</th>
+                          <th className="px-4 py-1.5 font-medium">Resolved by</th>
+                          {isAdmin && <th />}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {data.balances_resolved.map((r) => (
+                          <tr key={r.job_id} className="text-gray-500">
+                            <td className="px-4 py-2 align-top">
+                              <Link to={jobHref(r)} className="hover:underline"><JobRef hh={r.hh_job_number} name={r.job_name} /></Link>
+                            </td>
+                            <td className="px-4 py-2 align-top">{r.client_name || '—'}</td>
+                            <td className="px-4 py-2 align-top">
+                              <span className="text-[11px] px-2 py-0.5 rounded bg-gray-100 text-gray-600">{REASON_LABEL[r.override_reason || ''] || r.override_reason}</span>
+                              {r.override_notes && <span className="block text-[11px] text-gray-400 mt-0.5">{r.override_notes}</span>}
+                            </td>
+                            <td className="px-4 py-2 align-top text-right line-through">{gbp(r.balance_outstanding)}</td>
+                            <td className="px-4 py-2 align-top text-[11px]">
+                              {r.override_resolved_by_name || '—'}
+                              <span className="block text-gray-400">{fmtDate(r.override_resolved_at || null)}</span>
+                            </td>
+                            {isAdmin && (
+                              <td className="px-4 py-2 align-top text-right">
+                                <button onClick={() => undoResolve(r.job_id)} className="text-[11px] text-gray-400 hover:text-red-600 underline">Undo</button>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
         {tab === 'deposits' && (
           <Table
@@ -339,6 +527,20 @@ export default function MoneyOverviewPage() {
           />
         )}
       </div>
+
+      {resolveTarget && (
+        <ResolveBalanceModal
+          target={resolveTarget}
+          onClose={() => setResolveTarget(null)}
+          onDone={(msg) => { setResolveTarget(null); setToast(msg); load(); }}
+        />
+      )}
+      {toast && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white text-sm px-4 py-2 rounded-lg shadow-lg flex items-center gap-3">
+          <span>{toast}</span>
+          <button onClick={() => setToast('')} className="text-gray-300 hover:text-white">✕</button>
+        </div>
+      )}
     </div>
   );
 }
