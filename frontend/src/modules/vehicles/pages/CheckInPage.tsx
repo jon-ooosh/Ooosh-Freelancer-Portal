@@ -188,14 +188,26 @@ export function CheckInPage() {
     [allVehicles],
   )
 
+  // Pre-select + auto-advance when arriving via a "Check In" deep-link that
+  // names the van (Job Detail / Vehicle Detail / Vehicles list). Check-in is
+  // per-van and the link carries that van's identifier, so re-picking it from
+  // the full fleet list is pure friction — skip straight to Review Book-Out.
+  // Tolerant match (UUID or reg) because entry points historically disagreed.
   const preSelectedId = searchParams.get('vehicle')
-  const preSelectedVehicle = preSelectedId
-    ? vehicles.find(v => v.id === preSelectedId)
-    : null
+  const preSelectedVehicle = useMemo(() => {
+    if (!preSelectedId) return null
+    const needle = preSelectedId.toUpperCase()
+    return vehicles.find(v => v.id === preSelectedId || v.reg.toUpperCase() === needle) || null
+  }, [preSelectedId, vehicles])
 
-  if (preSelectedVehicle && !form.vehicleId) {
+  useEffect(() => {
+    // Wait until the draft check has settled; never override a resumable draft.
+    if (!draftChecked || draftLoaded) return
+    if (!preSelectedVehicle || form.vehicleId) return
     selectVehicle(preSelectedVehicle)
-  }
+    setStep(s => (s === 0 ? 1 : s))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preSelectedVehicle, form.vehicleId, draftChecked, draftLoaded])
 
   function selectVehicle(v: Vehicle) {
     setForm(f => ({

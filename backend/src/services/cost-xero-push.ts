@@ -82,15 +82,18 @@ async function recordAdvisory(costId: string, message: string): Promise<void> {
   );
 }
 
-// A 403 on a bill/payment write means the accounting.transactions scope isn't
-// on the Custom Connection yet. Treat as an advisory, not a failure — flipping
-// the scope on + Push now resolves it.
+// A bill/payment write fails until the granular bill scopes are granted on the
+// Custom Connection. Two shapes: the isolated bills-token mint rejects the scope
+// (invalid_scope), or the API call returns 401/403 insufficient_scope. Treat all
+// as a calm advisory, not a red failure — granting the scopes + Push now fixes it.
 function isScopeError(err: unknown): boolean {
-  return err instanceof XeroApiError && err.status === 403;
+  if (!(err instanceof XeroApiError)) return false;
+  if (err.status === 401 || err.status === 403) return true;
+  return /invalid_scope/i.test(err.message);
 }
 
 const SCOPE_ADVISORY =
-  'Xero bills not enabled yet — grant the "accounting.transactions" scope on the Custom Connection, then Push now';
+  'Xero bills not enabled yet — grant the "accounting.invoices" + "accounting.payments" scopes on the Custom Connection (re-authorise it), then Push now';
 
 interface PushResult {
   pushed: boolean;
@@ -107,6 +110,8 @@ interface CostRow {
   payment_status: string;
   approval_state: string | null;
   amount_gross: string | number | null;
+  amount_vat: string | number | null;
+  amount_net: string | number | null;
   xero_account_code: string | null;
   xero_object_id: string | null;
   xero_payment_id: string | null;
@@ -137,6 +142,27 @@ async function loadCost(costId: string): Promise<CostRow | null> {
 
 function dateOnly(v: string | null | undefined): string | undefined {
   return v ? new Date(v).toISOString().slice(0, 10) : undefined;
+}
+
+// Xero requires a DueDate on an ACCPAY bill. Default to invoice date + 30 days
+// (no per-supplier terms tracked yet); staff set the real payment date at
+// "Mark paid" anyway, so this just drives the Bills-to-pay aging.
+function addDaysISO(iso: string | undefined, days: number): string {
+  const base = iso ? new Date(`${iso}T00:00:00Z`) : new Date();
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
+}
+
+// Resolve the Xero TaxType for a cost's line. No VAT recorded → 'NONE' (so a
+// freelancer's no-VAT invoice doesn't inherit the account's 20% default). VAT
+// recorded → the org's purchase tax type for the implied rate (fallback: leave
+// undefined so Xero applies the account default, which is correct for 20%).
+async function resolveLineTaxType(cost: CostRow): Promise<string | undefined> {
+  const vat = Number(cost.amount_vat || 0);
+  const net = Number(cost.amount_net || 0);
+  if (vat <= 0) return 'NONE';
+  const rate = net > 0 ? Math.round((vat / net) * 100) : 20;
+  return (await xeroBroker.getPurchaseTaxType(rate)) || undefined;
 }
 
 async function attachReceipt(
@@ -178,7 +204,8 @@ async function pushSpendMoney(cost: CostRow): Promise<PushResult> {
   }
 
   const description = (cost.description || cost.category || cost.supplier_name || 'Cost').toString().slice(0, 4000);
-  const lineItem = { Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code) };
+  const taxType = await resolveLineTaxType(cost);
+  const lineItem = { Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code), ...(taxType ? { TaxType: taxType } : {}) };
 
   let bankTransactionID: string;
   try {
@@ -249,15 +276,17 @@ async function pushBill(cost: CostRow): Promise<PushResult> {
     const baseDesc = (cost.description || cost.category || 'Cost').toString();
     const description = (isReimburse && cost.supplier_name ? `${cost.supplier_name} — ${baseDesc}` : baseDesc).slice(0, 4000);
 
+    const taxType = await resolveLineTaxType(cost);
     let invoiceID: string;
     try {
       const bill = await xeroBroker.createBill({
         contactName,
         date: dateOnly(cost.cost_date),
+        dueDate: addDaysISO(dateOnly(cost.cost_date), 30),
         reference: (cost.supplier_name || '').toString().slice(0, 255) || undefined,
         status: 'AUTHORISED',
         lineAmountTypes: 'Inclusive',
-        lineItems: [{ Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code) }],
+        lineItems: [{ Description: description, Quantity: 1, UnitAmount: Number(cost.amount_gross), AccountCode: String(cost.xero_account_code), ...(taxType ? { TaxType: taxType } : {}) }],
       });
       invoiceID = bill.InvoiceID;
     } catch (err) {

@@ -44,20 +44,26 @@ export const XERO_API_BASE = 'https://api.xero.com/api.xro/2.0';
 // transactions + creating SPEND money (banktransactions), supplier linkage
 // (contacts) and receipt upload (attachments).
 //
-// `accounting.transactions` governs ACCPAY *Invoices* (supplier bills) AND
-// *Payments* (recording a payment against a bill) — the pay-later flow
-// (not_yet_paid / reimburse_me) needs it. Granted on the Ooosh Custom
-// Connection Jun 2026. The push service still soft-handles a 403 here (calm
-// "needs Xero bills scope" advisory, not a red error) as a safety net if the
-// grant is ever revoked. IMPORTANT: a scope listed here MUST be granted on the
-// connection — requesting an ungranted scope fails the whole client_credentials
-// token mint and breaks ALL Xero reads. Never add a scope before granting it.
+// Xero moved to GRANULAR scopes: apps created on/after 2 Mar 2026 (the Ooosh
+// Custom Connection is May 2026) cannot use the old broad `accounting.transactions`
+// at all — requesting it returns `invalid_scope`. The pay-later bill flow needs
+// the granular scopes instead:
+//   accounting.invoices  → create/read ACCPAY supplier bills
+//   accounting.payments  → record a Payment against a bill
+//
+// These are NOT in DEFAULT_SCOPES. They're requested in an ISOLATED bills token
+// (see xero-broker getToken(bills=true)) used only by createBill / payInvoice /
+// invoice-attach. If they're not yet granted on the connection, only that token
+// fails — the base token (the 4 scopes below) keeps reads + Spend Money working.
+// Grant them on the Custom Connection (which deactivates + must be re-authorised
+// when scopes change), and bills start working with no code change.
+export const XERO_BILLS_SCOPES = 'accounting.invoices accounting.payments';
+
 const DEFAULT_SCOPES = [
   'accounting.banktransactions',
   'accounting.settings',
   'accounting.contacts',
   'accounting.attachments',
-  'accounting.transactions',  // ACCPAY bills + payments (granted on the Custom Connection Jun 2026)
 ].join(' ');
 
 export function getXeroConfig(): XeroConfig {

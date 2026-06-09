@@ -89,6 +89,24 @@ const typeColors: Record<string, string> = {
   supplier: 'bg-gray-100 text-gray-700',
 };
 
+// Org types offered when creating a new org inline (matches OrganisationForm)
+const ORG_TYPE_OPTIONS = [
+  'band', 'client', 'management', 'label', 'agency', 'promoter',
+  'venue', 'festival', 'supplier', 'hire_company', 'booking_agent', 'other',
+];
+
+// Sensible default org type to pre-select when creating the other party of a
+// relationship, inferred from the relationship type (forward direction). Always
+// editable — staff override freely. Falls back to 'band' (the dominant case).
+const INFERRED_ORG_TYPE: Record<string, string> = {
+  manages: 'band',
+  books_for: 'band',
+  does_accounts_for: 'band',
+  promotes: 'band',
+  represents: 'band',
+  supplies: 'client',
+};
+
 export default function OrganisationDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -118,6 +136,11 @@ export default function OrganisationDetailPage() {
   const [relType, setRelType] = useState<OrgRelationshipType>('manages');
   const [relDirection, setRelDirection] = useState<'forward' | 'reverse'>('forward');
   const [relSaving, setRelSaving] = useState(false);
+  // Create-new-org inline (within the relationship modal)
+  const [relCreating, setRelCreating] = useState(false);
+  const [relNewName, setRelNewName] = useState('');
+  const [relNewType, setRelNewType] = useState('band');
+  const [relSuggestions, setRelSuggestions] = useState<Array<{ id: string; name: string; type: string; via_person: string }>>([]);
 
   // Edit relationship type in place
   const [editingRelId, setEditingRelId] = useState<string | null>(null);
@@ -202,6 +225,20 @@ export default function OrganisationDetailPage() {
     }, 250);
     return () => clearTimeout(timeout);
   }, [relOrgSearch, id]);
+
+  // Load "quick associate" suggestions (orgs sharing a person, not yet linked)
+  // when the relationship modal opens.
+  useEffect(() => {
+    if (!showAddRelationship || !id) { setRelSuggestions([]); return; }
+    (async () => {
+      try {
+        const data = await api.get<{ data: Array<{ id: string; name: string; type: string; via_person: string }> }>(
+          `/organisations/${id}/relationship-suggestions`
+        );
+        setRelSuggestions(data.data || []);
+      } catch { setRelSuggestions([]); }
+    })();
+  }, [showAddRelationship, id]);
 
   useEffect(() => {
     if (personSearch.length < 2) { setPersonResults([]); return; }
@@ -301,15 +338,50 @@ export default function OrganisationDetailPage() {
         to_org_id,
         relationship_type: relType,
       });
-      setShowAddRelationship(false);
-      setRelSelectedOrg(null);
-      setRelOrgSearch('');
+      resetRelationshipModal();
       loadOrg();
     } catch (err: any) {
       alert(err?.response?.data?.error || 'Failed to add relationship');
     } finally {
       setRelSaving(false);
     }
+  }
+
+  // Open the inline create-new form, prefilling the name from the search box
+  // and the type inferred from the currently-selected relationship type.
+  function startCreateOrg() {
+    setRelNewName(relOrgSearch.trim());
+    setRelNewType(INFERRED_ORG_TYPE[relType] || 'band');
+    setRelCreating(true);
+  }
+
+  // Create the org with just name + type, then drop into the relationship
+  // type/direction step with the new org pre-selected.
+  async function handleCreateOrgForRelationship() {
+    if (!relNewName.trim() || !id) return;
+    setRelSaving(true);
+    try {
+      const created = await api.post<{ id: string; name: string; type: string }>('/organisations', {
+        name: relNewName.trim(),
+        type: relNewType,
+      });
+      setRelSelectedOrg({ id: created.id, name: created.name, type: created.type });
+      setRelCreating(false);
+      setRelOrgResults([]);
+    } catch (err: any) {
+      alert(err?.response?.data?.error || 'Failed to create organisation');
+    } finally {
+      setRelSaving(false);
+    }
+  }
+
+  function resetRelationshipModal() {
+    setShowAddRelationship(false);
+    setRelSelectedOrg(null);
+    setRelOrgSearch('');
+    setRelOrgResults([]);
+    setRelCreating(false);
+    setRelNewName('');
   }
 
   async function handleTogglePrimary(roleId: string, makePrimary: boolean) {
@@ -947,7 +1019,7 @@ export default function OrganisationDetailPage() {
           {/* Add relationship button */}
           <div className="flex justify-end">
             <button
-              onClick={() => { setShowAddRelationship(true); setRelSelectedOrg(null); setRelOrgSearch(''); }}
+              onClick={() => { setShowAddRelationship(true); setRelSelectedOrg(null); setRelOrgSearch(''); setRelCreating(false); setRelNewName(''); }}
               className="px-3 py-1.5 text-sm bg-ooosh-600 text-white rounded hover:bg-ooosh-700 transition-colors"
             >
               + Add Relationship
@@ -1178,35 +1250,119 @@ export default function OrganisationDetailPage() {
           <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Add Relationship</h3>
 
-            {/* Step 1: Search and select org */}
+            {/* Relationship type — chosen up front so a new org's type can be
+                inferred from it. Visible across both steps. */}
+            <label className="block text-sm font-medium text-gray-700 mb-1">Relationship type</label>
+            <select
+              value={relType}
+              onChange={(e) => setRelType(e.target.value as OrgRelationshipType)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4"
+            >
+              {Object.entries(ORG_RELATIONSHIP_LABELS).map(([key, labels]) => (
+                <option key={key} value={key}>{labels.forward}</option>
+              ))}
+            </select>
+
+            {/* Step 1: Search / create org */}
             {!relSelectedOrg ? (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Search for organisation</label>
-                <input
-                  type="text"
-                  value={relOrgSearch}
-                  onChange={(e) => setRelOrgSearch(e.target.value)}
-                  placeholder="Type to search organisations..."
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
-                  autoFocus
-                />
-                {relOrgResults.length > 0 && (
-                  <div className="mt-2 border border-gray-200 rounded-lg max-h-60 overflow-y-auto">
-                    {relOrgResults.map((o) => (
-                      <button
-                        key={o.id}
-                        onClick={() => { setRelSelectedOrg(o); setRelOrgResults([]); }}
-                        className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100 last:border-b-0"
-                      >
-                        <span className="text-sm font-medium text-gray-900">{o.name}</span>
-                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs ${typeColors[o.type] || 'bg-gray-100 text-gray-700'}`}>
-                          {o.type}
-                        </span>
-                      </button>
+              relCreating ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">New organisation name</label>
+                  <input
+                    type="text"
+                    value={relNewName}
+                    onChange={(e) => setRelNewName(e.target.value)}
+                    placeholder="Organisation name"
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3 focus:ring-ooosh-500 focus:border-ooosh-500"
+                    autoFocus
+                  />
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                  <select
+                    value={relNewType}
+                    onChange={(e) => setRelNewType(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-2"
+                  >
+                    {ORG_TYPE_OPTIONS.map((t) => (
+                      <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>
                     ))}
-                  </div>
-                )}
-              </div>
+                  </select>
+                  <p className="text-xs text-gray-400 mb-3">Just name + type for now — add full details later on the new org's page.</p>
+                  <button
+                    onClick={() => setRelCreating(false)}
+                    className="text-xs text-gray-500 hover:text-gray-700"
+                  >
+                    ← Back to search
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Search for organisation</label>
+                  <input
+                    type="text"
+                    value={relOrgSearch}
+                    onChange={(e) => setRelOrgSearch(e.target.value)}
+                    placeholder="Type to search organisations..."
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-ooosh-500 focus:border-ooosh-500"
+                    autoFocus
+                  />
+                  {relOrgResults.length > 0 && (
+                    <div className="mt-2 border border-gray-200 rounded-lg max-h-60 overflow-y-auto">
+                      {relOrgResults.map((o) => (
+                        <button
+                          key={o.id}
+                          onClick={() => { setRelSelectedOrg(o); setRelOrgResults([]); }}
+                          className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-2 border-b border-gray-100 last:border-b-0"
+                        >
+                          <span className="text-sm font-medium text-gray-900">{o.name}</span>
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-xs ${typeColors[o.type] || 'bg-gray-100 text-gray-700'}`}>
+                            {o.type}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* No match → offer to create */}
+                  {relOrgSearch.trim().length >= 2 && relOrgResults.length === 0 && (
+                    <button
+                      onClick={startCreateOrg}
+                      className="mt-2 w-full text-left px-4 py-3 border border-dashed border-ooosh-300 rounded-lg text-sm text-ooosh-700 hover:bg-ooosh-50"
+                    >
+                      + Create <strong>{relOrgSearch.trim()}</strong> as a new organisation
+                    </button>
+                  )}
+
+                  {/* Quick associate — orgs connected via a shared person, not yet linked */}
+                  {!relOrgSearch.trim() && relSuggestions.length > 0 && (
+                    <div className="mt-4">
+                      <p className="text-xs font-medium text-gray-500 mb-2">Quick associate — connected via shared people</p>
+                      <div className="flex flex-wrap gap-2">
+                        {relSuggestions.map((s) => (
+                          <button
+                            key={s.id}
+                            onClick={() => setRelSelectedOrg({ id: s.id, name: s.name, type: s.type })}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-gray-200 text-xs hover:bg-gray-50"
+                            title={`via ${s.via_person}`}
+                          >
+                            <span className="font-medium text-gray-900">{s.name}</span>
+                            <span className={`inline-flex px-1.5 py-0.5 rounded-full ${typeColors[s.type] || 'bg-gray-100 text-gray-700'}`}>{s.type}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Manual create fallback (before typing) */}
+                  {relOrgSearch.trim().length < 2 && (
+                    <button
+                      onClick={startCreateOrg}
+                      className="mt-3 text-xs text-ooosh-600 hover:text-ooosh-700 font-medium"
+                    >
+                      + Create a new organisation instead
+                    </button>
+                  )}
+                </div>
+              )
             ) : (
               <div>
                 {/* Selected org */}
@@ -1222,18 +1378,6 @@ export default function OrganisationDetailPage() {
                     Change
                   </button>
                 </div>
-
-                {/* Relationship type */}
-                <label className="block text-sm font-medium text-gray-700 mb-1">Relationship type</label>
-                <select
-                  value={relType}
-                  onChange={(e) => setRelType(e.target.value as OrgRelationshipType)}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-3"
-                >
-                  {Object.entries(ORG_RELATIONSHIP_LABELS).map(([key, labels]) => (
-                    <option key={key} value={key}>{labels.forward}</option>
-                  ))}
-                </select>
 
                 {/* Direction */}
                 <label className="block text-sm font-medium text-gray-700 mb-2">Direction</label>
@@ -1262,11 +1406,20 @@ export default function OrganisationDetailPage() {
 
             <div className="flex justify-end gap-2 mt-4 pt-4 border-t">
               <button
-                onClick={() => { setShowAddRelationship(false); setRelSelectedOrg(null); setRelOrgSearch(''); }}
+                onClick={resetRelationshipModal}
                 className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
               >
                 Cancel
               </button>
+              {relCreating && !relSelectedOrg && (
+                <button
+                  onClick={handleCreateOrgForRelationship}
+                  disabled={relSaving || !relNewName.trim()}
+                  className="px-4 py-2 text-sm bg-ooosh-600 text-white rounded-lg hover:bg-ooosh-700 disabled:opacity-50"
+                >
+                  {relSaving ? 'Creating...' : 'Create & continue'}
+                </button>
+              )}
               {relSelectedOrg && (
                 <button
                   onClick={handleAddRelationship}

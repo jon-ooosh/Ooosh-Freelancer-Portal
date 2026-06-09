@@ -17,7 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "paths": {
       "@/*": ["./src/*"],
-      "@shared/*": ["../shared/types/*"]
+      "@shared/*": ["../shared/types/*"],
+      "@calc": ["../backend/src/services/crew-transport-calculator.ts"]
     },
     "baseUrl": "."
   },
