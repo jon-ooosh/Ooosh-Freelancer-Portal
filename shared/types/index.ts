@@ -1123,6 +1123,8 @@ export interface HeldItem {
   // Inbound (incoming)
   expected_date: string | null;
   import_charge_flag: HeldItemImportCharge | null;
+  contact_email: string | null;
+  contact_phone: string | null;
 
   // Deadline (forward-looking kinds)
   needed_by: string | null;

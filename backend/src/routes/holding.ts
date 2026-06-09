@@ -46,7 +46,7 @@ router.get('/public/job/:hhJobNumber', publicLimiter, async (req: Request, res: 
 const merchFormSchema = z.object({
   band_name: z.string().min(1).max(200),
   hh_job_number: z.number().int().optional().nullable(),
-  box_count: z.number().int().min(1).max(99),
+  box_count: z.number().int().min(1).max(99).optional().nullable(), // null = "don't know yet"
   expected_date: z.string().optional().nullable(),
   import_charge_flag: z.enum(['yes', 'no', 'unknown']).optional().nullable(),
   contact_email: z.string().email(),
@@ -65,20 +65,21 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
     if (j.rows.length > 0) { jobId = j.rows[0].id; jobName = j.rows[0].job_name; }
   }
 
-  const contactLine = [b.contact_email, b.contact_phone].filter(Boolean).join(' · ');
-  const notes = [b.notes, contactLine ? `Contact: ${contactLine}` : null].filter(Boolean).join('\n') || null;
+  const description = b.box_count ? `${b.box_count} box(es) of merch/equipment` : 'Merch/equipment (box count TBC)';
 
   const ins = await query(
     `INSERT INTO held_items (
         kind, status, owner_unknown, client_name_text, job_id, hh_job_number,
-        description, box_count, expected_date, import_charge_flag, needed_by, notes, created_by
+        description, box_count, expected_date, import_charge_flag, needed_by,
+        contact_email, contact_phone, notes, created_by
      ) VALUES ('incoming', 'expected', false, $1, $2, $3, $4, $5, $6, $7,
         CASE WHEN $2::uuid IS NOT NULL THEN (SELECT out_date::date FROM jobs WHERE id = $2::uuid) ELSE NULL END,
-        $8, $9) RETURNING *`,
+        $8, $9, $10, $11) RETURNING *`,
     [
       b.band_name, jobId, b.hh_job_number ?? null,
-      `${b.box_count} box(es) of merch/equipment`, b.box_count,
-      b.expected_date || null, b.import_charge_flag ?? null, notes, SYSTEM_USER_ID,
+      description, b.box_count ?? null,
+      b.expected_date || null, b.import_charge_flag ?? null,
+      b.contact_email, b.contact_phone ?? null, b.notes || null, SYSTEM_USER_ID,
     ]
   );
   const item = ins.rows[0];
@@ -88,7 +89,7 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
     try {
       await query(
         `INSERT INTO interactions (type, content, job_id, created_by) VALUES ('note', $1, $2, $3)`,
-        [`📦 Incoming delivery declared via merch form: ${b.box_count} box(es) from ${b.band_name}`, jobId, SYSTEM_USER_ID]
+        [`📦 Incoming delivery declared via merch form: ${description} from ${b.band_name}`, jobId, SYSTEM_USER_ID]
       );
       const existing = await query(`SELECT id FROM job_requirements WHERE job_id = $1 AND requirement_type = 'merch' AND phase = 'pre_hire'`, [jobId]);
       if (existing.rows.length === 0) {
@@ -104,7 +105,7 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
   // Generate labels + email them back to the client (best-effort)
   let labelEmailed = false;
   try {
-    const pdf = await buildMerchLabelPdf({ heldItemId: item.id, hhJobNumber: b.hh_job_number ?? null, clientName: b.band_name, boxCount: b.box_count });
+    const pdf = await buildMerchLabelPdf({ heldItemId: item.id, hhJobNumber: b.hh_job_number ?? null, clientName: b.band_name, boxCount: b.box_count ?? 1 });
     if (isR2Configured()) {
       await uploadToR2(`files/holding/labels/${item.id}.pdf`, pdf, 'application/pdf').catch((e) => console.warn('[holding] label R2 upload failed:', e));
     }
@@ -114,7 +115,7 @@ router.post('/public/merch-form', publicLimiter, validate(merchFormSchema), asyn
         clientName: b.band_name,
         jobName: jobName || b.band_name,
         jobNumber: String(b.hh_job_number || ''),
-        boxCount: String(b.box_count),
+        boxCount: b.box_count ? String(b.box_count) : 'each',
       },
       attachments: [{ filename: `ooosh-labels-${b.hh_job_number || item.id}.pdf`, content: pdf, contentType: 'application/pdf' }],
     });
@@ -508,18 +509,54 @@ router.post('/:id/dispose', async (req: AuthRequest, res: Response) => {
   res.json({ data: result.rows[0] });
 });
 
-// Mark client notified (records the state + timeline; client email wiring lands with templates)
+// Notify the client their items have arrived. Emails the contact captured on
+// the record (or the job's client contacts as a fallback), flips status to
+// client_notified, and reports who got it so the UI can show clear feedback.
 router.post('/:id/notify', async (req: AuthRequest, res: Response) => {
-  const result = await query(
-    `UPDATE held_items SET status = CASE WHEN status IN ('expected','arrived','stored') THEN 'client_notified' ELSE status END,
-        updated_at = NOW()
-     WHERE id = $1 RETURNING *`,
+  const cur = await query(
+    `SELECT h.*, j.job_name, j.hh_job_number AS job_hh
+     FROM held_items h LEFT JOIN jobs j ON j.id = h.job_id WHERE h.id = $1`,
     [req.params.id]
   );
-  if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
+  if (cur.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
+  const h = cur.rows[0];
+
+  // Resolve recipient: the contact captured on the record wins; else the job's
+  // client contacts via the shared resolver.
+  let to: string | null = h.contact_email || null;
+  if (!to && h.job_id) {
+    try {
+      const { resolveClientEmailTarget } = await import('../services/money-emails');
+      const target = await resolveClientEmailTarget(h.job_id);
+      to = target?.primaryEmail || null;
+    } catch { /* fall through */ }
+  }
+
+  let emailed = false;
+  if (to) {
+    const received = h.received_count ? ` (${h.received_count} item${h.received_count === 1 ? '' : 's'})` : '';
+    try {
+      await emailService.send('holding_received', {
+        to,
+        variables: {
+          clientName: h.owner_person_name || h.client_name_text || 'there',
+          jobName: h.job_name || h.client_name_text || 'your hire',
+          jobNumber: String(h.hh_job_number || h.job_hh || ''),
+          receivedSummary: received,
+        },
+      });
+      emailed = true;
+    } catch (err) { console.warn('[holding] notify email failed:', err); }
+  }
+
+  const result = await query(
+    `UPDATE held_items SET status = CASE WHEN status IN ('expected','arrived','stored') THEN 'client_notified' ELSE status END,
+        updated_at = NOW() WHERE id = $1 RETURNING *`,
+    [req.params.id]
+  );
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
-  // TODO (Stage 8): send the client email (incoming-received / lost-property-found) with photo.
-  res.json({ data: result.rows[0] });
+  if (result.rows[0].job_id) await logToJobTimeline(result.rows[0], req.user!.id, emailed ? `client notified (${to})` : 'marked client notified');
+  res.json({ data: result.rows[0], emailed, notified_to: emailed ? to : null });
 });
 
 // Send a chase (from the human-gated review queue). Bumps the escalation level.

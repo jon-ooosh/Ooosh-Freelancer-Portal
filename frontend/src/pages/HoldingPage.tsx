@@ -233,6 +233,8 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
+  const GIVEN = '__given__';
+  const givenStraight = f.storage_location_id === GIVEN;
   const somewhereElse = (() => {
     const loc = locations.find((l) => l.id === f.storage_location_id);
     return loc?.name === 'Somewhere else';
@@ -252,8 +254,9 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
         hh_job_number: f.hh_job_number ? Number(f.hh_job_number) : null,
         found_in: f.kind === 'lost_property' ? f.found_in : null,
         found_location_text: f.kind === 'lost_property' ? (f.found_location_text || null) : null,
-        storage_location_id: f.storage_location_id || null,
+        storage_location_id: givenStraight ? null : (f.storage_location_id || null),
         storage_location_text: somewhereElse ? (f.storage_location_text || null) : null,
+        status: givenStraight ? 'given_to_client' : undefined,
         expected_date: f.kind === 'incoming' && f.expected_date ? f.expected_date : null,
         import_charge_flag: f.kind === 'incoming' && f.import_charge_flag ? f.import_charge_flag : null,
         notes: f.notes || null,
@@ -319,6 +322,7 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
           <div><label className="block text-xs text-slate-500 mb-1">Where stored</label>
             <select className={inputCls} value={f.storage_location_id} onChange={(e) => setF({ ...f, storage_location_id: e.target.value })}>
               <option value="">—</option>
+              <option value={GIVEN}>✋ Given straight to client</option>
               {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
             </select></div>
           {somewhereElse && <div><label className="block text-xs text-slate-500 mb-1">Where exactly?</label><input className={inputCls} value={f.storage_location_text} onChange={(e) => setF({ ...f, storage_location_text: e.target.value })} /></div>}

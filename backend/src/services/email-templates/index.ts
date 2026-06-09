@@ -19,10 +19,26 @@ const templates: Record<string, EmailTemplate> = {
 
   // ── Client-facing templates ────────────────────────────────────────────
 
+  holding_received: {
+    variant: 'client',
+    preheader: 'Your items have arrived with us',
+    subject: 'Your items have arrived - {{jobName}} (job #{{jobNumber}})',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your items have arrived</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        Just to let you know your delivery for <strong>{{jobName}}</strong>
+        (job <strong>#{{jobNumber}}</strong>) has arrived safely with us{{receivedSummary}}.
+        We'll have it ready for your hire.
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
   merch_form_request: {
     variant: 'client',
     preheader: 'Sending items to Ooosh ahead of your hire?',
-    subject: 'Sending us merch / equipment? — {{jobName}} (job #{{jobNumber}})',
+    subject: 'Sending us merch / equipment? - {{jobName}} (job #{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Sending items to us?</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
@@ -42,7 +58,7 @@ const templates: Record<string, EmailTemplate> = {
   merch_label: {
     variant: 'client',
     preheader: 'Your delivery labels are attached',
-    subject: 'Your Ooosh delivery labels — {{jobName}} (job #{{jobNumber}})',
+    subject: 'Your Ooosh delivery labels - {{jobName}} (job #{{jobNumber}})',
     body: `
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your delivery labels</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>

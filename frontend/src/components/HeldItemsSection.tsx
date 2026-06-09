@@ -38,6 +38,8 @@ export function HeldItemsSection({
   hideWhenEmpty,
   openOnly,
   heading,
+  bare,
+  emptyHint,
 }: {
   entityType: 'person' | 'organisation' | 'job';
   entityId: string;
@@ -46,6 +48,8 @@ export function HeldItemsSection({
   hideWhenEmpty?: boolean;          // render nothing instead of an empty card
   openOnly?: boolean;              // drop the resolved section entirely
   heading?: string;                // optional heading rendered above the card (only when items exist)
+  bare?: boolean;                  // no outer card wrapper (for embedding in another panel)
+  emptyHint?: string;              // muted text shown when empty + not hideWhenEmpty
 }) {
   const [items, setItems] = useState<HeldItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -73,15 +77,18 @@ export function HeldItemsSection({
 
   if (items.length === 0 || (openOnly && open.length === 0)) {
     if (hideWhenEmpty) return null;
-    return <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-sm text-gray-500">Nothing currently held.</div>;
+    const empty = emptyHint || 'Nothing currently held.';
+    return bare
+      ? <p className="text-sm text-gray-400">{empty}</p>
+      : <div className="bg-white rounded-xl border border-gray-200 p-8 text-center text-sm text-gray-500">{empty}</div>;
   }
 
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 p-4">
-      {heading && <h3 className="text-sm font-semibold text-gray-800 mb-3">{heading}</h3>}
+  const inner = (
+    <>
+      {heading && <h3 className={bare ? 'text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2' : 'text-sm font-semibold text-gray-800 mb-3'}>{heading}</h3>}
       {open.length > 0 && (
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-amber-600 mb-2">Currently held ({open.length})</h3>
+          {!heading && <h3 className="text-xs font-semibold uppercase tracking-wide text-amber-600 mb-2">Currently held ({open.length})</h3>}
           <div className="space-y-2">{open.map((h) => <Row key={h.id} h={h} context={entityType} />)}</div>
         </div>
       )}
@@ -94,8 +101,10 @@ export function HeldItemsSection({
           {showDone && <div className="space-y-2 mt-2">{done.map((h) => <Row key={h.id} h={h} context={entityType} />)}</div>}
         </div>
       )}
-    </div>
+    </>
   );
+
+  return bare ? inner : <div className="bg-white rounded-xl border border-gray-200 p-4">{inner}</div>;
 }
 
 function Row({ h, context }: { h: HeldItem; context: string }) {
