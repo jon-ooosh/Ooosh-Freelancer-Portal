@@ -151,6 +151,7 @@ async function runMigrations(direction: 'up' | 'down') {
         '114_fleet_vehicles_needs_external_wash.sql',
         '115_holding_contact_fields.sql',
         '116_holding_received_by.sql',
+        '117_job_balance_overrides.sql',
       ];
 
       for (const migration of migrations) {

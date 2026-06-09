@@ -77,20 +77,37 @@ router.use(authenticateFlexible as any);
 // the parametrised /:jobId routes (single-segment path, no collision anyway).
 router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest, res: Response) => {
   try {
-    // Balances outstanding — anything still owed on a non-dead job, biggest first.
-    const balances = await query(
+    // Balances outstanding — anything still owed on a non-dead job, biggest
+    // first. Jobs with a business-level balance override (admin flagged the HH
+    // balance as settled in Xero / written off / etc.) are split into a separate
+    // `resolved` list and excluded from the active list + headline total — see
+    // migration 117. The override carries reason/notes/who/when for the
+    // collapsible "Resolved" section.
+    const balancesAll = await query(
       `SELECT jf.job_id, j.hh_job_number, j.job_name,
               COALESCE(j.client_name, j.company_name) AS client_name,
               j.pipeline_status, j.job_date, j.job_end, j.return_date,
               jf.hire_value_inc_vat, jf.total_hire_deposits, jf.balance_outstanding,
-              jf.vat_saved, jf.last_synced_at
+              jf.vat_saved, jf.last_synced_at,
+              o.reason       AS override_reason,
+              o.notes        AS override_notes,
+              o.resolved_at  AS override_resolved_at,
+              u.name         AS override_resolved_by_name
        FROM job_financials jf
        JOIN jobs j ON j.id = jf.job_id
+       LEFT JOIN job_balance_overrides o ON o.job_id = jf.job_id
+       LEFT JOIN users u ON u.id = o.resolved_by
        WHERE jf.balance_outstanding > 0.01
          AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
        ORDER BY jf.balance_outstanding DESC
-       LIMIT 200`
+       LIMIT 400`
     );
+    const balances = {
+      rows: balancesAll.rows.filter((r: Record<string, unknown>) => !r.override_reason),
+    };
+    const balancesResolved = {
+      rows: balancesAll.rows.filter((r: Record<string, unknown>) => !!r.override_reason),
+    };
 
     // Deposits pending — confirmed-ish jobs with no hire deposit recorded yet.
     const depositsPending = await query(
@@ -155,12 +172,15 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
     res.json({
       data: {
         balances_outstanding: balances.rows,
+        balances_resolved: balancesResolved.rows,
         deposits_pending: depositsPending.rows,
         excess_held: excessHeld.rows,
         pending_refunds: pendingRefunds.rows,
         totals: {
           balance_outstanding: sum(balances.rows, 'balance_outstanding'),
           balances_count: balances.rows.length,
+          balances_resolved_total: sum(balancesResolved.rows, 'balance_outstanding'),
+          balances_resolved_count: balancesResolved.rows.length,
           deposits_pending_count: depositsPending.rows.length,
           excess_held: excessHeldUpcoming + excessHeldPast,
           excess_held_count: excessHeld.rows.length,
@@ -177,6 +197,138 @@ router.get('/overview', authorize('admin', 'manager'), async (_req: AuthRequest,
     const msg = error instanceof Error ? error.message : String(error);
     console.error('[money] Overview error:', msg);
     res.status(500).json({ error: 'Failed to load money overview', detail: msg });
+  }
+});
+
+// ── Balance override ("ignore this outstanding balance") — admin only ──
+// Business-level resolution of an HH-derived hire balance that the business
+// (via Xero) considers settled/written-off. Does NOT touch HireHop or Xero —
+// pure OP annotation (migration 117). Excludes the job from the active
+// /money/overview Balances Outstanding list + headline total.
+const BALANCE_OVERRIDE_REASONS = [
+  'xero_settled',        // payment applied in Xero, never fed back to HH
+  'internal_discounted', // our own / 100%-discounted job not zeroed in HH
+  'hh_xero_corrected',   // since-corrected HH↔Xero error still showing in HH
+  'write_off',           // bad debt / goodwill
+  'other',
+] as const;
+
+const resolveBalanceSchema = z.object({
+  reason: z.enum(BALANCE_OVERRIDE_REASONS),
+  notes: z.string().max(1000).nullable().optional(),
+});
+
+const bulkResolveSchema = z.object({
+  reason: z.enum(BALANCE_OVERRIDE_REASONS),
+  notes: z.string().max(1000).nullable().optional(),
+  job_ids: z.array(z.string().uuid()).max(500).optional(),
+  // YYYY-MM-DD — resolve every still-outstanding non-dead job that finished
+  // before this date and isn't already overridden. For the old backlog sweep.
+  finished_before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+}).refine((d) => (d.job_ids && d.job_ids.length > 0) || d.finished_before, {
+  message: 'Provide job_ids or finished_before',
+});
+
+// Resolve a :jobId param (OP UUID or HH job number) to the OP UUID.
+async function resolveJobUuid(jobIdParam: string): Promise<string | null> {
+  const isUuid = /^[0-9a-f]{8}-/.test(jobIdParam);
+  if (isUuid) return jobIdParam;
+  const r = await query(`SELECT id FROM jobs WHERE hh_job_number = $1`, [parseInt(jobIdParam)]);
+  return r.rows[0]?.id ?? null;
+}
+
+// POST /api/money/:jobId/resolve-balance — flag a job's balance as resolved.
+router.post('/:jobId/resolve-balance', authorize('admin'), validate(resolveBalanceSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const { reason, notes } = req.body;
+    const result = await query(
+      `INSERT INTO job_balance_overrides (job_id, reason, notes, resolved_by, resolved_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW(), NOW())
+       ON CONFLICT (job_id) DO UPDATE SET
+         reason = EXCLUDED.reason, notes = EXCLUDED.notes,
+         resolved_by = EXCLUDED.resolved_by, resolved_at = NOW(), updated_at = NOW()
+       RETURNING *`,
+      [jobUuid, reason, notes ?? null, req.user!.id]
+    );
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, after_json)
+       VALUES ($1, 'jobs', $2, 'resolve_balance', $3::jsonb)`,
+      [req.user!.id, jobUuid, JSON.stringify({ reason, notes: notes ?? null })]
+    ).catch((e) => console.error('[money] audit_log insert failed (resolve_balance):', e));
+    res.json({ data: result.rows[0], message: 'Balance marked as resolved' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] resolve-balance error:', msg);
+    res.status(500).json({ error: 'Failed to resolve balance', detail: msg });
+  }
+});
+
+// DELETE /api/money/:jobId/resolve-balance — undo (un-resolve).
+router.delete('/:jobId/resolve-balance', authorize('admin'), async (req: AuthRequest, res: Response) => {
+  try {
+    const jobUuid = await resolveJobUuid(String(req.params.jobId));
+    if (!jobUuid) { res.status(404).json({ error: 'Job not found' }); return; }
+    const result = await query(`DELETE FROM job_balance_overrides WHERE job_id = $1 RETURNING *`, [jobUuid]);
+    if (result.rows.length === 0) { res.status(404).json({ error: 'No balance override on this job' }); return; }
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, before_json)
+       VALUES ($1, 'jobs', $2, 'unresolve_balance', $3::jsonb)`,
+      [req.user!.id, jobUuid, JSON.stringify({ reason: result.rows[0].reason, notes: result.rows[0].notes })]
+    ).catch((e) => console.error('[money] audit_log insert failed (unresolve_balance):', e));
+    res.json({ message: 'Balance override removed' });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] unresolve-balance error:', msg);
+    res.status(500).json({ error: 'Failed to remove balance override', detail: msg });
+  }
+});
+
+// POST /api/money/balances/bulk-resolve — resolve many at once (multi-select or
+// "everything finished before <date>"). For the old 2022/2023 backlog.
+router.post('/balances/bulk-resolve', authorize('admin'), validate(bulkResolveSchema), async (req: AuthRequest, res: Response) => {
+  try {
+    const { reason, notes, job_ids, finished_before } = req.body;
+    // Resolve the target set of OP UUIDs.
+    let targetIds: string[] = [];
+    if (job_ids && job_ids.length > 0) {
+      targetIds = job_ids;
+    } else if (finished_before) {
+      const r = await query(
+        `SELECT jf.job_id
+         FROM job_financials jf
+         JOIN jobs j ON j.id = jf.job_id
+         LEFT JOIN job_balance_overrides o ON o.job_id = jf.job_id
+         WHERE jf.balance_outstanding > 0.01
+           AND COALESCE(j.pipeline_status, '') NOT IN ('lost', 'cancelled')
+           AND o.job_id IS NULL
+           AND COALESCE(j.return_date, j.job_end)::date < $1::date`,
+        [finished_before]
+      );
+      targetIds = r.rows.map((row: { job_id: string }) => row.job_id);
+    }
+    if (targetIds.length === 0) { res.json({ resolved: 0, message: 'No matching jobs to resolve' }); return; }
+
+    const result = await query(
+      `INSERT INTO job_balance_overrides (job_id, reason, notes, resolved_by, resolved_at, updated_at)
+       SELECT unnest($1::uuid[]), $2, $3, $4, NOW(), NOW()
+       ON CONFLICT (job_id) DO UPDATE SET
+         reason = EXCLUDED.reason, notes = EXCLUDED.notes,
+         resolved_by = EXCLUDED.resolved_by, resolved_at = NOW(), updated_at = NOW()
+       RETURNING job_id`,
+      [targetIds, reason, notes ?? null, req.user!.id]
+    );
+    await query(
+      `INSERT INTO audit_log (user_id, entity_type, entity_id, action, after_json)
+       VALUES ($1, 'jobs', NULL, 'bulk_resolve_balance', $2::jsonb)`,
+      [req.user!.id, JSON.stringify({ reason, notes: notes ?? null, count: result.rows.length, finished_before: finished_before ?? null })]
+    ).catch((e) => console.error('[money] audit_log insert failed (bulk_resolve_balance):', e));
+    res.json({ resolved: result.rows.length, message: `Resolved ${result.rows.length} balance(s)` });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error('[money] bulk-resolve error:', msg);
+    res.status(500).json({ error: 'Failed to bulk-resolve balances', detail: msg });
   }
 });
 
@@ -1215,6 +1367,18 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
       ).catch((e) => console.error('[money] job_financials write-through failed (non-fatal):', e.message));
     }
 
+    // Business-level balance override (admin flagged the HH balance as settled
+    // in Xero / written off — migration 117). Surfaced as a banner on the Money
+    // tab; the live HH balance above is still shown (staff source of truth).
+    const overrideResult = await query(
+      `SELECT o.reason, o.notes, o.resolved_at, u.name AS resolved_by_name
+       FROM job_balance_overrides o
+       LEFT JOIN users u ON u.id = o.resolved_by
+       WHERE o.job_id = $1`,
+      [job.id]
+    );
+    const balanceOverride = overrideResult.rows[0] ?? null;
+
     res.json({
       data: {
         job: {
@@ -1223,6 +1387,7 @@ router.get('/:jobId/summary', async (req: AuthRequest, res: Response) => {
           client_name: job.client_name || job.company_name,
         },
         financial: {
+          balance_override: balanceOverride,
           hire_value_ex_vat: hireValueExVat,
           hire_value_inc_vat: effectiveHireValueIncVat,
           vat_amount: effectiveVatAmount,
