@@ -187,7 +187,7 @@ const SELECT_WITH_JOINS = `
          loc.name                                  AS storage_location_name,
          j.job_name                                AS job_name,
          fv.reg                                    AS found_vehicle_reg,
-         (rb.first_name || ' ' || rb.last_name)    AS received_by_name
+         (rbp.first_name || ' ' || rbp.last_name)  AS received_by_name
   FROM held_items h
   LEFT JOIN people p              ON p.id = h.owner_person_id
   LEFT JOIN organisations o       ON o.id = h.owner_organisation_id
@@ -195,6 +195,7 @@ const SELECT_WITH_JOINS = `
   LEFT JOIN jobs j                ON j.id = h.job_id
   LEFT JOIN fleet_vehicles fv     ON fv.id = h.found_vehicle_id
   LEFT JOIN users rb              ON rb.id = h.received_by
+  LEFT JOIN people rbp            ON rbp.id = rb.person_id
 `;
 
 // ════════════════════════ LOCATIONS (picklist) ════════════════════════
