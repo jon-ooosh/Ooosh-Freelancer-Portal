@@ -49,7 +49,7 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
          AND j.hh_job_number IS NOT NULL
          AND j.job_date IS NOT NULL
          AND jr.status = 'not_started'
-         AND j.pipeline_status IN ('confirmed', 'provisional')
+         AND j.pipeline_status = 'confirmed'
          AND j.job_date::date - CURRENT_DATE BETWEEN 8 AND 11
          AND (jr.notes IS NULL OR jr.notes NOT LIKE '%Hire form email sent%')
        ORDER BY j.job_date ASC`
@@ -86,7 +86,7 @@ export async function sendAutoHireFormEmails(): Promise<AutoEmailResult> {
          AND j.hh_job_number IS NOT NULL
          AND j.job_date IS NOT NULL
          AND jr.status IN ('not_started', 'in_progress')
-         AND j.pipeline_status IN ('confirmed', 'provisional')
+         AND j.pipeline_status = 'confirmed'
          AND j.job_date::date - CURRENT_DATE BETWEEN 4 AND 5
        ORDER BY j.job_date ASC`
     );
