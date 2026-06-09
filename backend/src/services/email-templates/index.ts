@@ -43,12 +43,12 @@ const templates: Record<string, EmailTemplate> = {
       <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">We found some lost property</h2>
       <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
-        While {{foundContext}}, we found some lost property — see the attached photo(s) for details.
+        While {{foundContext}}, we found some lost property - see the attached photo(s) for details.
       </p>
       {{#if itemDescription}}<p style="margin:0 0 16px;padding:12px 14px;background-color:#f8fafc;border-radius:8px;font-size:15px;color:#1e293b;line-height:1.6;"><strong>{{itemDescription}}</strong></p>{{/if}}
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         We can hold lost property for up to 14 days{{#if disposeAfterDate}} (until <strong>{{disposeAfterDate}}</strong>){{/if}}, after which it
-        may be disposed of. We're happy to arrange shipping if that's easier — this is usually chargeable.
+        may be disposed of. We're happy to arrange shipping if that's easier - this is usually chargeable.
       </p>
       <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
         To sort out collection or shipping, please get in touch as soon as you can:<br>
