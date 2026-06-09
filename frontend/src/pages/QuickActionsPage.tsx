@@ -117,6 +117,8 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+  const GIVEN = '__given__';
+  const givenStraight = f.storage_location_id === GIVEN;
   const somewhereElse = locations.find((l) => l.id === f.storage_location_id)?.name === 'Somewhere else';
 
   async function save() {
@@ -131,8 +133,9 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
         hh_job_number: f.hh_job_number ? Number(f.hh_job_number) : null,
         found_in: kind === 'lost_property' ? f.found_in : null,
         found_location_text: kind === 'lost_property' ? (f.found_location_text || null) : null,
-        storage_location_id: f.storage_location_id || null,
+        storage_location_id: givenStraight ? null : (f.storage_location_id || null),
         storage_location_text: somewhereElse ? (f.storage_location_text || null) : null,
+        status: givenStraight ? 'given_to_client' : undefined,
         notes: f.notes || null,
         photos,
       });
@@ -178,7 +181,9 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
 
         <div><label className="block text-sm text-slate-500 mb-1">Where are you putting it?</label>
           <select className={inputCls} value={f.storage_location_id} onChange={(e) => setF({ ...f, storage_location_id: e.target.value })}>
-            <option value="">—</option>{locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            <option value="">—</option>
+            <option value={GIVEN}>✋ Given straight to client</option>
+            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
           </select>
           {somewhereElse && <input className={`${inputCls} mt-2`} value={f.storage_location_text} onChange={(e) => setF({ ...f, storage_location_text: e.target.value })} placeholder="Where exactly?" />}
         </div>

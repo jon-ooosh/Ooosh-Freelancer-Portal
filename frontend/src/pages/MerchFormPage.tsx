@@ -16,8 +16,9 @@ export default function MerchFormPage() {
   const [params] = useSearchParams();
   const jobFromUrl = params.get('job') || '';
   const [ctx, setCtx] = useState<{ client_name: string | null } | null>(null);
+  const today = new Date().toISOString().slice(0, 10);
   const [f, setF] = useState({
-    band_name: '', hh_job_number: jobFromUrl, box_count: '', expected_date: '',
+    band_name: '', hh_job_number: jobFromUrl, box_count: '', boxes_unknown: false, expected_date: '',
     import_charge_flag: '', contact_email: '', contact_phone: '', notes: '', agree: false,
   });
   const [submitting, setSubmitting] = useState(false);
@@ -34,7 +35,7 @@ export default function MerchFormPage() {
   async function submit() {
     setErr('');
     if (!f.band_name.trim()) { setErr('Please enter the band / artist name.'); return; }
-    if (!f.box_count || Number(f.box_count) < 1) { setErr('How many boxes are you sending?'); return; }
+    if (!f.boxes_unknown && (!f.box_count || Number(f.box_count) < 1)) { setErr('How many boxes are you sending? (Or tick "I don\'t know yet".)'); return; }
     if (!f.contact_email.trim()) { setErr('We need an email to send your labels to.'); return; }
     if (!f.agree) { setErr('Please accept the terms to continue.'); return; }
     setSubmitting(true);
@@ -44,7 +45,7 @@ export default function MerchFormPage() {
         body: JSON.stringify({
           band_name: f.band_name.trim(),
           hh_job_number: f.hh_job_number ? Number(f.hh_job_number) : null,
-          box_count: Number(f.box_count),
+          box_count: f.boxes_unknown || !f.box_count ? null : Number(f.box_count),
           expected_date: f.expected_date || null,
           import_charge_flag: f.import_charge_flag || null,
           contact_email: f.contact_email.trim(),
@@ -63,7 +64,7 @@ export default function MerchFormPage() {
         <div className="bg-white rounded-2xl shadow p-8 max-w-md text-center">
           <div className="text-5xl mb-4">✅</div>
           <h1 className="text-xl font-bold text-slate-800 mb-2">Thanks!</h1>
-          <p className="text-slate-600">We've emailed your printable labels to <strong>{f.contact_email}</strong>. Please attach one to each box — we can't accept items without a label.</p>
+          <p className="text-slate-600">We've emailed your printable labels to <strong>{f.contact_email}</strong>. Please attach one to each box - we can't accept items without a label.</p>
         </div>
       </div>
     );
@@ -84,12 +85,17 @@ export default function MerchFormPage() {
           <div className="grid grid-cols-2 gap-3">
             <div><label className="block text-sm text-slate-500 mb-1">Job / contract #</label>
               <input className={inputCls} type="number" inputMode="numeric" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="0000" /></div>
-            <div><label className="block text-sm text-slate-500 mb-1">Total boxes *</label>
-              <input className={inputCls} type="number" inputMode="numeric" value={f.box_count} onChange={(e) => setF({ ...f, box_count: e.target.value })} /></div>
+            <div><label className="block text-sm text-slate-500 mb-1">Total boxes{f.boxes_unknown ? '' : ' *'}</label>
+              <input className={inputCls} type="number" inputMode="numeric" disabled={f.boxes_unknown} value={f.boxes_unknown ? '' : f.box_count}
+                onChange={(e) => setF({ ...f, box_count: e.target.value })} placeholder={f.boxes_unknown ? "I don't know" : ''} /></div>
           </div>
+          <label className="flex items-center gap-2 text-sm text-slate-600">
+            <input type="checkbox" className="w-5 h-5" checked={f.boxes_unknown} onChange={(e) => setF({ ...f, boxes_unknown: e.target.checked })} />
+            I don't know how many yet
+          </label>
 
           <div><label className="block text-sm text-slate-500 mb-1">Estimated delivery date</label>
-            <input className={inputCls} type="date" value={f.expected_date} onChange={(e) => setF({ ...f, expected_date: e.target.value })} /></div>
+            <input className={inputCls} type="date" min={today} value={f.expected_date} onChange={(e) => setF({ ...f, expected_date: e.target.value })} /></div>
 
           <div><label className="block text-sm text-slate-500 mb-1">Will a customs / import charge be payable?</label>
             <select className={inputCls} value={f.import_charge_flag} onChange={(e) => setF({ ...f, import_charge_flag: e.target.value })}>
@@ -108,7 +114,7 @@ export default function MerchFormPage() {
 
           <label className="flex items-start gap-2 text-sm text-slate-600">
             <input type="checkbox" className="w-5 h-5 mt-0.5" checked={f.agree} onChange={(e) => setF({ ...f, agree: e.target.checked })} />
-            <span>I understand items must arrive no more than 5 days before the hire, each box must carry a printed label, and Ooosh accepts deliveries as a goodwill service without liability for loss or damage.</span>
+            <span>I understand items should arrive no more than 5 days before the hire, each box should carry a printed label, and Ooosh accepts deliveries as a goodwill service without liability for loss or damage.</span>
           </label>
 
           {err && <p className="text-red-600 text-sm">{err}</p>}

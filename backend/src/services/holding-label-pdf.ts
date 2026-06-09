@@ -10,8 +10,6 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import QRCode from 'qrcode';
 import { frontendLink } from '../config/app-urls';
 
-const PURPLE = rgb(0.482, 0.369, 0.655); // #7B5EA7
-
 export interface MerchLabelInput {
   heldItemId: string;
   hhJobNumber: number | null;
@@ -34,27 +32,32 @@ export async function buildMerchLabelPdf(input: MerchLabelInput): Promise<Buffer
   const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const qrImage = await pdf.embedPng(qrPng);
 
-  // A6 landscape-ish label (420 x 298 pt)
+  // A6 landscape-ish label (420 x 298 pt). Printer-friendly: black on white,
+  // no colour fills (clients print these on home/office printers).
+  const black = rgb(0, 0, 0);
+  const grey = rgb(0.4, 0.4, 0.4);
   const W = 420, H = 298;
   for (let i = 1; i <= total; i++) {
     const page = pdf.addPage([W, H]);
-    // Header band
-    page.drawRectangle({ x: 0, y: H - 44, width: W, height: 44, color: PURPLE });
-    page.drawText('OOOSH TOURS — DELIVERY LABEL', { x: 18, y: H - 30, size: 14, font: fontBold, color: rgb(1, 1, 1) });
+    // Simple border
+    page.drawRectangle({ x: 8, y: 8, width: W - 16, height: H - 16, borderColor: black, borderWidth: 1.5 });
+
+    page.drawText('OOOSH TOURS — DELIVERY LABEL', { x: 20, y: H - 36, size: 12, font: fontBold, color: black });
+    page.drawLine({ start: { x: 20, y: H - 46 }, end: { x: W - 20, y: H - 46 }, thickness: 0.75, color: grey });
 
     // Client + job
-    page.drawText(clientName || 'Client', { x: 18, y: H - 78, size: 18, font: fontBold, color: rgb(0.1, 0.1, 0.1) });
-    if (hhJobNumber) page.drawText(`Job #${hhJobNumber}`, { x: 18, y: H - 102, size: 14, font, color: rgb(0.3, 0.3, 0.3) });
+    page.drawText(clientName || 'Client', { x: 20, y: H - 78, size: 18, font: fontBold, color: black });
+    if (hhJobNumber) page.drawText(`Job #${hhJobNumber}`, { x: 20, y: H - 100, size: 13, font, color: grey });
 
     // Box count
-    page.drawText(`Box ${i} of ${total}`, { x: 18, y: 60, size: 22, font: fontBold, color: PURPLE });
-    page.drawText('Attach one label per box.', { x: 18, y: 36, size: 9, font, color: rgb(0.5, 0.5, 0.5) });
-    page.drawText('Items without a label may be delayed.', { x: 18, y: 24, size: 9, font, color: rgb(0.5, 0.5, 0.5) });
+    page.drawText(`Box ${i} of ${total}`, { x: 20, y: 60, size: 22, font: fontBold, color: black });
+    page.drawText('Attach one label per box.', { x: 20, y: 38, size: 9, font, color: grey });
+    page.drawText('Items without a label may be delayed.', { x: 20, y: 26, size: 9, font, color: grey });
 
     // QR
     const qrSize = 120;
-    page.drawImage(qrImage, { x: W - qrSize - 18, y: 28, width: qrSize, height: qrSize });
-    page.drawText('Ooosh staff: scan on arrival', { x: W - qrSize - 18, y: 16, size: 7, font, color: rgb(0.5, 0.5, 0.5) });
+    page.drawImage(qrImage, { x: W - qrSize - 20, y: 30, width: qrSize, height: qrSize });
+    page.drawText('Ooosh staff: scan on arrival', { x: W - qrSize - 20, y: 18, size: 7, font, color: grey });
   }
 
   const bytes = await pdf.save();
