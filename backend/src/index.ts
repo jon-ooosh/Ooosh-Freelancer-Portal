@@ -1,4 +1,10 @@
 import express from 'express';
+// Patches Express 4 so rejected promises from `async` route handlers are
+// forwarded to the global error handler below, instead of escaping as
+// unhandled rejections (which terminate the process in Node 15+). Must be
+// imported before any routers are constructed. Express 5 does this natively;
+// drop this shim if/when we upgrade.
+import 'express-async-errors';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -26,6 +32,20 @@ if (process.env.JWT_SECRET && process.env.JWT_SECRET.length < 32) {
   console.error('FATAL: JWT_SECRET must be at least 32 characters');
   process.exit(1);
 }
+
+// ── Last-resort process guards ───────────────────────────────────────────────
+// The express-async-errors shim routes async route-handler rejections to the
+// error middleware, but errors that originate OUTSIDE the request lifecycle
+// (scheduler tasks, setImmediate post-hooks, socket.io handlers, stray
+// promises) still surface here. Log loudly but DO NOT exit — a single stray
+// rejection in one module must never take the whole API down. A genuinely
+// unrecoverable state would be caught by systemd's health, not by us crashing.
+process.on('unhandledRejection', (reason) => {
+  console.error('UNHANDLED REJECTION (process kept alive):', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION (process kept alive):', err);
+});
 
 const app = express();
 const httpServer = createServer(app);
