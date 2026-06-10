@@ -202,6 +202,31 @@ router.get('/locations', async (_req: AuthRequest, res: Response) => {
   res.json({ data: result.rows });
 });
 
+// Live job lookup for the capture forms — enter the HH job number and we show
+// the client we'll link it to (the number is the primary input). Returns the
+// job + denormalised client so the form can confirm "✓ linked to <client>"
+// before save. 404 when the number isn't a synced OP job.
+router.get('/job-lookup/:hhJobNumber', async (req: AuthRequest, res: Response) => {
+  const n = Number(req.params.hhJobNumber);
+  if (!Number.isFinite(n)) { res.status(400).json({ error: 'Invalid job number' }); return; }
+  const r = await query(
+    `SELECT j.id, j.hh_job_number, j.job_name, j.client_id, j.client_name, j.out_date, o.name AS client_org_name
+     FROM jobs j LEFT JOIN organisations o ON o.id = j.client_id
+     WHERE j.hh_job_number = $1`,
+    [n]
+  );
+  if (r.rows.length === 0) { res.status(404).json({ error: 'not_found' }); return; }
+  const j = r.rows[0];
+  res.json({ data: {
+    job_id: j.id,
+    hh_job_number: j.hh_job_number,
+    job_name: j.job_name,
+    client_org_id: j.client_id,
+    client_name: j.client_org_name || j.client_name || null,
+    out_date: j.out_date,
+  } });
+});
+
 // ════════════════════════ CHASE REVIEW (lost property) ════════════════════════
 // The human-gated escalation queue — items due a chase, NOT auto-sent.
 
@@ -506,6 +531,7 @@ const shipBackSchema = z.object({
   return_method: z.string().min(1),
   tracking_number: z.string().optional().nullable(),
   notes: z.string().optional().nullable(),
+  notify: z.boolean().optional(),  // default true — email the tracking to the client
 });
 
 router.post('/:id/ship-back', validate(shipBackSchema), async (req: AuthRequest, res: Response) => {
@@ -518,8 +544,35 @@ router.post('/:id/ship-back', validate(shipBackSchema), async (req: AuthRequest,
   );
   if (result.rows.length === 0) { res.status(404).json({ error: 'Held item not found' }); return; }
   await logAudit(req.user!.id, 'held_items', req.params.id as string, 'update', null, result.rows[0]);
-  if (result.rows[0].job_id) await syncMerchRequirementStatus(result.rows[0].job_id);
-  res.json({ data: result.rows[0] });
+
+  // Forward the postage method + tracking to the client (unless told not to).
+  let emailed = false;
+  let to: string | null = null;
+  if (b.notify !== false) {
+    const r = await resolveHeldItemRecipient(req.params.id as string);
+    to = r.to;
+    if (to) {
+      try {
+        await emailService.send('holding_shipped_back', {
+          to,
+          variables: {
+            clientName: r.clientName,
+            itemDescription: r.description,
+            returnMethod: b.return_method,
+            trackingNumber: b.tracking_number || '',
+            jobNumber: r.jobNumber,
+          },
+        });
+        emailed = true;
+      } catch (err) { console.warn('[holding] ship-back email failed:', err); }
+    }
+  }
+
+  if (result.rows[0].job_id) {
+    await logToJobTimeline(result.rows[0], req.user!.id, emailed ? `shipped back, tracking emailed (${to})` : 'shipped back');
+    await syncMerchRequirementStatus(result.rows[0].job_id);
+  }
+  res.json({ data: result.rows[0], emailed, notified_to: emailed ? to : null });
 });
 
 router.post('/:id/dispose', async (req: AuthRequest, res: Response) => {
@@ -738,6 +791,40 @@ function formatDisposeDate(h: Record<string, unknown>): string {
   else if (h.found_date) { d = new Date(h.found_date as string); d.setDate(d.getDate() + 14); }
   if (!d || isNaN(d.getTime())) return '';
   return d.toLocaleDateString('en-GB');
+}
+
+/**
+ * Single best client recipient for a held item — the contact captured on the
+ * record wins, else the job's primary client contact, else the owner
+ * person/org email. Used by ship-back (and any other single-recipient send).
+ */
+async function resolveHeldItemRecipient(itemId: string): Promise<{ to: string | null; clientName: string; jobNumber: string; description: string }> {
+  const r = await query(
+    `SELECT h.contact_email, h.client_name_text, h.description, h.job_id, h.hh_job_number,
+            (p.first_name || ' ' || p.last_name) AS person_name, p.email AS person_email,
+            o.name AS org_name, o.email AS org_email
+     FROM held_items h
+     LEFT JOIN people p ON p.id = h.owner_person_id
+     LEFT JOIN organisations o ON o.id = h.owner_organisation_id
+     WHERE h.id = $1`,
+    [itemId]
+  );
+  const h = r.rows[0] || {};
+  let to: string | null = h.contact_email || null;
+  if (!to && h.job_id) {
+    try {
+      const { resolveClientEmailTarget } = await import('../services/money-emails');
+      const target = await resolveClientEmailTarget(h.job_id);
+      to = target?.primaryEmail || null;
+    } catch { /* fall through */ }
+  }
+  if (!to) to = h.person_email || h.org_email || null;
+  return {
+    to,
+    clientName: h.person_name || h.client_name_text || h.org_name || 'there',
+    jobNumber: String(h.hh_job_number || ''),
+    description: h.description || '',
+  };
 }
 
 async function logToJobTimeline(item: Record<string, unknown>, userId: string, verb: string): Promise<void> {

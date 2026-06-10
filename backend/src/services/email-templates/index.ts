@@ -59,6 +59,23 @@ const templates: Record<string, EmailTemplate> = {
     `,
   },
 
+  holding_shipped_back: {
+    variant: 'client',
+    preheader: 'Your items are on their way back to you',
+    subject: 'Your items have been sent back{{#if jobNumber}} (#{{jobNumber}}){{/if}}',
+    body: `
+      <h2 style="margin:0 0 16px;font-size:20px;color:#1e293b;">Your items are on their way</h2>
+      <p style="margin:0 0 12px;font-size:15px;color:#334155;line-height:1.6;">Hi {{clientName}},</p>
+      <p style="margin:0 0 16px;font-size:15px;color:#334155;line-height:1.6;">
+        We've sent your items back to you{{#if itemDescription}} ({{itemDescription}}){{/if}}.
+      </p>
+      <p style="margin:0 0 16px;padding:12px 14px;background-color:#f8fafc;border-radius:8px;font-size:15px;color:#1e293b;line-height:1.6;">
+        <strong>Sent via:</strong> {{returnMethod}}{{#if trackingNumber}}<br><strong>Tracking #:</strong> {{trackingNumber}}{{/if}}
+      </p>
+      <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">Any questions, just reply to this email.</p>
+    `,
+  },
+
   merch_form_request: {
     variant: 'client',
     preheader: 'Sending items to Ooosh ahead of your hire?',
