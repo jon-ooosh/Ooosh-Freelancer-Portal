@@ -12,6 +12,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { EntitySearch } from '../components/holding/EntitySearch';
+import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
@@ -253,10 +254,7 @@ function QuickLogSheet({ kind, locations, onClose, onSaved }: { kind: 'incoming'
           </label>
           {!f.owner_unknown && (
             <>
-              <div><label className="block text-sm text-slate-500 mb-1">HireHop job #</label>
-                <input className={inputCls} type="number" inputMode="numeric" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="e.g. 15816" />
-                <p className="text-[11px] text-slate-400 mt-1">Enter the job # and we link the job &amp; client for you. Only fill the boxes below if there's no job.</p>
-              </div>
+              <JobNumberField value={f.hh_job_number} onChange={(v) => setF({ ...f, hh_job_number: v })} compact />
               <EntitySearch kind="organisations" label="Client / band" value={f.org_name} compact onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
               <EntitySearch kind="people" label="Or a person" value={f.person_name} compact onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
               <input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} placeholder="…or just a name (free text)" />

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { useAuthStore } from '../hooks/useAuthStore';
 import { EntitySearch } from '../components/holding/EntitySearch';
+import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
 
@@ -283,10 +284,7 @@ function CreateModal({ view, locations, onClose, onSaved }: { view: View; locati
           </label>
           {!f.owner_unknown && (
             <>
-              <div><label className="block text-xs text-slate-500 mb-1">HireHop job #</label>
-                <input className={inputCls} type="number" value={f.hh_job_number} onChange={(e) => setF({ ...f, hh_job_number: e.target.value })} placeholder="e.g. 15816" />
-                <p className="text-[11px] text-slate-400 mt-1">Enter the job number and we'll link the job &amp; client automatically — no need to fill the boxes below unless there's no job (or you want to override).</p>
-              </div>
+              <JobNumberField value={f.hh_job_number} onChange={(v) => setF({ ...f, hh_job_number: v })} />
               <EntitySearch kind="organisations" label="Client / band (organisation)" value={f.org_name} onPick={(id, name) => setF({ ...f, owner_organisation_id: id, org_name: name })} />
               <EntitySearch kind="people" label="Or a person" value={f.person_name} onPick={(id, name) => setF({ ...f, owner_person_id: id, person_name: name })} />
               <div><label className="block text-xs text-slate-500 mb-1">Or just a name (free text)</label><input className={inputCls} value={f.client_name_text} onChange={(e) => setF({ ...f, client_name_text: e.target.value })} /></div>
@@ -343,6 +341,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
   const [msg, setMsg] = useState('');
   const [linkOpen, setLinkOpen] = useState(false);
   const [notifyOpen, setNotifyOpen] = useState(false);
+  const [openAction, setOpenAction] = useState<null | 'collect' | 'ship' | 'location'>(null);
 
   const load = useCallback(async () => { setH((await api.get<{ data: HeldItem }>(`/holding/${id}`)).data); }, [id]);
   useEffect(() => { load(); }, [load]);
@@ -417,26 +416,34 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
           </div>
         )}
 
-        {/* Actions */}
+        {/* Actions — when one inline action is open, the rest hide so the
+            "next step" isn't surrounded by unrelated buttons. */}
         {isOpen && (
           <div className="flex flex-wrap gap-2 pt-2 border-t">
-            {(h.status === 'expected' || h.status === 'arrived' || h.status === 'stored' || h.status === 'client_notified') && (
-              <button disabled={!!busy} onClick={() => setNotifyOpen(true)}
-                className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">✉ Notify client</button>
+            {openAction === 'collect' && <CollectButton id={id} kind={h.kind} busy={busy} open onClose={() => setOpenAction(null)} onAction={action} />}
+            {openAction === 'ship' && <ShipBackButton id={id} busy={busy} open onClose={() => setOpenAction(null)} onAction={action} />}
+            {openAction === 'location' && <LocationButton id={id} locations={locations} current={h.storage_location_id} open onClose={() => setOpenAction(null)} onDone={() => { load(); onChange(); }} />}
+            {openAction === null && (
+              <>
+                {(h.status === 'expected' || h.status === 'arrived' || h.status === 'stored' || h.status === 'client_notified') && (
+                  <button disabled={!!busy} onClick={() => setNotifyOpen(true)}
+                    className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">✉ Notify client</button>
+                )}
+                <CollectButton id={id} kind={h.kind} busy={busy} onOpen={() => setOpenAction('collect')} onAction={action} />
+                <ShipBackButton id={id} busy={busy} onOpen={() => setOpenAction('ship')} onAction={action} />
+                {h.kind === 'incoming' && h.status === 'expected' && (
+                  <button disabled={!!busy} onClick={() => { if (confirm("Mark this as not arriving? It'll drop off the prep checklist.")) action('cancel', async () => { await api.put(`/holding/${id}`, { status: 'cancelled' }); onClose(); }); }}
+                    className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">✕ Won't arrive</button>
+                )}
+                {h.kind === 'lost_property' && (
+                  <button disabled={!!busy} onClick={() => action('chase', async () => { await api.post(`/holding/${id}/chase`, {}); setMsg('Chase logged (escalation bumped).'); })}
+                    className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs">📨 Log chase (lvl {h.escalation_level})</button>
+                )}
+                <button disabled={!!busy} onClick={() => { if (confirm('Mark as disposed?')) action('dispose', async () => { await api.post(`/holding/${id}/dispose`, {}); onClose(); }); }}
+                  className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs">🗑 Dispose</button>
+                <LocationButton id={id} locations={locations} current={h.storage_location_id} onOpen={() => setOpenAction('location')} onDone={() => { load(); onChange(); }} />
+              </>
             )}
-            <CollectButton id={id} kind={h.kind} busy={busy} onAction={action} />
-            <ShipBackButton id={id} busy={busy} onAction={action} />
-            {h.kind === 'incoming' && h.status === 'expected' && (
-              <button disabled={!!busy} onClick={() => { if (confirm("Mark this as not arriving? It'll drop off the prep checklist.")) action('cancel', async () => { await api.put(`/holding/${id}`, { status: 'cancelled' }); onClose(); }); }}
-                className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">✕ Won't arrive</button>
-            )}
-            {h.kind === 'lost_property' && (
-              <button disabled={!!busy} onClick={() => action('chase', async () => { await api.post(`/holding/${id}/chase`, {}); setMsg('Chase logged (escalation bumped).'); })}
-                className="px-3 py-1.5 bg-amber-600 text-white rounded-lg text-xs">📨 Log chase (lvl {h.escalation_level})</button>
-            )}
-            <button disabled={!!busy} onClick={() => { if (confirm('Mark as disposed?')) action('dispose', async () => { await api.post(`/holding/${id}/dispose`, {}); onClose(); }); }}
-              className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs">🗑 Dispose</button>
-            <LocationButton id={id} locations={locations} current={h.storage_location_id} onDone={() => { load(); onChange(); }} />
           </div>
         )}
       </div>
@@ -480,49 +487,48 @@ function LinkForm({ item, onDone }: { item: HeldItem; onDone: () => void }) {
   );
 }
 
-function CollectButton({ id, kind, busy, onAction }: { id: string; kind: HeldItemKind; busy: string; onAction: (l: string, fn: () => Promise<void>) => void }) {
-  const [open, setOpen] = useState(false);
+function CollectButton({ id, kind, busy, open, onOpen, onClose, onAction }: { id: string; kind: HeldItemKind; busy: string; open?: boolean; onOpen?: () => void; onClose?: () => void; onAction: (l: string, fn: () => Promise<void>) => void }) {
   const [who, setWho] = useState('');
   const label = kind === 'incoming' ? '✅ Given to client' : '✅ Collected';
-  if (!open) return <button disabled={!!busy} onClick={() => setOpen(true)} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs">{label}</button>;
+  if (!open) return <button disabled={!!busy} onClick={onOpen} className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs">{label}</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-2 flex flex-wrap items-center gap-2">
-      <input className="border border-slate-300 rounded px-2 py-1 text-xs flex-1 min-w-[140px]" placeholder="Collected/received by (name)" value={who} onChange={(e) => setWho(e.target.value)} />
-      <button className="text-xs text-slate-500" onClick={() => setOpen(false)}>cancel</button>
+      <input autoFocus className="border border-slate-300 rounded px-2 py-1 text-xs flex-1 min-w-[140px]" placeholder="Collected/received by (name)" value={who} onChange={(e) => setWho(e.target.value)} />
+      <button className="text-xs text-slate-500" onClick={onClose}>cancel</button>
       <button className="text-xs bg-green-600 text-white px-3 py-1 rounded" onClick={() => onAction('collected', async () => { await api.post(`/holding/${id}/collected`, { collected_by: who || null }); })}>Confirm</button>
     </div>
   );
 }
 
-function ShipBackButton({ id, busy, onAction }: { id: string; busy: string; onAction: (l: string, fn: () => Promise<void>) => void }) {
-  const [open, setOpen] = useState(false);
+function ShipBackButton({ id, busy, open, onOpen, onClose, onAction }: { id: string; busy: string; open?: boolean; onOpen?: () => void; onClose?: () => void; onAction: (l: string, fn: () => Promise<void>) => void }) {
   const [method, setMethod] = useState('');
   const [tracking, setTracking] = useState('');
-  if (!open) return <button disabled={!!busy} onClick={() => setOpen(true)} className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">📮 Ship back</button>;
+  const [notify, setNotify] = useState(true);
+  if (!open) return <button disabled={!!busy} onClick={onOpen} className="px-3 py-1.5 bg-slate-700 text-white rounded-lg text-xs">📮 Ship back</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-2 flex flex-wrap items-center gap-2">
-      <input className="border border-slate-300 rounded px-2 py-1 text-xs" placeholder="Postage method" value={method} onChange={(e) => setMethod(e.target.value)} />
+      <input autoFocus className="border border-slate-300 rounded px-2 py-1 text-xs" placeholder="Postage method" value={method} onChange={(e) => setMethod(e.target.value)} />
       <input className="border border-slate-300 rounded px-2 py-1 text-xs" placeholder="Tracking #" value={tracking} onChange={(e) => setTracking(e.target.value)} />
-      <button className="text-xs text-slate-500" onClick={() => setOpen(false)}>cancel</button>
-      <button disabled={!method.trim()} className="text-xs bg-slate-700 text-white px-3 py-1 rounded disabled:opacity-40" onClick={() => onAction('ship', async () => { await api.post(`/holding/${id}/ship-back`, { return_method: method, tracking_number: tracking || null }); })}>Confirm</button>
+      <label className="flex items-center gap-1 text-xs text-slate-600"><input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} /> email client</label>
+      <button className="text-xs text-slate-500" onClick={onClose}>cancel</button>
+      <button disabled={!method.trim()} className="text-xs bg-slate-700 text-white px-3 py-1 rounded disabled:opacity-40" onClick={() => onAction('ship', async () => { await api.post(`/holding/${id}/ship-back`, { return_method: method, tracking_number: tracking || null, notify }); })}>Confirm</button>
     </div>
   );
 }
 
-function LocationButton({ id, locations, current, onDone }: { id: string; locations: HeldItemLocation[]; current: string | null; onDone: () => void }) {
-  const [open, setOpen] = useState(false);
+function LocationButton({ id, locations, current, open, onOpen, onClose, onDone }: { id: string; locations: HeldItemLocation[]; current: string | null; open?: boolean; onOpen?: () => void; onClose?: () => void; onDone: () => void }) {
   const [loc, setLoc] = useState(current || '');
   const [text, setText] = useState('');
   const somewhereElse = locations.find((l) => l.id === loc)?.name === 'Somewhere else';
-  if (!open) return <button onClick={() => setOpen(true)} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">📍 Move</button>;
+  if (!open) return <button onClick={onOpen} className="px-3 py-1.5 bg-white border border-slate-300 text-slate-600 rounded-lg text-xs">📍 Move</button>;
   return (
     <div className="w-full border border-slate-200 rounded-lg p-2 flex flex-wrap items-center gap-2">
       <select className="border border-slate-300 rounded px-2 py-1 text-xs" value={loc} onChange={(e) => setLoc(e.target.value)}>
         <option value="">—</option>{locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
       </select>
       {somewhereElse && <input className="border border-slate-300 rounded px-2 py-1 text-xs" placeholder="Where?" value={text} onChange={(e) => setText(e.target.value)} />}
-      <button className="text-xs text-slate-500" onClick={() => setOpen(false)}>cancel</button>
-      <button className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded" onClick={async () => { await api.put(`/holding/${id}`, { storage_location_id: loc || null, storage_location_text: somewhereElse ? (text || null) : null }); setOpen(false); onDone(); }}>Save</button>
+      <button className="text-xs text-slate-500" onClick={onClose}>cancel</button>
+      <button className="text-xs bg-[#7B5EA7] text-white px-3 py-1 rounded" onClick={async () => { await api.put(`/holding/${id}`, { storage_location_id: loc || null, storage_location_text: somewhereElse ? (text || null) : null }); onClose?.(); onDone(); }}>Save</button>
     </div>
   );
 }
