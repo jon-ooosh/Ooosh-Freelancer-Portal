@@ -119,6 +119,14 @@ export interface CapturedPhoto {
   blobUrl: string        // Object URL for preview
   blob: Blob             // Actual image data
   timestamp: number
+  /**
+   * ~800px JPEG data URI generated at capture time for PDF embedding.
+   * Avoids re-decoding every full-size blob at submit time (the dominant
+   * cost of the old ~2-minute book-out submit). Optional — photos restored
+   * from older drafts won't have it; consumers must fall back to
+   * resizeImageForPdf().
+   */
+  pdfBase64?: string
 }
 
 /**

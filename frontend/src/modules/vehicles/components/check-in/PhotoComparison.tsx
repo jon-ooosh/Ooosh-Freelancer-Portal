@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 import { LEGACY_WINDSCREEN_ANGLE, REQUIRED_PHOTOS } from '../../types/vehicle-event'
-import { compressImage } from '../../lib/image-utils'
+import { compressImageWithThumb } from '../../lib/image-utils'
 import { PhotoLightbox } from '../shared/PhotoLightbox'
 import { AuthImage } from '../shared/AuthImage'
 import type { CapturedPhoto, PhotoAngle } from '../../types/vehicle-event'
@@ -56,6 +56,12 @@ export function PhotoComparison({
 }: PhotoComparisonProps) {
   const [activeAngle, setActiveAngle] = useState<CaptureAngle | null>(null)
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null)
+  /**
+   * Angle currently being compressed after the camera returned a file.
+   * Without visible feedback during the multi-second compression, users
+   * assume the photo "didn't take" and retake it.
+   */
+  const [processingAngle, setProcessingAngle] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const capturedMap = new Map(currentPhotos.map(p => [p.angle, p]))
@@ -96,21 +102,31 @@ export function PhotoComparison({
       const file = e.target.files?.[0]
       if (!file || !activeAngle) return
 
-      const compressed = await compressImage(file, 2048, 0.85)
-      const blobUrl = URL.createObjectURL(compressed)
-      // Prefer the explicit required-angle label, otherwise the book-out
-      // label from the event's photoMeta, otherwise the angle slug.
-      const requiredLabel = REQUIRED_PHOTOS.find(r => r.angle === activeAngle)?.label
-      const extraLabel = bookOutPhotoLabels?.get(String(activeAngle))
-      const label = requiredLabel || extraLabel || String(activeAngle)
+      setProcessingAngle(String(activeAngle))
+      try {
+        // Compress for storage AND generate the ~800px PDF thumbnail in one
+        // decode pass — submit no longer has to re-decode every photo.
+        const { blob: compressed, pdfBase64 } = await compressImageWithThumb(file, 2048, 0.85)
+        const blobUrl = URL.createObjectURL(compressed)
+        // Prefer the explicit required-angle label, otherwise the book-out
+        // label from the event's photoMeta, otherwise the angle slug.
+        const requiredLabel = REQUIRED_PHOTOS.find(r => r.angle === activeAngle)?.label
+        const extraLabel = bookOutPhotoLabels?.get(String(activeAngle))
+        const label = requiredLabel || extraLabel || String(activeAngle)
 
-      onCapture({
-        angle: activeAngle,
-        label,
-        blobUrl,
-        blob: compressed,
-        timestamp: Date.now(),
-      })
+        onCapture({
+          angle: activeAngle,
+          label,
+          blobUrl,
+          blob: compressed,
+          timestamp: Date.now(),
+          pdfBase64,
+        })
+      } catch (err) {
+        console.error('[PhotoComparison] Failed to process photo:', err)
+      } finally {
+        setProcessingAngle(null)
+      }
 
       if (fileInputRef.current) fileInputRef.current.value = ''
     },
@@ -156,6 +172,7 @@ export function PhotoComparison({
           label={label}
           bookOutUrl={resolveRequiredBookOutUrl(angle)}
           captured={capturedMap.get(angle)}
+          processing={processingAngle === angle}
           damageFlagged={damageFlaggedAngles?.has(angle) ?? false}
           onCapture={triggerCapture}
           onRemove={onRemove}
@@ -192,6 +209,7 @@ export function PhotoComparison({
                   label={label}
                   bookOutUrl={bookOutUrl}
                   captured={capturedMap.get(angle as CaptureAngle)}
+                  processing={processingAngle === angle}
                   damageFlagged={damageFlaggedAngles?.has(angle) ?? false}
                   onCapture={triggerCapture}
                   onRemove={onRemove}
@@ -226,6 +244,8 @@ interface ComparisonCardProps {
   label: string
   bookOutUrl: string | undefined
   captured: CapturedPhoto | undefined
+  /** True while the freshly-captured file for this angle is compressing */
+  processing?: boolean
   damageFlagged: boolean
   onCapture: (angle: CaptureAngle) => void
   onRemove: (angle: string) => void
@@ -239,6 +259,7 @@ function ComparisonCard({
   label,
   bookOutUrl,
   captured,
+  processing,
   damageFlagged,
   onCapture,
   onRemove,
@@ -302,7 +323,15 @@ function ComparisonCard({
         {/* Current photo (right) — capture slot */}
         <div className="bg-white p-1.5">
           <p className="mb-1 text-center text-[10px] font-medium text-ooosh-navy uppercase tracking-wide">Now</p>
-          {captured ? (
+          {processing ? (
+            <div className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-1 rounded border-2 border-ooosh-navy/40 bg-ooosh-navy/5">
+              <svg className="h-5 w-5 animate-spin text-ooosh-navy" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+              </svg>
+              <span className="text-[10px] font-medium text-ooosh-navy">Processing…</span>
+            </div>
+          ) : captured ? (
             <div className="group relative aspect-[4/3] overflow-hidden rounded border-2 border-green-300">
               <img
                 src={captured.blobUrl}
