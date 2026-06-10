@@ -34,6 +34,11 @@ import {
   buildFallbackBanner,
   logFallbackToTimeline,
 } from '../services/money-emails';
+import {
+  buildConditionReportSubject,
+  buildConditionReportEmailHtml,
+  type ConditionReportEmailParams,
+} from '../services/condition-report-email';
 
 const router = Router();
 
@@ -368,6 +373,7 @@ const FREELANCER_BOOKOUT_ALLOW: Array<{ method: string; pattern: RegExp }> = [
   { method: 'POST',  pattern: /^\/save-event$/ },
   { method: 'POST',  pattern: /^\/generate-pdf$/ },
   { method: 'POST',  pattern: /^\/send-email$/ },
+  { method: 'POST',  pattern: /^\/send-condition-report$/ },
   { method: 'GET',   pattern: /^\/jobs\/[^/]+$/ },
   // Walkaround / briefing UI: settings are global (no PII) so freelancer
   // sessions read the same payload as staff. The scope-check on get-events
@@ -4029,6 +4035,203 @@ router.post('/send-email', async (req: FlexibleVehicleRequest, res: Response) =>
   } catch (error) {
     console.error('[vehicles/email] Send error:', error);
     res.status(500).json({ error: 'Email send failed', details: error instanceof Error ? error.message : 'Unknown error' });
+  }
+});
+
+/**
+ * POST /api/vehicles/send-condition-report
+ * Generate AND email condition-report PDFs for one or more drivers in a
+ * single call, fully server-side.
+ *
+ * Replaces the legacy two-step flow (POST /generate-pdf -> POST /send-email
+ * per driver) used by BookOutPage/CheckInPage. That flow returned each
+ * 7-9MB base64 PDF to the phone, which then re-uploaded it as the email
+ * payload — per driver. On a multi-driver hire that was ~16MB of transfer
+ * per driver for PDFs that differ only by the driver name at the top.
+ * Here the (already ~800px) photo thumbnails come up once and the per-driver
+ * PDFs never leave the server. (Validated against the 10 Jun 2026 Scene
+ * Queen book-out, where PDF/email round-trips were ~30s of the 2-min submit.)
+ *
+ * Body:
+ *   {
+ *     ...pdfData,                       // same shape as POST /generate-pdf
+ *     recipients: [{ driverName, email | null }],
+ *     emailMeta?: { driverPresent?, damageCount?, fuelDifference?, milesDriven? }
+ *   }
+ *
+ * Per-recipient email resolution follows the /send-email fallback chain:
+ * explicit email -> job-level address book via resolveClientEmailTarget ->
+ * info@oooshtours.co.uk with amber banner + timeline interaction.
+ *
+ * Legacy /generate-pdf + /send-email stay in place for CollectionPage,
+ * the offline sync-processors, and events/:id/regenerate-pdf.
+ */
+router.post('/send-condition-report', async (req: FlexibleVehicleRequest, res: Response) => {
+  try {
+    const body = req.body || {};
+    const recipients = Array.isArray(body.recipients) ? body.recipients : [];
+    if (recipients.length === 0) {
+      res.status(400).json({ error: 'recipients is required (at least one)' });
+      return;
+    }
+
+    // Freelancer: the PDF template includes vehicleReg — require it to
+    // match the session (same guard as /generate-pdf).
+    if (isFreelancerBookout(req)) {
+      const scope = await getBookoutScope(req);
+      const regInBody = typeof body.vehicleReg === 'string' ? body.vehicleReg.toUpperCase() : '';
+      if (!scope || !regInBody || regInBody !== scope.registration) {
+        res.status(403).json({ error: 'PDF target does not match your vehicle' });
+        return;
+      }
+    }
+
+    // Same hire-date backstop + operator-name derivation as /generate-pdf.
+    const { recipients: _r, emailMeta, ...pdfData } = body;
+    const data: any = { ...pdfData };
+    const needsAnyFallback = !data.hireStartDate || !data.hireEndDate
+      || !data.hireStartTime || !data.hireEndTime;
+    if (needsAnyFallback) {
+      const resolved = await resolveJobHireDates(data.hireHopJob);
+      if (!data.hireStartDate && resolved.start)     data.hireStartDate = resolved.start;
+      if (!data.hireEndDate   && resolved.end)       data.hireEndDate   = resolved.end;
+      if (!data.hireStartTime && resolved.startTime) data.hireStartTime = resolved.startTime;
+      if (!data.hireEndTime   && resolved.endTime)   data.hireEndTime   = resolved.endTime;
+    }
+    data.performedByName = await resolveOperatorName(req);
+
+    // Job-level fallback recipient (resolved once, reused for any recipient
+    // with no email on file).
+    let fallbackJobId: string | null = null;
+    if (data.hireHopJob) {
+      const jobLookup = await query(
+        `SELECT id FROM jobs WHERE hh_job_number = $1 LIMIT 1`,
+        [parseInt(String(data.hireHopJob), 10)]
+      );
+      if (jobLookup.rows.length > 0) fallbackJobId = jobLookup.rows[0].id;
+    }
+
+    const nodemailer = await import('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.SMTP_PORT || '587', 10),
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER || '',
+        pass: process.env.SMTP_PASS || '',
+      },
+    });
+    const isTestMode = (process.env.EMAIL_MODE || 'test') === 'test';
+
+    const results: Array<{
+      driverName: string;
+      success: boolean;
+      emailedTo?: string;
+      isFallback?: boolean;
+      filename?: string;
+      size?: number;
+      error?: string;
+    }> = [];
+
+    // Sequential per driver — PDFs share the photo set, and one in-flight
+    // jsPDF build at a time keeps memory predictable.
+    for (const recipient of recipients) {
+      const driverName = String(recipient?.driverName || '').trim() || 'Driver';
+      const explicitEmail = recipient?.email ? String(recipient.email).trim() : '';
+
+      try {
+        const { pdfBytes, filename } = await buildConditionReportPdf({
+          ...data,
+          driverName,
+          clientEmail: explicitEmail || undefined,
+        });
+
+        // Resolve recipient: explicit email, else job-level fallback chain.
+        let to = explicitEmail;
+        let prependBanner: string | undefined;
+        let usedFallback = false;
+        if (!to) {
+          if (!fallbackJobId) {
+            results.push({
+              driverName,
+              success: false,
+              filename,
+              size: pdfBytes.length,
+              error: 'No email on file and no job to resolve a fallback from',
+            });
+            continue;
+          }
+          const target = await resolveClientEmailTarget(fallbackJobId);
+          to = target.primaryEmail;
+          if (target.isFallback) {
+            usedFallback = true;
+            prependBanner = buildFallbackBanner({
+              jobId: fallbackJobId,
+              clientName: target.clientName,
+              jobNumber: target.jobNumber,
+              jobName: target.jobName,
+            });
+          }
+        }
+
+        const emailParams: ConditionReportEmailParams = {
+          vehicleReg: String(data.vehicleReg || ''),
+          driverName,
+          eventDate: String(data.eventDate || ''),
+          isCheckIn: !!data.isCheckIn,
+          hireHopJob: data.hireHopJob ? String(data.hireHopJob) : null,
+          driverPresent: emailMeta?.driverPresent,
+          damageCount: emailMeta?.damageCount,
+          fuelDifference: emailMeta?.fuelDifference ?? null,
+          milesDriven: emailMeta?.milesDriven ?? null,
+        };
+        const subject = buildConditionReportSubject(emailParams);
+        const html = (prependBanner || '') + buildConditionReportEmailHtml(emailParams);
+
+        const actualTo = isTestMode && process.env.EMAIL_TEST_REDIRECT
+          ? process.env.EMAIL_TEST_REDIRECT : to;
+
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || 'Ooosh Tours <notifications@oooshtours.co.uk>',
+          to: actualTo,
+          subject: isTestMode ? `[TEST] ${subject}` : subject,
+          html,
+          attachments: [{
+            filename,
+            content: Buffer.from(pdfBytes),
+            contentType: 'application/pdf' as const,
+          }],
+        });
+
+        if (usedFallback && fallbackJobId) {
+          await logFallbackToTimeline({ jobId: fallbackJobId, templateId: 'condition_report' });
+        }
+
+        results.push({
+          driverName,
+          success: true,
+          emailedTo: to,
+          isFallback: usedFallback,
+          filename,
+          size: pdfBytes.length,
+        });
+      } catch (err) {
+        console.error(`[vehicles/send-condition-report] Failed for ${driverName}:`, err);
+        results.push({
+          driverName,
+          success: false,
+          error: err instanceof Error ? err.message : 'PDF/email failed',
+        });
+      }
+    }
+
+    res.json({ results });
+  } catch (error) {
+    console.error('[vehicles/send-condition-report] Error:', error);
+    res.status(500).json({
+      error: 'Condition report send failed',
+      details: error instanceof Error ? error.message : 'Unknown error',
+    });
   }
 });
 

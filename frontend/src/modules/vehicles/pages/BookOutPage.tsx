@@ -9,7 +9,7 @@ import { updateFleetHireStatus } from '../lib/fleet-status'
 import { getAllocations, saveAllocations } from '../lib/allocations-api'
 import { withRetry } from '../lib/retry'
 import { checkMileagePlausibility } from '../lib/mileage-sanity'
-import { generateConditionReportPdf, sendConditionReportEmail, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
+import { sendConditionReport, blobToBase64, resizeImageForPdf } from '../lib/pdf-email'
 import { PhotoCapture } from '../components/book-out/PhotoCapture'
 import { TimeInput } from '../../../components/TimeInput'
 import { SignatureCapture } from '../components/book-out/SignatureCapture'
@@ -694,13 +694,16 @@ export function BookOutPage() {
     setUploadProgress('Preparing photos for PDF...')
     const photoBase64s: Array<{ angle: string; label: string; base64: string; r2Url?: string }> = []
     let photoConvertFails = 0
-    // Resize one photo at a time. createImageBitmap + OffscreenCanvas each
-    // allocate a full decoded bitmap; doing them all in parallel (Promise.all)
-    // spiked memory and could OOM the browser tab on phones with lots of
-    // high-res photos. Sequential keeps only one decode alive at a time.
+    // Photos captured since Jun 2026 carry a capture-time PDF thumbnail
+    // (CapturedPhoto.pdfBase64) — using it here skips re-decoding every
+    // full-size blob, which used to be ~75s of the 2-minute submit
+    // (validated against the 10 Jun 2026 journal). The resize fallback
+    // covers photos restored from pre-thumbnail drafts. When falling back,
+    // resize one photo at a time — parallel resizing (Promise.all) spiked
+    // memory and could OOM the browser tab.
     for (const p of form.photos) {
       try {
-        const base64 = await resizeImageForPdf(p.blob)
+        const base64 = p.pdfBase64 || (await resizeImageForPdf(p.blob))
         const photoKey = `events/${eventId}/${safeReg}/${p.angle}.jpg`
         const r2Url = r2PublicBase ? `${r2PublicBase}/${photoKey}` : undefined
         photoBase64s.push({ angle: p.angle, label: p.label, base64, r2Url })
@@ -754,129 +757,56 @@ export function BookOutPage() {
       allDrivers: form.allDrivers,
     }
 
-    // Track: PDF generation → email → additional driver PDFs/emails
+    // Track: condition-report PDFs + emails — ONE server-side call for all
+    // drivers. The server builds each driver's PDF (same photos, different
+    // name) and emails it directly; the 7-9MB PDFs never come back to the
+    // phone. Replaces the legacy per-driver generate-pdf -> send-email
+    // round-trip (~16MB transfer per driver, ~30s of the old 2-min submit).
     const pdfEmailTrack = (async () => {
       const trackResults: typeof results = []
 
-      const pdfResult = await withRetry(
-        () => generateConditionReportPdf(pdfData),
-        'PDF generation',
+      // Lead (collecting) driver first, then any additional drivers from the
+      // hire forms. We send even when an email is missing: the backend
+      // resolves a job-level recipient via the address book and falls back
+      // to info@ with an amber banner + timeline interaction.
+      const recipients = [
+        { driverName: form.driverName, email: form.clientEmail || null },
+        ...(form.hireFormEntries || [])
+          .filter(entry => entry.driverName !== form.driverName)
+          .map(entry => ({ driverName: entry.driverName, email: entry.clientEmail || null })),
+      ]
+
+      const sendResult = await withRetry(
+        () => sendConditionReport(pdfData, recipients),
+        'Condition report PDFs + emails',
       )
 
-      if (pdfResult.success && pdfResult.data) {
-        trackResults.push({
-          label: 'PDF report',
-          success: true,
-          detail: `${pdfResult.data.filename} (${Math.round(pdfResult.data.size / 1024)}KB)`,
-        })
-      } else {
-        trackResults.push({
-          label: 'PDF report',
-          success: false,
-          detail: pdfResult.error || 'Generation failed after 3 attempts',
-        })
-      }
-
-      // Send email to primary (collecting) driver. We send even when
-      // form.clientEmail is empty: the backend resolves a job-level
-      // recipient via the address book and falls back to info@ with
-      // an amber banner + timeline interaction if nothing's reachable.
-      // Without the fallback, condition reports were silently dropped
-      // for HH-synced sole-trader jobs that had no contact email.
-      if (pdfResult.success && pdfResult.data) {
-        const emailResult = await withRetry(
-          () =>
-            sendConditionReportEmail({
-              to: form.clientEmail || null,
-              vehicleReg: form.vehicleReg,
-              driverName: form.driverName,
-              eventDate,
-              pdfBase64: pdfResult.data!.pdf,
-              pdfFilename: pdfResult.data!.filename,
-              hireHopJob: form.hireHopJob || null,
-            }),
-          'Email sending',
-        )
-
-        if (emailResult.success) {
-          const isFallback = (emailResult.data as { isFallback?: boolean } | undefined)?.isFallback
-          const detailRecipient = isFallback ? 'info@oooshtours.co.uk (no client email on file)' : form.clientEmail || 'recipient resolved by backend'
-          trackResults.push({ label: `Email — ${form.driverName}`, success: true, detail: `Sent to ${detailRecipient}` })
-        } else {
-          trackResults.push({
-            label: `Email — ${form.driverName}`,
-            success: false,
-            detail: emailResult.error || 'Send failed after 3 attempts',
-          })
-        }
-      } else if (!pdfResult.success) {
-        trackResults.push({
-          label: `Email — ${form.driverName}`,
-          success: false,
-          detail: 'Skipped — PDF generation failed',
-        })
-      }
-
-      // Generate PDFs and send emails for additional drivers on this job.
-      // We include drivers without a clientEmail too — backend resolves
-      // the job-level fallback (info@ + amber banner) so each customer's
-      // condition report still lands somewhere staff can forward.
-      const additionalDrivers = (form.hireFormEntries || []).filter(
-        entry => entry.driverName !== form.driverName,
-      )
-
-      if (additionalDrivers.length > 0 && pdfResult.success) {
-        for (let i = 0; i < additionalDrivers.length; i++) {
-          const driver = additionalDrivers[i]!
-
-          const driverPdfResult = await withRetry(
-            () =>
-              generateConditionReportPdf({
-                ...pdfData,
-                driverName: driver.driverName,
-                clientEmail: driver.clientEmail || undefined,
-              }),
-            `PDF for ${driver.driverName}`,
-          )
-
-          if (driverPdfResult.success && driverPdfResult.data) {
-            const driverEmailResult = await withRetry(
-              () =>
-                sendConditionReportEmail({
-                  to: driver.clientEmail || null,
-                  vehicleReg: form.vehicleReg,
-                  driverName: driver.driverName,
-                  eventDate,
-                  pdfBase64: driverPdfResult.data!.pdf,
-                  pdfFilename: driverPdfResult.data!.filename,
-                  hireHopJob: form.hireHopJob || null,
-                }),
-              `Email to ${driver.driverName}`,
-            )
-
-            if (driverEmailResult.success) {
-              const isFallback = (driverEmailResult.data as { isFallback?: boolean } | undefined)?.isFallback
-              const detailRecipient = isFallback ? 'info@oooshtours.co.uk (no client email on file)' : driver.clientEmail || 'recipient resolved by backend'
-              trackResults.push({
-                label: `Email — ${driver.driverName}`,
-                success: true,
-                detail: `Sent to ${detailRecipient}`,
-              })
-            } else {
-              trackResults.push({
-                label: `Email — ${driver.driverName}`,
-                success: false,
-                detail: driverEmailResult.error || 'Send failed',
-              })
-            }
+      if (sendResult.success && sendResult.data) {
+        for (const r of sendResult.data) {
+          if (r.success) {
+            const sizeNote = r.size ? ` (${Math.round(r.size / 1024)}KB)` : ''
+            const recipientNote = r.isFallback
+              ? 'info@oooshtours.co.uk (no client email on file)'
+              : r.emailedTo || 'recipient resolved by backend'
+            trackResults.push({
+              label: `Report — ${r.driverName}`,
+              success: true,
+              detail: `${r.filename || 'PDF'}${sizeNote} sent to ${recipientNote}`,
+            })
           } else {
             trackResults.push({
-              label: `PDF — ${driver.driverName}`,
+              label: `Report — ${r.driverName}`,
               success: false,
-              detail: driverPdfResult.error || 'PDF generation failed',
+              detail: r.error || 'PDF/email failed',
             })
           }
         }
+      } else {
+        trackResults.push({
+          label: 'Condition report PDFs + emails',
+          success: false,
+          detail: sendResult.error || 'Failed after 3 attempts',
+        })
       }
 
       return trackResults

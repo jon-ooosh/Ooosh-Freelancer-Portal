@@ -117,8 +117,63 @@ export async function resizeImageForPdf(
   return blobToBase64(resizedBlob)
 }
 
+export interface ConditionReportRecipient {
+  driverName: string
+  email: string | null
+}
+
+export interface ConditionReportSendResult {
+  driverName: string
+  success: boolean
+  emailedTo?: string
+  isFallback?: boolean
+  filename?: string
+  size?: number
+  error?: string
+}
+
+/**
+ * Generate AND email condition-report PDFs for one or more drivers in a
+ * single server-side call (POST /api/vehicles/send-condition-report).
+ *
+ * Replaces the legacy generateConditionReportPdf + sendConditionReportEmail
+ * round-trip per driver: the old flow downloaded each 7-9MB base64 PDF to
+ * the phone and re-uploaded it as the email payload. Here the (~800px)
+ * photo thumbnails go up once and the per-driver PDFs never leave the
+ * server. The legacy functions stay for CollectionPage + sync-processors.
+ */
+export async function sendConditionReport(
+  pdfData: PdfData,
+  recipients: ConditionReportRecipient[],
+  emailMeta?: {
+    driverPresent?: boolean
+    damageCount?: number
+    fuelDifference?: string | null
+    milesDriven?: number | null
+  },
+): Promise<ConditionReportSendResult[]> {
+  console.log(`[pdf-email] Calling send-condition-report for ${recipients.length} recipient(s)...`)
+  const response = await apiFetch('/send-condition-report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...pdfData, recipients, emailMeta }),
+  })
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Condition report send failed' }))
+    const detail = (err as { details?: string }).details || ''
+    const errorMsg = (err as { error?: string }).error || `Send failed: ${response.status}`
+    console.error('[pdf-email] send-condition-report failed:', errorMsg, detail)
+    throw new Error(detail ? `${errorMsg}: ${detail}` : errorMsg)
+  }
+
+  const result = await response.json() as { results: ConditionReportSendResult[] }
+  return result.results
+}
+
 /**
  * Send the condition report email with PDF attachment.
+ * Legacy two-step path — still used by CollectionPage + sync-processors.
  */
 export async function sendConditionReportEmail(params: {
   to: string | null     // nullable so the backend's info@ fallback can fire when no customer email is on file
