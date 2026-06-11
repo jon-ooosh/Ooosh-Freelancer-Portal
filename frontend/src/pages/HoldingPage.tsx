@@ -7,6 +7,7 @@ import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
 import { compressImage } from '../components/holding/compress';
+import { locationLabelOrDash } from '../components/holding/format';
 import type { HeldItem, HeldItemKind, HeldItemLocation } from '../../../shared/types';
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -177,7 +178,7 @@ export default function HoldingPage({ view }: { view: View }) {
                         <td className="px-3 py-2">{h.found_in ? FOUND_IN_LABEL[h.found_in] : '—'}{h.found_vehicle_reg ? ` (${h.found_vehicle_reg})` : ''}</td>
                         <td className="px-3 py-2">{fmtDate(h.found_date)}</td>
                       </>}
-                  <td className="px-3 py-2">{h.storage_location_name || h.storage_location_text || '—'}</td>
+                  <td className="px-3 py-2">{locationLabelOrDash(h)}</td>
                   <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs font-medium capitalize ${STATUS_COLOUR[h.status] || 'bg-slate-100'}`}>{statusLabel(h.status)}</span></td>
                 </tr>
               );
@@ -378,9 +379,11 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
         <div className="grid grid-cols-2 gap-3">
           <Field label="Client" value={client || (h.owner_unknown ? 'Unknown' : '—')} />
           <div>
-            <p className="text-xs text-slate-400">HireHop job</p>
+            <p className="text-xs text-slate-400">Job (HH #)</p>
             {h.hh_job_number
-              ? (h.job_id ? <Link to={`/jobs/${h.job_id}`} className="text-ooosh-600 hover:underline">#{h.hh_job_number} →</Link> : <p className="text-slate-800">#{h.hh_job_number}</p>)
+              ? (h.job_id
+                  ? <Link to={`/jobs/${h.job_id}`} title="Opens the job in the operations portal" className="text-ooosh-600 hover:underline">#{h.hh_job_number} · open job in OP →</Link>
+                  : <p className="text-slate-800">#{h.hh_job_number} <span className="text-xs text-slate-400">(not linked in OP)</span></p>)
               : <p className="text-slate-800">—</p>}
           </div>
           {h.kind !== 'lost_property' && <Field label="Boxes" value={h.received_count != null && h.box_count != null ? `${h.received_count}/${h.box_count}` : (h.box_count != null ? String(h.box_count) : '—')} />}
@@ -393,7 +396,7 @@ function DetailModal({ id, locations, onClose, onChange }: { id: string; locatio
             <Field label="Arrived" value={`${fmtDate(h.arrived_at)}${h.received_by_name ? ` by ${h.received_by_name}` : ''}`} />}
           {h.kind === 'lost_property' && <Field label="Found in" value={h.found_in ? `${FOUND_IN_LABEL[h.found_in]}${h.found_vehicle_reg ? ` (${h.found_vehicle_reg})` : (h.found_location_text ? ` (${h.found_location_text})` : '')}` : '—'} />}
           {h.kind === 'lost_property' && <Field label="Found date" value={fmtDate(h.found_date)} />}
-          <Field label="Location" value={h.storage_location_name || h.storage_location_text || '—'} />
+          <Field label="Location" value={locationLabelOrDash(h)} />
           {h.import_charge_flag && <Field label="Import charge" value={h.import_charge_flag} />}
           {h.collected_at && <Field label="Collected" value={`${fmtDate(h.collected_at)}${h.collected_by ? ` by ${h.collected_by}` : ''}`} />}
           {h.return_method && <Field label="Shipped back" value={`${h.return_method}${h.tracking_number ? ` · ${h.tracking_number}` : ''}`} />}

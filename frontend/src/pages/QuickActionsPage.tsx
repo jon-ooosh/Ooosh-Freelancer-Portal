@@ -16,6 +16,7 @@ import { JobNumberField } from '../components/holding/JobNumberField';
 import { NotifyClientModal } from '../components/holding/NotifyClientModal';
 import { OrgJobSuggestions } from '../components/holding/OrgJobSuggestions';
 import { compressImage } from '../components/holding/compress';
+import { locationLabel } from '../components/holding/format';
 import type { HeldItem, HeldItemLocation } from '../../../shared/types';
 
 const PURPLE = '#7B5EA7';
@@ -336,7 +337,7 @@ function HandoverSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () 
           <div className="bg-slate-50 rounded-xl p-4">
             <p className="font-semibold text-slate-800">{picked.description || 'Item'}</p>
             <p className="text-sm text-slate-500">{picked.owner_person_name || picked.owner_organisation_name || picked.client_name_text || 'Unknown owner'}
-              {picked.storage_location_name ? ` · ${picked.storage_location_name}` : ''}</p>
+              {locationLabel(picked) ? ` · ${locationLabel(picked)}` : ''}</p>
           </div>
           <div><label className="block text-sm text-slate-500 mb-1">Collected / received by (optional)</label>
             <input autoFocus className={inputCls} value={who} onChange={(e) => setWho(e.target.value)} placeholder="Name" /></div>
@@ -360,7 +361,7 @@ function HandoverSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () 
               <p className="font-medium text-slate-800">{h.description || 'Item'}</p>
               <p className="text-xs text-slate-500">
                 {h.owner_person_name || h.owner_organisation_name || h.client_name_text || (h.owner_unknown ? '❓ Unknown' : '—')}
-                {h.storage_location_name ? ` · ${h.storage_location_name}` : ''}
+                {locationLabel(h) ? ` · ${locationLabel(h)}` : ''}
                 {h.hh_job_number ? ` · #${h.hh_job_number}` : ''}
               </p>
             </button>
